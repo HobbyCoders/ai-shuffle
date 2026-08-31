@@ -129,6 +129,35 @@ def test_projection_lists_searches_and_docs() -> None:
     assert proj.docs("nope") is None
 
 
+def test_session_projection_inherits_the_registrys_deferred_tier() -> None:
+    """A host-deferred in-proc server is deferred in the projection too — the
+    engine's deferred set and the code-mode catalog cannot disagree."""
+    @tool("archive", "Archive a record.",
+          {"type": "object", "properties": {"rid": {"type": "string"}}, "required": ["rid"]})
+    async def archive(args: dict) -> dict:  # pragma: no cover - never dispatched
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    registry = _weather_registry()
+    registry.register_inproc(create_inproc_server("appcfg", [archive]), defer=True)
+    session = CodeModeSession(registry)
+    proj = session._projection()
+
+    assert proj.deferred_leaves() == ["archive"]
+    assert not proj.is_deferred("get_weather")
+
+    # list_tools flags it; read_tool_docs round-trips the full stub, so the
+    # docs the prompt skipped are one in-kernel call away.
+    listing = session.render_list()
+    assert "archive:" in listing and "read_tool_docs" in listing
+    assert "get_weather:" in listing
+    docs = session.render_docs("archive")
+    assert docs.startswith("def archive(rid: str)")
+    assert "rid (str, required)" in docs
+    # ...and it is mounted in the VFS like any other tool: deferral costs no
+    # capability, only prompt bytes.
+    assert "archive" in proj.sources()
+
+
 # ── kernel unit tests (subprocess) ────────────────────────────────────────
 
 async def _null_host(name: str, kwargs: dict) -> HostReply:  # pragma: no cover

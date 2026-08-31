@@ -1,23 +1,32 @@
-"""Bridges — every in-kernel tool call, run through the real host gate.
+"""HostBridge — every in-kernel tool call, run through the real host gate.
 
 The kernel is untrusted (prompt injection == code execution), so the host-call
-handler is the one place the host reasserts control. Two bridges implement the
-same idea at different integration depths:
+handler is the one place the host reasserts control. ``HostBridge`` is that
+gate: registry + PermissionEngine + optional hooks, with the interactive
+round-trips injected as callbacks so the same object serves both the production
+engine and a bare embedding.
 
-- ``HostCallBridge`` wires each ``__host_call__`` into a live ``NativeLoop``, so
-  in-kernel calls reuse the loop's exact gated path (``_gated_call``) and surface
-  as real ``ToolUse`` / ``ToolResult`` / ``PermissionRequest`` events. This is
-  what ``CodeModeSession`` uses in production.
-- ``HostBridge`` is a self-contained gate (registry + PermissionEngine + optional
-  hooks) with an injected ``on_permission`` callback — no engine required. Handy
-  for embedding code-mode outside the native loop and for focused tests.
+Two callbacks, both optional, both about asking the human something:
 
-Both enforce the same hard refusals before dispatch: a tool outside the
-session's tool surface (``tool_filter``, ruling T9 — ``HostBridge`` checks it
-itself; ``HostCallBridge`` inherits the loop's own check inside ``_gated_call``),
-a tool with ``code_mode_allowed=False`` (the auditable high-risk escape hatch —
-the model is told to use the JSON tool path), and a denied permission/hook. Refusals come back
-as ``HostReply(denied=…)`` / ``HostReply(error=…)`` so the kernel *raises* in the
+- ``on_permission`` — the engine says "ask"; in production ``CodeModeSession``
+  backs it with a ``PermissionRequest``/``RespondPermission`` pair.
+- ``on_input_required`` — the *tool* asks (MRTR: ``AskUser``, ``StopPlanning``);
+  production backs it with ``QuestionRequest``/``RespondQuestion``.
+
+Unwired, each one fails loudly rather than quietly: a missing permission
+handler denies, and a missing input-required handler returns an error telling
+the model the user was never asked and to use the JSON tool path. Neither ever
+returns an empty result — an in-kernel ``AskUser`` that answered ``''`` for a
+release read to the model as "the tool ran and said nothing", and it invented
+the user's answers from there.
+
+Hard refusals, all before dispatch: a tool outside the session's tool surface
+(``tool_filter``, ruling T9), a write tool while plan mode is active
+(``plan_mode`` — same rule the request schemas apply, asked live so an
+approval mid-turn lifts it at once), a tool with ``code_mode_allowed=False`` (the
+auditable high-risk escape hatch — the model is told to use the JSON tool path),
+a re-entrant ``run_python``, and a denied permission/hook. Refusals come back as
+``HostReply(denied=…)`` / ``HostReply(error=…)`` so the kernel *raises* in the
 model's code — the error stays in context rather than being silently dropped.
 """
 
@@ -27,85 +36,30 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fluid.codemode.kernel import HostReply
-from fluid.events.model import ToolUse
 from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, HookBus
 from fluid.permissions.engine import (
     PROMPT_DENIAL,
     PermissionEngine,
     non_interactive_denial,
+    plan_mode_blocks,
+    plan_mode_denial,
 )
-from fluid.store.base import new_id
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
-
-
-class HostCallBridge:
-    """Routes one code-mode kernel's host calls through a live ``NativeLoop``.
-
-    Constructed per ``run_python`` invocation with the loop plus the current
-    ``session_id`` / ``turn_id``. ``handle`` is the ``on_host_call`` coroutine
-    passed to ``Kernel.exec``: for each in-kernel tool call it emits a ``ToolUse``,
-    reuses the loop's ``_gated_call`` (PreToolUse hook → PermissionEngine, incl.
-    the ``ask`` → ``PermissionRequest`` round-trip and doom-loop guard → dispatch
-    → PostToolUse → ``ToolResult``), and maps the outcome back to a ``HostReply``.
-    The ``code_mode_allowed=False`` escape hatch is enforced here, before the
-    gate, and reported so the model is steered to the JSON tool path.
-    """
-
-    def __init__(self, *, loop: Any, sid: str, turn_id: str) -> None:
-        self._loop = loop
-        self._sid = sid
-        self._turn_id = turn_id
-
-    async def handle(self, name: str, kwargs: dict[str, Any]) -> HostReply:
-        loop = self._loop
-        tool_use_id = new_id("codetool")
-        await loop._emit(
-            ToolUse(
-                session_id=self._sid, turn_id=self._turn_id,
-                tool_use_id=tool_use_id, name=name, input=kwargs,
-            )
-        )
-
-        registry = loop.registry
-        spec = registry.get(name) if registry is not None else None
-        if spec is None:
-            outcome = ToolOutcome(text=f"unknown tool: {name}", is_error=True)
-            await loop._finish_tool(self._sid, self._turn_id, name, tool_use_id, outcome)
-            return HostReply(error=outcome.text)
-
-        # Auditable escape hatch: high-risk tools opt out of code-mode entirely.
-        if not spec.code_mode_allowed:
-            message = (
-                f"{name} is JSON-path only — not callable from code-mode; "
-                "use the JSON tool interface (auditable high-risk path)."
-            )
-            await loop._finish_tool(
-                self._sid, self._turn_id, name, tool_use_id,
-                ToolOutcome(text=message, is_error=True),
-            )
-            return HostReply(denied=True, message=message)
-
-        # Reuse the loop's full gated path — same hook/permission/dispatch/events
-        # the JSON tool surface uses, including the PermissionRequest round-trip.
-        outcome = await loop._gated_call(
-            self._sid, self._turn_id, name, tool_use_id, dict(kwargs)
-        )
-        if outcome.is_error and not outcome.soft_error:
-            if outcome.text.startswith("permission denied"):
-                return HostReply(denied=True, message=outcome.text)
-            return HostReply(error=outcome.text)
-        return HostReply(
-            result=outcome.text,
-            images=outcome.images,
-            content_id=outcome.content_id,
-            window_of=outcome.window_of,
-        )
+from fluid.tools.mrtr import resolve_input_required, unresolved_notice
+from fluid.tools.registry import InputRequired, ToolCtx, ToolRegistry
 
 # Injected permission round-trip: the engine says "ask", the bridge calls this
 # to surface a PermissionRequest and await the user's answer. In production the
 # engine loop backs it with a PermissionRequest/RespondPermission pair; tests
 # inject a fake that returns a bool.
 OnPermission = Callable[[Any, dict[str, Any]], Awaitable[bool]]
+
+# Injected MRTR round-trip: the tool pauses on ``input_required``, the bridge
+# calls this with (tool name, this call's tool_use_id, marker) to surface one
+# QuestionRequest per request and await the answers. Returns
+# {server-request-id: answer}, or None if the turn was interrupted.
+OnInputRequired = Callable[
+    [str, str | None, InputRequired], Awaitable[dict[str, Any] | None]
+]
 
 
 class HostBridge:
@@ -116,19 +70,46 @@ class HostBridge:
         *,
         hooks: HookBus | None = None,
         on_permission: OnPermission | None = None,
+        on_input_required: OnInputRequired | None = None,
         ctx: ToolCtx | None = None,
         doom_loop: bool = True,
         tool_filter: Callable[[str], bool] | None = None,
+        plan_mode: Callable[[], bool] | None = None,
+        result_budget: int | None = None,
     ) -> None:
         self._registry = registry
         self._permissions = permissions
         self._hooks = hooks
         self._on_permission = on_permission
+        self._on_input_required = on_input_required
         self._ctx = ctx or ToolCtx()
         self._doom_loop = doom_loop
         self._tool_filter = tool_filter
+        # "Is plan mode on right now?" — a live predicate, not a snapshot. The
+        # mode ends mid-turn (StopPlanning's approval flips it during dispatch),
+        # and the very next in-kernel call must be free to write.
+        self._plan_mode = plan_mode
+        # What the kernel delivers verbatim (its ResultRef threshold). Stamped
+        # on the shared ctx so repeat-work notes can tell "the model has this"
+        # from "the kernel has this" — see ToolCtx.read_delivered.
+        if result_budget is not None:
+            self._ctx.result_budget = result_budget
 
-    async def on_host_call(self, tool_name: str, kwargs: dict[str, Any]) -> HostReply:
+    async def on_host_call(
+        self, tool_name: str, kwargs: dict[str, Any], *,
+        tool_use_id: str | None = None,
+    ) -> HostReply:
+        # Plan mode, before the surface check: a write tool is filtered out of
+        # the projection while planning, so the generic "not available in this
+        # session" would be true but useless — the model would read it as a
+        # missing tool rather than as the mode it can end itself. Checked here
+        # (not only in the projection) because the projection just decides what
+        # the kernel is TOLD about; a hand-written ``__host_call__`` skips it.
+        if self._plan_mode is not None and self._plan_mode():
+            spec = self._registry.get(tool_name)
+            if spec is not None and plan_mode_blocks(spec):
+                return HostReply(denied=True, message=plan_mode_denial(tool_name))
+
         # Session tool surface (ruling T9), ahead of the registry lookup so the
         # answer does not depend on whether the filtered name happens to exist.
         # The stub was never projected, so the model should not be able to reach
@@ -140,6 +121,17 @@ class HostBridge:
         spec = self._registry.get(tool_name)
         if spec is None:
             return HostReply(error=f"unknown tool: {tool_name}")
+
+        # Re-entrancy: run_python is engine-driven and owns the very kernel this
+        # call came out of. It is not projected, so only a hand-written
+        # ``__host_call__`` can name it — refuse rather than recurse.
+        if tool_name == "run_python":
+            return HostReply(
+                error=(
+                    "run_python cannot be called from inside the kernel — you "
+                    "are already in it; just write the code in this cell."
+                )
+            )
 
         # Auditable escape hatch: high-risk tools opt out of code-mode entirely.
         if not spec.code_mode_allowed:
@@ -181,6 +173,25 @@ class HostBridge:
                 return HostReply(denied=True, message=PROMPT_DENIAL)
 
         outcome = await self._registry.dispatch(tool_name, tool_input, self._ctx)
+
+        # MRTR: the tool paused to ask the user something (AskUser,
+        # StopPlanning, an elicitating MCP server). Its first leg is an EMPTY
+        # result carrying a marker — returning that as ``result`` is how a
+        # release told models their questions had been answered with silence.
+        if outcome.input_required is not None:
+            if self._on_input_required is None:
+                return HostReply(error=unresolved_notice(tool_name))
+            outcome = await resolve_input_required(
+                outcome,
+                name=tool_name,
+                collect=lambda marker: self._on_input_required(  # type: ignore[misc]
+                    tool_name, tool_use_id, marker
+                ),
+                redispatch=lambda answers, request_state: self._registry.dispatch(
+                    tool_name, tool_input, self._ctx,
+                    input_responses=answers, request_state=request_state,
+                ),
+            )
 
         if self._hooks is not None:
             await self._hooks.emit(

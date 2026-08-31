@@ -21,8 +21,9 @@ prints — a dropped handle is recovered with ``_refs[7]``, never by re-running
 the tool. A call that would deliver a payload already sitting behind a live ref
 (the host says so with ``content_id``: same file, same bytes) gets the id back
 instead of the bytes; a call that would deliver a *slice* of such a payload
-(``window_of``) gets the id and the slicing expression. The previous cell's
-displayed value stays bound to ``_``.
+(``window_of``) gets the id and the slicing expression, whether the ref holds
+the file whole or an earlier window wide enough to contain the new one. The
+previous cell's displayed value stays bound to ``_``.
 """
 
 import ast
@@ -53,12 +54,25 @@ _NS: dict = {}
 # cell that rebinds the name ``_refs`` cannot detach the registry the RPC
 # boundary writes into.
 _REFS = vfs.RefRegistry()
-# ``content_id`` (host-supplied payload identity) -> the ResultRef already
-# holding that exact payload. Populated only for results big enough to become a
-# ref; a hit means a re-read is pointless and gets a pointer instead. Deliberately
-# NOT checkpointed: a restarted kernel has no refs to point at, so it starts
-# empty and every read is a real read again.
+# ``content_id`` (host-supplied payload identity) -> ``(ResultRef, covered)``:
+# the ref holding that payload and how much of it the ref actually has.
+# ``covered is None`` means the whole thing; ``(start, stop)`` means the ref
+# holds only those lines of it. Populated only for results big enough to become
+# a ref; a hit means a re-read is pointless and gets a pointer instead.
+#
+# A *windowed* read files itself twice: under its own exact-window identity
+# (covering it whole) and under the file's window-independent identity with the
+# span it covers. That second entry is what makes a model that only ever reads
+# with offset/limit — the common case in transcripts, where the same file was
+# read four times and the dedupe never once fired — hit the ref it already has
+# whenever the new window sits inside the old one. Deliberately NOT
+# checkpointed: a restarted kernel has no refs to point at, so it starts empty
+# and every read is a real read again.
 _READ_REFS = {}
+# ``(registry id, size)`` for every ref this cell created or was pointed at, in
+# call order. The stdout-cap notice names these so truncated output is
+# recovered with a slice instead of a re-run (see ``truncate.fair_share_stdout``).
+_CELL_REFS = []
 
 
 # ─── framing ─────────────────────────────────────────────────────────────────
@@ -109,58 +123,112 @@ def _host_call(tool_name: str, kwargs: dict):
     if result is None:
         result = ""
     content_id = reply.get("content_id")
-    held = _live_ref(content_id)
-    if held is not None:
+    window = reply.get("window_of")
+    held = _live_entry(content_id)
+    if held is not None and held[1] is None:
         # This exact payload is already in the kernel and still reachable, so
         # the model gets the id rather than a second copy of the bytes. Any
         # break in that chain — the file changed, a different window, the ref
         # aged out of the registry — moves or clears the map entry, and the
-        # read falls through below as an ordinary one.
-        return truncate.repeat_read_pointer(held.key, len(held))
-    window = reply.get("window_of")
+        # read falls through below as an ordinary one. An entry that covers
+        # only PART of this identity cannot answer for the whole thing, so it
+        # is not a hit here.
+        ref = held[0]
+        _CELL_REFS.append((ref.key, len(ref)))
+        return truncate.repeat_read_pointer(ref.key, len(ref))
     if isinstance(window, dict):
         # A *narrower* claim: this result is a slice of a payload the host has
-        # identified. If the kernel is holding that whole payload, the model
-        # gets the slicing expression rather than a second, overlapping copy —
-        # this is what makes re-reading the same file at a new offset/limit
-        # free. A partial earlier read never registers the whole-file id, so it
-        # falls through here and reads for real.
-        whole = _live_ref(window.get("content_id"))
+        # identified. If the kernel holds a payload that contains this window —
+        # the file whole, or an earlier window wide enough — the model gets the
+        # slicing expression rather than a second, overlapping copy. This is
+        # what makes re-reading the same file at a new offset/limit free.
+        start = window.get("start") or 0
+        stop = window.get("stop")
+        whole = _live_entry(window.get("content_id"))
         if whole is not None:
-            return truncate.windowed_read_pointer(
-                whole.key, len(whole), window.get("start") or 0, window.get("stop")
-            )
+            ref, covered = whole
+            base = _slice_base(covered, start, stop)
+            if base is not None:
+                _CELL_REFS.append((ref.key, len(ref)))
+                return truncate.windowed_read_pointer(
+                    ref.key, len(ref), start, stop, offset=base
+                )
     wrapped = truncate.to_result_ref(result, vfs.ResultRef, limit=_REF_THRESHOLD)
     if isinstance(wrapped, vfs.ResultRef):
         # Every ref gets an id in ``_refs`` before the cell sees it, so a
         # handle the cell forgets to bind is still recoverable from the id its
         # repr printed (``_refs[7]``) instead of costing a re-run of the tool.
         _REFS.register(wrapped)
+        _CELL_REFS.append((wrapped.key, len(wrapped)))
         if content_id:
-            _remember_ref(content_id, wrapped)
+            _remember_ref(content_id, wrapped, None)
+        if isinstance(window, dict) and window.get("content_id"):
+            # Also file it under the window-independent identity of the whole
+            # payload, with the span this ref actually covers.
+            _remember_ref(
+                window["content_id"],
+                wrapped,
+                (window.get("start") or 0, window.get("stop")),
+            )
     return wrapped
 
 
-def _live_ref(content_id):
-    """The ResultRef already holding ``content_id``'s payload, if still held."""
+def _live_entry(content_id):
+    """``(ref, covered)`` for ``content_id`` while the ref is still held."""
     if not content_id:
         return None
-    ref = _READ_REFS.get(content_id)
+    entry = _READ_REFS.get(content_id)
+    if not isinstance(entry, tuple):
+        return None
+    ref, covered = entry
     key = getattr(ref, "key", None)
     if key is None:
         return None
     # ``_refs`` is bounded and FIFO: an evicted id is gone, and asking the
     # registry (rather than trusting the map) is what makes eviction fall
     # through to a real read instead of pointing at a dead handle.
-    return _REFS.get(key)
+    live = _REFS.get(key)
+    return None if live is None else (live, covered)
 
 
-def _remember_ref(content_id, ref) -> None:
-    """Record ``ref`` as the holder of ``content_id``, dropping dead entries."""
-    _READ_REFS[content_id] = ref
+def _contains(covered, start, stop) -> bool:
+    """True when a ref covering ``covered`` can serve lines ``start:stop``."""
+    if covered is None:  # holds the payload whole
+        return True
+    low, high = covered
+    if start < low:
+        return False
+    if high is None:  # covered through the end
+        return True
+    return stop is not None and stop <= high
+
+
+def _slice_base(covered, start, stop):
+    """Line index the held ref starts at, or None when it cannot serve."""
+    if not _contains(covered, start, stop):
+        return None
+    return 0 if covered is None else covered[0]
+
+
+def _wider(a, b) -> bool:
+    """True when coverage ``a`` is at least as wide as coverage ``b``."""
+    if a is None:
+        return True
+    if b is None:
+        return False
+    return _contains(a, b[0], b[1])
+
+
+def _remember_ref(content_id, ref, covered) -> None:
+    """File ``ref`` as a holder of ``content_id``, keeping the widest entry."""
+    existing = _live_entry(content_id)
+    if existing is not None and not _wider(covered, existing[1]):
+        return
+    _READ_REFS[content_id] = (ref, covered)
     if len(_READ_REFS) <= vfs.REF_REGISTRY_MAX:
         return
-    for cid, held in list(_READ_REFS.items()):
+    for cid, entry in list(_READ_REFS.items()):
+        held = entry[0] if isinstance(entry, tuple) else None
         if getattr(held, "key", None) not in _REFS:
             del _READ_REFS[cid]
 
@@ -186,11 +254,16 @@ _UNQUOTED_HINT = (
 )
 
 _UNTERMINATED_HINT = (
-    "Hint: the string literal never closes. Do not nest a shell heredoc "
-    "(<<'EOF') or a long multi-line body inside a Python string — assign the "
-    "text to a triple-quoted variable, or Write it to a file and point the "
-    "command at that file (e.g. gh pr create --body-file), then pass the "
-    "command as one ordinary string."
+    "Hint: the string literal never closes. The usual causes are a shell "
+    "heredoc (<<'EOF') nested in a Python string and a long prose argument — "
+    "a commit message, a PR body, a markdown report — whose own quotes, "
+    '``` fences or """ run into the literal that holds it. Give the prose its '
+    "own triple-quoted variable, with a delimiter the text does not itself "
+    "contain (body = '''…''' when the text has no '''; "
+    'r"""…""" otherwise), or Write it to a file '
+    "and point the command at that file (git commit -F <file>, gh pr create "
+    "--body-file <file>) — a file outside the repo working tree, so git add "
+    "-A cannot commit it. Then pass the command as one ordinary string."
 )
 
 _IMPORT_SPELLING_HINT = (
@@ -223,6 +296,10 @@ def _stub_signature(name: str) -> str:
 def _signature_hint(name: str) -> str:
     sig = _stub_signature(name)
     if sig:
+        # Deliberately inline and pointer-free: the kernel holds the stub for
+        # EVERY projected tool, deferred ones included, so a bad call to a tool
+        # whose docs never entered the prompt still self-corrects here without
+        # spending a turn on read_tool_docs.
         return f"Hint: the signature is {sig} — pass only those parameters."
     return (
         "Hint: pass only the parameters in the tool's signature; run "
@@ -261,10 +338,18 @@ def _error_hint(exc: BaseException) -> str:
         return _syntax_hint(exc)
     if isinstance(exc, ImportError) and message.startswith("cannot import name "):
         pkg = getattr(exc, "name", None) or ""
-        if pkg in ("tools", "skills"):
+        if pkg == "tools":
             return (
-                f"Hint: no such {'tool' if pkg == 'tools' else 'skill'} — run "
-                "list_tools or search_tools to find the right name."
+                "Hint: no such tool in the kernel VFS — `dir(tools)` lists "
+                "every name mounted here, and `tools.<name>.__doc__` is its "
+                "documentation. (list_tools / search_tools / read_tool_docs "
+                "are separate top-level tool calls; they are not importable "
+                "from `tools` and cannot be called inside a cell.)"
+            )
+        if pkg == "skills":
+            return (
+                "Hint: no such skill — `dir(skills)` lists the skills mounted "
+                "in this kernel."
             )
     if isinstance(exc, TypeError) and "got an unexpected keyword argument" in message:
         name = message.split("(", 1)[0].strip().rsplit(".", 1)[-1] or "the tool"
@@ -346,6 +431,7 @@ def _run_cell(code: str):
     err = None
     saved = sys.stdout
     sys.stdout = buf
+    _CELL_REFS.clear()
     try:
         tree = ast.parse(code, "<cell>", "exec")
         if tree.body and isinstance(tree.body[-1], ast.Expr):
@@ -371,7 +457,9 @@ def _run_cell(code: str):
     # The registry is the runner's, not the cell's: rebinding ``_refs`` in a
     # cell shadows the view, never the recording.
     _NS["_refs"] = _REFS
-    out = truncate.fair_share_stdout(buf.segments(), _STDOUT_CAP)
+    out = truncate.fair_share_stdout(
+        buf.segments(), _STDOUT_CAP, refs=list(_CELL_REFS)
+    )
     return out, value_repr, err
 
 

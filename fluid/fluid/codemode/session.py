@@ -10,7 +10,12 @@ into the kernel VFS, and implements the four code-mode tools:
 
 When the host restricts the session's tool surface it sets ``tool_filter``
 (ruling T9); every one of those four tools, the projected VFS, and the host-call
-gate then behave as though a filtered tool does not exist.
+gate then behave as though a filtered tool does not exist. ``plan_mode`` is the
+same idea for the read-only planning phase: while it reports active, write and
+destructive tools leave the projection (so the kernel has no stub to import)
+and the host gate refuses them by name (so a hand-written ``__host_call__``
+cannot write either). Both are live predicates — plan mode ends mid-turn, and
+the next cell must find its write tools back.
 
 With a :class:`~fluid.codemode.skills.SkillStore` attached, the session is also
 the driver of the *continual harness*: persistent skills mount into the kernel
@@ -26,9 +31,12 @@ projection (discoverable), carrying zero prompt-schema cost.
 Each in-kernel tool call is gated by ``HostBridge`` — the same PreToolUse hook →
 PermissionEngine (incl. doom-loop) → dispatch → PostToolUse pipeline the JSON
 path uses, with the ``code_mode_allowed=False`` escape hatch enforced host-side.
-The session wraps that bridge with the engine's ``PermissionRequest`` round-trip
-(``on_permission``) and emits ``ToolUse``/``ToolResult`` events so in-kernel calls
-are as observable as JSON calls.
+The session wraps that bridge with the engine's two round-trips back to the
+human — ``PermissionRequest`` (``on_permission``) and the input-required/MRTR
+``QuestionRequest`` (``on_input_required``, which is what lets an in-kernel
+``AskUser``/``StopPlanning`` actually reach the user) — and emits
+``ToolUse``/``ToolResult`` events so in-kernel calls are as observable as JSON
+calls.
 """
 
 from __future__ import annotations
@@ -43,7 +51,7 @@ from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
 from fluid.codemode.verify import verify_sources, verify_store
 from fluid.events.model import ToolResult, ToolUse
-from fluid.permissions.engine import PermissionEngine
+from fluid.permissions.engine import PermissionEngine, plan_mode_blocks
 from fluid.store.base import new_id
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
@@ -52,7 +60,9 @@ SKILLS_SOURCE = "skills"
 
 _RUN_PYTHON_DESC = (
     "Execute Python in a persistent per-session kernel (state survives across "
-    "calls). Discover tools with list_tools/search_tools/read_tool_docs, then "
+    "calls). Discover tools with the list_tools/search_tools/read_tool_docs "
+    "tools — they are separate top-level calls, not functions inside the "
+    "kernel; from inside a cell, `dir(tools)` lists what is mounted. Then "
     "`from tools import Read, Edit` and call them as plain synchronous "
     "functions (`import tools; tools.Read(...)` also works) — each call is "
     "permission-gated on the host. Saved skills (reusable helpers that persist "
@@ -75,12 +85,34 @@ _RUN_PYTHON_DESC = (
     "The cell must be valid Python, so:\n"
     "- Quote every argument. `Grep(pattern=r\"def foo|bar\", glob=\"*.py\")`, "
     "never `pattern=def foo|bar`. Raw strings for regexes and Windows paths.\n"
-    "- Never nest a shell heredoc or a long multi-line body inside a command "
-    "string. Put the text in a triple-quoted variable, or Write it to a file "
-    "and point the command at that file (e.g. `--body-file`).\n"
+    "- Never nest a shell heredoc or a long multi-line body (a commit message, "
+    "a PR description, a markdown report) inside a command string. Put the "
+    "text in its own triple-quoted variable, or Write it to a file and point "
+    "the command at that file (`git commit -F <file>`, `gh pr create "
+    "--body-file <file>`) — writing that file OUTSIDE the repo working tree, "
+    "since `git add -A` will otherwise commit it.\n"
     "- Tools return text, not dicts; parse with json.loads when a tool emits "
     "JSON."
 )
+
+
+def _run_python_desc(stdout_cap: int = KernelConfig.stdout_cap) -> str:
+    """run_python's description plus this session's real stdout budget.
+
+    The cap used to be undocumented, and it is the single largest silent loss
+    in the code surface: transcripts show cells printing 27k chars, losing 11k
+    of them, and the model paying to re-run the tools because nothing had told
+    it a budget existed or that the full results were still in the kernel.
+    """
+    return (
+        f"{_RUN_PYTHON_DESC}\n"
+        "\n"
+        f"A cell's stdout is capped at {stdout_cap:,} characters, fair-shared "
+        "across its prints, and what is cut is named in a closing notice. Print "
+        "what you need to decide, not whole payloads: a tool result too large "
+        "to print is already in the kernel as a ResultRef, so slice it (or "
+        "recover it from `_refs[N]`) rather than re-running the tool."
+    )
 
 # Journal previews are bounded so journal.jsonl (synthesis input) stays small.
 _JOURNAL_STDOUT_CAP = 1500
@@ -155,6 +187,7 @@ class CodeModeSession:
         skills: SkillStore | None = None,
         synthesizer: Any | None = None,  # fluid.codemode.continual.Synthesizer
         tool_filter: Callable[[str], bool] | None = None,
+        plan_mode: Callable[[], bool] | None = None,
     ) -> None:
         self._registry = registry
         self._config = config or KernelConfig()
@@ -169,10 +202,19 @@ class CodeModeSession:
         # projection is rebuilt per call, so a later change takes effect at once
         # (and the VFS signature shift re-mounts the kernel's ``tools`` package).
         self.tool_filter: Callable[[str], bool] | None = tool_filter
+        # "Is plan mode on right now?" — ``None`` for hosts with no plan mode.
+        # Same live-predicate contract as ``tool_filter``: the engine stamps its
+        # own flag in, the projection is rebuilt per call, and the VFS signature
+        # shifts when the answer changes, so entering or leaving plan mode
+        # re-mounts the kernel's ``tools`` package with the right stubs.
+        self.plan_mode: Callable[[], bool] | None = plan_mode
 
     @property
     def skills(self) -> SkillStore | None:
         return self._skills
+
+    def _planning(self) -> bool:
+        return self.plan_mode is not None and bool(self.plan_mode())
 
     # ── projection (rebuilt cheaply; reflects late-loaded MCP tools) ──
     def _projection(self) -> Projection:
@@ -180,7 +222,23 @@ class CodeModeSession:
             s for s in self._registry.list_tools(loaded_only=False)
             if s.source != CODE_MODE_SOURCE
         ]
-        return Projection(specs, tool_filter=self.tool_filter)
+        if self._planning():
+            # Plan mode's promise ("write and shell tools have left your
+            # surface") has to hold on the surface the model actually uses. In
+            # code mode that is the projection: no stub, no catalog entry, no
+            # docs — the same withholding the request schemas do on the JSON
+            # path, rather than a rule the model is merely asked to respect.
+            specs = [s for s in specs if not plan_mode_blocks(s)]
+        # Deferral rides along: every projected tool is callable, but a host
+        # that inlines per-tool documentation into the prompt must collapse the
+        # deferred ones to name + one-liner and leave read_tool_docs to serve
+        # the rest. Best-effort — a registry double without the accessor simply
+        # projects everything as loaded.
+        try:
+            deferred = {s.name for s in self._registry.deferred_tools()}
+        except Exception:  # noqa: BLE001
+            deferred = set()
+        return Projection(specs, tool_filter=self.tool_filter, deferred=deferred)
 
     # ── the three discovery tools (tools + persistent skills) ──
     def render_list(self) -> str:
@@ -274,13 +332,32 @@ class CodeModeSession:
             )
             return verdict == "allow"
 
+        # MRTR round-trip: an in-kernel AskUser/StopPlanning (or an elicitating
+        # MCP tool) pauses on ``input_required``, and the engine turns that into
+        # QuestionRequest events, parks for RespondQuestion, and hands the
+        # answers back for the retry leg — the same path the JSON surface uses.
+        # An embedder whose loop has no such round-trip leaves this unwired, and
+        # the bridge then refuses the call loudly instead of answering "".
+        collect = getattr(loop, "_collect_input_responses", None)
+        on_input_required = None
+        if collect is not None:
+            async def on_input_required(
+                name: str, tool_use_id: str | None, marker: Any
+            ) -> dict | None:
+                return await collect(sid, turn_id, name, tool_use_id, marker)
+
         # No engine ⇒ allow-all, matching the JSON path (which skips gating when
         # ``permissions is None``).
         permissions = loop.permissions or PermissionEngine("never_ask")
         bridge = HostBridge(
             self._registry, permissions,
-            hooks=loop.hooks, on_permission=_on_permission, ctx=loop.ctx,
-            tool_filter=self.tool_filter,
+            hooks=loop.hooks, on_permission=_on_permission,
+            on_input_required=on_input_required, ctx=loop.ctx,
+            tool_filter=self.tool_filter, plan_mode=self.plan_mode,
+            # What this surface actually delivers: a result over the ref
+            # threshold reaches the cell as a ResultRef stub, not as text the
+            # model reads (see ToolCtx.result_budget).
+            result_budget=self._config.ref_threshold,
         )
 
         # Ordered per-call records: name, what it acted on, whether it landed,
@@ -319,10 +396,17 @@ class CodeModeSession:
             previous = extra.get("tool_use_id") if had_previous else None
             if stamped:
                 extra["tool_use_id"] = tool_use_id
+                # Tools whose output talks about how to call things next need
+                # to know they were reached from inside the kernel (ToolSearch
+                # otherwise prints wire names the kernel cannot import).
+                extra["in_kernel_call"] = True
             try:
-                reply = await bridge.on_host_call(name, kwargs)
+                reply = await bridge.on_host_call(
+                    name, kwargs, tool_use_id=tool_use_id
+                )
             finally:
                 if stamped:
+                    extra.pop("in_kernel_call", None)
                     if had_previous:
                         extra["tool_use_id"] = previous
                     else:
@@ -438,6 +522,7 @@ def register_code_mode_tools(
     session: CodeModeSession,
     *,
     tool_filter: Callable[[str], bool] | None = None,
+    plan_mode: Callable[[], bool] | None = None,
 ) -> None:
     """Register the four code-mode tools as the model's entire schema surface.
 
@@ -445,10 +530,14 @@ def register_code_mode_tools(
     it is stamped onto the session, so discovery (``list_tools``,
     ``search_tools``, ``read_tool_docs``), the projected kernel VFS, and the
     host-call gate all describe and accept exactly the tools this session may
-    call. Passing ``None`` leaves whatever the session already carries.
+    call. ``plan_mode`` is the host's live plan-mode flag, which does the same
+    to write and destructive tools while the session is planning. Passing
+    ``None`` for either leaves whatever the session already carries.
     """
     if tool_filter is not None:
         session.tool_filter = tool_filter
+    if plan_mode is not None:
+        session.plan_mode = plan_mode
 
     async def _run_guard(_input: dict, _ctx: ToolCtx) -> ToolOutcome:
         # The engine intercepts run_python and drives the kernel directly; this
@@ -469,7 +558,8 @@ def register_code_mode_tools(
 
     registry.register_builtin(
         ToolSpec(
-            name="run_python", description=_RUN_PYTHON_DESC,
+            name="run_python",
+            description=_run_python_desc(session._config.stdout_cap),
             input_schema={
                 "type": "object",
                 "properties": {

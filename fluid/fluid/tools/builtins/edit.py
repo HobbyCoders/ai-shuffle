@@ -266,15 +266,19 @@ def _diagnose(file_lines: list[str], old_lines: list[str]) -> str:
     if first_idx is None:
         return (
             "old_string not found in file (no line matches the first line of "
-            "old_string). Re-Read the file and copy the text exactly."
+            "old_string). Re-Read the file and copy the text exactly, "
+            'stripping Read\'s "lineno<TAB>" prefix — that tab is display '
+            "formatting, not file content."
         )
     target = _body(old_lines[first_idx])
     hit = next((i for i, line in enumerate(file_lines) if _body(line) == target), None)
     if hit is None:
         return (
             "old_string not found in file (no line matches the first line of "
-            "old_string). Re-Read the file and copy the text exactly, or Grep "
-            "for the text first to confirm it is in this file at all."
+            "old_string). Re-Read the file and copy the text exactly — "
+            'without Read\'s "lineno<TAB>" prefix, which is display '
+            "formatting, not file content — or Grep for the text first to "
+            "confirm it is in this file at all."
         )
     start = max(0, hit - first_idx)
     quote = _quote_span(file_lines, start, len(old_lines))

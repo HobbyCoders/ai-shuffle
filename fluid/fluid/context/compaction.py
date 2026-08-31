@@ -77,12 +77,19 @@ class CompactionConfig:
     enabled: bool = True
     # Tier-1 knobs (the owned trimmer's config).
     trim: TrimConfig = field(default_factory=TrimConfig)
-    # Absolute estimated-total-context trigger; also the fallback when the
+    # Estimated-total-context trigger FLOOR; also the whole story when the
     # model's context window is unknown.
     trigger_tokens: int = 120_000
+    # Fraction of a KNOWN context window the prompt may reach before the ladder
+    # arms. The effective threshold is
+    #   min(max(trigger_tokens, window * trigger_window_ratio),
+    #       window - headroom_tokens - output reserve)
+    # so a 200k model keeps the historical 120k trigger while a 1M model gets
+    # 600k instead of compacting (and cache-busting) at 12% window usage.
+    # 0.0 restores the old fixed trigger.
+    trigger_window_ratio: float = 0.6
     # Reserve kept free below a known context window so arrivals can't
-    # overflow: the effective threshold is
-    # min(trigger_tokens, context_window - headroom_tokens - output reserve).
+    # overflow: it is the cap in the formula above.
     headroom_tokens: int = 16_000
     # A batch reclaims down to target_ratio * threshold (hysteresis: batches
     # stay rare, renders stay byte-identical for long stretches).
@@ -111,15 +118,53 @@ class CompactionConfig:
     error_text_cap: int = 2_000
 
 
+def derive_trigger_tokens(
+    *,
+    base: int,
+    window_ratio: float,
+    context_window: int | None,
+    headroom_tokens: int,
+    output_reserve_tokens: int = 0,
+) -> int:
+    """The estimated-token threshold that arms an eviction batch.
+
+    With no known window this is ``base`` verbatim — the pre-existing fixed
+    trigger, unchanged. With a window it scales: ``base`` becomes a floor,
+    ``window * window_ratio`` the target, and ``window - headroom - reserve``
+    the ceiling, so a large window is actually used instead of being compacted
+    away at a fraction of its capacity.
+    """
+    if context_window is None:
+        return base
+    scaled = base
+    if window_ratio > 0:
+        scaled = max(base, int(context_window * window_ratio))
+    return min(scaled, context_window - headroom_tokens - output_reserve_tokens)
+
+
 @dataclass(frozen=True, kw_only=True)
 class Promotion:
     """What one batch rung did — the persistable decision, never the text."""
 
     tier: int  # 1 | 2 | 3
-    reason: str = "trigger"  # "trigger" | "overflow"
+    reason: str = "trigger"  # "trigger" | "overflow" | "image_consumed"
     trimmed: tuple[tuple[str, str], ...] = ()  # (node_id, tool_use_id)
     spans: tuple[tuple[str, str, str], ...] = ()  # (start, end, kind)
     reclaimed_chars: int = 0
+
+
+def _chars_of(
+    nodes: list[SessionNode], pairs: list[tuple[str, str]]
+) -> int:
+    """Estimated chars carried by the named tool-result blocks."""
+    wanted = set(pairs)
+    return sum(
+        block_chars(block)
+        for node in nodes
+        for block in node.message.content
+        if isinstance(block, ToolResultBlock)
+        and (node.node_id, block.tool_use_id) in wanted
+    )
 
 
 def is_turn_start(node: SessionNode) -> bool:
@@ -444,18 +489,14 @@ class Compactor:
         # trimmer.apply, which the Compactor path never calls). The decision
         # is deterministic from the path, so this is about keeping the
         # rendered prefix byte-identical between requests, not durability.
-        if self.trimmer.config.enabled:
-            self.trimmer._trimmed.update(
-                self.trimmer._consumed_image_results(nodes)
-            )
+        promotions: list[Promotion] = self._consume_images(nodes)
         rendered = self._render(nodes)
         threshold = self._threshold(
             self.config.trigger_tokens, context_window, output_reserve_tokens
         )
         total = overhead_tokens + estimate_tokens_of_messages(rendered)
         if total <= threshold:
-            return rendered, []
-        promotions: list[Promotion] = []
+            return rendered, promotions
         target = int(threshold * self.config.target_ratio)
 
         # Rung 1: batch-trim tool results.
@@ -520,14 +561,41 @@ class Compactor:
         base: int,
         context_window: int | None,
         output_reserve_tokens: int,
+        window_ratio: float | None = None,
     ) -> int:
-        """``base``, capped so a known window keeps its headroom free."""
-        if context_window is None:
-            return base
-        return min(
-            base,
-            context_window - self.config.headroom_tokens - output_reserve_tokens,
+        """``base`` scaled to a known window, capped to keep headroom free."""
+        return derive_trigger_tokens(
+            base=base,
+            window_ratio=(
+                self.config.trigger_window_ratio
+                if window_ratio is None
+                else window_ratio
+            ),
+            context_window=context_window,
+            headroom_tokens=self.config.headroom_tokens,
+            output_reserve_tokens=output_reserve_tokens,
         )
+
+    def _consume_images(self, nodes: list[SessionNode]) -> list[Promotion]:
+        """Persist consume-once image trims and report them as a promotion.
+
+        An image dropping out of context is a real loss — HistoryExpand cannot
+        put it back — and it used to happen silently, so neither the transcript
+        nor the user could see it. Reporting it as a tier-1 promotion with its
+        own reason gives it a ``ContextCompaction`` event, and makes the
+        decision replay on resume like every other rung's.
+        """
+        newly = self.trimmer.consume_images(nodes)
+        if not newly:
+            return []
+        return [
+            Promotion(
+                tier=1,
+                reason="image_consumed",
+                trimmed=tuple(newly),
+                reclaimed_chars=_chars_of(nodes, newly),
+            )
+        ]
 
     def _apply_trim_only(
         self,
@@ -542,26 +610,30 @@ class Compactor:
         Same batch-and-sticky discipline as the full ladder (rare, amortized,
         cache-safe), driven by the tier-1 trigger rather than the ladder's.
         """
-        self.trimmer._trimmed.update(self.trimmer._consumed_image_results(nodes))
+        promotions = self._consume_images(nodes)
         rendered = self._render(nodes)
         threshold = self._threshold(
-            self.config.trim.trigger_tokens, context_window, output_reserve_tokens
+            self.config.trim.trigger_tokens,
+            context_window,
+            output_reserve_tokens,
+            window_ratio=self.config.trim.trigger_window_ratio,
         )
         if overhead_tokens + estimate_tokens_of_messages(rendered) <= threshold:
-            return rendered, []
+            return rendered, promotions
         pairs = self.trimmer.trim_batch(nodes)
         if not pairs:
-            return rendered, []
+            return rendered, promotions
         before = estimate_tokens_of_messages(rendered)
         rendered = self._render(nodes)
         return rendered, [
+            *promotions,
             Promotion(
                 tier=1,
                 trimmed=tuple(pairs),
                 reclaimed_chars=max(
                     0, (before - estimate_tokens_of_messages(rendered)) * 4
                 ),
-            )
+            ),
         ]
 
     def escalate(self, nodes: list[SessionNode]) -> list[Promotion]:

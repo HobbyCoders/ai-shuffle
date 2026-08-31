@@ -148,7 +148,8 @@ Knobs for tool-result trimming and the compaction ladder
 |---|---|---|
 | `enabled` | `true` | `false` disables both trimming and compaction. |
 | `trim_only` | `false` | `true` runs tier 1 alone: old tool results become recoverable placeholders, but no turn is ever folded into a digest and no epoch stub is ever written. Ignored when `enabled = false`. |
-| `trigger_tokens` | `120000` | Prompt size at which trimming and compaction start. |
+| `trigger_tokens` | `120000` | Floor for the prompt size at which trimming and compaction start; also the whole trigger when the model's context window is unknown. |
+| `trigger_window_ratio` | `0.6` | Fraction of a **known** context window (`context_window`) the prompt may reach before the ladder arms. The effective trigger is `min(max(trigger_tokens, window × trigger_window_ratio), window − headroom_tokens − output reserve)`, so a 200k model keeps the historical 120k trigger while a 1M model gets ~600k instead of compacting at 12% usage. Set `0` to pin the fixed trigger. |
 | `headroom_tokens` | `16000` | Reserve kept free below the trigger. |
 | `target_ratio` | `0.7` | Compaction aims to bring the prompt down to this fraction of the trigger. |
 | `keep_recent_turns` | `3` | Turns never folded into a digest. |
@@ -162,6 +163,15 @@ Knobs for tool-result trimming and the compaction ladder
 A trimmed result is replaced by a placeholder that states how many characters
 were removed, quotes the first 160 characters of the original, and carries a
 `node_...` ref that `HistoryExpand` or `HistorySearch` can recover.
+
+An **image** result gets a different placeholder, because recall is a text path
+and cannot put an image back: it says so outright and names the re-Read path
+from the result's own `[image: <path>, …]` caption. Images are consumed once —
+a later assistant node is the evidence one model call already saw them — and
+that trim now reports itself as a `ContextCompaction` event with
+`reason="image_consumed"`, so an image leaving the context is visible in the
+transcript instead of silent. `HistoryExpand` on a node that carried an image
+says the same thing rather than returning the caption alone.
 
 `trim_only = true` is the embedding contract for host apps that want the
 context saving without the model ever reading a machine summary of its own
@@ -348,6 +358,7 @@ Config overrides, applied as layer 5 (`env_overrides` in the loader):
 | `FLUID_APPROVAL_POLICY` | `permission.approval_policy` |
 | `FLUID_CONTEXT_ENABLED` | `context.enabled` |
 | `FLUID_CONTEXT_TRIGGER_TOKENS` | `context.trigger_tokens` |
+| `FLUID_CONTEXT_TRIGGER_WINDOW_RATIO` | `context.trigger_window_ratio` (ignored if not a float) |
 | `FLUID_CONTEXT_HEADROOM_TOKENS` | `context.headroom_tokens` |
 
 Read outside the config loader:
@@ -390,9 +401,14 @@ Three things keep a cell's output honest:
 - **Fair-share stdout.** A cell's stdout is capped at 16384 chars
   (`KernelConfig.stdout_cap`). The budget is divided across the cell's prints
   rather than kept from the front, so the summary a model prints *last* still
-  arrives; the closing notice names the totals and the heaviest drops
-  (`…[stdout truncated: kept 16384 of 139201 chars across 13 prints; heaviest
-  drops: print 11 (-48200), print 12 (-31005)]`).
+  arrives; the closing notice names the totals, the budget, the heaviest drops,
+  and the `_refs` handles still holding this cell's full tool results, so the
+  recovery is a slice rather than a re-run
+  (`…[stdout truncated: kept 16384 of 139201 chars across 13 prints — one
+  cell's stdout budget is 16,384 chars; heaviest drops: print 11 (-48200),
+  print 12 (-31005). This cell's full tool output is held in the kernel:
+  _refs[4] (55,123 bytes) — slice it instead of re-running the tools or
+  re-printing.]`). The cap is stated in `run_python`'s own description.
 - **Committed-call manifest.** A tool error aborts the whole cell, so a cell
   that edited three files before failing would otherwise show only a traceback.
   The result appends the calls that already ran, in order, with their targets

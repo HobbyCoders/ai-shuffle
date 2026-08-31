@@ -10,6 +10,9 @@ from fluid.events.model import (
     ErrorEvent,
     Event,
     Interrupted,
+    WAKE_AUTO,
+    WAKE_NOT_APPLICABLE,
+    WAKE_SUPPRESSED,
     SessionParked,
     SessionWoken,
     SubagentEvent,
@@ -19,6 +22,9 @@ from fluid.events.ops import BackgroundTaskFinished, UserTurn
 from fluid.tools.registry import BackgroundTaskReceipt
 
 _TERMINAL_EVENTS = (TurnComplete, Interrupted, ErrorEvent)
+# How much of a long worker report rides the wake turn when the rest is one
+# Read away. Only applied when there IS a report path to point at.
+_REPORT_HEAD_CHARS = 4_000
 _TERMINAL_TASK_KINDS = {"finished", "failed", "cancelled"}
 _BACKGROUND_SPAWN_SETTLE_TIMEOUT = 5.0
 
@@ -69,6 +75,7 @@ class BackgroundLifecycleMixin:
                             task_id=event.task_id,
                             worker_session_id=event.worker_session_id,
                             description=event.description,
+                            serves=event.serves,
                         )
                 elif event.kind == "completion_pending":
                     if event.task_id not in self._background_terminal:
@@ -78,6 +85,7 @@ class BackgroundLifecycleMixin:
                             summary=event.summary,
                             worker_session_id=event.worker_session_id,
                             wake=event.wake,
+                            report_path=event.report_path,
                         )
                 elif event.kind in _TERMINAL_TASK_KINDS:
                     self._background_pending.pop(event.task_id, None)
@@ -90,6 +98,7 @@ class BackgroundLifecycleMixin:
                             summary=event.summary,
                             worker_session_id=event.worker_session_id,
                             wake=True,
+                            report_path=event.report_path,
                         )
                     else:
                         self._background_completions.pop(event.task_id, None)
@@ -102,6 +111,24 @@ class BackgroundLifecycleMixin:
             if task_id in self._background_pending:
                 op = self._background_early.pop(task_id)
                 await self._finalize_background_task_unlocked(op)
+
+    def _park_pending_ids(self) -> tuple[str, ...]:
+        """The pending task ids a park is actually WAITING on.
+
+        A ``serves`` receipt (a dev server, a tunnel — see
+        ``BackgroundTaskReceipt.serves``) is tracked and surfaced like any
+        other background task, but it is not work whose result the session
+        wants: its only "completion" is its own death. Counting it parked the
+        session on every turn that had a server running, so it is excluded
+        here — the one place park accounting is decided. A turn whose only
+        live tasks are serving ones therefore parks on nothing and emits no
+        ``SessionParked`` at all.
+        """
+        return tuple(sorted(
+            task_id
+            for task_id, receipt in self._background_pending.items()
+            if not receipt.serves
+        ))
 
     async def _background_task_started(self, receipt: BackgroundTaskReceipt) -> None:
         should_wake = False
@@ -121,17 +148,24 @@ class BackgroundLifecycleMixin:
                     kind="started",
                     description=receipt.description,
                     worker_session_id=receipt.worker_session_id,
+                    # A task that has only just started owes nobody a wake yet.
+                    # The default wake=True here was the dataclass default, not
+                    # a claim about anything.
+                    wake_disposition=WAKE_NOT_APPLICABLE,
+                    serves=receipt.serves,
                 ))
                 early = self._background_early.pop(receipt.task_id, None)
                 if early is not None:
                     await self._finalize_background_task_unlocked(early)
                 elif self._background_turn_terminal:
-                    await self._emit(SessionParked(
-                        session_id=meta.session_id,
-                        turn_id=self._active_turn_id,
-                        pending_task_ids=tuple(sorted(self._background_pending)),
-                        reason="background_tasks",
-                    ))
+                    parked_on = self._park_pending_ids()
+                    if parked_on:
+                        await self._emit(SessionParked(
+                            session_id=meta.session_id,
+                            turn_id=self._active_turn_id,
+                            pending_task_ids=parked_on,
+                            reason="background_tasks",
+                        ))
             should_wake = bool(self._background_completions)
         if should_wake:
             self._kick_background_wake()
@@ -159,6 +193,10 @@ class BackgroundLifecycleMixin:
                         worker_session_id=op.worker_session_id,
                         wake=op.wake,
                         status=op.status,
+                        # Still a placeholder — the real terminal event carries
+                        # the disposition that counts.
+                        wake_disposition=WAKE_NOT_APPLICABLE,
+                        report_path=op.report_path,
                     ))
             should_wake = bool(self._background_completions)
         if should_wake:
@@ -182,6 +220,11 @@ class BackgroundLifecycleMixin:
             summary=op.summary,
             worker_session_id=worker_session_id,
             wake=op.wake,
+            # The one place the distinction is real: a terminal completion the
+            # engine will wake for, versus one where a wake is owed but the
+            # host performs it instead of us.
+            wake_disposition=WAKE_AUTO if op.wake else WAKE_SUPPRESSED,
+            report_path=op.report_path,
         ))
         if op.wake:
             self._background_completions[op.task_id] = BackgroundTaskFinished(
@@ -190,6 +233,7 @@ class BackgroundLifecycleMixin:
                 summary=op.summary,
                 worker_session_id=worker_session_id,
                 wake=True,
+                report_path=op.report_path,
             )
 
     async def _emit_terminal_with_park(self, event: Event) -> Event:
@@ -197,12 +241,13 @@ class BackgroundLifecycleMixin:
             return await self._emit(event)
         async with self._background_lock:
             await self._rehydrate_background_lifecycle_unlocked()
-            if self._background_pending:
+            parked_on = self._park_pending_ids()
+            if parked_on:
                 await self._emit(SessionParked(
                     session_id=event.session_id,
                     node_id=event.node_id,
                     turn_id=event.turn_id,
-                    pending_task_ids=tuple(sorted(self._background_pending)),
+                    pending_task_ids=parked_on,
                     reason="background_tasks",
                 ))
             emitted = await self._emit(event)
@@ -291,6 +336,16 @@ class BackgroundLifecycleMixin:
     def _background_wake_content(
         completions: Iterable[BackgroundTaskFinished],
     ) -> str:
+        """The synthetic user turn a completed background worker wakes into.
+
+        A *synchronous* Task hands the model the worker's report directly. A
+        background one used to hand it whatever summary the host chose to
+        include, with no way back to the rest — so a report that arrived elided
+        cost two HistoryExpand round-trips to recover text that had never been
+        in history. When the host names a report file, this carries the same
+        contract the sync path does: a head of the report plus the handle that
+        opens the whole of it.
+        """
         sections = [
             "<system-reminder>",
             (
@@ -300,7 +355,25 @@ class BackgroundLifecycleMixin:
         ]
         for item in completions:
             sections.append(f"\nTask {item.task_id} ({item.status}):")
-            sections.append(item.summary or "(no summary was provided)")
+            summary = item.summary or "(no summary was provided)"
+            path = (item.report_path or "").strip()
+            if not path:
+                # Nothing to point at, so nothing may be dropped: an elided
+                # summary with no recovery handle is the failure being fixed.
+                sections.append(summary)
+                continue
+            if len(summary) > _REPORT_HEAD_CHARS:
+                sections.append(summary[:_REPORT_HEAD_CHARS].rstrip() + "…")
+                sections.append(
+                    f"[report head only — {len(summary)} chars in full. The "
+                    f"complete report is at {path}: Read it. HistoryExpand "
+                    f"cannot help here (the rest was never in this "
+                    f"conversation), and re-running the task is never the "
+                    f"recovery.]"
+                )
+            else:
+                sections.append(summary)
+                sections.append(f"[full report: {path} — Read it for detail.]")
         sections.append("</system-reminder>")
         return "\n".join(sections)
 
@@ -341,14 +414,15 @@ class BackgroundLifecycleMixin:
                 await asyncio.gather(*unsettled, return_exceptions=True)
 
         async with self._background_lock:
+            parked_on = self._park_pending_ids()
             if (
-                self._background_pending
+                parked_on
                 and not self._background_turn_terminal
                 and self._session is not None
             ):
                 await self._emit(SessionParked(
                     session_id=self._session.session_id,
                     turn_id=self._active_turn_id,
-                    pending_task_ids=tuple(sorted(self._background_pending)),
+                    pending_task_ids=parked_on,
                     reason="engine_closed",
                 ))

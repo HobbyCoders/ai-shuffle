@@ -216,7 +216,11 @@ async def test_the_same_search_twice_says_so(tmp_path) -> None:
     second = await registry.dispatch("Grep", dict(call), ctx)
     assert not second.is_error
     assert _REPEAT_SEARCH in second.text
-    assert "a.py" in second.text  # results still returned in full
+    # The rows are byte-identical to a copy already in the conversation, so
+    # the pointer REPLACES them rather than riding underneath a second copy.
+    assert "a.py" not in second.text
+    assert "searched via" in second.text  # the header still locates the first
+    assert len(second.text) < len(first.text) + 400
 
 
 async def test_a_changed_search_input_is_not_a_repeat(tmp_path) -> None:

@@ -19,6 +19,12 @@ a plain string, which is wrapped). Contract for ``input``:
               ``BackgroundTaskReceipt`` (or ``ToolOutcome.background_task``).
               The host later submits ``BackgroundTaskFinished`` to the parent
               engine; Fluid persists the result and wakes the parked session.
+              A host that writes the worker's report to a file should set
+              ``BackgroundTaskFinished.report_path``: the wake turn then
+              carries the report head plus that path, which is the pointer
+              contract the synchronous result already has. Without it a summary
+              the host elides has no recovery route at all — HistoryExpand
+              cannot return text that was never in the conversation.
   * label   — optional short display label
 
 The host may replace this fallback spec per session with an eligible subagent

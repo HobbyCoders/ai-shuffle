@@ -56,7 +56,8 @@ def describe(tools: frozenset[str] | None = None) -> str:
     """Read's description, specialized to the session's tool surface."""
     has = (lambda name: tools is None or name in tools)
     line_prefix = "Text is returned with `lineno<TAB>` prefixes" + (
-        " (display formatting only — never copy it into Edit old_string)"
+        " (display formatting, not file content — strip the line-number "
+        "prefix from anything you copy into Edit's old_string)"
         if has("Edit")
         else " (display formatting only, not file content)"
     )
@@ -118,8 +119,12 @@ def _read_image(path: Path, media_type: str) -> ToolOutcome:
             is_error=True,
         )
     data = base64.b64encode(path.read_bytes()).decode("ascii")
+    # The caption carries the FULL path, not just the file name: an image is
+    # consumed once and then trimmed out of history (fluid.context.trim), and
+    # the placeholder that replaces it can only tell the model to re-Read the
+    # file if the path survives in the text block beside the image.
     return ToolOutcome(
-        text=f"[image: {path.name}, {media_type}, {size} bytes]",
+        text=f"[image: {path}, {media_type}, {size} bytes]",
         images=(ToolImage(media_type=media_type, data=data),),
     )
 
@@ -183,9 +188,37 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # matching without any explicit invalidation.
     key = (str(path), offset, int(limit) if limit else None)
     stamp = _stamp(path)
-    repeat = stamp is not None and ctx.read_seen.get(key) == stamp
+    prior_stamp = ctx.read_seen.get(key)
+    # …but "already in the conversation" is a claim about the MODEL's context,
+    # not about this process's memory. In code mode an oversized result never
+    # reaches the model at all — it is handed to the cell as a ResultRef whose
+    # repr is a stub, and a cell that only measured it (``print(len(out))``)
+    # learned nothing. Telling that model to "reuse what you already learned"
+    # is false, and transcripts show it paying several round-trips to recover.
+    # So the note only fires when the earlier read's payload was small enough
+    # that the calling surface delivered it whole.
+    # Sized the way the code-mode kernel sizes it — UTF-8 bytes, not chars.
+    delivered = (
+        ctx.result_budget is None
+        or len(numbered.encode("utf-8", "replace")) <= ctx.result_budget
+    )
+    repeat = (
+        stamp is not None and prior_stamp == stamp and key in ctx.read_delivered
+    )
     if stamp is not None:
         ctx.read_seen[key] = stamp
+        if delivered:
+            ctx.read_delivered.add(key)
+        elif prior_stamp != stamp:
+            ctx.read_delivered.discard(key)
+
+    if not numbered:
+        # No lines, so no payload to claim an identity for — and in particular
+        # no window claim, which would otherwise let a later read be answered
+        # by slicing a ref for lines this call never saw.
+        return ToolOutcome(
+            text=_no_lines_note(path, offset) + unchanged_read_note(repeat)
+        )
 
     # A read that starts at line 1 and runs out of file is the whole file,
     # whatever offset/limit was asked for, so it claims the window-independent
@@ -194,7 +227,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     window = None if offset == 1 and not more else (offset, key[2])
     span = int(limit) if limit else DEFAULT_LINE_LIMIT
     return ToolOutcome(
-        text=(numbered or "(empty file)") + unchanged_read_note(repeat),
+        text=numbered + unchanged_read_note(repeat),
         content_id=_content_id(str(path), window, stamp),
         window_of=(
             None
@@ -205,6 +238,37 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 stop=offset - 1 + span,
             )
         ),
+    )
+
+
+def _count_lines(path: Path) -> int | None:
+    """Line count, or None when the file cannot be re-read. Error path only."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            return sum(1 for _ in fh)
+    except OSError:
+        return None
+
+
+def _no_lines_note(path: Path, offset: int) -> str:
+    """Why a read produced nothing — an empty file, or a window past the end.
+
+    "(empty file)" for a 900-line file read at ``offset=1200`` sent models
+    hunting for a bug that was not there (two recovery calls in the audited
+    transcript). Say which case it is, and hand back the number that makes the
+    next offset obvious.
+    """
+    if offset <= 1:
+        return "(empty file)"
+    total = _count_lines(path)
+    if total is None:
+        return f"no lines at offset {offset} — the file could not be re-read"
+    plural = "line" if total == 1 else "lines"
+    if total == 0:
+        return "(empty file)"
+    return (
+        f"offset {offset} is past the end of the file ({total} {plural}) — "
+        f"the last readable offset is {total}"
     )
 
 

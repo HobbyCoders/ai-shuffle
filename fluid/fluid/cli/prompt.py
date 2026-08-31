@@ -743,7 +743,9 @@ def compose_code_mode_addendum(tools: frozenset[str] | None = None) -> str:
     )
     body_route = (
         " — assign the text to a triple-quoted variable, or Write it to a file "
-        "and point the command at that file with `--body-file`/`-F`"
+        "and point the command at that file (`git commit -F <file>`, "
+        "`gh pr create --body-file <file>`). Put that file OUTSIDE the repo "
+        "working tree (a temp directory), or `git add -A` will commit it"
         if has("Write")
         else " — assign the text to a triple-quoted variable and pass that"
     )
@@ -767,7 +769,9 @@ def compose_code_mode_addendum(tools: frozenset[str] | None = None) -> str:
 
 In this session tools are reached through run_python, not as individual tool \
 calls. Compose one cell that carries the several calls a step needs — discover \
-with list_tools/search_tools, import with `from tools.<name> import <name>`, \
+with list_tools/search_tools (top-level tool calls, not importable from \
+`tools`; inside a cell `dir(tools)` lists what is mounted), import with \
+`from tools.<name> import <name>`, \
 loop and filter in Python — rather than one cell per call. Iterate scratch \
 logic inside the cell instead of rewriting a script file on disk between runs, \
 and hold intermediate results in kernel variables rather than fetching them a \
@@ -780,6 +784,13 @@ code does not: {exit_owner} its output with an [exit code N] line), and the rule
 do not route around it. The file tools are the only way to touch the \
 filesystem; `open()`, `os`, `subprocess` and the network are disabled.\
 {shell}{search}
+
+A catalog entry marked `[deferred]` carries only its one-line summary here — \
+its signature and parameter docs are not in this prompt. Run \
+`read_tool_docs("<name>")` once before the first call instead of guessing \
+parameter names. It imports and calls exactly like any other tool: deferral \
+saves prompt space, it never withholds a capability, and a tool listed as \
+deferred is never "unavailable".
 
 A cell that does not parse costs a whole turn, so watch the two mistakes that \
 cause nearly all of them. {grep_example} And never nest a shell heredoc or a \

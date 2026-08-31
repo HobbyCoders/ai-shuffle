@@ -394,7 +394,9 @@ async def test_session_search_flags_a_repeated_query() -> None:
 
     second = await _registry().dispatch("SessionSearch", {"query": "terraform"}, ctx)
     assert "identical search already run" in second.text
-    assert "ses_a" in second.text  # the results still come back in full
+    # The listing is not repeated — the pointer stands in for it.
+    assert "ses_a" not in second.text
+    assert "session(s) matched" in second.text  # the header still locates it
 
     other = await _registry().dispatch("SessionSearch", {"query": "billing"}, ctx)
     assert "identical search already run" not in other.text

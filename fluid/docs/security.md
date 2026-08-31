@@ -91,7 +91,10 @@ model *reads* framing tokens even when they can't structurally escape.
 
 **8. Structural gates** (pre-existing, part of the same story). The
 permission engine (policy + last-match-wins rules + scoped allow-always), the
-doom-loop guard, plan mode's schema-level exclusion of write tools, the
+doom-loop guard, plan mode's exclusion of write tools (from the request
+schemas on the JSON path, and — because code mode reaches its tools through a
+kernel rather than a schema — from the code-mode projection and the host-call
+gate, plus a final refusal at dispatch), the
 session tool restriction (CE12) enforced at schema build, registry view, and
 dispatch, read-before-write on file edits, and the code-mode kernel's
 host-side gates (`open()` and network disabled; every in-kernel tool call

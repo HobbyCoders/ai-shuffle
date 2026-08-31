@@ -49,6 +49,11 @@ from fluid.codemode.session import (
     register_code_mode_tools,
 )
 from fluid.context.cache_plan import plan_cache
+from fluid.context.cache_probe import (
+    CacheProbeConfig,
+    diagnose_cache_miss,
+    fingerprint_prefix,
+)
 from fluid.context.compaction import CompactionConfig, Compactor, Promotion
 from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
@@ -114,7 +119,13 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from fluid.permissions.engine import PROMPT_DENIAL, PermissionEngine, plan_mode_tools
+from fluid.permissions.engine import (
+    PROMPT_DENIAL,
+    PermissionEngine,
+    plan_mode_blocks,
+    plan_mode_denial,
+    plan_mode_tools,
+)
 from fluid.providers.base import ProviderClient, ProviderRequest
 from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
 from fluid.tools.builtins._util import resolve as resolve_tool_path
@@ -123,6 +134,7 @@ from fluid.tools.builtins.tool_search import (
     render_deferred_catalog,
 )
 from fluid.tools.images import condition_image
+from fluid.tools.mrtr import resolve_input_required
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -515,6 +527,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         max_continuations_per_turn: int = 3,
         trim: TrimConfig | None = None,
         compaction: CompactionConfig | None = None,
+        cache_probe: CacheProbeConfig | None = None,
         mcp_servers: dict[str, dict[str, Any]] | None = None,
         agents: Sequence[dict[str, Any]] | None = None,
         allowed_tools: Sequence[str] | None = None,
@@ -600,8 +613,13 @@ class NativeLoop(BackgroundLifecycleMixin):
             # Ruling T9: code-mode discovery, the projected kernel VFS, and the
             # in-kernel host-call gate all see this session's tool surface, so
             # a filtered tool is never described and never callable from code.
+            # Plan mode rides in as a live predicate for the same reason: the
+            # mode ends mid-turn, and a snapshot taken at construction would
+            # keep the kernel read-only for the rest of the session.
             register_code_mode_tools(
-                registry, codemode, tool_filter=self._tool_available
+                registry, codemode,
+                tool_filter=self._tool_available,
+                plan_mode=lambda: self.plan_mode,
             )
         # ``None`` means unlimited: the provider stays the source of truth for
         # when a turn has to stop. Every comparison below guards that case.
@@ -666,6 +684,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         # while that node is still on the loaded path — a fork or rewind past
         # it means the numbers describe a prompt this session no longer sends.
         self._last_call_usage: dict[str, tuple[str, dict[str, Any]]] = {}
+        # Prompt-cache instrumentation (context/cache_probe.py). Every request
+        # gets a short prefix fingerprint; when a call bills a big fresh prompt
+        # with ~no cache read, the two fingerprints are bisected to name the
+        # segment that moved. Purely diagnostic — it never changes a request.
+        self._cache_probe = cache_probe or CacheProbeConfig()
+        self._prefix_fingerprint: dict[str, str] | None = None
+        self._prev_prefix_fingerprint: dict[str, str] | None = None
         # MCP servers from config, connected lazily on the first turn (the
         # constructor is sync; connecting needs the event loop).
         self._mcp_servers = dict(mcp_servers or {})
@@ -991,8 +1016,15 @@ class NativeLoop(BackgroundLifecycleMixin):
         )
 
     def _deferred_tools_api(self) -> list[dict[str, Any]]:
-        """Schemas of known-but-unloaded tools — the ToolSearch catalog."""
-        if self.registry is None or self._codemode is not None:
+        """Schemas of known-but-unloaded tools — the ToolSearch catalog.
+
+        Code mode does not make this empty. The host's deferred set is what it
+        always was: tools that are callable (they get a kernel stub) but whose
+        documentation the prompt does not carry — reachable there with
+        ``read_tool_docs`` rather than ToolSearch. Reporting [] hid the very
+        saving deferral exists to make.
+        """
+        if self.registry is None:
             return []
         return [
             s.to_api() for s in self.registry.deferred_tools()
@@ -1527,6 +1559,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 usage_raw = dict(result.usage)
                 usage_raw["model_call_index"] = num_calls
                 usage_raw["projected_prompt_tokens"] = projected_prompt
+                usage_raw.update(self._cache_probe_fields(result.usage))
                 await self._emit(Usage(
                     session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                     input_tokens=result.usage.get("input_tokens", 0),
@@ -1602,6 +1635,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             usage_raw = dict(result.usage)
             usage_raw["model_call_index"] = num_calls
             usage_raw["projected_prompt_tokens"] = projected_prompt
+            usage_raw.update(self._cache_probe_fields(result.usage))
             prompt_tokens = _measured_prompt_tokens(result.usage)
             if prompt_tokens > 0:
                 # A provider that reported nothing leaves the estimate in place
@@ -1827,20 +1861,34 @@ class NativeLoop(BackgroundLifecycleMixin):
         return not _matches_tool_pattern(name, self.disallowed_tools)
 
     def _tool_available(self, name: str) -> bool:
-        """Permitted *and* backed by a wired host capability.
+        """Permitted, plan-mode-allowed, *and* backed by a wired host capability.
 
         The JSON surface drops a ``requires_extra`` tool whose injection is
         missing (:meth:`_capability_present`), but code mode projected it
         anyway — so a kernel cell could import ``SessionSearch`` and get
         "unavailable: no session store directory injected" back as a tool
         error. Absent capability must be invisible on both surfaces.
+
+        Plan mode is here for the mirror-image reason. It used to live only in
+        :meth:`_tools_api`'s non-codemode branch, i.e. only in the request
+        schemas — so a code-mode session in "plan mode" was handed a kernel
+        that still had ``Write`` in it, and ``from tools import Write`` wrote
+        the file while the Plan tool's own result claimed write tools had left
+        the surface. This predicate is what code mode filters its projection
+        and its discovery tools through, so the withholding now happens on the
+        surface the model actually uses. It is read live: an approval that ends
+        plan mode mid-turn puts the tools back on the next call.
         """
         if not self._tool_permitted(name):
             return False
         if self.registry is None:
             return True
         spec = self.registry.get(name)
-        return spec is None or self._capability_present(spec)
+        if spec is None:
+            return True
+        if self.plan_mode and plan_mode_blocks(spec):
+            return False
+        return self._capability_present(spec)
 
     def _tools_api(self) -> list[dict[str, Any]]:
         """The tool schemas the next request would carry (code-mode surface or
@@ -1851,7 +1899,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._codemode is not None:
             # Code-mode replaces N schemas with the four-tool surface; the
             # work-tools stay in the registry (reachable via host calls) but
-            # never enter the prompt schema.
+            # never enter the prompt schema. Plan mode therefore has nothing to
+            # filter HERE — the four tools are all ``safe``, and the write tools
+            # it withholds are not on this surface to begin with. It is enforced
+            # where code mode actually reaches them: the projection and the
+            # host-call gate (both via :meth:`_tool_available`), plus
+            # :meth:`_gated_call`.
             specs = [
                 s for s in self.registry.list_tools(loaded_only=True)
                 if s.source == "codemode"
@@ -1903,12 +1956,67 @@ class NativeLoop(BackgroundLifecycleMixin):
             },
         )
 
+    def _fingerprint_request(self, request: ProviderRequest) -> None:
+        """Record the prefix fingerprint of the request about to be sent.
+
+        Best-effort: a fingerprint that cannot be computed costs a diagnostic,
+        never a turn.
+        """
+        if not self._cache_probe.enabled:
+            return
+        try:
+            self._prefix_fingerprint = fingerprint_prefix(
+                system=request.system,
+                tools=request.tools,
+                messages=request.messages,
+            )
+        except Exception:  # noqa: BLE001 — instrumentation is never fatal
+            log.debug("prefix fingerprint failed", exc_info=True)
+            self._prefix_fingerprint = None
+
+    def _cache_probe_fields(self, usage: dict[str, Any]) -> dict[str, Any]:
+        """``prefix_hashes`` (+ ``cache_miss`` on a miss) for a Usage payload.
+
+        Consumes the fingerprint of the call that just completed and rotates it
+        into the "previous" slot, so the next call diffs against this one.
+        """
+        fingerprint = self._prefix_fingerprint
+        if fingerprint is None:
+            return {}
+        self._prefix_fingerprint = None
+        out: dict[str, Any] = {"prefix_hashes": fingerprint}
+        try:
+            diagnosis = diagnose_cache_miss(
+                previous=self._prev_prefix_fingerprint,
+                current=fingerprint,
+                input_tokens=int(usage.get("input_tokens", 0) or 0),
+                cache_read_tokens=int(
+                    usage.get("cache_read_input_tokens", 0) or 0
+                ),
+                config=self._cache_probe,
+            )
+        except Exception:  # noqa: BLE001 — instrumentation is never fatal
+            log.debug("cache-miss diagnosis failed", exc_info=True)
+            diagnosis = None
+        self._prev_prefix_fingerprint = fingerprint
+        if diagnosis is not None:
+            out["cache_miss"] = diagnosis
+            log.warning(
+                "prompt cache miss: %s (%s); fresh=%s cache_read=%s",
+                diagnosis.get("reason"),
+                diagnosis.get("note", ""),
+                diagnosis.get("input_tokens"),
+                diagnosis.get("cache_read_tokens"),
+            )
+        return out
+
     async def _stream_once(
         self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True
     ) -> _CallResult:
         request = self._build_request(
             self._without_stale_plan_reminder(history), sticky=sticky
         )
+        self._fingerprint_request(request)
 
         blocks: dict[int, dict[str, Any]] = {}
         usage_totals: dict[str, Any] = {}
@@ -2297,6 +2405,18 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
         spec = self.registry.get(name)
 
+        # Plan mode's last wall. The JSON surface withholds write schemas while
+        # planning, so a call arriving here names a tool the model was never
+        # offered — but code mode reaches this path from a kernel, where the
+        # model writes the call itself, and "the schema was withheld" enforces
+        # nothing. Live flag: an approval that ends plan mode mid-turn lets the
+        # very next call of the same turn through.
+        if self.plan_mode and spec is not None and plan_mode_blocks(spec):
+            return await self._finish_tool(
+                sid, turn_id, name, tool_use_id,
+                ToolOutcome(text=plan_mode_denial(name), is_error=True),
+            )
+
         # PreToolUse hook: deny short-circuits with an in-context error result;
         # modify replaces the input before permissions/dispatch see it.
         if self.hooks is not None:
@@ -2358,7 +2478,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
 
         # run_python is engine-driven: it opens the kernel; the kernel's in-sandbox
-        # tool calls are gated by HostBridge (see CodeModeSession.run_python).
+        # tool calls are gated by HostBridge (see CodeModeSession.run_python),
+        # which runs its own MRTR round-trip through this loop's
+        # ``_collect_input_responses`` — so an in-kernel AskUser reaches the user
+        # exactly as a JSON-path one does.
         if self._codemode is not None and name == "run_python":
             outcome = await self._codemode.run_python(
                 sid=sid, turn_id=turn_id, input=input, loop=self
@@ -2369,29 +2492,17 @@ class NativeLoop(BackgroundLifecycleMixin):
         # MRTR (MCP spec 2026-07-28): a tools/call can pause on input_required.
         # Collect answers via QuestionRequest/RespondQuestion round-trips, then
         # retry the SAME call with inputResponses + the echoed request_state.
-        # Bounded — a server that keeps pausing eventually gets its marker
-        # surfaced as an in-context error instead of wedging the turn.
-        rounds = 0
-        while outcome.input_required is not None and rounds < 3:
-            rounds += 1
-            marker = outcome.input_required
-            answers = await self._collect_input_responses(
+        outcome = await resolve_input_required(
+            outcome,
+            name=name,
+            collect=lambda marker: self._collect_input_responses(
                 sid, turn_id, name, tool_use_id, marker
-            )
-            if answers is None:  # interrupted mid-question
-                return await self._finish_tool(
-                    sid, turn_id, name, tool_use_id,
-                    ToolOutcome(text="input_required round-trip interrupted", is_error=True),
-                )
-            outcome = await self.registry.dispatch(
+            ),
+            redispatch=lambda answers, request_state: self.registry.dispatch(
                 name, input, self.ctx,
-                input_responses=answers, request_state=marker.request_state,
-            )
-        if outcome.input_required is not None:
-            outcome = ToolOutcome(
-                text=f"tool {name} still input_required after {rounds} round-trips",
-                is_error=True,
-            )
+                input_responses=answers, request_state=request_state,
+            ),
+        )
         return await self._finish_tool(sid, turn_id, name, tool_use_id, outcome, input=input)
 
     async def _collect_input_responses(

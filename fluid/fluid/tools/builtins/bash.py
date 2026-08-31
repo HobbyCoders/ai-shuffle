@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -60,6 +61,19 @@ def describe(tools: frozenset[str] | None = None) -> str:
     read_windows = "Redirect to a file" + (
         " and Read it in windows" if has("Read") else ""
     )
+    ps1_route = (
+        "save the script to a .ps1 file with Write"
+        if has("Write")
+        else "put the script in a .ps1 file"
+    )
+    windows_shell_bullet = (
+        "- On Windows that shell is Git Bash, not PowerShell or cmd. "
+        "PowerShell syntax is not rejected there, it is MANGLED: bash expands "
+        "`$_`, `$var` and `$env:NAME` itself (usually to nothing) and eats "
+        "backtick escapes, so the command runs with different text than you "
+        "wrote and can still exit 0. Use the bash equivalent, or "
+        f"{ps1_route} and run it with `powershell -File script.ps1`.\n"
+    )
     return (
         "Execute a shell command and return its combined stdout+stderr.\n"
         "\n"
@@ -103,6 +117,7 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "`out or fallback` — those are always true and will misfire.\n"
         "- Quote file paths that contain spaces. Under Git Bash, write Windows "
         "paths with forward slashes or inside quotes so backslashes survive.\n"
+        + windows_shell_bullet
     )
 
 
@@ -132,6 +147,18 @@ SPEC = ToolSpec(
     # call so the on_write policy does not prompt for them. See bash_risk.py.
     classify_risk=classify_bash_risk,
     session_scope=bash_session_scope,
+)
+
+
+# `cargo test | tail -20` on a command that printed nothing to the pipe reports
+# tail's exit code (0) and no output — indistinguishable from a clean silent
+# success. The description forbids the pipe; when it happens anyway and the
+# result is the ambiguous empty one, say what it probably means.
+_OUTPUT_PIPE_RE = re.compile(r"\|\s*(?:tail|head)\b")
+
+_PIPE_ATE_OUTPUT = (
+    "\nThe command pipes through tail/head: the pipe may have consumed the "
+    "output and replaced the real exit code — re-run it without the pipe."
 )
 
 
@@ -228,8 +255,13 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         # happened: a silent success and a silent failure read identically, and
         # a `gh pr merge` that already went through invites a retry. Whenever
         # there is no output to judge by, the status is the whole answer.
+        note = (
+            _PIPE_ATE_OUTPUT
+            if code == 0 and _OUTPUT_PIPE_RE.search(command)
+            else ""
+        )
         return ToolOutcome(
-            text=f"(no output) [exit code {code}]",
+            text=f"(no output) [exit code {code}]{note}",
             is_error=bool(code),
             soft_error=bool(code),
         )

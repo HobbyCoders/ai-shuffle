@@ -20,12 +20,29 @@ from typing import Any
 
 @dataclass(frozen=True, kw_only=True)
 class Event:
-    """Base event. ``seq`` is assigned by the EventBus at publish time."""
+    """Base event. ``seq`` and ``ts`` are assigned by the EventBus at publish time."""
 
     session_id: str
     node_id: str | None = None
     turn_id: str | None = None
     seq: int = -1
+    ts: float = 0.0
+    """Wall clock at publish, epoch seconds — the same convention as
+    ``SessionNode.ts``.
+
+    ``seq`` orders events but says nothing about time, so a persisted stream
+    could not answer how long anything actually took: the gap between a task
+    finishing and its session waking was simply not measurable from the log.
+
+    Assigned by ``EventBus.publish`` rather than by a ``default_factory``, for
+    two reasons. Constructing an event is not the same instant as emitting it,
+    and publish is already where ``seq`` is stamped, so both facts about the
+    event's position in the stream are decided in one place. It also keeps a
+    freshly constructed event equal to an identical one, which is what the
+    codec round-trip tests compare.
+
+    ``0.0`` means unstamped: an event that never went through the bus, or a row
+    persisted before this field existed. Read it as "unknown", never as 1970."""
 
     @property
     def type(self) -> str:
@@ -230,7 +247,10 @@ class ContextCompaction(Event):
     byte-identical view after a restart."""
 
     tier: int  # highest rung this batch reached: 1 trim | 2 digest | 3 epoch
-    reason: str  # "trigger" | "overflow"
+    # "trigger" (crossed the size threshold) | "overflow" (provider rejected the
+    # prompt) | "image_consumed" (an image the model has already seen left the
+    # context; unlike text, HistoryExpand cannot bring it back)
+    reason: str
     trimmed: list[list[str]] = field(default_factory=list)  # [node_id, tool_use_id]
     spans: list[list[str]] = field(default_factory=list)  # [start, end, kind]
     reclaimed_chars: int = 0
@@ -308,6 +328,12 @@ class DelegatedSurface(Event):
     mcp_servers: tuple[dict[str, Any], ...] = ()
 
 
+# ``SubagentEvent.wake_disposition`` values. See the field's docstring.
+WAKE_AUTO = "auto"
+WAKE_SUPPRESSED = "suppressed"
+WAKE_NOT_APPLICABLE = "not_applicable"
+
+
 @dataclass(frozen=True, kw_only=True)
 class SubagentEvent(Event):
     task_id: str
@@ -316,7 +342,37 @@ class SubagentEvent(Event):
     summary: str | None = None
     worker_session_id: str | None = None
     wake: bool = True
+    """Whether the ENGINE should run an autonomous continuation turn for this
+    completion. A directive to the engine, not an observation about the world —
+    ``wake=False`` does not mean no wake happened, it means this engine is not
+    the thing that will perform it. Read ``wake_disposition`` instead when what
+    you want to know is what actually became of the wake."""
     status: str | None = None
+    wake_disposition: str = WAKE_AUTO
+    """What became of the wake, for consumers that need to tell three cases
+    apart which ``wake`` alone collapses into two:
+
+    * ``"auto"`` — a terminal completion the engine will wake the parent for.
+    * ``"suppressed"`` — a terminal completion where a wake IS owed but the
+      host owns it: the embedding app already unparks its own session, or the
+      CLI drives the continuation itself, so the engine deliberately stands
+      down. Audits repeatedly misread the ``wake=False`` this produces as "the
+      session never woke", and concluded a latch was stuck when nothing was.
+    * ``"not_applicable"`` — a non-terminal event (``started``,
+      ``completion_pending``) where waking is not a question yet. These
+      previously carried ``wake=True`` purely because that is the field default,
+      which was never a claim about anything.
+
+    Additive and defaulted, so rows persisted before it existed decode as
+    ``"auto"`` — which is what the old default ``wake=True`` already meant."""
+    # ``started``-kind only: the task is a SERVICE meant to stay up (see
+    # ``BackgroundTaskReceipt.serves``). Durable so a rehydrated engine keeps
+    # the task out of park accounting across a restart.
+    serves: bool = False
+    # Where the worker's full report was written, when the host wrote one; it
+    # rides the completion so a woken parent can open the report directly.
+    # Optional and last so events persisted before the field existed rehydrate.
+    report_path: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -9,14 +9,15 @@ Public seams:
 - ``Kernel`` protocol + ``SubprocessKernel`` (v1, a soft boundary — see its
   docstring; a container/gVisor kernel is a roadmap item behind the same API);
 - ``Projection`` — tools → typed stub sources + a discovery catalog;
-- ``HostBridge`` — routes ``on_host_call`` RPCs through hooks/permissions/dispatch;
+- ``HostBridge`` — routes ``on_host_call`` RPCs through hooks/permissions/dispatch,
+  including the permission and input-required (MRTR) round-trips back to the user;
 - ``ResultRef`` — large results stay in-kernel behind a sliceable handle;
 - ``SkillStore`` + ``Synthesizer`` — the continual harness: persistent
   model-authored skills (mounted as ``skills.<name>``) and the background pass
   that distills the exec journal into new ones.
 """
 
-from fluid.codemode.bridge import HostBridge, HostCallBridge, OnPermission
+from fluid.codemode.bridge import HostBridge, OnInputRequired, OnPermission
 from fluid.codemode.continual import Synthesizer
 from fluid.codemode.kernel import (
     HostCall,
@@ -43,12 +44,12 @@ __all__ = [
     "DEFAULT_LIMIT",
     "HostBridge",
     "HostCall",
-    "HostCallBridge",
     "HostCallDenied",
     "HostReply",
     "Kernel",
     "KernelConfig",
     "KernelResult",
+    "OnInputRequired",
     "OnPermission",
     "Projection",
     "ResultRef",

@@ -95,6 +95,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "trim_only": False,
         "trigger_tokens": 120_000,
+        "trigger_window_ratio": 0.6,
         "headroom_tokens": 16_000,
         "target_ratio": 0.7,
         "keep_recent_turns": 3,
@@ -353,6 +354,13 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
                 context[key] = int(env[var])
             except ValueError:
                 pass
+    if "FLUID_CONTEXT_TRIGGER_WINDOW_RATIO" in env:
+        try:
+            context["trigger_window_ratio"] = float(
+                env["FLUID_CONTEXT_TRIGGER_WINDOW_RATIO"]
+            )
+        except ValueError:
+            pass
     if context:
         out["context"] = context
     return out
@@ -750,10 +758,12 @@ def build_engine(
         trim=TrimConfig(
             enabled=cc.enabled,
             trigger_tokens=cc.trigger_tokens,
+            trigger_window_ratio=cc.trigger_window_ratio,
             keep_recent_tool_results=cc.keep_recent_tool_results,
             min_result_chars=cc.min_result_chars,
         ),
         trigger_tokens=cc.trigger_tokens,
+        trigger_window_ratio=cc.trigger_window_ratio,
         headroom_tokens=cc.headroom_tokens,
         target_ratio=cc.target_ratio,
         keep_recent_turns=cc.keep_recent_turns,

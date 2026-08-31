@@ -41,6 +41,13 @@ class ToolCtx:
     an entry already there returns its full result with a short note saying so.
     Nothing is invalidated by hand — an Edit or a Write bumps the file's mtime,
     which drops the match on its own.
+
+    ``read_delivered`` is the honesty half of that registry: only the keys whose
+    payload the calling surface actually put in front of the model. A repeat-read
+    note claims "you already have this", which is false when the earlier result
+    was handed to a code-mode cell as a ResultRef stub the cell never printed.
+    ``result_budget`` is what the surface declares about itself — the largest
+    result it delivers verbatim (None = no ceiling, the JSON tool path).
     """
 
     cwd: str = "."
@@ -49,7 +56,11 @@ class ToolCtx:
     read_seen: dict[tuple[str, int | None, int | None], tuple[int, int]] = field(
         default_factory=dict
     )
+    read_delivered: set[tuple[str, int | None, int | None]] = field(
+        default_factory=set
+    )
     grep_seen: set[tuple[Any, ...]] = field(default_factory=set)
+    result_budget: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -157,6 +168,15 @@ class BackgroundTaskReceipt:
     task_id: str
     worker_session_id: str | None = None
     description: str | None = None
+    # A SERVICE, not a job: a process meant to stay up (a dev server, a
+    # tunnel, a file watcher) for as long as the work needs it. It is
+    # registered, surfaced and stoppable like any other background task, but
+    # it is EXCLUDED from park accounting — a turn that started one may end
+    # without parking, and ``SessionParked.pending_task_ids`` never lists it.
+    # Without this the Monitor contract ("the command must exit") contradicts
+    # its own dev-server use case and every later turn parks on a process
+    # whose only "completion" is its death.
+    serves: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)

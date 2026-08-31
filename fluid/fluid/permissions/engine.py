@@ -11,7 +11,11 @@ calls in a row force one ``ask`` checkpoint (then reset), breaking the
 "model repeats a failing call forever" pattern.
 
 ``plan_mode_tools`` implements schema-level plan mode: a read-only session
-simply never sees write/destructive tools in its request schema.
+simply never sees write/destructive tools in its request schema. Schema
+withholding alone is not enforcement, though — code mode reaches the same tools
+through a kernel, not through the request schema — so ``plan_mode_blocks`` is
+the shared predicate every surface asks, and ``plan_mode_denial`` is the one
+refusal text a blocked call comes back with.
 """
 
 from __future__ import annotations
@@ -166,6 +170,36 @@ class PermissionEngine:
         return False
 
 
+def plan_mode_blocks(spec: ToolSpec) -> bool:
+    """Is this tool off the surface while plan mode is active?
+
+    The single definition of "a write tool" for plan mode, asked by every
+    surface that has to honour the mode: the request schemas, the code-mode
+    projection, the in-kernel host-call gate, and dispatch. The tool's STATIC
+    risk decides — not ``effective_risk`` — because plan mode withholds the
+    tool itself, before any particular input exists to classify. (Bash is off
+    the planning surface even for ``git status``: the mode's promise to the
+    user is "no shell", and per-call classification would make the promise
+    depend on what the model happened to type.)
+    """
+    return spec.risk in _WRITE_RISKS
+
+
 def plan_mode_tools(tools: Sequence[ToolSpec]) -> list[ToolSpec]:
     """Filter write/destructive tools out of a read-only session's schema."""
-    return [t for t in tools if t.risk not in _WRITE_RISKS]
+    return [t for t in tools if not plan_mode_blocks(t)]
+
+
+def plan_mode_denial(name: str) -> str:
+    """Model-facing refusal for a write tool called while plan mode is on.
+
+    Reached from code mode, where the tool is not in a request schema that
+    could have been withheld: the model wrote the call itself, so the refusal
+    has to say what is going on and how the mode ends.
+    """
+    return (
+        f"{name} is unavailable: plan mode is active — write tools are "
+        "unavailable until you exit plan mode. Keep exploring with the "
+        "read-only tools, then present the plan with StopPlanning; only the "
+        "user's approval ends plan mode."
+    )

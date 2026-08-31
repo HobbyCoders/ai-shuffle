@@ -46,23 +46,64 @@ are batched into one continuation. Started and completed state is rebuilt from
 the durable event log when an engine is recreated.
 
 Set `wake=False` only when the host wants to persist a terminal task result
-without autonomously continuing the parent agent.
+without autonomously continuing the parent agent. `wake` is a directive to the
+engine, not a record of what happened: `wake=False` means fluid stands down
+because the host drives the continuation itself, not that no wake occurred.
+
+Read `SubagentEvent.wake_disposition` when the question is what became of the
+wake. It has three values where `wake` has two:
+
+| value | meaning |
+| --- | --- |
+| `auto` | terminal completion; the engine wakes the parent |
+| `suppressed` | terminal completion; a wake is owed, the host performs it |
+| `not_applicable` | `started` / `completion_pending`; waking is not yet a question |
+
+It defaults to `auto`, so events persisted before the field existed decode to
+the same thing their `wake=True` already meant.
+
+Every persisted event also carries `ts` — wall clock at publish, epoch seconds,
+assigned by the `EventBus` alongside `seq`. `0.0` means unstamped: an event that
+never went through the bus, or a row written before the field existed.
 
 ## Monitor: detached shell commands
 
 The `Monitor` builtin uses the same lifecycle for plain processes the agent
 wants to supervise — a CI run, a frontend build, a log watcher. The host
 injects an async spawner as `ToolCtx.extra["monitor_spawn"]`; it receives
-`(input, ctx)` where `input` carries `command` and optional `cwd`, and returns
-the same receipt shapes as a background Task (a `BackgroundTaskReceipt`, an
-`Outcome` carrying one, or a mapping with `task_id`). The spawner must run the
-command detached from the turn and buffer its output; when the command reaches
-a terminal state, submit `BackgroundTaskFinished` with the output tail as
-`summary`. The session parks if the turn ends first and is woken with the
-output when the command finishes.
+`(input, ctx)` where `input` carries `command`, optional `cwd` and optional
+`serves`, and returns the same receipt shapes as a background Task (a
+`BackgroundTaskReceipt`, an `Outcome` carrying one, or a mapping with
+`task_id`). The spawner must run the command detached from the turn and buffer
+its output; when the command reaches a terminal state, submit
+`BackgroundTaskFinished` with the output tail as `summary`. The session parks
+if the turn ends first and is woken with the output when the command finishes.
 
 Without an injected spawner, Monitor reports itself unavailable (the same
 graceful degradation as Task without a dispatcher).
+
+### Spawn-time lint
+
+Monitor appends a warning to the receipt when the command has no natural end
+(`while true`, `until`, `tail -f`, `watch`, a log follow) and carries no time
+budget — no `timeout`, deadline arithmetic or iteration cap — or when a glob
+like `*""*` collapses to `**` and makes a loop's exit arm dead code. It warns,
+never refuses: the spawn still happens and the receipt still carries its task
+id. A command that looks like a server is pointed at `serves` instead.
+
+### `serves`: a service, not a job
+
+`serves: true` marks a process that is MEANT to stay up — a dev server, a
+tunnel, a queue worker. The receipt sets `BackgroundTaskReceipt.serves`, the
+durable `SubagentEvent(kind="started")` carries it, and
+`BackgroundLifecycleMixin._park_pending_ids` — the single place park accounting
+is decided — excludes it. So a serving task is registered, surfaced, stoppable
+and still wakes the session when it dies, but the turn that started it may end
+without parking, `SessionParked.pending_task_ids` never lists it, and a turn
+whose only live tasks are serving ones emits no `SessionParked` at all. Hosts
+read the flag off the receipt to skip whatever time bound they impose on
+ordinary Monitor jobs and to settle a deliberate stop as `cancelled` rather
+than a failure.
 
 ## Standalone CLI host
 

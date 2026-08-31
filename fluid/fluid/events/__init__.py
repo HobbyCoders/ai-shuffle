@@ -1,5 +1,8 @@
 from fluid.events.bus import EventBus
 from fluid.events.model import (
+    WAKE_AUTO,
+    WAKE_NOT_APPLICABLE,
+    WAKE_SUPPRESSED,
     BlockStart,
     BlockStop,
     ContextCompaction,
@@ -81,5 +84,8 @@ __all__ = [
     "TurnStarted",
     "Usage",
     "UserTurn",
+    "WAKE_AUTO",
+    "WAKE_NOT_APPLICABLE",
+    "WAKE_SUPPRESSED",
     "register_event_type",
 ]

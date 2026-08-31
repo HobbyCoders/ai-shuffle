@@ -75,6 +75,12 @@ class BackgroundTaskFinished(Op):
     summary: str | None = None
     worker_session_id: str | None = None
     wake: bool = True
+    # Where the worker's full report was written, when the host wrote one. A
+    # synchronous Task hands the model the report itself; a background one has
+    # to hand it a way back to the report, or the wake notification's elided
+    # summary costs HistoryExpand round-trips to recover something that was
+    # never in history to begin with.
+    report_path: str | None = None
 
 
 @dataclass(kw_only=True)

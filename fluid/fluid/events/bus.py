@@ -18,6 +18,7 @@ subscriber (with an unbounded queue — it must never drop).
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -45,9 +46,17 @@ class EventBus:
         return self._logs[session_id]
 
     async def publish(self, event: Event) -> Event:
-        """Assign seq, append to the log, fan out. Returns the sequenced event."""
+        """Assign seq and ts, append to the log, fan out. Returns the sequenced event."""
         log = self._logs[event.session_id]
-        sequenced = replace(event, seq=len(log) + 1)
+        # Stamp both facts about the event's place in the stream together: its
+        # order (seq) and when it happened (ts, epoch seconds). An emitter that
+        # already set ts — a replayed or reconstructed event carrying its
+        # original time — keeps it; only an unstamped 0.0 is filled in.
+        sequenced = replace(
+            event,
+            seq=len(log) + 1,
+            ts=event.ts or time.time(),
+        )
         log.append(sequenced)
         for sub in self._subs[event.session_id]:
             if sub.lagging:
