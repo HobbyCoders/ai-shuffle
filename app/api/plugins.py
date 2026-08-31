@@ -483,6 +483,14 @@ async def run_auto_update(token: str = Depends(require_admin)):
         return AutoUpdateRunResponse(**summary)
 
 
+@router.get("/state/enabled", response_model=PluginEnableStateResponse)
+async def get_enabled_plugins(token: str = Depends(require_auth)):
+    """Get all plugin enable/disable states"""
+    service = get_plugin_service()
+    enabled = service.get_enabled_plugins()
+    return PluginEnableStateResponse(enabled_plugins=enabled)
+
+
 # ============================================================================
 # Plugin Details (catch-all - MUST be last among GET routes)
 # ============================================================================
@@ -650,11 +658,3 @@ async def disable_plugin(
             detail="Failed to disable plugin"
         )
     return {"status": "disabled", "plugin_id": plugin_id}
-
-
-@router.get("/state/enabled", response_model=PluginEnableStateResponse)
-async def get_enabled_plugins(token: str = Depends(require_auth)):
-    """Get all plugin enable/disable states"""
-    service = get_plugin_service()
-    enabled = service.get_enabled_plugins()
-    return PluginEnableStateResponse(enabled_plugins=enabled)

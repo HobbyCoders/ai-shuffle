@@ -797,35 +797,35 @@ class TestDisablePlugin:
 
 
 class TestGetEnabledPlugins:
-    """Test GET /state/enabled endpoint.
+    """GET /state/enabled returns the merged enabledPlugins map.
 
-    Note: Due to route ordering in the source code, /state/enabled is currently
-    caught by the /{plugin_id:path} catch-all route. This is a known issue
-    where the route should be defined before the catch-all route.
-
-    These tests verify the intended behavior if the route were properly ordered.
+    The route must stay defined BEFORE the /{plugin_id:path} catch-all, or the
+    catch-all intercepts "state/enabled" as a plugin id and 404s.
     """
 
-    def test_get_enabled_plugins_route_shadowed_by_catch_all(self, app, mock_plugin_service):
-        """
-        The /state/enabled route is shadowed by /{plugin_id:path} catch-all.
-        This test verifies the actual current behavior.
-        """
-        # The catch-all route intercepts /state/enabled and calls get_plugin_details
-        # with plugin_id="state/enabled", which returns None (not found). The
-        # available-plugin fallback must also be empty for the 404.
-        mock_plugin_service.get_plugin_details.return_value = None
-        mock_plugin_service.get_available_plugin_details.return_value = None
+    def test_get_enabled_plugins_returns_map(self, app, mock_plugin_service):
+        mock_plugin_service.get_enabled_plugins.return_value = {
+            "unslop@community": True,
+            "archify@community": False,
+        }
 
         with patch("app.api.plugins.get_plugin_service", return_value=mock_plugin_service):
             with TestClient(app) as client:
                 response = client.get("/api/v1/plugins/state/enabled")
 
-        # Due to route ordering, this is matched as a plugin_id lookup
-        # which returns 404 because "state/enabled" is not a valid plugin
-        assert response.status_code == 404
-        assert "Plugin not found" in response.json()["detail"]
+        assert response.status_code == 200
+        data = response.json()
+        assert data["enabled_plugins"] == {"unslop@community": True, "archify@community": False}
 
+    def test_get_enabled_plugins_empty_map(self, app, mock_plugin_service):
+        mock_plugin_service.get_enabled_plugins.return_value = {}
+
+        with patch("app.api.plugins.get_plugin_service", return_value=mock_plugin_service):
+            with TestClient(app) as client:
+                response = client.get("/api/v1/plugins/state/enabled")
+
+        assert response.status_code == 200
+        assert response.json()["enabled_plugins"] == {}
 
 # =============================================================================
 # Test Request/Response Models
