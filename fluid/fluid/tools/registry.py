@@ -487,8 +487,9 @@ class ToolRegistry:
             return ToolOutcome(
                 text=(
                     f"tool {name} is temporarily unavailable (its backing "
-                    "service did not respond). Do not retry immediately; use "
-                    "another approach or tell the user."
+                    "service did not respond). This is an outage, not a "
+                    "denial: do not retry it immediately; use another tool "
+                    "that is itself available, or tell the user."
                 ),
                 is_error=True,
             )

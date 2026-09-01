@@ -41,6 +41,7 @@ def resolved_prompt(
     extra_system: str | None = None,
     provider_name: str | None = None,
     guidance_home: Path | None = None,
+    wired: frozenset[str] | None = None,
 ):
     """CLI prompt assembly, delegated to the shared compiler.
 
@@ -56,12 +57,17 @@ def resolved_prompt(
     The base comes first, so it is the byte-stable prefix providers cache.
     Environment injection is on: the base prompt and the tool descriptions
     both point the model at the environment block for shell syntax, cwd, and
-    date. ``extra_system`` (per-run text) and, under code mode, the code-mode
-    addendum ride as ``extra_blocks`` after everything else. Native agent
-    definitions are always included when instruction discovery is enabled.
+    date. Under code mode the code-mode addendum is static text and joins the
+    base ahead of the dated environment block, so the daily date change never
+    invalidates it; ``extra_system`` (per-run text) rides as an
+    ``extra_blocks`` entry after everything else. Native agent definitions
+    are always included when instruction discovery is enabled.
     ``provider_name`` picks the engine leg the prompt is for: the delegated
     ``claude`` provider gets a prompt without the native-only tools and
     without the code-mode addendum, since that engine serves neither.
+    ``wired`` names the host capabilities the session will carry (see
+    :data:`~fluid.cli.prompt.TOOL_CAPABILITIES`); prose about a tool whose
+    capability is absent is left out, as the tool's schema is.
 
     The compiler places the environment block after the instruction stack and
     the skills/agents indexes, so the daily date change invalidates only the
@@ -78,20 +84,19 @@ def resolved_prompt(
         base: str | None = config.system
     elif config.base_prompt:
         base = default_base_prompt(
-            config, provider_name=provider_name, guidance_home=guidance_home
+            config, provider_name=provider_name, guidance_home=guidance_home,
+            wired=wired,
         )
     else:
         base = None
+    addendum = code_mode_addendum(config, provider_name=provider_name, wired=wired)
+    if addendum:
+        base = "\n\n".join(b for b in (base, addendum) if b)
     enabled = config.instruction_files.enabled
     return compile_prompt(
         PromptInputs(
             base=base,
-            extra_blocks=[
-                b for b in (
-                    code_mode_addendum(config, provider_name=provider_name),
-                    extra_system,
-                ) if b
-            ],
+            extra_blocks=[extra_system] if extra_system else [],
             cwd=config.cwd,
             include_env=True,
             include_global_instructions=enabled and config.instruction_files.discover_global,
@@ -164,7 +169,10 @@ def make_engine(
     if unavailable:
         print(f"fluid: {unavailable}", file=sys.stderr)
     compiled = resolved_prompt(
-        config, extra_system=extra_system, provider_name=provider_name
+        config, extra_system=extra_system, provider_name=provider_name,
+        wired=wired_capabilities(
+            config, store, provider_name=provider_name, background_host=background_host,
+        ),
     )
     engine = build_engine(
         config,
@@ -187,6 +195,39 @@ def make_engine(
             permission_responder=permission_responder,
         ).attach(engine)
     return engine
+
+
+def wired_capabilities(
+    config: HarnessConfig,
+    store,
+    *,
+    provider_name: str | None = None,
+    background_host: bool = True,
+) -> frozenset[str]:
+    """The host capabilities a CLI session's tool context will carry.
+
+    Mirrors what :func:`build_engine` and :class:`~fluid.cli.host.CliHost`
+    wire: recall over the store when it can search, the Task and Monitor
+    dispatchers when the host is attached, the learner's store under
+    ``continual`` or code mode, and the capabilities the native loop wires
+    itself (not on the delegated leg, which cannot serve them).
+    """
+    from fluid.cli.prompt import NATIVE_WIRED_CAPABILITIES, is_delegated_provider
+
+    wired: set[str] = set()
+    if callable(getattr(store, "search", None)):
+        wired.add("session_search")
+    if callable(getattr(store, "session_slice", None)):
+        wired.add("session_view")
+    if background_host:
+        wired.update({"task_dispatch", "monitor_spawn"})
+    if config.continual or config.code_mode:
+        wired.add("recall_store")
+    if config.continual:
+        wired.add("continual_journal")
+    if not is_delegated_provider(config, provider_name):
+        wired.update(NATIVE_WIRED_CAPABILITIES)
+    return frozenset(wired)
 
 
 def host_of(engine: Any):

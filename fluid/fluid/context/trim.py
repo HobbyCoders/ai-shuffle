@@ -37,6 +37,10 @@ from fluid.store.base import SessionNode
 @dataclass(kw_only=True)
 class TrimConfig:
     enabled: bool = True
+    # Whether the session can call HistoryExpand and HistorySearch. Off, the
+    # placeholders stop naming a recovery route the model cannot take and
+    # say instead that the content is gone from context.
+    recall_tools: bool = True
     # Estimated-token threshold that arms a batch trim (≈ chars / 4). This is
     # the FLOOR and the fallback: when the model's context window is known, the
     # effective trigger is max(trigger_tokens, window * trigger_window_ratio),
@@ -151,12 +155,16 @@ def block_head(block: Any, limit: int = HEAD_EXCERPT_CHARS) -> str:
     return head[:limit] + ("…" if len(head) > limit else "")
 
 
-def _placeholder(node_id: str, chars: int, head: str = "") -> Text:
+def _placeholder(node_id: str, chars: int, head: str = "", *, recall: bool = True) -> Text:
     excerpt = f' It began: "{head}"' if head else ""
+    route = (
+        f'recover it verbatim with HistoryExpand("{node_id}") when any detail matters'
+        if recall
+        else "re-run the tool when any detail matters"
+    )
     return Text(
         f"[old tool result trimmed to save context — {chars} chars removed.{excerpt} "
-        f'The rest is NOT in context: do not reconstruct it from memory; recover it '
-        f'verbatim with HistoryExpand("{node_id}") when any detail matters]'
+        f"The rest is NOT in context: do not reconstruct it from memory; {route}]"
     )
 
 
@@ -173,7 +181,9 @@ def image_source_path(head: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def _image_placeholder(node_id: str, chars: int, head: str = "") -> Text:
+def _image_placeholder(
+    node_id: str, chars: int, head: str = "", *, recall: bool = True,
+) -> Text:
     """What replaces an image once the model has already seen it.
 
     The generic placeholder pointed at HistoryExpand, which recovers TEXT — it
@@ -189,6 +199,13 @@ def _image_placeholder(node_id: str, chars: int, head: str = "") -> Text:
         if path
         else "Re-run the tool that produced it to see it again"
     )
+    if not recall:
+        return Text(
+            f"[image consumed from context — {chars} chars removed. You "
+            f"already saw this image; it is NOT in context now. {recovery}. "
+            f"Do not describe its contents from memory — look again if any "
+            f"detail matters]"
+        )
     return Text(
         f"[image consumed from context — {chars} chars removed. You already "
         f"saw this image; it is NOT in context now, and HistoryExpand cannot "
@@ -204,12 +221,19 @@ def _image_placeholder(node_id: str, chars: int, head: str = "") -> Text:
 USER_IMAGE_KEY = "<user-image>"
 
 
-def _user_image_placeholder(node_id: str, chars: int) -> Text:
+def _user_image_placeholder(node_id: str, chars: int, *, recall: bool = True) -> Text:
     """What replaces a user-attached image once the model has seen it.
 
     There is no file to re-Read and no tool to re-run: the only way back is
     the user attaching it again, which the placeholder says outright.
     """
+    if not recall:
+        return Text(
+            f"[image attachment consumed from context — {chars} chars "
+            f"removed. You already saw this image; it is NOT in context now. "
+            f"Ask the user to attach it again if any detail matters; do not "
+            f"describe its contents from memory]"
+        )
     return Text(
         f"[image attachment consumed from context — {chars} chars removed. "
         f"You already saw this image; it is NOT in context now, and "
@@ -298,7 +322,8 @@ class ToolResultTrimmer:
                             tool_use_id=block.tool_use_id,
                             content=[
                                 render(
-                                    node.node_id, block_chars(block), block_head(block)
+                                    node.node_id, block_chars(block), block_head(block),
+                                    recall=self.config.recall_tools,
                                 )
                             ],
                             is_error=block.is_error,
@@ -310,7 +335,10 @@ class ToolResultTrimmer:
                     and (node.node_id, USER_IMAGE_KEY) in trimmed
                 ):
                     blocks.append(
-                        _user_image_placeholder(node.node_id, block_chars(block))
+                        _user_image_placeholder(
+                            node.node_id, block_chars(block),
+                            recall=self.config.recall_tools,
+                        )
                     )
                     changed = True
                 else:

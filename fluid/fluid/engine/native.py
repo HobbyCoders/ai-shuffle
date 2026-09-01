@@ -766,6 +766,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if trim is not None
                 else CompactionConfig()
             )
+        if compaction.recall_tools and not self._recall_tools_on_surface():
+            # The placeholders and digests name HistoryExpand as the way
+            # back; a session that cannot call it gets the recovery-free
+            # wording instead of an instruction it cannot follow.
+            compaction = replace(
+                compaction, recall_tools=False,
+                trim=replace(compaction.trim, recall_tools=False),
+            )
         self._compactor = Compactor(config=compaction)
         # Compatibility seam: existing callers/tests reach the tier-1 trimmer.
         self._trimmer = self._compactor.trimmer
@@ -795,6 +803,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._setting_sources = (
             tuple(setting_sources) if setting_sources is not None else None
         )
+        # The Skill builtin's miss list walks the same scopes the index did.
+        self.ctx.extra.setdefault("setting_sources", self._setting_sources)
         # Deprecated Claude ecosystem keywords and observability attributes are
         # inert compatibility seams. Provider homes are never read by NativeLoop.
         self.claude_settings: dict[str, Any] = {}
@@ -2276,6 +2286,15 @@ class NativeLoop(BackgroundLifecycleMixin):
             estimate_tokens_of_messages(history)
             + estimate_tokens_of_text(system_text)
             + estimate_tokens_of_text(tools_text)
+        )
+
+    def _recall_tools_on_surface(self) -> bool:
+        """Can this session call both recall builtins?"""
+        if self.registry is None:
+            return False
+        return all(
+            self.registry.get(name) is not None and self._tool_permitted(name)
+            for name in ("HistoryExpand", "HistorySearch")
         )
 
     def _tool_permitted(self, name: str) -> bool:

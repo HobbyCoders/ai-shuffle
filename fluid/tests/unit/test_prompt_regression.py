@@ -368,3 +368,167 @@ def test_delegated_prompt_drops_the_code_mode_addendum(tmp_path, capsys):
     assert code_mode_unavailable(config, "anthropic") is None
     off = _delegated_config(tmp_path, code_mode=False, continual=False)
     assert code_mode_unavailable(off, "claude") is None
+
+
+
+# ─── Batch 8: the prompt says what the code enforces ─────────────────────────
+
+
+def _builtin_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    register_builtins(registry)
+    return registry
+
+
+def test_plan_mode_leaves_matches_the_registry() -> None:
+    """PRM-4: the set plan mode removes is the set the prompt and the Plan
+    tool name — every builtin with static write or destructive risk."""
+    from fluid.cli.prompt import PLAN_MODE_LEAVES
+    from fluid.permissions.engine import plan_mode_blocks
+    from fluid.tools.builtins.plan import ENTER_RESULT, PLAN_SPEC
+
+    blocked = sorted(
+        s.name for s in _builtin_registry().list_tools(loaded_only=False)
+        if plan_mode_blocks(s)
+    )
+    assert blocked == sorted(PLAN_MODE_LEAVES)
+    for name in ("Task", "Monitor", "WebFetch"):
+        assert name in PLAN_SPEC.description and name in ENTER_RESULT
+    assert "the shell" in PLAN_SPEC.description
+    assert "While planning, Bash, Edit, Monitor, Task, WebFetch, Write are off" in DEFAULT_BASE_PROMPT
+
+
+def test_tool_capabilities_match_the_registry() -> None:
+    """PRM-9: the prompt's capability map is the registry's requires_extra."""
+    from fluid.cli.prompt import TOOL_CAPABILITIES
+
+    expected = {
+        s.name: tuple(s.requires_extra)
+        for s in _builtin_registry().list_tools(loaded_only=False)
+        if s.requires_extra
+    }
+    assert TOOL_CAPABILITIES == expected
+
+
+def test_unwired_capabilities_drop_their_prose(tmp_path) -> None:
+    """PRM-9: a session whose store cannot search drops SessionSearch from
+    the schema; the prompt drops the paragraph the same way. Same for the
+    Task and Monitor dispatchers when no host is attached."""
+    from fluid.cli.config import make_engine, resolved_prompt, wired_capabilities
+    from fluid.cli.prompt import TOOL_CAPABILITIES
+    from fluid.store.base import MemoryStore
+    from fluid.store.jsonl import JsonlStore
+
+    config = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path)}))
+    none = resolved_prompt(config, wired=frozenset()).text
+    assert not mentioned_tool_names(none) & set(TOOL_CAPABILITIES)
+    full = resolved_prompt(config).text
+    assert {"SessionSearch", "Task", "Monitor", "HistoryExpand"} <= mentioned_tool_names(full)
+
+    memory_only = wired_capabilities(config, MemoryStore(), background_host=False)
+    assert "session_search" not in memory_only and "task_dispatch" not in memory_only
+    searchable = wired_capabilities(config, JsonlStore(tmp_path / "store"))
+    assert {"session_search", "session_view", "task_dispatch", "monitor_spawn"} <= searchable
+
+    engine = make_engine(config, MemoryStore(), provider=object(), background_host=False)
+    mentioned = mentioned_tool_names(engine.system)
+    assert not mentioned & {"SessionSearch", "SessionView", "Task", "Monitor"}
+    assert "HistoryExpand" in mentioned  # the native loop wires recall itself
+    # The delegated leg never gets the native-wired set.
+    assert "history_recall" not in wired_capabilities(config, MemoryStore(), provider_name="claude")
+
+
+def test_code_mode_prompt_drops_the_bullets_the_addendum_contradicts() -> None:
+    """PRM-7: reply-level parallelism, re-Read after a failed Edit and "the
+    user saw the tool call" describe the JSON surface; under code mode the
+    addendum owns those stories."""
+    from fluid.cli.prompt import PromptProfile, compose_base_prompt
+
+    json_mode = compose_base_prompt(PromptProfile(model="claude"))
+    code_mode = compose_base_prompt(PromptProfile(model="claude", code_mode=True))
+    for phrase in ("Make independent tool calls in the same reply", "re-Read the file"):
+        assert phrase in json_mode and phrase not in code_mode
+    assert "The user saw the tool call" in json_mode
+    assert "The user saw the cell run" in code_mode
+
+
+def test_addendum_teaches_the_import_spelling_the_kernel_prefers() -> None:
+    """PRM-8."""
+    from fluid.cli.prompt import CODE_MODE_ADDENDUM
+
+    assert "`from tools import <name>`" in CODE_MODE_ADDENDUM
+    assert "from tools.<name>" not in CODE_MODE_ADDENDUM
+
+
+def test_outage_and_denial_are_told_apart() -> None:
+    """PRM-6: the base prompt forbids routing around a denial; an outage of a
+    tool's backing service is named as a different case, and the registry's
+    own message says which one it is."""
+    import asyncio
+
+    from fluid.tools.registry import ToolCtx, ToolSpec
+
+    assert "temporary outage" in DEFAULT_BASE_PROMPT
+    assert "never treat the outage as permission" in DEFAULT_BASE_PROMPT
+    registry = ToolRegistry()
+
+    async def handler(input, ctx):  # pragma: no cover - never reached
+        raise AssertionError
+
+    registry.register_builtin(
+        ToolSpec(name="flaky", description="x", input_schema={"type": "object"},
+                 check_available=lambda: False),
+        handler,
+    )
+    outcome = asyncio.run(registry.dispatch("flaky", {}, ToolCtx()))
+    assert outcome.is_error and "This is an outage, not a denial" in outcome.text
+    assert "use another tool that is itself available" in outcome.text
+
+
+def test_code_mode_addendum_rides_ahead_of_the_environment_block(tmp_path) -> None:
+    """The addendum is static; the environment block carries today's date.
+    Placing the addendum first keeps the daily date change from
+    invalidating the addendum's cached prefix."""
+    from fluid.cli.config import resolved_prompt
+
+    config = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {
+        "cwd": str(tmp_path), "code_mode": True,
+    }))
+    compiled = resolved_prompt(config, extra_system="per-run note")
+    text = compiled.text
+    assert text.index("# Code mode") < text.index("\n# Environment") < text.index("per-run note")
+    kinds = [s.kind for s in compiled.sections]
+    assert kinds[0] == "base" and kinds[-1] == "extra"
+    assert "# Code mode" in compiled.sections[0].text
+
+
+def _golden_path(name: str):
+    from pathlib import Path
+
+    return Path(__file__).parent.parent / "golden" / name
+
+
+def _check_golden(name: str, rendered: str) -> None:
+    import os
+
+    path = _golden_path(name)
+    if os.environ.get("FLUID_UPDATE_GOLDEN"):
+        path.write_text(rendered, encoding="utf-8", newline="\n")
+    stored = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert rendered == stored, (
+        f"{name} drifted from the golden snapshot; review the diff and, when "
+        "the change is intended, regenerate with FLUID_UPDATE_GOLDEN=1"
+    )
+
+
+def test_base_prompt_matches_golden_snapshot() -> None:
+    """The rendered default prompt, byte for byte. A wording change is a
+    deliberate act that updates this file in the same commit; a drift the
+    author did not intend (PRM-3 shipped for weeks) fails here."""
+    _check_golden("base_prompt.txt", DEFAULT_BASE_PROMPT)
+
+
+def test_code_mode_addendum_matches_golden_snapshot() -> None:
+    from fluid.cli.prompt import CODE_MODE_ADDENDUM
+
+    _check_golden("code_mode_addendum.txt", CODE_MODE_ADDENDUM + "\n")

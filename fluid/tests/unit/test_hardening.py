@@ -519,7 +519,10 @@ async def test_context_overflow_recovers_an_oversize_current_turn() -> None:
     assert estimate_tokens_of_messages(provider.requests[-1].messages) < limit
     # Sticky: a compactor rebuilt from the persisted events renders the view
     # the live one does.
-    fresh = Compactor(config=CompactionConfig())
+    # Same config as the live loop: a registry without the recall builtins
+    # renders the recovery-free placeholders (PRM-5), and a fresh compactor
+    # has to be told that too.
+    fresh = Compactor(config=loop._compactor.config)
     fresh.rehydrate(
         Promotion(
             tier=e.tier, reason=e.reason,

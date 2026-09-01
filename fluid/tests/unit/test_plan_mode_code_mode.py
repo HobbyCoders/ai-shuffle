@@ -287,7 +287,8 @@ def test_the_plan_tools_own_promise_is_true_on_the_code_mode_surface() -> None:
     ``ENTER_RESULT`` tells the model its write and shell tools have left the
     surface. Under code mode that used to be false in every way that mattered.
     """
-    assert "Write and shell tools have left your surface" in ENTER_RESULT
+    assert "have left your surface" in ENTER_RESULT
+    assert "the shell" in ENTER_RESULT and "Task" in ENTER_RESULT
     loop, session = _code_mode_loop(plan_mode=True)
 
     listing = session.render_list()

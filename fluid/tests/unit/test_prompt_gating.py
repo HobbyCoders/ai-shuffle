@@ -255,3 +255,28 @@ def test_identity_and_guidance_do_not_break_static_bound(tmp_path, monkeypatch) 
     second = default_base_prompt(config)
     assert first == second
     assert len(first) < 16_000
+
+
+
+async def test_skill_miss_list_honours_setting_sources(tmp_path, monkeypatch) -> None:
+    """The Skill tool's "unknown skill, available: ..." list used to walk
+    every scope even when the prompt's index was built from a subset."""
+    from fluid.tools.builtins.skill import handler
+    from fluid.tools.registry import ToolCtx
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    for root, name in ((home, "global_only"), (tmp_path / "proj", "project_only")):
+        skill_dir = root / ".fluid" / "skills" / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: d\n---\nbody\n", encoding="utf-8",
+        )
+    cwd = str(tmp_path / "proj")
+    both = await handler({"name": "nope"}, ToolCtx(cwd=cwd))
+    assert "global_only" in both.text and "project_only" in both.text
+    project = await handler(
+        {"name": "nope"}, ToolCtx(cwd=cwd, extra={"setting_sources": ("project",)}),
+    )
+    assert "project_only" in project.text and "global_only" not in project.text

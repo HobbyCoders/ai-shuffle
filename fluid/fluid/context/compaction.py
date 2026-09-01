@@ -75,6 +75,9 @@ class CompactionConfig:
     # fully recoverable tool-result eviction without the model ever reading a
     # digest of its own history configure exactly that.
     enabled: bool = True
+    # Whether the session can call HistoryExpand and HistorySearch. Off, the
+    # digests and stubs stop naming a recovery route the model cannot take.
+    recall_tools: bool = True
     # Tier-1 knobs (the owned trimmer's config).
     trim: TrimConfig = field(default_factory=TrimConfig)
     # Estimated-total-context trigger FLOOR; also the whole story when the
@@ -245,6 +248,10 @@ def render_span_digest(
     lines: list[str] = [
         f"[compacted turn {ref} — mechanical digest; originals intact: "
         f'HistoryExpand("{ref}") re-reads verbatim, HistorySearch finds text]'
+        if config.recall_tools
+        else f"[compacted turn {ref} — mechanical digest; the originals are "
+        "not recoverable in this session, so do not reconstruct their detail "
+        "from memory]"
     ]
     for node in span:
         message = node.message
@@ -318,33 +325,42 @@ def render_epoch_stub(
             )
             break
     hint = f"; began with: {_clip(first_user, 120)}" if first_user else ""
-    return Message(
-        role="user",
-        content=[
-            Text(
-                f"[epoch {start}..{end} — {len(spans)} older turns folded; "
-                f"HistorySearch finds their content, "
-                f'HistoryExpand("{start}..{end}") re-reads them{hint}]'
-            )
-        ],
-    )
+    if config.recall_tools:
+        text = (
+            f"[epoch {start}..{end} — {len(spans)} older turns folded; "
+            f"HistorySearch finds their content, "
+            f'HistoryExpand("{start}..{end}") re-reads them{hint}]'
+        )
+    else:
+        text = (
+            f"[epoch {start}..{end} — {len(spans)} older turns folded; their "
+            f"content is not recoverable in this session{hint}]"
+        )
+    return Message(role="user", content=[Text(text)])
 
 
 def _intake_stub(node_id: str, text: str, config: CompactionConfig) -> Text:
     preview = text[: config.intake_preview_chars]
+    route = (
+        f'read the rest with HistoryExpand("{node_id}", offset=N)'
+        if config.recall_tools
+        else "the rest is not in context; ask the user for the part you need"
+    )
     return Text(
-        f"[large user attachment: {len(text)} chars — preview: {preview}… "
-        f'read the rest with HistoryExpand("{node_id}", offset=N)]'
+        f"[large user attachment: {len(text)} chars — preview: {preview}… {route}]"
     )
 
 
 def _tool_result_stub(node_id: str, text: str, config: CompactionConfig) -> Text:
     preview = text[: config.intake_preview_chars]
+    route = (
+        f'recover it with HistoryExpand("{node_id}", offset=N) when any detail matters'
+        if config.recall_tools
+        else "re-run the tool for the part you need when any detail matters"
+    )
     return Text(
         f"[large tool result: {len(text)} chars — preview: {preview}… "
-        f"The rest is NOT in context: do not reconstruct it from memory; "
-        f'recover it with HistoryExpand("{node_id}", offset=N) when any '
-        f"detail matters]"
+        f"The rest is NOT in context: do not reconstruct it from memory; {route}]"
     )
 
 

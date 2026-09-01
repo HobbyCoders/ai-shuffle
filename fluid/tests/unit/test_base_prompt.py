@@ -48,8 +48,10 @@ def test_code_mode_addendum_only_under_code_mode(tmp_path, monkeypatch) -> None:
     plain = resolved_system(_config(tmp_path)) or ""
     assert CODE_MODE_ADDENDUM.rstrip() not in plain
     coded = resolved_prompt(_config(tmp_path, code_mode=True))
-    extras = [s.text for s in coded.of_kind("extra")]
-    assert CODE_MODE_ADDENDUM.rstrip() in extras
+    # Static text joins the base ahead of the dated environment block, so the
+    # daily date change never invalidates it (batch 8).
+    assert coded.of_kind("extra") == ()
+    assert CODE_MODE_ADDENDUM.rstrip() in coded.sections[0].text
     # Appended after the base, never in the cached prefix.
     assert (coded.text or "").index("# Code mode") > (coded.text or "").index("# fluid")
 

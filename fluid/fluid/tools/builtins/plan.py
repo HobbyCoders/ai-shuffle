@@ -39,16 +39,22 @@ class PlanModeControl:
     set_active: Callable[[bool], None]
 
 
+# What the mode takes away, in the words every plan-mode message uses: the
+# tools with write or destructive risk, which is more than files and the
+# shell. Task and Monitor start work outside this context; WebFetch reaches
+# the network. The description used to promise only "write and shell".
+LEAVES = "file writes and edits, the shell, Task, Monitor, and WebFetch"
+
 ENTER_RESULT = (
-    "Plan mode is on. Write and shell tools have left your surface. Explore "
-    "the codebase with the read tools, weigh the approaches, then present a "
-    "concrete plan with StopPlanning for the user's approval. Do not "
-    "describe edits as if you were making them."
+    f"Plan mode is on. {LEAVES[0].upper()}{LEAVES[1:]} have left your surface. "
+    "Explore the codebase with the read tools, weigh the approaches, then "
+    "present a concrete plan with StopPlanning for the user's approval. Do "
+    "not describe edits as if you were making them."
 )
 
 APPROVED_RESULT = (
-    "Plan approved — plan mode is now OFF. Your write and shell tools are "
-    "back on the surface. Execute the approved plan now; steps it already "
+    "Plan approved — plan mode is now OFF. Your write tools are back on the "
+    f"surface ({LEAVES}). Execute the approved plan now; steps it already "
     "covers need no further permission."
 )
 
@@ -56,8 +62,8 @@ PLAN_SPEC = ToolSpec(
     name="Plan",
     description=(
         "Enter plan mode: a read-only phase for designing an approach before "
-        "writing code. Your write and shell tools leave the surface until "
-        "the user approves a plan.\n"
+        f"writing code. Every tool that changes something ({LEAVES}) leaves "
+        "the surface until the user approves a plan.\n"
         "\n"
         "Use it proactively for non-trivial implementation work: new "
         "features, changes with several valid approaches or architectural "
@@ -114,8 +120,8 @@ STOP_SPEC = ToolSpec(
 
 ALREADY_OFF_RESULT = (
     "Plan approved — plan mode is OFF (the host had already ended it). Your "
-    "write and shell tools are on the surface. Execute the approved plan now; "
-    "steps it already covers need no further permission."
+    f"write tools are on the surface ({LEAVES}). Execute the approved plan "
+    "now; steps it already covers need no further permission."
 )
 
 # Answers treated as approval on the MRTR second leg. "1" is the first
@@ -287,8 +293,8 @@ async def stop_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         text=(
             "The user did NOT approve the plan and answered:\n"
             f"{feedback}\n"
-            "PLAN MODE IS STILL ACTIVE — your write and shell tools are still "
-            "off the surface. Revise the plan to address that feedback and "
+            f"PLAN MODE IS STILL ACTIVE — {LEAVES} are still off the "
+            "surface. Revise the plan to address that feedback and "
             "present it again with StopPlanning; do not attempt to implement "
             "anything yet."
         )

@@ -205,7 +205,11 @@ Knobs for tool-result trimming and the compaction ladder
 
 A trimmed result is replaced by a placeholder that states how many characters
 were removed, quotes the first 160 characters of the original, and carries a
-`node_...` ref that `HistoryExpand` or `HistorySearch` can recover.
+`node_...` ref that `HistoryExpand` or `HistorySearch` can recover. When those
+two builtins are off the session's surface (a `tools.allowed` list without
+them, or an embedding host that never wired recall), the placeholders, digests
+and stubs say instead that the content is not recoverable in this session and
+name the way back that exists: re-running the tool, or asking the user.
 
 An **image** result gets a different placeholder, because recall is a text path
 and cannot put an image back: it says so outright and names the re-Read path

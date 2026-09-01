@@ -446,3 +446,72 @@ async def test_compaction_never_appends_nodes(tmp_path) -> None:
     nodes = await store.load_path(loop.session_id)
     # Exactly the user node + assistant node — no digest was written back.
     assert [n.message.role for n in nodes] == ["user", "assistant"]
+
+
+
+# ─── Batch 8: PRM-5, placeholders without a recall route ─────────────────────
+
+
+def test_placeholders_drop_the_recall_route_when_the_tools_are_absent() -> None:
+    from fluid.context.trim import (
+        TrimConfig,
+        _image_placeholder,
+        _placeholder,
+        _user_image_placeholder,
+    )
+
+    assert "HistoryExpand" in _placeholder("node_1", 5000, "head").text
+    no_recall = _placeholder("node_1", 5000, "head", recall=False).text
+    assert "HistoryExpand" not in no_recall and "re-run the tool" in no_recall
+    assert "NOT in context" in no_recall and "head" in no_recall
+    assert "HistoryExpand" not in _image_placeholder("n", 1, "[image: a.png, image/png]", recall=False).text
+    assert "HistoryExpand" not in _user_image_placeholder("n", 1, recall=False).text
+    assert TrimConfig().recall_tools is True
+
+
+def test_digests_and_stubs_drop_the_recall_route_when_the_tools_are_absent() -> None:
+    from fluid.context.compaction import (
+        CompactionConfig,
+        _intake_stub,
+        _tool_result_stub,
+        render_epoch_stub,
+        render_span_digest,
+    )
+    from fluid.messages import Message
+    from fluid.messages.content import Text
+    from fluid.store.base import SessionNode
+
+    span = [
+        SessionNode(node_id="n1", parent_id=None,
+                    message=Message(role="user", content=[Text("do the thing")])),
+        SessionNode(node_id="n2", parent_id="n1",
+                    message=Message(role="assistant", content=[Text("done")])),
+    ]
+    with_recall = CompactionConfig()
+    without = CompactionConfig(recall_tools=False)
+    assert "HistoryExpand" in render_span_digest(span, with_recall).text()
+    digest = render_span_digest(span, without).text()
+    assert "HistoryExpand" not in digest and "HistorySearch" not in digest
+    assert "not recoverable" in digest and "do the thing" in digest
+    epoch = render_epoch_stub([span], without).text()
+    assert "HistoryExpand" not in epoch and "not recoverable" in epoch
+    assert "HistoryExpand" not in _intake_stub("n1", "x" * 100, without).text
+    assert "HistoryExpand" not in _tool_result_stub("n1", "x" * 100, without).text
+    assert "HistoryExpand" in _tool_result_stub("n1", "x" * 100, with_recall).text
+
+
+def test_engine_turns_the_recall_route_off_with_the_tools(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from fluid.config.loader import BUILTIN_DEFAULTS, build_engine, deep_merge
+    from fluid.config.model import HarnessConfig
+    from fluid.store.base import MemoryStore
+
+    config = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path)}))
+    on = build_engine(config, MemoryStore(), provider=SimpleNamespace())
+    assert on._compactor.config.recall_tools and on._trimmer.config.recall_tools
+    off = build_engine(
+        config, MemoryStore(), provider=SimpleNamespace(), disallowed_tools=["HistoryExpand"],
+    )
+    assert not off._compactor.config.recall_tools
+    assert not off._trimmer.config.recall_tools

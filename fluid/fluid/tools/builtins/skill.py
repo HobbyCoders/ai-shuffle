@@ -65,7 +65,15 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     name = str(input.get("name", "")).strip()
     if not name:
         return ToolOutcome(text="missing skill name", is_error=True)
-    skills = discover_skills(ctx.cwd, include_plugins=True)
+    # The same scope gates that shaped the prompt's index: a skill the index
+    # could not list is not offered as "available" here either.
+    sources = ctx.extra.get("setting_sources")
+    user_on = sources is None or "user" in sources
+    project_on = sources is None or "project" in sources
+    skills = discover_skills(
+        ctx.cwd, include_global=user_on, include_project=project_on,
+        include_plugins=user_on,
+    )
     match = next((s for s in skills if s.name == name), None)
     if match is None:
         known = ", ".join(sorted(s.name for s in skills)) or "(none discovered)"
