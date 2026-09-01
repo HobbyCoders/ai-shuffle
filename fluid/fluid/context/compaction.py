@@ -41,8 +41,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from fluid.context.trim import (
@@ -118,6 +118,12 @@ class CompactionConfig:
     error_text_cap: int = 2_000
 
 
+# Absolute floor for a derived trigger. Below this the ladder would be
+# re-rendering on every call; no model this harness targets has a window
+# under 2k tokens, so the floor is never the binding one in practice.
+MIN_TRIGGER_TOKENS = 1_000
+
+
 def derive_trigger_tokens(
     *,
     base: int,
@@ -133,13 +139,24 @@ def derive_trigger_tokens(
     ``window * window_ratio`` the target, and ``window - headroom - reserve``
     the ceiling, so a large window is actually used instead of being compacted
     away at a fraction of its capacity.
+
+    Two clamps keep the ceiling meaningful on small windows. The output
+    reserve is capped at a quarter of the window (a 32k model cannot reserve
+    32k for output), and the result never drops below half the window: with
+    the defaults a 32k window used to yield -16,000 and an 8k window -39,808,
+    so the ladder fired on every render and ``_digest_until`` never reached
+    its target. The floor only rescues a collapsed ceiling; it never raises a
+    threshold above ``scaled``, so ``window_ratio=0`` still pins ``base``.
     """
     if context_window is None:
         return base
     scaled = base
     if window_ratio > 0:
         scaled = max(base, int(context_window * window_ratio))
-    return min(scaled, context_window - headroom_tokens - output_reserve_tokens)
+    reserve = min(output_reserve_tokens, context_window // 4)
+    ceiling = context_window - headroom_tokens - reserve
+    floor = max(context_window // 2, MIN_TRIGGER_TOKENS)
+    return max(min(scaled, ceiling), min(scaled, floor))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -636,44 +653,105 @@ class Compactor:
             ),
         ]
 
-    def escalate(self, nodes: list[SessionNode]) -> list[Promotion]:
-        """Overflow recovery: force the next rung that can still reclaim
-        anything. Called with the provider having rejected the prompt, so
-        thresholds no longer matter — reclaim as much as each rung can."""
-        if not self.config.enabled:
-            if not self.config.trim.enabled:
-                return []
-            # Trim-only: tier 1 is the only rung there is.
-            pairs = self.trimmer.trim_batch(nodes)
-            return (
-                [Promotion(tier=1, reason="overflow", trimmed=tuple(pairs))]
-                if pairs
-                else []
+    def escalate(
+        self,
+        nodes: list[SessionNode],
+        *,
+        overhead_tokens: int = 0,
+        context_window: int | None = None,
+        output_reserve_tokens: int = 0,
+    ) -> list[Promotion]:
+        """Overflow recovery: the provider rejected the prompt, so reclaim.
+
+        Rungs run in order and each is sticky and persisted like a trigger
+        batch, so a resume rebuilds the same view. The first three are the
+        recency-guarded tiers (trim old results, digest old turns, fold
+        digests). Two more follow with the recency guard off: trim every
+        result, then digest every turn including the in-flight one. They
+        exist because the payload that overflowed is usually the newest one,
+        which is exactly what the guards protect; with the defaults the
+        guarded rungs could not touch ~62k tokens of fresh results.
+
+        With an unknown window one rung runs per call (the engine retries
+        after each). With a known window rungs keep running until the
+        estimate is under the normal trigger, so one retry usually suffices.
+        """
+        if not self.active:
+            return []
+        trim_only = not self.config.enabled
+        target: int | None = None
+        if context_window is not None:
+            target = (
+                self._threshold(
+                    self.config.trim.trigger_tokens,
+                    context_window,
+                    output_reserve_tokens,
+                    window_ratio=self.config.trim.trigger_window_ratio,
+                )
+                if trim_only
+                else self._threshold(
+                    self.config.trigger_tokens, context_window, output_reserve_tokens
+                )
             )
-        pairs = self.trimmer.trim_batch(nodes)
-        if pairs:
-            return [
-                Promotion(tier=1, reason="overflow", trimmed=tuple(pairs))
-            ]
-        promoted = self._digest_until(nodes, overhead_tokens=0, target=0)
-        if promoted:
-            return [
-                Promotion(
+        digest_target = target or 0
+
+        def trim(keep: int | None) -> Callable[[], Promotion | None]:
+            def rung() -> Promotion | None:
+                pairs = self.trimmer.trim_batch(nodes, keep_recent=keep)
+                if not pairs:
+                    return None
+                return Promotion(tier=1, reason="overflow", trimmed=tuple(pairs))
+            return rung
+
+        def digest(keep: int | None) -> Callable[[], Promotion | None]:
+            def rung() -> Promotion | None:
+                promoted = self._digest_until(
+                    nodes,
+                    overhead_tokens=overhead_tokens,
+                    target=digest_target,
+                    keep_recent=keep,
+                )
+                if not promoted:
+                    return None
+                return Promotion(
                     tier=2,
                     reason="overflow",
                     spans=tuple((s, e, SPAN_DIGEST) for s, e in promoted),
                 )
-            ]
-        folded = self._fold_epochs(nodes, force=True)
-        if folded:
-            return [
-                Promotion(
-                    tier=3,
-                    reason="overflow",
-                    spans=tuple((s, e, EPOCH_STUB) for s, e in folded),
-                )
-            ]
-        return []
+            return rung
+
+        def fold() -> Promotion | None:
+            folded = self._fold_epochs(nodes, force=True)
+            if not folded:
+                return None
+            return Promotion(
+                tier=3,
+                reason="overflow",
+                spans=tuple((s, e, EPOCH_STUB) for s, e in folded),
+            )
+
+        rungs: list[Callable[[], Promotion | None]] = (
+            [trim(None), trim(0)]
+            if trim_only
+            else [trim(None), digest(None), fold, trim(0), digest(0)]
+        )
+        promotions: list[Promotion] = []
+        for rung in rungs:
+            before = self._estimate(nodes, overhead_tokens)
+            promo = rung()
+            if promo is None:
+                continue
+            after = self._estimate(nodes, overhead_tokens)
+            promotions.append(
+                replace(promo, reclaimed_chars=max(0, (before - after) * 4))
+            )
+            if target is None or after <= target:
+                break
+        return promotions
+
+    def _estimate(self, nodes: list[SessionNode], overhead_tokens: int) -> int:
+        """Estimated tokens the next request carries under the current view."""
+        return overhead_tokens + estimate_tokens_of_messages(self._render(nodes))
 
     def rehydrate(self, promotions: Iterable[Promotion]) -> None:
         """Re-apply persisted decisions (resume). Rendering is deterministic,
@@ -695,11 +773,13 @@ class Compactor:
             self._digest_by_start[start] = end
 
     def _eligible_spans(
-        self, nodes: list[SessionNode]
+        self, nodes: list[SessionNode], *, keep_recent: int | None = None
     ) -> list[list[SessionNode]]:
-        """Old spans not yet promoted, oldest first."""
+        """Old spans not yet promoted, oldest first. ``keep_recent`` overrides
+        ``keep_recent_turns`` for one call (0 makes the in-flight turn
+        eligible; overflow recovery's last rung)."""
         spans = split_spans(nodes)
-        keep = self.config.keep_recent_turns
+        keep = self.config.keep_recent_turns if keep_recent is None else keep_recent
         old = spans[:-keep] if keep else spans
         covered: set[str] = set()  # node ids inside existing promotions
         index = {n.node_id: i for i, n in enumerate(nodes)}
@@ -715,11 +795,12 @@ class Compactor:
         *,
         overhead_tokens: int,
         target: int,
+        keep_recent: int | None = None,
     ) -> list[tuple[str, str]]:
         """Promote eligible spans oldest-first until the estimate reaches
         target (target=0 → promote everything eligible). Incremental
         accounting avoids a full re-render per span."""
-        eligible = self._eligible_spans(nodes)
+        eligible = self._eligible_spans(nodes, keep_recent=keep_recent)
         if not eligible:
             return []
         current = overhead_tokens + estimate_tokens_of_messages(

@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from fluid.context.compiler import (
+    SECTION_KINDS,
     PromptInputs,
     PromptSection,
     compile_prompt,
@@ -45,7 +46,7 @@ from fluid.events.model import Usage, event_from_dict, event_to_dict
 from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore, SessionNode, new_id
-from fluid.tools.registry import ToolRegistry, ToolSpec
+from fluid.tools.registry import ToolCtx, ToolRegistry, ToolSpec
 
 FAKE = str(Path(__file__).parent.parent / "fixtures" / "fake_claude.py")
 
@@ -804,8 +805,11 @@ async def test_native_snapshot_is_an_estimate_before_any_call(tmp_path) -> None:
     finally:
         await loop.aclose()
     assert usage["measured"] is False
+    # The model table supplies a window for claude-sonnet-5, so a Free
+    # space row is present; it is not part of the total.
     assert usage["totalTokens"] == sum(
-        c["tokens"] for c in usage["categories"] if not c.get("isDeferred")
+        c["tokens"] for c in usage["categories"]
+        if not c.get("isDeferred") and c["name"] != FREE_SPACE
     )
 
 
@@ -944,3 +948,173 @@ def test_measured_total_below_estimates_scales_rows_instead_of_dropping_messages
     assert usage["totalTokens"] == 600
     assert names[MESSAGES] > 0
     assert names[SYSTEM_PROMPT] < 1000  # scaled down from the ~1000 estimate
+
+
+# ─── Every section kind lands in a category ──────────────────────────────────
+
+
+def _section(kind: str) -> PromptSection:
+    # 400 chars → 100 tokens each, so a dropped kind is visible in the total.
+    if kind == "tools":
+        return PromptSection(kind=kind, text="t" * 400, tool_name="Read")
+    if kind == "memory":
+        return PromptSection(kind=kind, text="m" * 400, path="AGENTS.md", scope="project")
+    return PromptSection(kind=kind, text=kind[0] * 400)
+
+
+def test_every_compiler_section_kind_is_priced() -> None:
+    """A kind the breakdown does not classify must still land in the total,
+    or a prompt section contributes zero tokens without anyone noticing."""
+    sections = [_section(kind) for kind in SECTION_KINDS]
+    usage = build_context_usage(sections=sections, model="m")
+    assert usage["totalTokens"] == 100 * len(SECTION_KINDS)
+    counted = sum(
+        c["tokens"] for c in usage["categories"] if not c.get("isDeferred")
+    )
+    assert counted == usage["totalTokens"]
+
+
+def test_unknown_section_kind_prices_as_system_prompt() -> None:
+    usage = build_context_usage(
+        sections=[PromptSection(kind="base", text="b" * 400),
+                  PromptSection(kind="not-a-kind-yet", text="?" * 800)],
+        model="m",
+    )
+    assert _by_name(usage)[SYSTEM_PROMPT]["tokens"] == 300
+    assert usage["totalTokens"] == 300
+
+
+# ─── Discovered agents: the index line is in the prompt, the body is not ─────
+
+
+def _agent_md(name: str, description: str, body: str) -> str:
+    return f"---\nname: {name}\ndescription: {description}\n---\n{body}"
+
+
+async def test_discovered_agent_bodies_are_not_priced(tmp_path, monkeypatch) -> None:
+    """Two agent files whose bodies dwarf the real prompt: the compiled prompt
+    carries only their index lines, and the breakdown prices only that —
+    no phantom "Custom agents" row, and the rows still sum to the prompt."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "nohome")
+    proj = _project(tmp_path)
+    agents_dir = proj / ".agents" / "agents"
+    agents_dir.mkdir(parents=True)
+    bodies = {
+        "reviewer": "REVIEWER WORKER PROMPT " * 600,   # ~3,450 tokens each
+        "tester": "TESTER WORKER PROMPT " * 700,
+    }
+    (agents_dir / "reviewer.md").write_text(
+        _agent_md("reviewer", "Reviews code", bodies["reviewer"]), encoding="utf-8"
+    )
+    (agents_dir / "tester.md").write_text(
+        _agent_md("tester", "Writes tests", bodies["tester"]), encoding="utf-8"
+    )
+    compiled = compile_prompt(_inputs(proj))
+    assert "- reviewer: Reviews code" in compiled.text
+    assert "- tester: Writes tests" in compiled.text
+    for body in bodies.values():
+        assert body[:60] not in compiled.text
+
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(
+        provider=_MeasuredProvider(), store=store, model="claude-sonnet-5",
+        system=compiled.text, system_sections=compiled,
+        registry=_registry_with_deferred(), ctx=ToolCtx(cwd=str(proj)),
+        session_id=sid,
+    )
+    try:
+        assert [d.name for d in loop.native_agents] == ["reviewer", "tester"]
+        assert loop.agents == []
+        usage = await loop.get_context_usage()
+        prompt_tokens = sum(estimate_tokens_of_text(s.text) for s in compiled.sections)
+        tools = sum(tool_schema_tokens(t) for t in loop._tools_api())
+        assert CUSTOM_AGENTS not in _by_name(usage)
+        assert usage["agents"] == []
+        assert usage["totalTokens"] == prompt_tokens + tools
+        assert usage["totalTokens"] < 2_000  # the bodies alone would be ~6,900
+
+        # With a measured total the fixed rows keep their own estimates: no
+        # phantom row pushes them over the measurement and scales them down.
+        await loop.submit(UserTurn(content="x" * 4_000))
+        await loop.wait_turn()
+        measured = await loop.get_context_usage()
+    finally:
+        await loop.aclose()
+    assert measured["measured"] is True
+    assert _by_name(measured)[SYSTEM_PROMPT]["tokens"] == sum(
+        estimate_tokens_of_text(s.text)
+        for s in compiled.sections if s.kind not in ("memory", "skills")
+    )
+
+
+# ─── Measured total describes the NEXT request ───────────────────────────────
+
+
+async def test_native_measured_total_carries_what_was_appended_since_the_call(
+    tmp_path,
+) -> None:
+    """The provider measured the prompt BEFORE its reply; the next request also
+    carries the reply and any user text written since, at the estimate."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _loop(tmp_path, store, session_id=sid, provider=_MeasuredProvider())
+    try:
+        await loop.submit(UserTurn(content="x" * 4_000))
+        await loop.wait_turn()
+        before = await loop.get_context_usage()
+        head = (await store.load_path(sid))[-1]
+        assert head.message.role == "assistant"
+        await store.append(sid, SessionNode(
+            node_id=new_id("node"), parent_id=head.node_id,
+            message=Message(role="user", content=[Text("y" * 4_000)]),
+        ))
+        after = await loop.get_context_usage()
+    finally:
+        await loop.aclose()
+    reply_tokens = estimate_tokens_of_text(head.message.text())
+    assert before["measured"] is True
+    assert before["totalTokens"] == _MeasuredProvider.PROMPT_TOKENS + reply_tokens
+    assert after["measured"] is True
+    assert after["totalTokens"] == _MeasuredProvider.PROMPT_TOKENS + reply_tokens + 1_000
+
+
+async def test_native_measured_total_survives_an_engine_rebuild(tmp_path) -> None:
+    """A resumed engine recovers the last call's billed prompt from the
+    persisted Usage event instead of guessing until its first call."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    first = _loop(tmp_path, store, session_id=sid, provider=_MeasuredProvider())
+    try:
+        await first.submit(UserTurn(content="x" * 4_000))
+        await first.wait_turn()
+        live = await first.get_context_usage()
+    finally:
+        await first.aclose()
+
+    # A second project dir: the helper builds the fixture tree afresh.
+    second = _loop(tmp_path / "rebuilt", store, session_id=sid,
+                   provider=_MeasuredProvider())
+    try:
+        assert sid not in second._last_call_usage
+        resumed = await second.get_context_usage()
+        assert sid in second._last_call_usage
+    finally:
+        await second.aclose()
+    assert resumed["measured"] is True
+    assert resumed["totalTokens"] == live["totalTokens"]
+
+
+async def test_native_rebuild_without_usage_events_stays_an_estimate(tmp_path) -> None:
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    await store.append(sid, SessionNode(
+        node_id=new_id("node"), parent_id=None,
+        message=Message(role="user", content=[Text("x" * 4_000)]),
+    ))
+    loop = _loop(tmp_path, store, session_id=sid, provider=_MeasuredProvider())
+    try:
+        usage = await loop.get_context_usage()
+    finally:
+        await loop.aclose()
+    assert usage["measured"] is False

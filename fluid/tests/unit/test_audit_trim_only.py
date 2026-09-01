@@ -100,6 +100,11 @@ def test_trim_only_escalation_stops_at_tier_one() -> None:
     nodes = _history()
     first = compactor.escalate(nodes)
     assert [p.tier for p in first] == [1]
+    # Old results are gone; the second overflow drops the recency guard and
+    # trims the newest ones. Still tier 1: trim-only never digests a turn.
+    second = compactor.escalate(nodes)
+    assert [p.tier for p in second] == [1]
+    assert all(p.reclaimed_chars > 0 for p in second)
     # Nothing left to trim → no rung 2/3 consolation prize.
     assert compactor.escalate(nodes) == []
     assert compactor._digested == {}

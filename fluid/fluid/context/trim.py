@@ -53,11 +53,53 @@ class TrimConfig:
     min_result_chars: int = 2_000
 
 
+# Flat per-image weight, in chars (≈1500 tokens). Providers bill images by
+# pixels (roughly width x height / 750), not bytes, and tool images are
+# conditioned to a ~1568px long edge before they enter history (see
+# fluid.tools.images), so the real charge is ~1.5-2k tokens per image. A
+# flat weight keeps the estimate sane and makes image-bearing blocks eligible
+# for trimming; pricing the base64 by chars/4 once made a 531k PNG look like
+# 130k tokens.
+IMAGE_CHARS = 6_000
+
+
+def _reasoning_chars(block: Any) -> int:
+    """Chars a Reasoning envelope puts on the wire.
+
+    ``raw`` is resent verbatim when present and already contains the summary
+    (OpenAI) or the thinking text plus signature (Anthropic), so it is the
+    whole cost; without it the parts are sent individually. Only one of
+    ``raw`` / ``encrypted_content`` goes out, never both.
+    """
+    raw = getattr(block, "raw", None)
+    raw_len = 0
+    if isinstance(raw, dict) and raw:
+        try:
+            raw_len = len(json.dumps(raw, default=str))
+        except (TypeError, ValueError):
+            raw_len = 0
+    parts = 0
+    for attr in ("summary_text", "signature", "encrypted_content"):
+        value = getattr(block, attr, None)
+        if isinstance(value, str):
+            parts += len(value)
+    return max(raw_len, parts)
+
+
 def block_chars(block: Any) -> int:
     total = 0
     text = getattr(block, "text", None)
     if isinstance(text, str):
         total += len(text)
+    # A top-level Image (a user attachment) is resent in full on every call
+    # until consumed, same as one nested in a tool result.
+    if isinstance(getattr(block, "data", None), str):
+        total += IMAGE_CHARS
+    # Reasoning envelopes carry no ``text`` but are resent verbatim every
+    # call; a 60 KB encrypted blob that counts as nothing lets a
+    # reasoning-heavy session grow past the trigger unseen.
+    if hasattr(block, "encrypted_content") or hasattr(block, "summary_text"):
+        total += _reasoning_chars(block)
     # tool_use inputs count too — Write/Edit calls carry whole files in their
     # args, and ignoring them lets a write-heavy session blow the window while
     # the estimate stays "under trigger".
@@ -71,14 +113,8 @@ def block_chars(block: Any) -> int:
         inner_text = getattr(inner, "text", None)
         if isinstance(inner_text, str):
             total += len(inner_text)
-        # Image blocks are billed by PIXELS on multimodal providers (roughly
-        # width x height / 750), not bytes — and tool images are conditioned
-        # to a ~1568px long edge before they enter history (see
-        # fluid.tools.images), so the real charge is ~1.5-2k tokens per image.
-        # A flat ≈1500-token weight keeps the estimate sane AND makes
-        # image-bearing results eligible for trimming.
         elif isinstance(getattr(inner, "data", None), str):
-            total += 6_000
+            total += IMAGE_CHARS
     return total
 
 
@@ -162,6 +198,28 @@ def _image_placeholder(node_id: str, chars: int, head: str = "") -> Text:
     )
 
 
+# The ``tool_use_id`` slot of a sticky trim key when the trimmed thing is a
+# user-attached image rather than a tool result. No provider issues an id in
+# this shape, so it cannot collide with a real call.
+USER_IMAGE_KEY = "<user-image>"
+
+
+def _user_image_placeholder(node_id: str, chars: int) -> Text:
+    """What replaces a user-attached image once the model has seen it.
+
+    There is no file to re-Read and no tool to re-run: the only way back is
+    the user attaching it again, which the placeholder says outright.
+    """
+    return Text(
+        f"[image attachment consumed from context — {chars} chars removed. "
+        f"You already saw this image; it is NOT in context now, and "
+        f"HistoryExpand cannot restore it (it recovers text only). Ask the "
+        f"user to attach it again if any detail matters; do not describe its "
+        f"contents from memory. The text beside it is still recoverable with "
+        f'HistoryExpand("{node_id}")]'
+    )
+
+
 @dataclass
 class ToolResultTrimmer:
     """Holds the sticky trimmed-set and renders trimmed history views."""
@@ -201,6 +259,10 @@ class ToolResultTrimmer:
                     and self._has_image(block)
                 ):
                     out.add((node.node_id, block.tool_use_id))
+                elif isinstance(block, Image):
+                    # A user attachment: same consume-once rule, keyed by the
+                    # node alone (every image in the message goes together).
+                    out.add((node.node_id, USER_IMAGE_KEY))
         return out
 
     def _render(
@@ -243,6 +305,14 @@ class ToolResultTrimmer:
                         )
                     )
                     changed = True
+                elif (
+                    isinstance(block, Image)
+                    and (node.node_id, USER_IMAGE_KEY) in trimmed
+                ):
+                    blocks.append(
+                        _user_image_placeholder(node.node_id, block_chars(block))
+                    )
+                    changed = True
                 else:
                     blocks.append(block)
             out.append(
@@ -251,8 +321,15 @@ class ToolResultTrimmer:
             )
         return out
 
-    def _eligible(self, nodes: list[SessionNode]) -> list[tuple[str, str]]:
-        """(node_id, tool_use_id) of every trimmable result, oldest first."""
+    def _eligible(
+        self, nodes: list[SessionNode], *, keep_recent: int | None = None
+    ) -> list[tuple[str, str]]:
+        """(node_id, tool_use_id) of every trimmable result, oldest first.
+
+        ``keep_recent`` overrides the config's recency guard for one call;
+        overflow recovery passes 0 because the result that no longer fits is
+        usually the newest one.
+        """
         found: list[tuple[str, str, int, bool]] = []
         for node in nodes:
             if node.message.role != "user":
@@ -264,7 +341,11 @@ class ToolResultTrimmer:
                     (node.node_id, block.tool_use_id, block_chars(block),
                      bool(block.is_error))
                 )
-        keep = self.config.keep_recent_tool_results
+        keep = (
+            self.config.keep_recent_tool_results
+            if keep_recent is None
+            else keep_recent
+        )
         candidates = found[:-keep] if keep else found
         return [
             (nid, tuid)
@@ -274,13 +355,16 @@ class ToolResultTrimmer:
             and (nid, tuid) not in self._trimmed
         ]
 
-    def trim_batch(self, nodes: list[SessionNode]) -> list[tuple[str, str]]:
+    def trim_batch(
+        self, nodes: list[SessionNode], *, keep_recent: int | None = None
+    ) -> list[tuple[str, str]]:
         """Trim every eligible result NOW, ignoring the trigger. Returns the
         newly trimmed ``(node_id, tool_use_id)`` pairs (empty when nothing was
-        eligible) so the caller can persist the decision."""
+        eligible) so the caller can persist the decision. ``keep_recent``
+        overrides the recency guard for this batch only."""
         if not self.config.enabled:
             return []
-        newly = self._eligible(nodes)
+        newly = self._eligible(nodes, keep_recent=keep_recent)
         self._trimmed.update(newly)
         return newly
 

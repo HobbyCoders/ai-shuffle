@@ -236,3 +236,39 @@ def test_max_model_calls_zero_means_unlimited() -> None:
         provider=FakeProvider(),
     )
     assert default_engine.max_model_calls_per_turn == 200
+
+
+# ─── context window: config wins, the model table fills the gap ──────────────
+
+
+def test_build_engine_falls_back_to_the_models_window() -> None:
+    config = HarnessConfig.from_dict(BUILTIN_DEFAULTS)  # claude-sonnet-5
+    engine = build_engine(config, MemoryStore(), provider=FakeProvider())
+    assert config.context_window is None  # the config is not rewritten
+    assert isinstance(engine, NativeLoop)
+    assert engine.context_window == 1_000_000
+    # A model switch re-resolves the fallback.
+    engine.model = "claude-haiku-4-5"
+    assert engine.context_window == 200_000
+
+
+def test_configured_window_beats_the_model_table() -> None:
+    config = HarnessConfig.from_dict(
+        deep_merge(BUILTIN_DEFAULTS, {"context_window": 123_000})
+    )
+    engine = build_engine(config, MemoryStore(), provider=FakeProvider())
+    assert engine.context_window == 123_000
+    engine.model = "claude-haiku-4-5"
+    assert engine.context_window == 123_000
+    assert env_overrides({"FLUID_CONTEXT_WINDOW": "77000"})["context_window"] == 77_000
+    assert "context_window" not in env_overrides({"FLUID_CONTEXT_WINDOW": "big"})
+
+
+def test_unknown_model_keeps_the_window_unknown() -> None:
+    config = HarnessConfig.from_dict(deep_merge(
+        BUILTIN_DEFAULTS,
+        {"providers": {"anthropic": {"kind": "anthropic", "model": "my-local-llm"}}},
+    ))
+    engine = build_engine(config, MemoryStore(), provider=FakeProvider())
+    assert engine.model == "my-local-llm"
+    assert engine.context_window is None

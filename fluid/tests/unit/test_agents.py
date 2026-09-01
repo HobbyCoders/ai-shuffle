@@ -268,16 +268,17 @@ def test_toggle_off_discovers_nothing(project: Path) -> None:
     assert loop.agents == []
 
 
-async def test_discovered_agents_show_in_the_usage_breakdown(project: Path) -> None:
+async def test_discovered_agents_are_not_priced_as_custom_agents(project: Path) -> None:
+    """The body is the worker's prompt; only the index line enters this
+    session's prompt, and the compiler prices that as System prompt."""
     _write(project / ".agents" / "agents" / "reviewer.md", REVIEWER_MD)
     loop = _loop(project)
+    assert [d.name for d in loop.native_agents] == ["reviewer"]
+    assert loop.agents == []
 
     usage = await loop.get_context_usage()
-    rows = {a["agentType"]: a for a in usage["agents"]}
-    assert rows["reviewer"]["source"] == "project"
-    assert rows["reviewer"]["tokens"] > 0
-    custom = [c for c in usage["categories"] if c["name"] == "Custom agents"]
-    assert custom and custom[0]["tokens"] == rows["reviewer"]["tokens"]
+    assert usage["agents"] == []
+    assert not [c for c in usage["categories"] if c["name"] == "Custom agents"]
 
 
 async def test_host_declared_agents_are_not_replaced(project: Path) -> None:

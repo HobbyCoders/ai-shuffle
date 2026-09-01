@@ -10,7 +10,12 @@ from pathlib import Path
 import httpx
 
 from fluid.config.loader import load_config
-from fluid.context.trim import ToolResultTrimmer, TrimConfig, estimate_tokens
+from fluid.context.trim import (
+    ToolResultTrimmer,
+    TrimConfig,
+    estimate_tokens,
+    estimate_tokens_of_messages,
+)
 from fluid.engine.native import NativeLoop
 from fluid.events import (
     ErrorEvent,
@@ -444,6 +449,157 @@ async def test_non_overflow_error_still_surfaces() -> None:
     await loop.wait_turn()
     err = next(e for e in loop.bus.log(loop.session_id) if isinstance(e, ErrorEvent))
     assert "upstream exploded" in err.message
+
+
+class SizeLimitedProvider(ScriptedProvider):
+    """Rejects any prompt over ``limit`` estimated tokens, the way a real
+    provider does. Accepted calls consume the script in order; rejections
+    do not, so the retry picks up where the script left off."""
+
+    def __init__(self, scripts: list[list[StreamChunk]], *, limit: int) -> None:
+        super().__init__(scripts)
+        self.limit = limit
+        self.rejections = 0
+
+    async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+        self.requests.append(request)
+        if estimate_tokens_of_messages(request.messages) > self.limit:
+            self.rejections += 1
+            for chunk in _error(
+                f"prompt is too long: {self.limit + 1} tokens > {self.limit} maximum"
+            ):
+                yield chunk
+            return
+        script = self.scripts[min(self.calls, len(self.scripts) - 1)]
+        self.calls += 1
+        for chunk in script:
+            yield chunk
+
+
+async def test_context_overflow_recovers_an_oversize_current_turn() -> None:
+    """The overflow comes from fresh results in the in-flight turn, which the
+    default recency guards (5 results, 3 turns) protect. Before the guard-off
+    rung, escalation reclaimed nothing and the turn died."""
+    from fluid.context.compaction import CompactionConfig, Compactor, Promotion
+    from fluid.events import ContextCompaction
+
+    registry = ToolRegistry()
+    # 10k tokens each: under the 50k-char stateless stub, over min_result_chars.
+    big = {"content": [{"type": "text", "text": "B" * 40_000}]}
+
+    @tool("blob", "Blob", {"type": "object", "properties": {}})
+    async def blob(args: dict) -> dict:
+        return big
+
+    registry.register_inproc(create_inproc_server("b", [blob]))
+    limit = 20_000
+    provider = SizeLimitedProvider([
+        _tool("t1", "mcp__b__blob", "{}"),
+        _tool("t2", "mcp__b__blob", "{}"),   # second result pushes past the limit
+        _tool("t3", "mcp__b__blob", "{}"),
+        _text("recovered"),
+    ], limit=limit)
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="m",
+        registry=registry, permissions=PermissionEngine("never_ask"),
+        context_window=limit, compaction=CompactionConfig(),
+    )
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+
+    events = loop.bus.log(loop.session_id)
+    assert provider.rejections >= 1
+    assert not any(isinstance(e, ErrorEvent) for e in events)
+    done = next(e for e in events if isinstance(e, TurnComplete))
+    assert done.stop_reason == "end_turn"
+    overflow = [e for e in events if isinstance(e, ContextCompaction)
+                and e.reason == "overflow"]
+    assert overflow and overflow[0].tier == 1 and overflow[0].trimmed
+    # Every accepted request after the overflow fit under the limit.
+    assert estimate_tokens_of_messages(provider.requests[-1].messages) < limit
+    # Sticky: a compactor rebuilt from the persisted events renders the view
+    # the live one does.
+    fresh = Compactor(config=CompactionConfig())
+    fresh.rehydrate(
+        Promotion(
+            tier=e.tier, reason=e.reason,
+            trimmed=tuple(tuple(p) for p in e.trimmed),
+            spans=tuple(tuple(s) for s in e.spans),
+        )
+        for e in events if isinstance(e, ContextCompaction)
+    )
+    nodes = await loop.store.load_path(loop.session_id)
+    assert fresh.view(nodes) == loop._compactor.view(nodes)
+
+
+def _status_error(status: int, message: str) -> list[StreamChunk]:
+    return [
+        StreamChunk("message_start", {"usage": {}}),
+        StreamChunk("error", {"status": status, "message": message, "retriable": False}),
+    ]
+
+
+async def _overflow_recovery(error_script: list[StreamChunk]) -> tuple:
+    """One tool call, then ``error_script``, then a recovery; returns
+    (provider, events)."""
+    registry = ToolRegistry()
+    big = {"content": [{"type": "text", "text": "B" * 5000}]}
+
+    @tool("blob", "Blob", {"type": "object", "properties": {}})
+    async def blob(args: dict) -> dict:
+        return big
+
+    registry.register_inproc(create_inproc_server("b", [blob]))
+    provider = ScriptedProvider([
+        _tool("t1", "mcp__b__blob", "{}"),
+        error_script,
+        _text("recovered"),
+    ])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="m",
+        registry=registry, permissions=PermissionEngine("never_ask"),
+        trim=TrimConfig(trigger_tokens=10_000_000,
+                        keep_recent_tool_results=0, min_result_chars=100),
+    )
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+    return provider, loop.bus.log(loop.session_id)
+
+
+async def test_context_overflow_detected_by_status_413() -> None:
+    """A 413 whose body matches no marker still climbs the ladder."""
+    from fluid.events import ContextCompaction
+
+    provider, events = await _overflow_recovery(
+        _status_error(413, "Payload Too Large")
+    )
+    assert not any(isinstance(e, ErrorEvent) for e in events)
+    assert provider.calls == 3
+    assert any(isinstance(e, ContextCompaction) and e.reason == "overflow"
+               for e in events)
+
+
+async def test_context_overflow_detected_by_gemini_wording() -> None:
+    from fluid.events import ContextCompaction
+
+    provider, events = await _overflow_recovery(_error(
+        "The input token count (1200000) exceeds the maximum number of "
+        "tokens allowed (1048576)."
+    ))
+    assert not any(isinstance(e, ErrorEvent) for e in events)
+    assert provider.calls == 3
+    assert any(isinstance(e, ContextCompaction) and e.reason == "overflow"
+               for e in events)
+
+
+async def test_non_overflow_status_does_not_escalate() -> None:
+    from fluid.events import ContextCompaction
+
+    provider, events = await _overflow_recovery(
+        _status_error(500, "upstream exploded")
+    )
+    assert any(isinstance(e, ErrorEvent) for e in events)
+    assert not any(isinstance(e, ContextCompaction) for e in events)
 
 
 # ─── 4. client retry/backoff ─────────────────────────────────────────────────

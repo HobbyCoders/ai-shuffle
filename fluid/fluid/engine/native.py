@@ -127,6 +127,7 @@ from fluid.permissions.engine import (
     plan_mode_tools,
 )
 from fluid.providers.base import ProviderClient, ProviderRequest
+from fluid.providers.windows import context_window_for
 from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
 from fluid.tools.builtins._util import resolve as resolve_tool_path
 from fluid.tools.builtins.tool_search import (
@@ -254,6 +255,9 @@ class _CallResult:
     interrupted: bool = False
     error_message: str | None = None  # set when stop_reason == "error"
     error_retriable: bool = False
+    # HTTP status of a rejected request, when the provider reported one. A
+    # 413 means "the prompt no longer fits" whatever the body says.
+    error_status: int | None = None
     # The provider's own verdict on the upstream call when it differs from the
     # normalized stop reason (OpenRouter's native_finish_reason). "stop" with a
     # native reason of "network_error" is how a dead upstream replica looks.
@@ -268,7 +272,13 @@ _OVERFLOW_MARKERS = (
     "maximum context length",
     "exceed context limit",
     "context window",
+    "too many tokens",
+    "input token count",  # Gemini via OpenRouter: "The input token count (N) exceeds ..."
+    "request too large",
 )
+
+# HTTP statuses that mean the request body itself was rejected for size.
+_OVERFLOW_STATUSES = frozenset({413})
 
 
 def _matches_tool_pattern(name: str, patterns: Sequence[str]) -> bool:
@@ -282,8 +292,16 @@ def _matches_tool_pattern(name: str, patterns: Sequence[str]) -> bool:
     return any(name == p or fnmatchcase(name, p) for p in patterns)
 
 
-def _is_context_overflow(message: str) -> bool:
-    lowered = message.lower()
+def _is_context_overflow(message: str, status: int | None = None) -> bool:
+    """Did the provider reject the prompt for being too long?
+
+    A 413 is an overflow whatever the body says (the wording varies by
+    provider and gateway); otherwise the message has to carry one of the
+    known markers.
+    """
+    if status in _OVERFLOW_STATUSES:
+        return True
+    lowered = (message or "").lower()
     return any(marker in lowered for marker in _OVERFLOW_MARKERS)
 
 
@@ -585,15 +603,18 @@ class NativeLoop(BackgroundLifecycleMixin):
         # sends ``system`` — but it is what lets get_context_usage price memory
         # files and skills separately instead of as one opaque blob.
         self.system_sections = system_sections
-        # Model context window, when the host app knows it. None → the usage
-        # breakdown reports maxTokens/percentage as None rather than guessing.
-        self.context_window = context_window
+        # Model context window. An explicit value (host app, config, env) is
+        # authoritative; None falls back to the model-id table in
+        # fluid.providers.windows — see the ``context_window`` property.
+        self._explicit_context_window = context_window
         # Agent-definition descriptors behind the "Custom agents" row of
-        # get_context_usage() (see usage.agent_usage). Host-declared when the
-        # host passed any; otherwise auto-filled from native ``.agents/agents``
-        # definitions below. Dispatch remains host territory either way.
+        # get_context_usage() (see usage.agent_usage): only what the host
+        # itself injected into the prompt. Native ``.agents/agents``
+        # definitions are NOT added here — their bodies are worker prompts
+        # that never enter this session's context, and the index line that
+        # does is priced as part of the compiled prompt. Dispatch remains
+        # host territory.
         self.agents = list(agents or ())
-        self._host_declared_agents = bool(self.agents)
         self.max_tokens = max_tokens
         # Reasoning-depth knob, provider-mapped by each serializer (Anthropic
         # output_config.effort; OpenAI-shaped reasoning.effort, clamped).
@@ -727,6 +748,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         # while that node is still on the loaded path — a fork or rewind past
         # it means the numbers describe a prompt this session no longer sends.
         self._last_call_usage: dict[str, tuple[str, dict[str, Any]]] = {}
+        # Sessions whose ``_last_call_usage`` entry was already looked for in
+        # the persisted Usage events (a resume recovers it from there once).
+        self._usage_rehydrated: set[str] = set()
         # Prompt-cache instrumentation (context/cache_probe.py). Every request
         # gets a short prefix fingerprint; when a call bills a big fresh prompt
         # with ~no cache read, the two fingerprints are bisected to name the
@@ -754,8 +778,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._init_background_lifecycle()
 
     # Discovery scope → the ``source`` label carried on a usage agent row.
-    _AGENT_SOURCES = {"project": "project", "global": "user", "plugin": "plugin"}
-
     def _apply_native_agents(self) -> None:
         """Discover native agent definitions and publish them to the session.
 
@@ -766,9 +788,13 @@ class NativeLoop(BackgroundLifecycleMixin):
           host's Task dispatcher. Host-provided entries WIN: an app that
           declared an agent under a name a file also uses keeps its own, with a
           warning, because its dispatcher is what actually runs the thing.
-        * ``self.agents`` — descriptors for the "Custom agents" usage row, but
-          only when the host declared none: a host that passed its own catalog
-          already priced what it injected, and adding to it would double-count.
+        * the compiled prompt's agents index (name + description per agent,
+          built by the prompt compiler, not here) — the only part of a
+          definition this session's context carries.
+
+        ``self.agents`` (the "Custom agents" usage row) is left alone: the
+        bodies are worker prompts, so pricing them here would report tokens
+        the request never sends. The index line is priced with the prompt.
         """
         from fluid.context.agents import discover_agents
 
@@ -797,15 +823,6 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
                 continue
             registry[definition.name] = definition
-        if not self._host_declared_agents:
-            self.agents = [
-                {
-                    "agentType": d.name,
-                    "source": self._AGENT_SOURCES.get(d.scope, d.scope or "app"),
-                    "text": d.body,
-                }
-                for d in self.native_agents
-            ]
 
     async def _ensure_session(self) -> SessionMeta:
         if self._session is None:
@@ -843,6 +860,23 @@ class NativeLoop(BackgroundLifecycleMixin):
         except Exception:  # a store that cannot replay: numbering starts fresh
             return
         self.bus.seed(sid, last)
+
+    @property
+    def context_window(self) -> int | None:
+        """The window the usage breakdown and the eviction ladder size against.
+
+        An explicit value wins. Otherwise the model id is looked up in
+        :mod:`fluid.providers.windows` on every read, so a mid-session model
+        switch is reflected. None when neither knows.
+        """
+        if self._explicit_context_window is not None:
+            return self._explicit_context_window
+        return context_window_for(self.model)
+
+    @context_window.setter
+    def context_window(self, value: int | None) -> None:
+        self._explicit_context_window = value
+
     @property
     def session_id(self) -> str:
         assert self._session is not None, "no session yet — submit a turn first"
@@ -1046,9 +1080,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         and no node is written; a session that does not exist yet simply prices
         as an empty history rather than being created here.
 
-        The total is the last call's REAL prompt size whenever one is available
-        for the current path (see ``_last_call_usage``); with no call yet — or
-        after a fork/rewind past it — it falls back to the chars/4 estimate.
+        The total is the last call's REAL prompt size plus the chars/4 estimate
+        of everything appended since (the reply itself, user text, tool
+        results) whenever a measured call is on the current path — recorded
+        live in ``_last_call_usage``, or recovered from the persisted Usage
+        events after a resume. With no call yet, or after a fork/rewind past
+        it, the whole total is the estimate.
 
         See :mod:`fluid.context.usage` for the category rules and the palette.
         """
@@ -1069,14 +1106,68 @@ class NativeLoop(BackgroundLifecycleMixin):
             # the request never actually saves. Report nothing instead.
             if self._compactor.active:
                 compaction_stats = self._compactor.stats(nodes)
-            recorded = self._last_call_usage.get(sid)
-            if recorded is not None and any(n.node_id == recorded[0] for n in nodes):
-                measured = _measured_prompt_tokens(recorded[1])
+            measured = await self._measured_next_prompt(sid, nodes)
         return self._context_usage_snapshot(
             history=history,
             compaction=compaction_stats,
             measured_prompt_tokens=measured,
         )
+
+    async def _measured_next_prompt(
+        self, sid: str, nodes: list[SessionNode]
+    ) -> int | None:
+        """The last call's billed prompt size, carried forward to the NEXT request.
+
+        The provider measured the prompt that produced the recorded assistant
+        node. The next request also carries that node (the reply) and whatever
+        was appended after it — user text, tool results — so those are added
+        at the chars/4 estimate. None when no measured call is on the current
+        path: a fresh session, or a fork/rewind past the measured node.
+        """
+        recorded = self._last_call_usage.get(sid)
+        if recorded is None:
+            recorded = await self._rehydrate_last_call_usage(sid, nodes)
+        if recorded is None:
+            return None
+        node_id, usage = recorded
+        index = next((i for i, n in enumerate(nodes) if n.node_id == node_id), None)
+        if index is None:
+            return None
+        appended = [n.message for n in nodes[index:]]
+        return _measured_prompt_tokens(usage) + estimate_tokens_of_messages(appended)
+
+    async def _rehydrate_last_call_usage(
+        self, sid: str, nodes: list[SessionNode]
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Recover the last call's prompt accounting from the persisted events.
+
+        ``_last_call_usage`` is process memory; the session outlives the
+        process. Every model call left a Usage event carrying the billed
+        prompt fields and the assistant node it produced, so a resumed engine
+        reads the newest one whose node is still on the path instead of
+        falling back to chars/4 until its first call. Looked for once per
+        session per engine; a store that cannot replay contributes nothing.
+        """
+        if sid in self._usage_rehydrated:
+            return None
+        self._usage_rehydrated.add(sid)
+        try:
+            events = await self.store.events_since(sid, 0)
+        except Exception:
+            return None
+        on_path = {n.node_id for n in nodes}
+        for event in reversed(events):
+            if not isinstance(event, Usage) or event.node_id not in on_path:
+                continue
+            usage = {
+                "input_tokens": event.input_tokens,
+                "cache_read_input_tokens": event.cache_read_tokens,
+                "cache_creation_input_tokens": event.cache_creation_tokens,
+            }
+            if _measured_prompt_tokens(usage) > 0:
+                self._last_call_usage[sid] = (event.node_id, usage)
+                return self._last_call_usage[sid]
+        return None
 
     def _deferred_tools_api(self) -> list[dict[str, Any]]:
         """Schemas of known-but-unloaded tools — the ToolSearch catalog.
@@ -1662,15 +1753,26 @@ class NativeLoop(BackgroundLifecycleMixin):
                     continue
                 if (
                     overflow_retries < 3
-                    and result.error_message
-                    and _is_context_overflow(result.error_message)
+                    and _is_context_overflow(
+                        result.error_message or "", result.error_status
+                    )
                 ):
                     # The prompt outgrew the window: force the next rung of
                     # the eviction ladder and retry on the smaller view. Each
                     # rung is a batch (tier 1 trim → tier 2 digests → tier 3
-                    # epoch folds); when no rung can reclaim anything, fall
-                    # through to the normal error path.
-                    escalations = self._compactor.escalate(nodes)
+                    # epoch folds, then both again with the recency guard
+                    # off); when no rung can reclaim anything, fall through
+                    # to the normal error path. With a known window the
+                    # compactor climbs as many rungs as the estimate needs in
+                    # one go.
+                    escalations = self._compactor.escalate(
+                        nodes,
+                        overhead_tokens=self._context_overhead_tokens(),
+                        context_window=self.context_window,
+                        output_reserve_tokens=(
+                            self.max_tokens or _DEFAULT_OUTPUT_RESERVE
+                        ),
+                    )
                     if escalations:
                         overflow_retries += 1
                         for promo in escalations:
@@ -2006,19 +2108,29 @@ class NativeLoop(BackgroundLifecycleMixin):
             max_tokens=self.max_tokens,
             effort=self.effort,
             cache_breakpoints=plan.breakpoints,
-            # OpenRouter documents session_id as the explicit sticky-routing
-            # key for prompt-cache locality. Other providers receive no extra.
-            # ``sticky=False`` drops the key so OpenRouter is free to pick a
-            # different upstream replica (see the empty-completion retry in
-            # _agent_loop). The host passthrough lands on top, so its keys win.
-            extra={
-                **(
-                    {"session_id": self.session_id}
-                    if sticky and self.provider.name == "openrouter" else {}
-                ),
-                **self.request_extra,
-            },
+            # Per-provider cache-affinity key first, host passthrough on top
+            # so the host's keys win.
+            extra={**self._affinity_keys(sticky), **self.request_extra},
         )
+
+    def _affinity_keys(self, sticky: bool) -> dict[str, Any]:
+        """The provider's prompt-cache affinity key, set to the session id.
+
+        OpenRouter documents ``session_id`` as its sticky-routing key; the
+        OpenAI Responses API takes ``prompt_cache_key`` for the same job
+        (routing requests that share a prefix to the same cache). Other
+        providers get nothing. ``sticky=False`` drops the key so OpenRouter
+        may pick a different upstream replica (see the empty-completion retry
+        in _agent_loop). Empty before a session exists.
+        """
+        if not sticky or self._session is None:
+            return {}
+        sid = self._session.session_id
+        if self.provider.name == "openrouter":
+            return {"session_id": sid}
+        if self.provider.name == "openai_responses":
+            return {"prompt_cache_key": sid}
+        return {}
 
     def _fingerprint_request(self, request: ProviderRequest) -> None:
         """Record the prefix fingerprint of the request about to be sent.
@@ -2191,12 +2303,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # No ErrorEvent here — _agent_loop decides whether this error
                 # is terminal or recoverable (context overflow → forced trim
                 # + one retry) before surfacing it.
+                status = payload.get("status")
                 return _CallResult(
                     message=self._assemble_message(blocks, request.model),
                     usage=usage_totals,
                     stop_reason="error",
                     error_message=str(payload.get("message", payload)),
                     error_retriable=bool(payload.get("retriable")),
+                    error_status=status if isinstance(status, int) else None,
                     native_stop_reason=native_stop_reason,
                 )
 

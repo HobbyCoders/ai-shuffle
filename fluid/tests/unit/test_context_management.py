@@ -4,11 +4,13 @@ from collections.abc import AsyncIterator
 
 from fluid.context.compaction import CompactionConfig, Compactor
 from fluid.context.trim import (
-    ToolResultTrimmer, TrimConfig, estimate_tokens_of_messages,
+    USER_IMAGE_KEY, ToolResultTrimmer, TrimConfig, block_chars,
+    estimate_tokens_of_messages,
 )
 from fluid.engine.native import NativeLoop
 from fluid.events import Handoff, HandoffCreated, UserTurn
 from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.messages.content import Reasoning, Thinking
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore, SessionNode
 from fluid.tools.builtins.note import handler as note_handler
@@ -207,6 +209,70 @@ def test_compactor_keeps_unconsumed_image() -> None:
     nodes = _screenshot_path()[:-1]
     compactor = Compactor(config=CompactionConfig())
     assert _has_image(compactor.view(nodes)[2])
+
+
+# ─── Estimator: reasoning envelopes and user images ──────────────────────────
+
+
+def test_reasoning_envelope_counts_what_is_resent() -> None:
+    """A Reasoning block has no ``text``; it used to estimate as ~3 tokens
+    while its 60 KB encrypted blob went on the wire every call."""
+    blob = "e" * 60_000
+    raw = {"type": "reasoning", "encrypted_content": blob, "summary": []}
+    openai = Reasoning(
+        origin="openai_responses", summary_text="short",
+        encrypted_content=blob, raw=raw,
+    )
+    assert block_chars(openai) >= 60_000
+    # raw already carries the blob; only one of them goes out.
+    assert block_chars(openai) < 2 * 60_000
+    # Legacy envelope without raw: the parts are what get sent.
+    assert block_chars(
+        Reasoning(origin="openai_responses", encrypted_content=blob)
+    ) == 60_000
+    thinking = "t" * 10_000
+    anthropic = Reasoning(
+        origin="anthropic", summary_text=thinking, signature="s" * 300,
+        raw={"type": "thinking", "thinking": thinking, "signature": "s" * 300},
+    )
+    assert 10_300 <= block_chars(anthropic) < 2 * 10_300
+    assert block_chars(Thinking(text="abc")) == 3
+    # A message made of reasoning alone now moves the estimate.
+    assert estimate_tokens_of_messages(
+        [Message(role="assistant", content=[openai])]
+    ) >= 15_000
+
+
+def test_user_image_estimates_flat_and_is_consumed_after_one_call() -> None:
+    """A top-level Image in a user turn: same flat weight and the same
+    consume-once rule as a screenshot inside a tool result."""
+    attachment = _node("u-img", "user", [
+        Text("what is this?"),
+        Image(media_type="image/png", data="a" * 400_000),
+    ])
+    assert 1_400 < estimate_tokens_of_messages([attachment.message]) < 1_700
+
+    trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=10_000_000))
+    first = trimmer.apply([attachment])
+    assert any(isinstance(b, Image) for b in first[0].content)  # first call sees it
+
+    assistant = _node("a-after", "assistant", [Text("a cat")])
+    second = trimmer.apply([attachment, assistant])
+    assert not any(isinstance(b, Image) for b in second[0].content)
+    text = "".join(getattr(b, "text", "") for b in second[0].content)
+    assert "what is this?" in text  # the caption beside it survives
+    assert "image attachment consumed from context" in text
+    assert "attach it again" in text
+    assert ("u-img", USER_IMAGE_KEY) in trimmer._trimmed
+    assert estimate_tokens_of_messages(second) < 300
+
+    # The Compactor path (what the engine renders through) agrees, and the
+    # decision is reported like any other consume-once trim.
+    compactor = Compactor(config=CompactionConfig())
+    rendered, promotions = compactor.apply([attachment, assistant])
+    assert not any(isinstance(b, Image) for b in rendered[0].content)
+    assert [(p.tier, p.reason) for p in promotions] == [(1, "image_consumed")]
+    assert ("u-img", USER_IMAGE_KEY) in compactor.trimmer._trimmed
 
 
 # ─── Note builtin ────────────────────────────────────────────────────────────

@@ -20,7 +20,9 @@ Categories — the same labels Claude Code's ``/context`` uses
 ------------------------------------------------------------
 ``System prompt``   base prompt + environment block + app "extra" blocks + the
                     agent-types index (CE7 — the index is prompt text; the
-                    definitions behind it price under "Custom agents").
+                    definitions behind it are not in the prompt at all).
+                    A section kind this module does not know also lands
+                    here rather than contributing zero.
                     Host-contributed ``tools`` sections WITHOUT a ``tool_name``
                     also ride here — an unattributable block of prose stays
                     honest instead of being priced as some tool's schema.
@@ -42,11 +44,13 @@ Categories — the same labels Claude Code's ``/context`` uses
 ``MCP tools``       loaded ``mcp__<server>__<tool>`` schemas (MCP + in-proc
                     servers — the naming convention IS the classifier, same as
                     Claude Code's). Per-tool detail: ``mcpTools``.
-``Custom agents``   agent definitions the session carries — host-declared
-                    descriptors, or native ``~/.fluid/agents`` / project
-                    ``.agents/agents`` definitions discovered by the loop.
-                    Dispatch stays host-app territory (rulings A6/A8); this row
-                    only prices the definitions. Per-agent detail: ``agents``.
+``Custom agents``   agent definitions the HOST injected into this session's
+                    prompt, priced from its descriptors. Native
+                    ``.agents/agents`` definitions discovered by the loop are
+                    not here: their bodies are worker prompts that never enter
+                    this context, and the index line that does is already
+                    "System prompt" text. Dispatch stays host-app territory
+                    (rulings A6/A8). Per-agent detail: ``agents``.
 ``Messages``        the TRIMMED history view (what a request would actually
                     carry), not the full stored tree.
 ``MCP tools (deferred)`` / ``System tools (deferred)``
@@ -140,14 +144,13 @@ CATEGORY_COLORS: dict[str, str] = {
     FREE_SPACE: "#2D3436",
 }
 
-# Sections that make up the "System prompt" category (memory/skills get their
-# own). The ``agents`` index rides here per ruling CE7: it is a compiled
-# section of the prompt, while the "Custom agents" category prices the agent
-# DEFINITIONS a session carries — counting the index there would double-count.
-# A ``tools`` section is NOT here: attributed ones price as tools, and an
-# unattributed one is folded back into system_tokens below rather than being
-# dropped from the accounting.
-_SYSTEM_KINDS = ("base", "environment", "extra", "agents")
+# Section kinds priced under a category of their own: memory files, the
+# skills index, and host ``tools`` sections (attributed ones price as tools;
+# an unattributed one is folded back into system_tokens below). Every OTHER
+# kind prices as "System prompt" — base, environment, extra, the agents index
+# (ruling CE7: the index is prompt text), and any kind the compiler grows
+# later — so no section can contribute zero by being unrecognised.
+_ATTRIBUTED_KINDS = frozenset({"memory", "skills", TOOLS_SECTION_KIND})
 
 # Discovery scope → the CLI's ``memoryFiles[].type`` vocabulary. Claude Code
 # labels an instruction file by where it came from: "User" (the user's home
@@ -301,7 +304,9 @@ def build_context_usage(
     system_tools_rows = [r for r in section_rows if "serverName" not in r]
     mcp_section_rows = [r for r in section_rows if "serverName" in r]
     system_tokens = sum(
-        estimate_tokens_of_text(s.text) for s in sections if s.kind in _SYSTEM_KINDS
+        estimate_tokens_of_text(s.text)
+        for s in sections
+        if s.kind not in _ATTRIBUTED_KINDS
     ) + unattributed
     if not sections and system_text:
         system_tokens = estimate_tokens_of_text(system_text)

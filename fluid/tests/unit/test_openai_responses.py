@@ -8,12 +8,14 @@ import httpx
 
 from fluid.messages import Message, Reasoning, Text, ToolResultBlock, ToolUseBlock
 from fluid.providers._sse import sse_events
-from fluid.providers.base import ProviderRequest, StreamChunk
+from fluid.engine.native import NativeLoop
+from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.providers.openai_responses.client import OpenAIResponsesClient
 from fluid.providers.openai_responses.serialize import (
     ResponsesStreamNormalizer,
     build_request_body,
 )
+from fluid.store.base import MemoryStore
 
 GOLDEN = Path(__file__).parent.parent / "golden" / "openai_responses_text_reasoning_tool.sse"
 
@@ -359,3 +361,58 @@ def test_thinking_effort_still_honored_without_explicit_effort() -> None:
     )
     body = build_request_body(request)
     assert body["reasoning"] == {"effort": "low", "summary": "auto"}
+
+
+# ─── prompt_cache_key: the session id, unless the host says otherwise ────────
+
+
+class _NamedProvider:
+    caps = ProviderCaps()
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    async def stream(self, request):  # pragma: no cover - never streamed here
+        if False:
+            yield None
+
+
+async def _loop_with_session(provider, **kw) -> tuple[NativeLoop, str]:
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(provider=provider, store=store, model="gpt-5.6", session_id=sid, **kw)
+    await loop._ensure_session()
+    return loop, sid
+
+
+async def test_responses_requests_carry_the_session_as_prompt_cache_key() -> None:
+    loop, sid = await _loop_with_session(_NamedProvider("openai_responses"))
+    try:
+        request = loop._build_request([])
+        assert request.extra == {"prompt_cache_key": sid}
+        assert build_request_body(request)["prompt_cache_key"] == sid
+        # The non-sticky retry drops the key, as it does for OpenRouter.
+        assert "prompt_cache_key" not in loop._build_request([], sticky=False).extra
+    finally:
+        await loop.aclose()
+
+
+async def test_host_request_extra_overrides_the_prompt_cache_key() -> None:
+    loop, _ = await _loop_with_session(
+        _NamedProvider("openai_responses"), request_extra={"prompt_cache_key": "host-key"}
+    )
+    try:
+        assert loop._build_request([]).extra["prompt_cache_key"] == "host-key"
+    finally:
+        await loop.aclose()
+
+
+async def test_other_providers_get_no_prompt_cache_key() -> None:
+    for name in ("anthropic", "openrouter", "local"):
+        loop, sid = await _loop_with_session(_NamedProvider(name))
+        try:
+            extra = loop._build_request([]).extra
+        finally:
+            await loop.aclose()
+        assert "prompt_cache_key" not in extra
+        assert extra == ({"session_id": sid} if name == "openrouter" else {})
