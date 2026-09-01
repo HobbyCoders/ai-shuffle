@@ -608,6 +608,19 @@ def build_engine(
     if pc.kind == "delegated_claude":
         from fluid.engine.delegated import DelegatedLoop
 
+        # The delegated leg gates fluid's builtins at the bundled bridge, so
+        # it needs the same permission engine and config hooks the native
+        # loop gets. Without these the child CLI's own mode is the only policy.
+        if config.hooks:
+            from fluid.hooks.bus import HookBus
+            from fluid.hooks.command import register_config_hooks
+
+            if hooks is None:
+                hooks = HookBus()
+            register_config_hooks(hooks, config.hooks, cwd=config.cwd)
+        if permissions is None:
+            permissions = _build_permissions(config)
+
         return DelegatedLoop(
             store=store,
             model=model,
@@ -623,6 +636,8 @@ def build_engine(
                 list(allowed_tools) if allowed_tools is not None else None
             ),
             disallowed_tools=list(disallowed_tools) or None,
+            permissions=permissions,
+            hooks=hooks,
         )
 
     # Native providers.

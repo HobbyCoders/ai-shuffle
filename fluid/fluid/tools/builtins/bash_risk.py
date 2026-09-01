@@ -19,17 +19,30 @@ only when:
   ``2>&1`` alone is tolerated because it merges streams without touching a file;
 - there is no command substitution (``$(`` or backticks), no background ``&``,
   no subshell parentheses, and no program outside the table (so ``sudo``,
-  ``xargs``, ``env cmd``, ``python`` and friends are all ``write``).
+  ``xargs``, ``env cmd``, ``python`` and friends are all ``write``);
+- any leading ``VAR=value`` assignment names a variable in
+  :data:`INERT_ENV_VARS`. Locale and colour variables cannot change what a
+  program does; almost anything else can (``LD_PRELOAD``, ``GIT_EXTERNAL_DIFF``,
+  ``GIT_PAGER``, ``BASH_ENV``, ``LESSOPEN`` all run a program of the caller's
+  choosing), so an assignment outside the list makes the command ``write``.
+
+A read-only command whose argument names a credential file (``cat .env``) is
+still ``write``; see :func:`_touches_sensitive_path`. An unquoted glob argument
+counts when any file it could expand to is a credential file (``cat .env*``,
+``cat ?env``, ``cat ~/.ssh/*``).
 
 Programs with extra rules:
 
 - ``find``: none of ``-exec``, ``-execdir``, ``-ok``, ``-okdir``, ``-delete``,
   ``-fprint*``, ``-fls``.
 - ``awk``/``gawk``/``mawk``: no ``system(``, ``getline`` or ``|`` in any
-  argument (those run or write to commands).
+  argument (those run or write to commands), and no ``-f``/``--file``,
+  ``-i``/``--include`` or ``-l``/``--load`` (script files and extension
+  libraries the classifier cannot read).
 - ``sed``: must carry ``-n``/``--quiet``/``--silent``, must not carry ``-i`` or
-  ``--in-place``, and no script argument that looks like a ``w`` file-write
-  command.
+  ``--in-place`` or ``-f``/``--file`` (an unread script file), and no script
+  argument that looks like a ``w`` file-write command or a GNU ``e`` command
+  or ``s///e`` flag (both run the text as a shell command).
 - ``sort``: no ``-o``/``--output``. ``uniq``: at most one positional argument
   (the second is an output file). ``date``: no ``-s``/``--set``. ``env``: no
   arguments (``env cmd`` runs ``cmd``). ``rg``: no ``--pre`` (runs a command).
@@ -66,7 +79,27 @@ _SEPARATORS = {"&&", "||", ";", "|", ";;"}
 
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SED_WRITE_CMD = re.compile(r"(?<![A-Za-z\\])[wW]\s*[\w./\\~-]")
+# GNU sed ``e``: a standalone command (``1e cmd``) or an ``s`` flag
+# (``s/a/b/e``, ``s/a/b/ge``). Address regexes (``/error/p``) are stripped
+# before this runs so a word that merely contains ``e`` does not trip it;
+# an ``e`` reached through a run of other ``s`` flags still does.
+_SED_EXEC_CMD = re.compile(r"(?<![A-Za-z\\])[gpiImM0-9]*[eE]")
+_SED_ADDRESS_RE = re.compile(r"/[^/]*/")
 _FIND_EXEC_FLAGS = {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fls"}
+_AWK_FILE_FLAGS = {"-f", "--file", "-i", "--include", "-l", "--load"}
+
+# Variables a leading ``VAR=value`` may set without changing the command's
+# class. Everything here only affects locale, time zone or colour output.
+INERT_ENV_VARS = frozenset({
+    "LANG", "LANGUAGE", "LC_ALL", "LC_COLLATE", "LC_CTYPE", "LC_MESSAGES",
+    "LC_MONETARY", "LC_NUMERIC", "LC_TIME", "TZ", "TERM", "COLUMNS", "LINES",
+    "NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE",
+})
+
+
+def _inert_assignment(token: str) -> bool:
+    m = _ENV_ASSIGNMENT.match(token)
+    return bool(m) and token[: m.end() - 1] in INERT_ENV_VARS
 
 
 def _no_flags(*banned: str) -> Check:
@@ -78,26 +111,44 @@ def _find_ok(args: list[str]) -> bool:
 
 
 def _awk_ok(args: list[str]) -> bool:
-    return not any("system(" in a or "getline" in a or "|" in a for a in args)
+    for a in args:
+        if "system(" in a or "getline" in a or "|" in a:
+            return False
+        # -f prog.awk, -fprog.awk, --file=prog.awk: a script we never see.
+        if a.split("=", 1)[0] in _AWK_FILE_FLAGS or (
+            a.startswith(("-f", "-i", "-l")) and not a.startswith("--") and len(a) > 2
+        ):
+            return False
+    return True
 
 
 def _sed_ok(args: list[str]) -> bool:
     quiet = False
+    scripts: list[str] = []
     for a in args:
         if a in ("--quiet", "--silent"):
             quiet = True
-        elif a.startswith("--in-place"):
+        elif a.startswith(("--in-place", "--file")):
             return False
-        elif a.startswith("-") and not a.startswith("--"):
+        elif a.startswith("--expression="):
+            scripts.append(a.split("=", 1)[1])
+        elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
             flags = a[1:]
-            if "i" in flags:
+            if "i" in flags or "f" in flags:
                 return False
             if "n" in flags:
                 quiet = True
+        else:
+            scripts.append(a)
     if not quiet:
         return False
-    scripts = [a for a in args if not a.startswith("-")]
-    return not any(_SED_WRITE_CMD.search(s) for s in scripts)
+    return not any(_sed_script_runs_or_writes(s) for s in scripts)
+
+
+def _sed_script_runs_or_writes(script: str) -> bool:
+    if _SED_WRITE_CMD.search(script):
+        return True
+    return bool(_SED_EXEC_CMD.search(_SED_ADDRESS_RE.sub("", script)))
 
 
 def _uniq_ok(args: list[str]) -> bool:
@@ -118,7 +169,7 @@ def _exact(*allowed: tuple[str, ...]) -> Check:
 # subject to the global redirection/substitution rules).
 READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     "ls": None, "dir": None, "cat": None, "head": None, "tail": None,
-    "less": None, "more": None, "wc": None,
+    "more": None, "wc": None,  # not less: LESSOPEN/LESSCLOSE run commands
     "grep": None, "egrep": None, "fgrep": None, "rg": _no_flags("--pre"),
     "find": _find_ok, "file": None, "stat": None, "du": None, "df": None,
     "pwd": None, "echo": None, "printf": None, "true": None,
@@ -209,8 +260,11 @@ def _lex(line: str) -> list[str] | None:
 
 
 def _simple_command_ok(tokens: list[str]) -> bool:
-    # Leading VAR=value assignments are fine; a bare assignment is not a command.
+    # Leading VAR=value assignments pass only for inert variables; a bare
+    # assignment is not a command.
     while tokens and _ENV_ASSIGNMENT.match(tokens[0]):
+        if not _inert_assignment(tokens[0]):
+            return False
         tokens = tokens[1:]
     if not tokens:
         return False
@@ -252,6 +306,43 @@ def is_read_only(command: str) -> bool:
     return True
 
 
+def simple_commands(command: str) -> list[str] | None:
+    """The simple commands of a command line, quoting kept, or None.
+
+    ``git commit -m "a b" && rm -rf /`` -> ``['git commit -m "a b"', 'rm -rf /']``.
+    Splits on ``&&``, ``||``, ``;``, ``|``, ``|&``, a background ``&`` and
+    newlines. None when the line uses command substitution, a subshell or
+    process substitution, or cannot be lexed: the pieces it would run are not
+    visible in the text, so a caller matching text against a policy must not
+    treat the split as complete.
+    """
+    if not command or not command.strip() or "$(" in command or "`" in command:
+        return None
+    out: list[str] = []
+    for line in command.splitlines():
+        if not line.strip():
+            continue
+        lex = shlex.shlex(line, posix=False, punctuation_chars=True)
+        lex.whitespace_split = True
+        try:
+            tokens = list(lex)
+        except ValueError:
+            return None
+        current: list[str] = []
+        for tok in tokens:
+            if tok in _SEPARATORS or tok in ("&", "|&"):
+                if current:
+                    out.append(" ".join(current))
+                current = []
+                continue
+            if tok and all(ch in "();<>|&" for ch in tok) and not set(tok) <= set("<>&"):
+                return None  # subshell parentheses, unknown operator soup
+            current.append(tok)
+        if current:
+            out.append(" ".join(current))
+    return out or None
+
+
 def program_names(command: str) -> frozenset[str] | None:
     """Every program a command invokes (``cat a | grep b`` → {cat, grep}).
 
@@ -286,6 +377,81 @@ def session_scope(input: dict[str, Any]) -> frozenset[str] | None:
     return program_names(command) if isinstance(command, str) else None
 
 
+# Concrete names the sensitive-file globs in fluid.tools.hardening cover, so an
+# argument glob can be tested against them: ``?env`` matches ``.env``,
+# ``~/.ssh/*`` matches ``.ssh/config``.
+_SENSITIVE_EXAMPLE_NAMES = (
+    ".env", ".env.local", "x.pem", "x.p12", "x.pfx",
+    "id_rsa", "id_rsa.pub", "id_ed25519", "id_ed25519.pub", "id_ecdsa", "id_ecdsa.pub",
+    ".netrc", "_netrc", ".npmrc", ".pypirc", ".htpasswd", ".git-credentials",
+)
+_SENSITIVE_EXAMPLE_PATHS = (".aws/credentials", ".ssh/config")
+_GLOB_CHARS = frozenset("*?[{")
+_BRACE_RE = re.compile(r"\{([^{}]*)\}")
+
+
+def _has_unquoted_glob(raw: str) -> bool:
+    """True when a raw (still-quoted) token has a glob or brace outside quotes."""
+    quote: str | None = None
+    for ch in raw:
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch in _GLOB_CHARS:
+            return True
+    return False
+
+
+def _expand_braces(pattern: str, limit: int = 64) -> list[str] | None:
+    """Innermost-first brace expansion; None when it cannot be done."""
+    out = [pattern]
+    for _ in range(limit):
+        if not any(_BRACE_RE.search(p) for p in out):
+            return out if all("{" not in p and "}" not in p for p in out) else None
+        expanded: list[str] = []
+        for p in out:
+            m = _BRACE_RE.search(p)
+            if m is None:
+                expanded.append(p)
+                continue
+            for alt in m.group(1).split(","):
+                expanded.append(p[: m.start()] + alt + p[m.end():])
+        if len(expanded) > limit:
+            return None
+        out = expanded
+    return None
+
+
+def _glob_could_name_sensitive_path(pattern: str) -> bool:
+    """True when a glob argument could expand to a credential file."""
+    from fnmatch import fnmatchcase
+
+    from fluid.tools.hardening import is_sensitive_path
+
+    alternatives = _expand_braces(pattern)
+    if alternatives is None:
+        return True
+    for alt in alternatives:
+        # The literal skeleton: ``.env*`` -> ``.env``, ``config/.env?`` -> ``config/.env``.
+        if is_sensitive_path(re.sub(r"[*?\[\]]", "", alt)):
+            return True
+        parts = [p for p in alt.replace("\\", "/").lower().split("/") if p]
+        if not parts:
+            continue
+        if any(fnmatchcase(name, parts[-1]) for name in _SENSITIVE_EXAMPLE_NAMES):
+            return True
+        for rep_path in _SENSITIVE_EXAMPLE_PATHS:
+            rep_parts = rep_path.split("/")
+            tail = parts[-len(rep_parts):]
+            if len(tail) == len(rep_parts) and all(
+                fnmatchcase(r, g) for r, g in zip(rep_parts, tail)
+            ):
+                return True
+    return False
+
+
 def _touches_sensitive_path(command: str) -> bool:
     """True when any argument names a credential file (``cat .env`` etc.).
 
@@ -293,19 +459,32 @@ def _touches_sensitive_path(command: str) -> bool:
     credential file, so it must not sail under the on_write policy. Best-effort
     shlex tokenization; a command we cannot tokenize was already rejected by
     the read-only classifier.
-    """
-    import shlex
 
+    Tokens are lexed with their quotes kept so an unquoted glob (``.env*``,
+    ``?env``, ``.{env,bashrc}``) can be told apart from a quoted regex
+    (``'foo.*'``): the shell expands the former after the classifier has seen
+    it, so it counts when any file it could match is sensitive.
+    """
     from fluid.tools.hardening import is_sensitive_path
 
+    lex = shlex.shlex(command, posix=False)
+    lex.whitespace_split = True
     try:
-        tokens = shlex.split(command)
+        raw_tokens = list(lex)
     except ValueError:
         return False
-    return any(
-        not token.startswith("-") and is_sensitive_path(token)
-        for token in tokens[1:]
-    )
+    for raw in raw_tokens[1:]:
+        if raw.startswith("-"):
+            continue
+        try:
+            literal = " ".join(shlex.split(raw))
+        except ValueError:
+            return True
+        if is_sensitive_path(literal):
+            return True
+        if _has_unquoted_glob(raw) and _glob_could_name_sensitive_path(literal):
+            return True
+    return False
 
 
 def classify(input: dict[str, Any]) -> str:

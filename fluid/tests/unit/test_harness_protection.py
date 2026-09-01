@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from fluid.config.loader import BUILTIN_DEFAULTS, _build_permissions, deep_merge
 from fluid.config.model import HarnessConfig
@@ -185,3 +186,19 @@ async def test_steer_still_rejected_when_idle(tmp_path) -> None:
     loop = NativeLoop(provider=_NullProvider(), store=JsonlStore(tmp_path), model="m")
     with pytest.raises(RuntimeError):
         await loop.submit(Steer(text="x"))
+
+
+@pytest.mark.parametrize("spelling", [".env/", ".env ", "./x/../.env", "src\\..\\.env"])
+def test_default_sensitive_rules_see_alternate_path_spellings(spelling: str) -> None:
+    """The tool resolves the path after the check, so the rule must resolve it too."""
+    engine = _build_permissions(_config())
+    read_spec = ToolSpec(name="Read", description="", input_schema={}, risk="safe")
+    assert engine.decide(read_spec, {"file_path": spelling}).decision == "ask"
+
+
+def test_default_sensitive_rules_see_absolute_paths_via_cwd(tmp_path) -> None:
+    engine = _build_permissions(_config())
+    read_spec = ToolSpec(name="Read", description="", input_schema={}, risk="safe")
+    target = str(tmp_path / "cfg" / ".." / ".env")
+    assert engine.decide(read_spec, {"file_path": target}, cwd=str(tmp_path)).decision == "ask"
+    assert engine.decide(read_spec, {"file_path": "README.md"}, cwd=str(tmp_path)).decision == "allow"

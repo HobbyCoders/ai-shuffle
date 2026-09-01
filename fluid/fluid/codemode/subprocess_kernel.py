@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import struct
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from fluid.codemode.kernel import HostCall, HostReply, KernelResult
@@ -29,6 +31,29 @@ from fluid.codemode.vfs import DEFAULT_ALLOWLIST
 
 _RUNNER = os.path.join(os.path.dirname(__file__), "_runner.py")
 _GB = 1024 * 1024 * 1024
+
+# Environment variables the kernel child never receives. Tools run host-side,
+# so nothing in the child needs a credential; a cell that reaches ``os.environ``
+# through the real builtins must find nothing worth reading there.
+_SENSITIVE_ENV_RE = re.compile(
+    r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.IGNORECASE
+)
+_SENSITIVE_ENV_NAMES = frozenset({
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY",
+    "GOOGLE_API_KEY", "GEMINI_API_KEY", "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN", "AWS_ACCESS_KEY_ID", "AZURE_OPENAI_API_KEY",
+    "GITHUB_TOKEN", "GH_TOKEN", "HF_TOKEN", "HUGGINGFACE_HUB_TOKEN",
+    "NPM_TOKEN", "PYPI_TOKEN", "DATABASE_URL",
+})
+
+
+def scrub_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """``environ`` minus every variable whose name looks like a credential."""
+    return {
+        name: value for name, value in environ.items()
+        if name.upper() not in _SENSITIVE_ENV_NAMES
+        and not _SENSITIVE_ENV_RE.search(name)
+    }
 
 
 @dataclass
@@ -78,6 +103,7 @@ class SubprocessKernel:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=scrub_env(os.environ),
         )
         # POSIX enforces the memory limit in-child via rlimit; on Windows that
         # is a no-op, so cap the child from the host with a Job Object.

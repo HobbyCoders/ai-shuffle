@@ -2557,7 +2557,7 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         # Permission gate.
         if self.permissions is not None and spec is not None:
-            decided = self.permissions.decide(spec, input)
+            decided = self.permissions.decide(spec, input, cwd=self.ctx.cwd)
             verdict = decided.decision
             # Default denial text: names the configured rule when one decided.
             deny_message: str | None = decided.deny_message()

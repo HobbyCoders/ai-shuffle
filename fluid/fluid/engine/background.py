@@ -19,6 +19,7 @@ from fluid.events.model import (
     TurnComplete,
 )
 from fluid.events.ops import BackgroundTaskFinished, UserTurn
+from fluid.tools.hardening import defang_harness_markers
 from fluid.tools.registry import BackgroundTaskReceipt
 
 _TERMINAL_EVENTS = (TurnComplete, Interrupted, ErrorEvent)
@@ -354,9 +355,14 @@ class BackgroundLifecycleMixin:
             ),
         ]
         for item in completions:
-            sections.append(f"\nTask {item.task_id} ({item.status}):")
-            summary = item.summary or "(no summary was provided)"
-            path = (item.report_path or "").strip()
+            # Everything below comes from the worker, and this text sits inside
+            # the trusted reminder fence: a summary carrying its own closing tag
+            # or a steer marker would forge a control channel. Defang all of it.
+            task_id = defang_harness_markers(str(item.task_id))
+            status = defang_harness_markers(str(item.status))
+            sections.append(f"\nTask {task_id} ({status}):")
+            summary = defang_harness_markers(item.summary or "(no summary was provided)")
+            path = defang_harness_markers((item.report_path or "").strip())
             if not path:
                 # Nothing to point at, so nothing may be dropped: an elided
                 # summary with no recovery handle is the failure being fixed.

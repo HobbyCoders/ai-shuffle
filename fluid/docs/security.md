@@ -97,8 +97,20 @@ kernel rather than a schema — from the code-mode projection and the host-call
 gate, plus a final refusal at dispatch), the
 session tool restriction (CE12) enforced at schema build, registry view, and
 dispatch, read-before-write on file edits, and the code-mode kernel's
-host-side gates (`open()` and network disabled; every in-kernel tool call
-passes the same hooks and permissions).
+gates. Every in-kernel *tool* call crosses the pipe to the host, where it
+passes the same hooks and permissions as a JSON-path call. Inside the child,
+cell code cannot reach the machine directly: an interpreter audit hook
+(`fluid/codemode/_audit_guard.py`, installed with `sys.addaudithook` before
+the first cell and irremovable after) refuses `open`, directory listing,
+`shutil`, socket creation and connection, `subprocess.Popen`, `os.system` /
+`os.exec*` / `os.spawn*`, `ctypes`, environment edits and further audit hooks
+whenever a cell frame is on the stack or the call runs off the main thread,
+so reaching the real builtins through a pre-bound module
+(`json.__builtins__['__import__']('os')`) gains nothing. The child is also
+spawned with credential-looking variables (`*KEY*`, `*TOKEN*`, `*SECRET*`,
+`*PASSWORD*`, `*CREDENTIAL*` and the known provider names) stripped from its
+environment. The patched `open`/`io`/`socket.socket` builtins and the import
+allowlist remain as the model-facing layer with the friendlier messages.
 
 **9. Hooks as the user's extension point.** `[[hooks]]` PreToolUse commands
 can deny or rewrite any call with organization-specific policy the harness
@@ -113,8 +125,13 @@ can't know (path allowlists, secret scanners, audit logging).
   deliberately conservative: false negatives are accepted to keep false
   positives near zero. Add project-specific coverage with permission rules
   and hooks.
-- The code-mode sandbox is a soft boundary by design; the hard gates are
-  host-side. A container-grade kernel remains future work
+- The code-mode kernel is not a container. The audit hook covers the
+  operations the interpreter reports; it does not cover memory exhaustion
+  inside the process (the memory cap does), CPU spin (the timeout does), or
+  code that runs after every cell frame has left the stack, such as an
+  `atexit` callback compiled under a different filename. Reading the
+  interpreter's own `.py` sources under `sys.path` stays possible because
+  imports need it. A container-grade kernel remains future work
   (`docs/agent-experience.md`).
 
 ## Override reference

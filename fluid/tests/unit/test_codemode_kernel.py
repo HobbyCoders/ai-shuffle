@@ -280,3 +280,255 @@ async def test_bash_nonzero_exit_is_data_in_code_mode(tmp_path) -> None:
     out = await handler({"command": f'"{sys.executable}" -c "import sys; print(\'no\'); sys.exit(3)"'}, ToolCtx(cwd=str(tmp_path)))
     assert out.is_error and out.soft_error
     assert "[exit code 3]" in out.text and "no" in out.text
+
+
+# ─── audit-hook boundary ─────────────────────────────────────────────────────
+#
+# Every cell below reaches the real ``os``/``_socket``/``subprocess`` through
+# the real builtins dict a pre-bound module carries — the route that made the
+# patched ``open``/``socket.socket`` a soft boundary. The audit hook installed
+# at child boot is what refuses these; each assertion names the event.
+
+_REAL_IMPORT = "json.__builtins__['__import__']"
+
+
+async def test_kernel_child_never_sees_credential_env_vars(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "canary-should-not-cross")
+    monkeypatch.setenv("MY_SERVICE_TOKEN", "canary-two")
+    monkeypatch.setenv("FLUID_PLAIN_SETTING", "visible")
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        r = await k.exec(
+            f"env = {_REAL_IMPORT}('os').environ\n"
+            "(env.get('ANTHROPIC_API_KEY'), env.get('MY_SERVICE_TOKEN'), "
+            "env.get('FLUID_PLAIN_SETTING'))",
+            timeout=5, on_host_call=_no_tools,
+        )
+        assert r.error is None, r.error
+        assert r.value_repr == "(None, None, 'visible')"
+    finally:
+        await k.stop()
+
+
+async def test_real_socket_creation_is_refused_by_audit_hook() -> None:
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        r = await k.exec(
+            f"s = {_REAL_IMPORT}('_socket').socket()\ns.connect(('127.0.0.1', 9))",
+            timeout=5, on_host_call=_no_tools,
+        )
+        assert r.error is not None
+        assert "socket.__new__ is blocked in the code-mode kernel" in r.error
+    finally:
+        await k.stop()
+
+
+async def test_os_open_is_refused_by_audit_hook(tmp_path) -> None:
+    target = tmp_path / "leak.txt"
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        r = await k.exec(
+            f"os = {_REAL_IMPORT}('os')\n"
+            f"fd = os.open({str(target)!r}, os.O_CREAT | os.O_WRONLY)",
+            timeout=5, on_host_call=_no_tools,
+        )
+        assert r.error is not None
+        assert "open is blocked in the code-mode kernel" in r.error
+        assert not target.exists()
+        listing = await k.exec(
+            f"{_REAL_IMPORT}('os').listdir({str(tmp_path)!r})",
+            timeout=5, on_host_call=_no_tools,
+        )
+        assert listing.error is not None
+        assert "os.listdir is blocked" in listing.error
+    finally:
+        await k.stop()
+
+
+async def test_subprocess_popen_is_refused_by_audit_hook() -> None:
+    import sys
+
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        r = await k.exec(
+            f"{_REAL_IMPORT}('subprocess').Popen([{sys.executable!r}, '-c', 'pass'])",
+            timeout=10, on_host_call=_no_tools,
+        )
+        assert r.error is not None
+        assert "subprocess.Popen is blocked in the code-mode kernel" in r.error
+        spawned = await k.exec(
+            f"os = {_REAL_IMPORT}('os')\n"
+            f"os.spawnv(os.P_NOWAIT, {sys.executable!r}, ['python', '-c', 'pass'])",
+            timeout=10, on_host_call=_no_tools,
+        )
+        assert spawned.error is not None
+        assert "os.spawn is blocked" in spawned.error
+    finally:
+        await k.stop()
+
+
+async def test_cell_cannot_add_its_own_audit_hook() -> None:
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        r = await k.exec(
+            f"sys = {_REAL_IMPORT}('sys')\n"
+            "seen = []\n"
+            "sys.addaudithook(lambda event, args: seen.append(event))\n"
+            "sys.audit('probe')\n"
+            "seen",
+            timeout=5, on_host_call=_no_tools,
+        )
+        assert r.error is None, r.error
+        assert r.value_repr == "[]"
+    finally:
+        await k.stop()
+
+
+async def test_audit_hook_covers_threads_and_recompiled_code() -> None:
+    """Neither a worker thread nor code compiled under another filename
+    escapes the cell attribution."""
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        r = await k.exec(
+            f"threading = {_REAL_IMPORT}('threading')\n"
+            "out = []\n"
+            "def probe():\n"
+            "    try:\n"
+            f"        {_REAL_IMPORT}('os').listdir('.')\n"
+            "        out.append('listed')\n"
+            "    except RuntimeError as e:\n"
+            "        out.append(str(e).split(';')[0])\n"
+            "t = threading.Thread(target=probe)\n"
+            "t.start()\n"
+            "t.join()\n"
+            "out",
+            timeout=5, on_host_call=_no_tools,
+        )
+        assert r.error is None, r.error
+        assert r.value_repr == "['os.listdir is blocked in the code-mode kernel']"
+        r2 = await k.exec(
+            f"g = {{'real_import': {_REAL_IMPORT}}}\n"
+            "src = \"real_import('os').listdir('.')\"\n"
+            "exec(compile(src, 'other.py', 'exec'), g)",
+            timeout=5, on_host_call=_no_tools,
+        )
+        assert r2.error is not None and "os.listdir is blocked" in r2.error
+    finally:
+        await k.stop()
+
+
+async def test_allowlisted_imports_and_tracebacks_still_work_under_audit_hook() -> None:
+    """Importing a not-yet-loaded stdlib module opens its source through
+    importlib, and traceback rendering reads stdlib lines through linecache;
+    both must pass the hook from inside a cell."""
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        r = await k.exec(
+            "import statistics, decimal, csv, datetime\n"
+            "statistics.mean([1, 2, 3])",
+            timeout=10, on_host_call=_no_tools,
+        )
+        assert r.error is None, r.error
+        assert r.value_repr == "2"
+        r2 = await k.exec(
+            f"traceback = {_REAL_IMPORT}('traceback')\n"
+            "try:\n"
+            "    json.loads('{')\n"
+            "except Exception:\n"
+            "    text = traceback.format_exc()\n"
+            "'decoder.py' in text and 'JSONDecodeError' in text",
+            timeout=10, on_host_call=_no_tools,
+        )
+        assert r2.error is None, r2.error
+        assert r2.value_repr == "True"
+    finally:
+        await k.stop()
+
+
+async def test_projected_tool_call_and_checkpoint_survive_audit_hook() -> None:
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        await k.set_vfs(dict(_ECHO_STUB))
+        r = await k.exec(
+            "from tools import Upper\nresult = Upper('hi')\nresult",
+            timeout=10, on_host_call=_echo_host,
+        )
+        assert r.error is None, r.error
+        assert r.value_repr == "'HI'"
+        timed_out = await k.exec("while True: pass", timeout=1.0, on_host_call=_no_tools)
+        assert timed_out.error is not None
+        assert "restored from last checkpoint" in timed_out.error
+        restored = await k.exec("result", timeout=5, on_host_call=_echo_host)
+        assert restored.error is None and restored.value_repr == "'HI'"
+    finally:
+        await k.stop()
+
+
+async def test_allow_fs_lifts_file_gate_but_not_process_gate(tmp_path) -> None:
+    from fluid.codemode.subprocess_kernel import KernelConfig
+
+    target = tmp_path / "ok.txt"
+    k = SubprocessKernel(KernelConfig(allow_fs=True))
+    await k.start()
+    try:
+        r = await k.exec(
+            f"os = {_REAL_IMPORT}('os')\n"
+            f"fd = os.open({str(target)!r}, os.O_CREAT | os.O_WRONLY)\n"
+            "os.write(fd, b'x')\nos.close(fd)\n'written'",
+            timeout=5, on_host_call=_no_tools,
+        )
+        assert r.error is None, r.error
+        assert target.read_text() == "x"
+        blocked = await k.exec(
+            f"{_REAL_IMPORT}('os').system('echo hi')", timeout=5, on_host_call=_no_tools,
+        )
+        assert blocked.error is not None and "os.system is blocked" in blocked.error
+    finally:
+        await k.stop()
+
+
+def test_scrub_env_drops_credential_shaped_names_only() -> None:
+    from fluid.codemode.subprocess_kernel import scrub_env
+
+    env = {
+        "PATH": "/usr/bin", "SYSTEMROOT": "C:\\Windows", "HOME": "/home/x",
+        "ANTHROPIC_API_KEY": "sk-1", "openai_api_key": "sk-2",
+        "SOME_SERVICE_TOKEN": "t", "DB_PASSWORD": "p", "AWS_SECRET_ACCESS_KEY": "s",
+        "GCP_CREDENTIALS": "c", "GITHUB_TOKEN": "g", "DATABASE_URL": "postgres://",
+    }
+    assert scrub_env(env) == {"PATH": "/usr/bin", "SYSTEMROOT": "C:\\Windows", "HOME": "/home/x"}
+
+
+def test_audit_guard_attributes_events_to_cell_frames_only() -> None:
+    """The decision logic, exercised in-process without installing a hook."""
+    import sys
+
+    from fluid.codemode._audit_guard import AuditGuard
+
+    guard = AuditGuard(allow_fs=False, allow_network=False, roots=[])
+    assert guard.denied_event("open")
+    assert guard.denied_event("socket.connect")
+    assert guard.denied_event("shutil.rmtree")
+    assert guard.denied_event("subprocess.Popen")
+    assert not guard.denied_event("compile")
+    assert not guard.denied_event("sys._getframe")
+    assert not guard.from_cell(sys._getframe())
+
+    ns: dict = {"__name__": "__cell__", "__builtins__": __builtins__}
+    exec(compile("def probe():\n    return sys._getframe()\n", "<cell>", "exec"), ns)
+    ns["sys"] = sys
+    assert guard.from_cell(ns["probe"]())
+
+    permissive = AuditGuard(allow_fs=True, allow_network=True, roots=[])
+    assert not permissive.denied_event("open")
+    assert not permissive.denied_event("socket.connect")
+    assert permissive.denied_event("subprocess.Popen")
+    assert permissive.denied_event("ctypes.dlopen")

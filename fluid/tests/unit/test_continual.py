@@ -505,3 +505,30 @@ async def test_synthesis_log_rotates(tmp_path, monkeypatch) -> None:
     assert len(lines) <= 5
     # The most recent passes are the ones that survive.
     assert json.loads(lines[-1])["changed"] == ["skill_39"]
+
+
+def test_skill_name_rejects_path_segments() -> None:
+    # referenced_skills once rebound the name regex to an unanchored pattern,
+    # which let names with separators through validate_skill.
+    assert "invalid skill name" in validate_skill("a/b", _GREET)
+    assert "invalid skill name" in validate_skill("x/../../pwned", _GREET)
+    assert "invalid skill name" in validate_skill("greet\n", _GREET)
+    assert "invalid skill name" in validate_skill("a" * 65, _GREET)
+    assert validate_skill("greet", _GREET) is None
+    # The loose identifier pattern still drives reference extraction.
+    assert referenced_skills("skills.greet('x')") == ["greet"]
+
+
+def test_store_refuses_to_write_outside_root(tmp_path) -> None:
+    root = tmp_path / "skills"
+    store = SkillStore(root)
+    for bad in ("x/../../pwned", "a/b", "..", "pwned.py"):
+        with pytest.raises(ValueError):
+            store.save(bad, _GREET)
+        with pytest.raises(ValueError):
+            store._path(bad)
+        assert store.get(bad) is None
+        assert store.delete(bad) is False
+    written = [p for p in tmp_path.rglob("*") if p.is_file() and p.suffix == ".py"]
+    assert written == []
+    assert store.list() == []

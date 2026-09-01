@@ -194,7 +194,7 @@ def _description_of(source: str) -> str | None:
 
 def validate_skill(name: str, source: str) -> str | None:
     """Return an error message, or None when (name, source) is a valid skill."""
-    if not isinstance(name, str) or not _NAME_RE.match(name) or keyword.iskeyword(name):
+    if not isinstance(name, str) or not _NAME_RE.fullmatch(name) or keyword.iskeyword(name):
         return (
             f"invalid skill name {name!r}: use a short lowercase identifier "
             "(letters, digits, underscores; not a Python keyword)"
@@ -242,6 +242,14 @@ class SkillStore:
 
     # ─── skills CRUD ─────────────────────────────────────────────────────
     def _path(self, name: str) -> Path:
+        # The name becomes a file name under the store root, so it must be a
+        # single bare identifier: no separators, no "..", no drive prefix.
+        if (
+            not isinstance(name, str)
+            or not _NAME_RE.fullmatch(name)
+            or Path(name).parts != (name,)
+        ):
+            raise ValueError(f"invalid skill name {name!r}")
         return self.root / f"{name}.py"
 
     def save(self, name: str, source: str) -> Skill:
@@ -261,7 +269,7 @@ class SkillStore:
         return skill
 
     def delete(self, name: str) -> bool:
-        path = self._path(name) if _NAME_RE.match(name or "") else None
+        path = self._path(name) if _NAME_RE.fullmatch(name or "") else None
         existed = bool(path and path.is_file())
         if path and existed:
             path.unlink()
@@ -271,7 +279,7 @@ class SkillStore:
         return existed
 
     def get(self, name: str) -> Skill | None:
-        if not _NAME_RE.match(name or ""):
+        if not _NAME_RE.fullmatch(name or ""):
             return None
         path = self._path(name)
         if not path.is_file():
@@ -317,7 +325,7 @@ class SkillStore:
     def _mtime_ns(self, name: str) -> int | None:
         try:
             return self._path(name).stat().st_mtime_ns
-        except OSError:
+        except (OSError, ValueError):
             return None
 
     def needs_verification(self, name: str) -> bool:
@@ -811,7 +819,10 @@ class SkillStore:
         for name, info in sorted((meta.get("skills") or {}).items()):
             if not isinstance(info, dict) or info.get("pinned"):
                 continue
-            path = self._path(name)
+            try:
+                path = self._path(name)
+            except ValueError:
+                continue
             if not path.is_file():
                 continue
             last_activity = max(
@@ -906,7 +917,7 @@ _USE_RE = re.compile(
     r"|(?:\bfrom\s+skills\.([a-z_][a-z0-9_]*)\s+import\b)"
     r"|(?:\bfrom\s+skills\s+import\s+(?:\(([^)]*)\)|([^\n]+)))"
 )
-_NAME_RE = re.compile(r"[a-z_][a-z0-9_]*")
+_IDENT_RE = re.compile(r"[a-z_][a-z0-9_]*")
 
 
 def referenced_skills(code: str) -> list[str]:
@@ -919,7 +930,7 @@ def referenced_skills(code: str) -> list[str]:
         elif m.group(3) or m.group(4):
             # ``from skills import a, b as c`` — the imported names, not aliases.
             for item in (m.group(3) or m.group(4)).split(","):
-                head = _NAME_RE.match(item.strip())
+                head = _IDENT_RE.match(item.strip())
                 if head:
                     seen.setdefault(head.group(0))
     return list(seen)

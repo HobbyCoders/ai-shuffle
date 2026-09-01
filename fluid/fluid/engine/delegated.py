@@ -40,11 +40,13 @@ import enum
 import json
 import logging
 import os
+import secrets
 import signal
 import socket
 import tempfile
 from collections.abc import AsyncIterator
-from typing import Any
+from fnmatch import fnmatchcase
+from typing import TYPE_CHECKING, Any
 
 from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps
@@ -79,7 +81,20 @@ from fluid.messages import Image, Message, Text
 from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
+if TYPE_CHECKING:
+    from fluid.hooks.bus import HookBus
+    from fluid.permissions.engine import PermissionEngine
+
 logger = logging.getLogger(__name__)
+
+# The bundled bridge publishes each registry tool to the CLI under this MCP
+# prefix; a session tool pattern may name either spelling.
+_BUNDLED_PREFIX = "mcp__fluid_bundled__"
+
+
+def _matches_tool_pattern(name: str, patterns: list[str]) -> bool:
+    """Exact name or case-sensitive fnmatch pattern (same rule as NativeLoop)."""
+    return any(name == p or fnmatchcase(name, p) for p in patterns)
 
 # How long a control_request may wait for its control_response before the
 # caller gives up and reports "unavailable". Short on purpose: these are
@@ -145,6 +160,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         disallowed_tools: list[str] | None = None,
         effort: str | None = None,
         settings: str | None = None,
+        permissions: PermissionEngine | None = None,
+        hooks: HookBus | None = None,
     ) -> None:
         self.store = store
         self.model = model
@@ -166,6 +183,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # the same pair itself; here the child CLI does the enforcing.
         self.allowed_tools = allowed_tools
         self.disallowed_tools = disallowed_tools
+        # Gates for the bundled bridge only: the CLI owns its own tools, but a
+        # registry tool served over the bridge is harness dispatch and gets the
+        # native loop's hook + permission treatment. Optional; None skips.
+        self.permissions = permissions
+        self.hooks = hooks
+        # Per-session shared secret every bridge request must carry. The socket
+        # (a loopback port on Windows) is reachable by any local process; the
+        # token is what makes it the CLI child's and nobody else's.
+        self._bridge_token = secrets.token_urlsafe(32)
         # Reasoning-depth knob — forwarded verbatim as the CLI's --effort flag.
         self.effort = effort
         # A settings JSON blob, forwarded verbatim as the CLI's --settings flag.
@@ -351,16 +377,35 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             env.update(self.env)
         return env
 
+    def _bridge_tool_permitted(self, name: str) -> bool:
+        """The session tool restriction, applied to a bridge-served tool.
+
+        Mirrors ``NativeLoop._tool_permitted``: ``allowed_tools=None`` permits
+        everything, otherwise the name must match; ``disallowed_tools`` then
+        subtracts. The CLI sees the tool as ``mcp__fluid_bundled__<name>``, so
+        a pattern written against either spelling counts. The CLI's own
+        ``--disallowed-tools`` flag never reaches a bridge tool on its own:
+        it matches the registry name while the CLI calls the prefixed one.
+        """
+        spellings = (name, _BUNDLED_PREFIX + name)
+        if self.disallowed_tools and any(
+            _matches_tool_pattern(s, self.disallowed_tools) for s in spellings
+        ):
+            return False
+        if self.allowed_tools is None:
+            return True
+        return any(_matches_tool_pattern(s, self.allowed_tools) for s in spellings)
+
     async def _start_bundled_server(self) -> None:
         """Expose the registry's inproc/builtin tools over a local socket and
         point ``--mcp-config`` at a bundled stdio server that bridges to it.
 
         Transport: a unix domain socket where the platform has one, otherwise
         (Windows — no ``AF_UNIX``) a **loopback-only** TCP socket on an
-        ephemeral port. The TCP form widens the trust boundary from "same user"
-        to "same machine"; that is the same boundary the CLI child already sits
-        inside, so the bridge stays unauthenticated — but binding anything other
-        than 127.0.0.1 would require a handshake secret first.
+        ephemeral port. Either way every request must carry this session's
+        bridge token, handed to the child through the config's ``env``; the
+        server also applies the session tool filter and, when the loop has
+        them, the permission engine and hooks.
         """
         if self.registry is None or self._socket_server is not None:
             return
@@ -371,7 +416,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
         specs = [
             s for s in self.registry.list_tools(loaded_only=True)
-            if s.source in ("inproc", "builtin")
+            if s.source in ("inproc", "builtin") and self._bridge_tool_permitted(s.name)
         ]
         if not specs and not self.mcp_servers:
             return
@@ -384,6 +429,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if specs:
             self._socket_server = await serve_registry_socket(
                 self.registry, self._socket_path, self.ctx,
+                token=self._bridge_token,
+                tool_filter=self._bridge_tool_permitted,
+                permissions=self.permissions,
+                hooks=self.hooks,
             )
             if not use_unix:
                 # Port 0 was an ask for *any* free port — resolve what we got so
@@ -393,6 +442,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         write_bundled_config(
             self.registry, self._mcp_config_path,
             socket_path=self._socket_path, user_servers=self.mcp_servers,
+            token=self._bridge_token, tool_filter=self._bridge_tool_permitted,
         )
 
     def _build_argv(self) -> list[str]:

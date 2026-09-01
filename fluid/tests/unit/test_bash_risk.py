@@ -103,7 +103,15 @@ SAFE_COMMANDS = [
     "node --version",
     "ls 2>&1",
     "ls 2>&1 | head -5",
-    "FOO=bar ls",
+    "LANG=C grep foo bar",  # locale assignments cannot change what grep does
+    "LC_ALL=C sort file.txt",
+    "NO_COLOR=1 ls",
+    "sed -n '/error/p' file.txt",  # an e inside an address regex is not the e command
+    "sed -n 's/one/two/p' file.txt",
+    "grep 'foo.*bar' file.txt",  # quoted regex, not a glob
+    "rg -n 'a.*' src",
+    "grep foo *.py",  # glob that cannot reach a credential file
+    "ls *.log",
 ]
 
 WRITE_COMMANDS = [
@@ -169,6 +177,27 @@ WRITE_COMMANDS = [
     'ls "unterminated',  # unlexable → conservative write
     "FOO=1",  # bare assignment is not a read
     "unknowntool --help",
+    # Environment variables that make a read-only program run something else.
+    "FOO=bar ls",  # not on the inert allowlist
+    "GIT_EXTERNAL_DIFF=/tmp/evil.sh git diff",
+    "LD_PRELOAD=/tmp/e.so ls",
+    "GIT_PAGER='sh -c \"rm -rf x\"' git log",
+    "LESSOPEN='|rm %s' less foo",
+    "BASH_ENV=/tmp/x ls",
+    "less foo",  # LESSOPEN/LESSCLOSE run commands, so less is off the table
+    # GNU sed e runs a shell command; -f/awk -f load a script we never see.
+    "sed -n '1e rm -rf x' f",
+    "sed -n 's/a/b/e' f",
+    "sed -n 's/a/b/ge' f",
+    "sed -n -e '1e rm' f",
+    "sed -n --expression='1e rm' f",
+    "sed -n -f script.sed f",
+    "sed -nf script.sed f",
+    "sed -n --file=script.sed f",
+    "awk -f prog.awk f",
+    "awk --file=prog.awk f",
+    "gawk -l ext f",  # loads an extension library
+    "gawk -i inc.awk f",
 ]
 
 
@@ -181,6 +210,28 @@ def test_read_only_commands_are_safe(command: str) -> None:
 @pytest.mark.parametrize("command", WRITE_COMMANDS)
 def test_everything_else_is_write(command: str) -> None:
     assert not is_read_only(command), command
+    assert classify({"command": command}) == "write"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat .env*",
+        "cat .env?",
+        "cat ?env",
+        "cat .en[v]",
+        "cat .{env,bashrc}",
+        "cat config/.env*",
+        "cat ~/.ssh/*",
+        "head /root/.aws/*",
+        "cat *",  # could expand to anything, .env included
+        "cat *.pem",
+        "cat '.en'*",  # the unquoted tail is still a glob
+        "cat {.env",  # unbalanced brace: unresolvable, so not safe
+    ],
+)
+def test_globs_that_could_reach_a_credential_file_are_write(command: str) -> None:
+    assert is_read_only(command), command  # read-only program, but ...
     assert classify({"command": command}) == "write"
 
 

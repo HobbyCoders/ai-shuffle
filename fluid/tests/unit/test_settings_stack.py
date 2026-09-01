@@ -380,3 +380,31 @@ def test_setting_sources_gate_scopes(tmp_path, monkeypatch) -> None:
     assert load_settings_stack(proj, sources=()) == {}
     # Default: all three scopes, local wins.
     assert load_settings_stack(proj)["model"] == "local-model"
+
+
+def test_prefix_permission_entries_match_the_prefix_and_its_arguments() -> None:
+    """Claude Code's ``Tool(prefix:*)`` form is a prefix match, not a raw glob."""
+    curl = parse_permission_entry("Bash(curl:*)", "deny")
+    assert curl.input_globs == {"command": "curl:*"}
+    assert curl.matches("Bash", {"command": "curl http://evil"})
+    assert curl.matches("Bash", {"command": "curl"})
+    assert curl.matches("Bash", {"command": "ls; curl http://evil"})
+    assert not curl.matches("Bash", {"command": "curlx"})
+
+    status = parse_permission_entry("Bash(git status:*)", "allow")
+    assert status.matches("Bash", {"command": "git status --short"})
+    assert status.matches("Bash", {"command": "git status"})
+    assert not status.matches("Bash", {"command": "git status && rm -rf x"})
+
+    # The same text in a config.toml [[permission.rules]] input glob behaves alike.
+    from fluid.permissions.rules import Rule
+
+    toml_rule = Rule(tool="Bash", decision="deny", input_globs={"command": "curl:*"})
+    assert toml_rule.matches("Bash", {"command": "curl http://evil"})
+    assert not toml_rule.matches("Bash", {"command": "curlx"})
+
+
+def test_settings_bash_allow_entry_does_not_cover_chained_commands() -> None:
+    npm = parse_permission_entry("Bash(npm run *)", "allow")
+    assert npm.matches("Bash", {"command": "npm run build"})
+    assert not npm.matches("Bash", {"command": "npm run build && rm -rf /"})

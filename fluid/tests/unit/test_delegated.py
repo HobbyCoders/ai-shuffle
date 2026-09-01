@@ -45,6 +45,7 @@ from fluid.store.base import MemoryStore
 from fluid.store.jsonl import JsonlStore
 from fluid.tools.inproc import create_inproc_server, tool
 from fluid.tools.mcp.bundled_server import (
+    _answer,
     _call_result,
     _field_name,
     _parse_address,
@@ -818,7 +819,7 @@ async def test_delegated_start_bundled_server_uses_available_transport(tmp_path)
             host, port = _parse_address(address)
             assert (host, port > 0) == ("127.0.0.1", True)
         # the address written to disk is the one that actually answers
-        listing = await _socket_rpc(address, {"op": "list"})
+        listing = await _socket_rpc(address, {"op": "list"}, loop._bridge_token)
         assert [t["name"] for t in listing["tools"]] == ["mcp__wx__get_weather"]
     finally:
         await loop.aclose()
@@ -951,3 +952,248 @@ async def test_child_server_propagates_tool_errors(transport, tmp_path) -> None:
         )
         assert called.is_error is True
         assert [c.text for c in called.content] == ["kaboom"]
+
+
+# ─── Bridge gates: token, session tool filter, permissions, hooks ────────────
+
+
+async def _rpc_lines(address: str, *reqs: dict) -> list:
+    """Send ``reqs`` on one connection; collect one parsed line per request
+    (``None`` where the server closed instead of answering)."""
+    reader, writer = await _dial(address)
+    out = []
+    try:
+        for req in reqs:
+            writer.write(json.dumps(req).encode() + b"\n")
+            await writer.drain()
+            line = await reader.readline()
+            out.append(json.loads(line) if line else None)
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+    return out
+
+
+@pytest.mark.parametrize("transport", TRANSPORTS)
+async def test_bridge_refuses_requests_without_the_session_token(transport, tmp_path) -> None:
+    """A local process that finds the port and speaks the wire format gets an
+    error and a closed connection, never a tool result."""
+    reg = _weather_registry()
+    address = str(tmp_path / "b.sock") if transport == "unix" else "tcp:127.0.0.1:0"
+    server = await serve_registry_socket(reg, address, token="s3cret")
+    try:
+        if transport == "tcp":
+            address = f"tcp:127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        call = {"op": "call", "name": "mcp__wx__get_weather", "arguments": {"city": "Paris"}}
+        missing = await _rpc_lines(address, call, call)
+        assert missing[0] == {"error": "unauthorized: bridge token missing or wrong"}
+        assert missing[1] is None  # the connection is gone after the refusal
+        wrong = await _rpc_lines(address, {**call, "token": "s3cret-not"})
+        assert "error" in wrong[0] and "text" not in wrong[0]
+        listing = await _rpc_lines(address, {"op": "list", "token": "nope"})
+        assert "tools" not in listing[0]
+        # The child helper attaches the token and gets through.
+        ok = await _socket_rpc(address, call, "s3cret")
+        assert ok == {"text": "Paris: sunny", "is_error": False}
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+def test_bundled_config_carries_token_in_env_not_args(tmp_path) -> None:
+    reg = _weather_registry()
+    config = write_bundled_config(
+        reg, str(tmp_path / "mcp.json"), socket_path="tcp:127.0.0.1:1", token="tok",
+    )
+    entry = config["mcpServers"]["fluid_bundled"]
+    assert entry["env"] == {"FLUID_BUNDLED_TOKEN": "tok"}
+    assert "tok" not in " ".join(entry["args"])
+
+
+@pytest.mark.parametrize("transport", TRANSPORTS)
+async def test_bundled_child_subprocess_authenticates_with_env_token(transport, tmp_path) -> None:
+    """The real child reads FLUID_BUNDLED_TOKEN and presents it on every
+    request; without it the parent refuses and the CLI would see no tools."""
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    reg = _weather_registry()
+    address = str(tmp_path / "b.sock") if transport == "unix" else "tcp:127.0.0.1:0"
+    server = await serve_registry_socket(reg, address, token="child-token")
+    try:
+        if transport == "tcp":
+            address = f"tcp:127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        env = _child_env()
+        env["FLUID_BUNDLED_TOKEN"] = "child-token"
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "fluid.tools.mcp.bundled_server", "--socket", address],
+            env=env,
+        )
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                listed = await session.list_tools()
+                assert [t.name for t in listed.tools] == ["mcp__wx__get_weather"]
+                called = await session.call_tool("mcp__wx__get_weather", {"city": "Paris"})
+                assert [c.text for c in called.content] == ["Paris: sunny"]
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+def _builtin_registry() -> ToolRegistry:
+    from fluid.tools.builtins import register_builtins
+
+    reg = ToolRegistry()
+    register_builtins(reg)
+    return reg
+
+
+async def test_bridge_applies_session_tool_filter_to_list_and_call() -> None:
+    """A tool outside the session surface is neither listed nor callable, and
+    the filter honours the CLI-facing ``mcp__fluid_bundled__`` spelling."""
+    reg = _builtin_registry()
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake", claude_cmd=_cmd(), registry=reg,
+        disallowed_tools=["mcp__fluid_bundled__Bash", "Write"],
+    )
+    try:
+        filt = loop._bridge_tool_permitted
+        listing = await _answer(reg, ToolCtx(), {"op": "list"}, tool_filter=filt)
+        names = {t["name"] for t in listing["tools"]}
+        assert "Bash" not in names and "Write" not in names
+        assert "Read" in names
+        denied = await _answer(
+            reg, ToolCtx(),
+            {"op": "call", "name": "Bash", "arguments": {"command": "echo PWNED"}},
+            tool_filter=filt,
+        )
+        assert denied["is_error"] is True
+        assert denied["text"] == "tool not available in this session: Bash"
+        assert "PWNED" not in denied["text"]
+    finally:
+        await loop.aclose()
+
+    allow_only = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake", claude_cmd=_cmd(), registry=reg,
+        allowed_tools=["mcp__fluid_bundled__Read", "Glob"], disallowed_tools=["Glob"],
+    )
+    try:
+        assert allow_only._bridge_tool_permitted("Read")  # CLI-facing spelling
+        assert not allow_only._bridge_tool_permitted("Glob")  # deny beats allow
+        assert not allow_only._bridge_tool_permitted("Bash")
+    finally:
+        await allow_only.aclose()
+
+
+async def test_bridge_routes_calls_through_the_permission_engine(tmp_path) -> None:
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.permissions.rules import Rule
+
+    reg = _builtin_registry()
+    ctx = ToolCtx(cwd=str(tmp_path))
+    engine = PermissionEngine("never_ask", rules=[Rule(tool="Bash", decision="deny")])
+    denied = await _answer(
+        reg, ctx,
+        {"op": "call", "name": "Bash", "arguments": {"command": "echo PWNED"}},
+        permissions=engine,
+    )
+    assert denied["is_error"] is True
+    assert "permission denied by a configured rule" in denied["text"]
+    assert "PWNED" not in denied["text"]
+
+    # No rule and a policy that would prompt: nobody is listening on this
+    # socket, so the prompt becomes the non-interactive denial.
+    asking = PermissionEngine("always_ask")
+    parked = await _answer(
+        reg, ctx,
+        {"op": "call", "name": "Bash", "arguments": {"command": "echo PWNED"}},
+        permissions=asking,
+    )
+    assert parked["is_error"] is True
+    assert "non-interactive run cannot prompt" in parked["text"]
+    assert "PWNED" not in parked["text"]
+
+    # An allowed call still runs.
+    (tmp_path / "hello.txt").write_text("hi")
+    allowed = await _answer(
+        reg, ctx,
+        {"op": "call", "name": "Read", "arguments": {"file_path": str(tmp_path / "hello.txt")}},
+        permissions=PermissionEngine("never_ask"),
+    )
+    assert allowed["is_error"] is False and "hi" in allowed["text"]
+
+
+async def test_bridge_runs_pre_and_post_tool_hooks(tmp_path) -> None:
+    from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, HookBus, HookDecision
+
+    reg = _builtin_registry()
+    ctx = ToolCtx(cwd=str(tmp_path))
+    seen: list[tuple[str, str]] = []
+    bus = HookBus()
+
+    async def pre(event: str, payload: dict) -> HookDecision:
+        seen.append((event, payload["name"]))
+        if payload["name"] == "Bash":
+            return HookDecision(action="deny", note="no shells over the bridge")
+        return HookDecision()
+
+    async def post(event: str, payload: dict) -> HookDecision:
+        seen.append((event, payload["name"]))
+        return HookDecision()
+
+    bus.on(PRE_TOOL_USE, pre)
+    bus.on(POST_TOOL_USE, post)
+
+    denied = await _answer(
+        reg, ctx,
+        {"op": "call", "name": "Bash", "arguments": {"command": "echo PWNED"}},
+        hooks=bus,
+    )
+    assert denied == {"text": "blocked by hook: no shells over the bridge", "is_error": True}
+    (tmp_path / "hello.txt").write_text("hi")
+    allowed = await _answer(
+        reg, ctx,
+        {"op": "call", "name": "Read", "arguments": {"file_path": str(tmp_path / "hello.txt")}},
+        hooks=bus,
+    )
+    assert allowed["is_error"] is False
+    assert seen == [(PRE_TOOL_USE, "Bash"), (PRE_TOOL_USE, "Read"), (POST_TOOL_USE, "Read")]
+
+
+async def test_delegated_loop_serves_bridge_with_token_and_gates(tmp_path) -> None:
+    """End to end through DelegatedLoop: the server it starts refuses an
+    unauthenticated caller, and an authenticated one still meets the session
+    filter and the permission engine."""
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.permissions.rules import Rule
+
+    reg = _builtin_registry()
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake", claude_cmd=_cmd(), registry=reg,
+        ctx=ToolCtx(cwd=str(tmp_path)),
+        disallowed_tools=["Write"],
+        permissions=PermissionEngine("never_ask", rules=[Rule(tool="Bash", decision="deny")]),
+    )
+    try:
+        await loop._start_bundled_server()
+        address = loop._socket_path
+        config = json.loads(Path(loop._mcp_config_path).read_text())
+        token = config["mcpServers"]["fluid_bundled"]["env"]["FLUID_BUNDLED_TOKEN"]
+        assert token == loop._bridge_token and len(token) >= 32
+
+        call = {"op": "call", "name": "Bash", "arguments": {"command": "echo PWNED"}}
+        anonymous = await _rpc_lines(address, call)
+        assert "error" in anonymous[0] and "text" not in anonymous[0]
+
+        listing = await _socket_rpc(address, {"op": "list"}, token)
+        assert "Write" not in {t["name"] for t in listing["tools"]}
+        gated = await _socket_rpc(address, call, token)
+        assert gated["is_error"] is True and "PWNED" not in gated["text"]
+        assert "permission denied by a configured rule" in gated["text"]
+    finally:
+        await loop.aclose()

@@ -38,6 +38,7 @@ import traceback
 # ``-I`` drops the script dir from sys.path; re-add it for the sibling imports.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import _audit_guard
 import truncate
 import vfs
 
@@ -614,6 +615,13 @@ def _boot(config: dict) -> None:
     _REF_THRESHOLD = config.get("ref_threshold", truncate.DEFAULT_LIMIT)
     _STDOUT_CAP = config.get("stdout_cap", truncate.DEFAULT_STDOUT_CAP)
     _apply_rlimit(config.get("mem_limit_bytes", 0))
+    # The hard boundary: an audit hook the interpreter consults at every
+    # spawn/socket/open no matter which object the cell reached it through.
+    # Installed before the namespace exists, so no cell ever runs without it.
+    _audit_guard.install(
+        allow_fs=bool(config.get("allow_fs", False)),
+        allow_network=bool(config.get("allow_network", False)),
+    )
     if not config.get("allow_network", False):
         _guard_network()
     if not config.get("allow_fs", False):

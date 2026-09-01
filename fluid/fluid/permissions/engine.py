@@ -101,15 +101,18 @@ class PermissionEngine:
         """Return ``allow`` | ``deny`` | ``ask`` for one tool call."""
         return self.decide(spec, input).decision
 
-    def decide(self, spec: ToolSpec, input: dict[str, Any]) -> Verdict:
+    def decide(
+        self, spec: ToolSpec, input: dict[str, Any], *, cwd: str | None = None
+    ) -> Verdict:
         """Like :meth:`evaluate`, but says where the decision came from.
 
         The policy axis keys off the call's *effective* risk — the tool's
         ``classify_risk`` hook when it has one (Bash reports read-only
-        commands as safe), its static ``risk`` otherwise.
+        commands as safe), its static ``risk`` otherwise. ``cwd`` lets path
+        rules see the resolved spelling of a relative path.
         """
         risk = spec.effective_risk(input)
-        rule = match_rule(self.rules, spec.name, input)
+        rule = match_rule(self.rules, spec.name, input, cwd=cwd)
         if rule is not None:
             return Verdict(rule.decision, "rule", risk, rule)
         if self._session_allows(spec, input):
