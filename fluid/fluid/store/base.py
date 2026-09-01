@@ -9,6 +9,7 @@ older node; nothing is copied, so the shared prefix stays byte-identical
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 import uuid
@@ -19,9 +20,37 @@ from typing import Any, Protocol
 from fluid.events.model import Event
 from fluid.messages import Message
 
+log = logging.getLogger(__name__)
+
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+# ─── errors ──────────────────────────────────────────────────────────────────
+
+
+class StoreError(Exception):
+    """Base class for session-store failures a caller may want to catch."""
+
+
+class SessionLocked(StoreError):
+    """Another process holds the session's write lock."""
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"session {session_id} is open in another process")
+        self.session_id = session_id
+
+
+class CorruptSession(StoreError):
+    """A stored tree cannot be walked: a node is its own ancestor."""
+
+    def __init__(self, session_id: str, node_id: str) -> None:
+        super().__init__(
+            f"session {session_id} is corrupt: node {node_id} is its own ancestor"
+        )
+        self.session_id = session_id
+        self.node_id = node_id
 
 
 # ─── project identity ────────────────────────────────────────────────────────
@@ -97,6 +126,36 @@ class SessionNode:
     parent_id: str | None
     message: Message
     ts: float = field(default_factory=time.time)
+
+
+def walk_path(
+    nodes: dict[str, SessionNode], leaf_node_id: str | None, *, session_id: str
+) -> list[SessionNode]:
+    """Leaf-to-root walk of ``parent_id`` links, returned root-first.
+
+    A parent id that no node carries ends the walk: the nodes below the gap
+    come back as a partial path with a warning, so one damaged session still
+    lists and resumes as far as it can. A node that reaches itself again
+    raises :class:`CorruptSession` instead of looping forever.
+    """
+    path: list[SessionNode] = []
+    seen: set[str] = set()
+    cursor = leaf_node_id
+    while cursor is not None:
+        if cursor in seen:
+            raise CorruptSession(session_id, cursor)
+        seen.add(cursor)
+        node = nodes.get(cursor)
+        if node is None:
+            log.warning(
+                "session %s: node %s is missing from the log; "
+                "using the %d node(s) below it", session_id, cursor, len(path),
+            )
+            break
+        path.append(node)
+        cursor = node.parent_id
+    path.reverse()
+    return path
 
 
 @dataclass
@@ -343,16 +402,11 @@ class MemoryStore:
     ) -> list[SessionNode]:
         meta = self._sessions[session_id]
         nodes = self._nodes[session_id]
-        cursor = leaf_node_id or meta.head_node_id
-        path: list[SessionNode] = []
-        while cursor is not None:
-            node = nodes[cursor]
-            path.append(node)
-            cursor = node.parent_id
-        path.reverse()
-        return path
+        return walk_path(nodes, leaf_node_id or meta.head_node_id, session_id=session_id)
 
     async def set_head(self, session_id: str, node_id: str | None) -> None:
+        if node_id is not None and node_id not in self._nodes[session_id]:
+            raise ValueError(f"session {session_id} has no node {node_id}")
         self._sessions[session_id].head_node_id = node_id
 
     async def set_cli_session_id(self, session_id: str, cli_session_id: str | None) -> None:

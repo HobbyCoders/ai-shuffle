@@ -27,6 +27,7 @@ from fluid.events.model import (
     ToolUse,
     TurnComplete,
     TurnStarted,
+    UnknownEvent,
     Usage,
     register_event_type,
 )
@@ -82,6 +83,7 @@ __all__ = [
     "ToolUse",
     "TurnComplete",
     "TurnStarted",
+    "UnknownEvent",
     "Usage",
     "UserTurn",
     "WAKE_AUTO",

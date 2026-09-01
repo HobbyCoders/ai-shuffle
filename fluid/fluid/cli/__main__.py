@@ -38,6 +38,7 @@ from fluid.cli.config import (
 from fluid.cli.repl import Repl, auto_deny, stream_turn, tty_permission_responder
 from fluid.config.loader import load_config
 from fluid.config.model import HarnessConfig
+from fluid.store.base import SessionLocked
 
 
 def _cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
@@ -119,10 +120,10 @@ async def _close_and_flush_learning(engine, session_id: str, out) -> None:
     """
     from fluid.events.model import ContinualUpdate
 
-    before = len(engine.bus.log(session_id))
+    before = engine.bus.last_seq(session_id)
     await engine.aclose()
-    for event in engine.bus.log(session_id)[before:]:
-        if isinstance(event, ContinualUpdate):
+    for event in engine.bus.log(session_id):
+        if event.seq > before and isinstance(event, ContinualUpdate):
             out.write(f"\n  [learned] {', '.join(event.changes)}\n")
             out.flush()
 
@@ -146,6 +147,11 @@ async def open_session(store, session_id: str | None, *, cwd: str | None = None)
     meta = await store.get_session(session_id)
     if meta is None:
         raise SessionNotFound(session_id)
+    # Refuse a session another process has open before the first turn, not
+    # halfway through it. Stores without locking just skip this.
+    lock = getattr(store, "lock_session", None)
+    if lock is not None:
+        lock(meta.session_id)
     return meta
 
 
@@ -423,6 +429,9 @@ def main(argv: list[str] | None = None) -> int:
             )
     except SessionNotFound as exc:
         print(f"fluid: no such session: {exc}", file=sys.stderr)
+        return 2
+    except SessionLocked as exc:
+        print(f"fluid: {exc}", file=sys.stderr)
         return 2
     return 2  # unreachable: subparsers are required
 

@@ -12,6 +12,7 @@ with ``y``/``n`` typed into the same input box.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 
 try:  # pragma: no cover - trivial import guard
@@ -88,11 +89,14 @@ async def run_tui(engine, session_id: str) -> int:
             self.run_worker(self._pump_events(), exclusive=False)
 
         async def _pump_events(self) -> None:
-            async for event in self.engine.bus.subscribe(self.session_id):
-                render_event(event, self._writer)
-                self._writer.flush()
-                if isinstance(event, PermissionRequest):
-                    self._pending_perm = event.request_id
+            async with contextlib.aclosing(
+                self.engine.bus.subscribe(self.session_id, from_store=False)
+            ) as events:
+                async for event in events:
+                    render_event(event, self._writer)
+                    self._writer.flush()
+                    if isinstance(event, PermissionRequest):
+                        self._pending_perm = event.request_id
 
         async def on_input_submitted(self, message: Input.Submitted) -> None:
             text = message.value.strip()

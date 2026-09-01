@@ -33,6 +33,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from fluid.codemode.skills import atomic_write_text, load_json_document
+
 MAX_ANCHORS = 20
 MAX_PROMPT_CHARS = 4_000
 MAX_SETUP_FILES = 8
@@ -206,21 +208,18 @@ class AnchorStore:
         self.path = self.root / "anchors.json"
 
     def _load(self) -> dict:
-        try:
-            doc = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {"next_id": 1, "entries": []}
-        if not isinstance(doc, dict):
-            return {"next_id": 1, "entries": []}
+        # A file that does not parse is set aside and logged, never read as
+        # empty and then overwritten — same policy as memories.json.
+        doc = load_json_document(self.path, {"next_id": 1, "entries": []})
         doc.setdefault("next_id", 1)
         entries = doc.get("entries")
         doc["entries"] = entries if isinstance(entries, list) else []
         return doc
 
     def _save(self, doc: dict) -> None:
-        self.path.write_text(
+        atomic_write_text(
+            self.path,
             json.dumps(doc, indent=2, ensure_ascii=False, sort_keys=True),
-            encoding="utf-8",
         )
 
     @staticmethod

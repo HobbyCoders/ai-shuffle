@@ -16,6 +16,7 @@ same rendering and permission logic without a pty.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -332,34 +333,39 @@ async def stream_turn(
     watcher renders the wake turn later.
     """
     host = host_of(engine)
-    start_seq = len(engine.bus.log(session_id))
+    start_seq = engine.bus.last_seq(session_id)
     await engine.submit(UserTurn(content=text, parent_node_id=parent_node_id))
     result = "end_turn"
-    async for event in engine.bus.subscribe(session_id, since_seq=start_seq):
-        render_event(event, out)
-        if on_event is not None:
-            on_event(event)
-        if isinstance(event, PermissionRequest):
-            await engine.submit(_to_response(event, await on_permission(event)))
-            continue
-        if isinstance(event, QuestionRequest):
-            await engine.submit(
-                RespondQuestion(
-                    request_id=event.request_id, answer=await on_question(event)
+    # aclosing: leaving the loop early must unregister the subscriber now,
+    # not whenever the generator is collected.
+    async with contextlib.aclosing(
+        engine.bus.subscribe(session_id, since_seq=start_seq, from_store=False)
+    ) as events:
+        async for event in events:
+            render_event(event, out)
+            if on_event is not None:
+                on_event(event)
+            if isinstance(event, PermissionRequest):
+                await engine.submit(_to_response(event, await on_permission(event)))
+                continue
+            if isinstance(event, QuestionRequest):
+                await engine.submit(
+                    RespondQuestion(
+                        request_id=event.request_id, answer=await on_question(event)
+                    )
                 )
-            )
-            continue
-        if isinstance(event, TurnComplete):
-            result = event.stop_reason
-        elif isinstance(event, Interrupted):
-            result = "interrupted"
-        elif isinstance(event, ErrorEvent):
-            result = "error"
-        else:
-            continue
-        if wait_background and host is not None and host.busy():
-            continue
-        break
+                continue
+            if isinstance(event, TurnComplete):
+                result = event.stop_reason
+            elif isinstance(event, Interrupted):
+                result = "interrupted"
+            elif isinstance(event, ErrorEvent):
+                result = "error"
+            else:
+                continue
+            if wait_background and host is not None and host.busy():
+                continue
+            break
     if host is None or not host.busy():
         await engine.wait_turn()
     return result
@@ -428,9 +434,11 @@ class Repl:
 
     async def _watch_background(self) -> None:
         """Render wake-turn events that arrive while the user is at the prompt."""
-        since = len(self.engine.bus.log(self.session_id))
+        since = self.engine.bus.last_seq(self.session_id)
         self._rendered_seq = max(self._rendered_seq, since)
-        async for event in self.engine.bus.subscribe(self.session_id, since_seq=since):
+        async for event in self.engine.bus.subscribe(
+            self.session_id, since_seq=since, from_store=False
+        ):
             if self._foreground or event.seq <= self._rendered_seq:
                 continue
             self._rendered_seq = event.seq

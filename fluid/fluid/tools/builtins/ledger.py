@@ -17,12 +17,28 @@ the cached prompt prefix.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 SECTIONS = ("constraints", "decisions", "state", "threads")
+
+
+def _replace_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` through a temp file and one rename.
+
+    The ledger is the state that must survive everything, so a crash mid-write
+    must leave the previous ledger, never a half-written one.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 SPEC = ToolSpec(
     name="Ledger",

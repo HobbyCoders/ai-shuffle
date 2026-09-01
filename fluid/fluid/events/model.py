@@ -401,12 +401,33 @@ class HookEvent(Event):
     tool_name: str | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class UnknownEvent(Event):
+    """A persisted row this build cannot rebuild into a concrete event.
+
+    Produced by :func:`event_from_dict` instead of an exception when the row's
+    ``_cls`` is not registered, a required field is missing, or construction
+    fails — a session written by a newer build must still load in an older
+    one, with the foreign rows carried along rather than making the whole
+    stream unreadable. ``cls_name`` is the original ``_cls``; ``raw`` is the
+    row exactly as read, and :func:`event_to_dict` writes it back unchanged
+    so a rewrite of the file loses nothing. Subscribers that switch on event
+    type fall through it; it is never terminal.
+    """
+
+    cls_name: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 # ─── Durable event codec ─────────────────────────────────────────────────────
 #
 # The EventBus keeps an in-process log; durable replay across restarts belongs
 # to the SessionStore, which serializes events with these helpers. Round-trips
 # by concrete class name so ``events_since`` returns byte-identical events after
-# a reload.
+# a reload. Every row carries ``_v``, the codec schema version, so a future
+# incompatible change can be told apart from a row of this shape.
+
+SCHEMA_VERSION = 1
 
 _EVENT_TYPES: dict[str, type[Event]] = {
     cls.__name__: cls
@@ -441,23 +462,73 @@ def register_event_type(cls: type[Event]) -> type[Event]:
 
 
 def event_to_dict(event: Event) -> dict[str, Any]:
-    d: dict[str, Any] = {"_cls": type(event).__name__}
+    if isinstance(event, UnknownEvent):
+        # Write the foreign row back exactly as it was read.
+        return dict(event.raw)
+    d: dict[str, Any] = {"_cls": type(event).__name__, "_v": SCHEMA_VERSION}
     for f in dataclasses.fields(event):
         d[f.name] = getattr(event, f.name)
     return d
 
 
+def _unknown_event(cls_name: object, raw: dict[str, Any]) -> UnknownEvent:
+    """Placeholder carrying whatever base fields the row does have."""
+    def _int(v: object, default: int) -> int:
+        try:
+            return int(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return default
+
+    def _float(v: object, default: float) -> float:
+        try:
+            return float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return default
+
+    node_id = raw.get("node_id")
+    turn_id = raw.get("turn_id")
+    return UnknownEvent(
+        session_id=str(raw.get("session_id") or ""),
+        node_id=str(node_id) if node_id is not None else None,
+        turn_id=str(turn_id) if turn_id is not None else None,
+        seq=_int(raw.get("seq"), -1),
+        ts=_float(raw.get("ts"), 0.0),
+        cls_name=str(cls_name) if cls_name is not None else "",
+        raw=dict(raw),
+    )
+
+
 def event_from_dict(d: dict[str, Any]) -> Event:
+    """Rebuild one persisted row. Never raises on a row of the wrong shape.
+
+    An unregistered ``_cls``, a missing required field, or a value the
+    dataclass refuses all decode to :class:`UnknownEvent`. Fields the target
+    class does not declare are dropped, so a row written by a build that
+    added a field still loads here.
+    """
+    raw = dict(d)
     d = dict(d)
-    cls = _EVENT_TYPES[d.pop("_cls")]
-    if cls is SessionParked and isinstance(d.get("pending_task_ids"), list):
-        d["pending_task_ids"] = tuple(d["pending_task_ids"])
-    elif cls is SessionWoken and isinstance(d.get("task_ids"), list):
-        d["task_ids"] = tuple(d["task_ids"])
-    elif cls is DelegatedSurface:
-        # JSON round-trips both tuples back as lists.
-        if isinstance(d.get("tools"), list):
-            d["tools"] = tuple(d["tools"])
-        if isinstance(d.get("mcp_servers"), list):
-            d["mcp_servers"] = tuple(d["mcp_servers"])
-    return cls(**d)
+    d.pop("_v", None)
+    cls_name = d.pop("_cls", None)
+    cls = _EVENT_TYPES.get(cls_name) if isinstance(cls_name, str) else None
+    if cls is None:
+        return _unknown_event(cls_name, raw)
+    known = {f.name: f for f in dataclasses.fields(cls) if f.init}
+    kwargs = {k: v for k, v in d.items() if k in known}
+    for name, f in known.items():
+        # JSON round-trips every tuple back as a list; the annotation (a
+        # string, this module defers annotations) says which fields to
+        # restore so the revived event compares equal to the original.
+        value = kwargs.get(name)
+        if isinstance(value, list) and str(f.type).startswith("tuple"):
+            kwargs[name] = tuple(value)
+        if (
+            name not in kwargs
+            and f.default is dataclasses.MISSING
+            and f.default_factory is dataclasses.MISSING
+        ):
+            return _unknown_event(cls_name, raw)
+    try:
+        return cls(**kwargs)
+    except (TypeError, ValueError):
+        return _unknown_event(cls_name, raw)

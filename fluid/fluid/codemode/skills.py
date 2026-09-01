@@ -40,13 +40,27 @@ consolidation pass. The caps live in module constants next to
 Everything is stdlib-only and synchronous; callers are the code-mode session
 (host side) and the synthesizer.
 
-Concurrency posture matches the rest of the store: no locks, last writer
-wins. Within one process journaling and reaping are synchronous and the
-synthesizer's background pass runs on the same event loop, so they cannot
-interleave; two processes sharing a skills root race exactly as they already
-do on ``meta.json``. Rewrites go through a temp file plus ``os.replace``, so
-the worst a lost race costs is a few dropped log lines — never a truncated or
-half-written file.
+Concurrency posture. Within one process journaling and reaping are
+synchronous and the synthesizer's background pass runs on the same event
+loop, so they cannot interleave. Across processes sharing a skills root:
+
+- Every JSON document rewrite (``meta.json``, ``memories.json``,
+  ``anchors.json``) and every log trim goes through a temp file in the same
+  directory plus ``os.replace`` (:func:`atomic_write_text`), so a crash or a
+  lost race leaves the previous complete file, never a truncated one. A
+  document that fails to parse on load is renamed aside as
+  ``<name>.corrupt-<timestamp>`` and logged, then the store starts from
+  empty; it is never overwritten in place.
+- Journal reaping holds an advisory lock file (``journal.jsonl.lock``) while
+  it reads and replaces the journal, and appenders take the same lock for
+  the duration of their single write. A reap that finds the lock held skips
+  and tries again next pass. As a backstop against a writer that does not
+  take the lock (an older build), reap re-checks the journal's size right
+  before the replace and aborts if anything landed in between. Residual
+  race: an appender that gave up waiting for the lock and wrote anyway,
+  after the size check and before the replace, loses that line.
+- ``meta.json`` counters (usage, cursor) are last-writer-wins between
+  processes; the write itself is still atomic.
 """
 
 from __future__ import annotations
@@ -54,11 +68,22 @@ from __future__ import annotations
 import ast
 import json
 import keyword
+import logging
 import os
 import re
+import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
+
+_log = logging.getLogger(__name__)
 
 _NAME_RE = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
 MAX_SKILL_BYTES = 65536
@@ -109,23 +134,187 @@ def trim_jsonl(path: Path, keep: int) -> int:
     return drop if _rewrite_dropping_prefix(path, drop) else 0
 
 
-def _rewrite_dropping_prefix(path: Path, drop: int) -> bool:
-    """Atomically rewrite ``path`` without its first ``drop`` lines."""
-    tmp = path.with_name(path.name + ".tmp")
+def _tmp_path(path: Path) -> Path:
+    """Sibling temp file for an atomic rewrite of ``path``.
+
+    Same directory, so ``os.replace`` is a rename and never a copy; the pid
+    keeps two processes rewriting the same file from clobbering each other's
+    temp.
+    """
+    return path.with_name(f"{path.name}.tmp-{os.getpid()}")
+
+
+def _discard(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` so a reader only ever sees a complete file.
+
+    Write to a sibling temp file, flush and fsync it, then ``os.replace``
+    over the target. A crash at any point leaves either the old file or the
+    new one, never a truncated mix. Raises ``OSError`` when the write or the
+    replace fails; the temp file is removed first.
+    """
+    tmp = _tmp_path(path)
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        _discard(tmp)
+        raise
+
+
+def _set_aside_corrupt(path: Path) -> Path | None:
+    """Rename a document that failed to parse to ``<name>.corrupt-<timestamp>``.
+
+    Returns the new path, or None when the rename itself failed. The file is
+    kept so the bytes can be inspected and possibly recovered by hand; the
+    next save writes a fresh document beside it instead of over it.
+    """
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    aside = path.with_name(f"{path.name}.corrupt-{stamp}")
+    n = 1
+    while aside.exists():
+        aside = path.with_name(f"{path.name}.corrupt-{stamp}-{n}")
+        n += 1
+    try:
+        os.replace(path, aside)
+    except OSError:
+        return None
+    return aside
+
+
+def load_json_document(path: Path, default: dict) -> dict:
+    """Parse a JSON object at ``path``, or return a copy of ``default``.
+
+    An absent file is the normal empty case. A file that exists but does not
+    parse, or parses to something other than an object, is set aside with a
+    warning rather than silently treated as empty — a truncated
+    ``memories.json`` used to make every memory vanish and the next save
+    overwrite the evidence.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return dict(default)
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        aside = _set_aside_corrupt(path)
+        _log.warning(
+            "%s does not parse (%s); moved aside to %s and starting from empty",
+            path, exc, aside.name if aside is not None else "<rename failed>",
+        )
+        return dict(default)
+    if not isinstance(doc, dict):
+        aside = _set_aside_corrupt(path)
+        _log.warning(
+            "%s holds a %s, not an object; moved aside to %s and starting from empty",
+            path, type(doc).__name__,
+            aside.name if aside is not None else "<rename failed>",
+        )
+        return dict(default)
+    return doc
+
+
+def _rewrite_dropping_prefix(
+    path: Path, drop: int, *, expect_size: int | None = None
+) -> bool:
+    """Atomically rewrite ``path`` without its first ``drop`` lines.
+
+    With ``expect_size`` the rewrite is abandoned (returns False, file
+    untouched) when the file's size differs from it right before the
+    replace: something appended after the caller measured it, and replacing
+    would drop that line.
+    """
+    tmp = _tmp_path(path)
     try:
         with path.open("r", encoding="utf-8") as src, \
                 tmp.open("w", encoding="utf-8") as dst:
             for i, line in enumerate(src):
                 if i >= drop:
                     dst.write(line)
+            dst.flush()
+            os.fsync(dst.fileno())
+        if expect_size is not None and path.stat().st_size != expect_size:
+            _discard(tmp)
+            return False
         os.replace(tmp, path)
     except OSError:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        _discard(tmp)
         return False
     return True
+
+
+# ─── journal lock ────────────────────────────────────────────────────────────
+#
+# Advisory, cross-process, on a sibling ``.lock`` file rather than the journal
+# itself: the journal is replaced by rename during a reap, and a lock on the
+# old inode would guard nothing once the new file is in place.
+
+
+def _try_lock(fd: int) -> bool:
+    try:
+        if sys.platform == "win32":
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(fd: int) -> None:
+    try:
+        if sys.platform == "win32":
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+@contextmanager
+def journal_lock(path: Path, *, wait: float = 0.0) -> Iterator[bool]:
+    """Hold the advisory lock for ``path`` (the journal) inside the block.
+
+    Yields True when the lock was taken, False when another holder kept it
+    for the whole ``wait`` window (polled at 10ms) or the lock file could not
+    be opened at all. The caller decides what False means: reap skips,
+    append goes ahead anyway rather than losing the entry.
+    """
+    lock_path = path.with_name(path.name + ".lock")
+    try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError:
+        yield False
+        return
+    held = False
+    try:
+        deadline = time.monotonic() + max(0.0, wait)
+        while True:
+            held = _try_lock(fd)
+            if held or time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        yield held
+    finally:
+        if held:
+            _unlock(fd)
+        os.close(fd)
+
+
+# How long an appender waits for a reap in another process to finish before
+# writing anyway. A reap of a 1 MiB journal takes milliseconds; this only
+# bites when the holder is stuck.
+JOURNAL_APPEND_LOCK_WAIT = 1.0
 
 
 @dataclass(frozen=True)
@@ -230,14 +419,11 @@ class SkillStore:
 
     # ─── meta ────────────────────────────────────────────────────────────
     def _load_meta(self) -> dict:
-        try:
-            return json.loads(self._meta_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
+        return load_json_document(self._meta_path, {})
 
     def _save_meta(self, meta: dict) -> None:
-        self._meta_path.write_text(
-            json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8"
+        atomic_write_text(
+            self._meta_path, json.dumps(meta, indent=2, sort_keys=True)
         )
 
     # ─── skills CRUD ─────────────────────────────────────────────────────
@@ -370,10 +556,16 @@ class SkillStore:
     def journal_append(self, entry: dict) -> None:
         entry = dict(entry)
         entry.setdefault("ts", time.time())
-        before = self._journal_size()
-        with self._journal_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        after = self._journal_size()
+        line = json.dumps(entry, ensure_ascii=False) + "\n"
+        # One write under the journal lock: a reap in another process cannot
+        # slip its replace between our size check and our line. If the lock
+        # never frees, the entry is written anyway — losing it is worse than
+        # the residual race documented in the module docstring.
+        with journal_lock(self._journal_path, wait=JOURNAL_APPEND_LOCK_WAIT):
+            before = self._journal_size()
+            with self._journal_path.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+            after = self._journal_size()
         # Only carry the cached count forward when the file was exactly where
         # we last left it; otherwise someone else wrote and the count is a
         # guess, so force a rescan instead of guessing.
@@ -412,23 +604,35 @@ class SkillStore:
         removed, so ``journal_entries(start=synth_cursor())`` keeps meaning
         the same slice. Returns the number of lines dropped; every failure
         path returns 0 and leaves the journal untouched.
+
+        The read-and-replace runs under the journal lock so a cooperating
+        appender in another process waits instead of writing into the file
+        about to be replaced; a reap that finds the lock already held skips
+        this pass. The size measured under the lock is re-checked right
+        before the replace, so a line from a writer that ignores the lock
+        aborts the reap instead of vanishing.
         """
-        size = self._journal_size()
-        if size < 0:
-            return 0
-        cursor = max(0, self.synth_cursor())
-        total = self.journal_count()
-        drop = min(cursor, total)
-        if size <= JOURNAL_MAX_BYTES:
-            drop = min(drop, max(0, total - JOURNAL_KEEP_ENTRIES))
-        if drop <= 0 or not _rewrite_dropping_prefix(self._journal_path, drop):
-            return 0
-        meta = self._load_meta()
-        meta["synth_cursor"] = max(0, int(meta.get("synth_cursor", 0)) - drop)
-        self._save_meta(meta)
-        self._journal_lines = max(0, total - drop)
-        self._journal_bytes = self._journal_size()
-        return drop
+        with journal_lock(self._journal_path) as held:
+            if not held:
+                return 0
+            size = self._journal_size()
+            if size < 0:
+                return 0
+            cursor = max(0, self.synth_cursor())
+            total = self.journal_count()
+            drop = min(cursor, total)
+            if size <= JOURNAL_MAX_BYTES:
+                drop = min(drop, max(0, total - JOURNAL_KEEP_ENTRIES))
+            if drop <= 0 or not _rewrite_dropping_prefix(
+                self._journal_path, drop, expect_size=size
+            ):
+                return 0
+            meta = self._load_meta()
+            meta["synth_cursor"] = max(0, int(meta.get("synth_cursor", 0)) - drop)
+            self._save_meta(meta)
+            self._journal_lines = max(0, total - drop)
+            self._journal_bytes = self._journal_size()
+            return drop
 
     def reap(self) -> dict[str, int]:
         """Bound every append-only file the store owns. Never raises.
@@ -446,6 +650,15 @@ class SkillStore:
             )),
             ("curation_log", lambda: trim_jsonl(
                 self.root / ".curation-log.jsonl", MAX_LOG_ENTRIES,
+            )),
+            # The evolution gate's files live in the same root: parked
+            # proposals carry the full content and evidence of every failed
+            # gate, so unbounded they outgrow everything else here.
+            ("parked", lambda: trim_jsonl(
+                self.root / "parked.jsonl", MAX_LOG_ENTRIES,
+            )),
+            ("evolution_log", lambda: trim_jsonl(
+                self.root / ".evolution-log.jsonl", MAX_LOG_ENTRIES,
             )),
             ("archived_skills", self._reap_archived_skills),
         ):
@@ -519,20 +732,15 @@ class SkillStore:
         return self.root / "memories.json"
 
     def _load_memories(self) -> dict:
-        try:
-            doc = json.loads(self.memories_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {"next_id": 1, "entries": []}
-        if not isinstance(doc, dict):
-            return {"next_id": 1, "entries": []}
+        doc = load_json_document(self.memories_path, {"next_id": 1, "entries": []})
         doc.setdefault("next_id", 1)
         entries = doc.get("entries")
         doc["entries"] = entries if isinstance(entries, list) else []
         return doc
 
     def _save_memories(self, doc: dict) -> None:
-        self.memories_path.write_text(
-            json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8"
+        atomic_write_text(
+            self.memories_path, json.dumps(doc, indent=2, ensure_ascii=False)
         )
 
     def memories(self) -> list[MemoryEntry]:

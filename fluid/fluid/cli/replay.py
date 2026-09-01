@@ -27,6 +27,7 @@ for anchors of that family).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shutil
 import tempfile
 from dataclasses import replace
@@ -195,24 +196,27 @@ class AnchorRunner:
         tool_calls: list[str] = []
         try:
             await engine.submit(UserTurn(content=anchor.prompt))
-            async for event in engine.bus.subscribe(meta.session_id):
-                if isinstance(event, ToolUse):
-                    tool_calls.append(event.name)
-                elif isinstance(event, PermissionRequest):
-                    await engine.submit(
-                        RespondPermission(
-                            request_id=event.request_id, decision="allow",
-                            message=None,
+            async with contextlib.aclosing(
+                engine.bus.subscribe(meta.session_id, from_store=False)
+            ) as events:
+                async for event in events:
+                    if isinstance(event, ToolUse):
+                        tool_calls.append(event.name)
+                    elif isinstance(event, PermissionRequest):
+                        await engine.submit(
+                            RespondPermission(
+                                request_id=event.request_id, decision="allow",
+                                message=None,
+                            )
                         )
-                    )
-                elif isinstance(event, TurnComplete):
-                    break
-                elif isinstance(event, Interrupted):
-                    status, error = "error", event.message
-                    break
-                elif isinstance(event, ErrorEvent):
-                    status, error = "error", event.message
-                    break
+                    elif isinstance(event, TurnComplete):
+                        break
+                    elif isinstance(event, Interrupted):
+                        status, error = "error", event.message
+                        break
+                    elif isinstance(event, ErrorEvent):
+                        status, error = "error", event.message
+                        break
             await engine.wait_turn()
             final_text = ""
             try:

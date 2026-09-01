@@ -573,6 +573,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         self.provider = provider
         self.store = store
         self.bus = bus or EventBus()
+        # A subscriber asking for events older than the bus's in-memory ring
+        # gets them from the store. A bus shared between engines keeps the
+        # source the first engine attached.
+        if self.bus.replay_source is None:
+            self.bus.set_replay_source(self.store.events_since)
         self.model = model
         self.system = system
         # The compiled prompt's labeled sections, when the caller compiled one
@@ -806,6 +811,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._session is None:
             if self._session_id is not None:
                 self._session = await self.store.get_session(self._session_id)
+                if self._session is not None:
+                    await self._seed_bus_seq(self._session.session_id)
             if self._session is None:
                 self._session = await self.store.create_session(
                     self._session_id, cwd=self.ctx.cwd
@@ -818,6 +825,24 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
         return self._session
 
+    async def _seed_bus_seq(self, sid: str) -> None:
+        """Continue event numbering after the rows already persisted.
+
+        A fresh bus counts from 1, so a resumed session would re-issue seqs
+        the events file already holds and ``events_since`` would skip the
+        resumed run's first events. A store may offer ``last_event_seq``;
+        otherwise the maximum is taken from a full ``events_since`` read.
+        """
+        last_event_seq = getattr(self.store, "last_event_seq", None)
+        try:
+            if callable(last_event_seq):
+                last = int(await last_event_seq(sid))
+            else:
+                events = await self.store.events_since(sid, 0)
+                last = max((e.seq for e in events), default=0)
+        except Exception:  # a store that cannot replay: numbering starts fresh
+            return
+        self.bus.seed(sid, last)
     @property
     def session_id(self) -> str:
         assert self._session is not None, "no session yet — submit a turn first"

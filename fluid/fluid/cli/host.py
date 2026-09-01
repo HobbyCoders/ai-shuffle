@@ -41,6 +41,7 @@ child's deny message tells the model where the decision came from.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -444,25 +445,28 @@ class CliHost:
         await child.submit(UserTurn(content=prompt))
         status = "finished"
         error: str | None = None
-        async for event in child.bus.subscribe(session_id):
-            if isinstance(event, PermissionRequest):
-                decision = await self.permission_responder(event)
-                await child.submit(RespondPermission(
-                    request_id=event.request_id,
-                    decision=decision,
-                    message=None if decision in ("allow", "allow_always") else (
-                        "denied by the parent session's permission policy"
-                    ),
-                ))
-            elif isinstance(event, TurnComplete):
-                break
-            elif isinstance(event, Interrupted):
-                status = "cancelled"
-                break
-            elif isinstance(event, ErrorEvent):
-                status = "failed"
-                error = event.message
-                break
+        async with contextlib.aclosing(
+            child.bus.subscribe(session_id, from_store=False)
+        ) as events:
+            async for event in events:
+                if isinstance(event, PermissionRequest):
+                    decision = await self.permission_responder(event)
+                    await child.submit(RespondPermission(
+                        request_id=event.request_id,
+                        decision=decision,
+                        message=None if decision in ("allow", "allow_always") else (
+                            "denied by the parent session's permission policy"
+                        ),
+                    ))
+                elif isinstance(event, TurnComplete):
+                    break
+                elif isinstance(event, Interrupted):
+                    status = "cancelled"
+                    break
+                elif isinstance(event, ErrorEvent):
+                    status = "failed"
+                    error = event.message
+                    break
         await child.wait_turn()
         host = child.ctx.extra.get("cli_host")
         if isinstance(host, CliHost):

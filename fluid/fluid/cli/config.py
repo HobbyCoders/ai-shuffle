@@ -164,56 +164,99 @@ def list_sessions(
     """List persisted sessions in a JSONL store directory (newest first).
 
     Each row carries ``session_id``, ``created_at``, ``last_active`` (the newest
-    node's timestamp, or ``created_at`` for an empty session), ``nodes``,
-    ``first_message`` (the first user turn's text, untruncated) and the
-    ``model``/``provider`` of the most recent turn when the event log recorded
-    one. Reads each ``<sid>.jsonl`` line by line without building the tree, and
-    only scans the event log for ``TurnStarted`` records — cheap enough to list
-    hundreds of sessions. ``limit`` keeps the newest N rows.
+    node or head-move timestamp, or ``created_at`` for an empty session),
+    ``nodes``, ``first_message`` (the first user turn's text, untruncated) and
+    the ``model``/``provider`` of the most recent turn when the event log
+    recorded one.
+
+    Rows rank on ``max(last_active, log mtime)``: a fork or rewind on an old log
+    writes a head record with no timestamp, and the mtime still moves it to
+    the top. Because that rank is never below the mtime, logs are parsed in
+    mtime order and parsing stops as soon as the next log cannot reach the
+    ``limit`` already collected — ``--continue`` reads one log, not all of
+    them. A line that does not parse is skipped; a log with nothing
+    recognisable in it is not a session.
     """
+    if limit is not None and limit <= 0:
+        return []
     d = Path(directory or default_store_dir())
     if not d.is_dir():
         return []
-    out: list[dict[str, Any]] = []
-    for log in sorted(d.glob("*.jsonl")):
+    candidates: list[tuple[float, Path]] = []
+    for log in d.glob("*.jsonl"):
         if log.name.endswith(".events.jsonl"):
             continue
-        session_id = log.name[: -len(".jsonl")]
-        created_at = 0.0
-        last_active = 0.0
-        nodes = 0
-        first_message: str | None = None
         try:
-            with log.open(encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    rec = json.loads(line)
-                    if rec.get("t") == "meta":
-                        created_at = rec.get("created_at", 0.0)
-                    elif rec.get("t") == "node":
-                        nodes += 1
-                        node = rec.get("node") or {}
-                        last_active = max(last_active, float(node.get("ts") or 0.0))
-                        if first_message is None:
-                            first_message = _first_user_text(node.get("message") or {})
-        except (OSError, json.JSONDecodeError, ValueError):
+            candidates.append((log.stat().st_mtime, log))
+        except OSError:
             continue
-        model, provider = _last_turn_model(d / f"{session_id}.events.jsonl")
-        out.append({
-            "session_id": session_id,
-            "created_at": created_at,
-            "last_active": last_active or created_at,
-            "nodes": nodes,
-            "first_message": first_message,
-            "model": model,
-            "provider": provider,
-        })
-    out.sort(key=lambda s: (s["last_active"], s["created_at"]), reverse=True)
+    candidates.sort(key=lambda c: (c[0], c[1].name), reverse=True)
+    rows: list[dict[str, Any]] = []
+    for mtime, log in candidates:
+        if limit is not None and len(rows) >= limit:
+            floor = sorted(r["_rank"] for r in rows)[-limit]
+            if mtime < floor:
+                break
+        row = _session_row(log, mtime)
+        if row is not None:
+            rows.append(row)
+    rows.sort(key=lambda r: (r["_rank"], r["last_active"], r["created_at"]), reverse=True)
     if limit is not None:
-        out = out[: max(0, limit)]
-    return out
+        rows = rows[:limit]
+    for row in rows:
+        del row["_rank"]
+        row["model"], row["provider"] = _last_turn_model(
+            d / f"{row['session_id']}.events.jsonl"
+        )
+    return rows
+
+
+def _session_row(log: Path, mtime: float) -> dict[str, Any] | None:
+    """One listing row from a session log, or None when nothing in it parses."""
+    created_at = 0.0
+    last_active = 0.0
+    nodes = 0
+    first_message: str | None = None
+    seen = False
+    try:
+        with log.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                kind = rec.get("t")
+                if kind == "meta":
+                    seen = True
+                    created_at = float(rec.get("created_at") or 0.0)
+                elif kind == "node":
+                    seen = True
+                    nodes += 1
+                    node = rec.get("node") or {}
+                    last_active = max(last_active, float(node.get("ts") or 0.0))
+                    if first_message is None:
+                        first_message = _first_user_text(node.get("message") or {})
+                elif kind == "head":
+                    seen = True
+                    last_active = max(last_active, float(rec.get("ts") or 0.0))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not seen:
+        return None
+    last_active = last_active or created_at
+    return {
+        "session_id": log.name[: -len(".jsonl")],
+        "created_at": created_at,
+        "last_active": last_active,
+        "nodes": nodes,
+        "first_message": first_message,
+        "_rank": max(last_active, mtime),
+    }
 
 
 def _first_user_text(message: dict[str, Any]) -> str | None:

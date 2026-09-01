@@ -241,11 +241,28 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self._session is None:
             if self._session_id is not None:
                 self._session = await self.store.get_session(self._session_id)
+                if self._session is not None:
+                    await self._seed_bus_seq(self._session.session_id)
             if self._session is None:
                 self._session = await self.store.create_session(
                     self._session_id, cwd=self.cwd
                 )
         return self._session
+
+    async def _seed_bus_seq(self, sid: str) -> None:
+        """Continue event numbering after the rows already persisted, the
+        same way NativeLoop does, so a resumed delegated session does not
+        re-issue seqs the events file already holds."""
+        last_event_seq = getattr(self.store, "last_event_seq", None)
+        try:
+            if callable(last_event_seq):
+                last = int(await last_event_seq(sid))
+            else:
+                events = await self.store.events_since(sid, 0)
+                last = max((e.seq for e in events), default=0)
+        except Exception:  # a store that cannot replay: numbering starts fresh
+            return
+        self.bus.seed(sid, last)
 
     @property
     def session_id(self) -> str:
