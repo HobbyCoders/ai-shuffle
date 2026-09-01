@@ -87,16 +87,45 @@ class AnthropicClient:
                                  "retriable": retriable},
                             )
                             return
+                        # message_start is held until the first chunk after
+                        # it, so an overloaded_error sent in place of content
+                        # can be retried before the engine sees a message
+                        # begin. Once content has flowed, an error surfaces.
+                        pending_start: StreamChunk | None = None
+                        retry_error = False
                         async for event_name, data in sse_events(resp.aiter_lines()):
                             chunk = sse_to_chunk(event_name, data)
-                            if chunk is not None:
+                            if chunk is None:
+                                continue
+                            if chunk.kind == "message_start" and not yielded:
+                                pending_start = chunk
+                                continue
+                            if (
+                                chunk.kind == "error"
+                                and not yielded
+                                and chunk.payload.get("retriable")
+                                and attempt < self._retry.max_retries
+                            ):
+                                retry_error = True
+                                break
+                            if pending_start is not None:
                                 yielded = True
-                                yield chunk
+                                yield pending_start
+                                pending_start = None
+                            yielded = True
+                            yield chunk
+                        if retry_error:
+                            await asyncio.sleep(self._retry.delay(attempt))
+                            attempt += 1
+                            continue
+                        if pending_start is not None:
+                            yielded = True
+                            yield pending_start
                         return
                 except httpx.TransportError as exc:
                     # Pre-stream connection failures retry; mid-stream ones
                     # don't (chunks were already delivered downstream).
-                    if not yielded and attempt < self._retry.max_retries:
+                    if not yielded and attempt < self._retry.transport_retries:
                         await asyncio.sleep(self._retry.delay(attempt))
                         attempt += 1
                         continue

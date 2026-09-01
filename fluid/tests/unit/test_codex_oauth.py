@@ -249,3 +249,78 @@ def test_build_authorize_url_has_pkce_challenge() -> None:
     assert "code_challenge=" in start.url
     assert "code_challenge_method=S256" in start.url
     assert start.redirect_uri == "http://localhost:1455/auth/callback"
+
+
+# ─── the token store: atomic writes, one rotation across processes ───────────
+
+
+def test_save_bundle_replaces_atomically_and_leaves_no_temp_file(tmp_path) -> None:
+    path = tmp_path / "codex_auth.json"
+    save_bundle(StoredBundle(access_token="a1", refresh_token="r1"), path)
+    save_bundle(StoredBundle(access_token="a2", refresh_token="r2"), path)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["codex_auth.json"]
+    assert load_bundle(path).refresh_token == "r2"
+
+
+async def test_refresh_adopts_a_peer_rotation_instead_of_reposting(tmp_path) -> None:
+    path = tmp_path / "codex_auth.json"
+    old = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    save_bundle(
+        StoredBundle(access_token="at_old", refresh_token="rt_old", last_refresh=old), path
+    )
+    calls: list = []
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(_token_endpoint(calls, rotate_to="rt_new"))
+    )
+    auth = CodexAuth(token_path=path, client=http)
+    auth._ensure_loaded()  # this process's view: rt_old, due for refresh
+
+    # Another process rotates the credential on disk first.
+    save_bundle(
+        StoredBundle(
+            access_token=_far_future_access(), refresh_token="rt_peer",
+            last_refresh=_now_iso(),
+        ),
+        path,
+    )
+    await auth.get_access_token()
+    await http.aclose()
+
+    # Re-posting rt_old would have killed the credential as reused.
+    assert calls == []
+    assert auth._bundle is not None and auth._bundle.refresh_token == "rt_peer"
+
+
+async def test_refresh_gives_up_when_another_process_holds_the_lock(
+    tmp_path, monkeypatch
+) -> None:
+    from fluid._filelock import file_lock
+
+    path = tmp_path / "codex_auth.json"
+    old = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    save_bundle(
+        StoredBundle(access_token="at_old", refresh_token="rt_old", last_refresh=old), path
+    )
+    monkeypatch.setattr(ox, "REFRESH_LOCK_WAIT", 0.05)
+    calls: list = []
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(_token_endpoint(calls, rotate_to="rt_new"))
+    )
+    auth = CodexAuth(token_path=path, client=http)
+
+    with file_lock(path.with_name(path.name + ".lock")) as held:
+        assert held
+        with pytest.raises(ox.CodexAuthError) as info:
+            await auth.get_access_token()
+    await http.aclose()
+
+    assert info.value.code == "refresh_lock_timeout"
+    assert calls == []
+    # The lock released, the refresh goes through.
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(_token_endpoint(calls, rotate_to="rt_new"))
+    )
+    auth = CodexAuth(token_path=path, client=http)
+    await auth.get_access_token()
+    await http.aclose()
+    assert calls == ["rt_old"]

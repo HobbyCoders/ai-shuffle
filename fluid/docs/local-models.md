@@ -81,7 +81,10 @@ request body. Instead:
   `<tool_call>{"name": "Read", "arguments": {"path": "a.txt"}}</tool_call>`
   in its reply (several blocks for several calls);
 - tool outputs are returned to the model as
-  `<tool_result name="Read">…</tool_result>` text;
+  `<tool_result name="Read">…</tool_result>` text. Marker text inside an
+  output or a call argument (a file that happens to contain
+  `</tool_result>`) is written as `&lt;/tool_result>`, so data can never
+  read as a finished result or a call the model did not make;
 - the streamed reply is parsed incrementally — marker text is suppressed from
   what you see, and the engine receives the same tool-use events native calling
   would produce. `<think>…</think>` passes through as thinking output.

@@ -455,7 +455,11 @@ async def _stream_with(sse_text: str) -> list:
         )
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    client = OpenRouterClient(api_key="or-test", http_client=http)
+    # No retries: these tests look at how one response is classified, not at
+    # the backoff the default policy would spend on a retriable one.
+    client = OpenRouterClient(
+        api_key="or-test", http_client=http, retry=RetryPolicy(max_retries=0)
+    )
     request = ProviderRequest(
         model="stealth/ox-alpha", messages=[Message(role="user", content=[Text("hi")])]
     )
@@ -618,3 +622,195 @@ def test_effort_passthrough_low() -> None:
     )
     body = build_request_body(request)
     assert body["reasoning"] == {"effort": "low"}
+
+
+# ─── retries: a refused request retries, an ambiguous transport failure does not
+
+
+def _request() -> ProviderRequest:
+    return ProviderRequest(
+        model="stealth/ox-alpha", messages=[Message(role="user", content=[Text("hi")])]
+    )
+
+
+def _fast_retries() -> RetryPolicy:
+    return RetryPolicy(max_retries=3, max_transport_retries=0, base_delay=0, jitter=0)
+
+
+def _sse_response(body: str, **headers: str) -> httpx.Response:
+    return httpx.Response(
+        200, content=body.encode(),
+        headers={"content-type": "text/event-stream", **headers},
+    )
+
+
+def test_default_policy_retries_statuses_but_not_transport_failures() -> None:
+    policy = OpenRouterClient(api_key="or-test")._retry
+    assert policy.max_retries == 3
+    assert policy.transport_retries == 0
+
+
+async def test_rate_limit_status_is_retried() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                429, json={"error": {"message": "slow down"}}, headers={"retry-after": "0"}
+            )
+        return _sse_response(GOLDEN.read_text())
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenRouterClient(api_key="or-test", http_client=http, retry=_fast_retries())
+    chunks = [c async for c in client.stream(_request())]
+    await http.aclose()
+
+    assert calls == 2
+    assert chunks[-1].kind == "message_stop"
+
+
+async def test_in_stream_retriable_error_before_content_is_retried() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _sse_response(
+                'data: {"error":{"message":"Provider returned error","code":520}}\n\n'
+                "data: [DONE]\n\n"
+            )
+        return _sse_response(GOLDEN.read_text())
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenRouterClient(api_key="or-test", http_client=http, retry=_fast_retries())
+    chunks = [c async for c in client.stream(_request())]
+    await http.aclose()
+
+    assert calls == 2
+    kinds = [c.kind for c in chunks if c.kind != "provider_request"]
+    # One message begins, on the attempt that produced content.
+    assert kinds.count("message_start") == 1
+    assert "error" not in kinds
+    assert kinds[-1] == "message_stop"
+
+
+async def test_in_stream_error_after_content_is_not_retried() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _sse_response(
+            'data: {"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n'
+            'data: {"error":{"message":"upstream died","code":520}}\n\n'
+            "data: [DONE]\n\n"
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenRouterClient(api_key="or-test", http_client=http, retry=_fast_retries())
+    chunks = [c async for c in client.stream(_request())]
+    await http.aclose()
+
+    assert calls == 1
+    kinds = [c.kind for c in chunks if c.kind != "provider_request"]
+    assert kinds == ["message_start", "block_start", "text_delta", "error"]
+    assert chunks[-1].payload["retriable"] is True
+
+
+def test_retry_after_accepts_seconds_and_http_dates() -> None:
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    from fluid.providers._retry import parse_retry_after
+
+    assert parse_retry_after("7") == 7.0
+    soon = datetime.now(timezone.utc) + timedelta(seconds=20)
+    wait = parse_retry_after(format_datetime(soon, usegmt=True))
+    assert wait is not None and 17.0 <= wait <= 20.0
+    assert parse_retry_after("Thu, 01 Jan 1970 00:00:00 GMT") == 0.0
+    assert parse_retry_after("later") is None
+    assert parse_retry_after(None) is None
+
+
+def test_delay_honors_retry_after_and_adds_bounded_jitter() -> None:
+    policy = RetryPolicy(base_delay=1.0, max_delay=30.0, jitter=0.5)
+    for _ in range(50):
+        assert 4.0 <= policy.delay(0, "4") <= 6.0
+    assert RetryPolicy(base_delay=0, jitter=0.5).delay(3) == 0.0
+    assert RetryPolicy(base_delay=1.0, jitter=0).delay(2) == 4.0
+
+
+# ─── tool calls without an index, content filters ────────────────────────────
+
+
+def _chunk(delta: dict, finish_reason: str | None = None) -> dict:
+    return {"choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+
+
+def _collect_args(chunks: list[StreamChunk]) -> list[dict]:
+    args: dict[int, str] = {}
+    for c in chunks:
+        if c.kind == "tool_args_delta":
+            index = c.payload["index"]
+            args[index] = args.get(index, "") + c.payload["partial_json"]
+    return [json.loads(v) for _, v in sorted(args.items())]
+
+
+def test_tool_calls_without_index_stay_distinct_by_id() -> None:
+    n = ChatCompletionsNormalizer()
+    out: list[StreamChunk] = []
+    out += n.consume("", _chunk({"tool_calls": [
+        {"id": "call_a", "type": "function", "function": {"name": "Read", "arguments": ""}},
+    ]}))
+    out += n.consume("", _chunk({"tool_calls": [
+        {"function": {"arguments": '{"path":"a"}'}},
+    ]}))
+    out += n.consume("", _chunk({"tool_calls": [
+        {"id": "call_b", "type": "function",
+         "function": {"name": "Read", "arguments": '{"path":"b"}'}},
+    ]}, "tool_calls"))
+    out += n.consume("", {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+
+    starts = [c for c in out if c.kind == "block_start"]
+    assert [s.payload["tool_use_id"] for s in starts] == ["call_a", "call_b"]
+    assert _collect_args(out) == [{"path": "a"}, {"path": "b"}]
+
+
+def test_tool_calls_without_index_or_id_split_on_a_new_name() -> None:
+    n = ChatCompletionsNormalizer()
+    out: list[StreamChunk] = []
+    out += n.consume("", _chunk({"tool_calls": [
+        {"function": {"name": "Read", "arguments": '{"path":'}},
+    ]}))
+    out += n.consume("", _chunk({"tool_calls": [{"function": {"arguments": '"a"}'}}]}))
+    out += n.consume("", _chunk({"tool_calls": [
+        {"function": {"name": "Glob", "arguments": '{"pattern":"*"}'}},
+    ]}, "tool_calls"))
+    out += n.consume("", {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+
+    starts = [c for c in out if c.kind == "block_start"]
+    assert [s.payload["tool_name"] for s in starts] == ["Read", "Glob"]
+    assert _collect_args(out) == [{"path": "a"}, {"pattern": "*"}]
+
+
+def test_content_filter_before_any_output_is_an_error() -> None:
+    n = ChatCompletionsNormalizer()
+    out = n.consume("", _chunk({}, "content_filter"))
+    out += n.consume("", {"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 0}})
+    assert [c.kind for c in out] == ["message_start", "error"]
+    assert "content filter" in out[-1].payload["message"]
+    assert out[-1].payload["retriable"] is False
+
+
+def test_content_filter_after_output_keeps_the_text_and_names_the_cause() -> None:
+    n = ChatCompletionsNormalizer()
+    out = n.consume("", _chunk({"content": "partial"}))
+    out += n.consume("", _chunk({}, "content_filter"))
+    out += n.consume("", {"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 2}})
+    usage = next(c for c in out if c.kind == "usage")
+    assert usage.payload["stop_reason"] == "end_turn"
+    assert usage.payload["native_stop_reason"] == "content_filter"
+    assert any(c.kind == "text_delta" for c in out)

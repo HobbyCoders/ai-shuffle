@@ -416,3 +416,126 @@ async def test_other_providers_get_no_prompt_cache_key() -> None:
             await loop.aclose()
         assert "prompt_cache_key" not in extra
         assert extra == ({"session_id": sid} if name == "openrouter" else {})
+
+
+# ─── truncation, refusals, the output ceiling ────────────────────────────────
+
+
+def _consume_all(events: list[tuple[str, dict]]) -> list[StreamChunk]:
+    normalizer = ResponsesStreamNormalizer()
+    out: list[StreamChunk] = []
+    for name, data in events:
+        out.extend(normalizer.consume(name, data))
+    return out
+
+
+def _truncated_call_events() -> list[tuple[str, dict]]:
+    """A response cut off by max_output_tokens halfway through a tool call."""
+    return [
+        ("response.created", {"response": {"id": "resp_1"}}),
+        ("response.output_item.added", {"item": {
+            "id": "fc_1", "type": "function_call", "name": "Write", "call_id": "call_1",
+        }}),
+        ("response.function_call_arguments.delta", {
+            "item_id": "fc_1", "delta": '{"path": "a.txt", "content": "half',
+        }),
+        ("response.incomplete", {"response": {
+            "id": "resp_1", "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "usage": {"input_tokens": 120, "output_tokens": 4096},
+        }}),
+    ]
+
+
+def test_incomplete_response_closes_the_open_call_and_reports_max_tokens() -> None:
+    chunks = _consume_all(_truncated_call_events())
+    assert [c.kind for c in chunks] == [
+        "message_start", "block_start", "tool_args_delta", "block_stop",
+        "usage", "message_stop",
+    ]
+    usage = chunks[-2].payload
+    assert usage["stop_reason"] == "max_tokens"
+    assert usage["usage"]["input_tokens"] == 120
+    assert usage["usage"]["output_tokens"] == 4096
+    assert usage["native_stop_reason"] == "incomplete:max_output_tokens"
+
+
+async def test_truncated_call_is_not_mistaken_for_an_empty_completion() -> None:
+    # Before the incomplete event was handled the stream ended with no usage
+    # chunk, which the engine reads as an empty completion and retries ten
+    # times. With usage reported it is a max_tokens stop like any other.
+    import asyncio
+
+    from fluid.events import ProviderRetry, UserTurn
+
+    truncated = _consume_all(_truncated_call_events())
+
+    class _Provider:
+        name = "openai_responses"
+        caps = ProviderCaps(stateful_reasoning=True)
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+            self.calls += 1
+            for chunk in truncated:
+                yield chunk
+
+    provider = _Provider()
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(
+        provider=provider, store=store, model="gpt-5.6-sol", session_id=sid,
+        max_continuations_per_turn=0,
+    )
+    await loop.submit(UserTurn(content="write it"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+
+    assert provider.calls == 1
+    assert not any(isinstance(e, ProviderRetry) for e in loop.bus.log(sid))
+
+
+def test_incomplete_content_filter_before_any_output_is_an_error() -> None:
+    chunks = _consume_all([
+        ("response.created", {"response": {"id": "resp_1"}}),
+        ("response.incomplete", {"response": {
+            "id": "resp_1", "status": "incomplete",
+            "incomplete_details": {"reason": "content_filter"},
+            "usage": {"input_tokens": 12},
+        }}),
+    ])
+    assert [c.kind for c in chunks] == ["message_start", "error"]
+    assert "content filter" in chunks[-1].payload["message"]
+    assert chunks[-1].payload["retriable"] is False
+
+
+def test_refusal_delta_renders_as_text() -> None:
+    chunks = _consume_all([
+        ("response.created", {"response": {"id": "resp_1"}}),
+        ("response.output_item.added", {"item": {"id": "msg_1", "type": "message"}}),
+        ("response.refusal.delta", {"item_id": "msg_1", "delta": "I can't help with that."}),
+        ("response.output_item.done", {"item": {
+            "id": "msg_1", "type": "message",
+            "content": [{"type": "refusal", "refusal": "I can't help with that."}],
+        }}),
+        ("response.completed", {"response": {
+            "id": "resp_1", "status": "completed",
+            "usage": {"input_tokens": 10, "output_tokens": 8},
+        }}),
+    ])
+    text = "".join(c.payload["text"] for c in chunks if c.kind == "text_delta")
+    assert text == "I can't help with that."
+    assert [c.kind for c in chunks].count("block_stop") == 1
+    assert chunks[-2].payload["stop_reason"] == "end_turn"
+
+
+def test_request_body_carries_the_output_ceiling() -> None:
+    request = ProviderRequest(
+        model="gpt-5.6-sol",
+        messages=[Message(role="user", content=[Text("hi")])],
+        max_tokens=2048,
+    )
+    assert build_request_body(request)["max_output_tokens"] == 2048
+    request.max_tokens = None
+    assert "max_output_tokens" not in build_request_body(request)

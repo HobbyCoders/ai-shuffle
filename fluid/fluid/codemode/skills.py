@@ -71,17 +71,13 @@ import keyword
 import logging
 import os
 import re
-import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-if sys.platform == "win32":
-    import msvcrt
-else:
-    import fcntl
+from fluid._filelock import file_lock
 
 _log = logging.getLogger(__name__)
 
@@ -264,27 +260,6 @@ def _rewrite_dropping_prefix(
 # old inode would guard nothing once the new file is in place.
 
 
-def _try_lock(fd: int) -> bool:
-    try:
-        if sys.platform == "win32":
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return False
-    return True
-
-
-def _unlock(fd: int) -> None:
-    try:
-        if sys.platform == "win32":
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    except OSError:
-        pass
-
-
 @contextmanager
 def journal_lock(path: Path, *, wait: float = 0.0) -> Iterator[bool]:
     """Hold the advisory lock for ``path`` (the journal) inside the block.
@@ -294,25 +269,8 @@ def journal_lock(path: Path, *, wait: float = 0.0) -> Iterator[bool]:
     be opened at all. The caller decides what False means: reap skips,
     append goes ahead anyway rather than losing the entry.
     """
-    lock_path = path.with_name(path.name + ".lock")
-    try:
-        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
-    except OSError:
-        yield False
-        return
-    held = False
-    try:
-        deadline = time.monotonic() + max(0.0, wait)
-        while True:
-            held = _try_lock(fd)
-            if held or time.monotonic() >= deadline:
-                break
-            time.sleep(0.01)
+    with file_lock(path.with_name(path.name + ".lock"), wait=wait) as held:
         yield held
-    finally:
-        if held:
-            _unlock(fd)
-        os.close(fd)
 
 
 # How long an appender waits for a reap in another process to finish before

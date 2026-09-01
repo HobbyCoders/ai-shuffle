@@ -511,3 +511,92 @@ async def test_closing_a_subscription_unregisters_at_once() -> None:
                 break
     assert bus.subscriber_count("s1") == 0
     assert "s1" not in bus._subs  # the list itself is dropped, not just emptied
+
+
+# ─── Anthropic history fidelity ──────────────────────────────────────────────
+
+
+def test_unsigned_thinking_is_not_resent() -> None:
+    from fluid.messages import Thinking
+
+    request = ProviderRequest(
+        model="m",
+        messages=[
+            Message(role="user", content=[Text("hi")]),
+            Message(role="assistant", content=[
+                Thinking("cut off"),
+                Reasoning(origin="anthropic",
+                          raw={"type": "thinking", "thinking": "cut off", "signature": ""}),
+                Text("answer"),
+            ]),
+        ],
+    )
+    body = build_request_body(request)
+    assert body["messages"][1]["content"] == [{"type": "text", "text": "answer"}]
+
+
+def test_empty_text_blocks_leave_the_wire() -> None:
+    from fluid.messages import ToolResultBlock, ToolUseBlock
+
+    request = ProviderRequest(
+        model="m",
+        messages=[
+            Message(role="user", content=[Text("hi")]),
+            Message(role="assistant", content=[
+                Text(""), ToolUseBlock(id="t1", name="Read", input={}),
+            ]),
+            Message(role="user", content=[
+                ToolResultBlock(tool_use_id="t1", content=[Text("")]),
+            ]),
+        ],
+    )
+    body = build_request_body(request)
+    assert body["messages"][1]["content"] == [
+        {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+    ]
+    result = body["messages"][2]["content"][0]
+    assert result["type"] == "tool_result"
+    assert "content" not in result
+
+
+def test_a_message_that_serializes_to_nothing_keeps_roles_alternating() -> None:
+    from fluid.messages import Thinking
+
+    request = ProviderRequest(
+        model="m",
+        messages=[
+            Message(role="user", content=[Text("first")]),
+            Message(role="assistant", content=[
+                Thinking("unsigned"),
+                Reasoning(origin="anthropic",
+                          raw={"type": "thinking", "thinking": "unsigned", "signature": ""}),
+            ]),
+            Message(role="user", content=[Text("second")]),
+        ],
+    )
+    body = build_request_body(request)
+    assert [m["role"] for m in body["messages"]] == ["user"]
+    assert [b["text"] for b in body["messages"][0]["content"]] == ["first", "second"]
+
+
+def test_redacted_thinking_and_server_tool_blocks_resend_verbatim() -> None:
+    redacted = {"type": "redacted_thinking", "data": "OPAQUE"}
+    search = {"type": "server_tool_use", "id": "srvtoolu_1",
+              "name": "web_search", "input": {"query": "x"}}
+    result = {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": []}
+    request = ProviderRequest(
+        model="m",
+        messages=[
+            Message(role="user", content=[Text("hi")]),
+            Message(role="assistant", content=[
+                Reasoning(origin="anthropic", raw=redacted),
+                Reasoning(origin="anthropic", raw=search),
+                Reasoning(origin="anthropic", raw=result),
+                Text("done"),
+            ]),
+        ],
+    )
+    body = build_request_body(request)
+    assert body["messages"][1]["content"] == [
+        redacted, search, result, {"type": "text", "text": "done"},
+    ]

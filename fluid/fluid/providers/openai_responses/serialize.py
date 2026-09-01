@@ -256,6 +256,9 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
     if request.tools:
         body["tools"] = _translate_tools(request.tools)
 
+    if request.max_tokens is not None:
+        body["max_output_tokens"] = request.max_tokens
+
     reasoning = _reasoning_config(request.thinking, request.effort)
     if reasoning is not None:
         body["reasoning"] = reasoning
@@ -294,13 +297,21 @@ def _normalize_usage(usage: dict[str, Any] | None) -> dict[str, int]:
     }
 
 
+def _incomplete_reason(response: dict[str, Any]) -> str | None:
+    """The ``incomplete_details.reason`` of a truncated response, else None."""
+    if response.get("status") != "incomplete":
+        return None
+    reason = (response.get("incomplete_details") or {}).get("reason")
+    return str(reason) if reason else "unknown"
+
+
 def _map_stop_reason(response: dict[str, Any], has_function_call: bool) -> str:
+    # Truncation wins over an open function call: the call's arguments are
+    # cut short, and the engine explains a decode failure by this reason.
+    if _incomplete_reason(response) in ("max_output_tokens", "max_tokens"):
+        return "max_tokens"
     if has_function_call:
         return "tool_use"
-    if response.get("status") == "incomplete":
-        reason = (response.get("incomplete_details") or {}).get("reason")
-        if reason in ("max_output_tokens", "max_tokens"):
-            return "max_tokens"
     return "end_turn"
 
 
@@ -327,6 +338,32 @@ class ResponsesStreamNormalizer:
         self._index_of: dict[str, int] = {}
         self._next_index = 0
         self._has_function_call = False
+        self._stopped: set[int] = set()
+
+    def _close_open_blocks(self) -> list[StreamChunk]:
+        """``block_stop`` for every block still open, in index order.
+
+        A truncated response never sends ``output_item.done`` for the item it
+        was cut off in; the engine still needs the stop so it parses what
+        arrived (and reports a cut-off tool call as such).
+        """
+        out: list[StreamChunk] = []
+        for index in sorted(self._index_of.values()):
+            if index not in self._stopped:
+                self._stopped.add(index)
+                out.append(StreamChunk("block_stop", {"index": index}))
+        return out
+
+    def _terminal(self, response: dict[str, Any]) -> list[StreamChunk]:
+        """``usage`` plus ``message_stop`` for a finished (or cut-off) response."""
+        payload: dict[str, Any] = {
+            "usage": _normalize_usage(response.get("usage")),
+            "stop_reason": _map_stop_reason(response, self._has_function_call),
+        }
+        reason = _incomplete_reason(response)
+        if reason is not None:
+            payload["native_stop_reason"] = f"incomplete:{reason}"
+        return [StreamChunk("usage", payload), StreamChunk("message_stop", {})]
 
     def _open(
         self, item_id: str, block_type: str, **kw: Any
@@ -381,7 +418,10 @@ class ResponsesStreamNormalizer:
                 out += self._open(item.get("id", ""), _ITEM_BLOCK_TYPE[itype], block=item)
             return out
 
-        if name == "response.output_text.delta":
+        if name in ("response.output_text.delta", "response.refusal.delta"):
+            # A refusal is the model's visible answer in place of output text;
+            # rendering it as text is what keeps the reply from coming back
+            # blank.
             item_id = data.get("item_id", "")
             out += self._open(item_id, "text")
             out.append(
@@ -438,22 +478,40 @@ class ResponsesStreamNormalizer:
                 block=item,
             )
             index = self._index_of.get(item.get("id", ""))
-            if index is not None:
+            if index is not None and index not in self._stopped:
+                self._stopped.add(index)
                 out.append(StreamChunk("block_stop", {"index": index, "block": item}))
             return out
 
         if name == "response.completed":
             response = data.get("response", {}) or {}
-            out.append(
-                StreamChunk(
-                    "usage",
-                    {
-                        "usage": _normalize_usage(response.get("usage")),
-                        "stop_reason": _map_stop_reason(response, self._has_function_call),
-                    },
+            out += self._close_open_blocks()
+            out += self._terminal(response)
+            return out
+
+        if name == "response.incomplete":
+            # The response was cut off (output budget, content filter). Usage
+            # is real and so is whatever streamed; close the block it stopped
+            # in and end the message with the reason, instead of letting the
+            # stream fall off the end as if nothing had been billed.
+            response = data.get("response", {}) or {}
+            if not self._index_of and _incomplete_reason(response) == "content_filter":
+                out.append(
+                    StreamChunk(
+                        "error",
+                        {
+                            "message": (
+                                "the provider's content filter stopped the "
+                                "response before any output"
+                            ),
+                            "retriable": False,
+                            "native_stop_reason": "incomplete:content_filter",
+                        },
+                    )
                 )
-            )
-            out.append(StreamChunk("message_stop", {}))
+                return out
+            out += self._close_open_blocks()
+            out += self._terminal(response)
             return out
 
         if name in ("response.failed", "error"):

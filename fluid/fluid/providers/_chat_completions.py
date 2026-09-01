@@ -245,7 +245,27 @@ class ChatCompletionsNormalizer:
         self._order: list[str] = []
         self._next_index = 0
         self._stop_reason = "end_turn"
+        self._content_filtered = False
         self._response_meta: dict[str, Any] = {}
+        # Tool calls keyed without an ``index`` (some servers omit it): the
+        # call id when the chunk carries one, else a fresh key per named call
+        # with argument fragments attaching to the most recent call.
+        self._last_tool_key: str | None = None
+        self._anonymous_calls = 0
+
+    def _tool_key(self, tc: dict[str, Any]) -> str:
+        index = tc.get("index")
+        if index is not None:
+            return f"tool:{index}"
+        call_id = tc.get("id")
+        if call_id:
+            self._last_tool_key = f"tool:id:{call_id}"
+            return self._last_tool_key
+        fn = tc.get("function") or {}
+        if fn.get("name") or self._last_tool_key is None:
+            self._anonymous_calls += 1
+            self._last_tool_key = f"tool:anon:{self._anonymous_calls}"
+        return self._last_tool_key
 
     def _open(self, key: str, block_type: str, **kw: Any) -> list[StreamChunk]:
         if key in self._index_of:
@@ -328,7 +348,7 @@ class ChatCompletionsNormalizer:
                     )
                 )
             for tc in delta.get("tool_calls") or []:
-                key = f"tool:{tc.get('index', 0)}"
+                key = self._tool_key(tc)
                 fn = tc.get("function") or {}
                 out += self._open(
                     key,
@@ -347,6 +367,8 @@ class ChatCompletionsNormalizer:
                     )
             if choice.get("finish_reason"):
                 self._stop_reason = map_stop_reason(choice["finish_reason"])
+                if choice["finish_reason"] == "content_filter":
+                    self._content_filtered = True
             if choice.get("native_finish_reason"):
                 self.native_stop_reason = str(choice["native_finish_reason"])
 
@@ -354,6 +376,27 @@ class ChatCompletionsNormalizer:
         # close every open block, then emit usage + message_stop.
         usage = data.get("usage")
         if usage is not None:
+            if self._content_filtered and not self._order:
+                # The filter ended the response before any output. A reply
+                # with nothing in it would render blank and say nothing about
+                # why; an error names the cause.
+                self.errored = True
+                out.append(
+                    StreamChunk(
+                        "error",
+                        {
+                            "message": (
+                                "the provider's content filter stopped the "
+                                "response before any output"
+                            ),
+                            "retriable": False,
+                            "native_stop_reason": "content_filter",
+                        },
+                    )
+                )
+                return out
+            if self._content_filtered and not self.native_stop_reason:
+                self.native_stop_reason = "content_filter"
             for key in self._order:
                 out.append(StreamChunk("block_stop", {"index": self._index_of[key]}))
             normalized: dict[str, Any] = dict(normalize_usage(usage))
@@ -480,6 +523,13 @@ async def stream_chat_completions(
                     events = sse_events(resp.aiter_lines()).__aiter__()
                     starved = False
                     awaiting_first = True
+                    # message_start is held until the first chunk after it,
+                    # so an error the provider sends in place of content can
+                    # be retried without the engine having seen a message
+                    # begin. ``content_seen`` is that first chunk.
+                    pending_start: StreamChunk | None = None
+                    content_seen = False
+                    retry_error: StreamChunk | None = None
                     while True:
                         try:
                             if awaiting_first:
@@ -500,6 +550,25 @@ async def stream_chat_completions(
                             break
                         awaiting_first = False
                         for chunk in normalizer.consume(event_name, data):
+                            if chunk.kind == "message_start" and not content_seen:
+                                pending_start = chunk
+                                continue
+                            if (
+                                chunk.kind == "error"
+                                and not content_seen
+                                and chunk.payload.get("retriable")
+                                and attempt < retry.max_retries
+                            ):
+                                # Refused before any content: the same
+                                # verdict a non-200 status carries, so the
+                                # same backoff applies.
+                                retry_error = chunk
+                                break
+                            if pending_start is not None:
+                                yielded = True
+                                yield pending_start
+                                pending_start = None
+                            content_seen = True
                             if chunk.kind == "usage" and track_provider_requests:
                                 payload = dict(chunk.payload)
                                 usage = dict(payload.get("usage") or {})
@@ -511,6 +580,16 @@ async def stream_chat_completions(
                                 chunk = StreamChunk("usage", payload)
                             yielded = True
                             yield chunk
+                        if retry_error is not None:
+                            break
+                    if retry_error is not None:
+                        await asyncio.sleep(retry.delay(attempt))
+                        attempt += 1
+                        continue
+                    if pending_start is not None:
+                        yielded = True
+                        yield pending_start
+                        pending_start = None
                     if starved or (not normalizer.finished and not normalizer.errored):
                         # Stream closed before the usage/terminal chunk, or the
                         # watchdog gave up waiting for its first byte of data:
@@ -545,7 +624,7 @@ async def stream_chat_completions(
                         "attempt": attempt + 1,
                         "transport_error": type(exc).__name__,
                     })
-                if not yielded and attempt < retry.max_retries:
+                if not yielded and attempt < retry.transport_retries:
                     await asyncio.sleep(retry.delay(attempt))
                     attempt += 1
                     continue

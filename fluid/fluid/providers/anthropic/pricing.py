@@ -45,6 +45,13 @@ _PRICES: list[tuple[str, float, float]] = [
 
 _CACHE_WRITE_MULTIPLIER = 1.25  # 5m ephemeral
 _CACHE_READ_MULTIPLIER = 0.1
+# Families whose published cache-read rate is not the 0.1x default, as a
+# fraction of their input rate. Fable 5.1 lists cache reads at $0.25/MTok
+# against a $10 input rate. Whether Mythos 5.1 shares that rate was open at
+# launch, so it keeps the default. Longest prefix first.
+_CACHE_READ_OVERRIDES: list[tuple[str, float]] = [
+    ("claude-fable-5-1", 0.025),
+]
 
 # Families whose native window is 200K and whose 1M window was the
 # ``context-1m`` beta. Prefix-matched like ``_PRICES``; a ``[1m]`` id from any
@@ -100,7 +107,15 @@ def estimate_cost(model: str, usage: dict) -> float | None:
     total = (
         input_tokens * input_rate
         + cache_write * _CACHE_WRITE_MULTIPLIER * input_rate
-        + cache_read * _CACHE_READ_MULTIPLIER * input_rate
+        + cache_read * _cache_read_multiplier(model) * input_rate
         + output_tokens * output_rate
     )
     return total / 1_000_000
+
+
+def _cache_read_multiplier(model: str) -> float:
+    lowered = (model or "").lower()
+    for prefix, multiplier in _CACHE_READ_OVERRIDES:
+        if lowered.startswith(prefix):
+            return multiplier
+    return _CACHE_READ_MULTIPLIER

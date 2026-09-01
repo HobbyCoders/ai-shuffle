@@ -77,3 +77,15 @@ def test_native_1m_models_price_the_same_across_the_window() -> None:
         assert estimate_cost(f"{model}[1m]", _OVER_200K) == pytest.approx(
             estimate_cost(model, _OVER_200K)
         )
+
+
+# ─── cache-read rates that differ from the 0.1x default ──────────────────────
+
+
+def test_fable_5_1_cache_reads_bill_at_a_quarter_rate() -> None:
+    usage = {"cache_read_input_tokens": 1_000_000}
+    # $10 input, cache reads listed at $0.25/MTok.
+    assert estimate_cost("claude-fable-5-1", usage) == pytest.approx(0.25)
+    # Fable 5 and Mythos keep the published 0.1x default.
+    assert estimate_cost("claude-fable-5", usage) == pytest.approx(1.0)
+    assert estimate_cost("claude-mythos-5-1", usage) == pytest.approx(1.0)

@@ -155,7 +155,7 @@ class OpenAIResponsesClient:
                 except httpx.TransportError as exc:
                     # Pre-stream connection failures retry; mid-stream ones
                     # don't (chunks were already delivered downstream).
-                    if not yielded and attempt < self._retry.max_retries:
+                    if not yielded and attempt < self._retry.transport_retries:
                         await asyncio.sleep(self._retry.delay(attempt))
                         attempt += 1
                         continue

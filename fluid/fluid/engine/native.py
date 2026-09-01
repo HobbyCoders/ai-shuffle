@@ -2534,6 +2534,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                     "signature": "",
                     "tool_name": payload.get("tool_name"),
                     "tool_use_id": payload.get("tool_use_id"),
+                    # The provider's own block as it opened. Blocks the
+                    # engine has no model for (redacted thinking, server
+                    # tool use and results) are kept from this and resent
+                    # verbatim, so the stored prefix stays what the
+                    # provider produced.
+                    "raw": payload.get("block") or None,
                 }
                 await self._emit(
                     BlockStart(
@@ -3342,7 +3348,33 @@ class NativeLoop(BackgroundLifecycleMixin):
                                  name=block["tool_name"] or "",
                                  input=block.get("input", {}))
                 )
+            else:
+                opaque = self._opaque_block(block)
+                if opaque is not None:
+                    content.append(Reasoning(
+                        origin=self.provider.name, raw=opaque, model=model,
+                    ))
         return Message(role="assistant", content=content)
+
+    @staticmethod
+    def _opaque_block(block: dict[str, Any]) -> dict[str, Any] | None:
+        """The provider's own item for a block the engine has no model for.
+
+        Anthropic's redacted_thinking, server_tool_use and the server tool
+        result blocks arrive this way. They are kept as an opaque envelope
+        and resent verbatim by the serializer that produced them, since the
+        API refuses a later turn whose prefix lost them. A server tool call's
+        arguments stream after the block opens, so they are folded back in.
+        """
+        raw = block.get("raw")
+        if not isinstance(raw, dict) or not raw.get("type"):
+            return None
+        item = dict(raw)
+        if block.get("args"):
+            parsed, error = _parse_tool_args(block["args"])
+            if error is None:
+                item["input"] = parsed
+        return item
 
     def _reasoning_envelope(self, block: dict[str, Any], model: str) -> Reasoning:
         """Build the provider-tagged Reasoning envelope for one thinking block.

@@ -28,6 +28,8 @@ from fluid.providers.anthropic.limits import resolve_max_tokens
 
 def _block_to_api(block: Any, model: str | None = None) -> dict[str, Any] | None:
     if isinstance(block, Text):
+        if not block.text:
+            return None  # the API rejects an empty text block
         return {"type": "text", "text": block.text}
     if isinstance(block, Thinking):
         return None  # carried via its Reasoning envelope
@@ -39,19 +41,26 @@ def _block_to_api(block: Any, model: str | None = None) -> dict[str, Any] | None
             # produced fails verification. Untagged legacy envelopes
             # (model=None) still resend as before.
             return None
-        if block.raw is not None:
-            return block.raw  # verbatim resend (signed thinking block)
-        return None
+        if block.raw is None:
+            return None
+        if block.raw.get("type") == "thinking" and not block.raw.get("signature"):
+            # A thinking block the stream never signed (cut off, or the
+            # stream died) fails verification on every later turn. Dropping
+            # it costs the model its memory of that reasoning, nothing more.
+            return None
+        return block.raw  # verbatim resend: signed thinking, redacted thinking, server tool blocks
     if isinstance(block, ToolUseBlock):
         return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
     if isinstance(block, ToolResultBlock):
         content = [b for b in (_block_to_api(c, model) for c in block.content) if b]
-        return {
+        out: dict[str, Any] = {
             "type": "tool_result",
             "tool_use_id": block.tool_use_id,
-            "content": content,
             "is_error": block.is_error,
         }
+        if content:
+            out["content"] = content
+        return out
     if isinstance(block, Image):
         return {
             "type": "image",
@@ -66,8 +75,15 @@ def build_request_body(request: ProviderRequest) -> dict[str, Any]:
         content = [
             b for b in (_block_to_api(blk, request.model) for blk in msg.content) if b
         ]
-        if content:
-            messages.append({"role": msg.role, "content": content})
+        if not content:
+            continue  # nothing this dialect can carry (an unsigned thinking turn)
+        if messages and messages[-1]["role"] == msg.role:
+            # Roles must alternate. A dropped message leaves two neighbours
+            # with the same role; folding the second into the first keeps
+            # the order of every block and invents nothing.
+            messages[-1]["content"].extend(content)
+            continue
+        messages.append({"role": msg.role, "content": content})
 
     body: dict[str, Any] = {
         "model": request.model,
@@ -152,5 +168,16 @@ def sse_to_chunk(event_name: str, data: dict[str, Any]) -> StreamChunk | None:
     if t == "message_stop":
         return StreamChunk("message_stop", {})
     if t == "error":
-        return StreamChunk("error", data.get("error", {}))
+        err = dict(data.get("error", {}) or {})
+        # An overloaded or internal failure on an open stream is the same
+        # blip a 529 or 500 status is; the client may retry it when nothing
+        # has been delivered yet. Everything else names a fault in the
+        # request and stays fatal.
+        err.setdefault("retriable", err.get("type") in _RETRIABLE_STREAM_ERRORS)
+        return StreamChunk("error", err)
     return None
+
+
+_RETRIABLE_STREAM_ERRORS = frozenset(
+    ("overloaded_error", "api_error", "rate_limit_error")
+)

@@ -50,11 +50,12 @@ class OpenRouterClient:
         self._base_url = base_url
         self._timeout = timeout
         self._http = http_client
-        # OpenRouter already performs provider fallback before the first token.
-        # A client-side retry after an ambiguous transport failure can create a
-        # second billable generation with no idempotency guarantee, so metered
-        # requests do not retry by default. Tests/embedders may opt in explicitly.
-        self._retry = retry or RetryPolicy(max_retries=0)
+        # A refused request (429, 5xx, or an error chunk sent in place of
+        # content) started no generation, so it retries with backoff. A
+        # transport failure is ambiguous: OpenRouter may have started a
+        # billable generation with no idempotency guarantee, so those do not
+        # retry by default. Embedders may raise that budget explicitly.
+        self._retry = retry or RetryPolicy(max_retries=3, max_transport_retries=0)
         self._pricing = dict(pricing or {})
         # Serialized as ``provider.allow_fallbacks``. Off by default so one
         # logical call stays bound to one upstream generation; set it when the

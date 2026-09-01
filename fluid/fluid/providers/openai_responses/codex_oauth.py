@@ -34,6 +34,8 @@ import json
 import logging
 import os
 import secrets
+import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,7 +43,13 @@ from urllib.parse import urlencode
 
 import httpx
 
+from fluid._filelock import file_lock
+
 logger = logging.getLogger(__name__)
+
+# How long a refresh waits for another process's refresh of the same
+# credential to finish. A refresh is one HTTP round trip.
+REFRESH_LOCK_WAIT = 30.0
 
 # Issuer / endpoints. One editable place if the undocumented backend shifts.
 ISSUER = "https://auth.openai.com"
@@ -445,13 +453,53 @@ class StoredBundle:
         )
 
 
+def _restrict_to_owner_windows(path: Path) -> None:
+    """Best effort: leave only the current user on the file's ACL.
+
+    POSIX modes do nothing on Windows, so the equivalent of ``0600`` is an
+    ACL with inheritance removed and one grant. A failure is logged, not
+    raised: a token file the user can still read beats no token file.
+    """
+    user = os.environ.get("USERNAME")
+    if not user:
+        return
+    try:
+        subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+            check=False, capture_output=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        logger.debug("codex_oauth: could not restrict %s", path, exc_info=True)
+
+
 def save_bundle(bundle: StoredBundle, path: Path | None = None) -> Path:
-    """Persist a bundle as JSON with ``0600`` perms (dir created ``0700``)."""
+    """Persist a bundle as JSON readable by the owner only.
+
+    The bytes go to a sibling temp file opened ``0600`` from the start, are
+    flushed and fsynced, then renamed over the target; a reader sees the old
+    bundle or the new one, never a torn one, and the secret is never briefly
+    world-readable. On Windows the ACL is restricted after the rename.
+    """
     target = Path(path or DEFAULT_TOKEN_PATH)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    # Write then chmod so the secret is never briefly world-readable.
-    target.write_text(json.dumps(asdict(bundle), indent=2))
-    os.chmod(target, 0o600)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(asdict(bundle), indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    if sys.platform == "win32":
+        _restrict_to_owner_windows(target)
+    else:
+        os.chmod(target, 0o600)
     return target
 
 
@@ -517,20 +565,48 @@ class CodexAuth:
             )
         return self._bundle
 
+    def _lock_path(self) -> Path:
+        return self.token_path.with_name(self.token_path.name + ".lock")
+
     async def _refresh_locked(self) -> None:
+        """Rotate the credential, once per rotation across processes.
+
+        The asyncio lock the callers hold covers this process only. A second
+        fluid process refreshing the same file would POST the same refresh
+        token and the server would kill the credential as reused, so the
+        rotation also takes the token file's lock, and re-reads the file
+        under it: a peer that rotated first has already left the new bundle
+        there, and adopting it is the whole refresh.
+        """
         assert self._bundle is not None
         prior = self._bundle
-        new = await refresh_tokens(prior.refresh_token, client=self._client)
-        bundle = StoredBundle(
-            access_token=new.access_token,
-            refresh_token=new.refresh_token,
-            id_token=new.id_token or prior.id_token,
-            # A refresh response may omit the id_token → keep the prior account id.
-            account_id=new.account_id or prior.account_id,
-            last_refresh=_now_iso(),
-        )
-        self._bundle = bundle
-        save_bundle(bundle, self.token_path)
+        loop = asyncio.get_running_loop()
+        lock = file_lock(self._lock_path(), wait=REFRESH_LOCK_WAIT)
+        held = await loop.run_in_executor(None, lock.__enter__)
+        try:
+            if not held:
+                raise CodexAuthError(
+                    "refresh_lock_timeout",
+                    f"another process has held {self._lock_path()} for "
+                    f"{REFRESH_LOCK_WAIT:g}s; not refreshing",
+                )
+            disk = load_bundle(self.token_path)
+            if disk is not None and disk.refresh_token != prior.refresh_token:
+                self._bundle = disk
+                return
+            new = await refresh_tokens(prior.refresh_token, client=self._client)
+            bundle = StoredBundle(
+                access_token=new.access_token,
+                refresh_token=new.refresh_token,
+                id_token=new.id_token or prior.id_token,
+                # A refresh response may omit the id_token → keep the prior account id.
+                account_id=new.account_id or prior.account_id,
+                last_refresh=_now_iso(),
+            )
+            self._bundle = bundle
+            save_bundle(bundle, self.token_path)
+        finally:
+            lock.__exit__(None, None, None)
 
     async def get_access_token(self) -> str:
         async with self._lock:

@@ -292,11 +292,34 @@ def render_tool_protocol(tools: list[dict[str, Any]]) -> str:
 # ─── history serialization (blocks → protocol text) ──────────────────────────
 
 
+RESULT_OPEN = "<tool_result"
+RESULT_CLOSE = "</tool_result>"
+
+# Marker text that came from a tool result or a call argument is data, not
+# protocol. Breaking the leading angle bracket keeps a file that happens to
+# contain ``</tool_result><tool_call>`` from reading as a finished result
+# followed by a call the model never made.
+_MARKER_ESCAPES = (
+    (TOOL_OPEN, "&lt;tool_call>"),
+    (TOOL_CLOSE, "&lt;/tool_call>"),
+    (RESULT_CLOSE, "&lt;/tool_result>"),
+    (RESULT_OPEN, "&lt;tool_result"),
+)
+
+
+def escape_markers(text: str) -> str:
+    """Defang protocol markers inside text the model must read as data."""
+    for marker, replacement in _MARKER_ESCAPES:
+        if marker in text:
+            text = text.replace(marker, replacement)
+    return text
+
+
 def tool_call_text(name: str, args: dict[str, Any]) -> str:
     payload = json.dumps(
         {"name": name, "arguments": args}, separators=(",", ":"), ensure_ascii=False
     )
-    return f"\n{TOOL_OPEN}{payload}{TOOL_CLOSE}"
+    return f"\n{TOOL_OPEN}{escape_markers(payload)}{TOOL_CLOSE}"
 
 
 def tool_result_to_text(block: ToolResultBlock, name: str) -> str:
@@ -308,9 +331,10 @@ def tool_result_to_text(block: ToolResultBlock, name: str) -> str:
             parts.append("[image omitted]")
         else:
             parts.append(json.dumps(c.to_dict(), separators=(",", ":"), ensure_ascii=False))
-    body = "".join(parts)
+    body = escape_markers("".join(parts))
     error = ' error="true"' if block.is_error else ""
-    return f'<tool_result name="{name}"{error}>\n{body}\n</tool_result>'
+    safe_name = name.replace('"', "&quot;").replace(">", "&gt;")
+    return f'<tool_result name="{safe_name}"{error}>\n{body}\n</tool_result>'
 
 
 def serialize_history(messages: list[Message]) -> list[Message]:
