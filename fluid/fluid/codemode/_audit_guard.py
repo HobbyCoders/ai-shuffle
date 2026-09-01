@@ -29,6 +29,11 @@ import threading
 
 CELL_FILENAME = "<cell>"
 CELL_MODULE_NAME = "__cell__"
+# Saved skills are model-authored too: the VFS compiles ``skills.<name>`` as
+# ``skills/<name>.py``, and a frame from one counts as cell code whether or
+# not a cell frame sits below it on the stack.
+SKILL_FILENAME_PREFIX = "skills/"
+SKILL_MODULE_PREFIX = "skills."
 
 # Events the child refuses from cell code regardless of config: process
 # spawning, signals, native code loading, registry access, environment edits.
@@ -135,10 +140,13 @@ class AuditGuard:
         if threading.get_ident() != self._main_thread:
             return True
         while frame is not None:
-            code = frame.f_code
-            if code.co_filename == CELL_FILENAME:
+            filename = frame.f_code.co_filename
+            if filename == CELL_FILENAME or filename.startswith(SKILL_FILENAME_PREFIX):
                 return True
-            if frame.f_globals.get("__name__") == CELL_MODULE_NAME:
+            name = frame.f_globals.get("__name__")
+            if name == CELL_MODULE_NAME or (
+                isinstance(name, str) and name.startswith(SKILL_MODULE_PREFIX)
+            ):
                 return True
             frame = frame.f_back
         return False

@@ -75,6 +75,9 @@ class GateVerdict:
     anchor_results: dict[str, str] = field(default_factory=dict)
     regressions: int = 0
     budget: int = DEFAULT_BUDGET
+    # Anchors with a passing baseline behind the retention stage (0 means
+    # that stage checked nothing).
+    anchors: int = 0
 
 
 class CommitGate:
@@ -99,13 +102,33 @@ class CommitGate:
         validator: Callable[[Proposal], list[str]] | None = None,
         apply: Callable[[Proposal], None] | None = None,
         require_motivation: bool = True,
+        require_anchors: bool = False,
     ) -> GateVerdict:
-        """Run the gate; apply and log on commit, park with evidence on fail."""
+        """Run the gate; apply and log on commit, park with evidence on fail.
+
+        ``require_anchors`` refuses to commit while no anchor has a passing
+        baseline: with nothing to replay, the retention stage passes
+        trivially and the only check left is the motivating case the same
+        model authored. The default install has no anchors, so a synthesizer
+        proposal is refused there unless a human waives this.
+        """
         errors = list(validator(proposal)) if validator is not None else []
         if errors:
             return self._park(proposal, "validity", errors, {})
 
         anchor_results: dict[str, str] = {}
+        anchors = self._anchors.list()
+        passing = sum(1 for a in anchors if a.baseline == "pass")
+        if require_anchors and passing == 0:
+            return self._park(
+                proposal,
+                "retention",
+                ["no anchor has a passing baseline, so the retention stage "
+                 "cannot detect a regression; add anchors (fluid evolve "
+                 "anchors add, then anchors run) or waive with "
+                 "--allow-no-anchors"],
+                anchor_results,
+            )
         if proposal.motivation is None:
             if require_motivation:
                 return self._park(
@@ -153,7 +176,7 @@ class CommitGate:
 
         regressions = 0
         retention_reasons: list[str] = []
-        for anchor in self._anchors.list():
+        for anchor in anchors:
             if anchor.baseline != "pass":
                 anchor_results[anchor.id] = f"skipped (baseline {anchor.baseline})"
                 continue
@@ -187,6 +210,7 @@ class CommitGate:
             anchor_results=anchor_results,
             regressions=regressions,
             budget=self._budget,
+            anchors=passing,
         )
         self._append(
             LOG_FILE,

@@ -461,6 +461,12 @@ class CliHost:
             ctx=ToolCtx(cwd=self.config.cwd, session_id=meta.session_id),
             allowed_tools=allowed,
             disallowed_tools=disallowed,
+            # One learner per store: the worker journals into the parent's
+            # journal (stamped with its agent name) and the parent's
+            # synthesizer reads it. A synthesizer per worker paid for the
+            # same slice N times and wrote near-duplicate memories.
+            synthesizer=self._learner(),
+            agent=definition.name if definition is not None else "subagent",
         )
         if definition is not None and definition.model:
             child.model = definition.model
@@ -470,6 +476,14 @@ class CliHost:
             permission_responder=self.permission_responder, nested=True,
         ).attach(child)
         return child
+
+    def _learner(self) -> Any | None:
+        """The parent engine's synthesizer, whichever recorder holds it."""
+        for holder in ("_codemode", "_journal"):
+            synthesizer = getattr(getattr(self.engine, holder, None), "_synthesizer", None)
+            if synthesizer is not None:
+                return synthesizer
+        return None
 
     async def _run_child(self, child: Any, session_id: str, prompt: str) -> tuple[str, str]:
         """Run one child turn to completion. Returns ``(status, final_text)``."""

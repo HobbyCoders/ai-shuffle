@@ -306,10 +306,12 @@ class CodeModeSession:
         """Verified skill sources for the kernel mount.
 
         Stale skills (source changed since their last verdict) are re-verified
-        in a throwaway kernel first; broken ones are excluded from the mount
-        and flagged in ``list_tools``. Verification failure of the *pass*
-        itself (e.g. kernel spawn issues) degrades to mounting as-is — the
-        continual layer must never take down run_python.
+        in a throwaway kernel first, within the mount's verification budget;
+        broken ones are excluded from the mount and flagged in
+        ``list_tools``, and ones the budget did not reach wait for the next
+        mount. Verification failure of the *pass* itself (e.g. kernel spawn
+        issues) degrades to mounting as-is — the continual layer must never
+        take down run_python.
         """
         if self._skills is None:
             return {}
@@ -318,7 +320,9 @@ class CodeModeSession:
         except Exception:
             return self._skills.sources()
         return {
-            s.name: s.source for s in self._skills.list() if s.broken is None
+            s.name: s.source for s in self._skills.list()
+            if s.broken is None and s.source
+            and not self._skills.needs_verification(s.name)
         }
 
     async def _ensure_kernel(self) -> SubprocessKernel:

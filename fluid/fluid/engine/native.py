@@ -2942,6 +2942,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 ToolOutcome(
                     text=f"tool not available in this session: {name}", is_error=True
                 ),
+                input=input,
             )
         spec = self.registry.get(name)
 
@@ -2955,6 +2956,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return await self._finish_tool(
                 sid, turn_id, name, tool_use_id,
                 ToolOutcome(text=plan_mode_denial(name), is_error=True),
+                input=input,
             )
 
         # PreToolUse hook: deny short-circuits with an in-context error result;
@@ -3011,6 +3013,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     return await self._finish_tool(
                         sid, turn_id, name, tool_use_id,
                         ToolOutcome(text=_DOOM_LOOP_DENIAL, is_error=True),
+                        input=input,
                     )
                 verdict = "ask"
                 ask_reason = _DOOM_LOOP_REASON
@@ -3033,6 +3036,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 return await self._finish_tool(
                     sid, turn_id, name, tool_use_id,
                     ToolOutcome(text=deny_message or "permission denied", is_error=True),
+                    input=input,
                 )
 
         # run_python is engine-driven: it opens the kernel; the kernel's in-sandbox

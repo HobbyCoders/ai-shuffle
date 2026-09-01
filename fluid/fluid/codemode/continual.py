@@ -30,6 +30,8 @@ from fluid.codemode.skills import (
     MAX_LOG_BYTES,
     MAX_LOG_ENTRIES,
     SkillStore,
+    journal_lock,
+    referenced_skills,
     trim_jsonl,
     validate_skill,
 )
@@ -51,7 +53,11 @@ corrections).
 You will see the current skill library, the current memory list, and a journal
 of the recent session: conversation events ([user] prompts and [assistant]
 replies — these carry the intent behind the work and whether the user accepted
-it) interleaved with the cells that were executed. Distill only *genuinely
+it) interleaved with the cells that were executed. Several sessions may share
+one journal (a parent and its subagents, two shells on one machine); a
+`--- session ... ---` line marks where one narrative ends and another begins,
+so never read across one as if it were a single story. A skill listed without
+its source this pass can be deleted but not rewritten. Distill only *genuinely
 reusable* workflow improvements:
 - recurring multi-step patterns worth naming (not one-off task logic);
 - generalize: parameters instead of hard-coded values from the journal;
@@ -199,9 +205,76 @@ _GUIDANCE_RE = re.compile(
     r'<guidance stem="([^"]{1,64})">\n?(.*?)</guidance>', re.DOTALL
 )
 
+_WORD_RE = re.compile(r"[a-z0-9]{4,}")
+# Journal kinds whose text a user wrote (or asked to have remembered).
+_USER_KINDS = ("user", "remember")
+_PROVENANCE_MATCH = 0.5
+
+
+def _content_words(text: str) -> set[str]:
+    return set(_WORD_RE.findall((text or "").lower()))
+
+
+def _entry_tool_text(entry: dict) -> str:
+    kind = entry.get("kind", "cell")
+    if kind == "tool":
+        return str(entry.get("output", ""))
+    if kind == "cell":
+        parts = [str(entry.get(k, "") or "") for k in ("stdout", "value", "error")]
+        return " ".join(parts)
+    if kind == "friction":
+        return str(entry.get("text", ""))
+    return ""
+
+
+def memory_provenance(text: str, entries: list[dict]) -> str:
+    """Where a proposed memory's words came from in the slice that produced it.
+
+    ``user`` when at least half its content words appear in what the user
+    wrote (user prompts, Remember entries); otherwise ``tool`` when they
+    appear in tool or cell output; otherwise ``session``. Mechanical on
+    purpose: the model that proposed the memory is the one an injected
+    document may have steered, so it does not get to vouch for itself.
+    """
+    words = _content_words(text)
+    if not words:
+        return "session"
+    user_words = _content_words(" ".join(
+        str(e.get("text", "")) for e in entries if e.get("kind") in _USER_KINDS
+    ))
+    if len(words & user_words) / len(words) >= _PROVENANCE_MATCH:
+        return "user"
+    tool_words = _content_words(" ".join(_entry_tool_text(e) for e in entries))
+    if len(words & tool_words) / len(words) >= _PROVENANCE_MATCH:
+        return "tool"
+    return "session"
+
+
+def _add_usage(total: dict[str, int], raw: dict) -> None:
+    """Fold one model call's usage into ``total`` (provider key spellings
+    normalized to fluid's four counters)."""
+    for key, aliases in (
+        ("input_tokens", ("input_tokens", "prompt_tokens")),
+        ("output_tokens", ("output_tokens", "completion_tokens")),
+        ("cache_read_tokens", ("cache_read_input_tokens", "cache_read_tokens")),
+        ("cache_creation_tokens", ("cache_creation_input_tokens", "cache_creation_tokens")),
+    ):
+        for alias in aliases:
+            value = raw.get(alias)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value:
+                total[key] = total.get(key, 0) + int(value)
+                break
+
 # Journal previews are already trimmed at write time; cap the slice we show.
 MAX_ENTRIES_PER_PASS = 40
 MIN_NEW_ENTRIES = 8
+# Skill source shown per pass: skills the slice referenced are always shown
+# whole; the rest fill this budget most-used first and beyond it appear as an
+# index line only. Every pass used to re-send every skill's full source.
+SKILL_SOURCE_BUDGET = 24_000
+# Lock file (next to the journal) held for the whole pass, so two processes
+# over one store never pay for the same slice or write the same memory twice.
+SYNTHESIS_LOCK = "synthesis"
 # Consolidation (a whole-store curation pass) is interval-gated like skill
 # curation; it rides an ordinary background pass, never session close.
 CONSOLIDATE_INTERVAL_DAYS = 7.0
@@ -254,6 +327,15 @@ class Synthesizer:
         # instead of maybe never.
         self._urgent = False
         self.last_error: str | None = None
+        # Spend: the last pass's tokens and the running total for this
+        # synthesizer's life. Both land in the pass log; the loader puts the
+        # last pass on the ContinualUpdate event.
+        self.last_pass_usage: dict[str, int] = {}
+        self.usage: dict[str, int] = {}
+        # Memories the last pass saved with tool-only provenance, as
+        # ``"<id>: <text>"``: stored, held out of the prompt, surfaced to the
+        # host so the user can confirm or ignore them.
+        self.last_held: list[str] = []
 
     # ─── triggering ──────────────────────────────────────────────────────
     def mark_urgent(self) -> None:
@@ -338,13 +420,25 @@ class Synthesizer:
 
     # ─── one synthesis pass ──────────────────────────────────────────────
     async def run(self) -> list[str]:
-        """One pass over the un-synthesized journal slice. Returns saved names."""
+        """One pass over the un-synthesized journal slice. Returns saved names.
+
+        Single-flight across processes: the pass holds the store's synthesis
+        lock from reading the cursor to advancing it, and a pass that finds
+        the lock taken does nothing, so two engines over one store never pay
+        twice for a slice or write near-duplicate memories from it.
+        """
+        with journal_lock(self._store.root / SYNTHESIS_LOCK) as held:
+            if not held:
+                return []
+            return await self._run_locked()
+
+    async def _run_locked(self) -> list[str]:
         cursor = self._store.synth_cursor()
         entries = self._store.journal_entries(cursor, self._max_entries)
         if not entries:
             return []
-        text = await self._complete(self._prompt(entries), _SYNTH_SYSTEM)
-        changed = await self._apply(text)  # sets last_error (None on a clean pass)
+        text, usage = await self._complete(self._prompt(entries), _SYNTH_SYSTEM)
+        changed = await self._apply(text, entries)  # sets last_error (None on a clean pass)
         self._store.set_synth_cursor(cursor + len(entries))
         # Consumed entries have no reader left: drop the ones past the
         # retention tail and rebase the cursor. Best-effort — a failed reap
@@ -358,7 +452,7 @@ class Synthesizer:
         self._urgent = False
         self._log_pass(
             "synthesis", changed, error=self.last_error,
-            consumed=len(entries), output_preview=text,
+            consumed=len(entries), output_preview=text, usage=usage,
         )
         return changed
 
@@ -370,6 +464,7 @@ class Synthesizer:
         error: str | None = None,
         consumed: int | None = None,
         output_preview: str | None = None,
+        usage: dict[str, int] | None = None,
     ) -> None:
         """Append one pass record to ``.synthesis-log.jsonl`` (best-effort).
 
@@ -385,6 +480,8 @@ class Synthesizer:
         record: dict[str, Any] = {"ts": time.time(), "kind": kind, "changed": changed}
         if consumed is not None:
             record["consumed"] = consumed
+        if usage:
+            record["usage"] = dict(usage)
         if error:
             record["error"] = error
         if output_preview is not None and not changed:
@@ -446,7 +543,7 @@ class Synthesizer:
             lines.append("(empty)")
         for s in skills:
             lines.append(f"- {s.name} (used {s.uses}x): {s.description}")
-        text = await self._complete("\n".join(lines), _CONSOLIDATE_SYSTEM)
+        text, usage = await self._complete("\n".join(lines), _CONSOLIDATE_SYSTEM)
         changed: list[str] = []
         for match in _MEMORY_RE.finditer(text or ""):
             memory_id, scope_attr, memory_text = match.groups()
@@ -467,7 +564,7 @@ class Synthesizer:
         for match in _DELETE_RE.finditer(text or ""):
             if self._store.delete(match.group(1)):
                 changed.append(f"-{match.group(1)}")
-        self._log_pass("consolidation", changed, output_preview=text)
+        self._log_pass("consolidation", changed, output_preview=text, usage=usage)
         return changed
 
     def _resolve_scope(self, scope_attr: str | None) -> str | None:
@@ -483,16 +580,38 @@ class Synthesizer:
             return self._project or "global"
         return "global"
 
-    def _prompt(self, entries: list[dict]) -> str:
+    def _library_lines(self, entries: list[dict]) -> list[str]:
+        """The skill library as the prompt shows it: skills the slice
+        referenced in full, then the most used, until ``SKILL_SOURCE_BUDGET``
+        characters of source are spent; the rest as an index line."""
         lines = ["## Current skill library"]
         skills = self._store.list()
         if not skills:
             lines.append("(empty)")
-        for s in skills:
-            lines.append(f"### skills.{s.name}  (used {s.uses}x)")
-            lines.append("```python")
-            lines.append(s.source.rstrip("\n"))
-            lines.append("```")
+            return lines
+        referenced: set[str] = set()
+        for e in entries:
+            if e.get("kind", "cell") == "cell":
+                referenced.update(referenced_skills(str(e.get("code", ""))))
+        ordered = sorted(
+            skills, key=lambda s: (s.name not in referenced, -s.uses, s.name)
+        )
+        budget = SKILL_SOURCE_BUDGET
+        for s in ordered:
+            header = f"### skills.{s.name}  (used {s.uses}x)"
+            source = s.source.rstrip("\n")
+            if source and (s.name in referenced or len(source) <= budget):
+                lines += [header, "```python", source, "```"]
+                budget -= len(source)
+            else:
+                lines.append(
+                    f"{header}: {s.description} (source not shown this pass; "
+                    f"{len(s.source)} bytes)"
+                )
+        return lines
+
+    def _prompt(self, entries: list[dict]) -> str:
+        lines = self._library_lines(entries)
         lines.append("")
         lines.append("## Current memory (id, recalls, scope, text)")
         memories = self._store.memories()
@@ -513,7 +632,15 @@ class Synthesizer:
         lines.append("")
         lines.append("## Session journal (conversation + executed cells, in order)")
         cell_no = 0
+        current: tuple[Any, Any] | None = None
         for e in entries:
+            tag = (e.get("session"), e.get("agent"))
+            if any(tag) and tag != current:
+                current = tag
+                label = f"session {tag[0] or '?'}"
+                if tag[1]:
+                    label += f", agent {tag[1]}"
+                lines.append(f"--- {label} ---")
             kind = e.get("kind", "cell")
             if kind in ("user", "assistant", "remember", "friction"):
                 scope_hint = (
@@ -545,7 +672,16 @@ class Synthesizer:
                 lines.append(f"outcome: {json.dumps(summary, ensure_ascii=False)}")
         return "\n".join(lines)
 
-    async def _complete(self, prompt: str, system: str = _SYNTH_SYSTEM) -> str:
+    async def _complete(
+        self, prompt: str, system: str = _SYNTH_SYSTEM,
+    ) -> tuple[str, dict[str, int]]:
+        """One plain completion: the text, and the tokens it cost.
+
+        Usage arrives on ``message_start`` and ``usage`` chunks; a later chunk
+        restates a counter (Anthropic's final ``output_tokens``), so the last
+        value per counter wins within the call before it is added to the
+        running totals.
+        """
         request = ProviderRequest(
             model=self._model,
             messages=[Message(role="user", content=[Text(text=prompt)])],
@@ -554,21 +690,37 @@ class Synthesizer:
             max_tokens=self._max_tokens,
         )
         parts: list[str] = []
+        raw: dict[str, Any] = {}
         async for chunk in self._provider.stream(request):
             if chunk.kind == "text_delta":
                 parts.append(chunk.payload["text"])
-        return "".join(parts)
+            elif chunk.kind in ("message_start", "usage"):
+                reported = (chunk.payload or {}).get("usage")
+                if isinstance(reported, dict):
+                    raw.update({k: v for k, v in reported.items() if v})
+        usage: dict[str, int] = {}
+        _add_usage(usage, raw)
+        self.last_pass_usage = dict(usage)
+        _add_usage(self.usage, raw)
+        return "".join(parts), usage
 
-    async def _apply(self, text: str) -> list[str]:
+    async def _apply(self, text: str, entries: list[dict] | None = None) -> list[str]:
         """Parse the model's output, verify candidates, apply what passes.
 
         Candidates that fail static validation OR the verification kernel
         (import + ``_selftest``) are skipped and recorded on ``last_error`` —
         synthesized knowledge has to prove it works before it lands. Returns
         the names saved (or ``-name`` for deletions).
+
+        ``entries`` is the journal slice the output came from: each memory is
+        stamped with the provenance :func:`memory_provenance` derives from
+        it, and the ones that only tool output supports are listed on
+        ``last_held``. Without a slice (a direct call) provenance is left
+        alone.
         """
         changed: list[str] = []
         errors: list[str] = []
+        held: list[str] = []
         candidates: dict[str, str] = {}
         for match in _SKILL_RE.finditer(text or ""):
             name, source = match.group(1), match.group(2).strip("\n") + "\n"
@@ -599,16 +751,23 @@ class Synthesizer:
                 changed.append(f"-{match.group(1)}")
         for match in _MEMORY_RE.finditer(text or ""):
             memory_id, scope_attr, memory_text = match.groups()
+            provenance = (
+                memory_provenance(memory_text, entries) if entries is not None else None
+            )
             try:
                 saved = self._store.save_memory(
                     memory_text.strip(),
                     memory_id=memory_id,
                     scope=self._resolve_scope(scope_attr),
+                    provenance=provenance,
                 )
             except ValueError as exc:
                 errors.append(f"memory: {exc}")
                 continue
             changed.append(f"memory:{saved.id}")
+            if saved.provenance == "tool":
+                held.append(f"{saved.id}: {saved.text}")
+        self.last_held = held
         for match in _DELETE_MEMORY_RE.finditer(text or ""):
             if self._store.delete_memory(match.group(1)):
                 changed.append(f"-memory:{match.group(1)}")

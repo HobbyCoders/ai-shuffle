@@ -480,3 +480,26 @@ def test_cli_parses_anchor_and_evolve_commands() -> None:
         ["evolve", "propose", "--stem", "glm", "--content", "x", "--no-motivation"]
     )
     assert propose.evolve_command == "propose" and propose.no_motivation
+
+
+
+@pytest.mark.asyncio
+async def test_empty_anchor_set_parks_unless_waived(tmp_path) -> None:
+    """CL-4: zero passing anchors means the retention stage cannot detect a
+    regression; ``require_anchors`` parks there before any replay is paid."""
+    store = AnchorStore(tmp_path)
+    store.add(**_anchor_fields(title="never baselined"))  # baseline unknown
+    runner = ScriptedRunner()
+    gate = CommitGate(store, runner)
+    verdict = await gate.evaluate(_proposal(), require_anchors=True)
+    assert not verdict.committed and verdict.stage == "retention"
+    assert runner.replayed == []
+    assert any("no anchor has a passing baseline" in r for r in verdict.reasons)
+
+    waived = await gate.evaluate(_proposal(), require_anchors=False)
+    assert waived.committed and waived.anchors == 0
+
+    passing = await CommitGate(_passing_anchor_set(tmp_path / "ok"), ScriptedRunner()).evaluate(
+        _proposal(), require_anchors=True,
+    )
+    assert passing.committed and passing.anchors == 3

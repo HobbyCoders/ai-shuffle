@@ -139,14 +139,15 @@ both Linux/macOS and Windows.
 journal of what actually happened — executed kernel cells under code mode, or
 per-tool-call entries in plain JSON sessions — and runs a background pass that
 distills recurring workflows into persistent Python skills. Skills have to
-prove themselves: each one carries a self-test, verified in a throwaway kernel
-on save and whenever it changes — broken skills are unmounted and flagged, not
-silently trusted. The synthesizer is explicitly told what *not* to learn
-(environment-dependent failures, negative tool claims that harden into
-standing refusals, unresolved failures written up as workflows), and a
-deterministic curation pass ages the library: stale after 30 days, archived —
-never deleted — after 90, pinned skills untouched. Over time the harness gets
-genuinely better at *your* work. (Design rationale:
+prove themselves: each one is imported in a throwaway kernel on save and
+whenever it changes, and its `_selftest` runs when it defines one — broken
+skills are unmounted and flagged, not silently trusted. The synthesizer is
+explicitly told what *not* to learn (environment-dependent failures, negative
+tool claims that harden into standing refusals, unresolved failures written up
+as workflows), and a deterministic curation pass ages the library: stale after
+30 days, archived after 90, pinned skills untouched, with the live set and the
+archive both capped so the oldest archived skills eventually go. Over time the
+harness gets genuinely better at *your* work. (Design rationale:
 [docs/agent-experience.md](docs/agent-experience.md).)
 
 **A real base prompt — composed, not pasted.** The CLI's system prompt is a
@@ -170,7 +171,8 @@ SSRF-guarded, results fenced as untrusted data) close the network gap without
 an MCP server. `AskUser` asks the user structured questions mid-turn and
 parks until they answer. Memory is two-sided: the continual learner distills
 remembered facts (alongside its skills) into a bounded, machine-curated list
-injected each session, and the session store itself is episodic memory —
+injected each session — a fact whose only evidence was tool output is held
+back until you confirm it — and the session store itself is episodic memory —
 `SessionSearch` lists and searches past sessions, `SessionView` opens one, so
 "like we did last week" is answered from the record.
 

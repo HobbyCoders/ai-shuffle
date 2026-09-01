@@ -532,3 +532,122 @@ def test_store_refuses_to_write_outside_root(tmp_path) -> None:
     written = [p for p in tmp_path.rglob("*") if p.is_file() and p.suffix == ".py"]
     assert written == []
     assert store.list() == []
+
+
+
+# ─── Batch 7: one learner per store, bounded inputs, visible spend ───────────
+
+
+def test_journal_context_stamps_session_and_agent(tmp_path) -> None:
+    store = SkillStore(tmp_path)
+    store.journal_context(session_id="ses_1", agent="worker")
+    store.journal_append({"kind": "user", "text": "hi"})
+    store.journal_append({"kind": "tool", "name": "Read", "session": "ses_other"})
+    first, second = store.journal_entries(0)
+    assert first["session"] == "ses_1" and first["agent"] == "worker"
+    assert second["session"] == "ses_other" and second["agent"] == "worker"
+    store.journal_context()
+    store.journal_append({"kind": "user", "text": "untagged"})
+    assert "session" not in store.journal_entries(2)[0]
+
+
+async def test_prompt_separates_sessions_and_budgets_skill_sources(tmp_path, monkeypatch) -> None:
+    """CL-3 and CL-7: the journal is rendered one session at a time, and the
+    library is no longer re-sent whole every pass: skills the slice used are
+    shown in full, the rest until the source budget is spent, then as an
+    index line."""
+    import fluid.codemode.continual as continual
+
+    store = SkillStore(tmp_path)
+    big = '"""Big skill."""\n' + "x = 1\n" * 3000
+    store.save("big_one", big)
+    store.save("big_two", big)
+    store.save("tiny", '"""Tiny."""\n\ndef tiny():\n    return 1\n')
+    monkeypatch.setattr(continual, "SKILL_SOURCE_BUDGET", 20_000)
+    entries = [
+        {"kind": "user", "text": "first", "session": "s1"},
+        {"kind": "cell", "code": "from skills import big_two\nbig_two", "session": "s1"},
+        {"kind": "user", "text": "second", "session": "s2", "agent": "worker"},
+        {"kind": "assistant", "text": "done", "session": "s2", "agent": "worker"},
+    ]
+    prompt = Synthesizer(provider=None, model="m", store=store)._prompt(entries)
+    assert "--- session s1 ---" in prompt
+    assert prompt.count("--- session s2, agent worker ---") == 1
+    library = prompt.split("## Current memory")[0]
+    assert library.count("```python") == 2  # big_two (referenced) and tiny
+    assert "### skills.big_one  (used 0x): Big skill. (source not shown this pass" in prompt
+    assert prompt.index("### skills.big_two") < prompt.index("### skills.big_one")
+
+
+async def test_synthesis_is_single_flight_across_processes(tmp_path) -> None:
+    """CL-3: a pass holds the store's synthesis lock; a second learner over
+    the same store (another process, or a worker) skips the slice instead of
+    paying for it again and writing duplicate memories."""
+    from fluid.codemode.continual import SYNTHESIS_LOCK
+    from fluid.codemode.skills import journal_lock
+
+    store = SkillStore(tmp_path)
+    _journal(store, 3)
+    provider = _FakeProvider("NO_CHANGES")
+    synth = Synthesizer(provider, "test-model", store, min_new_entries=1)
+    with journal_lock(tmp_path / SYNTHESIS_LOCK) as held:
+        assert held
+        assert await synth.run() == []
+    assert provider.requests == [] and store.synth_cursor() == 0
+    await synth.run()
+    assert len(provider.requests) == 1 and store.synth_cursor() == 3
+
+
+class _UsageProvider(_FakeProvider):
+    async def stream(self, request):
+        self.requests.append(request)
+        yield StreamChunk(
+            kind="message_start",
+            payload={"usage": {"input_tokens": 120, "output_tokens": 1}, "message": {}},
+        )
+        yield StreamChunk(kind="text_delta", payload={"text": self._text})
+        yield StreamChunk(
+            kind="usage",
+            payload={"usage": {"output_tokens": 30, "cache_read_input_tokens": 40}},
+        )
+        yield StreamChunk(kind="message_stop")
+
+
+async def test_synthesis_spend_is_recorded(tmp_path) -> None:
+    """CL-8: the pass's tokens land on the synthesizer and in the pass log."""
+    store = SkillStore(tmp_path)
+    _journal(store, 3)
+    synth = Synthesizer(_UsageProvider("NO_CHANGES"), "m", store, min_new_entries=1)
+    await synth.run()
+    assert synth.last_pass_usage == {
+        "input_tokens": 120, "output_tokens": 30, "cache_read_tokens": 40,
+    }
+    _journal(store, 2)
+    await synth.run()
+    assert synth.usage["input_tokens"] == 240 and synth.usage["output_tokens"] == 60
+    log = (tmp_path / ".synthesis-log.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(log[-1])["usage"]["input_tokens"] == 120
+
+
+def test_live_skill_cap_archives_the_least_used(tmp_path, monkeypatch) -> None:
+    """CL-7: the live library is bounded; past the cap the least used, least
+    recently active skill moves to the archive."""
+    import fluid.codemode.skills as skills_mod
+
+    monkeypatch.setattr(skills_mod, "MAX_LIVE_SKILLS", 3)
+    store = SkillStore(tmp_path)
+    for i in range(3):
+        store.save(f"s{i}", f'"""S{i}."""\n')
+    store.note_uses(["s0", "s0", "s1"])
+    store.save("s3", '"""S3."""\n')
+    assert {s.name for s in store.list()} == {"s0", "s1", "s3"}
+    assert (store.archive_dir / "s2.py").is_file()
+    assert store.archived_skills()[0].name == "s2"
+
+
+def test_oversized_skill_file_is_flagged_not_mounted(tmp_path) -> None:
+    store = SkillStore(tmp_path)
+    (tmp_path / "huge.py").write_text('"""Huge."""\n' + "#" * 70_000, encoding="utf-8")
+    skill = store.get("huge")
+    assert skill is not None and skill.broken and "byte cap" in skill.broken
+    assert "huge" not in store.sources()

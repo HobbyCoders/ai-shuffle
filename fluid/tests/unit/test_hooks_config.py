@@ -460,3 +460,36 @@ def test_register_config_hooks_accepts_bus_shaped_object(tmp_path) -> None:
     )
     assert [e for e, _ in seen] == ["PostToolUse"]
     assert registered[0].matcher == "Edit" and registered[0].timeout == 3.0
+
+
+
+async def test_post_tool_hook_sees_the_input_of_a_denied_call(tmp_path) -> None:
+    """CL-6: a denial is the most useful negative evidence there is, and the
+    PostToolUse payload (and so the journal) used to carry ``input: None``
+    for it."""
+    from fluid.config.loader import BUILTIN_DEFAULTS, deep_merge
+    from fluid.hooks.bus import POST_TOOL_USE, HookBus
+    from fluid.permissions.rules import Rule
+
+    seen: list[dict] = []
+    bus = HookBus()
+
+    async def capture(event: str, payload: dict):
+        seen.append(dict(payload))
+        return None
+
+    bus.on(POST_TOOL_USE, capture)
+    config = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path)}))
+    provider = ScriptedProvider([_tool("t1", "mcp__wx__get_weather", '{"city": "Paris"}'),
+                                 _text("denied")])
+    engine = build_engine(
+        config, MemoryStore(), provider=provider, registry=_weather_registry(),
+        permissions=PermissionEngine(
+            "never_ask", rules=[Rule(tool="mcp__wx__get_weather", decision="deny")],
+        ),
+        hooks=bus,
+    )
+    events = await _run_turn(engine)
+    result = next(e for e in events if isinstance(e, ToolResult))
+    assert result.is_error
+    assert seen and seen[0]["input"] == {"city": "Paris"} and seen[0]["is_error"]

@@ -21,7 +21,9 @@ import asyncio
 import json
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from fluid.codemode.anchors import (
     AnchorStore,
@@ -143,14 +145,46 @@ def guidance_validator(proposal: Proposal) -> list[str]:
     return errors
 
 
-def apply_guidance(proposal: Proposal, *, home: Path | None = None) -> Path:
-    """Write the committed guidance file (the gate calls this on commit)."""
+def render_guidance_diff(stem: str, before: str | None, after: str) -> str:
+    """What committing this content changes, as a unified diff (or the whole
+    file when there was none)."""
+    import difflib
+
+    name = f"guidance/{stem}.md"
+    if before is None:
+        return f"new file {name}:\n" + after.rstrip("\n")
+    diff = difflib.unified_diff(
+        before.splitlines(), after.splitlines(),
+        fromfile=f"{name} (before)", tofile=f"{name} (after)", lineterm="",
+    )
+    return "\n".join(diff) or f"{name}: unchanged"
+
+
+def apply_guidance(
+    proposal: Proposal,
+    *,
+    home: Path | None = None,
+    report: Callable[[str], Any] | None = None,
+) -> Path:
+    """Write the committed guidance file (the gate calls this on commit).
+
+    The previous content, when there is one, is kept next to it as
+    ``<stem>.md.bak``, and ``report`` (print, for the CLI) receives the diff
+    the commit makes, so a committed proposal is never a silent full-file
+    replacement.
+    """
     directory = guidance_dir(home)
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / f"{proposal.target}.md"
     content = proposal.content
     if not content.endswith("\n"):
         content += "\n"
+    before: str | None = None
+    if target.is_file():
+        before = target.read_text(encoding="utf-8")
+        target.with_name(f"{proposal.target}.md.bak").write_text(before, encoding="utf-8")
+    if report is not None:
+        report(render_guidance_diff(proposal.target, before, content))
     target.write_text(content, encoding="utf-8")
     return target
 
@@ -434,6 +468,7 @@ async def _evolve_run_pending(args, config: HarnessConfig) -> int:
         config,
         runner=runner,
         budget=budget if budget is not None else config.anchor_budget,
+        allow_no_anchors=getattr(args, "allow_no_anchors", False),
     )
     if not committed and not parked:
         print("no pending proposals")
@@ -442,33 +477,49 @@ async def _evolve_run_pending(args, config: HarnessConfig) -> int:
     return 0 if not parked else 1
 
 
+def _passing_anchors(store: AnchorStore) -> int:
+    return sum(1 for a in store.list() if a.baseline == "pass")
+
+
 async def run_pending(
     config: HarnessConfig,
     *,
     runner,
     budget: int | None = None,
     guidance_home: Path | None = None,
+    allow_no_anchors: bool = False,
+    report: Callable[[str], Any] = print,
 ) -> tuple[list[str], list[str]]:
     """Evaluate every queued proposal through the gate; returns (committed,
     parked) target lists. Verdicts are durable in the evolution log /
-    parked.jsonl either way, so evaluated proposals leave the queue."""
+    parked.jsonl either way, so evaluated proposals leave the queue.
+
+    Synthesizer proposals need at least one anchor with a passing baseline
+    behind the retention stage; ``allow_no_anchors`` is the human waiver.
+    ``report`` receives the anchor count and each commit's diff.
+    """
     root = skills_root(config)
+    anchors = AnchorStore(root)
     gate = CommitGate(
-        AnchorStore(root),
+        anchors,
         runner,
         budget=budget if budget is not None else config.anchor_budget,
     )
     committed: list[str] = []
     parked: list[str] = []
-    for record in pending_queue(root):
+    queue = pending_queue(root)
+    if queue:
+        report(f"anchors with a passing baseline: {_passing_anchors(anchors)}")
+    for record in queue:
         proposal = proposal_from_dict(record)
         if proposal.kind != "guidance":
             continue  # unknown kinds stay queued for a newer fluid
         verdict = await gate.evaluate(
             proposal,
             validator=guidance_validator,
-            apply=lambda p: apply_guidance(p, home=guidance_home),
+            apply=lambda p: apply_guidance(p, home=guidance_home, report=report),
             require_motivation=True,  # the synthesizer never gets the waiver
+            require_anchors=not allow_no_anchors,
         )
         label = f"{proposal.kind}:{proposal.target}"
         for anchor_id, result in sorted(verdict.anchor_results.items()):
@@ -515,16 +566,19 @@ async def _evolve_propose(args, config: HarnessConfig) -> int:
         proposer="manual",
     )
     runner = AnchorRunner(config, provider_name=getattr(args, "provider", None))
+    anchors = AnchorStore(skills_root(config))
+    print(f"anchors with a passing baseline: {_passing_anchors(anchors)}")
     gate = CommitGate(
-        AnchorStore(skills_root(config)),
+        anchors,
         runner,
         budget=args.budget if args.budget is not None else config.anchor_budget,
     )
     verdict = await gate.evaluate(
         proposal,
         validator=guidance_validator,
-        apply=lambda p: apply_guidance(p),
+        apply=lambda p: apply_guidance(p, report=print),
         require_motivation=not args.no_motivation,
+        require_anchors=not getattr(args, "allow_no_anchors", False),
     )
     for anchor_id, result in sorted(verdict.anchor_results.items()):
         print(f"  {anchor_id}: {result}")

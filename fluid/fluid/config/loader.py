@@ -673,6 +673,8 @@ def _wire_continual(
     session_id: str | None,
     model: str,
     client: Any | None,
+    synthesizer: Any | None = None,
+    agent: str | None = None,
 ) -> tuple[Any, Any | None]:
     """The skill store and, when ``client`` is given, its synthesizer.
 
@@ -680,11 +682,14 @@ def _wire_continual(
     Remember builtin (``continual_journal``) onto ``ctx`` so both legs of the
     engine serve them. ``client`` is the ProviderClient synthesis passes run
     on; None keeps the journal without a synthesizer, which is what the
-    delegated leg gets when no ``continual_provider`` is configured.
+    delegated leg gets when no ``continual_provider`` is configured. A
+    ``synthesizer`` handed in (a subagent host passing its parent's) is used
+    as is, so one store has one learner. ``agent`` stamps the journal.
     """
     from fluid.codemode.skills import SkillStore, project_key_for
 
     skills = SkillStore(config.skills_dir)  # None → ~/.fluid/skills
+    skills.journal_context(session_id=session_id, agent=agent)
     try:
         # Opportunistic lifecycle pass (interval-gated, deterministic,
         # archive-not-delete). Best-effort: curation must never block an
@@ -698,8 +703,7 @@ def _wire_continual(
     if not config.continual:
         return skills, None
 
-    synthesizer = None
-    if client is not None:
+    if synthesizer is None and client is not None:
         from fluid.codemode.continual import Synthesizer
 
         on_change: Any = None
@@ -707,12 +711,16 @@ def _wire_continual(
             from fluid.events.model import ContinualUpdate
 
             _bus, _sid = bus, session_id or ""
+            learner: list[Any] = []
 
             async def _announce(changes: list[str]) -> None:
                 # Learning that lands invisibly might as well not have
-                # happened — announce what the pass changed.
+                # happened — announce what the pass changed, what it cost,
+                # and which memories are waiting on the user.
+                usage = dict(learner[0].last_pass_usage) if learner else {}
+                held = tuple(learner[0].last_held) if learner else ()
                 await _bus.publish(ContinualUpdate(
-                    session_id=_sid, changes=tuple(changes),
+                    session_id=_sid, changes=tuple(changes), usage=usage, held=held,
                 ))
 
             on_change = _announce
@@ -741,6 +749,8 @@ def _wire_continual(
             session_model=model,
             guidance_snapshot=guidance_snapshot or None,
         )
+        if bus is not None:
+            learner.append(synthesizer)
 
     def _remember(text: str, scope: str | None = None) -> None:
         # The Remember builtin's write path: journal a high-salience entry
@@ -815,6 +825,8 @@ def build_engine(
     claude_cmd: list[str] | None = None,
     allowed_tools: Any | None = None,
     disallowed_tools: Any | None = None,
+    synthesizer: Any | None = None,
+    agent: str | None = None,
 ):
     """Build the engine for ``provider_name`` (default: ``config.default_provider``).
 
@@ -831,7 +843,9 @@ def build_engine(
     ``hooks`` is the caller's own :class:`~fluid.hooks.bus.HookBus`; the
     config's ``[[hooks]]`` commands are registered onto it after whatever the
     caller already attached (a fresh bus is created when the config has hooks
-    and none was passed).
+    and none was passed). ``synthesizer`` shares an existing learner with
+    this engine instead of building one (a subagent host passes its
+    parent's); ``agent`` names the engine in the journal it writes.
     """
     from fluid.tools.registry import ToolCtx, ToolRegistry
 
@@ -923,7 +937,7 @@ def build_engine(
                 )
             skills, synthesizer = _wire_continual(
                 config, ctx=ctx, bus=bus, session_id=session_id, model=model,
-                client=synth_client,
+                client=synth_client, synthesizer=synthesizer, agent=agent,
             )
             journal = ToolJournal(skills, synthesizer)
 
@@ -980,6 +994,7 @@ def build_engine(
         skills, synthesizer = _wire_continual(
             config, ctx=ctx, bus=bus, session_id=session_id, model=model,
             client=synth_client if config.continual else None,
+            synthesizer=synthesizer, agent=agent,
         )
         if config.code_mode:
             from fluid.codemode.session import CodeModeSession

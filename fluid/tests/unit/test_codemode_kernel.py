@@ -532,3 +532,36 @@ def test_audit_guard_attributes_events_to_cell_frames_only() -> None:
     assert not permissive.denied_event("socket.connect")
     assert permissive.denied_event("subprocess.Popen")
     assert permissive.denied_event("ctypes.dlopen")
+
+
+
+def test_audit_guard_attributes_skill_module_frames_to_the_cell() -> None:
+    """ENG-23: a saved skill is model-authored too. Its frames (compiled as
+    ``skills/<name>.py``, module ``skills.<name>``) count as cell code on
+    their own, without a cell frame below them on the stack."""
+    import sys
+
+    from fluid.codemode._audit_guard import AuditGuard
+
+    guard = AuditGuard(allow_fs=False, allow_network=False, roots=[])
+    by_file: dict = {"__name__": "not_a_skill", "__builtins__": __builtins__, "sys": sys}
+    exec(compile("def probe():\n    return sys._getframe()\n", "skills/probe.py", "exec"), by_file)
+    assert guard.from_cell(by_file["probe"]())
+    by_name: dict = {"__name__": "skills.probe", "__builtins__": __builtins__, "sys": sys}
+    exec(compile("def probe():\n    return sys._getframe()\n", "elsewhere.py", "exec"), by_name)
+    assert guard.from_cell(by_name["probe"]())
+
+
+async def test_skill_verification_runs_under_the_audit_hook() -> None:
+    """The verification kernel refuses a skill body that reaches the real
+    interpreter builtins, and reports the refusal as the verdict."""
+    from fluid.codemode.verify import verify_sources
+
+    source = (
+        '"""Escape attempt."""\n'
+        "import json\n"
+        f"os = {_REAL_IMPORT}('os')\n"
+        "os.listdir('.')\n"
+    )
+    verdicts = await verify_sources({"escape": source}, ["escape"])
+    assert verdicts["escape"] and "os.listdir is blocked" in verdicts["escape"]

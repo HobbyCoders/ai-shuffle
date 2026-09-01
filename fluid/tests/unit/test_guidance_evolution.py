@@ -234,6 +234,7 @@ def test_run_pending_commits_through_the_gate(tmp_path) -> None:
     _queue(tmp_path)
     committed, parked = asyncio.run(run_pending(
         _config(tmp_path), runner=ScriptedRunner(), guidance_home=tmp_path,
+        allow_no_anchors=True,
     ))
     assert committed == ["glm"] and parked == []
     written = tmp_path / ".fluid" / "guidance" / "glm.md"
@@ -252,6 +253,7 @@ def test_run_pending_parks_a_failing_proposal(tmp_path) -> None:
     )
     committed, parked = asyncio.run(run_pending(
         _config(tmp_path), runner=runner, guidance_home=tmp_path,
+        allow_no_anchors=True,
     ))
     assert committed == [] and parked == ["glm"]
     assert not (tmp_path / ".fluid" / "guidance" / "glm.md").exists()
@@ -259,3 +261,43 @@ def test_run_pending_parks_a_failing_proposal(tmp_path) -> None:
     records = parked_proposals(tmp_path / "skills")
     assert records and records[-1]["stage"] == "improvement"
     assert records[-1]["proposer"] == "synthesizer"
+
+
+def test_run_pending_refuses_synthesizer_proposals_without_anchors(tmp_path) -> None:
+    """CL-4: with no anchor behind the retention stage the gate checked
+    nothing, and the default install has no anchors. A synthesizer proposal
+    now parks there unless a human waives it, and the report says how many
+    anchors stood behind the decision."""
+    from fluid.cli.evolve import run_pending
+
+    _queue(tmp_path)
+    lines: list[str] = []
+    committed, parked = asyncio.run(run_pending(
+        _config(tmp_path), runner=ScriptedRunner(), guidance_home=tmp_path,
+        report=lines.append,
+    ))
+    assert committed == [] and parked == ["glm"]
+    assert not (tmp_path / ".fluid" / "guidance" / "glm.md").exists()
+    records = parked_proposals(tmp_path / "skills")
+    assert records[-1]["stage"] == "retention"
+    assert "no anchor has a passing baseline" in records[-1]["reasons"][0]
+    assert lines[0] == "anchors with a passing baseline: 0"
+
+
+def test_apply_guidance_keeps_a_backup_and_reports_the_diff(tmp_path) -> None:
+    from fluid.cli.evolve import apply_guidance
+
+    reports: list[str] = []
+    first = apply_guidance(
+        Proposal(kind="guidance", target="glm", content="one"),
+        home=tmp_path, report=reports.append,
+    )
+    assert first.read_text(encoding="utf-8") == "one\n"
+    assert reports[0].startswith("new file guidance/glm.md:")
+    apply_guidance(
+        Proposal(kind="guidance", target="glm", content="two\n"),
+        home=tmp_path, report=reports.append,
+    )
+    assert first.read_text(encoding="utf-8") == "two\n"
+    assert first.with_name("glm.md.bak").read_text(encoding="utf-8") == "one\n"
+    assert "-one" in reports[1] and "+two" in reports[1]

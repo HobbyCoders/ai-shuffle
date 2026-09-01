@@ -75,10 +75,10 @@ These observations became features (v2): the journal is now **episodic** —
 user prompts and final assistant replies are recorded alongside executed
 cells, so synthesis sees *why* a workflow ran and whether the user accepted
 it (a corrected workflow is a delete signal, not a keep signal). Stored
-skills must **prove they work**: every skill carries a pure `_selftest()`,
-verified in a throwaway no-tools kernel on save and re-verified whenever its
-source changes; broken skills are excluded from the kernel mount and flagged
-in `list_tools` instead of failing silently at use time. And synthesis can be
+skills must **prove they work**: each is imported in a throwaway no-tools
+kernel on save and whenever its source changes, and a pure `_selftest()` runs
+when the skill defines one; broken skills are excluded from the kernel mount
+and flagged in `list_tools` instead of failing silently at use time. And synthesis can be
 pinned to one model (`continual_model`) so skill quality doesn't drift with
 whichever provider runs the session.
 
@@ -118,7 +118,7 @@ that deserve friction.
   (journal + synthesis; the journal is episodic — conversation events ride
   alongside cells so intent and feedback inform what gets kept).
 - Make stored knowledge earn its place (usage counts, prune-biased synthesis,
-  and mandatory verification — `_selftest` on save, re-check on change,
+  and verification on save and on change — `_selftest` when a skill has one,
   broken skills flagged and unmounted).
 - Keep the audit surface identical regardless of how I act (host-side gate on
   every path).

@@ -290,3 +290,37 @@ async def test_synthesizer_accepts_and_preverifies(tmp_path) -> None:
     assert await synth.run() == ["double"]
     assert store.get("double").broken is None
     assert not store.needs_verification("double")  # verified at synthesis time
+
+
+
+async def test_verification_budget_bounds_a_mount() -> None:
+    """CL-11: one slow skill used to hold the first run_python for the whole
+    library's worth of timeouts. A mount now spends a bounded wall clock;
+    skills the budget never reaches are simply not verdicted this time."""
+    import time
+
+    slow = '"""Slow."""\nimport time\n\ndef _selftest():\n    time.sleep(30)\n'
+    ok = '"""Fine."""\n\ndef _selftest():\n    pass\n'
+    started = time.monotonic()
+    verdicts = await verify_sources(
+        {"a_slow": slow, "b_ok": ok, "c_slow": slow}, budget=3.0,
+    )
+    assert time.monotonic() - started < 15
+    assert set(verdicts) == {"a_slow"}
+    assert verdicts["a_slow"]  # timed out inside its slice: a real verdict
+
+
+async def test_mount_excludes_skills_the_budget_did_not_reach(tmp_path, monkeypatch) -> None:
+    import fluid.codemode.session as session_mod
+
+    store = SkillStore(tmp_path)
+    store.save("pending", '"""Pending."""\n')
+    store.save("done", '"""Done."""\n')
+    store.mark_verified("done")
+
+    async def out_of_time(store, **kwargs):
+        return {}
+
+    monkeypatch.setattr(session_mod, "verify_store", out_of_time)
+    session = CodeModeSession(ToolRegistry(), skills=store)
+    assert set(await session._mountable_skills()) == {"done"}

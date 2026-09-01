@@ -386,6 +386,13 @@ class ContinualUpdate(Event):
     move on."""
 
     changes: tuple[str, ...] = ()
+    # What the pass cost (fluid's four token counters), so learning has a
+    # visible bill.
+    usage: dict[str, Any] = field(default_factory=dict)
+    # Memories saved this pass whose only evidence was tool output, as
+    # ``"<id>: <text>"``: stored, held out of the prompt, waiting for the user
+    # to confirm (a "remember ..." does it) or ignore them.
+    held: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)

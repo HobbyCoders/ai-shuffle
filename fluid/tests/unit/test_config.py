@@ -401,3 +401,51 @@ def test_system_config_path_per_platform() -> None:
     assert system_config_path("darwin", {}) == Path("/etc/fluid/config.toml")
     assert system_config_path("win32", {"ProgramData": r"D:\PD"}) == Path(r"D:\PD\fluid\config.toml")
     assert system_config_path("win32", {}) == Path(r"C:\ProgramData\fluid\config.toml")
+
+
+
+def test_build_engine_shares_a_synthesizer_and_stamps_the_agent(tmp_path) -> None:
+    """CL-3: a subagent host hands its parent's learner in, so one store has
+    one synthesizer, and every entry the child journals names the agent."""
+    from types import SimpleNamespace
+
+    from fluid.codemode.skills import SkillStore
+
+    class Learner:
+        kicked = 0
+
+        def mark_urgent(self) -> None:
+            pass
+
+        def kick(self) -> None:
+            self.kicked += 1
+
+    learner = Learner()
+    config = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {
+        "cwd": str(tmp_path), "continual": True, "skills_dir": str(tmp_path / "skills"),
+    }))
+    engine = build_engine(
+        config, MemoryStore(), provider=SimpleNamespace(), session_id="ses_child",
+        synthesizer=learner, agent="worker",
+    )
+    assert engine._journal._synthesizer is learner
+    engine.ctx.extra["continual_journal"]("the user likes short replies")
+    entry = SkillStore(tmp_path / "skills").journal_entries(0)[0]
+    assert entry["kind"] == "remember"
+    assert entry["session"] == "ses_child" and entry["agent"] == "worker"
+    assert learner.kicked == 1
+
+
+def test_cli_host_hands_the_parent_learner_to_children() -> None:
+    from types import SimpleNamespace
+
+    from fluid.cli.host import CliHost
+
+    host = CliHost.__new__(CliHost)
+    marker = object()
+    host.engine = SimpleNamespace(_journal=SimpleNamespace(_synthesizer=marker))
+    assert host._learner() is marker
+    host.engine = SimpleNamespace(_codemode=SimpleNamespace(_synthesizer=marker), _journal=None)
+    assert host._learner() is marker
+    host.engine = SimpleNamespace()
+    assert host._learner() is None

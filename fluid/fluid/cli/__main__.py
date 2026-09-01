@@ -144,13 +144,14 @@ async def _close_and_flush_learning(engine, session_id: str, out) -> None:
     well not have happened; print those late events here. Everything
     published before close was already rendered by the stream loop.
     """
+    from fluid.cli.repl import render_continual_update
     from fluid.events.model import ContinualUpdate
 
     before = engine.bus.last_seq(session_id)
     await engine.aclose()
     for event in engine.bus.log(session_id):
         if event.seq > before and isinstance(event, ContinualUpdate):
-            out.write(f"\n  [learned] {', '.join(event.changes)}\n")
+            out.write(f"\n  {render_continual_update(event)}\n")
             out.flush()
 
 
@@ -318,12 +319,18 @@ def build_parser() -> argparse.ArgumentParser:
                            help="waive the improvement stage (deliberate human proposals only)")
     e_propose.add_argument("--budget", type=int, default=None,
                            help="anchor regression budget for this evaluation (default: config anchor_budget)")
+    e_propose.add_argument("--allow-no-anchors", action="store_true", dest="allow_no_anchors",
+                           help="commit even though no anchor has a passing baseline "
+                                "(the retention stage then checks nothing)")
     e_run = evolve_sub.add_parser(
         "run", help="evaluate synthesizer-queued proposals through the gate (live replays)"
     )
     _add_common(e_run)
     e_run.add_argument("--budget", type=int, default=None,
                        help="anchor regression budget (default: config anchor_budget)")
+    e_run.add_argument("--allow-no-anchors", action="store_true", dest="allow_no_anchors",
+                       help="commit even though no anchor has a passing baseline "
+                            "(the retention stage then checks nothing)")
     for name, help_text in (
         ("pending", "list synthesizer-drafted proposals awaiting the gate"),
         ("parked", "list proposals the gate refused, with reasons"),

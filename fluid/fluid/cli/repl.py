@@ -337,7 +337,7 @@ def render_event(event: Event, out: TextIO) -> None:
     elif isinstance(event, HookEvent):
         out.write(f"  {render_hook_event(event)}\n")
     elif isinstance(event, ContinualUpdate):
-        line = f"[learned] {', '.join(event.changes)}"
+        line = render_continual_update(event)
         if id(out) in _mode:
             # Synthesis is a background pass; it can land mid-stream. Hold
             # the note until the turn ends rather than splicing it in.
@@ -838,3 +838,21 @@ class Repl:
         self.out.write("\n")
         self.out.flush()
         return self.exit_code
+
+
+def render_continual_update(event: ContinualUpdate) -> str:
+    """The learner's note: what changed, what it cost, what waits on the
+    user. Memories held back were distilled only from tool output; the user
+    confirms one by asking to remember it."""
+    line = f"[learned] {', '.join(event.changes)}"
+    usage = event.usage or {}
+    tokens_in = int(usage.get("input_tokens", 0) or 0)
+    tokens_out = int(usage.get("output_tokens", 0) or 0)
+    if tokens_in or tokens_out:
+        line += f" ({tokens_in} in / {tokens_out} out tokens)"
+    for held in event.held:
+        line += (
+            f"\n  [held] {held} — from tool output only; say \"remember ...\" "
+            "to keep it"
+        )
+    return line

@@ -87,6 +87,10 @@ _log = logging.getLogger(__name__)
 
 _NAME_RE = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
 MAX_SKILL_BYTES = 65536
+# Live skills past this many are archived, least useful first (the memory cap
+# has the same posture): a library the synthesizer must re-read every pass
+# cannot grow without bound.
+MAX_LIVE_SKILLS = 40
 MAX_MEMORIES = 40
 MAX_MEMORY_CHARS = 500  # one memory is a fact, not an essay
 
@@ -334,6 +338,13 @@ class MemoryEntry:
     # Project-scoped entries render only into that project's sessions, so one
     # repo's conventions stop riding into every other repo on the machine.
     scope: str = "global"
+    # Where the evidence for this fact came from: ``user`` (a user prompt or a
+    # Remember entry said it), ``tool`` (only tool output or cell output said
+    # it), ``session`` (neither clearly; the default and what older stores
+    # carry), ``manual``. A ``tool`` entry is kept but held out of the prompt:
+    # file and web content the agent read is not a source the next session
+    # should be told to trust.
+    provenance: str = "session"
 
 
 def project_key_for(cwd: "str | Path | os.PathLike[str] | None") -> str:
@@ -416,6 +427,22 @@ class SkillStore:
         # cache is self-healing rather than authoritative. -1 = unknown.
         self._journal_lines = 0
         self._journal_bytes = -1
+        # Stamped onto every journal entry (see journal_context).
+        self._journal_tag: dict[str, str] = {}
+
+    def journal_context(
+        self, *, session_id: str | None = None, agent: str | None = None,
+    ) -> None:
+        """Stamp the entries this store journals with their session and, for
+        a subagent, the agent name. Several engines share one journal (a
+        parent and its workers, two shells on one machine); the stamps let
+        the synthesizer read the braid one session at a time instead of as a
+        single narrative."""
+        self._journal_tag = {}
+        if session_id:
+            self._journal_tag["session"] = session_id
+        if agent:
+            self._journal_tag["agent"] = agent
 
     # ─── meta ────────────────────────────────────────────────────────────
     def _load_meta(self) -> dict:
@@ -449,10 +476,46 @@ class SkillStore:
         meta = self._load_meta()
         entry = meta.setdefault("skills", {}).setdefault(name, {"uses": 0})
         entry["updated_at"] = time.time()
+        self._enforce_live_cap(meta, keep=name)
         self._save_meta(meta)
         skill = self.get(name)
         assert skill is not None
         return skill
+
+    def _enforce_live_cap(self, meta: dict, *, keep: str) -> list[str]:
+        """Archive the least useful unpinned skills once the live set is over
+        ``MAX_LIVE_SKILLS``: fewest uses first, oldest activity as the
+        tiebreak, the skill just saved and pinned skills never. Archived, not
+        deleted, like curation. Returns the names moved."""
+        live = [p.stem for p in self.root.glob("*.py")]
+        if len(live) <= MAX_LIVE_SKILLS:
+            return []
+        skills_meta = meta.setdefault("skills", {})
+
+        def rank(name: str) -> tuple[int, float]:
+            info = skills_meta.get(name) or {}
+            return (
+                int(info.get("uses", 0)),
+                max(float(info.get("last_used_at", 0.0)), float(info.get("updated_at", 0.0))),
+            )
+
+        candidates = sorted(
+            (
+                n for n in live
+                if n != keep and not (skills_meta.get(n) or {}).get("pinned")
+            ),
+            key=rank,
+        )
+        archived: list[str] = []
+        for name in candidates[: len(live) - MAX_LIVE_SKILLS]:
+            try:
+                self.archive_dir.mkdir(exist_ok=True)
+                self._path(name).replace(self.archive_dir / f"{name}.py")
+            except (OSError, ValueError):
+                continue
+            skills_meta.setdefault(name, {})["state"] = "archived"
+            archived.append(name)
+        return archived
 
     def delete(self, name: str) -> bool:
         path = self._path(name) if _NAME_RE.fullmatch(name or "") else None
@@ -470,6 +533,18 @@ class SkillStore:
         path = self._path(name)
         if not path.is_file():
             return None
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return None
+        if size > MAX_SKILL_BYTES:
+            # A file written by hand (or by an older fluid) never passed
+            # validation; treat it like a failed verdict rather than read
+            # and mount it whole.
+            return Skill(
+                name=name, source="", description=name,
+                broken=f"source is {size} bytes, over the {MAX_SKILL_BYTES}-byte cap",
+            )
         source = path.read_text(encoding="utf-8")
         info = self._load_meta().get("skills", {}).get(name, {})
         broken = info.get("broken")
@@ -495,7 +570,7 @@ class SkillStore:
 
     def sources(self) -> dict[str, str]:
         """``{name: source}`` for the kernel's ``skills`` VFS mount."""
-        return {s.name: s.source for s in self.list()}
+        return {s.name: s.source for s in self.list() if s.source}
 
     def signature(self) -> tuple:
         """Change-detection key for the kernel VFS (name + mtime per skill)."""
@@ -556,6 +631,8 @@ class SkillStore:
     def journal_append(self, entry: dict) -> None:
         entry = dict(entry)
         entry.setdefault("ts", time.time())
+        for key, value in self._journal_tag.items():
+            entry.setdefault(key, value)
         line = json.dumps(entry, ensure_ascii=False) + "\n"
         # One write under the journal lock: a reap in another process cannot
         # slip its replace between our size check and our line. If the lock
@@ -755,16 +832,28 @@ class SkillStore:
                     uses=int(e.get("uses", 0)),
                     last_recalled_at=float(e.get("last_recalled_at", 0.0)),
                     scope=str(e.get("scope") or "global"),
+                    provenance=str(e.get("provenance") or "session"),
                 ))
         return out
+
+    def held_memories(self) -> list[MemoryEntry]:
+        """Entries whose only evidence was tool output: stored, never
+        rendered into the prompt until a user statement or a Remember
+        rewrites them with better provenance."""
+        return [m for m in self.memories() if m.provenance == "tool"]
 
     def save_memory(
         self,
         text: str,
         memory_id: str | None = None,
         scope: str | None = None,
+        provenance: str | None = None,
     ) -> MemoryEntry:
         """Add (``memory_id=None``) or rewrite one remembered fact.
+
+        ``provenance`` records where the evidence came from (see
+        :class:`MemoryEntry`); a rewrite without one keeps the entry's
+        existing provenance, a new entry without one is ``session``.
 
         Raises ``ValueError`` for empty/oversized text and for anything that
         looks like a credential — memories land in every future session's
@@ -792,6 +881,8 @@ class SkillStore:
                     e["updated_at"] = now
                     if scope is not None:
                         e["scope"] = scope
+                    if provenance is not None:
+                        e["provenance"] = provenance
                     self._save_memories(doc)
                     return MemoryEntry(
                         id=str(memory_id), text=text,
@@ -799,11 +890,13 @@ class SkillStore:
                         uses=int(e.get("uses", 0)),
                         last_recalled_at=float(e.get("last_recalled_at", 0.0)),
                         scope=str(e.get("scope") or "global"),
+                        provenance=str(e.get("provenance") or "session"),
                     )
         entry = {
             "id": f"m{int(doc.get('next_id', 1))}", "text": text,
             "created_at": now, "updated_at": now,
             "scope": scope or "global",
+            "provenance": provenance or "session",
         }
         doc["next_id"] = int(doc.get("next_id", 1)) + 1
         doc["entries"].append(entry)
@@ -844,7 +937,7 @@ class SkillStore:
         self._save_memories(doc)
         return MemoryEntry(
             id=str(entry["id"]), text=text, created_at=now, updated_at=now,
-            scope=str(entry["scope"]),
+            scope=str(entry["scope"]), provenance=str(entry["provenance"]),
         )
 
     def note_memories_recalled(self, memory_ids: list[str]) -> None:
@@ -940,7 +1033,9 @@ class SkillStore:
         render — other projects' facts stay out of this session's prompt (a
         count line says they exist). Entries pass the injection screen; a
         finding replaces that entry with a note naming the file, never
-        silently deleting it.
+        silently deleting it. Entries whose only evidence was tool output
+        (``provenance == "tool"``) are held back the same way: a count line,
+        never the text, until a user statement or a Remember confirms them.
         """
         entries = self.memories()
         if not entries:
@@ -949,6 +1044,7 @@ class SkillStore:
 
         shown: list[str] = []
         hidden = 0
+        held = 0
         for entry in entries:
             if (
                 project is not None
@@ -956,6 +1052,9 @@ class SkillStore:
                 and entry.scope != project
             ):
                 hidden += 1
+                continue
+            if entry.provenance == "tool":
+                held += 1
                 continue
             findings = screen_findings(entry.text)
             if findings:
@@ -974,6 +1073,12 @@ class SkillStore:
             if hidden
             else ""
         )
+        if held:
+            footer += (
+                f"\n\n({held} entr{'y' if held == 1 else 'ies'} distilled only "
+                "from tool output held back until the user confirms "
+                f"{'it' if held == 1 else 'them'}.)"
+            )
         return (
             "# Memory\n"
             "Facts your continual learner distilled from earlier sessions. "
