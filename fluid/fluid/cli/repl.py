@@ -17,8 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import queue
+import signal
 import sys
-from collections.abc import Awaitable, Callable
+import threading
+import time
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -44,6 +48,7 @@ from fluid.events.model import (
 )
 from fluid.events.ops import (
     Fork,
+    Interrupt,
     RespondPermission,
     RespondQuestion,
     Rewind,
@@ -75,6 +80,164 @@ async def auto_answer(event: QuestionRequest) -> str:
 
 _TERMINAL = (TurnComplete, Interrupted, ErrorEvent)
 
+# A second Ctrl-C inside this many seconds quits instead of interrupting again.
+SIGINT_EXIT_WINDOW = 2.0
+# The exit code a Ctrl-C ended the process with (128 + SIGINT).
+SIGINT_EXIT_CODE = 130
+
+
+class LineReader:
+    """Blocking ``input_fn`` calls on one daemon thread, handed back as futures.
+
+    ``asyncio.to_thread`` ran the read on the default executor, whose threads
+    are joined at shutdown, so a Ctrl-C at the prompt hung the process until
+    stdin produced a line. This thread is a daemon: exit never waits for it. A
+    read the signal handler abandons keeps blocking here; the line it finally
+    gets is kept and answers the next request, so nothing typed after an
+    interrupt is lost.
+    """
+
+    def __init__(self, input_fn: Callable[[str], str]) -> None:
+        self._input_fn = input_fn
+        self._requests: queue.SimpleQueue[
+            tuple[str | None, asyncio.AbstractEventLoop, asyncio.Future[str]]
+        ] = queue.SimpleQueue()
+        self._thread: threading.Thread | None = None
+        self._reading = False  # the thread is inside input_fn
+        self._stashed: str | None = None
+        self._pending: asyncio.Future[str] | None = None
+
+    def read(self, prompt: str, *, out: TextIO | None = None) -> asyncio.Future[str]:
+        """Start a read; the future resolves with the line on the running loop."""
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[str] = loop.create_future()
+        self._pending = fut
+        request_prompt: str | None = prompt
+        if self._reading and out is not None:
+            # The thread is still inside an abandoned read, which already
+            # showed its own prompt; that call cannot print a new one.
+            out.write(prompt)
+            out.flush()
+            request_prompt = None
+        self._requests.put((request_prompt, loop, fut))
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(
+                target=self._serve, name="fluid-stdin", daemon=True
+            )
+            self._thread.start()
+        return fut
+
+    def abandon(self) -> None:
+        """Resolve the pending read with an empty line without waiting on stdin."""
+        fut = self._pending
+        if fut is not None and not fut.done():
+            fut.set_result("")
+
+    def _serve(self) -> None:
+        while True:
+            prompt, loop, fut = self._requests.get()
+            if self._stashed is not None:
+                line, self._stashed = self._stashed, None
+                outcome: tuple[Callable[[Any], None], Any] = (fut.set_result, line)
+            else:
+                self._reading = True
+                try:
+                    line = self._input_fn("" if prompt is None else prompt)
+                except BaseException as exc:  # noqa: BLE001 — EOFError and whatever input_fn raises
+                    outcome = (fut.set_exception, exc)
+                else:
+                    outcome = (fut.set_result, line)
+                finally:
+                    self._reading = False
+            try:
+                loop.call_soon_threadsafe(self._settle, fut, *outcome)
+            except RuntimeError:
+                return  # the loop is closed; nobody is waiting
+
+    def _settle(self, fut: asyncio.Future[str], setter, value) -> None:
+        if not fut.done():
+            setter(value)
+        elif setter == fut.set_result:
+            # Abandoned by a signal: keep the line for the next request.
+            self._stashed = value
+
+
+_stdin_reader: LineReader | None = None
+
+
+def stdin_reader() -> LineReader:
+    """The process-wide reader for real stdin (shared by every prompt on it)."""
+    global _stdin_reader
+    if _stdin_reader is None:
+        _stdin_reader = LineReader(input)
+    return _stdin_reader
+
+
+def abandon_stdin_read() -> None:
+    """Release whoever is waiting on stdin, with an empty line."""
+    if _stdin_reader is not None:
+        _stdin_reader.abandon()
+
+
+_UNSET = object()
+
+
+@contextlib.contextmanager
+def sigint_scope(callback: Callable[[], None]) -> Iterator[None]:
+    """Run ``callback`` on the event loop whenever Ctrl-C arrives in the block.
+
+    Uses ``loop.add_signal_handler`` where the loop supports it. Windows loops
+    do not, so there a ``signal.signal`` handler runs on the main thread
+    between bytecodes and only forwards to the loop; Ctrl-Break is routed the
+    same way, since that is the console event a parent process can deliver to
+    a child. Off the main thread no handler can be installed and the block
+    runs unguarded.
+    """
+    loop = asyncio.get_running_loop()
+    restore: list[tuple[int, Any]] = []
+    signums = [signal.SIGINT]
+    if hasattr(signal, "SIGBREAK"):
+        signums.append(signal.SIGBREAK)
+    for signum in signums:
+        try:
+            loop.add_signal_handler(signum, callback)
+            restore.append((signum, _UNSET))
+            continue
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass
+        try:
+            previous = signal.signal(
+                signum, lambda *_: loop.call_soon_threadsafe(callback)
+            )
+        except (ValueError, OSError):
+            continue
+        restore.append((signum, previous))
+    try:
+        yield
+    finally:
+        for signum, previous in restore:
+            if previous is _UNSET:
+                loop.remove_signal_handler(signum)
+            else:
+                signal.signal(signum, previous)
+
+
+_interrupt_submits: set[asyncio.Task] = set()
+
+
+def request_interrupt(engine) -> None:
+    """Submit ``Interrupt`` to the engine from a signal callback."""
+
+    async def _submit() -> None:
+        try:
+            await engine.submit(Interrupt())
+        except Exception:  # noqa: BLE001 — an engine without a turn has nothing to stop
+            pass
+
+    task = asyncio.ensure_future(_submit())
+    _interrupt_submits.add(task)
+    task.add_done_callback(_interrupt_submits.discard)
+
 
 # Per-stream render mode ("text" | "thinking"), keyed by id(out), so thinking
 # and answer text get separated without threading state through every caller.
@@ -95,6 +258,19 @@ def _switch_mode(out: TextIO, mode: str) -> None:
     else:
         out.write(("\x1b[0m" if dim else "") + "\n\n")
     _mode[key] = mode
+
+
+def _end_stream(out: TextIO) -> None:
+    """Leave streaming mode at a terminal event, whichever kind it is.
+
+    Undoes a thinking dim (the ``\\x1b[0m`` a tty needs) and drops the
+    per-stream mode and deferred notes, so a turn that ends interrupted or
+    with an error cannot leave the terminal dimmed or hand stale state to the
+    next turn.
+    """
+    _switch_mode(out, "text")
+    _mode.pop(id(out), None)
+    out.writelines(f"\n  {note}\n" for note in _deferred_notes.pop(id(out), []))
 
 
 def render_hook_event(event: HookEvent) -> str:
@@ -136,14 +312,14 @@ def render_event(event: Event, out: TextIO) -> None:
             f"hit_rate={event.cache_hit_rate:.2f}\n"
         )
     elif isinstance(event, TurnComplete):
-        _switch_mode(out, "text")
-        _mode.pop(id(out), None)
-        out.writelines(f"\n  {note}\n" for note in _deferred_notes.pop(id(out), []))
+        _end_stream(out)
         cost =f" cost=${event.cost_usd:.4f}" if event.cost_usd is not None else ""
         out.write(f"\n[done] stop={event.stop_reason} calls={event.num_model_calls}{cost}\n")
     elif isinstance(event, Interrupted):
+        _end_stream(out)
         out.write("\n[interrupted]\n")
     elif isinstance(event, ErrorEvent):
+        _end_stream(out)
         out.write(f"\n[error] {event.message}\n")
     elif isinstance(event, HookEvent):
         out.write(f"  {render_hook_event(event)}\n")
@@ -268,7 +444,7 @@ def tty_permission_responder() -> PermissionResponder:
         return auto_deny
 
     async def _ask(event: PermissionRequest) -> str:
-        return await ask_permission(event, lambda p: asyncio.to_thread(input, p))
+        return await ask_permission(event, lambda p: stdin_reader().read(p))
 
     return _ask
 
@@ -279,7 +455,7 @@ def tty_question_responder() -> QuestionResponder | None:
         return None
 
     async def _ask(event: QuestionRequest) -> str:
-        answer = await asyncio.to_thread(input, "  answer> ")
+        answer = await stdin_reader().read("  answer> ")
         return answer.strip()
 
     return _ask
@@ -394,6 +570,7 @@ class Repl:
         self.engine = engine
         self.session_id = session_id
         self.input_fn = input_fn or input
+        self._reader = stdin_reader() if input_fn is None else LineReader(input_fn)
         self.out = out or sys.stdout
         self.prompt = prompt
         # Background rendering state: the foreground turn renders its own
@@ -402,12 +579,48 @@ class Repl:
         self._foreground = False
         self._rendered_seq = 0
         self._watcher: asyncio.Task | None = None
+        # Ctrl-C state: the exit code ``run`` returns, whether a quit was
+        # asked for, when the last Ctrl-C landed, and the task running ``run``
+        # (cancelled as the last resort when a turn ignores Interrupt).
+        self.exit_code = 0
+        self._exit_requested = False
+        self._last_sigint = 0.0
+        self._loop_task: asyncio.Task | None = None
         host = host_of(engine)
         if host is not None:
             host.permission_responder = self.handle_permission
 
     async def _read_line(self, prompt: str) -> str:
-        return await asyncio.to_thread(self.input_fn, prompt)
+        return await self._reader.read(prompt, out=self.out)
+
+    def on_sigint(self) -> None:
+        """Ctrl-C: interrupt the running turn; again (or at the prompt) to quit.
+
+        The first press during a turn submits ``Interrupt`` so the turn ends
+        with ``Interrupted`` and the session stays intact. A second press
+        within :data:`SIGINT_EXIT_WINDOW`, or any press while no turn runs,
+        asks ``run`` to return :data:`SIGINT_EXIT_CODE`. A third press while
+        a quit is already pending cancels the loop task outright, for a turn
+        that does not honor Interrupt.
+        """
+        now = time.monotonic()
+        again = now - self._last_sigint < SIGINT_EXIT_WINDOW
+        self._last_sigint = now
+        if self._foreground and not again and not self._exit_requested:
+            self.out.write("\n[interrupting; press Ctrl-C again to quit]\n")
+            self.out.flush()
+            request_interrupt(self.engine)
+            self._reader.abandon()
+            return
+        if self._exit_requested:
+            if self._loop_task is not None and not self._loop_task.done():
+                self._loop_task.cancel()
+            return
+        self._exit_requested = True
+        self.exit_code = SIGINT_EXIT_CODE
+        if self._foreground:
+            request_interrupt(self.engine)
+        self._reader.abandon()
 
     async def handle_permission(self, event: PermissionRequest) -> str:
         return await ask_permission(event, self._read_line)
@@ -579,22 +792,36 @@ class Repl:
         except NotImplementedError:
             self.out.write(f"{label} not supported by this engine\n")
 
-    async def run(self) -> None:
-        """Main loop: read lines, dispatch slash-commands or run turns."""
+    async def run(self) -> int:
+        """Main loop: read lines, dispatch slash-commands or run turns.
+
+        Returns the process exit code: 0 after ``/exit`` or end of input,
+        :data:`SIGINT_EXIT_CODE` when Ctrl-C ended the session.
+        """
+        self._loop_task = asyncio.current_task()
         self._start_watcher()
         try:
-            while True:
-                try:
-                    line = await self._read_line(self.prompt)
-                except (EOFError, KeyboardInterrupt):
-                    self.out.write("\n")
-                    break
-                if not line.strip():
-                    continue
-                if line.strip().startswith("/"):
-                    if not await self.dispatch_slash(line):
+            with sigint_scope(self.on_sigint):
+                while not self._exit_requested:
+                    try:
+                        line = await self._read_line(self.prompt)
+                    except EOFError:
                         break
-                    continue
-                await self.run_turn(line)
+                    except KeyboardInterrupt:
+                        self.exit_code = SIGINT_EXIT_CODE
+                        break
+                    if self._exit_requested or not line.strip():
+                        continue
+                    if line.strip().startswith("/"):
+                        if not await self.dispatch_slash(line):
+                            break
+                        continue
+                    await self.run_turn(line)
+        except asyncio.CancelledError:
+            if not self._exit_requested:
+                raise
         finally:
             await self._stop_watcher()
+        self.out.write("\n")
+        self.out.flush()
+        return self.exit_code

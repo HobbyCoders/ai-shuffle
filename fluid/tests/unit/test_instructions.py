@@ -435,3 +435,61 @@ def test_render_command_file_reference_in_code_span_inert(tmp_path) -> None:
     (tmp_path / "notes.md").write_text("body", encoding="utf-8")
     out = render_command("Docs about `@notes.md` syntax", "", cwd=tmp_path)
     assert "Contents of" not in out
+
+
+def test_parse_frontmatter_folded_block_joins_lines() -> None:
+    text = "---\nname: deploy\ndescription: >-\n  Deploy the app.\n  Use when asked.\n---\nbody"
+    fields, body = parse_frontmatter(text)
+    assert fields == {"name": "deploy", "description": "Deploy the app. Use when asked."}
+    assert body == "body"
+
+
+def test_parse_frontmatter_folded_chomping_and_paragraphs() -> None:
+    clip = "---\nd: >\n  one\n  two\n\n  three\n---\n"
+    assert parse_frontmatter(clip)[0]["d"] == "one two\nthree\n"
+    keep = "---\nd: >+\n  one\n\n\nnext: x\n---\n"
+    assert parse_frontmatter(keep)[0] == {"d": "one\n\n\n", "next": "x"}
+
+
+def test_parse_frontmatter_literal_block_keeps_newlines() -> None:
+    text = "---\nd: |\n  line one\n    indented\n  line three\n---\n"
+    assert parse_frontmatter(text)[0]["d"] == "line one\n  indented\nline three\n"
+    strip = "---\nd: |-\n  a\n  b\n\n---\n"
+    assert parse_frontmatter(strip)[0]["d"] == "a\nb"
+
+
+def test_parse_frontmatter_plain_continuation_is_not_a_field() -> None:
+    text = (
+        "---\nname: helper\ndescription: Runs shell commands. Also handles\n"
+        "  tools: Bash and friends.\ntools: [Read, Grep]\n---\n"
+    )
+    fields, _ = parse_frontmatter(text)
+    assert fields["description"] == "Runs shell commands. Also handles tools: Bash and friends."
+    assert fields["tools"] == ["Read", "Grep"]
+
+
+def test_parse_frontmatter_single_line_and_list_shapes_unchanged() -> None:
+    text = '---\nname: "quoted"\ndesc: a, b, c\ntools: [Read, Grep]\nempty:\n---\nb'
+    fields, body = parse_frontmatter(text)
+    assert fields == {"name": "quoted", "desc": "a, b, c", "tools": ["Read", "Grep"], "empty": ""}
+    assert body == "b"
+
+
+def test_skills_index_renders_a_folded_description(tmp_path) -> None:
+    from fluid.context.compiler import skills_index
+
+    proj = _mk_project(tmp_path)
+    skill_dir = proj / ".agents" / "skills" / "live-monitor-flow"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: live-monitor-flow\ndescription: >-\n"
+        "  Keep the app running and watch it.\n"
+        "  Delegate feature work to sub-agents.\n---\nbody",
+        encoding="utf-8",
+    )
+    index = skills_index(proj, include_global=False)
+    assert (
+        "- live-monitor-flow: Keep the app running and watch it. "
+        "Delegate feature work to sub-agents."
+    ) in index
+    assert ">-" not in index

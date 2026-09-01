@@ -46,14 +46,16 @@ def _text(text: str) -> list[StreamChunk]:
     ]
 
 
-def _tool(tuid: str, name: str, args_json: str) -> list[StreamChunk]:
+def _tool(
+    tuid: str, name: str, args_json: str, *, stop_reason: str = "tool_use"
+) -> list[StreamChunk]:
     return [
         StreamChunk("message_start", {"usage": {"input_tokens": 10}}),
         StreamChunk("block_start",
                     {"index": 0, "block_type": "tool_use", "tool_name": name, "tool_use_id": tuid}),
         StreamChunk("tool_args_delta", {"index": 0, "partial_json": args_json}),
         StreamChunk("block_stop", {"index": 0}),
-        StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": "tool_use"}),
+        StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": stop_reason}),
         StreamChunk("message_stop", {}),
     ]
 
@@ -123,6 +125,51 @@ async def test_tool_round_trip() -> None:
     assert done.num_model_calls == 2
     assert done.stop_reason == "end_turn"
     assert provider.calls == 2
+
+
+async def test_tool_call_reported_with_end_turn_stop_reason_is_dispatched() -> None:
+    """llama.cpp, vLLM and Ollama builds send ``finish_reason: stop`` next to
+    tool_calls; the call still has to run or the ToolUse is left unanswered."""
+    registry = ToolRegistry()
+    registry.register_inproc(_weather_server())
+    provider = ScriptedProvider([
+        _tool("t1", "mcp__wx__get_weather", '{"city": "Paris"}', stop_reason="end_turn"),
+        _text("It is sunny in Paris."),
+    ])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="m",
+        registry=registry, permissions=PermissionEngine("never_ask"),
+    )
+    await loop.submit(UserTurn(content="weather in Paris?"))
+    await loop.wait_turn()
+
+    events = loop.bus.log(loop.session_id)
+    uses = [e for e in events if isinstance(e, ToolUse)]
+    results = [e for e in events if isinstance(e, ToolResult)]
+    assert [e.tool_use_id for e in uses] == ["t1"]
+    assert [e.tool_use_id for e in results] == ["t1"]
+    assert results[0].output == "Paris: sunny"
+    assert provider.calls == 2
+    done = next(e for e in events if isinstance(e, TurnComplete))
+    assert done.num_model_calls == 2
+    assert done.stop_reason == "end_turn"
+
+
+async def test_tool_call_without_a_registry_ends_the_turn() -> None:
+    """No registry means nothing can run the call: the turn ends on it."""
+    provider = ScriptedProvider([
+        _tool("t1", "mcp__wx__get_weather", '{"city": "Paris"}'),
+        _text("must not be called"),
+    ])
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="m")
+    await loop.submit(UserTurn(content="weather?"))
+    await loop.wait_turn()
+
+    events = loop.bus.log(loop.session_id)
+    assert provider.calls == 1
+    assert not any(isinstance(e, ToolResult) for e in events)
+    done = next(e for e in events if isinstance(e, TurnComplete))
+    assert done.stop_reason == "tool_use"
 
 
 async def test_explicit_model_call_cap_halts_with_ordered_tool_pairs() -> None:

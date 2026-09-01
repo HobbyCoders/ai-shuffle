@@ -13,7 +13,10 @@ their bare names (``Read``, ``Edit``, ...).
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
@@ -21,11 +24,40 @@ from typing import Any
 
 from fluid.tools.mcp.manager import McpManager
 
+log = logging.getLogger(__name__)
+
 # A local (builtin/inproc) handler: takes the parsed input and the tool context,
 # returns anything ``_normalize`` understands (ToolOutcome | str | SDK dict).
 Handler = Callable[[dict[str, Any], "ToolCtx"], Awaitable[Any]]
 
 _RISK_ORDER = {"safe": 0, "write": 1, "destructive": 2}
+
+# The provider's tool-name grammar (Anthropic: ``^[a-zA-Z0-9_-]{1,64}$``). A
+# name outside it fails every request for the rest of the session.
+API_TOOL_NAME_MAX = 64
+_API_NAME_BAD_CHAR = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def api_tool_name(server: str, tool: str, taken: Callable[[str], bool]) -> str:
+    """``mcp__<server>__<tool>`` made valid for the provider.
+
+    Disallowed characters become ``_``; a name past 64 characters loses the
+    tail of its tool part and gains a 6-hex digest of the original so two long
+    names stay distinct. ``taken`` reports names already registered to a
+    different tool, and a collision gets the same digest suffix.
+    """
+    prefix = f"mcp__{_API_NAME_BAD_CHAR.sub('_', server)}__"
+    safe = _API_NAME_BAD_CHAR.sub("_", tool) or "_"
+    digest = hashlib.sha1(tool.encode("utf-8")).hexdigest()[:6]
+    room = max(API_TOOL_NAME_MAX - len(prefix), len(digest) + 2)
+
+    def with_digest() -> str:
+        return prefix + safe[: room - len(digest) - 1] + "_" + digest
+
+    if len(safe) > room:
+        return with_digest()
+    name = prefix + safe
+    return with_digest() if taken(name) else name
 
 
 @dataclass
@@ -231,6 +263,7 @@ class _Entry:
     spec: ToolSpec
     handler: Handler | None = None  # None for MCP tools (routed to the manager)
     server: str | None = None  # MCP/inproc server name
+    remote_name: str | None = None  # the MCP server's own name for the tool
 
 
 def _normalize(result: Any) -> ToolOutcome:
@@ -338,13 +371,38 @@ class ToolRegistry:
         """
         descriptors = await self._manager.connect(name, config)
         specs: list[ToolSpec] = []
+
+        def taken_by_other(candidate: str, remote: str) -> bool:
+            # Only another MCP tool is a collision to rename around; a builtin
+            # or in-proc holder of the name makes the server's tool skip below.
+            entry = self._entries.get(candidate)
+            return (
+                entry is not None
+                and entry.spec.source == "mcp"
+                and (entry.server != name or entry.remote_name != remote)
+            )
+
         for d in descriptors:
-            tool_name = f"mcp__{name}__{d.name}"
+            tool_name = api_tool_name(name, d.name, lambda c, r=d.name: taken_by_other(c, r))
+            if tool_name != f"mcp__{name}__{d.name}":
+                log.warning(
+                    "mcp: server %r tool %r registered as %s (name made valid for the API)",
+                    name, d.name, tool_name,
+                )
+            existing = self._entries.get(tool_name)
+            if existing is not None and existing.spec.source != "mcp":
+                # A server may not replace a builtin or in-proc tool: it would
+                # inherit the always-loaded status and route the call remotely.
+                log.warning(
+                    "mcp: server %r tool %r skipped; %s is a %s tool",
+                    name, d.name, tool_name, existing.spec.source,
+                )
+                continue
             spec = ToolSpec(
                 name=tool_name, description=d.description, input_schema=d.input_schema,
                 risk=d.risk, source="mcp",
             )
-            self._entries[tool_name] = _Entry(spec=spec, server=name)
+            self._entries[tool_name] = _Entry(spec=spec, server=name, remote_name=d.name)
             specs.append(spec)
         return specs
 
@@ -438,6 +496,10 @@ class ToolRegistry:
             input = coerce_args(input, entry.spec.input_schema)
             if entry.spec.source == "mcp":
                 _, server, tool = name.split("__", 2)
+                if entry.server is not None:
+                    server = entry.server
+                if entry.remote_name is not None:
+                    tool = entry.remote_name  # the server knows only its own name
                 outcome = await self._manager.dispatch(
                     server, tool, input,
                     input_responses=input_responses, request_state=request_state,

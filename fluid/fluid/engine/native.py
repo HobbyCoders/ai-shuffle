@@ -1324,15 +1324,25 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._mcp_connected or not self._mcp_servers or self.registry is None:
             return
         self._mcp_connected = True
-        for name, cfg in self._mcp_servers.items():
+        registry = self.registry
+
+        async def connect_one(name: str, cfg: Any) -> None:
             try:
-                await self.registry.connect_mcp(name, dict(cfg))
+                await registry.connect_mcp(name, dict(cfg))
             except Exception as exc:
                 await self._emit(ErrorEvent(
                     session_id=sid, turn_id=turn_id,
                     message=f"mcp server {name!r} failed to connect: {exc!r}",
                     retriable=False,
                 ))
+
+        # Servers connect side by side, so the first turn waits for the
+        # slowest one rather than the sum; a connect timeout is reported by
+        # connect_one like any other failure.
+        await asyncio.gather(
+            *(connect_one(name, cfg) for name, cfg in self._mcp_servers.items()),
+            return_exceptions=True,
+        )
 
     async def _rehydrate_deferred_announced(
         self, sid: str, head_node_id: str | None
@@ -1847,20 +1857,15 @@ class NativeLoop(BackgroundLifecycleMixin):
                 return
 
             # Only run the tool loop when tools are actually configured; without
-            # a registry a tool_use stop is terminal (M0 behavior).
-            dispatchable = (
-                self.registry is not None
-                and bool(result.tool_uses)
-                and (
-                    result.stop_reason == "tool_use"
-                    # A stream that ran out of output budget mid-call still
-                    # emitted ToolUse events for the blocks that closed. Those
-                    # calls have to be answered — continuing without a result
-                    # leaves the transcript malformed and the UI showing a tool
-                    # that never finishes.
-                    or any(tu.get("arg_error") for tu in result.tool_uses)
-                )
-            )
+            # a registry a tool_use stop is terminal (M0 behavior). With one,
+            # every emitted tool call is dispatched whatever the stop reason
+            # says: llama.cpp, vLLM and Ollama builds report ``stop`` next to
+            # tool_calls (mapped to ``end_turn``), and a stream that ran out of
+            # output budget mid-call still emitted ToolUse events for the
+            # blocks that closed. Leaving any of them unanswered puts a
+            # ToolUse with no ToolResult in the transcript, which the next
+            # turn can only repair as "its result was lost".
+            dispatchable = self.registry is not None and bool(result.tool_uses)
             if (
                 not dispatchable
                 and result.stop_reason == "max_tokens"

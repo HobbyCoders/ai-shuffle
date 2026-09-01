@@ -13,11 +13,16 @@ Behavior knobs:
     so the client's TTL cache can be exercised.
   * the ``need_input`` tool — returns an MRTR ``input_required`` result
     (an elicitation round-trip) to test that path.
+  * ``FLUID_FAKE_HANG_HANDSHAKE`` — never answer the handshake (sleeps), so
+    the client's connect timeout can be exercised.
+  * ``FLUID_FAKE_CALL_SLEEP_S`` — sleep that many seconds before answering
+    any ``tools/call``, so the client's call timeout can be exercised.
 """
 
 import json
 import os
 import sys
+import time
 
 TOOLS = [
     {
@@ -110,6 +115,8 @@ def _handle(msg: dict) -> dict | None:
         return None  # notification (e.g. notifications/initialized)
     params = msg.get("params") or {}
     if method in ("initialize", "server/discover"):
+        if os.environ.get("FLUID_FAKE_HANG_HANDSHAKE"):
+            time.sleep(600)
         # discover pins the modern version; initialize echoes the client's so
         # every SDK generation's version check passes.
         version = (
@@ -129,6 +136,9 @@ def _handle(msg: dict) -> dict | None:
     elif method == "tools/list":
         result = _tools_list_result()
     elif method == "tools/call":
+        sleep_s = os.environ.get("FLUID_FAKE_CALL_SLEEP_S")
+        if sleep_s:
+            time.sleep(float(sleep_s))
         result = _call_tool_result(params)
     elif method == "ping":
         result = {}

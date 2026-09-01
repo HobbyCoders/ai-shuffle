@@ -14,10 +14,10 @@ import pytest
 
 from fluid.cli.__main__ import _version, build_parser, main, run_once
 from fluid.cli.config import list_sessions, make_engine, make_store
-from fluid.cli.repl import Repl, stream_turn
+from fluid.cli.repl import Repl, _deferred_notes, _mode, render_event, stream_turn
 from fluid.config.loader import BUILTIN_DEFAULTS, deep_merge
 from fluid.config.model import HarnessConfig
-from fluid.events.model import ToolResult
+from fluid.events.model import ErrorEvent, Interrupted, ThinkingDelta, ToolResult
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore
 from fluid.tools.inproc import create_inproc_server, tool
@@ -158,6 +158,32 @@ def test_repl_slash_model_and_exit() -> None:
         await engine.aclose()
 
     asyncio.run(scenario())
+
+
+class _TtyStream(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [Interrupted(session_id="s"), ErrorEvent(session_id="s", message="boom")],
+    ids=["interrupted", "error"],
+)
+def test_interrupted_and_error_events_undo_the_thinking_dim(terminal) -> None:
+    """A turn that ends mid-thinking must reset the tty dim and drop the
+    per-stream state, not only when it ends with TurnComplete."""
+    out = _TtyStream()
+    render_event(ThinkingDelta(session_id="s", index=0, text="hmm"), out)
+    assert "\x1b[2m" in out.getvalue()
+    assert id(out) in _mode
+
+    render_event(terminal, out)
+    text = out.getvalue()
+    assert "\x1b[0m" in text
+    assert text.index("\x1b[0m") > text.index("\x1b[2m")
+    assert id(out) not in _mode
+    assert id(out) not in _deferred_notes
 
 
 def test_stream_turn_reports_stop_reason() -> None:

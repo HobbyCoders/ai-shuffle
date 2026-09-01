@@ -142,3 +142,97 @@ async def test_do_list_defaults_missing_schema():
 
     assert tools[0].input_schema == {"type": "object"}
     assert tools[0].description == ""
+
+
+# ─── deadlines and the streamable-HTTP transport ─────────────────────────────
+
+
+class _TimeoutAwareSession(_FakeSession):
+    """The 2.0 signature: ``read_timeout_seconds: float | None``."""
+
+    seen: dict[str, Any] = {}
+
+    def __init__(self, read, write, read_timeout_seconds: "float | None" = None):
+        super().__init__(read, write)
+        _TimeoutAwareSession.seen["read_timeout_seconds"] = read_timeout_seconds
+
+
+@pytest.mark.asyncio
+async def test_call_timeout_reaches_the_session_read_timeout(monkeypatch):
+    import mcp.client.session as session_mod
+    import mcp.client.stdio as stdio_mod
+
+    monkeypatch.setattr(session_mod, "ClientSession", _TimeoutAwareSession)
+    monkeypatch.setattr(stdio_mod, "StdioServerParameters", lambda **kw: kw)
+    monkeypatch.setattr(stdio_mod, "stdio_client", lambda params: _FakeStreams())
+
+    client = McpClient("fake", {"transport": "stdio", "command": "noop", "call_timeout": 7})
+    await client.start()
+    try:
+        assert _TimeoutAwareSession.seen["read_timeout_seconds"] == 7
+    finally:
+        await client.aclose()
+
+
+def test_timeout_defaults_and_bad_values():
+    client = McpClient("fake", {"command": "noop", "connect_timeout": "abc", "call_timeout": -1})
+    assert client.connect_timeout == 30
+    assert client.call_timeout == 120
+    assert client.shutdown_timeout == 5
+
+
+def test_http_transport_resolves_the_2_0_symbol_and_passes_headers(monkeypatch):
+    """``streamable_http_client`` (2.0) is used, and ``headers`` reach the
+    httpx client it is handed; the client is returned so the actor owns it."""
+    import mcp.client.streamable_http as http_mod
+
+    from fluid.tools.mcp.client import _open_http_transport
+
+    assert hasattr(http_mod, "streamable_http_client") or hasattr(
+        http_mod, "streamablehttp_client"
+    )
+    calls: dict[str, Any] = {}
+
+    def fake_connect(url, *, http_client=None, terminate_on_close=True):
+        calls["url"] = url
+        calls["http_client"] = http_client
+        return "cm"
+
+    def fake_factory(headers=None, timeout=None, auth=None):
+        calls["factory_headers"] = headers
+        return {"client": headers}
+
+    monkeypatch.setattr(http_mod, "streamable_http_client", fake_connect, raising=False)
+    monkeypatch.setattr(http_mod, "create_mcp_http_client", fake_factory, raising=False)
+
+    cm, owned = _open_http_transport(
+        {"url": "https://x/mcp", "headers": {"Authorization": "Bearer t"}}
+    )
+    assert cm == "cm" and calls["url"] == "https://x/mcp"
+    assert calls["factory_headers"] == {"Authorization": "Bearer t"}
+    assert calls["http_client"] == {"client": {"Authorization": "Bearer t"}}
+    assert owned is calls["http_client"]
+
+    calls.clear()
+    cm, owned = _open_http_transport({"url": "https://x/mcp"})
+    assert calls["http_client"] is None and owned is None
+
+
+def test_http_transport_falls_back_to_the_1_x_symbol(monkeypatch):
+    import mcp.client.streamable_http as http_mod
+
+    from fluid.tools.mcp.client import _open_http_transport
+
+    calls: dict[str, Any] = {}
+
+    def legacy_connect(url, headers=None, timeout=30, sse_read_timeout=300):
+        calls["url"] = url
+        calls["headers"] = headers
+        return "legacy-cm"
+
+    monkeypatch.delattr(http_mod, "streamable_http_client", raising=False)
+    monkeypatch.setattr(http_mod, "streamablehttp_client", legacy_connect, raising=False)
+
+    cm, owned = _open_http_transport({"url": "https://x/mcp", "headers": {"A": "b"}})
+    assert cm == "legacy-cm" and owned is None
+    assert calls == {"url": "https://x/mcp", "headers": {"A": "b"}}

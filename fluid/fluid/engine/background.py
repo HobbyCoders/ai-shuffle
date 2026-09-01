@@ -28,6 +28,12 @@ _TERMINAL_EVENTS = (TurnComplete, Interrupted, ErrorEvent)
 _REPORT_HEAD_CHARS = 4_000
 _TERMINAL_TASK_KINDS = {"finished", "failed", "cancelled"}
 _BACKGROUND_SPAWN_SETTLE_TIMEOUT = 5.0
+# A wake that fails before its SessionWoken marker is retried this many times
+# (with doubling backoff from the base delay) before delivery is latched off.
+# The latch lifts on the next user turn, so one bad spell never blocks every
+# later completion for the life of the process.
+_BACKGROUND_WAKE_MAX_ATTEMPTS = 3
+_BACKGROUND_WAKE_RETRY_BASE_SECONDS = 0.5
 
 
 class BackgroundLifecycleMixin:
@@ -51,6 +57,8 @@ class BackgroundLifecycleMixin:
         self._background_wake_task: asyncio.Task | None = None
         self._background_waiting_on: asyncio.Task | None = None
         self._background_wake_blocked = False
+        self._background_wake_failures = 0
+        self._background_wake_retry: asyncio.TimerHandle | None = None
         self._background_spawn_tasks: set[asyncio.Task] = set()
         self._background_closed = False
         self._background_turn_terminal = False
@@ -261,6 +269,11 @@ class BackgroundLifecycleMixin:
     async def _mark_background_woken(
         self, op: UserTurn, session_id: str, node_id: str, turn_id: str
     ) -> None:
+        # Reached by every user turn once its node is written, wake or not: a
+        # turn that got this far shows turns can start again, so a latch left
+        # by earlier failed wakes lifts here and the retry budget resets.
+        self._background_wake_failures = 0
+        self._background_wake_blocked = False
         if not op.wake_task_ids:
             return
         async with self._background_lock:
@@ -273,7 +286,31 @@ class BackgroundLifecycleMixin:
             ))
             for task_id in op.wake_task_ids:
                 self._background_completions.pop(task_id, None)
-            self._background_wake_blocked = False
+
+    def _schedule_background_wake_retry(self) -> None:
+        """Kick delivery again after a failed wake, backing off per failure.
+
+        ``wait_turn`` re-kicks on its own as soon as the failed wake settles,
+        so the timer only matters when nobody is waiting on the engine.
+        """
+        if self._background_closed:
+            return
+        delay = _BACKGROUND_WAKE_RETRY_BASE_SECONDS * 2 ** (
+            self._background_wake_failures - 1
+        )
+        if self._background_wake_retry is not None:
+            self._background_wake_retry.cancel()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._background_wake_retry = loop.call_later(
+            delay, self._background_wake_retry_due
+        )
+
+    def _background_wake_retry_due(self) -> None:
+        self._background_wake_retry = None
+        self._kick_background_wake()
 
     def _kick_background_wake(self) -> None:
         if (
@@ -327,11 +364,17 @@ class BackgroundLifecycleMixin:
                 wake_task_ids=task_ids,
             ))
         finally:
-            # If the engine failed before persisting the synthetic user node and
-            # its SessionWoken marker, retain the completion for restart/retry but
-            # do not spin in-process. A fresh engine may attempt delivery again.
+            # The engine failed before persisting the synthetic user node and
+            # its SessionWoken marker. Keep the completion and try again a
+            # bounded number of times; after that, latch delivery off until a
+            # user turn shows the engine can run turns again (or a fresh
+            # engine picks the completion up from the store).
             if any(task_id in self._background_completions for task_id in task_ids):
-                self._background_wake_blocked = True
+                self._background_wake_failures += 1
+                if self._background_wake_failures >= _BACKGROUND_WAKE_MAX_ATTEMPTS:
+                    self._background_wake_blocked = True
+                else:
+                    self._schedule_background_wake_retry()
 
     @staticmethod
     def _background_wake_content(
@@ -401,6 +444,9 @@ class BackgroundLifecycleMixin:
 
     async def _close_background_lifecycle(self) -> None:
         self._background_closed = True
+        if self._background_wake_retry is not None:
+            self._background_wake_retry.cancel()
+            self._background_wake_retry = None
         wake = self._background_wake_task
         if wake is not None and not wake.done():
             wake.cancel()

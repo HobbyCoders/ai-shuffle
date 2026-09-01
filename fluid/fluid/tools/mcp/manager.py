@@ -18,6 +18,11 @@ class McpManager:
         self._clients: dict[str, McpClient] = {}
 
     async def connect(self, name: str, config: dict[str, Any]) -> list[ToolDescriptor]:
+        # A reconnect under the same name closes the old client first, so its
+        # actor task and child process do not outlive the replacement.
+        old = self._clients.pop(name, None)
+        if old is not None:
+            await old.aclose()
         client = McpClient(name, config)
         await client.start()
         self._clients[name] = client

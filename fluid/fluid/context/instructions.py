@@ -425,30 +425,100 @@ def _frontmatter_value(raw: str) -> str | list[str]:
     return _unquote(value)
 
 
-def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
-    """Split ``---`` frontmatter and parse simple ``key: value`` lines.
+_BLOCK_INDICATOR = re.compile(r"^([>|])([+-]?)$")
 
-    Returns ``(fields, body)``. Only flat ``key: value`` pairs are understood —
-    enough for a skill's ``name``/``description`` (~100-token) header — plus
-    inline ``[a, b]`` arrays (see :func:`_frontmatter_value`), so an agent's
-    ``tools:`` list parses without a YAML dependency.
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _block_scalar(lines: list[str], style: str, chomp: str) -> str:
+    """Text of a ``|`` (literal) or ``>`` (folded) block.
+
+    Lines are dedented by the shallowest indent among them. Literal keeps
+    every line break; folded joins lines with spaces and turns a blank line
+    into a paragraph break. Trailing line breaks follow the chomping
+    indicator: ``-`` drops them, ``+`` keeps them all, neither keeps one.
+    """
+    kept = list(lines)
+    trailing = 0
+    while kept and not kept[-1].strip():
+        kept.pop()
+        trailing += 1
+    if not kept:
+        return ""
+    base = min(_indent(line) for line in kept if line.strip())
+    body = [line[base:] if line.strip() else "" for line in kept]
+    if style == "|":
+        text = "\n".join(body)
+    else:
+        paragraphs: list[str] = []
+        current: list[str] = []
+        for line in body:
+            if line.strip():
+                current.append(line.strip())
+            else:
+                paragraphs.append(" ".join(current))
+                current = []
+        paragraphs.append(" ".join(current))
+        text = "\n".join(paragraphs)
+    if chomp == "-":
+        return text
+    if chomp == "+":
+        return text + "\n" * (trailing + 1)
+    return text + "\n"
+
+
+def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+    """Split ``---`` frontmatter and parse its flat ``key: value`` fields.
+
+    Returns ``(fields, body)``. Understood without a YAML dependency: scalar
+    values, inline ``[a, b]`` arrays (see :func:`_frontmatter_value`), block
+    scalars (``>``, ``>-``, ``>+``, ``|``, ``|-``, ``|+``), and a plain value
+    continued on more-indented lines (joined with spaces). A line is a new
+    field only when it sits at the first field's indent; a deeper line always
+    belongs to the field above it, so a wrapped description that happens to
+    contain ``tools: Bash`` cannot become a field.
     """
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return {}, text
-    fields: dict[str, Any] = {}
-    body_start = len(lines)
+    end = len(lines)
     for i in range(1, len(lines)):
         if lines[i].strip() == "---":
-            body_start = i + 1
+            end = i
             break
-        raw = lines[i]
-        if ":" in raw:
-            key, _, value = raw.partition(":")
-            key = key.strip()
-            if key:
-                fields[key] = _frontmatter_value(value)
-    body = "\n".join(lines[body_start:])
+    block = lines[1:end]
+    body = "\n".join(lines[end + 1:])
+    fields: dict[str, Any] = {}
+    base: int | None = None
+    i = 0
+    while i < len(block):
+        raw = block[i]
+        if not raw.strip():
+            i += 1
+            continue
+        indent = _indent(raw)
+        if base is None:
+            base = indent
+        key, sep, rest = raw.partition(":")
+        key = key.strip()
+        if indent > base or not sep or not key:
+            i += 1  # a continuation with no field above it, or not a field at all
+            continue
+        j = i + 1
+        while j < len(block) and (not block[j].strip() or _indent(block[j]) > base):
+            j += 1
+        continuation = block[i + 1:j]
+        rest = rest.strip()
+        indicator = _BLOCK_INDICATOR.match(rest)
+        if indicator:
+            fields[key] = _block_scalar(continuation, indicator.group(1), indicator.group(2))
+        else:
+            parts = [rest] if rest else []
+            parts.extend(line.strip() for line in continuation if line.strip())
+            fields[key] = _frontmatter_value(" ".join(parts))
+        i = j
     return fields, body
 
 

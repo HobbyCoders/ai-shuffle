@@ -35,7 +35,16 @@ from fluid.cli.config import (
     make_engine,
     make_store,
 )
-from fluid.cli.repl import Repl, auto_deny, stream_turn, tty_permission_responder
+from fluid.cli.repl import (
+    SIGINT_EXIT_CODE,
+    Repl,
+    abandon_stdin_read,
+    auto_deny,
+    request_interrupt,
+    sigint_scope,
+    stream_turn,
+    tty_permission_responder,
+)
 from fluid.config.loader import load_config
 from fluid.config.model import HarnessConfig
 from fluid.store.base import SessionLocked
@@ -91,21 +100,38 @@ async def run_once(
         session_id=meta.session_id, permission_responder=on_permission,
     )
     host = host_of(engine)
+    sigints = 0
+
+    def on_sigint() -> None:
+        # Ctrl-C ends the turn through the engine (the session stays intact
+        # and is flushed below), releases a stdin prompt the turn may be
+        # parked on, and makes the run exit 130.
+        nonlocal sigints
+        sigints += 1
+        if sigints == 1:
+            out.write("\n[interrupting]\n")
+            out.flush()
+        request_interrupt(engine)
+        abandon_stdin_read()
+
     try:
         # Background work (Task/Monitor) parks the session instead of ending
         # it; the one-shot run keeps streaming through park and wake until
         # nothing is in flight, so it never exits with workers running.
         from fluid.cli.repl import auto_answer, tty_question_responder
 
-        stop = await stream_turn(
-            engine, meta.session_id, prompt, out=out, on_permission=on_permission,
-            on_question=on_question or tty_question_responder() or auto_answer,
-            wait_background=True,
-        )
+        with sigint_scope(on_sigint):
+            stop = await stream_turn(
+                engine, meta.session_id, prompt, out=out, on_permission=on_permission,
+                on_question=on_question or tty_question_responder() or auto_answer,
+                wait_background=True,
+            )
     finally:
         if host is not None:
             await host.aclose()
         await _close_and_flush_learning(engine, meta.session_id, out)
+    if sigints:
+        return SIGINT_EXIT_CODE
     return 0 if stop != "error" else 1
 
 
@@ -172,8 +198,7 @@ async def chat_session(
             return await run_tui(engine, meta.session_id)
         verb = "resumed" if session_id else "session"
         print(f"fluid chat — {verb} {meta.session_id} (/help, /exit)", file=sys.stderr)
-        await Repl(engine, meta.session_id).run()
-        return 0
+        return await Repl(engine, meta.session_id).run()
     finally:
         host = host_of(engine)
         if host is not None:
@@ -433,6 +458,11 @@ def main(argv: list[str] | None = None) -> int:
     except SessionLocked as exc:
         print(f"fluid: {exc}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        # Ctrl-C outside the REPL's own handler (engine construction, MCP
+        # connect, shutdown): no traceback, the conventional exit code.
+        print(file=sys.stderr)
+        return SIGINT_EXIT_CODE
     return 2  # unreachable: subparsers are required
 
 

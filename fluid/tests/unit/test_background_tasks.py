@@ -6,6 +6,7 @@ import json
 import pytest
 
 import fluid.engine.native as native_module
+from fluid.engine.background import _BACKGROUND_WAKE_MAX_ATTEMPTS
 from fluid.engine.delegated import DelegatedLoop
 from fluid.engine.native import NativeLoop
 from fluid.events import (
@@ -300,15 +301,58 @@ async def test_delegated_failed_wake_does_not_retry_forever() -> None:
     await loop.submit(BackgroundTaskFinished(
         task_id="task-fail-wake", summary="wake me"
     ))
-    await asyncio.wait_for(loop.wait_turn(), timeout=1)
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
 
     errors = [
         e for e in loop.bus.log(loop.session_id) if isinstance(e, ErrorEvent)
     ]
-    assert len(errors) == 1
-    assert "spawn failed" in errors[0].message
+    # One attempt per retry in the budget, then the latch: no more spawns.
+    assert len(errors) == _BACKGROUND_WAKE_MAX_ATTEMPTS
+    assert all("spawn failed" in e.message for e in errors)
     assert loop._background_wake_blocked
     assert "task-fail-wake" in loop._background_completions
+    await loop.aclose()
+
+
+async def test_failed_wakes_latch_until_a_user_turn_then_deliver() -> None:
+    """Three wakes that die before writing their node latch delivery off; the
+    next user turn lifts the latch, the held completion wakes the session,
+    and a completion arriving after that is delivered too."""
+    async def dispatch(input, ctx):
+        raise AssertionError("not used")
+
+    loop = _loop(ScriptedProvider([_text("ok")]), MemoryStore(), dispatch)
+    original = loop._run_turn
+    failures_left = _BACKGROUND_WAKE_MAX_ATTEMPTS
+
+    async def flaky(op):
+        nonlocal failures_left
+        if op.wake_task_ids and failures_left > 0:
+            failures_left -= 1
+            return  # died before the wake node and SessionWoken were written
+        await original(op)
+
+    loop._run_turn = flaky
+
+    await loop._background_task_started(BackgroundTaskReceipt(task_id="t1"))
+    await loop.submit(BackgroundTaskFinished(task_id="t1", summary="first"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+    assert failures_left == 0
+    assert loop._background_wake_blocked
+    assert "t1" in loop._background_completions
+
+    await loop.submit(UserTurn(content="hello"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+    assert not loop._background_wake_blocked
+    woken = [e for e in loop.bus.log(loop.session_id) if isinstance(e, SessionWoken)]
+    assert [e.task_ids for e in woken] == [("t1",)]
+    assert "t1" not in loop._background_completions
+
+    await loop._background_task_started(BackgroundTaskReceipt(task_id="t2"))
+    await loop.submit(BackgroundTaskFinished(task_id="t2", summary="second"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+    woken = [e for e in loop.bus.log(loop.session_id) if isinstance(e, SessionWoken)]
+    assert [e.task_ids for e in woken] == [("t1",), ("t2",)]
     await loop.aclose()
 
 
