@@ -104,10 +104,15 @@ from fluid.events.ops import (
     UserTurn,
 )
 from fluid.hooks.bus import (
+    NOTIFICATION,
     POST_TOOL_USE,
+    PRE_COMPACT,
     PRE_TOOL_USE,
+    SESSION_END,
+    SESSION_START,
     TURN_END,
     TURN_START,
+    HookDecision,
     HookBus,
 )
 from fluid.messages import (
@@ -230,6 +235,25 @@ _CONTINUE_NUDGE = (
     "exactly where you stopped without repeating what you already said. "
     "Use tools to act rather than narrating long plans."
 )
+
+# How many times the TurnEnd (Stop) hooks may send the model back to work in
+# one turn. Past this a block is reported and the turn ends anyway.
+MAX_STOP_HOOK_CONTINUATIONS = 3
+
+
+def _hook_reminder(label: str, text: str) -> str:
+    """Hook-supplied text as a system-reminder block on a user message.
+
+    The text is defanged first, so a hook's output cannot close the block
+    early or forge a steering marker.
+    """
+    from fluid.tools.hardening import defang_harness_markers
+
+    return (
+        "<system-reminder>\n"
+        f"{label}:\n{defang_harness_markers(text).strip()}\n"
+        "</system-reminder>"
+    )
 
 
 def _steer_parts(pending: Steer | str) -> tuple[str | None, str]:
@@ -690,6 +714,18 @@ class NativeLoop(BackgroundLifecycleMixin):
         # loop's local counter so terminal events raised OUTSIDE the loop (the
         # catch-all handler in _start_and_loop) can still report the count.
         self._turn_model_calls = 0
+        # Hook bookkeeping. ``_session_hook_started`` gates the one SessionStart
+        # per engine and ``_session_start_context`` holds what those hooks
+        # asked to add to the first user message. ``_turn_end_hook_fired``
+        # lets _start_and_loop's finally fire TurnEnd on the paths the agent
+        # loop left early; ``_turn_end_reason`` names why. ``_hook_stop_reason``
+        # carries a hook's ``continue: false`` to the next point the loop can
+        # end the turn.
+        self._session_hook_started = False
+        self._session_start_context: str | None = None
+        self._turn_end_hook_fired = False
+        self._turn_end_reason: str | None = None
+        self._hook_stop_reason: str | None = None
         # End-of-turn reflection nudge (see _reflection_nudge): per-turn state,
         # reset by _agent_loop. ``_background_dispatches`` counts detached Task
         # workers started this turn; ``_reflection_nudged`` caps the reminder at
@@ -826,9 +862,11 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     async def _ensure_session(self) -> SessionMeta:
         if self._session is None:
+            resumed = False
             if self._session_id is not None:
                 self._session = await self.store.get_session(self._session_id)
                 if self._session is not None:
+                    resumed = True
                     await self._seed_bus_seq(self._session.session_id)
             if self._session is None:
                 self._session = await self.store.create_session(
@@ -840,7 +878,197 @@ class NativeLoop(BackgroundLifecycleMixin):
             self.ctx.extra["history_recall"] = HistoryRecall(
                 store=self.store, session_id=self._session.session_id
             )
+            await self._emit_session_start(
+                self._session.session_id, "resume" if resumed else "startup"
+            )
         return self._session
+
+    # ─── Hook plumbing ───────────────────────────────────────────────────
+
+    def _transcript_path(self, sid: str) -> str:
+        """The session's transcript file, for hook payloads. Empty when the
+        store keeps nothing on disk."""
+        for attr in ("transcript_path", "_log_path"):
+            fn = getattr(self.store, attr, None)
+            if callable(fn):
+                try:
+                    return str(fn(sid))
+                except Exception:  # noqa: BLE001 — a payload field, never fatal
+                    return ""
+        return ""
+
+    def _hook_payload(self, sid: str, **fields: Any) -> dict[str, Any]:
+        return {"session_id": sid, "transcript_path": self._transcript_path(sid), **fields}
+
+    async def _emit_session_start(self, sid: str, source: str) -> None:
+        """SessionStart hooks, once per engine. Their context is held for the
+        first user message (see _turn_start_hook)."""
+        if self._session_hook_started or self.hooks is None:
+            return
+        self._session_hook_started = True
+        decision = await self.hooks.emit(
+            SESSION_START, self._hook_payload(sid, source=source)
+        )
+        await self._report_hook_warnings(sid, None, SESSION_START, decision)
+        if decision.additional_context:
+            self._session_start_context = decision.additional_context
+
+    async def _emit_session_end(self) -> None:
+        """SessionEnd hooks on close, best effort: nothing here may keep the
+        engine from closing, and the event bus is already on its way out, so
+        diagnostics go to the log."""
+        if self.hooks is None or self._session is None:
+            return
+        sid = self._session.session_id
+        try:
+            decision = await self.hooks.emit(
+                SESSION_END, self._hook_payload(sid, reason="other")
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("SessionEnd hooks failed", exc_info=True)
+            return
+        for message in [*decision.warnings, decision.system_message or ""]:
+            if message:
+                log.warning("SessionEnd hook: %s", message)
+
+    async def _emit_pre_compact(
+        self, sid: str, turn_id: str, promotions: Sequence[Promotion]
+    ) -> None:
+        """PreCompact hooks, before a compaction batch is applied to the
+        request. The batch is already decided; hooks observe, they cannot
+        veto."""
+        if self.hooks is None:
+            return
+        decision = await self.hooks.emit(
+            PRE_COMPACT,
+            self._hook_payload(
+                sid, turn_id=turn_id, trigger="auto", custom_instructions="",
+                tiers=sorted({p.tier for p in promotions}),
+            ),
+        )
+        await self._report_hook_warnings(sid, turn_id, PRE_COMPACT, decision)
+
+    async def _notify_hooks(
+        self, sid: str, turn_id: str, notification_type: str, message: str,
+        *, name: str | None = None, tool_use_id: str | None = None,
+    ) -> None:
+        """Notification hooks: the engine is waiting on the user."""
+        if self.hooks is None:
+            return
+        decision = await self.hooks.emit(
+            NOTIFICATION,
+            self._hook_payload(
+                sid, turn_id=turn_id, notification_type=notification_type,
+                message=message, name=name, tool_use_id=tool_use_id,
+            ),
+        )
+        await self._report_hook_warnings(sid, turn_id, NOTIFICATION, decision, name)
+
+    async def _turn_start_hook(
+        self, sid: str, turn_id: str, prompt: str, *, with_context: bool = True
+    ) -> tuple[bool, str | None]:
+        """TurnStart (UserPromptSubmit) hooks. Returns ``(blocked, context)``.
+
+        A block ends the turn right here: a HookEvent names the reason, the
+        TurnEnd hooks run, an ErrorEvent closes the turn, and nothing reaches
+        the store, so the blocked prompt is not part of the session. Context
+        is what the hooks asked to add to the user message, already wrapped
+        as system-reminder blocks; SessionStart context rides the first turn
+        the same way. ``with_context=False`` (Resume) drops it, since the
+        prompt node already exists.
+        """
+        self._turn_end_hook_fired = False
+        self._turn_end_reason = None
+        self._hook_stop_reason = None
+        parts: list[str] = []
+        if with_context and self._session_start_context:
+            parts.append(_hook_reminder("SessionStart hook context", self._session_start_context))
+            self._session_start_context = None
+        if self.hooks is None:
+            return False, "\n".join(parts) or None
+        decision = await self.hooks.emit(
+            TURN_START, self._hook_payload(sid, turn_id=turn_id, prompt=prompt)
+        )
+        await self._report_hook_warnings(sid, turn_id, TURN_START, decision)
+        if decision.action == "deny" or decision.stop:
+            reason = decision.note or "blocked by hook"
+            await self._emit(HookEvent(
+                session_id=sid, turn_id=turn_id, level="deny",
+                message=reason, hook_event=TURN_START,
+            ))
+            await self._emit_turn_end_hook(sid, turn_id, text="", stop_reason="blocked")
+            await self._emit_terminal_with_park(ErrorEvent(
+                session_id=sid, turn_id=turn_id,
+                message=f"prompt blocked by hook: {reason}",
+                retriable=False, num_model_calls=0,
+            ))
+            self._active_turn_id = None
+            return True, None
+        if with_context and decision.additional_context:
+            parts.append(
+                _hook_reminder("UserPromptSubmit hook context", decision.additional_context)
+            )
+        return False, "\n".join(parts) or None
+
+    async def _emit_turn_end_hook(
+        self, sid: str, turn_id: str, *, text: str, stop_reason: str,
+        stop_hook_active: bool = False,
+    ) -> HookDecision | None:
+        """TurnEnd (Stop) hooks. Marks the turn's hooks as fired so the
+        fallback in _start_and_loop does not run them twice."""
+        self._turn_end_hook_fired = True
+        if self.hooks is None:
+            return None
+        decision = await self.hooks.emit(
+            TURN_END,
+            self._hook_payload(
+                sid, turn_id=turn_id, text=text, stop_reason=stop_reason,
+                stop_hook_active=stop_hook_active,
+            ),
+        )
+        await self._report_hook_warnings(sid, turn_id, TURN_END, decision)
+        return decision
+
+    async def _stop_hook_continuation(
+        self, sid: str, turn_id: str, result: _CallResult, continuations: int
+    ) -> str | None:
+        """Run the TurnEnd hooks on a finished reply. Returns the reason the
+        model should keep going, or None to end the turn. A block past
+        MAX_STOP_HOOK_CONTINUATIONS is reported and ignored; a hook's
+        ``continue: false`` always ends the turn."""
+        decision = await self._emit_turn_end_hook(
+            sid, turn_id, text=_plain_text(result.message.content),
+            stop_reason=result.stop_reason, stop_hook_active=continuations > 0,
+        )
+        if decision is None:
+            return None
+        if decision.stop:
+            await self._emit(HookEvent(
+                session_id=sid, turn_id=turn_id, level="warning",
+                message=f"stopped by hook: {decision.note or 'no reason given'}",
+                hook_event=TURN_END,
+            ))
+            return None
+        if decision.action != "deny":
+            return None
+        reason = decision.note or "a Stop hook asked the model to continue"
+        if continuations >= MAX_STOP_HOOK_CONTINUATIONS:
+            await self._emit(HookEvent(
+                session_id=sid, turn_id=turn_id, level="warning",
+                message=(
+                    f"Stop hook asked to continue ({reason}) but the turn already "
+                    f"continued {continuations} times; ending it"
+                ),
+                hook_event=TURN_END,
+            ))
+            return None
+        await self._emit(HookEvent(
+            session_id=sid, turn_id=turn_id, level="info",
+            message=f"Stop hook asked to continue: {reason}", hook_event=TURN_END,
+        ))
+        # The hooks run again when the turn really ends.
+        self._turn_end_hook_fired = False
+        return reason
 
     async def _seed_bus_seq(self, sid: str) -> None:
         """Continue event numbering after the rows already persisted.
@@ -1054,6 +1282,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 await self._turn_task
             except asyncio.CancelledError:
                 pass
+        await self._emit_session_end()
         if self._codemode is not None:
             await self._codemode.aclose()
         if self._journal is not None:
@@ -1250,12 +1479,22 @@ class NativeLoop(BackgroundLifecycleMixin):
                 ))
                 self._active_turn_id = None
                 return
+            await self._emit(TurnStarted(
+                session_id=sid, node_id=head.node_id, turn_id=turn_id,
+                model=self.model, provider=self.provider.name,
+            ))
+            blocked, _ = await self._turn_start_hook(
+                sid, turn_id, head.message.text(), with_context=False
+            )
+            if blocked:
+                return
             await self._start_and_loop(sid, turn_id, head)
             return
 
         content: list[Any] = (
             [Text(op.content)] if isinstance(op.content, str) else list(op.content)
         )
+        prompt_text = op.content if isinstance(op.content, str) else _plain_text(content)
         reminder = self._deferred_catalog_reminder()
         if reminder is not None:
             content.append(Text(reminder))
@@ -1268,8 +1507,21 @@ class NativeLoop(BackgroundLifecycleMixin):
         plan_reminder = self._plan_mode_reminder()
         if plan_reminder is not None:
             content.append(Text(plan_reminder))
+        # The node id is fixed before the TurnStart hooks run so TurnStarted
+        # can name it; the node itself is only written once they allow the
+        # prompt, so a blocked prompt never enters the session.
+        node_id = new_id("node")
+        await self._emit(TurnStarted(
+            session_id=sid, node_id=node_id, turn_id=turn_id,
+            model=self.model, provider=self.provider.name,
+        ))
+        blocked, hook_context = await self._turn_start_hook(sid, turn_id, prompt_text)
+        if blocked:
+            return
+        if hook_context:
+            content.append(Text(hook_context))
         user_node = SessionNode(
-            node_id=new_id("node"),
+            node_id=node_id,
             parent_id=op.parent_node_id or meta.head_node_id,
             message=Message(role="user", content=content),
         )
@@ -1285,24 +1537,17 @@ class NativeLoop(BackgroundLifecycleMixin):
     async def _start_and_loop(
         self, sid: str, turn_id: str, from_node: SessionNode
     ) -> None:
-        """The half of a turn that runs once the user node exists: announce it,
-        fire TURN_START, run the agent loop, and end on a terminal event. Shared
-        by UserTurn (which just wrote the node) and Resume (which continues from
-        the node already at the head)."""
-        await self._emit(
-            TurnStarted(
-                session_id=sid, node_id=from_node.node_id, turn_id=turn_id,
-                model=self.model, provider=self.provider.name,
-            )
-        )
-        if self.hooks is not None:
-            decision = await self.hooks.emit(
-                TURN_START, {"session_id": sid, "turn_id": turn_id}
-            )
-            await self._report_hook_warnings(sid, turn_id, TURN_START, decision)
+        """The half of a turn that runs once the user node exists and the
+        TurnStart hooks let the prompt through: run the agent loop and end on
+        a terminal event. Shared by UserTurn (which just wrote the node) and
+        Resume (which continues from the node already at the head). The
+        TurnEnd hooks fire on every way out except cancellation, which is the
+        engine closing."""
+        cancelled = False
         try:
             await self._agent_loop(sid, turn_id, from_node)
         except asyncio.CancelledError:
+            cancelled = True
             raise
         except Exception as exc:  # surface, never swallow
             await self._emit_terminal_with_park(
@@ -1312,6 +1557,17 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
             )
         finally:
+            if not cancelled and not self._turn_end_hook_fired:
+                # The loop left early: a provider error, an interrupt, a
+                # hook's stop, or an exception. The terminal event is already
+                # out; the hooks still get their turn.
+                reason = self._turn_end_reason or (
+                    "interrupted" if self._interrupted.is_set() else "error"
+                )
+                try:
+                    await self._emit_turn_end_hook(sid, turn_id, text="", stop_reason=reason)
+                except Exception:  # noqa: BLE001 — never mask the turn's own outcome
+                    log.warning("TurnEnd hooks failed", exc_info=True)
             self._active_turn_id = None
 
     async def _connect_mcp_once(self, sid: str, turn_id: str) -> None:
@@ -1626,6 +1882,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         result: _CallResult | None = None
         empty_retries = 0  # CONSECUTIVE empty completions; any real call resets it
         continuations = 0
+        stop_hook_continuations = 0
 
         while True:
             nodes = await self.store.load_path(sid, parent.node_id)
@@ -1642,6 +1899,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # rather than pay another rejected request (the stored tree
                 # keeps them — a switch back could decrypt them again).
                 history = strip_opaque_reasoning(history)
+            if promotions:
+                await self._emit_pre_compact(sid, turn_id, promotions)
             for promo in promotions:
                 await self._emit_compaction(sid, turn_id, promo)
             projected_prompt = self._estimate_request_input_tokens(history)
@@ -1785,6 +2044,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     )
                     if escalations:
                         overflow_retries += 1
+                        await self._emit_pre_compact(sid, turn_id, escalations)
                         for promo in escalations:
                             await self._emit_compaction(sid, turn_id, promo)
                         continue
@@ -1888,6 +2148,22 @@ class NativeLoop(BackgroundLifecycleMixin):
                 continue
             if not dispatchable:
                 final_stop = result.stop_reason
+                reason = await self._stop_hook_continuation(
+                    sid, turn_id, result, stop_hook_continuations
+                )
+                if reason is not None:
+                    # A Stop hook blocked the end of the turn: the reason goes
+                    # to the model as a user message and the loop runs again.
+                    stop_hook_continuations += 1
+                    nudge = SessionNode(
+                        node_id=new_id("node"), parent_id=parent.node_id,
+                        message=Message(role="user", content=[Text(
+                            _hook_reminder("A Stop hook asked you to continue", reason)
+                        )]),
+                    )
+                    await self.store.append(sid, nudge)
+                    parent = nudge
+                    continue
                 break
             call_cap_reached = (
                 self.max_model_calls_per_turn is not None
@@ -1931,6 +2207,19 @@ class NativeLoop(BackgroundLifecycleMixin):
             if call_cap_reached:
                 final_stop = "max_calls"
                 break
+            if self._hook_stop_reason is not None:
+                # A PreToolUse or PostToolUse hook answered ``continue: false``:
+                # the tool results are in the transcript, no further model call.
+                reason, self._hook_stop_reason = self._hook_stop_reason, None
+                self._turn_end_reason = "stopped"
+                partial, partial_cost = self._partial_usage(total_usage)
+                await self._emit_terminal_with_park(ErrorEvent(
+                    session_id=sid, node_id=parent.node_id, turn_id=turn_id,
+                    message=f"stopped by hook: {reason}", retriable=False,
+                    usage=partial, cost_usd=partial_cost,
+                    num_model_calls=num_calls,
+                ))
+                return
             if self._interrupted.is_set():
                 # Interrupt landed during tool dispatch (e.g. while parked on a
                 # permission prompt) — stop before issuing another model call.
@@ -1953,13 +2242,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._journal.record_event(
                     "assistant", _plain_text(result.message.content)
                 )
-        if self.hooks is not None:
-            decision = await self.hooks.emit(
-                TURN_END,
-                {"session_id": sid, "turn_id": turn_id,
-                 "text": _plain_text(result.message.content)},
+        if not self._turn_end_hook_fired:
+            # The max_calls path ends the turn without a final reply.
+            await self._emit_turn_end_hook(
+                sid, turn_id,
+                text=_plain_text(result.message.content) if result is not None else "",
+                stop_reason=final_stop or "end_turn",
             )
-            await self._report_hook_warnings(sid, turn_id, TURN_END, decision)
         if self._pending_steers:
             # No further tool result will carry them; the user should send a
             # normal message. This is the designed fallback for a turn that
@@ -2677,16 +2966,23 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
 
         # PreToolUse hook: deny short-circuits with an in-context error result;
-        # modify replaces the input before permissions/dispatch see it.
+        # modify replaces the input before permissions/dispatch see it; a
+        # permission decision of "allow" skips the permission gate and "ask"
+        # forces a prompt; a stop denies the call and ends the turn after it.
+        hook_permission: str | None = None
+        hook_reason: str | None = None
         if self.hooks is not None:
             decision = await self.hooks.emit(
                 PRE_TOOL_USE,
-                {"name": name, "input": input, "tool_use_id": tool_use_id,
-                 "session_id": sid},
+                self._hook_payload(
+                    sid, name=name, input=input, tool_use_id=tool_use_id, turn_id=turn_id
+                ),
             )
             await self._report_hook_warnings(sid, turn_id, PRE_TOOL_USE, decision, name)
-            if decision.action == "deny":
-                reason = decision.note or "denied"
+            if decision.action == "deny" or decision.stop:
+                reason = decision.note or ("stopped by hook" if decision.stop else "denied")
+                if decision.stop:
+                    self._hook_stop_reason = reason
                 await self._emit(HookEvent(
                     session_id=sid, turn_id=turn_id, level="deny",
                     message=reason, hook_event=PRE_TOOL_USE, tool_name=name,
@@ -2698,9 +2994,17 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
             if decision.action == "modify" and decision.replacement_input is not None:
                 input = decision.replacement_input
+            hook_permission = decision.permission_decision
+            hook_reason = decision.note
+            if hook_permission == "allow":
+                await self._emit(HookEvent(
+                    session_id=sid, turn_id=turn_id, level="info",
+                    message=f"hook approved {name}; permission prompt skipped",
+                    hook_event=PRE_TOOL_USE, tool_name=name,
+                ))
 
         # Permission gate.
-        if self.permissions is not None and spec is not None:
+        if self.permissions is not None and spec is not None and hook_permission != "allow":
             decided = self.permissions.decide(spec, input, cwd=self.ctx.cwd)
             verdict = decided.decision
             # Default denial text: names the configured rule when one decided.
@@ -2718,6 +3022,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                     )
                 verdict = "ask"
                 ask_reason = _DOOM_LOOP_REASON
+            if verdict == "allow" and hook_permission == "ask":
+                verdict = "ask"
+                ask_reason = hook_reason or "a PreToolUse hook asked for confirmation"
             if verdict == "ask":
                 verdict, responder_message, updated_input = await self._await_permission(
                     sid, turn_id, name, tool_use_id, input, decided.risk,
@@ -2784,6 +3091,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                 message=str(desc.get("message", "") or f"{marker.server} needs input for {name}"),
                 schema=desc.get("schema"),
             ))
+            await self._notify_hooks(
+                sid, turn_id, "elicitation_dialog", f"{name} is waiting for an answer",
+                name=name, tool_use_id=tool_use_id,
+            )
             interrupt_wait = asyncio.create_task(self._interrupted.wait())
             try:
                 done, _ = await asyncio.wait(
@@ -2816,6 +3127,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             session_id=sid, turn_id=turn_id, request_id=request_id,
             tool_use_id=tool_use_id, name=name, input=input, risk=risk, reason=reason,
         ))
+        await self._notify_hooks(
+            sid, turn_id, "permission_prompt", f"{name} needs your permission to run",
+            name=name, tool_use_id=tool_use_id,
+        )
         interrupt_wait = asyncio.create_task(self._interrupted.wait())
         try:
             done, _ = await asyncio.wait(
@@ -2842,12 +3157,16 @@ class NativeLoop(BackgroundLifecycleMixin):
         )
 
     async def _report_hook_warnings(
-        self, sid: str, turn_id: str, event: str, decision: Any,
+        self, sid: str, turn_id: str | None, event: str, decision: Any,
         tool_name: str | None = None,
     ) -> None:
-        """Surface non-fatal hook diagnostics (timeouts, odd exit codes) as
-        HookEvents. Never changes the decision."""
-        for message in getattr(decision, "warnings", ()):
+        """Surface non-fatal hook diagnostics (timeouts, odd exit codes) and
+        a hook's ``systemMessage`` as HookEvents. Never changes the decision."""
+        messages = [*getattr(decision, "warnings", ())]
+        system_message = getattr(decision, "system_message", None)
+        if system_message:
+            messages.append(system_message)
+        for message in messages:
             await self._emit(HookEvent(
                 session_id=sid, turn_id=turn_id, level="warning",
                 message=message, hook_event=event, tool_name=tool_name,
@@ -2872,11 +3191,43 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self.hooks is not None:
             decision = await self.hooks.emit(
                 POST_TOOL_USE,
-                {"name": name, "tool_use_id": tool_use_id, "input": input,
-                 "output": outcome.text, "is_error": outcome.is_error,
-                 "session_id": sid},
+                self._hook_payload(
+                    sid, name=name, tool_use_id=tool_use_id, input=input,
+                    output=outcome.text, is_error=outcome.is_error, turn_id=turn_id,
+                ),
             )
             await self._report_hook_warnings(sid, turn_id, POST_TOOL_USE, decision, name)
+            # A block appends its reason to the result (the call already ran,
+            # so is_error stays as it was); additionalContext rides the same
+            # way; a stop ends the turn once this dispatch round is recorded.
+            additions: list[str] = []
+            if decision.stop:
+                reason = decision.note or "stopped by hook"
+                self._hook_stop_reason = reason
+                await self._emit(HookEvent(
+                    session_id=sid, turn_id=turn_id, level="warning",
+                    message=f"stopped by hook: {reason}",
+                    hook_event=POST_TOOL_USE, tool_name=name,
+                ))
+            elif decision.action == "deny":
+                reason = decision.note or "blocked by hook"
+                await self._emit(HookEvent(
+                    session_id=sid, turn_id=turn_id, level="info",
+                    message=f"PostToolUse hook on {name}: {reason}",
+                    hook_event=POST_TOOL_USE, tool_name=name,
+                ))
+                additions.append(_hook_reminder("PostToolUse hook feedback", reason))
+            if decision.additional_context:
+                additions.append(
+                    _hook_reminder("PostToolUse hook context", decision.additional_context)
+                )
+            if additions:
+                # New text the tool never produced: drop the content id so
+                # code mode cannot collapse this result into an older ref.
+                outcome = replace(
+                    outcome, text="\n\n".join([outcome.text, *additions]).strip(),
+                    content_id=None, window_of=None,
+                )
         if self._journal is not None:
             # Continual journal, JSON-mode leg: one compact entry per call.
             self._journal.record_tool(

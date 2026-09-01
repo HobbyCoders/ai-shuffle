@@ -3,7 +3,11 @@
 This module is deliberately not part of normal configuration discovery.  A host
 chooses a source home, asks for a preview, and may apply selected ``ready``
 items from that exact preview.  It never reads credentials, histories, or
-session data, and it never overwrites an existing Fluid/native file.
+session data, and it never overwrites an existing Fluid/native file — with one
+exception: an existing ``hooks.json`` is merged per event (identical entries
+dropped), because a sidecar nothing reads would silently lose the hooks.
+Credential-shaped MCP values are replaced by ``${VAR}`` placeholders the
+loader expands from the environment.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, quote_plus, urlsplit, urlunsplit
 
 try:  # pragma: no cover - Python 3.11+ in supported deployments
     import tomllib
@@ -348,22 +352,115 @@ def _add_skills(items: list[SettingsImportItem], system: Literal["claude", "code
 
 
 def _add_agents(items: list[SettingsImportItem], system: Literal["claude", "codex"], root: Path,
-                destination: Path, kind: str, pattern: str = "*.md") -> None:
+                destination: Path, kind: str, pattern: str = "*.md", *, recursive: bool = True) -> None:
+    """One item per markdown file under ``root``; agents recurse, commands do not."""
     if not root.exists() and not _is_symlink(root):
         return
     if _is_symlink(root) or not root.is_dir():
         items.append(_item(system, kind, (root,), destination, is_directory=True))
         return
-    for source in sorted(root.rglob(pattern)):
+    for source in sorted(root.rglob(pattern) if recursive else root.glob(pattern)):
         _add_file(items, system, kind, source, destination / source.relative_to(root))
 
 
 def _instruction_destination(project: Path, source: Path, dot_claude: bool = False) -> Path:
-    name = source.name
-    native_name = "AGENTS" + name[len("CLAUDE"):]
-    if name == "CLAUDE.local.md":
-        native_name = "AGENTS.override.md"
+    """``CLAUDE.md`` → ``AGENTS.md``; ``CLAUDE.local.md`` → ``AGENTS.local.md``, the
+    sibling fluid layers after ``AGENTS.md`` (never the codex override, which
+    would replace the shared file instead of adding to it)."""
+    native_name = "AGENTS" + source.name[len("CLAUDE"):]
     return (project / ".fluid" / native_name) if dot_claude else project / native_name
+
+
+def _hooks_block(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """The ``hooks`` object of a Claude settings file, or ``(None, None)`` when absent."""
+    raw, error = _read_json(path)
+    if error:
+        return None, error
+    assert raw is not None
+    hooks = raw.get("hooks")
+    if hooks is None:
+        return None, None
+    if not isinstance(hooks, dict):
+        return None, "hooks must be an object keyed by event"
+    return hooks, None
+
+
+def _merge_hook_groups(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    """Per-event union of matcher groups; a group equal to one already present is dropped."""
+    out: dict[str, Any] = {
+        event: (list(groups) if isinstance(groups, list) else groups)
+        for event, groups in base.items()
+    }
+    for event, groups in extra.items():
+        if not isinstance(groups, list):
+            continue
+        target = out.get(event)
+        if not isinstance(target, list):
+            target = []
+            out[event] = target
+        for group in groups:
+            if group not in target:
+                target.append(group)
+    return out
+
+
+def _add_hooks(items: list[SettingsImportItem], sources: list[Path], destination: Path, kind: str,
+               *, local_note: str = "") -> None:
+    """The ``hooks`` blocks of ``sources`` as one ``hooks.json`` item.
+
+    Every event and matcher group is copied as written — the loader decides
+    which events it can run and warns about the rest. When the destination
+    exists, its groups and the imported ones are merged per event (identical
+    entries dropped) and apply replaces the file after checking it has not
+    changed since the preview.
+    """
+    merged: dict[str, Any] = {}
+    used: list[Path] = []
+    notes: list[str] = []
+    for path in sources:
+        if not (path.exists() or _is_symlink(path)):
+            continue
+        block, error = _hooks_block(path)
+        if error:
+            items.append(_diagnostic("claude", kind, path, error))
+            continue
+        if not block:
+            continue
+        merged = _merge_hook_groups(merged, block)
+        used.append(path)
+        if local_note and path.name == "settings.local.json":
+            notes.append(local_note)
+    if not used:
+        return
+    provenance: dict[str, Any] = {
+        "translation": "hooks block copied as written; the loader validates events",
+    }
+    payload: dict[str, Any] = {"hooks": merged}
+    if destination.exists() or _is_symlink(destination):
+        if _path_has_symlink(destination):
+            items.append(_item("claude", kind, tuple(used), destination, status="skipped",
+                               message="destination path has a symlink ancestor; rejected"))
+            return
+        existing, error = _read_json(destination)
+        if error:
+            items.append(_item("claude", kind, tuple(used), destination, status="conflict",
+                               message=f"existing destination cannot be merged: {error}"))
+            return
+        assert existing is not None
+        envelope = isinstance(existing.get("hooks"), dict)
+        current = existing["hooks"] if envelope else existing
+        combined = _merge_hook_groups(current, merged)
+        if combined == current:
+            items.append(_item("claude", kind, tuple(used), destination, status="duplicate",
+                               message="every imported hook already exists in the destination"))
+            return
+        payload = {**existing, "hooks": combined} if envelope else combined
+        provenance["merge_into_existing"] = True
+        provenance["destination_digest"] = _file_digest(destination)
+        notes.insert(0, "destination exists; hooks are merged per event, identical entries dropped")
+    content = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False).encode() + b"\n"
+    items.append(_item("claude", kind, tuple(used), destination, content=content,
+                       message="; ".join(notes), provenance=provenance))
 
 
 def _add_claude_project(items: list[SettingsImportItem], project: Path, system_home: Path,
@@ -375,10 +472,16 @@ def _add_claude_project(items: list[SettingsImportItem], project: Path, system_h
         _add_file(items, "claude", "project_instruction", source, _instruction_destination(project, source, True))
     _add_skills(items, "claude", dot / "skills", project / ".fluid" / "skills", "project_skill")
     _add_agents(items, "claude", dot / "agents", project / ".fluid" / "agents", "project_agent")
+    _add_agents(items, "claude", dot / "commands", project / ".fluid" / "commands", "project_command",
+                recursive=False)
     for setting in (dot / "settings.json", dot / "settings.local.json"):
         if setting.exists() or _is_symlink(setting):
             items.append(_diagnostic("claude", "project_settings", setting,
-                                     "inventoried only; Fluid has no safe native translation"))
+                                     "inventoried; only the hooks block is imported (see the hooks item)"))
+    # Both files land in .fluid/hooks.json: fluid reads no hooks.local.json.
+    _add_hooks(items, [dot / "settings.json", dot / "settings.local.json"],
+               project / ".fluid" / "hooks.json", "project_hooks",
+               local_note="settings.local.json hooks merged in too: fluid reads no hooks.local.json")
     mcp_file = project / ".mcp.json"
     if mcp_file.exists() or _is_symlink(mcp_file):
         raw, error = _read_json(mcp_file)
@@ -521,10 +624,14 @@ def _claude(items: list[SettingsImportItem], home: Path, fluid: Path,
     _add_file(items, "claude", "global_instruction", root / "CLAUDE.md", fluid / "AGENTS.md")
     _add_skills(items, "claude", root / "skills", fluid / "skills", "global_skill")
     _add_agents(items, "claude", root / "agents", fluid / "agents", "global_agent")
+    _add_agents(items, "claude", root / "commands", fluid / "commands", "global_command",
+                recursive=False)
     setting = root / "settings.json"
     if setting.exists() or _is_symlink(setting):
         items.append(_diagnostic("claude", "settings", setting,
-                                 "inventoried only; Fluid has no safe native translation"))
+                                 "inventoried; the hooks block is imported (see the hooks item) "
+                                 "and enabledPlugins with the plugins; other keys are not translated"))
+    _add_hooks(items, [setting], fluid / "hooks.json", "hooks")
     _claude_plugins(items, root, fluid)
     config_path = home / ".claude.json"
     persisted_config = root / ".claude.json"
@@ -633,6 +740,54 @@ def _agent_references(value: Any, key: str = "", in_agent_section: bool = False)
     return found
 
 
+# Codex ``approval_policy`` → fluid ``permission.approval_policy``.
+_CODEX_APPROVAL = {
+    "untrusted": "always_ask",
+    "on-failure": "on_write",
+    "on-request": "on_write",
+    "never": "never_ask",
+}
+
+
+def _codex_config_fragment(items: list[SettingsImportItem], config: Path, raw: dict[str, Any],
+                           fluid: Path) -> None:
+    """``model`` and ``approval_policy`` as a ``~/.fluid/config.toml`` fragment.
+
+    ``model`` goes to ``[providers.openai]`` (Codex models are OpenAI models);
+    ``approval_policy`` maps through :data:`_CODEX_APPROVAL`. Codex OAuth
+    tokens are never read: fluid signs in on its own and keeps that login in
+    ``~/.config/fluid/codex_auth.json``. When ``~/.fluid/config.toml`` already
+    exists the fragment lands in ``~/.fluid/imports/codex/config.toml`` for a
+    manual merge.
+    """
+    lines = [f"# From: {config}"]
+    model = raw.get("model")
+    if isinstance(model, str) and model.strip():
+        lines += ["", "[providers.openai]", f"model = {json.dumps(model.strip())}"]
+    policy = raw.get("approval_policy")
+    mapped = _CODEX_APPROVAL.get(policy.strip().lower()) if isinstance(policy, str) else None
+    if mapped is not None:
+        lines += ["", "[permission]", f'approval_policy = "{mapped}"']
+    if len(lines) == 1:
+        return
+    notes = [
+        "model and approval_policy translated; mcp_servers land in mcp.json; Codex OAuth is "
+        "not imported (fluid keeps its own login in ~/.config/fluid/codex_auth.json)",
+    ]
+    if isinstance(policy, str) and mapped is None:
+        notes.append(f"approval_policy {policy!r} has no fluid equivalent; omitted")
+    destination = fluid / "config.toml"
+    if destination.exists() or _is_symlink(destination):
+        destination = fluid / "imports" / "codex" / "config.toml"
+        notes.insert(0, "~/.fluid/config.toml exists; the fragment goes to "
+                        "~/.fluid/imports/codex/config.toml for you to merge by hand")
+    items.append(_item(
+        "codex", "configuration_fragment", (config,), destination,
+        content=("\n".join(lines) + "\n").encode(), message="; ".join(notes),
+        provenance={"translation": "codex config.toml model/approval_policy to fluid config.toml"},
+    ))
+
+
 def _codex(items: list[SettingsImportItem], home: Path, fluid: Path,
            mcp_inputs: dict[Path | None, list[tuple[Path, dict[str, Any]]]]) -> None:
     codex, native = home / ".codex", home / ".agents"
@@ -651,7 +806,10 @@ def _codex(items: list[SettingsImportItem], home: Path, fluid: Path,
         items.append(_diagnostic("codex", "configuration", config, error))
         return
     items.append(_diagnostic("codex", "configuration", config,
-                             "inventoried for MCP, agent references, and projects; other settings are not imported"))
+                             "inventoried for MCP, agent references, and projects; model and "
+                             "approval_policy become a config.toml fragment item; other settings "
+                             "are not imported"))
+    _codex_config_fragment(items, config, raw, fluid)
     for reference in sorted(_agent_references(raw)):
         source = (codex / reference).resolve(strict=False)
         # resolve is only used to construct a path; containment prevents config escapes.
@@ -713,34 +871,162 @@ def _contains_embedded_secret(value: str) -> bool:
     )
 
 
-def _sanitize_server(name: str, raw: Any) -> tuple[dict[str, Any] | None, str | None]:
+# Key names whose values are treated as secrets wherever they appear (env,
+# headers, query strings, ``--flag`` names), on top of ``_SECRET_WORDS``.
+_SECRET_KEY_RE = re.compile(r"(?i)key|token|secret|password|passwd|authorization|cookie|credential|auth")
+# Server fields fluid's loader understands; anything else is dropped with a note.
+_SERVER_KEYS = frozenset({"command", "url", "args", "type", "env", "headers", "cwd", "disabled", "enabled"})
+
+
+def _secret_key(name: str) -> bool:
+    return _has_secret_key(name) or bool(_SECRET_KEY_RE.search(name))
+
+
+def _placeholder(server: str, key: str) -> str:
+    """``${SERVER_KEY}``: the variable the user sets in place of an imported secret."""
+    slug = "_".join(
+        re.sub(r"[^A-Za-z0-9]+", "_", part).strip("_").upper() for part in (server, key)
+    )
+    return "${" + re.sub(r"_+", "_", slug).strip("_") + "}"
+
+
+def _redact_map(server: str, raw: Any, placeholders: list[str]) -> dict[str, str] | None:
+    """``env``/``headers``: secret-looking values become placeholders, the rest stay."""
+    if not isinstance(raw, dict):
+        return None
+    clean: dict[str, str] = {}
+    for key, value in raw.items():
+        name = str(key)
+        text = "" if value is None else str(value)
+        if _secret_key(name) or _contains_embedded_secret(text):
+            placeholder = _placeholder(server, name)
+            placeholders.append(placeholder)
+            clean[name] = placeholder
+        else:
+            clean[name] = text
+    return clean
+
+
+def _redact_url(server: str, url: str, placeholders: list[str]) -> str | None:
+    """Secret query values become placeholders; credentials anywhere else reject the URL."""
+    parsed = urlsplit(url)
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    if _contains_embedded_secret(urlunsplit(parsed._replace(query=""))):
+        return None
+    if not parsed.query:
+        return url
+    pairs: list[str] = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if _secret_key(key) or _contains_embedded_secret(value):
+            placeholder = _placeholder(server, key)
+            placeholders.append(placeholder)
+            pairs.append(f"{quote_plus(key)}={placeholder}")
+        else:
+            pairs.append(f"{quote_plus(key)}={quote_plus(value)}")
+    return urlunsplit(parsed._replace(query="&".join(pairs)))
+
+
+def _redact_args(server: str, args: list[str], placeholders: list[str]) -> list[str]:
+    """``--token X`` / ``--token=X`` / ``token=X`` values, and any argument that
+    embeds a credential, become placeholders."""
+    clean: list[str] = []
+    pending: str | None = None
+    for index, arg in enumerate(args):
+        if pending is not None:
+            clean.append(pending)
+            placeholders.append(pending)
+            pending = None
+            continue
+        if arg.startswith("-"):
+            flag, sep, _value = arg.partition("=")
+            if _secret_key(flag.lstrip("-")):
+                placeholder = _placeholder(server, flag.lstrip("-"))
+                if sep:
+                    clean.append(f"{flag}={placeholder}")
+                    placeholders.append(placeholder)
+                else:
+                    clean.append(arg)
+                    pending = placeholder
+                continue
+            clean.append(arg)
+            continue
+        key, sep, _value = arg.partition("=")
+        if sep and key and " " not in key and _secret_key(key):
+            placeholder = _placeholder(server, key)
+            placeholders.append(placeholder)
+            clean.append(f"{key}={placeholder}")
+            continue
+        if _contains_embedded_secret(arg):
+            placeholder = _placeholder(server, f"ARG{index}")
+            placeholders.append(placeholder)
+            clean.append(placeholder)
+            continue
+        clean.append(arg)
+    return clean
+
+
+def _sanitize_server(name: str, raw: Any) -> tuple[dict[str, Any] | None, str | None, list[str]]:
+    """One server entry in fluid's mcp.json shape: ``(entry, note, placeholders)``.
+
+    Secret-shaped values in ``env``, ``headers``, query strings and arguments
+    are replaced by ``${SERVER_KEY}`` placeholders (never copied, never
+    quoted in a note); non-secret values stay as written. ``cwd``, ``type``
+    (``sse`` kept but flagged: the loader skips it) and the ``disabled`` /
+    ``enabled`` flags pass through. A credential in the command itself or in
+    a URL's userinfo rejects the entry, since there is no field to put a
+    placeholder in.
+    """
     if not isinstance(name, str) or not name or not isinstance(raw, dict):
-        return None, "server name and definition must be non-empty string/object"
+        return None, "server name and definition must be non-empty string/object", []
     command, url = raw.get("command"), raw.get("url")
     if not isinstance(command, str) and not isinstance(url, str):
-        return None, "server requires a string command or url"
+        return None, "server requires a string command or url", []
     if isinstance(command, str) and isinstance(url, str):
-        return None, "server cannot specify both command and url"
+        return None, "server cannot specify both command and url", []
     args = raw.get("args", [])
     if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
-        return None, "server args must be a list of strings"
-    values = [value for value in (command, url, *args) if isinstance(value, str)]
-    secret_flag = any(
-        arg.startswith("-") and _has_secret_key(arg.lstrip("-").split("=", 1)[0])
-        for arg in args
-    )
-    if secret_flag or any(_contains_embedded_secret(value) for value in values):
-        return None, "server contains credential-bearing command, URL, or argument values"
-    clean: dict[str, Any] = {"command": command} if isinstance(command, str) else {"url": url}
+        return None, "server args must be a list of strings", []
+    placeholders: list[str] = []
+    notes: list[str] = []
+    clean: dict[str, Any] = {}
+    if isinstance(command, str):
+        if _contains_embedded_secret(command):
+            return None, "server command embeds a credential", []
+        clean["command"] = command
+    else:
+        redacted = _redact_url(name, url, placeholders)
+        if redacted is None:
+            return None, "server URL carries a credential outside its query string", []
+        clean["url"] = redacted
     if args:
-        clean["args"] = args
+        clean["args"] = _redact_args(name, args, placeholders)
+    for key in ("env", "headers"):
+        if key in raw:
+            mapping = _redact_map(name, raw[key], placeholders)
+            if mapping is None:
+                notes.append(f"{key} must be an object; omitted")
+            elif mapping:
+                clean[key] = mapping
     if isinstance(raw.get("type"), str):
         clean["type"] = raw["type"]
-    # env and secret-shaped fields are deliberately not represented, even in diagnostics.
-    unsupported = [key for key in raw if key not in {"command", "url", "args", "type", "env"} and not _has_secret_key(str(key))]
-    if unsupported:
-        return None, "server contains unsupported fields"
-    return clean, "environment and secret fields omitted" if ("env" in raw or any(_has_secret_key(str(k)) for k in raw)) else None
+        if raw["type"].strip().lower() == "sse":
+            notes.append("type 'sse' is not supported by fluid's MCP client; entry kept, the loader skips it")
+    if isinstance(raw.get("cwd"), str):
+        clean["cwd"] = raw["cwd"]
+    for flag in ("disabled", "enabled"):
+        if isinstance(raw.get(flag), bool):
+            clean[flag] = raw[flag]
+    extra = [str(k) for k in raw if str(k) not in _SERVER_KEYS]
+    dropped_secret = sorted(k for k in extra if _secret_key(k))
+    dropped_other = sorted(k for k in extra if not _secret_key(k))
+    if dropped_secret:
+        notes.append("credential field(s) omitted: " + ", ".join(dropped_secret))
+    if dropped_other:
+        notes.append("unsupported field(s) omitted: " + ", ".join(dropped_other))
+    if placeholders:
+        notes.append("set before use: " + ", ".join(dict.fromkeys(placeholders)))
+    return clean, "; ".join(notes) or None, placeholders
 
 
 def _mcp_items(items: list[SettingsImportItem], inputs: dict[Path | None, list[tuple[Path, dict[str, Any]]]],
@@ -753,7 +1039,7 @@ def _mcp_items(items: list[SettingsImportItem], inputs: dict[Path | None, list[t
         for path, supplied in groups:
             paths.append(path)
             for name, raw in sorted(supplied.items()):
-                clean, note = _sanitize_server(str(name), raw)
+                clean, note, _placeholders = _sanitize_server(str(name), raw)
                 if clean is None:
                     items.append(_diagnostic("claude" if path.name.endswith("json") else "codex", "mcp_server", path,
                                              f"MCP server {name!r} rejected: {note}"))
@@ -819,12 +1105,44 @@ def _as_review_sidecar(item: SettingsImportItem, destination: Path) -> SettingsI
     )
 
 
+# Concatenation order for competing global instruction files.
+_SYSTEM_ORDER = {"claude": 0, "codex": 1}
+
+
+def _concatenated_instruction(
+    items: list[SettingsImportItem], destination: Path
+) -> SettingsImportItem | None:
+    """One file from several competing instruction sources, Claude first, then
+    Codex, each under a ``# From: <path>`` header. ``None`` when a source
+    cannot be read."""
+    ordered = sorted(items, key=lambda it: (_SYSTEM_ORDER.get(it.source_system, 2), it.source_paths))
+    parts: list[str] = []
+    paths: list[Path] = []
+    for item in ordered:
+        for raw_path in item.source_paths:
+            path = Path(raw_path)
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                return None
+            parts.append(f"# From: {path}\n{text.rstrip()}\n")
+            paths.append(path)
+    listed = ", ".join(str(p) for p in paths)
+    return _item(
+        "combined", ordered[0].kind, tuple(paths), destination,
+        content="\n".join(parts).encode(),
+        message=f"{len(paths)} sources differ; one file concatenates them under '# From:' headers, in this order: {listed}",
+        provenance={"translation": "concatenated", "concatenated_from": [str(p) for p in paths]},
+    )
+
+
 def _resolve_destinations(items: list[SettingsImportItem]) -> list[SettingsImportItem]:
     """Apply destination/native and source-to-source collision rules."""
     result = list(items)
     indexed: dict[str, list[int]] = {}
     for index, item in enumerate(result):
-        if item.status == "ready" and item.destination:
+        # A hooks.json merge item already knows its destination exists.
+        if item.status == "ready" and item.destination and not item.provenance.get("merge_into_existing"):
             indexed.setdefault(item.destination, []).append(index)
     for destination, indices in indexed.items():
         dest = Path(destination)
@@ -855,9 +1173,23 @@ def _resolve_destinations(items: list[SettingsImportItem]) -> list[SettingsImpor
             for index in indices[1:]:
                 result[index] = replace(result[index], status="duplicate",
                                         message=f"exact duplicate of {result[first].id}; one copy will be used")
+            continue
+        # Several sources, no native file yet: instruction files are joined
+        # into one destination; anything else has no safe merge.
+        combined = (
+            _concatenated_instruction([result[i] for i in indices], dest)
+            if all("instruction" in result[i].kind for i in indices)
+            else None
+        )
+        if combined is not None:
+            result[indices[0]] = combined
+            for index in indices[1:]:
+                result[index] = replace(result[index], status="duplicate",
+                                        message=f"concatenated into {combined.id}; one combined file will be written")
         else:
             for index in indices:
-                result[index] = _as_review_sidecar(result[index], dest)
+                result[index] = replace(result[index], status="conflict",
+                                        message="competing sources differ and no destination exists; none copied")
     return result
 
 
@@ -949,6 +1281,37 @@ def _write_exclusive(destination: Path, data: bytes) -> None:
         os.close(descriptor)
 
 
+def _write_replace(destination: Path, data: bytes) -> None:
+    """Replace an existing regular file through an exclusively created
+    sibling and ``os.replace`` — the hooks.json merge, nothing else."""
+    temp = destination.with_name(destination.name + ".fluid-import")
+    _write_exclusive(temp, data)
+    try:
+        os.replace(temp, destination)
+    except OSError:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _merge_existing(item: SettingsImportItem, destination: Path) -> SettingsImportItem:
+    """Apply a ``merge_into_existing`` item: the destination must still match
+    the preview's digest, then the merged document replaces it."""
+    if item._content is None or _is_symlink(destination):
+        return replace(item, status="conflict", message="destination changed after preview; not merged")
+    if _file_digest(destination) != item.provenance.get("destination_digest"):
+        return replace(item, status="conflict", message="destination changed after preview; not merged")
+    try:
+        _write_replace(destination, item._content)
+    except FileExistsError:
+        return replace(item, status="skipped", message="a stale temporary file blocks the merge; remove it and retry")
+    except OSError as exc:
+        return replace(item, status="skipped", message=f"merge failed: {exc}")
+    return replace(item, status="imported", message="merged into the existing destination; identical entries dropped")
+
+
 def _provenance(destination_home: Path, item: SettingsImportItem) -> None:
     directory = destination_home / ".fluid" / "provenance"
     directory.mkdir(parents=True, exist_ok=True)
@@ -983,6 +1346,15 @@ def apply_settings_import(preview: SettingsImportPreview, *, selected_ids: Itera
             results.append(replace(item, status="skipped", message="destination path has a symlink ancestor; rejected"))
             continue
         if destination.exists() or _is_symlink(destination):
+            if item.provenance.get("merge_into_existing"):
+                outcome = _merge_existing(item, destination)
+                if outcome.status == "imported":
+                    try:
+                        _provenance(destination_home, item)
+                    except OSError as exc:
+                        outcome = replace(outcome, message=f"{outcome.message}; provenance record failed: {exc}")
+                results.append(outcome)
+                continue
             results.append(replace(item, status="conflict", message="destination appeared after preview; native file wins"))
             continue
         try:
@@ -1025,7 +1397,16 @@ def apply_settings_import(preview: SettingsImportPreview, *, selected_ids: Itera
                         pass
             results.append(replace(item, status="skipped", message=f"copy failed without overwrite: {exc}"))
         else:
-            results.append(replace(item, status="imported", message="copied without modifying source"))
+            proposed = item.provenance.get("proposed_native_destination")
+            if item.provenance.get("activation") == "review_required" and proposed:
+                # The native file won; what was written is a sidecar nothing
+                # reads until the user merges it, so this is not an import.
+                results.append(replace(
+                    item, status="skipped",
+                    message=f"destination exists: {proposed}; review sidecar written to {destination}",
+                ))
+            else:
+                results.append(replace(item, status="imported", message="copied without modifying source"))
     return SettingsImportResult(preview=preview, items=tuple(results))
 
 

@@ -63,7 +63,7 @@ def test_hooks_merge_user_then_project(tmp_path, monkeypatch) -> None:
     assert config.to_dict()["hooks"][1]["command"] == "project-hook"
 
 
-def test_hooks_json_import_shape(tmp_path) -> None:
+def test_hooks_json_import_shape(tmp_path, caplog) -> None:
     path = tmp_path / "hooks.json"
     path.write_text(json.dumps({
         "hooks": {
@@ -75,15 +75,26 @@ def test_hooks_json_import_shape(tmp_path) -> None:
                 {"hooks": [{"command": "audit.sh"}]},
             ],
             "Stop": [{"hooks": [{"type": "command", "command": "notify.sh"}]}],
-            "Notification": [{"hooks": [{"type": "command", "command": "skip.sh"}]}],
+            "UserPromptSubmit": [{"hooks": [{"command": "prompt.sh"}]}],
+            "SessionStart": [{"hooks": [{"command": "start.sh"}]}],
+            "Notification": [{"hooks": [{"type": "command", "command": "notice.sh"}]}],
+            "PermissionRequest": [{"hooks": [{"command": "skip.sh"}]}],
         }
     }), encoding="utf-8")
-    overlay = _load_hooks_json(path)
+    with caplog.at_level("WARNING", logger="fluid.config.loader"):
+        overlay = _load_hooks_json(path)
     assert overlay["hooks"] == [
         {"event": "PreToolUse", "command": "guard.sh", "matcher": "Bash|Edit", "timeout": 10},
         {"event": "PreToolUse", "command": "audit.sh"},
         {"event": "TurnEnd", "command": "notify.sh"},
+        {"event": "TurnStart", "command": "prompt.sh"},
+        {"event": "SessionStart", "command": "start.sh"},
+        {"event": "Notification", "command": "notice.sh"},
     ]
+    # Every dropped entry is named in the log rather than vanishing.
+    dropped = [r.getMessage() for r in caplog.records]
+    assert any("'PermissionRequest'" in m and "no such event" in m for m in dropped)
+    assert any("type 'prompt'" in m for m in dropped)
     # The file is read at both scopes, ahead of the TOML in the same scope.
     (tmp_path / ".fluid").mkdir()
     (tmp_path / ".fluid" / "hooks.json").write_text(path.read_text(encoding="utf-8"))
@@ -92,19 +103,25 @@ def test_hooks_json_import_shape(tmp_path) -> None:
     )
     config = load_config(cwd=tmp_path, include_system=False, include_user=False, env={})
     assert [h.command for h in config.hooks] == [
-        "guard.sh", "audit.sh", "notify.sh", "toml-hook"
+        "guard.sh", "audit.sh", "notify.sh", "prompt.sh", "start.sh", "notice.sh", "toml-hook"
     ]
 
 
-def test_hooks_json_malformed_is_ignored(tmp_path) -> None:
+def test_hooks_json_malformed_is_ignored(tmp_path, caplog) -> None:
     path = tmp_path / "hooks.json"
     path.write_text("{not json", encoding="utf-8")
-    assert _load_hooks_json(path) == {}
+    with caplog.at_level("WARNING", logger="fluid.config.loader"):
+        assert _load_hooks_json(path) == {}
+    assert any("hooks file ignored" in r.getMessage() for r in caplog.records)
 
 
 def test_hook_config_validation() -> None:
     with pytest.raises(ValueError, match="unknown hook event"):
-        HookConfig.from_dict({"event": "SessionStart", "command": "x"})
+        HookConfig.from_dict({"event": "PermissionRequest", "command": "x"})
+    # Claude Code's names are accepted in config.toml too, stored as fluid's.
+    assert HookConfig.from_dict({"event": "UserPromptSubmit", "command": "x"}).event == "TurnStart"
+    assert HookConfig.from_dict({"event": "Stop", "command": "x"}).event == "TurnEnd"
+    assert HookConfig.from_dict({"event": "PreCompact", "command": "x"}).event == "PreCompact"
     with pytest.raises(ValueError, match="non-empty command"):
         HookConfig.from_dict({"event": "TurnEnd", "command": "  "})
     with pytest.raises(ValueError, match="timeout"):
@@ -132,6 +149,11 @@ def test_hook_config_validation() -> None:
         ("(Bash|Monitor)", "Monitor", True),
         ("Bash", None, False),
         ("(", "Bash", False),  # invalid regex never matches
+        ("Notebook.*", "NotebookEdit", True),
+        ("Bas.", "Bash", True),
+        ("Bash", "BashOutput", False),
+        ("mcp__chrome__.*", "mcp__chrome__click", True),
+        ("mcp__chrome__.*", "mcp__wx__get_weather", False),
     ],
 )
 def test_matcher_matches(matcher, name, expected) -> None:
@@ -142,19 +164,23 @@ def test_interpret_exit_codes() -> None:
     hook = CommandHook(event=PRE_TOOL_USE, command="x")
     deny = hook.interpret(PRE_TOOL_USE, 2, "", "bad idea\n")
     assert deny.action == "deny" and deny.note == "bad idea"
-    assert hook.interpret(PRE_TOOL_USE, 2, "", "").note == "denied by hook"
+    assert hook.interpret(PRE_TOOL_USE, 2, "", "").note == "blocked by hook"
     warn = hook.interpret(PRE_TOOL_USE, 3, "", "boom")
     assert warn.action == "allow" and "code 3" in warn.warnings[0] and "boom" in warn.warnings[0]
     json_deny = hook.interpret(PRE_TOOL_USE, 0, '{"decision": "deny", "reason": "nope"}', "")
     assert json_deny.action == "deny" and json_deny.note == "nope"
     rewrite = hook.interpret(PRE_TOOL_USE, 0, '{"updated_input": {"a": 1}}', "")
     assert rewrite.action == "modify" and rewrite.replacement_input == {"a": 1}
-    # updated_input is PreToolUse-only, and so is a denial: after the fact it
-    # degrades to a warning.
+    # updated_input is PreToolUse-only. A PostToolUse block reaches the engine
+    # as a deny, which appends the reason to the result.
     assert hook.interpret(POST_TOOL_USE, 0, '{"updated_input": {"a": 1}}', "").action == "allow"
     late = hook.interpret(POST_TOOL_USE, 2, "", "too late")
-    assert late.action == "allow" and "cannot be blocked" in late.warnings[0]
+    assert late.action == "deny" and late.note == "too late"
     assert hook.interpret(PRE_TOOL_USE, 0, "plain text", "").action == "allow"
+    # Events with nothing left to block turn a block into a warning.
+    start = CommandHook(event="SessionStart", command="x")
+    early = start.interpret("SessionStart", 2, "", "no")
+    assert early.action == "allow" and "cannot be blocked" in early.warnings[0]
 
 
 def test_bus_accumulates_warnings() -> None:

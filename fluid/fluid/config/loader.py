@@ -3,17 +3,22 @@
 Precedence (lowest → highest, later layers deep-merge over earlier ones):
 
   1. built-in defaults (:data:`BUILTIN_DEFAULTS`)
-  2. system   ``/etc/fluid/config.toml``            (skipped if absent)
-  3. user     ``~/.fluid/mcp.json``, ``~/.fluid/hooks.json``, then ``~/.fluid/config.toml``
-  4. project  ``./.fluid/mcp.json``, ``./.fluid/hooks.json``, then
-              ``./.fluid/config.toml`` or ``./fluid.toml``
-  5. env      ``FLUID_*`` overrides
-  6. explicit CLI/`overrides` argument
+  2. settings  ``permissions.defaultMode`` from the settings.json stack, as an
+               approval policy (so any file, env or flag below still wins)
+  3. system    ``/etc/fluid/config.toml`` (``%ProgramData%/fluid/config.toml``
+               on Windows), skipped if absent
+  4. user      ``~/.fluid/mcp.json``, ``~/.fluid/hooks.json``, then ``~/.fluid/config.toml``
+  5. project   for every directory from the git root down to the cwd, outer
+               first: ``<dir>/.fluid/mcp.json``, ``<dir>/.fluid/hooks.json``,
+               then ``<dir>/.fluid/config.toml`` or ``<dir>/fluid.toml``
+  6. env       ``FLUID_*`` overrides
+  7. explicit CLI/`overrides` argument
 
-The TOML layer follows the JSON layers at each scope, so a native ``[mcp]``
-entry wins a same-named imported server definition. ``hooks`` is the one list
-that accumulates across layers instead of being replaced: user hooks run
-first, project hooks after them.
+The TOML layer follows the JSON layers at each scope, and ``mcp.<name>`` is a
+replace-level key, so a native ``[mcp.x]`` table wins a same-named imported
+server definition outright. ``hooks`` is the one list that accumulates across
+layers instead of being replaced: user hooks run first, project hooks after
+them.
 
 Parsing uses the stdlib :mod:`tomllib` (3.11+), so the core stays dependency-free.
 ``build_engine`` turns a resolved :class:`HarnessConfig` into a ready
@@ -26,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -137,7 +143,21 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     },
 }
 
-SYSTEM_CONFIG = Path("/etc/fluid/config.toml")
+def system_config_path(
+    platform: str | None = None, env: dict[str, str] | None = None
+) -> Path:
+    """The machine-wide config file: ``/etc/fluid/config.toml``, or
+    ``%ProgramData%\\fluid\\config.toml`` on Windows (where ``/etc`` would
+    resolve to ``<drive>:\\etc``)."""
+    platform = sys.platform if platform is None else platform
+    env = os.environ if env is None else env
+    if platform == "win32":
+        base = env.get("ProgramData") or env.get("PROGRAMDATA") or r"C:\ProgramData"
+        return Path(base) / "fluid" / "config.toml"
+    return Path("/etc/fluid/config.toml")
+
+
+SYSTEM_CONFIG = system_config_path()
 
 
 def _user_config_path() -> Path:
@@ -148,23 +168,36 @@ def _user_mcp_path() -> Path:
     return Path.home() / ".fluid" / "mcp.json"
 
 
-def _project_config_path(cwd: Path) -> Path | None:
-    for candidate in (cwd / ".fluid" / "config.toml", cwd / "fluid.toml"):
-        if candidate.is_file():
-            return candidate
-    return None
+def project_config_paths(cwd: Path, name: str) -> list[Path]:
+    """Every existing ``<dir>/.fluid/<name>`` for the project walk, outer first.
+
+    The walk is the settings stack's (git root → ``cwd`` inside a checkout,
+    the cwd alone outside one, the home directory excluded), so a session
+    started in a subdirectory sees the same project ``mcp.json`` /
+    ``hooks.json`` / ``config.toml`` as one started at the root. Later entries
+    are nearer the cwd and merge over earlier ones.
+    """
+    from fluid.context.settings_stack import project_dirs
+
+    return [p for d in project_dirs(cwd) if (p := d / ".fluid" / name).is_file()]
 
 
-def _project_mcp_path(cwd: Path) -> Path:
-    return cwd / ".fluid" / "mcp.json"
+def _project_config_paths(cwd: Path) -> list[Path]:
+    """Project TOML files, outer first: ``.fluid/config.toml`` per directory,
+    or ``fluid.toml`` where the former is absent."""
+    from fluid.context.settings_stack import project_dirs
+
+    found: list[Path] = []
+    for directory in project_dirs(cwd):
+        for candidate in (directory / ".fluid" / "config.toml", directory / "fluid.toml"):
+            if candidate.is_file():
+                found.append(candidate)
+                break
+    return found
 
 
 def _user_hooks_path() -> Path:
     return Path.home() / ".fluid" / "hooks.json"
-
-
-def _project_hooks_path(cwd: Path) -> Path:
-    return cwd / ".fluid" / "hooks.json"
 
 
 # ─── merge + parse ───────────────────────────────────────────────────────────
@@ -173,15 +206,27 @@ def _project_hooks_path(cwd: Path) -> Path:
 # Top-level keys whose list values accumulate across layers instead of the
 # higher layer replacing the lower one.
 ADDITIVE_LIST_KEYS = frozenset({"hooks"})
+# Top-level tables whose entries are replaced whole rather than merged key by
+# key: ``[mcp.x]`` in a higher layer is a complete server definition, and
+# merging it over an ``mcp.json`` entry of the same name would leave the
+# lower layer's ``env``/``args`` behind.
+REPLACE_ENTRY_KEYS = frozenset({"mcp"})
 
 
 def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     """Recursively merge ``overlay`` onto a copy of ``base`` (dicts merge,
     scalars/lists replace — except the top-level ``hooks`` list, which
-    appends so project hooks follow user hooks)."""
+    appends so project hooks follow user hooks, and the top-level ``mcp``
+    table, whose per-server entries replace rather than merge)."""
     out = dict(base)
     for key, value in overlay.items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
+        if (
+            key in REPLACE_ENTRY_KEYS
+            and isinstance(value, dict)
+            and isinstance(out.get(key), dict)
+        ):
+            out[key] = {**out[key], **value}
+        elif isinstance(value, dict) and isinstance(out.get(key), dict):
             out[key] = deep_merge(out[key], value)
         elif (
             key in ADDITIVE_LIST_KEYS
@@ -199,12 +244,27 @@ def _load_toml(path: Path) -> dict[str, Any]:
         return tomllib.load(fh)
 
 
-def _load_mcp_json(path: Path) -> dict[str, Any]:
+def _load_mcp_json(
+    path: Path,
+    *,
+    cwd: Path | str = ".",
+    env: dict[str, str] | None = None,
+    only: set[str] | None = None,
+) -> dict[str, Any]:
     """Load Fluid's canonical MCP file as a config overlay.
 
     The file accepts the common ``{"mcpServers": {...}}`` envelope or a plain
-    name-to-config mapping. Transport defaults are inferred only when unambiguous.
+    name-to-config mapping, in Claude Code's server shape. Each entry goes
+    through the plugin path's ``substitute_vars`` (``${VAR}`` from ``env`` —
+    the process environment overlaid with the settings stack's ``env`` — and
+    ``${CLAUDE_PROJECT_DIR}``) and ``normalize_mcp_server`` (``type: "http"``
+    → streamable HTTP; ``type: "sse"`` is skipped with a warning rather than
+    dialed as the wrong transport). An entry marked ``disabled: true`` or
+    ``enabled: false`` is left out. ``only`` restricts the file to those
+    server names (the ``enabledMcpjsonServers`` gate for project files).
     """
+    from fluid.context.plugins import normalize_mcp_server, substitute_vars
+
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -218,21 +278,20 @@ def _load_mcp_json(path: Path) -> dict[str, Any]:
     for name, value in servers.items():
         if not isinstance(name, str) or not isinstance(value, dict):
             continue
-        config = dict(value)
-        if "transport" not in config:
-            if isinstance(config.get("command"), str):
-                config["transport"] = "stdio"
-            elif isinstance(config.get("url"), str):
-                config["transport"] = "http"
+        if only is not None and name not in only:
+            continue
+        if value.get("disabled") is True or value.get("enabled") is False:
+            continue
+        expanded = substitute_vars(
+            {k: v for k, v in value.items() if k not in ("disabled", "enabled")},
+            plugin_root=None, project_dir=cwd, env=env,
+        )
+        config = normalize_mcp_server(name, expanded)
+        if config is None:
+            continue
+        config.setdefault("transport", "stdio")
         normalized[name] = config
     return {"mcp": normalized}
-
-
-# Claude Code event names that fluid's bus spells differently.
-_CLAUDE_HOOK_EVENT_ALIASES = {
-    "UserPromptSubmit": "TurnStart",
-    "Stop": "TurnEnd",
-}
 
 
 def _load_hooks_json(path: Path) -> dict[str, Any]:
@@ -242,36 +301,55 @@ def _load_hooks_json(path: Path) -> dict[str, Any]:
     "command", "command": "...", "timeout": 30}]}]}}`` (the envelope is
     optional) so a user can copy the ``hooks`` block straight out of Claude
     Code's settings.json. ``UserPromptSubmit`` maps to ``TurnStart`` and
-    ``Stop`` to ``TurnEnd``; events fluid has no bus for, and non-command hook
-    types, are skipped. A malformed file is ignored rather than fatal.
+    ``Stop`` to ``TurnEnd`` (``fluid.config.model.HOOK_EVENT_ALIASES``).
+    Events fluid has no bus for, and non-command hook types, are skipped
+    with a logged warning naming them. A malformed file is logged and
+    ignored rather than fatal.
     """
-    from fluid.config.model import HOOK_EVENTS
+    import logging
 
+    from fluid.config.model import resolve_hook_event
+
+    log = logging.getLogger(__name__)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        log.warning("%s: hooks file ignored: %s", path, exc)
         return {}
     if not isinstance(raw, dict):
+        log.warning("%s: hooks file ignored: expected a JSON object", path)
         return {}
     groups = raw.get("hooks", raw)
     if not isinstance(groups, dict):
+        log.warning("%s: hooks file ignored: 'hooks' is not an object", path)
         return {}
     entries: list[dict[str, Any]] = []
     for event_name, matchers in groups.items():
-        event = _CLAUDE_HOOK_EVENT_ALIASES.get(event_name, event_name)
-        if event not in HOOK_EVENTS or not isinstance(matchers, list):
+        event = resolve_hook_event(event_name)
+        if event is None:
+            log.warning("%s: hooks for %r dropped: fluid has no such event", path, event_name)
+            continue
+        if not isinstance(matchers, list):
+            log.warning("%s: hooks for %r dropped: expected a list", path, event_name)
             continue
         for group in matchers:
             if not isinstance(group, dict):
+                log.warning("%s: %s hook group dropped: not an object", path, event_name)
                 continue
             matcher = group.get("matcher")
             for hook in group.get("hooks") or ():
                 if not isinstance(hook, dict):
+                    log.warning("%s: %s hook dropped: not an object", path, event_name)
                     continue
                 if hook.get("type", "command") != "command":
+                    log.warning(
+                        "%s: %s hook of type %r dropped: only command hooks run",
+                        path, event_name, hook.get("type"),
+                    )
                     continue
                 command = hook.get("command")
                 if not isinstance(command, str) or not command.strip():
+                    log.warning("%s: %s hook dropped: empty command", path, event_name)
                     continue
                 entry: dict[str, Any] = {"event": event, "command": command}
                 if isinstance(matcher, str) and matcher:
@@ -387,41 +465,69 @@ def load_config(
     # is never source-gated — it is where ``setting_sources`` itself can live),
     # and together with env + overrides they resolve which sources gate the
     # mcp.json / hooks.json context layers below.
+    system_path = system_config_path()
     system_toml = (
-        _load_toml(SYSTEM_CONFIG) if include_system and SYSTEM_CONFIG.is_file() else {}
+        _load_toml(system_path) if include_system and system_path.is_file() else {}
     )
     user_path = _user_config_path()
     user_toml = _load_toml(user_path) if include_user and user_path.is_file() else {}
-    project_path = _project_config_path(cwd_path)
-    project_toml = _load_toml(project_path) if project_path is not None else {}
+    project_tomls = [_load_toml(p) for p in _project_config_paths(cwd_path)]
     env_layer = env_overrides(env)
 
     from fluid.config.model import _setting_sources_from
 
     raw_sources: Any = None
-    for layer in (system_toml, user_toml, project_toml, env_layer, overrides or {}):
+    for layer in (system_toml, user_toml, *project_tomls, env_layer, overrides or {}):
         if "setting_sources" in layer:
             raw_sources = layer["setting_sources"]
     sources = set(_setting_sources_from(raw_sources))
+    if not include_user:
+        sources.discard("user")
+
+    # The settings.json stack feeds three things here: the defaultMode policy
+    # layer (lowest, so every file/env/flag layer above still wins), the
+    # ``${VAR}`` expansion environment for mcp.json, and the project-file
+    # server gate.
+    from fluid.context.settings_stack import (
+        default_mode_policy,
+        layered_env,
+        load_settings_stack,
+        mcp_toggles,
+        settings_env,
+    )
+
+    settings = load_settings_stack(cwd_path, sources=tuple(sources))
+    mode_policy, _mode_rules = default_mode_policy(settings)
+    if mode_policy is not None:
+        merged = deep_merge(merged, {"permission": {"approval_policy": mode_policy}})
+    expansion_env = layered_env(settings_env(settings))
+    enabled_json, _disabled = mcp_toggles(settings)
+    project_gate = set(enabled_json) if enabled_json else None
 
     merged = deep_merge(merged, system_toml)
     if include_user:
         if "user" in sources:
             user_mcp_path = _user_mcp_path()
             if user_mcp_path.is_file():
-                merged = deep_merge(merged, _load_mcp_json(user_mcp_path))
+                merged = deep_merge(
+                    merged, _load_mcp_json(user_mcp_path, cwd=cwd_path, env=expansion_env)
+                )
             user_hooks_path = _user_hooks_path()
             if user_hooks_path.is_file():
                 merged = deep_merge(merged, _load_hooks_json(user_hooks_path))
         merged = deep_merge(merged, user_toml)
     if "project" in sources:
-        project_mcp_path = _project_mcp_path(cwd_path)
-        if project_mcp_path.is_file():
-            merged = deep_merge(merged, _load_mcp_json(project_mcp_path))
-        project_hooks_path = _project_hooks_path(cwd_path)
-        if project_hooks_path.is_file():
+        for project_mcp_path in project_config_paths(cwd_path, "mcp.json"):
+            merged = deep_merge(
+                merged,
+                _load_mcp_json(
+                    project_mcp_path, cwd=cwd_path, env=expansion_env, only=project_gate
+                ),
+            )
+        for project_hooks_path in project_config_paths(cwd_path, "hooks.json"):
             merged = deep_merge(merged, _load_hooks_json(project_hooks_path))
-    merged = deep_merge(merged, project_toml)
+    for project_toml in project_tomls:
+        merged = deep_merge(merged, project_toml)
 
     merged = deep_merge(merged, env_layer)
     if overrides:
@@ -460,16 +566,37 @@ def _sensitive_file_rules():
     ]
 
 
-def _build_permissions(config: HarnessConfig):
+def _session_settings(config: HarnessConfig) -> dict[str, Any]:
+    """The merged settings.json stack for this session's cwd and sources."""
+    from fluid.context.settings_stack import load_settings_stack
+
+    return load_settings_stack(config.cwd, sources=config.setting_sources)
+
+
+def _build_permissions(config: HarnessConfig, settings: dict[str, Any] | None = None):
+    """The session's permission engine.
+
+    Rule order, first to last (last match wins): the sensitive-file asks, the
+    allow rules ``permissions.defaultMode = "acceptEdits"`` implies, the
+    settings stack's ``permissions.{allow,ask,deny}``, then ``config.toml``
+    ``[[permission.rules]]`` — so a host's TOML rule outranks a settings rule
+    of the same shape, and a settings deny outranks the mode's allows.
+    """
+    from fluid.context.settings_stack import default_mode_policy, permission_rules
     from fluid.permissions.engine import PermissionEngine
     from fluid.permissions.rules import Rule
 
+    if settings is None:
+        settings = _session_settings(config)
     rules = []
     if (
         config.permission.protect_sensitive_files
         and config.permission.approval_policy != "never_ask"
     ):
         rules.extend(_sensitive_file_rules())
+    _policy, mode_rules = default_mode_policy(settings)
+    rules.extend(mode_rules)
+    rules.extend(permission_rules(settings))
     rules.extend(
         Rule(tool=r.tool, decision=r.decision, input_globs=dict(r.input_globs))
         for r in config.permission.rules
@@ -593,6 +720,18 @@ def build_engine(
             )
     if ctx is None:
         ctx = ToolCtx(cwd=config.cwd, session_id=session_id)
+    # The settings.json stack, read once for this build: permission rules,
+    # the child-process ``env`` (Bash builtin, MCP stdio spawns) and the MCP
+    # server toggles all come from it.
+    from fluid.context.settings_stack import mcp_toggles, settings_env
+
+    settings = _session_settings(config)
+    child_env = settings_env(settings)
+    if child_env:
+        # Read by the Bash builtin; layered over the process environment for
+        # the child only. Never written to os.environ.
+        ctx.extra.setdefault("settings_env", child_env)
+    _enabled_json, disabled_mcp = mcp_toggles(settings)
     # Builtin wiring that rides the tool context: the recall builtins borrow
     # the store's own optional hooks when it has them (a store with no durable
     # record, like MemoryStore, simply leaves the tools unwired and invisible).
@@ -619,7 +758,7 @@ def build_engine(
                 hooks = HookBus()
             register_config_hooks(hooks, config.hooks, cwd=config.cwd)
         if permissions is None:
-            permissions = _build_permissions(config)
+            permissions = _build_permissions(config, settings)
 
         return DelegatedLoop(
             store=store,
@@ -661,7 +800,7 @@ def build_engine(
 
     client = provider if provider is not None else _build_provider_client(config, provider_name)
     if permissions is None:
-        permissions = _build_permissions(config)
+        permissions = _build_permissions(config, settings)
 
     codemode = None
     journal = None
@@ -759,6 +898,23 @@ def build_engine(
                 mcp_servers.setdefault(name, server)
         except Exception:  # noqa: BLE001 — CE11: a broken plugin never blocks the build
             pass
+    # ``disabledMcpServers`` applies to the whole map (config, mcp.json and
+    # plugin servers alike); ``enabledMcpjsonServers`` was applied where the
+    # project mcp.json files were read (load_config).
+    for name in disabled_mcp:
+        mcp_servers.pop(name, None)
+    # The settings ``env`` reaches each stdio server's spawn environment under
+    # the server's own ``env`` (the MCP SDK layers that over its default
+    # environment); HTTP servers have no child process.
+    if child_env:
+        for name, server in list(mcp_servers.items()):
+            if server.get("transport", "stdio") != "stdio":
+                continue
+            own = server.get("env")
+            mcp_servers[name] = {
+                **server,
+                "env": {**child_env, **(own if isinstance(own, dict) else {})},
+            }
 
     from fluid.context.compaction import CompactionConfig
     from fluid.context.trim import TrimConfig

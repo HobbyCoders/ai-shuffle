@@ -282,7 +282,29 @@ def _loop(cwd, *, rules=None, claude_settings=True):
     )
 
 
-def test_native_loop_keeps_claude_settings_inert(tmp_path, monkeypatch) -> None:
+def _engine(cwd, *, toml: str = "", env: dict | None = None):
+    """A native engine built the way the CLI builds one: load_config + build_engine."""
+    from fluid.config.loader import build_engine, load_config
+    from fluid.providers.base import ProviderCaps
+    from fluid.store.base import MemoryStore
+
+    class _Provider:
+        name = "anthropic"
+        caps = ProviderCaps()
+
+        async def stream(self, request):  # pragma: no cover - never streamed
+            if False:
+                yield None
+
+    if toml:
+        (Path(cwd) / ".fluid").mkdir(exist_ok=True)
+        (Path(cwd) / ".fluid" / "config.toml").write_text(toml, encoding="utf-8")
+    config = load_config(cwd=cwd, include_system=False, env=env or {})
+    return build_engine(config, MemoryStore(), provider=_Provider())
+
+
+def test_native_loop_reads_no_settings_itself(tmp_path, monkeypatch) -> None:
+    """The loader wires the stack; a bare NativeLoop stays inert."""
     proj = _scoped(
         tmp_path, monkeypatch,
         project={
@@ -296,28 +318,68 @@ def test_native_loop_keeps_claude_settings_inert(tmp_path, monkeypatch) -> None:
     assert loop.permissions.rules == []
 
 
-def test_native_loop_toggle_off_reads_nothing(tmp_path, monkeypatch) -> None:
+def test_settings_permission_rules_reach_the_session(tmp_path, monkeypatch) -> None:
+    proj = _scoped(
+        tmp_path, monkeypatch,
+        project={"permissions": {"deny": ["Bash(rm *)"], "allow": ["Bash(git status:*)"]}},
+    )
+    engine = _engine(proj)
+    assert engine.permissions.evaluate(_spec("Bash"), {"command": "rm -rf /"}) == "deny"
+    assert engine.permissions.evaluate(_spec("Bash"), {"command": "git status"}) == "allow"
+
+
+def test_setting_sources_off_wires_nothing(tmp_path, monkeypatch) -> None:
     proj = _scoped(
         tmp_path, monkeypatch,
         project={"env": {"FLUID_ENV_PROBE": "x"}, "permissions": {"deny": ["Bash(rm *)"]}},
     )
-    loop = _loop(proj, claude_settings=False)
-    assert loop.claude_settings == {}
-    assert "settings_env" not in loop.ctx.extra
-    assert loop.permissions.rules == []
+    engine = _engine(proj, toml="setting_sources = []\n")
+    assert "settings_env" not in engine.ctx.extra
+    assert all(r.decision != "deny" for r in engine.permissions.rules)
 
 
 def test_host_rules_outrank_settings_rules(tmp_path, monkeypatch) -> None:
-    """Settings rules go *before* host rules — last-match-wins leaves the host
-    with the final say over its own session."""
-    from fluid.permissions.rules import Rule
-
+    """Settings rules go *before* config.toml rules — last-match-wins leaves
+    the host's own config with the final say."""
     proj = _scoped(tmp_path, monkeypatch, project={"permissions": {"deny": ["Bash(rm *)"]}})
-    host_rule = Rule(tool="Bash", decision="allow", input_globs={"command": "rm *"})
-    loop = _loop(proj, rules=[host_rule])
+    engine = _engine(
+        proj,
+        toml='[[permission.rules]]\ntool = "Bash"\ndecision = "allow"\n'
+             'input_globs = { command = "rm *" }\n',
+    )
+    assert engine.permissions.rules[-1].decision == "allow"
+    assert engine.permissions.evaluate(_spec("Bash"), {"command": "rm -rf /"}) == "allow"
 
-    assert loop.permissions.rules[-1] is host_rule
-    assert loop.permissions.evaluate(_spec("Bash"), {"command": "rm -rf /"}) == "allow"
+
+def test_default_mode_sets_the_policy_unless_a_config_layer_does(tmp_path, monkeypatch) -> None:
+    from fluid.config.loader import load_config
+
+    proj = _scoped(
+        tmp_path, monkeypatch, project={"permissions": {"defaultMode": "bypassPermissions"}}
+    )
+    assert load_config(cwd=proj, include_system=False, env={}).permission.approval_policy == "never_ask"
+    # Any TOML, env or flag layer beats the settings default.
+    (proj / ".fluid" / "config.toml").write_text(
+        '[permission]\napproval_policy = "always_ask"\n', encoding="utf-8"
+    )
+    assert load_config(cwd=proj, include_system=False, env={}).permission.approval_policy == "always_ask"
+    forced = load_config(
+        cwd=proj, include_system=False, env={"FLUID_APPROVAL_POLICY": "on_write"}
+    )
+    assert forced.permission.approval_policy == "on_write"
+
+
+def test_accept_edits_allows_the_file_editing_builtins(tmp_path, monkeypatch) -> None:
+    proj = _scoped(
+        tmp_path, monkeypatch,
+        project={"permissions": {"defaultMode": "acceptEdits", "deny": ["Write(*.lock)"]}},
+    )
+    engine = _engine(proj)
+    assert engine.permissions.approval_policy == "on_write"
+    assert engine.permissions.evaluate(_spec("Edit"), {"file_path": "a.py"}) == "allow"
+    # A settings deny still outranks the mode's allow.
+    assert engine.permissions.evaluate(_spec("Write"), {"file_path": "x.lock"}) == "deny"
+    assert engine.permissions.evaluate(_spec("Bash"), {"command": "rm x"}) == "ask"
 
 
 def _spec(name: str):
@@ -326,7 +388,8 @@ def _spec(name: str):
     return ToolSpec(name=name, description="", input_schema={}, risk="write")
 
 
-async def test_bash_builtin_does_not_inherit_claude_settings_env(tmp_path, monkeypatch) -> None:
+async def test_bash_builtin_child_sees_settings_env(tmp_path, monkeypatch) -> None:
+    import os
     import sys
 
     from fluid.tools.builtins.bash import handler
@@ -338,9 +401,24 @@ async def test_bash_builtin_does_not_inherit_claude_settings_env(tmp_path, monke
     )
     command = f'"{sys.executable}" "{probe}"'
 
-    loop = _loop(proj)
-    assert "MISSING" in (await handler({"command": command}, loop.ctx)).text
-    assert "FLUID_ENV_PROBE" not in __import__("os").environ
+    engine = _engine(proj)
+    assert engine.ctx.extra["settings_env"] == {"FLUID_ENV_PROBE": "from-settings"}
+    assert "from-settings" in (await handler({"command": command}, engine.ctx)).text
+    # The child got it; the harness process did not.
+    assert "FLUID_ENV_PROBE" not in os.environ
+    # Without the wiring the child inherits only the process environment.
+    assert "MISSING" in (await handler({"command": command}, _loop(proj).ctx)).text
+
+
+def test_mcp_stdio_servers_get_settings_env_under_their_own(tmp_path, monkeypatch) -> None:
+    proj = _scoped(tmp_path, monkeypatch, project={"env": {"A": "settings", "B": "settings"}})
+    _write_settings(proj / ".fluid", "mcp.json", {"mcpServers": {
+        "s": {"command": "srv", "env": {"B": "own"}},
+        "h": {"url": "https://example.test/mcp"},
+    }})
+    engine = _engine(proj)
+    assert engine._mcp_servers["s"]["env"] == {"A": "settings", "B": "own"}
+    assert "env" not in engine._mcp_servers["h"]
 
 
 def test_native_loop_has_no_implicit_provider_mcp_rewrite(tmp_path, monkeypatch) -> None:

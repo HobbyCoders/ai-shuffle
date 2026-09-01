@@ -1,5 +1,6 @@
 """M6 — layered config precedence, TOML parsing, and the engine factory."""
 
+import json
 from collections.abc import AsyncIterator
 
 from fluid.config.loader import (
@@ -272,3 +273,131 @@ def test_unknown_model_keeps_the_window_unknown() -> None:
     engine = build_engine(config, MemoryStore(), provider=FakeProvider())
     assert engine.model == "my-local-llm"
     assert engine.context_window is None
+
+
+# ─── project walk, mcp.json normalization, settings toggles, system path ─────
+
+
+def _write(path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _home(monkeypatch, path):
+    path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(path))
+    monkeypatch.setenv("USERPROFILE", str(path))
+    return path
+
+
+def test_project_layers_walk_up_from_the_git_root(tmp_path, monkeypatch) -> None:
+    _home(monkeypatch, tmp_path / "home")
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    _write(root / ".fluid" / "config.toml", 'default_model = "root"\ncode_mode = true\n')
+    _write(root / ".fluid" / "mcp.json", '{"mcpServers": {"rootsrv": {"command": "r"}, "shared": {"command": "outer"}}}')
+    _write(root / ".fluid" / "hooks.json", '{"hooks": {"TurnEnd": [{"hooks": [{"command": "root-hook"}]}]}}')
+    sub = root / "pkg"
+    _write(sub / ".fluid" / "config.toml", 'default_model = "pkg"\n')
+    _write(sub / ".fluid" / "mcp.json", '{"mcpServers": {"shared": {"command": "inner"}}}')
+    deeper = sub / "src" / "mod"
+    deeper.mkdir(parents=True)
+
+    config = load_config(cwd=deeper, include_system=False, env={})
+    assert config.default_model == "pkg"  # nearest wins
+    assert config.code_mode is True  # outer still applies
+    assert config.mcp["rootsrv"]["command"] == "r"
+    assert config.mcp["shared"]["command"] == "inner"
+    assert [h.command for h in config.hooks] == ["root-hook"]
+    # fluid.toml is the per-directory fallback.
+    _write(deeper / "fluid.toml", 'default_model = "leaf"\n')
+    assert load_config(cwd=deeper, include_system=False, env={}).default_model == "leaf"
+
+
+def test_outside_a_git_checkout_only_the_cwd_is_project(tmp_path, monkeypatch) -> None:
+    _home(monkeypatch, tmp_path / "home")
+    outer = tmp_path / "outer"
+    _write(outer / ".fluid" / "config.toml", 'default_model = "outer"\n')
+    inner = outer / "inner"
+    _write(inner / ".fluid" / "config.toml", 'code_mode = true\n')
+    config = load_config(cwd=inner, include_system=False, env={})
+    assert config.code_mode is True
+    assert config.default_model == BUILTIN_DEFAULTS["default_model"]
+
+
+def test_toml_mcp_entry_replaces_the_json_entry_whole(tmp_path, monkeypatch) -> None:
+    home = _home(monkeypatch, tmp_path / "home")
+    _write(
+        home / ".fluid" / "mcp.json",
+        '{"mcpServers":{"shared":{"command":"imported","env":{"LEFTOVER":"1"},"args":["-x"]}}}',
+    )
+    _write_toml(home / ".fluid" / "config.toml", '[mcp.shared]\ncommand = "native"\n')
+    config = load_config(cwd=tmp_path, include_system=False, env={})
+    assert config.mcp["shared"] == {"command": "native"}
+
+
+def test_mcp_json_normalizes_transports_and_skips_sse(tmp_path, monkeypatch) -> None:
+    home = _home(monkeypatch, tmp_path / "home")
+    _write(home / ".fluid" / "mcp.json", json.dumps({"mcpServers": {
+        "stdio": {"command": "srv", "args": ["a"]},
+        "http": {"type": "http", "url": "https://example.test/mcp"},
+        "sse": {"type": "sse", "url": "https://example.test/sse"},
+        "off": {"command": "srv", "disabled": True},
+        "off2": {"command": "srv", "enabled": False},
+    }}))
+    config = load_config(cwd=tmp_path, include_system=False, env={})
+    assert set(config.mcp) == {"stdio", "http"}
+    assert config.mcp["stdio"] == {"command": "srv", "args": ["a"], "transport": "stdio"}
+    assert config.mcp["http"] == {"url": "https://example.test/mcp", "transport": "streamable_http"}
+
+
+def test_mcp_json_expands_variables_from_env_and_settings(tmp_path, monkeypatch) -> None:
+    home = _home(monkeypatch, tmp_path / "home")
+    monkeypatch.setenv("FLUID_TEST_HOST", "example.test")
+    monkeypatch.delenv("FLUID_TEST_TOKEN", raising=False)
+    _write(home / ".fluid" / "settings.json", json.dumps({"env": {"FLUID_TEST_TOKEN": "from-settings"}}))
+    _write(home / ".fluid" / "mcp.json", json.dumps({"mcpServers": {
+        "remote": {
+            "url": "https://${FLUID_TEST_HOST}/mcp",
+            "headers": {"Authorization": "Bearer ${FLUID_TEST_TOKEN}", "X-Missing": "${FLUID_TEST_ABSENT}"},
+        },
+        "local": {"command": "srv", "args": ["${CLAUDE_PROJECT_DIR}"]},
+    }}))
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    config = load_config(cwd=proj, include_system=False, env={})
+    assert config.mcp["remote"]["url"] == "https://example.test/mcp"
+    assert config.mcp["remote"]["headers"] == {"Authorization": "Bearer from-settings", "X-Missing": ""}
+    assert config.mcp["local"]["args"] == [str(proj)]
+
+
+def test_settings_toggles_filter_mcp_servers(tmp_path, monkeypatch) -> None:
+    home = _home(monkeypatch, tmp_path / "home")
+    _write(home / ".fluid" / "mcp.json", json.dumps({"mcpServers": {
+        "usersrv": {"command": "u"}, "gone": {"command": "g"},
+    }}))
+    proj = tmp_path / "proj"
+    (proj / ".git").mkdir(parents=True)
+    _write(proj / ".fluid" / "mcp.json", json.dumps({"mcpServers": {
+        "approved": {"command": "a"}, "unlisted": {"command": "x"},
+    }}))
+    _write(proj / ".fluid" / "settings.json", json.dumps({
+        "enabledMcpjsonServers": ["approved"],
+        "disabledMcpServers": ["gone"],
+    }))
+    config = load_config(cwd=proj, include_system=False, env={})
+    # enabledMcpjsonServers gates the project mcp.json only.
+    assert set(config.mcp) == {"usersrv", "gone", "approved"}
+    engine = build_engine(config, MemoryStore(), provider=FakeProvider())
+    assert set(engine._mcp_servers) == {"usersrv", "approved"}
+
+
+def test_system_config_path_per_platform() -> None:
+    from pathlib import Path
+
+    from fluid.config.loader import system_config_path
+
+    assert system_config_path("linux", {}) == Path("/etc/fluid/config.toml")
+    assert system_config_path("darwin", {}) == Path("/etc/fluid/config.toml")
+    assert system_config_path("win32", {"ProgramData": r"D:\PD"}) == Path(r"D:\PD\fluid\config.toml")
+    assert system_config_path("win32", {}) == Path(r"C:\ProgramData\fluid\config.toml")

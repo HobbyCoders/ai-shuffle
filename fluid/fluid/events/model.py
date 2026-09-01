@@ -390,10 +390,12 @@ class ContinualUpdate(Event):
 
 @dataclass(frozen=True, kw_only=True)
 class HookEvent(Event):
-    """A configured hook spoke: ``level`` is ``"deny"`` (a PreToolUse hook
-    blocked a call; the model sees the same reason as an error ToolResult) or
+    """A configured hook spoke: ``level`` is ``"deny"`` (a hook blocked a
+    call or a prompt; the model sees the same reason as an error ToolResult),
     ``"warning"`` (a hook timed out or exited with an unexpected code and the
-    engine carried on). Never terminal — clients render it and move on."""
+    engine carried on), or ``"info"`` (a hook approved a call past the
+    permission gate, or sent a ``systemMessage``). Never terminal — clients
+    render it and move on."""
 
     level: str
     message: str

@@ -49,10 +49,12 @@ setting the matching key; `fluid config` prints what a run will use.
   Pro/Max subscription — one harness, same experience.
 - **Native paths, explicit migration.** Global instructions, skills, and agents
   live under `~/.fluid`; project content lives under `.agents/`. Root
-  `AGENTS.md`, `AGENT.md`, and `AGENTS.override.md` retain their familiar
-  precedence. `fluid import-settings` previews Claude and Codex sources, never
-  overwrites a destination, redacts credential-bearing MCP values, and leaves
-  unsupported provider settings inert.
+  `AGENTS.md`, `AGENTS.local.md`, `AGENT.md`, and `AGENTS.override.md` retain
+  their familiar precedence. `fluid import-settings` previews Claude and Codex
+  sources (instructions, skills, agents, commands, hooks, MCP servers, plugins,
+  Codex model and approval policy), never overwrites a destination (an existing
+  `hooks.json` is merged per event), replaces credential-bearing MCP values
+  with `${VAR}` placeholders, and leaves unsupported provider settings inert.
 - **Built to be embedded.** The core is headless and event-driven — the bundled
   TUI is just one subscriber. Wire the same engine into a server, a bot, or your
   own app.

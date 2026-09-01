@@ -19,7 +19,31 @@ APPROVAL_POLICIES = ("never_ask", "on_write", "always_ask")
 # reliable native tool calling (see fluid.providers.local.text_tools).
 TOOL_STYLES = ("native", "text")
 # Lifecycle events a ``[[hooks]]`` entry may subscribe to (fluid.hooks.bus).
-HOOK_EVENTS = ("PreToolUse", "PostToolUse", "TurnStart", "TurnEnd")
+HOOK_EVENTS = (
+    "PreToolUse",
+    "PostToolUse",
+    "TurnStart",
+    "TurnEnd",
+    "SessionStart",
+    "SessionEnd",
+    "PreCompact",
+    "SubagentStop",
+    "Notification",
+)
+# Claude Code's names for the events fluid spells differently. Accepted in
+# config.toml and hooks.json alike.
+HOOK_EVENT_ALIASES = {
+    "UserPromptSubmit": "TurnStart",
+    "Stop": "TurnEnd",
+}
+
+
+def resolve_hook_event(name: object) -> str | None:
+    """The fluid event for a config event name, or None when unknown."""
+    if not isinstance(name, str):
+        return None
+    event = HOOK_EVENT_ALIASES.get(name, name)
+    return event if event in HOOK_EVENTS else None
 
 
 def _model_guidance_from(raw: Any) -> bool | str | tuple[str, ...]:
@@ -124,10 +148,11 @@ class PermissionConfig:
 class HookConfig:
     """One ``[[hooks]]`` entry: a shell command run on a lifecycle event.
 
-    ``matcher`` narrows tool events to a tool name (fnmatch, or a regex when it
-    contains ``^``, ``|`` or ``(``); it is ignored for turn events. ``timeout``
-    is in seconds. See docs/hooks.md for the stdin payload and exit-code
-    contract.
+    ``matcher`` narrows tool events to a tool name (a regex, or a glob when
+    it has no regex metacharacter other than ``*``); it is ignored for the
+    other events. ``timeout`` is in seconds. Claude Code's event names
+    (``UserPromptSubmit``, ``Stop``) are accepted and stored under fluid's.
+    See docs/hooks.md for the stdin payload and exit-code contract.
     """
 
     event: str  # one of HOOK_EVENTS
@@ -137,9 +162,11 @@ class HookConfig:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> HookConfig:
-        event = d.get("event")
-        if event not in HOOK_EVENTS:
-            raise ValueError(f"unknown hook event: {event!r} (expected one of {HOOK_EVENTS})")
+        event = resolve_hook_event(d.get("event"))
+        if event is None:
+            raise ValueError(
+                f"unknown hook event: {d.get('event')!r} (expected one of {HOOK_EVENTS})"
+            )
         command = d.get("command")
         if not isinstance(command, str) or not command.strip():
             raise ValueError(f"hook for {event} needs a non-empty command")

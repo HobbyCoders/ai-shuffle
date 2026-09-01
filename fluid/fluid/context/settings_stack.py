@@ -11,7 +11,8 @@ Scopes, lowest → highest precedence, named with the Agent SDK's
 
   1. user     ``~/.fluid/settings.json``
   2. project  ``<dir>/.fluid/settings.json`` for every dir from the git root
-              down to the cwd (outer → inner, inner wins)
+              down to the cwd (outer → inner, inner wins); the cwd alone
+              outside a git checkout (:func:`project_dirs`)
   3. local    ``<dir>/.fluid/settings.local.json`` (same walk, gitignored)
 
 Callers pass the session's enabled sources (``HarnessConfig.setting_sources``)
@@ -20,11 +21,18 @@ to load only those scopes.
 Merge rules: lists accumulate in scope order, dicts merge shallowly per key
 with the higher scope winning a scalar conflict, scalars override outright.
 
-What v1 consumes: ``permissions.{allow,ask,deny}``, ``env``, ``enabledPlugins``,
-``enabledMcpjsonServers`` / ``disabledMcpServers``. ``permissions.defaultMode``
-is *mapped* here (:func:`default_permission_mode`) but not yet applied to a
-session — see the note on that function's caller-side precedence question.
-Not consumed: hooks, model/outputStyle/UI keys.
+What is consumed (wired by ``fluid.config.loader``):
+
+* ``permissions.{allow,ask,deny}`` become rules evaluated before the
+  ``config.toml`` ``[[permission.rules]]``, so a TOML rule outranks them.
+* ``permissions.defaultMode`` sets ``permission.approval_policy`` through
+  :data:`_MODE_POLICY` unless a config.toml/env/CLI layer sets one.
+* ``env`` is layered onto the Bash builtin's child environment and each MCP
+  stdio server's spawn environment (under the server's own ``env``);
+  ``os.environ`` is never mutated.
+* ``enabledPlugins``, ``enabledMcpjsonServers`` / ``disabledMcpServers``.
+
+Not consumed: hooks (``hooks.json`` is the file for those), model/outputStyle/UI keys.
 
 Nothing here raises (CE11): a malformed or unreadable settings file is skipped
 with a ``logging`` warning, because session assembly must never fail on it.
@@ -39,7 +47,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from fluid.context.instructions import _walk_up_dirs
+from fluid.context.instructions import _git_root, _walk_up_dirs
 from fluid.permissions.rules import Rule
 
 log = logging.getLogger(__name__)
@@ -69,6 +77,18 @@ _DECISION_ORDER = ("allow", "ask", "deny")
 # than approximated — see :func:`default_permission_mode`.
 _PERMISSION_MODES = ("default", "plan", "acceptEdits", "bypassPermissions")
 
+# defaultMode → fluid approval policy. ``plan`` has no policy of its own (plan
+# mode is a session flag), so it takes the policy that asks before everything;
+# ``acceptEdits`` is on_write plus allow rules for the file-editing builtins
+# (:data:`_ACCEPT_EDITS_TOOLS`), which is what the mode means in Claude Code.
+_MODE_POLICY = {
+    "default": "on_write",
+    "plan": "always_ask",
+    "acceptEdits": "on_write",
+    "bypassPermissions": "never_ask",
+}
+_ACCEPT_EDITS_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+
 
 # ─── loading ─────────────────────────────────────────────────────────────────
 
@@ -89,6 +109,29 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     return data
 
 
+def project_dirs(cwd: Path | str | os.PathLike[str]) -> list[Path]:
+    """The project walk for settings and config files.
+
+    Inside a git checkout: every directory from the root down to ``cwd``,
+    outer first. Outside one: ``cwd`` alone — a walk to the filesystem root
+    would treat every ancestor (the home directory among them, so ``~/.fluid``
+    twice: once as the user scope, once as a "project") as project config.
+    The home directory is left out in both cases. Instruction files keep
+    their own, wider walk (:func:`_walk_up_dirs`).
+    """
+    resolved = Path(cwd).resolve()
+    dirs = _walk_up_dirs(resolved) if _git_root(resolved) is not None else [resolved]
+    home = _resolved_home()
+    return [d for d in dirs if d != home]
+
+
+def _resolved_home() -> Path | None:
+    try:
+        return Path.home().resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
 def settings_paths(
     cwd: Path | str | os.PathLike[str], *, sources: tuple[str, ...] | list[str] = SETTING_SOURCES
 ) -> list[Path]:
@@ -103,7 +146,7 @@ def settings_paths(
     if "user" in enabled:
         paths.append(Path.home() / ".fluid" / "settings.json")
     if "project" in enabled or "local" in enabled:
-        dirs = _walk_up_dirs(Path(cwd))
+        dirs = project_dirs(cwd)
         if "project" in enabled:
             paths += [d / ".fluid" / "settings.json" for d in dirs]
         if "local" in enabled:
@@ -186,12 +229,9 @@ def default_permission_mode(settings: dict[str, Any]) -> str | None:
     nearest known one could widen a user's permissions, which is exactly the
     failure this table must not have.
 
-    Applying the result to a session is deliberately NOT done here or in
-    ``NativeLoop`` yet: the setting must lose to an explicit host choice, and
-    the engine currently has no way to tell a host that deliberately passed
-    ``PermissionEngine("on_write")`` from one that simply took the default —
-    both arrive as an approval policy with a value. Wiring it without that
-    signal could silently override a host's configured policy.
+    The loader applies :func:`default_mode_policy` as the lowest config layer,
+    so a config.toml, ``FLUID_APPROVAL_POLICY`` or ``--approval-policy`` value
+    still wins.
     """
     perms = settings.get("permissions")
     if not isinstance(perms, dict):
@@ -204,6 +244,24 @@ def default_permission_mode(settings: dict[str, Any]) -> str | None:
         return mode
     log.warning("ignoring unsupported permissions.defaultMode %r", raw)
     return None
+
+
+def default_mode_policy(settings: dict[str, Any]) -> tuple[str | None, list[Rule]]:
+    """``permissions.defaultMode`` as ``(approval_policy, extra rules)``.
+
+    The policy comes from :data:`_MODE_POLICY`; the rules are the allow
+    entries ``acceptEdits`` implies for the file-editing builtins, empty for
+    every other mode. ``(None, [])`` when the mode is unset or unsupported.
+    """
+    mode = default_permission_mode(settings)
+    if mode is None:
+        return None, []
+    rules = (
+        [Rule(tool=tool, decision="allow") for tool in _ACCEPT_EDITS_TOOLS]
+        if mode == "acceptEdits"
+        else []
+    )
+    return _MODE_POLICY[mode], rules
 
 
 def mcp_toggles(settings: dict[str, Any]) -> tuple[list[str], list[str]]:

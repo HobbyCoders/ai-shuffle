@@ -1,5 +1,8 @@
 # Claude-Ecosystem Compatibility Plan (fluid)
 
+> Superseded 2026-09-01. fluid reads only its own `~/.fluid` / `.fluid` paths (documented in [configuration.md](configuration.md));
+> Claude and Codex content reaches them through `fluid import-settings` (`fluid/context/settings_importer.py`). Kept for the rulings' history.
+
 Status: RULINGS FINAL 2026-08-16 (Fable). Implementation in waves below.
 Goal: a fluid native-leg session picks up a user's existing Claude Code setup
 (CLAUDE.md @-imports, settings.json, plugins, skills, agents) and codex-style

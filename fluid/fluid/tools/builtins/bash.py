@@ -10,6 +10,7 @@ import subprocess
 import sys
 from typing import Any
 
+from fluid.context.settings_stack import layered_env
 from fluid.tools.builtins._util import _TRUNCATE_LIMIT, strip_ansi, truncate
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
@@ -211,15 +212,20 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     command = input["command"]
     timeout = float(input.get("timeout", DEFAULT_TIMEOUT_S))
     cwd = input.get("cwd") or ctx.cwd
+    # The settings stack's ``env`` (ctx.extra["settings_env"], set by the
+    # loader) rides on top of the process environment for the child only;
+    # os.environ itself is never changed.
+    env = layered_env(ctx.extra.get("settings_env"))
+    # Ask the child not to colourise; anything that ignores the hint gets
+    # its escapes stripped from the captured output below.
+    env.update(NO_COLOR="1", FORCE_COLOR="0")
     proc = await asyncio.create_subprocess_exec(
         *resolve_shell().argv_prefix,
         command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=cwd,
-        # Ask the child not to colourise; anything that ignores the hint gets
-        # its escapes stripped from the captured output below.
-        env=dict(os.environ, NO_COLOR="1", FORCE_COLOR="0"),
+        env=env,
         **_spawn_kwargs(),
     )
     try:

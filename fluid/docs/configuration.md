@@ -12,24 +12,36 @@ Lowest to highest. Each layer deep-merges over the previous one: tables merge
 key by key, scalars and lists replace, with one exception noted below.
 
 1. Built-in defaults (`BUILTIN_DEFAULTS` in the loader; listed in full below).
-2. System: `/etc/fluid/config.toml`, if present.
-3. User: `~/.fluid/mcp.json`, then `~/.fluid/hooks.json`, then
+2. `permissions.defaultMode` from the settings.json stack (see below), as an
+   approval policy. It sits under every file so a config file, environment
+   variable, or flag that names a policy still wins.
+3. System: `/etc/fluid/config.toml`, or `%ProgramData%\fluid\config.toml` on
+   Windows, if present.
+4. User: `~/.fluid/mcp.json`, then `~/.fluid/hooks.json`, then
    `~/.fluid/config.toml`.
-4. Project: `./.fluid/mcp.json`, then `./.fluid/hooks.json`, then
-   `./.fluid/config.toml` or, if that is absent, `./fluid.toml`.
-5. Environment: the `FLUID_*` variables below.
-6. Command-line flags (`--provider`, `--model`, `--code-mode`, `--continual`,
+5. Project: for each project directory, outer first: `<dir>/.fluid/mcp.json`,
+   then `<dir>/.fluid/hooks.json`, then `<dir>/.fluid/config.toml` or, if that
+   is absent, `<dir>/fluid.toml`.
+6. Environment: the `FLUID_*` variables below.
+7. Command-line flags (`--provider`, `--model`, `--code-mode`, `--continual`,
    `--skills-dir`, `--approval-policy`, `--cwd`).
 
-Within a scope the TOML file loads after the JSON files, so a native `[mcp.x]`
-table beats a same-named server from `mcp.json`.
+Within a scope the TOML file loads after the JSON files, and each `mcp.<name>`
+entry is replaced whole rather than merged key by key, so a native `[mcp.x]`
+table beats a same-named server from `mcp.json` outright (none of the JSON
+entry's `env` or `args` survive).
 
 The exception: `hooks` is additive. Lists from every layer are concatenated,
 user hooks first, then project hooks, each in file order. Every other list
 (`tools.allowed`, `permission.rules`, ...) is replaced by the higher layer.
 
-"Project" means the directory fluid was started in, or `--cwd`. There is no
-upward search for a project file.
+The project directories are the ones the settings stack reads: inside a git
+checkout, every directory from the repository root down to the directory
+fluid was started in (or `--cwd`), so a session started in a subdirectory sees
+the same project config, MCP servers, and hooks as one started at the root,
+and a nearer directory's values win. Outside a git checkout only the start
+directory counts. The home directory is never a project directory, even when
+the start directory sits under it.
 
 ## Top-level keys
 
@@ -44,7 +56,7 @@ upward search for a project file.
 | `anchor_budget` | `1` | Retention budget for the harness-evolution commit gate (`fluid evolve propose`): anchor regressions a proposed change may cause and still commit. `0` = strict stability. |
 | `skills_dir` | none (`~/.fluid/skills`) | Root directory for persistent code-mode skills. |
 | `cwd` | `"."` | Working directory for config discovery, instruction files, tools, and the prompt's environment block. |
-| `max_tokens` | `8192` | Maximum output tokens per model call. |
+| `max_tokens` | none | Maximum output tokens per model call. Unset, each request gets the model's own output maximum. |
 | `max_model_calls` | `200` | Maximum model calls in one turn before the turn stops with `max_calls`. Set it to `0` for no ceiling at all, leaving the provider the only authority on when a turn ends. |
 | `context_window` | none | The model's context window in tokens. Unset, fluid looks the model id up in a built-in table (`fluid/providers/windows.py`): Claude models from the 4.6 generation on 1M, earlier Claude models 200K, any Claude id carrying `[1m]` 1M; `gpt-5*` 400K, `gpt-4.1*` 1,047,576, `gpt-4o*` 128K, `o1`/`o3`/`o4` 200K. An OpenRouter vendor prefix (`anthropic/…`) is stripped before the lookup. A local or unknown model stays unknown: `/context` then shows no percentage or free space and the compaction trigger falls back to the flat `trigger_tokens`. A value here, or `FLUID_CONTEXT_WINDOW`, always wins over the table. |
 | `system` | none | Your own base system prompt. When set it replaces the shipped default (`fluid/cli/prompt.py`) entirely; the instruction stack, skills index, and environment block are still appended after it. |
@@ -98,7 +110,7 @@ commands). All default to `true`.
 |---|---|
 | `enabled` | Master switch. `false` disables every discovery below. |
 | `global` | `~/.fluid/AGENTS.md`. |
-| `project` | Root `AGENTS.md` / `AGENT.md` / `AGENTS.override.md`, plus `.fluid/` and `.agents/`. |
+| `project` | Root `AGENTS.md` / `AGENTS.local.md` / `AGENT.md` / `AGENTS.override.md`, plus `.fluid/` and `.agents/`. See [Instruction files](#instruction-files). |
 | `skills` | `SKILL.md` discovery under `~/.fluid/skills` and each project dir's `.fluid/skills` / `.agents/skills`. |
 | `commands` | User slash commands under `~/.fluid/commands` and each project dir's `.fluid/commands` / `.agents/commands`. |
 | `nested` | `AGENTS.md` files in subdirectories, surfaced when a tool touches that directory. |
@@ -110,15 +122,45 @@ On top of these toggles, `setting_sources` decides which scopes are read at
 all: dropping `"user"` removes the global tree and plugins, dropping
 `"project"` removes the project walk.
 
+### Instruction files
+
+Each project directory (the walk from the git root down to the cwd, else the
+filesystem root) contributes, in this order: `AGENTS.md`, `AGENTS.local.md`,
+`AGENT.md`, `.fluid/AGENTS.md`, `.fluid/AGENTS.local.md`, `.agents/AGENTS.md`.
+`AGENTS.local.md` is the gitignored personal file that layers after the shared
+one, the role `CLAUDE.local.md` has in Claude Code; the settings import maps
+`CLAUDE.local.md` to it. `AGENTS.override.md` is the Codex convention and does
+the opposite: when present it takes `AGENTS.md`'s place in that directory
+(`.fluid/AGENTS.override.md` does the same for `.fluid/AGENTS.md`); the local
+file still layers after it.
+
+Skills (`<dir>/.fluid/skills/<name>/SKILL.md`, `<dir>/.agents/skills/...`,
+`~/.fluid/skills/...`) and user commands (`<dir>/.fluid/commands/*.md`,
+`<dir>/.agents/commands/*.md`, `~/.fluid/commands/*.md`) are one entry per
+name: a project entry beats a global one, the directory nearest the cwd beats
+an outer one, and within a directory `.fluid` beats `.agents`. Plugin entries
+are namespaced `<plugin>:<name>` and never shadow a native one.
+
 ### settings.json and plugins
 
 fluid also reads a Claude-Code-schema `settings.json` stack from its own paths
 (`fluid/context/settings_stack.py`): `~/.fluid/settings.json` (user), each
 project dir's `.fluid/settings.json` (project), and `.fluid/settings.local.json`
-(local), merged lowest-to-highest. Consumed keys: `enabledPlugins`,
-`permissions.{allow,ask,deny}`, `env`, `enabledMcpjsonServers` /
-`disabledMcpServers`. Provider homes (`~/.claude`, `~/.codex`) are never read
-at runtime — the explicit settings import copies from them, non-destructively.
+(local), merged lowest-to-highest. Provider homes (`~/.claude`, `~/.codex`) are
+never read at runtime — the explicit settings import copies from them,
+non-destructively. Consumed keys:
+
+| Key | Effect |
+|---|---|
+| `permissions.allow` / `ask` / `deny` | `Tool(pattern)` entries become permission rules, evaluated before the `[[permission.rules]]` from `config.toml`, so under last-match-wins a TOML rule outranks a settings rule of the same shape and `deny` outranks `ask` outranks `allow` within the settings. |
+| `permissions.defaultMode` | Sets `permission.approval_policy` unless a config file, `FLUID_APPROVAL_POLICY`, or `--approval-policy` does: `default` → `on_write`, `acceptEdits` → `on_write` plus allow rules for `Edit`, `Write`, `MultiEdit`, `NotebookEdit` (a settings `deny` still wins), `plan` → `always_ask`, `bypassPermissions` → `never_ask`. Any other value is ignored with a warning. |
+| `env` | Layered over the process environment for the `Bash` builtin's child processes and for each MCP stdio server's spawn (under the server's own `env`). `os.environ` itself is never changed. The same map feeds `${VAR}` expansion in `mcp.json`. |
+| `enabledPlugins` | Which plugins under `~/.fluid/plugins` load (below). |
+| `enabledMcpjsonServers` | When non-empty, only the named servers load from a project `.fluid/mcp.json`; user `mcp.json` and TOML servers are unaffected. |
+| `disabledMcpServers` | Removed from the final server map, whatever their source (config, `mcp.json`, plugin). |
+
+`hooks` is not read from `settings.json`; put the same block in `hooks.json`
+(below). `model`, `outputStyle`, and UI keys are ignored.
 
 Plugins use the Claude Code package layout under `~/.fluid/plugins`
 (`cache/<marketplace>/<plugin>/<version>` or `marketplaces/...`), enabled via
@@ -214,9 +256,12 @@ matcher = "Edit|Write"
 command = "ruff format --quiet ."
 ```
 
-`~/.fluid/hooks.json` and `./.fluid/hooks.json` accept the Claude Code
-`settings.json` hooks shape; `UserPromptSubmit` maps to `TurnStart` and `Stop`
-to `TurnEnd`.
+`~/.fluid/hooks.json` and each project directory's `.fluid/hooks.json` accept
+the Claude Code `settings.json` hooks shape; `UserPromptSubmit` maps to
+`TurnStart` and `Stop` to `TurnEnd`. The settings import copies the `hooks`
+block of `~/.claude/settings.json` and a project's `.claude/settings.json` /
+`.claude/settings.local.json` into these files (merging per event when the
+file exists).
 
 ### `[providers.<name>]`
 
@@ -335,9 +380,17 @@ url = "https://example.com/mcp"
 headers = { Authorization = "Bearer ..." }
 ```
 
-`~/.fluid/mcp.json` and `./.fluid/mcp.json` accept the same servers in JSON,
-with or without the `{"mcpServers": {...}}` envelope. MCP support needs the
-`mcp` extra (`uv sync --extra mcp`), which installs `mcp>=2.0`.
+`~/.fluid/mcp.json` and each project directory's `.fluid/mcp.json` accept the
+same servers in Claude Code's JSON shape, with or without the
+`{"mcpServers": {...}}` envelope: `type: "http"` becomes the streamable HTTP
+transport, `type: "sse"` is skipped with a warning (fluid has no SSE
+transport), and an entry with `disabled: true` or `enabled: false` is left
+out. `${VAR}` tokens anywhere in an entry expand from the process environment
+overlaid with the settings stack's `env` (an unset variable expands to the
+empty string), and `${CLAUDE_PROJECT_DIR}` expands to the cwd — so the
+`${SERVER_KEY}` placeholders the settings import writes in place of
+credentials resolve once the variable is set. MCP support needs the `mcp`
+extra (`uv sync --extra mcp`), which installs `mcp>=2.0`.
 
 ## Environment variables
 

@@ -10,8 +10,11 @@ Global (per user):
   ~/.fluid/AGENTS.md
 
 Project (walk up from cwd to the git root, else the filesystem root):
-  AGENTS.md, AGENT.md, AGENTS.override.md, .fluid/AGENTS.md, .agents/AGENTS.md
-  AGENTS.override.md replaces root-level AGENTS.md in the same directory.
+  AGENTS.md, AGENTS.local.md, AGENT.md, .fluid/AGENTS.md, .fluid/AGENTS.local.md,
+  .agents/AGENTS.md
+  AGENTS.override.md replaces AGENTS.md in the same directory, and
+  .fluid/AGENTS.override.md replaces .fluid/AGENTS.md. AGENTS.local.md layers
+  after AGENTS.md (the gitignored personal file, CLAUDE.local.md's role).
 
 Skills use ``~/.fluid/skills/<name>/SKILL.md`` globally and
 ``<directory>/.fluid/skills/<name>/SKILL.md`` (or the codex-native
@@ -34,9 +37,23 @@ from pathlib import Path
 from typing import Any
 
 # Ordered per-directory candidates. Order fixes the order blocks appear within
-# a scope. ``AGENTS.override.md`` replaces only the root AGENTS.md slot.
-_AGENTS_NAMES = ("AGENTS.md", "AGENT.md", ".fluid/AGENTS.md", ".agents/AGENTS.md")
+# a scope. ``AGENTS.local.md`` follows ``AGENTS.md`` so personal rules layer
+# over shared ones.
+_AGENTS_NAMES = (
+    "AGENTS.md",
+    "AGENTS.local.md",
+    "AGENT.md",
+    ".fluid/AGENTS.md",
+    ".fluid/AGENTS.local.md",
+    ".agents/AGENTS.md",
+)
 _AGENTS_OVERRIDE = "AGENTS.override.md"
+# Slot → the override file that takes it outright when present (codex
+# convention: an override replaces, it does not stack).
+_AGENTS_OVERRIDES = {
+    "AGENTS.md": _AGENTS_OVERRIDE,
+    ".fluid/AGENTS.md": ".fluid/" + _AGENTS_OVERRIDE,
+}
 
 # Per-file size caps. Instruction files enter the cached prompt prefix, so an
 # unbounded AGENTS.md silently eats the window; the cap keeps the head (where
@@ -230,12 +247,19 @@ def _expand_outside_code_spans(line: str, expand) -> str:
 def _agents_names_for(directory: Path) -> tuple[str, ...]:
     """The AGENTS-family candidates for ``directory``.
 
-    ``AGENTS.override.md`` takes ``AGENTS.md``'s slot outright — the codex
-    override convention replaces rather than stacks.
+    ``AGENTS.override.md`` takes ``AGENTS.md``'s slot outright, and
+    ``.fluid/AGENTS.override.md`` takes ``.fluid/AGENTS.md``'s — the codex
+    override convention replaces rather than stacks. ``AGENTS.local.md`` is
+    untouched by an override: it layers after whichever file holds the slot.
     """
-    if (directory / _AGENTS_OVERRIDE).is_file():
-        return (_AGENTS_OVERRIDE, *_AGENTS_NAMES[1:])
-    return _AGENTS_NAMES
+    names: list[str] = []
+    for rel in _AGENTS_NAMES:
+        override = _AGENTS_OVERRIDES.get(rel)
+        if override is not None and (directory / override).is_file():
+            names.append(override)
+        else:
+            names.append(rel)
+    return tuple(names)
 
 
 def _files_in_dir(directory: Path, scope: str) -> list[InstructionFile]:
@@ -539,24 +563,41 @@ def _plugins_for(
     return discover_plugins(cwd)
 
 
-def _skill_dirs(
-    cwd: str | os.PathLike[str], include_global: bool, include_project: bool = True
-) -> list[tuple[Path, str]]:
-    """Native markdown skill roots, deliberately distinct from ``SkillStore``.
+def _skills_in(base: Path, scope: str) -> dict[str, Skill]:
+    """``<base>/*/SKILL.md`` keyed by skill name (frontmatter, else dir name).
 
-    ``SkillStore`` may place Python modules directly in ``~/.fluid/skills``;
-    this scan matches only ``<name>/SKILL.md`` and will never treat those modules
-    as prompt skills. Project scope reads ``.fluid/skills`` first, then the
-    codex-native ``.agents/skills`` tree.
+    Deliberately distinct from ``SkillStore``, which may place Python modules
+    directly in ``~/.fluid/skills``: only ``<name>/SKILL.md`` counts, so those
+    modules never become prompt skills. Within one directory the first name
+    in sorted order keeps the key.
     """
-    dirs: list[tuple[Path, str]] = []
-    if include_global:
-        dirs.append((Path.home() / ".fluid" / "skills", "global"))
-    if include_project:
-        for directory in _walk_up_dirs(Path(cwd)):
-            dirs.append((directory / ".fluid" / "skills", "project"))
-            dirs.append((directory / ".agents" / "skills", "project"))
-    return dirs
+    out: dict[str, Skill] = {}
+    if not base.is_dir():
+        return out
+    for skill_md in sorted(base.glob("*/SKILL.md")):
+        fields, _ = parse_frontmatter(_read(skill_md))
+        name = fields.get("name") or skill_md.parent.name
+        out.setdefault(
+            name,
+            Skill(
+                name=name,
+                description=fields.get("description", ""),
+                path=str(skill_md),
+                scope=scope,
+                body_loaded=False,
+            ),
+        )
+    return out
+
+
+def _commands_in(base: Path, scope: str) -> dict[str, Command]:
+    """``<base>/*.md`` keyed by file stem (non-recursive)."""
+    out: dict[str, Command] = {}
+    if not base.is_dir():
+        return out
+    for cmd in sorted(base.glob("*.md")):
+        out.setdefault(cmd.stem, Command(name=cmd.stem, path=str(cmd), scope=scope))
+    return out
 
 
 def discover_skills(
@@ -569,38 +610,32 @@ def discover_skills(
 ) -> list[Skill]:
     """Discover ``<skills-dir>/*/SKILL.md`` and parse name+description only.
 
+    One entry per name, sorted by name. Precedence mirrors
+    :func:`fluid.context.agents.discover_agents`: a project skill beats a
+    global one of the same name, the project directory nearest the cwd beats an
+    outer one, and in one directory ``.fluid/skills`` beats ``.agents/skills``.
+
     Bodies are left unread (``body_loaded=False``) — progressive disclosure:
     the ``Skill`` builtin loads a body on demand. ``include_plugins`` appends
     enabled plugins' skills, namespaced ``<plugin>:<name>`` (pass ``plugins``
     to reuse an already-discovered list). Provider homes are never read.
     """
-    out: list[Skill] = []
-    seen: set[str] = set()
-    for base, scope in _skill_dirs(cwd, include_global, include_project):
-        if not base.is_dir():
-            continue
-        for skill_md in sorted(base.glob("*/SKILL.md")):
-            resolved = str(skill_md.resolve())
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            fields, _ = parse_frontmatter(_read(skill_md))
-            name = fields.get("name") or skill_md.parent.name
-            out.append(
-                Skill(
-                    name=name,
-                    description=fields.get("description", ""),
-                    path=str(skill_md),
-                    scope=scope,
-                    body_loaded=False,
-                )
-            )
+    by_name: dict[str, Skill] = {}
+    if include_project:
+        for directory in _walk_up_dirs(Path(cwd)):
+            # Outermost → cwd, so an inner directory's entry replaces an outer
+            # one's; ``.fluid`` is applied after ``.agents`` so it wins in-place.
+            by_name.update(_skills_in(directory / ".agents" / "skills", "project"))
+            by_name.update(_skills_in(directory / ".fluid" / "skills", "project"))
+    if include_global:
+        for name, skill in _skills_in(Path.home() / ".fluid" / "skills", "global").items():
+            by_name.setdefault(name, skill)
+    out = [by_name[name] for name in sorted(by_name)]
     if include_plugins:
         from fluid.context.plugins import plugin_skills
 
-        taken = {s.name for s in out}
         out.extend(
-            s for s in plugin_skills(_plugins_for(cwd, plugins)) if s.name not in taken
+            s for s in plugin_skills(_plugins_for(cwd, plugins)) if s.name not in by_name
         )
     return out
 
@@ -615,33 +650,26 @@ def discover_commands(
 ) -> list[Command]:
     """Discover native slash-command files from ``.fluid`` / ``.agents``.
 
-    The REPL executes these via :func:`render_command`. ``include_plugins``
-    appends enabled plugins' commands, namespaced ``<plugin>:<name>``.
+    Same one-per-name precedence as :func:`discover_skills`: project over
+    global, nearest directory over outer, ``.fluid`` over ``.agents``; sorted
+    by name. The REPL executes these via :func:`render_command`.
+    ``include_plugins`` appends enabled plugins' commands, namespaced
+    ``<plugin>:<name>``.
     """
-    out: list[Command] = []
-    seen: set[str] = set()
-    bases: list[tuple[Path, str]] = []
-    if include_global:
-        bases.append((Path.home() / ".fluid" / "commands", "global"))
+    by_name: dict[str, Command] = {}
     if include_project:
         for directory in _walk_up_dirs(Path(cwd)):
-            bases.append((directory / ".fluid" / "commands", "project"))
-            bases.append((directory / ".agents" / "commands", "project"))
-    for base, scope in bases:
-        if not base.is_dir():
-            continue
-        for cmd in sorted(base.glob("*.md")):
-            resolved = str(cmd.resolve())
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            out.append(Command(name=cmd.stem, path=str(cmd), scope=scope))
+            by_name.update(_commands_in(directory / ".agents" / "commands", "project"))
+            by_name.update(_commands_in(directory / ".fluid" / "commands", "project"))
+    if include_global:
+        for name, cmd in _commands_in(Path.home() / ".fluid" / "commands", "global").items():
+            by_name.setdefault(name, cmd)
+    out = [by_name[name] for name in sorted(by_name)]
     if include_plugins:
         from fluid.context.plugins import plugin_commands
 
-        taken = {c.name for c in out}
         out.extend(
-            c for c in plugin_commands(_plugins_for(cwd, plugins)) if c.name not in taken
+            c for c in plugin_commands(_plugins_for(cwd, plugins)) if c.name not in by_name
         )
     return out
 

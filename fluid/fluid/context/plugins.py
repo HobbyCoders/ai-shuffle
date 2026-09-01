@@ -47,6 +47,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -337,33 +338,45 @@ def _agents_for(plugin_name: str, root: Path, manifest: dict[str, Any]) -> list[
 # ─── MCP servers ─────────────────────────────────────────────────────────────
 
 
-def substitute_vars(value: Any, *, plugin_root: Path, project_dir: Path | str) -> Any:
+def substitute_vars(
+    value: Any,
+    *,
+    plugin_root: Path | None,
+    project_dir: Path | str,
+    env: Mapping[str, str] | None = None,
+) -> Any:
     """Expand ``${...}`` tokens through a server config, recursively.
 
     ``${CLAUDE_PLUGIN_ROOT}`` and ``${CLAUDE_PROJECT_DIR}`` are the two the
-    plugin format defines; anything else reads the process environment (absent →
-    empty string, matching Claude Code). ``os.environ`` is only read, never
-    written.
+    plugin format defines; anything else reads ``env`` — the process
+    environment by default, or the caller's own map (the loader passes the
+    process environment overlaid with the settings stack's ``env`` for
+    ``mcp.json``). An absent variable expands to the empty string, matching
+    Claude Code. ``os.environ`` is only read, never written. ``plugin_root``
+    is ``None`` outside a plugin, where ``${CLAUDE_PLUGIN_ROOT}`` is looked up
+    like any other variable.
     """
+    lookup = os.environ if env is None else env
     if isinstance(value, str):
 
         def repl(match: re.Match[str]) -> str:
             var = match.group(1)
-            if var == "CLAUDE_PLUGIN_ROOT":
+            if var == "CLAUDE_PLUGIN_ROOT" and plugin_root is not None:
                 return str(plugin_root)
             if var == "CLAUDE_PROJECT_DIR":
                 return str(project_dir)
-            return os.environ.get(var, "")
+            return lookup.get(var, "")
 
         return _VAR_RE.sub(repl, value)
     if isinstance(value, dict):
         return {
-            k: substitute_vars(v, plugin_root=plugin_root, project_dir=project_dir)
+            k: substitute_vars(v, plugin_root=plugin_root, project_dir=project_dir, env=env)
             for k, v in value.items()
         }
     if isinstance(value, list):
         return [
-            substitute_vars(v, plugin_root=plugin_root, project_dir=project_dir) for v in value
+            substitute_vars(v, plugin_root=plugin_root, project_dir=project_dir, env=env)
+            for v in value
         ]
     return value
 

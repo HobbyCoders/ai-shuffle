@@ -343,7 +343,38 @@ class CliHost:
             await child.aclose()
         worker.status = status
         worker.summary = text
+        await self._subagent_stop_hooks(worker, status, text)
         return ToolOutcome(text=text, is_error=status != "finished")
+
+    async def _subagent_stop_hooks(self, worker: Worker, status: str, summary: str) -> None:
+        """SubagentStop hooks on the parent engine's bus, once a Task worker
+        has finished. Observational: the worker is already done, so a block
+        is reported and nothing else. Never raises."""
+        hooks = getattr(self.engine, "hooks", None)
+        session = getattr(self.engine, "_session", None)
+        if hooks is None or session is None:
+            return
+        from fluid.hooks.bus import SUBAGENT_STOP
+
+        try:
+            decision = await hooks.emit(SUBAGENT_STOP, {
+                "session_id": session.session_id,
+                "turn_id": getattr(self.engine, "_active_turn_id", None),
+                "task_id": worker.task_id,
+                "worker_session_id": worker.worker_session_id,
+                "status": status,
+                "summary": summary,
+            })
+        except Exception:  # noqa: BLE001
+            log.warning("SubagentStop hooks failed for %s", worker.task_id, exc_info=True)
+            return
+        for message in decision.warnings:
+            log.warning("SubagentStop hook: %s", message)
+        if decision.action == "deny":
+            log.warning(
+                "SubagentStop hook asked to block %s (%s) but the worker had "
+                "already finished", worker.task_id, decision.note,
+            )
 
     def _find_agent(self, name: str, ctx: ToolCtx) -> Any | None:
         registry = (ctx.extra or {}).get("agent_registry")
@@ -494,6 +525,7 @@ class CliHost:
                 pass
         if worker.status == "cancelled":
             return
+        await self._subagent_stop_hooks(worker, status, text)
         await self._report(worker, status, text)
 
 

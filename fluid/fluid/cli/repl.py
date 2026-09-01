@@ -106,6 +106,12 @@ class LineReader:
         self._reading = False  # the thread is inside input_fn
         self._stashed: str | None = None
         self._pending: asyncio.Future[str] | None = None
+        # Serializes "abandon this read" against "this read's line is on its
+        # way": whichever wins decides whether the line answers the pending
+        # request or is stashed for the next one. Both happen on the thread
+        # side before the next request is taken, so lines stay in order.
+        self._lock = threading.Lock()
+        self._handed: asyncio.Future[str] | None = None
 
     def read(self, prompt: str, *, out: TextIO | None = None) -> asyncio.Future[str]:
         """Start a read; the future resolves with the line on the running loop."""
@@ -129,8 +135,10 @@ class LineReader:
 
     def abandon(self) -> None:
         """Resolve the pending read with an empty line without waiting on stdin."""
-        fut = self._pending
-        if fut is not None and not fut.done():
+        with self._lock:
+            fut = self._pending
+            if fut is None or fut.done() or fut is self._handed:
+                return  # nothing pending, or its line is already on its way
             fut.set_result("")
 
     def _serve(self) -> None:
@@ -149,6 +157,14 @@ class LineReader:
                     outcome = (fut.set_result, line)
                 finally:
                     self._reading = False
+            with self._lock:
+                if fut.done() and outcome[0] == fut.set_result:
+                    # Abandoned by a signal while we were blocked: keep the
+                    # line for the next request, decided here, before that
+                    # request is taken, so it cannot be overtaken.
+                    self._stashed = outcome[1]
+                    continue
+                self._handed = fut
             try:
                 loop.call_soon_threadsafe(self._settle, fut, *outcome)
             except RuntimeError:
@@ -157,9 +173,6 @@ class LineReader:
     def _settle(self, fut: asyncio.Future[str], setter, value) -> None:
         if not fut.done():
             setter(value)
-        elif setter == fut.set_result:
-            # Abandoned by a signal: keep the line for the next request.
-            self._stashed = value
 
 
 _stdin_reader: LineReader | None = None

@@ -493,3 +493,117 @@ def test_skills_index_renders_a_folded_description(tmp_path) -> None:
         "Delegate feature work to sub-agents."
     ) in index
     assert ">-" not in index
+
+
+# ─── AGENTS.local.md layering, .fluid override, skill/command precedence ─────
+
+
+def test_agents_local_layers_after_agents_md(tmp_path) -> None:
+    proj = _mk_project(tmp_path)
+    (proj / "AGENTS.md").write_text("shared rules", encoding="utf-8")
+    (proj / "AGENTS.local.md").write_text("personal rules", encoding="utf-8")
+    (proj / ".fluid").mkdir()
+    (proj / ".fluid" / "AGENTS.md").write_text("dot shared", encoding="utf-8")
+    (proj / ".fluid" / "AGENTS.local.md").write_text("dot personal", encoding="utf-8")
+
+    stack = build_instruction_stack(proj, include_global=False)
+    assert (
+        stack.index("shared rules")
+        < stack.index("personal rules")
+        < stack.index("dot shared")
+        < stack.index("dot personal")
+    )
+
+
+def test_dot_fluid_override_replaces_dot_fluid_agents_md(tmp_path) -> None:
+    proj = _mk_project(tmp_path)
+    (proj / "AGENTS.md").write_text("root rules", encoding="utf-8")
+    (proj / ".fluid").mkdir()
+    (proj / ".fluid" / "AGENTS.md").write_text("replaced", encoding="utf-8")
+    (proj / ".fluid" / "AGENTS.override.md").write_text("dot override", encoding="utf-8")
+
+    paths = {f.path for f in discover_instruction_files(proj, include_global=False)}
+    assert str(proj / ".fluid" / "AGENTS.override.md") in paths
+    assert str(proj / ".fluid" / "AGENTS.md") not in paths
+    stack = build_instruction_stack(proj, include_global=False)
+    assert "root rules" in stack and "dot override" in stack
+    assert "replaced" not in stack
+
+
+def test_agents_override_leaves_the_local_file_in_place(tmp_path) -> None:
+    proj = _mk_project(tmp_path)
+    (proj / "AGENTS.md").write_text("replaced", encoding="utf-8")
+    (proj / "AGENTS.override.md").write_text("override body", encoding="utf-8")
+    (proj / "AGENTS.local.md").write_text("still personal", encoding="utf-8")
+
+    stack = build_instruction_stack(proj, include_global=False)
+    assert stack.index("override body") < stack.index("still personal")
+    assert "replaced" not in stack
+
+
+def _skill(root, name: str, note: str) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {note}\n---\nbody {note}", encoding="utf-8"
+    )
+
+
+def test_project_skill_shadows_global_and_fluid_beats_agents(tmp_path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    _set_home(monkeypatch, home)
+    _skill(home / ".fluid" / "skills" / "dup", "dup", "global")
+    _skill(home / ".fluid" / "skills" / "global-only", "global-only", "home")
+    proj = _mk_project(tmp_path / "proj")
+    _skill(proj / ".agents" / "skills" / "dup", "dup", "root agents")
+    _skill(proj / ".fluid" / "skills" / "dup", "dup", "root fluid")
+    child = proj / "child"
+    _skill(child / ".agents" / "skills" / "dup", "dup", "nearest")
+
+    at_root = {s.name: s for s in discover_skills(proj)}
+    assert at_root["dup"].description == "root fluid"
+    assert at_root["dup"].scope == "project"
+    assert at_root["global-only"].scope == "global"
+    assert [s.name for s in discover_skills(proj)] == ["dup", "global-only"]
+
+    at_child = {s.name: s for s in discover_skills(child)}
+    assert at_child["dup"].description == "nearest"
+    assert {s.name: s.description for s in discover_skills(child, include_project=False)} == {
+        "dup": "global", "global-only": "home",
+    }
+
+
+async def test_skill_builtin_loads_the_project_body_over_the_global_one(tmp_path, monkeypatch) -> None:
+    from fluid.tools.builtins.skill import handler
+    from fluid.tools.registry import ToolCtx
+
+    home = tmp_path / "home"
+    _set_home(monkeypatch, home)
+    _skill(home / ".fluid" / "skills" / "dup", "dup", "global")
+    proj = _mk_project(tmp_path / "proj")
+    _skill(proj / ".fluid" / "skills" / "dup", "dup", "project")
+
+    outcome = await handler({"name": "dup"}, ToolCtx(cwd=str(proj)))
+    assert "body project" in outcome.text
+    assert "body global" not in outcome.text
+
+
+def test_command_precedence_mirrors_skills(tmp_path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    _set_home(monkeypatch, home)
+    (home / ".fluid" / "commands").mkdir(parents=True)
+    (home / ".fluid" / "commands" / "dup.md").write_text("global", encoding="utf-8")
+    (home / ".fluid" / "commands" / "only-global.md").write_text("home", encoding="utf-8")
+    proj = _mk_project(tmp_path / "proj")
+    for tree, text in ((".agents", "root agents"), (".fluid", "root fluid")):
+        (proj / tree / "commands").mkdir(parents=True)
+        (proj / tree / "commands" / "dup.md").write_text(text, encoding="utf-8")
+    child = proj / "child"
+    (child / ".agents" / "commands").mkdir(parents=True)
+    (child / ".agents" / "commands" / "dup.md").write_text("nearest", encoding="utf-8")
+
+    by_name = {c.name: c for c in discover_commands(proj)}
+    assert Path(by_name["dup"].path).read_text(encoding="utf-8") == "root fluid"
+    assert by_name["only-global"].scope == "global"
+    assert [c.name for c in discover_commands(proj)] == ["dup", "only-global"]
+    nearest = next(c for c in discover_commands(child) if c.name == "dup")
+    assert Path(nearest.path).read_text(encoding="utf-8") == "nearest"

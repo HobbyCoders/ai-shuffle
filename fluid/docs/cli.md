@@ -61,8 +61,9 @@ checking which provider block and model a run will actually use. See
 ### `fluid import-settings`
 
 Previews (and with `--apply`, copies) portable Claude Code and Codex content
-into `~/.fluid`. Nothing is overwritten, credential-bearing MCP values are
-redacted, and provider runtime settings are never enabled. `import-claude` and
+into `~/.fluid`. Nothing is overwritten, credential-bearing MCP values become
+`${VAR}` placeholders you fill in, and provider runtime settings are never
+enabled. `import-claude` and
 `import-codex` are aliases that preselect one source.
 
 | Flag | Meaning |
