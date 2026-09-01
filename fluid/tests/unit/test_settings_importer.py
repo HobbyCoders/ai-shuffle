@@ -248,7 +248,7 @@ def test_project_inventory_and_native_codex_project_items(tmp_path: Path) -> Non
     preview = preview_settings_import(sources=("claude",), source_home=source, destination_home=destination)
     assert any(
         item.kind == "project_registration"
-        and item.status == "ready"
+        and item.status == "diagnostic"  # informational: nothing to write
         and item.provenance["project_path"] == str(project)
         for item in preview.items
     )
@@ -284,7 +284,7 @@ def test_managed_container_claude_registry_symlink_is_allowed(tmp_path: Path) ->
     )
 
     registration = next(item for item in preview.items if item.kind == "project_registration")
-    assert registration.status == "ready"
+    assert registration.status == "diagnostic"
     assert registration.provenance["project_path"] == str(project)
     assert not any(
         item.kind == "configuration" and "symlink" in item.message

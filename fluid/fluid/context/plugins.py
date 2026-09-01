@@ -244,7 +244,13 @@ def _skill_files(root: Path, manifest: dict[str, Any]) -> list[Path]:
     seen: set[str] = set()
 
     def add(path: Path) -> None:
-        key = str(path).lower()
+        # Same identity the instruction walker uses (the resolved path),
+        # case-folded where the filesystem is, so a symlink or a case-only
+        # respelling cannot list one skill twice.
+        try:
+            key = os.path.normcase(str(path.resolve()))
+        except OSError:
+            key = os.path.normcase(str(path))
         if path.is_file() and key not in seen:
             seen.add(key)
             found.append(path)
@@ -452,8 +458,16 @@ def _mcp_servers_for(
             continue
         expanded = substitute_vars(raw, plugin_root=root, project_dir=project_dir)
         normalized = normalize_mcp_server(str(name), expanded)
-        if normalized is not None:
-            out[str(name)] = normalized
+        if normalized is None:
+            continue
+        if normalized.get("transport", "stdio") == "stdio":
+            # Claude Code exports the plugin root to the server process as
+            # well as substituting it in the config; a server that reads the
+            # variable at runtime (to find its own data files) needs both.
+            env = dict(normalized.get("env") or {})
+            env.setdefault("CLAUDE_PLUGIN_ROOT", str(root))
+            normalized = {**normalized, "env": env}
+        out[str(name)] = normalized
     return out
 
 

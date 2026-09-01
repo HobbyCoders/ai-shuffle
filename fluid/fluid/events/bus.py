@@ -52,10 +52,14 @@ ReplaySource = Callable[[str, int], Awaitable[list[Event]]]
 
 
 class _Subscriber:
-    def __init__(self, maxsize: int) -> None:
+    def __init__(self, maxsize: int, generation: int = 0) -> None:
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize) if maxsize else asyncio.Queue()
         self.cursor: int = 0  # seq of the last event delivered
         self.lagging: bool = False
+        # The close generation this subscription was opened under. A close
+        # ends the subscriptions of its generation; one opened afterwards
+        # (a later session on the same bus) runs as normal.
+        self.generation: int = generation
 
 
 class EventBus:
@@ -72,7 +76,8 @@ class EventBus:
         self._maxsize = subscriber_queue_size
         self._ring_size = max(1, int(log_ring_size))
         self._replay_source = replay_source
-        self._closed = False
+        # Bumped by close(); subscriptions from an older generation end.
+        self._close_generation = 0
 
     # ─── introspection (never creates state) ─────────────────────────────
     def log(self, session_id: str) -> list[Event]:
@@ -176,7 +181,7 @@ class EventBus:
         cursor they take before a turn starts predates the resume seed, and
         the persisted history is not part of the turn they are watching.
         """
-        sub = _Subscriber(self._maxsize)
+        sub = _Subscriber(self._maxsize, self._close_generation)
         sub.cursor = since_seq
         subs = self._subs.setdefault(session_id, [])
         subs.append(sub)
@@ -200,7 +205,7 @@ class EventBus:
                         sub.queue.get_nowait()
                     sub.lagging = False
                     continue
-                if self._closed:
+                if sub.generation < self._close_generation:
                     return
                 item = await sub.queue.get()
                 if item is _CLOSE:
@@ -230,8 +235,13 @@ class EventBus:
                 del self._subs[session_id]
 
     async def close(self) -> None:
-        """Signal all subscribers to finish after draining the log."""
-        self._closed = True
+        """Signal the current subscribers to finish after draining the log.
+
+        Only subscriptions open now are ended: a session that subscribes to
+        the same bus later runs as normal, instead of ending as soon as it
+        has replayed the log.
+        """
+        self._close_generation += 1
         for subs in list(self._subs.values()):
             for sub in subs:
                 try:

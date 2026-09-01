@@ -740,7 +740,19 @@ class SkillStore:
 
     def journal_entries(self, start: int = 0, limit: int | None = None) -> list[dict]:
         """Entries [start, start+limit) by line index; malformed lines skipped."""
+        return self.journal_slice(start, limit)[0]
+
+    def journal_slice(
+        self, start: int = 0, limit: int | None = None
+    ) -> tuple[list[dict], int]:
+        """Up to ``limit`` entries from line ``start``, and the line index reached.
+
+        Malformed lines are skipped but still consumed: a cursor advanced by
+        the number of entries returned would fall short of the lines read
+        and hand the next pass a slice it had already synthesized.
+        """
         out: list[dict] = []
+        reached = start
         try:
             with self._journal_path.open("r", encoding="utf-8") as fh:
                 for i, line in enumerate(fh):
@@ -748,13 +760,14 @@ class SkillStore:
                         continue
                     if limit is not None and len(out) >= limit:
                         break
+                    reached = i + 1
                     try:
                         out.append(json.loads(line))
                     except ValueError:
                         continue
         except OSError:
             pass
-        return out
+        return out, reached
 
     # ─── memories (the declarative half — synthesizer-written only) ──────
     @property
@@ -864,7 +877,8 @@ class SkillStore:
         # tiebreak — an entry retrieval keeps asking for is protected even
         # when it is old.
         if len(doc["entries"]) > MAX_MEMORIES:
-            doc["entries"].sort(
+            ranked = sorted(
+                doc["entries"],
                 key=lambda e: (
                     int(e.get("uses", 0)),
                     max(
@@ -873,8 +887,12 @@ class SkillStore:
                     ),
                 ) if isinstance(e, dict) else (0, 0.0)
             )
-            overflow = doc["entries"][: len(doc["entries"]) - MAX_MEMORIES]
-            doc["entries"] = doc["entries"][len(overflow):]
+            overflow = ranked[: len(ranked) - MAX_MEMORIES]
+            evicted = {id(e) for e in overflow}
+            # The survivors keep their file order: the ranking picks what
+            # leaves, and reordering the rest would churn the prompt (and
+            # its cache prefix) on every eviction.
+            doc["entries"] = [e for e in doc["entries"] if id(e) not in evicted]
             archive_path = self.archive_dir / "memories-archive.jsonl"
             try:
                 self.archive_dir.mkdir(exist_ok=True)

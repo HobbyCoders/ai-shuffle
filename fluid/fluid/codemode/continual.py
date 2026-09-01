@@ -434,12 +434,16 @@ class Synthesizer:
 
     async def _run_locked(self) -> list[str]:
         cursor = self._store.synth_cursor()
-        entries = self._store.journal_entries(cursor, self._max_entries)
+        entries, reached = self._store.journal_slice(cursor, self._max_entries)
         if not entries:
+            if reached > cursor:
+                # Only malformed lines in the slice: step past them, or every
+                # later pass would stop at the same corrupt line.
+                self._store.set_synth_cursor(reached)
             return []
         text, usage = await self._complete(self._prompt(entries), _SYNTH_SYSTEM)
         changed = await self._apply(text, entries)  # sets last_error (None on a clean pass)
-        self._store.set_synth_cursor(cursor + len(entries))
+        self._store.set_synth_cursor(reached)
         # Consumed entries have no reader left: drop the ones past the
         # retention tail and rebase the cursor. Best-effort — a failed reap
         # must never cost us the pass that just succeeded.

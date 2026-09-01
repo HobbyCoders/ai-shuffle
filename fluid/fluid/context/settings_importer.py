@@ -498,11 +498,15 @@ def _add_claude_project(items: list[SettingsImportItem], project: Path, system_h
 def _project_registration(
     system: Literal["claude", "codex"], registry: Path, project: Path
 ) -> SettingsImportItem:
+    # Informational only: there is nothing to write, so the item is a
+    # diagnostic rather than a "ready" entry that apply would then report as
+    # skipped for a reason that is not true.
     item = _item(
         system,
         "project_registration",
         (registry,),
         None,
+        status="diagnostic",
         message="configured project available for host registration; Fluid will not change a database",
         provenance={"project_path": str(project)},
     )

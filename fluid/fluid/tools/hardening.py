@@ -107,7 +107,8 @@ SENSITIVE_PATH_SUFFIXES: tuple[str, ...] = (
 
 
 # Template/sample variants are meant to be read; they carry no real values.
-_SENSITIVE_EXCEPTIONS = frozenset({".env.example", ".env.sample", ".env.template"})
+SENSITIVE_EXCEPTIONS = frozenset({".env.example", ".env.sample", ".env.template"})
+_SENSITIVE_EXCEPTIONS = SENSITIVE_EXCEPTIONS
 
 
 def is_sensitive_path(path: str) -> bool:

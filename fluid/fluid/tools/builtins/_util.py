@@ -73,7 +73,7 @@ def truncate(text: str, limit: int = _TRUNCATE_LIMIT) -> str:
     half = limit // 2
     head, tail = text[:half], text[-half:]
     dropped = len(text) - 2 * half
-    return f"{head}\n... [{dropped} bytes truncated] ...\n{tail}"
+    return f"{head}\n... [{dropped} chars truncated] ...\n{tail}"
 
 
 @dataclass

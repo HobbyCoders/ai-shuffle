@@ -76,6 +76,8 @@ log = logging.getLogger(__name__)
 
 _MAX_SESSIONS_SCANNED = 500
 _MAX_MATCHES_PER_SESSION = 3
+# Sessions kept parsed in memory at once (the live session always among them).
+_MAX_CACHED_SESSIONS = 8
 # Hits given a title, past the caller's own limit. The caller re-ranks (project
 # scope pushes other projects' sessions down or out), so a hit that shows up on
 # screen is not necessarily one of the top ``limit`` by score — titling only
@@ -278,6 +280,10 @@ class JsonlStore:
             fsync if fsync is not None else os.environ.get("FLUID_STORE_FSYNC") == "1"
         )
         self._held: set[str] = set()  # sessions this store holds the write lock for
+        # Loaded sessions, least recently used first. A cross-session search
+        # or listing touches many logs; without a bound every one of them,
+        # images included, stayed in memory for the life of the process.
+        self._recent: list[str] = []
         # Torn trailing lines seen while parsing, cut off at the next write.
         self._torn: dict[Path, tuple[int, bytes]] = {}
         self._finalizer = weakref.finalize(self, _release_store_locks, self._dir, self._held)
@@ -348,6 +354,7 @@ class JsonlStore:
         (locked, unreadable) is tried again on the next call.
         """
         if session_id in self._loaded:
+            self._touch(session_id)
             return True
         path = self._log_path(session_id)
         if not path.exists():
@@ -359,7 +366,28 @@ class JsonlStore:
         self._sessions[session_id] = meta
         self._nodes[session_id] = nodes
         self._loaded.add(session_id)
+        self._touch(session_id)
         return True
+
+    def _touch(self, session_id: str) -> None:
+        """Mark a session as just used; drop the least recent past the cap.
+
+        A session this store holds the write lock for is the live one and is
+        never dropped. A dropped session is only forgotten in memory: the next
+        access parses its log again.
+        """
+        if session_id in self._recent:
+            self._recent.remove(session_id)
+        self._recent.append(session_id)
+        while len(self._recent) > _MAX_CACHED_SESSIONS:
+            victim = next((s for s in self._recent if s not in self._held), None)
+            if victim is None:
+                return
+            self._recent.remove(victim)
+            self._loaded.discard(victim)
+            self._events_loaded.discard(victim)
+            self._nodes.pop(victim, None)
+            self._events.pop(victim, None)
 
     def _parse_log(
         self, session_id: str, path: Path
@@ -482,6 +510,7 @@ class JsonlStore:
         self._events[meta.session_id] = []
         self._loaded.add(meta.session_id)
         self._events_loaded.add(meta.session_id)
+        self._touch(meta.session_id)
         self._append_line(
             self._log_path(meta.session_id),
             {"t": "meta", "session_id": meta.session_id,

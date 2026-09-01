@@ -556,7 +556,11 @@ def _sensitive_file_rules():
     (a read-only command targeting a credential file classifies as write).
     """
     from fluid.permissions.rules import Rule
-    from fluid.tools.hardening import SENSITIVE_BASENAME_GLOBS, SENSITIVE_PATH_SUFFIXES
+    from fluid.tools.hardening import (
+        SENSITIVE_BASENAME_GLOBS,
+        SENSITIVE_EXCEPTIONS,
+        SENSITIVE_PATH_SUFFIXES,
+    )
 
     # "*" prefixes make basename globs match directory-qualified inputs too
     # ("src/.env"); fnmatch "*" crosses "/" so this is a suffix match.
@@ -568,11 +572,21 @@ def _sensitive_file_rules():
         "Read": "file_path", "Edit": "file_path", "Write": "file_path",
         "Grep": "path", "Glob": "path",
     }
-    return [
+    asks = [
         Rule(tool=tool, decision="ask", input_globs={field: glob})
         for tool, field in field_by_tool.items()
         for glob in globs
     ]
+    # Template files (.env.example and friends) hold no values and are meant
+    # to be read. They match ``.env.*`` above, so an allow rule after the
+    # asks lets them through; last match wins, and a user rule still comes
+    # after both.
+    allows = [
+        Rule(tool=tool, decision="allow", input_globs={field: f"*{name}"})
+        for tool, field in field_by_tool.items()
+        for name in sorted(SENSITIVE_EXCEPTIONS)
+    ]
+    return [*asks, *allows]
 
 
 def _session_settings(config: HarnessConfig) -> dict[str, Any]:

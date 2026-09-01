@@ -287,7 +287,9 @@ def test_mcp_servers_are_substituted_and_normalized(tmp_path, monkeypatch) -> No
     assert local["command"] == "node"
     assert local["args"][0] == f"{plugin.root}/server.js"  # ${CLAUDE_PLUGIN_ROOT}
     assert local["args"][2] == str(proj)  # ${CLAUDE_PROJECT_DIR}
-    assert local["env"] == {"TOKEN": "s3cret"}  # ${MYPLUG_TOKEN} from the environment
+    # ${MYPLUG_TOKEN} from the environment, plus the plugin root the server
+    # process is given as Claude Code gives it.
+    assert local["env"] == {"TOKEN": "s3cret", "CLAUDE_PLUGIN_ROOT": str(plugin.root)}
     assert "type" not in local  # stdio is fluid's client default
 
     # http becomes fluid's streamable_http transport.
@@ -321,8 +323,12 @@ def test_inline_manifest_mcp_servers(tmp_path, monkeypatch) -> None:
             "mcpServers": {"inline": {"command": "npx", "args": ["thing@1"]}},
         },
     )
-    assert discover_plugins(proj)[0].mcp_servers == {
-        "inline": {"command": "npx", "args": ["thing@1"]}
+    plugin = discover_plugins(proj)[0]
+    assert plugin.mcp_servers == {
+        "inline": {
+            "command": "npx", "args": ["thing@1"],
+            "env": {"CLAUDE_PLUGIN_ROOT": str(plugin.root)},
+        }
     }
 
 
@@ -335,7 +341,9 @@ def test_manifest_mcp_servers_path(tmp_path, monkeypatch) -> None:
         root / "config" / "servers.json",
         json.dumps({"mcpServers": {"fromfile": {"command": "srv"}}}),
     )
-    assert discover_plugins(proj)[0].mcp_servers == {"fromfile": {"command": "srv"}}
+    assert discover_plugins(proj)[0].mcp_servers == {
+        "fromfile": {"command": "srv", "env": {"CLAUDE_PLUGIN_ROOT": str(root)}}
+    }
 
 
 def test_malformed_mcp_json_soft_fails(tmp_path, monkeypatch, caplog) -> None:

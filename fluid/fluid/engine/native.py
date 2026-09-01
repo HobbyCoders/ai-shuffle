@@ -296,6 +296,12 @@ _OVERFLOW_MARKERS = (
 # HTTP statuses that mean the request body itself was rejected for size.
 _OVERFLOW_STATUSES = frozenset({413})
 
+# How long a turn parks on a QuestionRequest before giving up on an answer.
+# A host that renders no questions and never interrupts used to hold the
+# turn open for good. An engine instance may set ``question_timeout`` to
+# another number of seconds, or None to wait without limit.
+QUESTION_TIMEOUT_S = 30 * 60.0
+
 
 def _matches_tool_pattern(name: str, patterns: Sequence[str]) -> bool:
     """Exact name match, or a case-sensitive fnmatch pattern (ruling CE12).
@@ -1934,6 +1940,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                 empty_retries += 1
                 # The dud call may still have billed something.
                 self._fold_call_usage(total_usage, result.usage)
+                # Rotate the prefix fingerprint past the dud call too, so the
+                # next cache-miss diagnosis diffs against the request that
+                # was actually sent last, not the one before it.
+                self._cache_probe_fields(result.usage)
                 delay = _empty_retry_delay(empty_retries)
                 await self._emit(ProviderRetry(
                     session_id=sid, turn_id=turn_id,
@@ -2550,12 +2560,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                     )
                 )
             elif chunk.kind == "text_delta":
+                await self._ensure_block(blocks, payload["index"], "text", sid, turn_id)
                 blocks[payload["index"]]["text"] += payload["text"]
                 await self._emit(
                     TextDelta(session_id=sid, turn_id=turn_id,
                               index=payload["index"], text=payload["text"])
                 )
             elif chunk.kind == "thinking_delta":
+                await self._ensure_block(
+                    blocks, payload["index"], "thinking", sid, turn_id
+                )
                 blocks[payload["index"]]["text"] += payload["text"]
                 await self._emit(
                     ThinkingDelta(session_id=sid, turn_id=turn_id,
@@ -2564,6 +2578,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             elif chunk.kind == "tool_args_delta":
                 index = payload["index"]
                 fragment = payload["partial_json"]
+                await self._ensure_block(blocks, index, "tool_use", sid, turn_id)
                 block = blocks[index]
                 block["args"] += fragment
                 await self._emit(ToolArgsDelta(
@@ -2665,6 +2680,27 @@ class NativeLoop(BackgroundLifecycleMixin):
             interrupted=interrupted,
             native_stop_reason=native_stop_reason,
         )
+
+    async def _ensure_block(
+        self, blocks: dict[int, dict[str, Any]], index: int, block_type: str,
+        sid: str, turn_id: str,
+    ) -> None:
+        """Open a block a delta refers to when no ``block_start`` announced it.
+
+        A provider that skips the start frame (a proxy that drops it, a
+        stream joined late) used to raise ``KeyError`` out of the consumer
+        and lose the turn; the delta's own index and kind say enough to open
+        the block.
+        """
+        if index in blocks:
+            return
+        blocks[index] = {
+            "type": block_type, "text": "", "args": "", "signature": "",
+            "tool_name": None, "tool_use_id": None, "raw": None,
+        }
+        await self._emit(BlockStart(
+            session_id=sid, turn_id=turn_id, index=index, block_type=block_type,
+        ))
 
     async def _provider_chunks_interruptible(
         self, request: ProviderRequest
@@ -3119,9 +3155,16 @@ class NativeLoop(BackgroundLifecycleMixin):
             interrupt_wait = asyncio.create_task(self._interrupted.wait())
             try:
                 done, _ = await asyncio.wait(
-                    {fut, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED
+                    {fut, interrupt_wait},
+                    timeout=getattr(self, "question_timeout", QUESTION_TIMEOUT_S),
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
                 if fut not in done:
+                    if interrupt_wait not in done:
+                        log.warning(
+                            "no answer to %s's question within the question "
+                            "timeout; giving up on it", name,
+                        )
                     return None
                 resp: RespondQuestion = fut.result()
             finally:

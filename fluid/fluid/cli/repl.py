@@ -766,6 +766,20 @@ class Repl:
             if isinstance(event, Usage):
                 last = event
                 break
+        if last is None:
+            # A resumed session has no Usage in this process's ring yet; the
+            # persisted log carries the last call's.
+            store = getattr(self.engine, "store", None)
+            events_since = getattr(store, "events_since", None)
+            if events_since is not None:
+                try:
+                    persisted = await events_since(self.session_id, 0)
+                except Exception:  # noqa: BLE001 - a display line, never a failure
+                    persisted = []
+                for event in reversed(list(persisted)):
+                    if isinstance(event, Usage):
+                        last = event
+                        break
         return format_context_usage(usage, last_usage=last)
 
     def render_skills(self) -> str:

@@ -172,6 +172,9 @@ class McpClient:
                             ClientSession(
                                 read, write,
                                 **_session_timeout_kwargs(ClientSession, self.call_timeout),
+                                **_session_notification_kwargs(
+                                    ClientSession, self._on_server_notification
+                                ),
                             )
                         )
                         result = await self._handshake(session)
@@ -258,6 +261,16 @@ class McpClient:
         if method == "call":
             return await self._do_call(session, *args, **kwargs)
         raise ValueError(f"unknown mcp command: {method}")
+
+    async def _on_server_notification(self, message: Any) -> None:
+        """Server notifications: a changed tool list drops the cached listing.
+
+        Anything else (log messages, transport errors the SDK routes here) is
+        left to the SDK's own default handling.
+        """
+        if _is_tool_list_changed(message):
+            self._cache = None
+            log.info("mcp: server %r reported a changed tool list", self.name)
 
     async def _do_list(self, session: Any) -> list[ToolDescriptor]:
         now = time.monotonic()
@@ -384,6 +397,25 @@ def _open_http_transport(config: dict[str, Any]) -> tuple[Any, Any]:
     return connect(url, headers=headers), None
 
 
+def _session_notification_kwargs(session_cls: Any, handler: Any) -> dict[str, Any]:
+    """``message_handler=handler`` when this SDK's ``ClientSession`` takes one."""
+    try:
+        params = inspect.signature(session_cls.__init__).parameters
+    except (TypeError, ValueError):
+        return {}
+    return {"message_handler": handler} if "message_handler" in params else {}
+
+
+def _is_tool_list_changed(message: Any) -> bool:
+    """True for the server's ``notifications/tools/list_changed``."""
+    if type(message).__name__ == "ToolListChangedNotification":
+        return True
+    method = getattr(message, "method", None)
+    if method is None and hasattr(message, "root"):
+        method = getattr(message.root, "method", None)
+    return method == "notifications/tools/list_changed"
+
+
 def _session_timeout_kwargs(session_cls: Any, seconds: float) -> dict[str, Any]:
     """``read_timeout_seconds`` in the shape this SDK's ``ClientSession`` takes.
 
@@ -484,13 +516,44 @@ def _map_call_result(result: Any) -> dict[str, Any]:
                 "media_type": _field(c, "mime_type", "mimeType") or "image/png",
                 "data": _field(c, "data"),
             })
+        elif ctype == "resource":
+            text_parts.append(_embedded_resource_text(_field(c, "resource")))
+        elif ctype == "resource_link":
+            uri = _field(c, "uri") or ""
+            title = _field(c, "title") or _field(c, "name") or ""
+            text_parts.append(f"[resource link: {uri}{' ' + title if title else ''}]")
+        elif ctype == "audio":
+            mime = _field(c, "mime_type", "mimeType") or "audio"
+            size = len(_field(c, "data") or "")
+            text_parts.append(f"[audio result omitted: {mime}, {size} base64 chars]")
+    structured = _model_dump(_field(result, "structured_content", "structuredContent"))
+    text = "".join(text_parts)
+    if not text and structured:
+        # A tool that answers only through structuredContent used to read as
+        # an empty success; the structure is the answer.
+        import json
+
+        text = json.dumps(structured, ensure_ascii=False, indent=2)
     return {
         "kind": "result",
-        "text": "".join(text_parts),
+        "text": text,
         "images": images,
         "is_error": bool(_field(result, "is_error", "isError")),
-        "structured": _model_dump(_field(result, "structured_content", "structuredContent")),
+        "structured": structured,
     }
+
+
+def _embedded_resource_text(resource: Any) -> str:
+    """Text for an EmbeddedResource: its text, or a note for a binary blob."""
+    if resource is None:
+        return "[resource result was empty]"
+    uri = _field(resource, "uri") or ""
+    text = _field(resource, "text")
+    if text is not None:
+        return f"[resource {uri}]\n{text}" if uri else str(text)
+    mime = _field(resource, "mime_type", "mimeType") or "binary"
+    size = len(_field(resource, "blob") or "")
+    return f"[binary resource omitted: {uri} ({mime}, {size} base64 chars)]"
 
 
 def _items(mapping: Any):

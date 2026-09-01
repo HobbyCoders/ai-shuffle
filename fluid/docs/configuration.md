@@ -135,6 +135,11 @@ the opposite: when present it takes `AGENTS.md`'s place in that directory
 (`.fluid/AGENTS.override.md` does the same for `.fluid/AGENTS.md`); the local
 file still layers after it.
 
+Each instruction file is capped at 24,000 characters (8,000 for a nested
+file); past that, the head and tail are kept and a marker names the file so
+the rest can be read on demand. Codex applies a 32 KiB budget to the whole
+chain instead, so a chain that fits fluid can exceed Codex's limit.
+
 Skills (`<dir>/.fluid/skills/<name>/SKILL.md`, `<dir>/.agents/skills/...`,
 `~/.fluid/skills/...`) and user commands (`<dir>/.fluid/commands/*.md`,
 `<dir>/.agents/commands/*.md`, `~/.fluid/commands/*.md`) are one entry per
