@@ -371,6 +371,12 @@ class ToolRegistry:
         """
         descriptors = await self._manager.connect(name, config)
         specs: list[ToolSpec] = []
+        # A server's readOnlyHint is the server's word about itself. Taken
+        # at face value it skips the permission prompt and keeps the tool on
+        # the plan-mode surface, so it counts only when the config says the
+        # server is trusted. A destructiveHint always counts: it raises the
+        # guard, never lowers it.
+        trusted = bool(config.get("trust_annotations", False))
 
         def taken_by_other(candidate: str, remote: str) -> bool:
             # Only another MCP tool is a collision to rename around; a builtin
@@ -398,9 +404,10 @@ class ToolRegistry:
                     name, d.name, tool_name, existing.spec.source,
                 )
                 continue
+            risk = d.risk if trusted or d.risk != "safe" else "write"
             spec = ToolSpec(
                 name=tool_name, description=d.description, input_schema=d.input_schema,
-                risk=d.risk, source="mcp",
+                risk=risk, source="mcp",
             )
             self._entries[tool_name] = _Entry(spec=spec, server=name, remote_name=d.name)
             specs.append(spec)

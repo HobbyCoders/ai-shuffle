@@ -19,6 +19,12 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 from fluid.tools.shell import resolve_shell
 
 DEFAULT_TIMEOUT_S = 120.0
+MIN_TIMEOUT_S = 1.0
+MAX_TIMEOUT_S = 600.0
+# Bytes of a command's output kept in memory while it runs: the first half
+# and the last half, the middle dropped as it streams. Well above what the
+# model can see, so the cap only ever bites a runaway command.
+MAX_CAPTURE_BYTES = 8 * _TRUNCATE_LIMIT
 
 
 def describe(tools: frozenset[str] | None = None) -> str:
@@ -91,7 +97,8 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "plain searches) run without a permission prompt; a command that "
         "writes, redirects, substitutes (`$(...)`), or touches credential "
         "files may ask the user first. An \"always allow\" answer covers the "
-        "programs that command ran, not every future command.\n"
+        "programs that command ran (for sudo, npm, uv, make and the like, the "
+        "program together with what it ran), not every future command.\n"
         "- There is no stdin: commands that prompt for input will hang until "
         "the timeout. Pass non-interactive flags (e.g. --yes) where needed; "
         "interactive git flags (e.g. `git rebase -i`) are not supported.\n"
@@ -133,7 +140,8 @@ SPEC = ToolSpec(
                 "type": "number",
                 "description": (
                     "Seconds before the command is killed and reported as a "
-                    f"timeout error (default {DEFAULT_TIMEOUT_S:g})."
+                    f"timeout error (default {DEFAULT_TIMEOUT_S:g}, at most "
+                    f"{MAX_TIMEOUT_S:g})."
                 ),
             },
             "cwd": {
@@ -208,9 +216,62 @@ async def kill_tree(proc: asyncio.subprocess.Process) -> None:
     await proc.wait()
 
 
+def clamp_timeout(value: Any) -> float:
+    """The timeout a call gets: the model's number held inside the bounds.
+
+    A negative or zero timeout would kill every command at once; a huge one
+    would let a hung command hold the turn for hours. Anything that is not a
+    number falls back to the default.
+    """
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_TIMEOUT_S
+    if timeout != timeout:  # NaN
+        return DEFAULT_TIMEOUT_S
+    return min(max(timeout, MIN_TIMEOUT_S), MAX_TIMEOUT_S)
+
+
+async def _read_capped(stream: asyncio.StreamReader) -> bytes:
+    """Drain ``stream`` keeping the first and last ``MAX_CAPTURE_BYTES // 2``.
+
+    ``communicate()`` buffers everything a command prints, so a runaway
+    command (a build in a loop, a log tail) grows the host without bound.
+    Only head and tail can reach the model anyway (see ``truncate``), so the
+    middle is dropped as it streams past.
+    """
+    half = MAX_CAPTURE_BYTES // 2
+    head = bytearray()
+    tail = bytearray()
+    dropped = 0
+    while True:
+        chunk = await stream.read(65536)
+        if not chunk:
+            break
+        if len(head) < half:
+            take = min(len(chunk), half - len(head))
+            head += chunk[:take]
+            chunk = chunk[take:]
+            if not chunk:
+                continue
+        tail += chunk
+        if len(tail) > 2 * half:
+            dropped += len(tail) - half
+            del tail[:-half]
+    if len(tail) > half:
+        dropped += len(tail) - half
+        del tail[:-half]
+    if not tail:
+        return bytes(head)
+    if dropped:
+        marker = f"\n... [{dropped} bytes dropped while streaming] ...\n".encode()
+        return bytes(head) + marker + bytes(tail)
+    return bytes(head + tail)
+
+
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     command = input["command"]
-    timeout = float(input.get("timeout", DEFAULT_TIMEOUT_S))
+    timeout = clamp_timeout(input.get("timeout", DEFAULT_TIMEOUT_S))
     cwd = input.get("cwd") or ctx.cwd
     # The settings stack's ``env`` (ctx.extra["settings_env"], set by the
     # loader) rides on top of the process environment for the child only;
@@ -222,14 +283,19 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     proc = await asyncio.create_subprocess_exec(
         *resolve_shell().argv_prefix,
         command,
+        # No stdin, as the description promises: a command that reads it
+        # gets EOF instead of the user's next keystrokes.
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=cwd,
         env=env,
         **_spawn_kwargs(),
     )
+    assert proc.stdout is not None
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        stdout = await asyncio.wait_for(_read_capped(proc.stdout), timeout=timeout)
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
     except TimeoutError:
         await kill_tree(proc)
         # Killed, so nothing partial survives — say what the retry should

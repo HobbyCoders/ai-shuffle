@@ -375,3 +375,15 @@ async def test_kernel_stdout_cap_fair_shares_across_prints() -> None:
         assert "across 6 prints" in r.stdout
     finally:
         await kernel.stop()
+
+
+def test_fair_share_payload_never_exceeds_the_cap() -> None:
+    # Thousands of prints with shares below two characters: an ellipsis per
+    # print used to push the payload to 2.4x the cap.
+    segments = [f"line {i}\n" for i in range(20_000)]
+    cap = 16_384
+    out = fair_share_stdout(segments, cap)
+    payload = out.rsplit("\n", 1)[0]  # everything before the closing notice
+    assert len(payload) <= cap
+    assert "across 20000 prints" in out
+    assert "…" in payload  # the drop is still visible

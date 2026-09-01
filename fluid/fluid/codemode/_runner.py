@@ -48,6 +48,7 @@ _OUT = sys.stdout.buffer
 # Boot-configured globals (populated by the boot frame).
 _REF_THRESHOLD = truncate.DEFAULT_LIMIT
 _STDOUT_CAP = truncate.DEFAULT_STDOUT_CAP
+_CKPT_MAX_BYTES = 0  # 0: no budget (the host keeps its own cap)
 _SOURCES: dict = {}
 _SKILLS: dict = {}
 _NS: dict = {}
@@ -377,8 +378,28 @@ def _format_cell_traceback(exc: BaseException) -> str:
     while tb is not None and tb.tb_frame.f_code.co_filename != "<cell>":
         tb = tb.tb_next
     if tb is None:
-        return "".join(traceback.format_exception_only(type(exc), exc))
-    return "".join(traceback.format_exception(type(exc), exc, tb))
+        text = "".join(traceback.format_exception_only(type(exc), exc))
+    else:
+        text = "".join(traceback.format_exception(type(exc), exc, tb))
+    return _scrub_host_paths(text)
+
+
+_KERNEL_DIR = os.path.dirname(os.path.abspath(__file__))
+_HOME_DIR = os.path.expanduser("~")
+
+
+def _scrub_host_paths(text: str) -> str:
+    """Replace host filesystem paths a traceback would print with placeholders.
+
+    Frames below the cell (the kernel's own modules, the user's home) name
+    directories on the host; the model has no use for them and a transcript
+    should not carry them.
+    """
+    if _KERNEL_DIR and _KERNEL_DIR in text:
+        text = text.replace(_KERNEL_DIR, "<kernel>")
+    if _HOME_DIR and len(_HOME_DIR) > 1 and _HOME_DIR in text:
+        text = text.replace(_HOME_DIR, "~")
+    return text
 
 
 class _SegmentedStdout(io.TextIOBase):
@@ -453,6 +474,13 @@ def _run_cell(code: str):
         hint = _error_hint(exc)
         if hint:
             err = err.rstrip("\n") + "\n" + hint + "\n"
+    except (SystemExit, KeyboardInterrupt) as exc:
+        # A cell that calls sys.exit() or raises KeyboardInterrupt ends the
+        # cell, not the kernel: letting it out would kill the child and the
+        # host would report a death it cannot explain.
+        err = _format_cell_traceback(exc).rstrip("\n") + (
+            "\nThe kernel keeps running; a cell cannot exit the process.\n"
+        )
     finally:
         sys.stdout = saved
     # The registry is the runner's, not the cell's: rebinding ``_refs`` in a
@@ -484,6 +512,31 @@ _CKPT_SKIP = (
 )
 
 
+class _CheckpointTooLarge(Exception):
+    pass
+
+
+class _BoundedSink:
+    """A write target for ``pickle.dump`` that gives up past a byte budget.
+
+    Pickling a 50 MB variable and then finding the result oversized cost
+    hundreds of milliseconds per cell. Raising as soon as the budget is
+    crossed keeps the work bounded by the budget, not by the variable.
+    """
+
+    def __init__(self, budget: int) -> None:
+        self.budget = budget
+        self.chunks: list = []
+        self.size = 0
+
+    def write(self, data) -> int:
+        self.size += len(data)
+        if self.size > self.budget:
+            raise _CheckpointTooLarge()
+        self.chunks.append(data)
+        return len(data)
+
+
 def _checkpoint() -> dict:
     import base64
     import pickle
@@ -491,6 +544,10 @@ def _checkpoint() -> dict:
 
     vars_map: dict = {}
     dropped: list = []
+    oversized: list = []
+    # Budget on the pickled bytes; base64 adds a third on the wire, which the
+    # host's own cap allows for.
+    remaining = _CKPT_MAX_BYTES if _CKPT_MAX_BYTES > 0 else None
     for key, value in _NS.items():
         if key.startswith("__") or key in _CKPT_SKIP:
             continue
@@ -498,13 +555,28 @@ def _checkpoint() -> dict:
         # prelude anyway; listing them as "dropped" would be pure noise.
         if isinstance(value, types.ModuleType):
             continue
+        if remaining is not None and remaining <= 0:
+            oversized.append(key)
+            continue
+        sink = _BoundedSink(remaining if remaining is not None else 1 << 62)
         try:
-            blob = pickle.dumps(value)
+            pickle.dump(value, sink)
+        except _CheckpointTooLarge:
+            oversized.append(key)
+            continue
         except Exception:
             dropped.append(key)
             continue
+        blob = b"".join(sink.chunks)
+        if remaining is not None:
+            remaining -= len(blob)
         vars_map[key] = base64.b64encode(blob).decode("ascii")
-    return {"kind": "checkpoint", "vars": vars_map, "dropped": sorted(dropped)}
+    return {
+        "kind": "checkpoint",
+        "vars": vars_map,
+        "dropped": sorted(dropped),
+        "oversized": sorted(oversized),
+    }
 
 
 def _restore(vars_map: dict) -> dict:
@@ -611,9 +683,10 @@ def _guard_filesystem() -> None:
 
 
 def _boot(config: dict) -> None:
-    global _REF_THRESHOLD, _STDOUT_CAP, _NS
+    global _REF_THRESHOLD, _STDOUT_CAP, _NS, _CKPT_MAX_BYTES
     _REF_THRESHOLD = config.get("ref_threshold", truncate.DEFAULT_LIMIT)
     _STDOUT_CAP = config.get("stdout_cap", truncate.DEFAULT_STDOUT_CAP)
+    _CKPT_MAX_BYTES = int(config.get("checkpoint_max_bytes", 0) or 0)
     _apply_rlimit(config.get("mem_limit_bytes", 0))
     # The hard boundary: an audit hook the interpreter consults at every
     # spawn/socket/open no matter which object the cell reached it through.

@@ -3168,9 +3168,18 @@ class NativeLoop(BackgroundLifecycleMixin):
             # Sticky for the rest of the session: future calls to this tool
             # skip the prompt (fix: allow_always used to be a one-shot allow).
             spec = self.registry.get(name) if self.registry is not None else None
-            self.permissions.allow_always(
-                name, spec.scope_of(input) if spec is not None else None
-            )
+            scope = spec.scope_of(input) if spec is not None else None
+            if spec is not None and spec.session_scope is not None and scope is None:
+                # The tool scopes its allows but could not label this call
+                # (a Bash line with command substitution): recording it
+                # unscoped would cover every later call, so it stays a
+                # one-shot allow.
+                log.info(
+                    "allow_always for %s applied to this call only: the "
+                    "command could not be scoped", name,
+                )
+            else:
+                self.permissions.allow_always(name, scope)
         return (
             "allow" if allowed else "deny",
             resp.message,

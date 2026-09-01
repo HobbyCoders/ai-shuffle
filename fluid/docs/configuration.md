@@ -396,6 +396,7 @@ MCP servers connected at session start. Their tools appear as
 | `headers` | http: a table of request headers sent with every call (an `Authorization` bearer token, say). |
 | `connect_timeout` | Seconds allowed for the transport to open and the handshake to finish (default 30). A server that misses it is reported as a non-fatal error and the session runs without it. |
 | `call_timeout` | Seconds allowed for one tool call, and for any other request to the server (default 120). A call that misses it returns an error result to the model; the connection stays up. |
+| `trust_annotations` | `true` lets a tool's own `readOnlyHint` count: the tool runs without a prompt under `on_write` and stays on the plan-mode surface. Off by default, since the hint is the server's word about itself; a `destructiveHint` always counts. |
 | `shutdown_timeout` | Seconds to wait for the server to stop at session end before it is abandoned (default 5). |
 
 ```toml

@@ -457,3 +457,59 @@ def test_allow_always_without_scope_hook_covers_every_call() -> None:
     engine = PermissionEngine("on_write")
     engine.allow_always("Write", spec.scope_of({"file_path": "a"}))
     assert engine.decide(spec, {"file_path": "b"}).source == "session"
+
+
+# ─── allow_always labels carry what a wrapper or subcommand program runs ─────
+
+
+def test_scope_labels_name_the_wrapped_program() -> None:
+    from fluid.tools.builtins.bash_risk import scope_labels
+
+    assert scope_labels("sudo apt list") == frozenset({"sudo apt"})
+    assert scope_labels("sudo rm -rf /") == frozenset({"sudo rm"})
+    assert scope_labels("env FOO=1 make test") == frozenset({"env make test"})
+    assert scope_labels("find . -name '*.py' | xargs grep TODO") == frozenset(
+        {"find", "xargs grep"}
+    )
+    assert scope_labels("npm run build") == frozenset({"npm run"})
+    assert scope_labels("npm install left-pad") == frozenset({"npm install"})
+    assert scope_labels("uv run pytest && uv pip install x") == frozenset(
+        {"uv run", "uv pip"}
+    )
+    assert scope_labels("make") == frozenset({"make"})
+    assert scope_labels("make clean") == frozenset({"make clean"})
+    # Plain programs keep their program-wide label.
+    assert scope_labels("git status && git push") == frozenset({"git"})
+
+
+def test_scope_labels_refuse_wrappers_with_options() -> None:
+    from fluid.tools.builtins.bash_risk import scope_labels
+
+    # Which token is the wrapped program is not knowable from the text.
+    assert scope_labels("sudo -u root rm -rf /") is None
+    assert scope_labels("echo $(rm x)") is None
+
+
+def test_allow_always_on_sudo_covers_that_program_only() -> None:
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins.bash import SPEC as bash_spec
+
+    engine = PermissionEngine("on_write")
+    listing = {"command": "sudo apt list --upgradable"}
+    engine.allow_always(bash_spec.name, bash_spec.scope_of(listing))
+    assert engine.decide(bash_spec, listing).source == "session"
+    assert engine.decide(bash_spec, {"command": "sudo apt update"}).source == "session"
+    assert engine.decide(bash_spec, {"command": "sudo rm -rf /"}).decision == "ask"
+    assert engine.decide(bash_spec, {"command": "sudo -u root apt list"}).decision == "ask"
+
+
+def test_allow_always_on_npm_run_does_not_cover_npm_install() -> None:
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins.bash import SPEC as bash_spec
+
+    engine = PermissionEngine("on_write")
+    build = {"command": "npm run build"}
+    engine.allow_always(bash_spec.name, bash_spec.scope_of(build))
+    assert engine.decide(bash_spec, {"command": "npm run test"}).source == "session"
+    assert engine.decide(bash_spec, {"command": "npm install evil"}).decision == "ask"
+    assert engine.decide(bash_spec, {"command": "npm run build && rm -rf /"}).decision == "ask"

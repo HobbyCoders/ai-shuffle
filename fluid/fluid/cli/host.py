@@ -101,6 +101,9 @@ class Worker:
     worker_session_id: str | None = None
     status: str = "running"  # running | finished | failed | cancelled
     summary: str | None = None
+    # A serving process (Monitor with ``serves``): meant to stay up, so it is
+    # not work the run or a synchronous Task has to wait for.
+    serves: bool = False
     _head: list[str] = field(default_factory=list, repr=False)
     _tail: list[str] = field(default_factory=list, repr=False)
     _head_len: int = field(default=0, repr=False)
@@ -190,19 +193,29 @@ class CliHost:
         return self
 
     def running(self) -> list[Worker]:
+        """Workers still running, serving processes included."""
         return [w for w in self.workers.values() if not w.done]
 
+    def pending(self) -> list[Worker]:
+        """Workers whose completion something is waiting for.
+
+        A serving process (a dev server started with ``serves``) is running
+        but is not pending: its only completion is its death, and a run or a
+        synchronous Task that waited for it would wait forever.
+        """
+        return [w for w in self.running() if not w.serves]
+
     def busy(self) -> bool:
-        """True while a worker runs or a completion still awaits its wake turn."""
-        if self.running():
+        """True while a job runs or a completion still awaits its wake turn."""
+        if self.pending():
             return True
         pending_wake = getattr(self.engine, "_background_completions", None)
         return bool(pending_wake)
 
     async def wait_idle(self) -> None:
-        """Block until every worker has delivered its completion."""
+        """Block until every job has delivered its completion."""
         while True:
-            tasks = [w.task for w in self.running() if w.task is not None]
+            tasks = [w.task for w in self.pending() if w.task is not None]
             if not tasks:
                 return
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -269,17 +282,21 @@ class CliHost:
             env=dict(os.environ, NO_COLOR="1", FORCE_COLOR="0"),
             **spawn_kwargs,
         )
+        serves = bool(input.get("serves"))
         worker = Worker(
             task_id=new_id("mon"),
             kind="monitor",
             description=command,
             process=process,
+            serves=serves,
         )
         self.workers[worker.task_id] = worker
         worker.task = asyncio.create_task(
             self._supervise(worker), name=f"fluid-monitor-{worker.task_id}"
         )
-        return BackgroundTaskReceipt(task_id=worker.task_id, description=command)
+        return BackgroundTaskReceipt(
+            task_id=worker.task_id, description=command, serves=serves
+        )
 
     async def _supervise(self, worker: Worker) -> None:
         process = worker.process
@@ -426,13 +443,37 @@ class CliHost:
 
         registry = ToolRegistry()
         register_builtins(registry)
-        allowed = None
+        # The worker's surface sits inside the parent's: a read-only session
+        # must not spawn a worker that can write. The parent engine's own
+        # lists are the live restriction (they may be narrower than the
+        # config's); an agent definition's ``tools`` narrows further.
+        parent_allowed = getattr(self.engine, "allowed_tools", None)
+        if parent_allowed is None:
+            parent_allowed = self.config.tools.allowed
+        allowed: list[str] | None = (
+            list(parent_allowed) if parent_allowed is not None else None
+        )
         if definition is not None and definition.tools:
-            allowed = list(definition.tools)
+            from fluid.engine.native import _matches_tool_pattern
+
+            wanted = list(definition.tools)
+            if allowed is not None:
+                kept = [t for t in wanted if _matches_tool_pattern(t, allowed)]
+                if len(kept) < len(wanted):
+                    log.info(
+                        "subagent %s: %s outside the parent's tool allowlist, dropped",
+                        definition.name, sorted(set(wanted) - set(kept)),
+                    )
+                wanted = kept
+            allowed = wanted
         # No recursive fan-out, and no plan mode inside a worker — a subagent
         # asking the user to approve a plan inverts the delegation contract
         # (Claude Code bans its plan tools in subagents the same way).
-        disallowed = ["Task", "Plan", "StopPlanning", *self.config.tools.disallowed]
+        parent_disallowed = getattr(self.engine, "disallowed_tools", None) or ()
+        disallowed = list(dict.fromkeys([
+            "Task", "Plan", "StopPlanning",
+            *self.config.tools.disallowed, *parent_disallowed,
+        ]))
         refine_builtin_descriptions(
             registry,
             allowed=allowed,

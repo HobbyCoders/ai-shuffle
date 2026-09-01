@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import signal
 import struct
 import sys
 from collections.abc import Mapping
@@ -31,6 +32,10 @@ from fluid.codemode.vfs import DEFAULT_ALLOWLIST
 
 _RUNNER = os.path.join(os.path.dirname(__file__), "_runner.py")
 _GB = 1024 * 1024 * 1024
+# Child stderr kept for the death diagnostic: this many bytes, of which the
+# last few lines are quoted.
+_STDERR_TAIL_BYTES = 4096
+_STDERR_TAIL_LINES = 5
 
 # Environment variables the kernel child never receives. Tools run host-side,
 # so nothing in the child needs a credential; a cell that reaches ``os.environ``
@@ -80,6 +85,9 @@ class KernelConfig:
             "allow_fs": self.allow_fs,
             "ref_threshold": self.ref_threshold,
             "stdout_cap": self.stdout_cap,
+            # The child stops pickling once a checkpoint passes this size, so
+            # one large variable costs at most this much work per cell.
+            "checkpoint_max_bytes": self.checkpoint_max_bytes if self.checkpoint else 0,
         }
 
 
@@ -92,18 +100,32 @@ class SubprocessKernel:
         self._job_handle: int | None = None  # Windows Job Object (memory limit)
         self._ckpt_vars: dict[str, str] | None = None  # last namespace checkpoint
         self._ckpt_dropped: list[str] = []  # unpicklables at checkpoint time
+        # The child's stderr, drained as it arrives (a full pipe would block
+        # the child) into a bounded tail kept for the death diagnostic.
+        self._stderr_task: asyncio.Task | None = None
+        self._stderr_tail = bytearray()
 
     # ── lifecycle ──
     async def start(self) -> None:
         await self._spawn()
 
     async def _spawn(self) -> None:
+        spawn_kwargs: dict = {}
+        if sys.platform != "win32":
+            # Own process group, so a kill reaches whatever the cell spawned
+            # through an allowed route; on Windows the Job Object does this.
+            spawn_kwargs["start_new_session"] = True
         self._proc = await asyncio.create_subprocess_exec(
             self.config.python, "-I", "-S", _RUNNER,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=scrub_env(os.environ),
+            **spawn_kwargs,
+        )
+        self._stderr_tail = bytearray()
+        self._stderr_task = asyncio.create_task(
+            self._drain_stderr(self._proc), name="fluid-kernel-stderr"
         )
         # POSIX enforces the memory limit in-child via rlimit; on Windows that
         # is a no-op, so cap the child from the host with a Job Object.
@@ -143,10 +165,55 @@ class SubprocessKernel:
             pass
         await self._kill()
 
+    async def _drain_stderr(self, proc: asyncio.subprocess.Process) -> None:
+        """Read the child's stderr for as long as it lives, keeping the tail."""
+        stream = proc.stderr
+        if stream is None:
+            return
+        try:
+            while True:
+                chunk = await stream.read(4096)
+                if not chunk:
+                    return
+                self._stderr_tail += chunk
+                if len(self._stderr_tail) > _STDERR_TAIL_BYTES:
+                    del self._stderr_tail[:-_STDERR_TAIL_BYTES]
+        except (asyncio.CancelledError, OSError, ValueError):
+            return
+
+    def _death_note(self, proc: asyncio.subprocess.Process | None) -> str:
+        """Why the child is gone, from its exit status and stderr tail.
+
+        An exit the runner chose (a cell called ``sys.exit``), a signal, and
+        a memory-cap kill all used to read as "likely OOM"; the status tells
+        them apart, and the last lines of stderr say what the child printed
+        on its way out.
+        """
+        code = proc.returncode if proc is not None else None
+        if code is None:
+            reason = "kernel died mid-exec"
+        elif code == -9:
+            reason = "kernel was killed by SIGKILL (the OS or the memory cap)"
+        elif code < 0:
+            reason = f"kernel was killed by signal {-code}"
+        else:
+            reason = f"kernel exited with status {code}"
+        tail = self._stderr_tail.decode("utf-8", errors="replace").strip()
+        if tail:
+            lines = tail.splitlines()[-_STDERR_TAIL_LINES:]
+            reason += "; stderr: " + " | ".join(line.strip() for line in lines)
+        return reason
+
     async def _kill(self) -> None:
         proc, self._proc = self._proc, None
         job, self._job_handle = self._job_handle, None
+        drain, self._stderr_task = self._stderr_task, None
         if proc is not None and proc.returncode is None:
+            if sys.platform != "win32":
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
             try:
                 proc.kill()
             except ProcessLookupError:
@@ -154,6 +221,12 @@ class SubprocessKernel:
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except (TimeoutError, Exception):
+                pass
+        if drain is not None:
+            drain.cancel()
+            try:
+                await drain
+            except (asyncio.CancelledError, Exception):
                 pass
         if job is not None:
             _win_close_handle(job)  # KILL_ON_JOB_CLOSE reaps any survivor
@@ -180,9 +253,17 @@ class SubprocessKernel:
             await self._restart_and_restore()
             return
         vars_map = frame.get("vars") or {}
-        if sum(len(v) for v in vars_map.values()) <= self.config.checkpoint_max_bytes:
+        # The child already stopped at the budget; base64 widens the pickled
+        # bytes by a third, so the wire size is allowed that much over it.
+        wire_cap = self.config.checkpoint_max_bytes * 4 // 3 + 1024
+        if sum(len(v) for v in vars_map.values()) <= wire_cap:
             self._ckpt_vars = vars_map
-            self._ckpt_dropped = list(frame.get("dropped") or [])
+            # Both lists name variables a restore will not bring back; the
+            # note the model reads after a restart must say so for each.
+            self._ckpt_dropped = [
+                *(frame.get("dropped") or []),
+                *(frame.get("oversized") or []),
+            ]
         # else: oversized — keep the previous checkpoint
 
     async def _restart_and_restore(self) -> str:
@@ -234,11 +315,24 @@ class SubprocessKernel:
                     host_calls=host_calls,
                 )
             except (asyncio.IncompleteReadError, ConnectionError):
+                proc = self._proc
+                if proc is not None and proc.returncode is None:
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=1)
+                    except (TimeoutError, Exception):
+                        pass
+                reason = self._death_note(proc)
                 note = await self._restart_and_restore()
                 return KernelResult(
-                    error=f"kernel died mid-exec (likely OOM / memory cap); restarted{note}",
-                    host_calls=host_calls,
+                    error=f"{reason}; restarted{note}", host_calls=host_calls
                 )
+            except asyncio.CancelledError:
+                # The turn was interrupted while the cell ran. The child is
+                # still executing it and would answer the NEXT exec with this
+                # cell's result, so the pipe is only kept in step by
+                # restarting the kernel; the checkpoint restores its state.
+                await self._restart_and_restore()
+                raise
             remaining -= loop.time() - started
             if remaining <= 0:
                 remaining = 0.001

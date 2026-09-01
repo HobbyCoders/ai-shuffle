@@ -36,8 +36,9 @@ async def test_connect_list_search_load_dispatch() -> None:
         assert loaded.input_schema["required"] == ["city"]
         assert [s.name for s in reg.list_tools(loaded_only=True)] == ["mcp__srv__get_weather"]
 
-        # read-only annotation → safe; unannotated write tool → write
-        assert reg.get("mcp__srv__get_weather").risk == "safe"
+        # A server's readOnlyHint is not taken at its word: without
+        # trust_annotations the tool is a write tool like the unannotated one.
+        assert reg.get("mcp__srv__get_weather").risk == "write"
         assert reg.get("mcp__srv__write_note").risk == "write"
 
         out = await reg.dispatch("mcp__srv__get_weather", {"city": "Paris"}, ToolCtx())
@@ -96,5 +97,34 @@ async def test_mrtr_input_required_surfaces_marker() -> None:
         assert marker.request_state == "rs-1"
         assert "confirm" in marker.requests
         assert marker.requests["confirm"]["method"] == "elicitation/create"
+    finally:
+        await reg.aclose()
+
+
+async def test_trusted_server_annotations_lower_the_risk() -> None:
+    from fluid.permissions.engine import plan_mode_blocks
+
+    reg = ToolRegistry()
+    try:
+        await reg.connect_mcp("srv", {**_config(), "trust_annotations": True})
+        weather = reg.get("mcp__srv__get_weather")
+        assert weather is not None and weather.risk == "safe"
+        assert not plan_mode_blocks(weather)
+        note = reg.get("mcp__srv__write_note")
+        assert note is not None and note.risk == "write"
+    finally:
+        await reg.aclose()
+
+
+async def test_untrusted_read_only_tool_leaves_the_plan_mode_surface() -> None:
+    from fluid.permissions.engine import PermissionEngine, plan_mode_blocks
+
+    reg = ToolRegistry()
+    try:
+        await reg.connect_mcp("srv", _config())
+        weather = reg.get("mcp__srv__get_weather")
+        assert weather is not None
+        assert plan_mode_blocks(weather)
+        assert PermissionEngine("on_write").decide(weather, {"city": "x"}).decision == "ask"
     finally:
         await reg.aclose()

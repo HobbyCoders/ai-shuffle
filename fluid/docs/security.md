@@ -36,7 +36,10 @@ the engine's tool-result path). fluid has two trusted markers — the
 teaches the model to trust exactly them. Genuine instances are appended by
 the engine *after* dispatch, so any instance inside a tool result's own text
 (a README the model Read, kernel stdout, an MCP payload) is spoofing and is
-neutralized in place. The surrounding data survives.
+neutralized in place. The surrounding data survives. The same defang runs
+over the descriptions an MCP server supplies before they enter the
+deferred-tool catalog, which is itself a `<system-reminder>` block, and each
+description is folded to one line so it cannot add an entry of its own.
 
 **4. Prompt-bound file screening** (`fluid/context/screening.py`).
 Instruction files (AGENTS.md chain, nested files, the identity file) and
@@ -90,7 +93,10 @@ model *reads* framing tokens even when they can't structurally escape.
   for a denied web tool; the permission engine's denial messages say the same.
 
 **8. Structural gates** (pre-existing, part of the same story). The
-permission engine (policy + last-match-wins rules + scoped allow-always), the
+permission engine (policy + last-match-wins rules + scoped allow-always; an
+MCP tool's own `readOnlyHint` counts only for a server with
+`trust_annotations = true`, and a Bash allow-always names what a wrapper such
+as `sudo` or `npm` ran, not the wrapper alone), the
 doom-loop guard, plan mode's exclusion of write tools (from the request
 schemas on the JSON path, and — because code mode reaches its tools through a
 kernel rather than a schema — from the code-mode projection and the host-call

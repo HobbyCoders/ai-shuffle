@@ -181,9 +181,14 @@ def fair_share_stdout(
         reserve = len(_drop_marker(len(segment) - budget)) + 1
         if budget <= reserve:
             # Shares too thin to carry a counted marker (a cell with hundreds
-            # of prints): a bare ellipsis still shows the print happened.
-            parts.append("…\n")
+            # of prints): a bare ellipsis still shows the print happened,
+            # paid for out of the segment's own share. A share too thin even
+            # for that (thousands of prints) joins one ellipsis for the whole
+            # run, so the payload cannot grow past the cap two characters at
+            # a time.
             drops.append((index + 1, len(segment)))
+            if budget >= 2 or not parts or parts[-1] != "…\n":
+                parts.append("…\n")
             continue
         head = segment[: budget - reserve]
         marker = _drop_marker(len(segment) - len(head))

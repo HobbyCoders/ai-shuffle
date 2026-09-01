@@ -46,6 +46,14 @@ def _one_line(text: str) -> str:
     return ""
 
 
+def _catalog_text(text: str) -> str:
+    """One description line made safe for the trusted catalog block."""
+    from fluid.tools.hardening import defang_harness_markers
+
+    text = defang_harness_markers(text)
+    return " ".join(text.split())  # one line: no newline can start a new entry
+
+
 # The literal first line of every catalog block. Rendering and parsing share it
 # so a resumed session can recognise its own past announcements.
 DEFERRED_CATALOG_HEADER = "The following deferred tools are available."
@@ -88,7 +96,12 @@ def render_deferred_catalog(
     if not specs:
         return None
     ordered = sorted(specs, key=lambda s: s.name)
-    full = "\n".join(f"- {s.name}: {_one_line(s.description)}" for s in ordered)
+    # The block is a trusted system-reminder; a server's description is not.
+    # Defang the harness markers and keep each entry on its own line, so a
+    # description cannot close the block or forge an entry of its own.
+    full = "\n".join(
+        f"- {s.name}: {_catalog_text(_one_line(s.description))}" for s in ordered
+    )
     if len(full) > budget_chars:
         names_only = "\n".join(f"- {s.name}" for s in ordered)
         if len(names_only) <= budget_chars:

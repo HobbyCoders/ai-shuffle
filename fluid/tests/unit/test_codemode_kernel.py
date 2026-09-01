@@ -10,6 +10,7 @@ import pytest
 
 from fluid.codemode import SubprocessKernel
 from fluid.codemode.kernel import HostReply
+from fluid.codemode.subprocess_kernel import KernelConfig
 
 
 async def _no_tools(name: str, kwargs: dict) -> HostReply:
@@ -565,3 +566,123 @@ async def test_skill_verification_runs_under_the_audit_hook() -> None:
     )
     verdicts = await verify_sources({"escape": source}, ["escape"])
     assert verdicts["escape"] and "os.listdir is blocked" in verdicts["escape"]
+
+
+# ─── kernel lifecycle: exits, interrupts, stderr, checkpoint cost ─────────────
+
+
+async def test_sys_exit_in_a_cell_does_not_kill_the_kernel() -> None:
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        await k.exec("keep = 'me'", timeout=5, on_host_call=_no_tools)
+        r = await k.exec("raise SystemExit(3)", timeout=5, on_host_call=_no_tools)
+        assert r.error is not None
+        assert "SystemExit" in r.error
+        assert "kernel keeps running" in r.error
+        assert "OOM" not in r.error
+        # Same process, same namespace: nothing was restarted.
+        r2 = await k.exec("keep", timeout=5, on_host_call=_no_tools)
+        assert r2.value_repr == "'me'"
+    finally:
+        await k.stop()
+
+
+async def test_interrupted_cell_does_not_desync_the_pipe() -> None:
+    import asyncio
+
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        await k.exec("kept = 41", timeout=5, on_host_call=_no_tools)
+        task = asyncio.create_task(
+            k.exec("import time; time.sleep(30); 'stale'", timeout=60, on_host_call=_no_tools)
+        )
+        await asyncio.sleep(0.5)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        # The next cell gets ITS OWN result, not the interrupted cell's, and
+        # the checkpoint brought the namespace across the restart.
+        r = await k.exec("kept + 1", timeout=5, on_host_call=_no_tools)
+        assert r.value_repr == "42"
+        assert r.error is None
+    finally:
+        await k.stop()
+
+
+async def test_heavy_stderr_does_not_block_the_child() -> None:
+    import asyncio
+
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        # A cell cannot import sys, but the interpreter itself writes to
+        # stderr: every exception raised in __del__ prints an "Exception
+        # ignored" report there. Hundreds of them exceed a pipe buffer;
+        # without a reader the child blocks on the write and the cell
+        # times out.
+        r = await asyncio.wait_for(
+            k.exec(
+                "class Loud:\n"
+                "    def __del__(self):\n"
+                "        raise ValueError('e' * 2000)\n"
+                "for _ in range(300):\n"
+                "    Loud()\n"
+                "'done'",
+                timeout=20, on_host_call=_no_tools,
+            ),
+            timeout=30,
+        )
+        assert r.error is None
+        assert r.value_repr == "'done'"
+    finally:
+        await k.stop()
+
+
+async def test_checkpoint_cost_is_bounded_by_the_budget() -> None:
+    import time
+
+    k = SubprocessKernel(KernelConfig(checkpoint_max_bytes=256 * 1024))
+    await k.start()
+    try:
+        r = await k.exec("big = 'x' * (50 * 1024 * 1024); small = 7", timeout=20,
+                         on_host_call=_no_tools)
+        assert r.error is None
+        started = time.monotonic()
+        r = await k.exec("small + 1", timeout=20, on_host_call=_no_tools)
+        elapsed = time.monotonic() - started
+        assert r.value_repr == "8"
+        # Pickling 50 MB and base64-ing it took hundreds of milliseconds per
+        # cell; the child now stops at the budget.
+        assert elapsed < 1.0, elapsed
+        # After a restart the note says which variable did not come back.
+        r = await k.exec("while True: pass", timeout=1.0, on_host_call=_no_tools)
+        assert r.error is not None and "not restorable: big" in r.error
+        r = await k.exec("small", timeout=5, on_host_call=_no_tools)
+        assert r.value_repr == "7"
+    finally:
+        await k.stop()
+
+
+async def test_tracebacks_do_not_name_host_directories() -> None:
+    import os
+
+    import fluid.codemode as codemode_pkg
+
+    kernel_dir = os.path.dirname(os.path.abspath(codemode_pkg.__file__))
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        # A failure inside the kernel's own vfs frames (a tool the host
+        # refuses) used to print the host path of vfs.py under the cell frame.
+        r = await k.exec(
+            "from tools import Read\nRead(file_path='x')", timeout=5, on_host_call=_no_tools
+        )
+        assert r.error is not None
+        assert kernel_dir not in r.error
+        assert os.path.expanduser("~") not in r.error
+    finally:
+        await k.stop()

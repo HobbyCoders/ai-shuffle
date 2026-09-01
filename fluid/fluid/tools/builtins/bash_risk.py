@@ -343,38 +343,119 @@ def simple_commands(command: str) -> list[str] | None:
     return out or None
 
 
-def program_names(command: str) -> frozenset[str] | None:
-    """Every program a command invokes (``cat a | grep b`` → {cat, grep}).
+# Programs that run another program named on their command line. Approving
+# ``sudo apt list`` once must not cover ``sudo rm -rf /``, so the label is the
+# wrapper plus what it wraps: ``sudo apt``.
+WRAPPER_PROGRAMS = frozenset((
+    "sudo", "doas", "env", "xargs", "nohup", "nice", "ionice", "time", "timeout",
+    "command", "exec", "busybox", "stdbuf", "unbuffer", "watch", "chronic",
+))
+# Programs whose first argument selects what they do. ``npm run`` and
+# ``npm install`` are different programs for approval purposes, as are
+# ``make build`` and ``make clean``.
+SUBCOMMAND_PROGRAMS = frozenset((
+    "npm", "npx", "pnpm", "yarn", "bun", "bunx", "uv", "uvx", "pip", "pip3",
+    "pipx", "poetry", "cargo", "go", "make", "docker", "podman", "kubectl",
+    "gh", "gcloud", "aws", "az", "terraform", "helm",
+))
 
-    None when the command cannot be lexed or uses substitution/subshells,
-    so callers fall back to the broadest scope rather than a wrong one.
+
+def _scope_label(tokens: list[str]) -> str | None:
+    """The approval label for one simple command's tokens.
+
+    A wrapper labels as ``wrapper <label of the wrapped command>``; a
+    subcommand program as ``program subcommand``; anything else as the
+    program alone. None when a wrapper carries options (``sudo -u root``):
+    which token is the wrapped program is then not knowable from the text,
+    and a guess would scope the approval wrongly.
     """
+    while tokens and _ENV_ASSIGNMENT.match(tokens[0]):
+        tokens = tokens[1:]
+    if not tokens:
+        return None
+    program = _program_name(tokens[0])
+    rest = tokens[1:]
+    if program in WRAPPER_PROGRAMS:
+        if not rest:
+            return program
+        if rest[0].startswith("-"):
+            return None
+        inner = _scope_label(rest)
+        return None if inner is None else f"{program} {inner}"
+    if program in SUBCOMMAND_PROGRAMS:
+        if rest and not rest[0].startswith("-"):
+            return f"{program} {rest[0].lower()}"
+        return program
+    return program
+
+
+def _simple_command_tokens(command: str) -> list[list[str]] | None:
+    """Token lists of every simple command, or None when they are not knowable."""
     if not command or not command.strip() or "$(" in command or "`" in command:
         return None
-    names: set[str] = set()
+    out: list[list[str]] = []
     for line in command.splitlines():
         if not line.strip():
             continue
         tokens = _lex(line)
         if tokens is None:
             return None
-        expect_program = True
+        current: list[str] = []
         for tok in tokens:
             if tok in _SEPARATORS:
-                expect_program = True
+                if current:
+                    out.append(current)
+                current = []
                 continue
             if tok and all(ch in "();<>|&" for ch in tok):
                 return None
-            if expect_program and not _ENV_ASSIGNMENT.match(tok):
-                names.add(_program_name(tok))
-                expect_program = False
+            current.append(tok)
+        if current:
+            out.append(current)
+    return out or None
+
+
+def program_names(command: str) -> frozenset[str] | None:
+    """Every program a command invokes (``cat a | grep b`` → {cat, grep}).
+
+    None when the command cannot be lexed or uses substitution/subshells,
+    so callers fall back to the broadest scope rather than a wrong one.
+    """
+    groups = _simple_command_tokens(command)
+    if groups is None:
+        return None
+    names: set[str] = set()
+    for tokens in groups:
+        while tokens and _ENV_ASSIGNMENT.match(tokens[0]):
+            tokens = tokens[1:]
+        if tokens:
+            names.add(_program_name(tokens[0]))
     return frozenset(names) or None
 
 
+def scope_labels(command: str) -> frozenset[str] | None:
+    """The ``allow_always`` labels of a command: one per simple command.
+
+    Plain programs label as themselves (``git``); wrappers and subcommand
+    programs carry what they run (``sudo apt``, ``npm run``). None when any
+    part cannot be labelled, so the approval is one-shot rather than wide.
+    """
+    groups = _simple_command_tokens(command)
+    if groups is None:
+        return None
+    labels: set[str] = set()
+    for tokens in groups:
+        label = _scope_label(list(tokens))
+        if label is None:
+            return None
+        labels.add(label)
+    return frozenset(labels) or None
+
+
 def session_scope(input: dict[str, Any]) -> frozenset[str] | None:
-    """``allow_always`` scope for Bash: the programs the command runs."""
+    """``allow_always`` scope for Bash: what the command runs, by label."""
     command = input.get("command")
-    return program_names(command) if isinstance(command, str) else None
+    return scope_labels(command) if isinstance(command, str) else None
 
 
 # Concrete names the sensitive-file globs in fluid.tools.hardening cover, so an

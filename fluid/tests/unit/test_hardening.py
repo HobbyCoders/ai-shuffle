@@ -4,6 +4,7 @@ context-overflow recovery, client retry, ToolSearch, [mcp] config.
 """
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -849,3 +850,48 @@ async def test_deferred_catalog_on_resume_announces_only_new_tools() -> None:
     assert sent.count("mcp__srv__weather") == 1  # the new one is announced
     assert sent.count("mcp__srv__hello") == 1  # the old one only from history
     await resumed.aclose()
+
+
+# ─── 8b. allow_always on a call the tool cannot scope stays a one-shot allow ──
+
+
+async def test_allow_always_on_an_unscopable_bash_call_does_not_widen() -> None:
+    from fluid.tools.builtins import register_builtins
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    # Command substitution: the programs that run are not visible in the
+    # text, so Bash cannot label the call. Recording the allow anyway would
+    # cover every later Bash command.
+    provider = ScriptedProvider([
+        _tool("t1", "Bash", '{"command": "echo $(echo one)"}'),
+        _tool("t2", "Bash", '{"command": "echo $(echo two)"}'),
+        _text("done"),
+    ])
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(
+        provider=provider, store=store, model="m", session_id=sid,
+        registry=registry, permissions=PermissionEngine("on_write"),
+    )
+    prompts: list[PermissionRequest] = []
+
+    async def answer_every_prompt() -> None:
+        async with contextlib.aclosing(loop.bus.subscribe(sid, from_store=False)) as events:
+            async for event in events:
+                if isinstance(event, PermissionRequest):
+                    prompts.append(event)
+                    await loop.submit(RespondPermission(
+                        request_id=event.request_id, decision="allow_always",
+                    ))
+                elif isinstance(event, TurnComplete):
+                    return
+
+    watcher = asyncio.create_task(answer_every_prompt())
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+    await asyncio.wait_for(watcher, timeout=5)
+
+    assert len(prompts) == 2  # the second call asked again
+    results = [e for e in loop.bus.log(sid) if isinstance(e, ToolResult)]
+    assert [r.is_error for r in results] == [False, False]

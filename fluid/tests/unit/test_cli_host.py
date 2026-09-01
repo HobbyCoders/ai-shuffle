@@ -359,3 +359,78 @@ def test_worker_finish_note_is_deferred_until_turn_end() -> None:
     text = out.getvalue()
     assert "The answer is forty-two." in text
     assert text.index("t1") > text.index("forty-two.")
+
+
+# ── serving monitors do not hold the run; workers inherit the parent's surface ──
+
+
+def _serving_call(command: str, tuid: str = "call-serve") -> list[StreamChunk]:
+    return _tool(tuid, "Monitor", json.dumps({"command": command, "serves": True}))
+
+
+async def test_serving_monitor_does_not_hold_the_run(tmp_path) -> None:
+    # A dev server never exits. Before ``serves`` reached the host, fluid run
+    # waited on it forever; now the run ends when the turn does and the
+    # server is stopped with the host.
+    provider = ScriptedProvider([
+        _serving_call(f'"{PY}" -c "import time; time.sleep(60)"'),
+        _text("Server is up."),
+    ])
+    out = io.StringIO()
+    rc = await asyncio.wait_for(
+        run_once(_config(tmp_path), MemoryStore(), "serve", provider=provider,
+                 out=out, on_permission=_allow),
+        timeout=20,
+    )
+    assert rc == 0
+    assert provider.calls == 2
+    assert "Server is up." in out.getvalue()
+
+
+async def test_host_pending_excludes_serving_workers() -> None:
+    host = CliHost(config=None, store=None)
+    job = Worker(task_id="mon_1", kind="monitor", description="pytest")
+    server = Worker(task_id="mon_2", kind="monitor", description="npm run dev", serves=True)
+    host.workers = {job.task_id: job, server.task_id: server}
+    assert {w.task_id for w in host.running()} == {"mon_1", "mon_2"}
+    assert [w.task_id for w in host.pending()] == ["mon_1"]
+    assert host.busy()
+    job.status = "finished"
+    assert not host.busy()
+
+
+async def test_subagent_surface_stays_inside_the_parents(tmp_path) -> None:
+    agents = tmp_path / ".agents" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "helper.md").write_text(
+        "---\nname: helper\ndescription: finds things\ntools: Read, Grep, Write\n---\n"
+        "You are HELPER-PROMPT.\n",
+        encoding="utf-8",
+    )
+    provider = RoutingProvider(
+        parent=[_task_call("sync"), _text("done")],
+        child=[_text("helper says hi")],
+        child_marker="HELPER-PROMPT",
+    )
+    out = io.StringIO()
+    config = _config(tmp_path, tools={"allowed": ["Read", "Grep", "Task"]})
+    await run_once(config, MemoryStore(), "go", provider=provider,
+                   out=out, on_permission=_allow)
+    assert "helper says hi" in out.getvalue()
+    child_req = provider.child_requests[0]
+    # Write was asked for by the definition but the parent cannot write.
+    assert {t["name"] for t in child_req.tools} == {"Read", "Grep"}
+
+
+async def test_subagent_without_a_definition_gets_the_parents_surface(tmp_path) -> None:
+    provider = RoutingProvider(
+        parent=[_task_call("sync", agent=""), _text("done")],
+        child=[_text("generic says hi")],
+    )
+    out = io.StringIO()
+    config = _config(tmp_path, tools={"allowed": ["Read", "Task"]})
+    await run_once(config, MemoryStore(), "go", provider=provider,
+                   out=out, on_permission=_allow)
+    assert "generic says hi" in out.getvalue()
+    child_req = provider.child_requests[0]
+    assert {t["name"] for t in child_req.tools} == {"Read"}
