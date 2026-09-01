@@ -338,6 +338,9 @@ class HarnessConfig:
     skills_dir: str | None = None
     continual: bool = False
     continual_model: str | None = None
+    # A native provider name whose client runs synthesis passes. Unset, the
+    # session's own provider does; the delegated ``claude`` leg has none.
+    continual_provider: str | None = None
     # Retention budget for the harness-evolution commit gate (HCL's B): how
     # many anchor regressions a proposed harness-state change may cause and
     # still commit. 0 = strict stability; the shipped default follows HCL's
@@ -407,6 +410,7 @@ class HarnessConfig:
             skills_dir=d.get("skills_dir"),
             continual=bool(d.get("continual", False)),
             continual_model=d.get("continual_model"),
+            continual_provider=d.get("continual_provider") or None,
             anchor_budget=max(0, int(d.get("anchor_budget", 1))),
             instruction_files=InstructionFilesConfig.from_dict(d.get("instruction_files", {})),
             setting_sources=_setting_sources_from(d.get("setting_sources")),
@@ -453,6 +457,7 @@ class HarnessConfig:
             "skills_dir": self.skills_dir,
             "continual": self.continual,
             "continual_model": self.continual_model,
+            "continual_provider": self.continual_provider,
             "anchor_budget": self.anchor_budget,
             "cwd": self.cwd,
             "max_tokens": self.max_tokens,

@@ -47,7 +47,8 @@ import hmac
 import json
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -60,6 +61,15 @@ if TYPE_CHECKING:
 
 _BUNDLED_SERVER_NAME = "fluid_bundled"
 _TCP_PREFIX = "tcp:"
+# Longest line accepted on the bridge sockets and, in the parent, on the
+# CLI's stdout. The CLI echoes whole tool results inside ``user`` frames and
+# a bridge call carries whole arguments and results, so asyncio's 64 KiB
+# default is exceeded by ordinary turns; a line over this cap raises out of
+# ``readline`` and ends the turn.
+STREAM_LINE_LIMIT = 16 * 1024 * 1024
+# A hook answered ``continue: false`` on a bridge-served call; the loop that
+# owns the CLI decides what ending the turn means.
+OnStop = Callable[[str], Awaitable[None]]
 # Environment entry the child reads its bridge token from.
 TOKEN_ENV = "FLUID_BUNDLED_TOKEN"
 _UNAUTHORIZED = {"error": "unauthorized: bridge token missing or wrong"}
@@ -99,6 +109,7 @@ async def serve_registry_socket(
     tool_filter: Callable[[str], bool] | None = None,
     permissions: PermissionEngine | None = None,
     hooks: HookBus | None = None,
+    on_stop: OnStop | None = None,
 ) -> asyncio.AbstractServer:
     """Serve ``list``/``call`` requests against ``registry`` over a socket.
 
@@ -110,7 +121,11 @@ async def serve_registry_socket(
     connection is answered with an error and closed. ``DelegatedLoop`` always
     sets one; ``None`` exists for in-process tests of the wire format.
     ``tool_filter``, ``permissions`` and ``hooks`` gate the registry the way
-    the native loop's dispatch path does (see ``_answer``).
+    the native loop's dispatch path does (see ``_answer``); ``on_stop`` is
+    told when a hook ends the turn.
+
+    Lines on this socket carry whole tool arguments and whole results, so
+    both sides read with the same cap as the CLI's stdout.
 
     Returns the started ``asyncio`` server; the caller owns its lifetime
     (``server.close()`` + ``await server.wait_closed()``).
@@ -136,6 +151,7 @@ async def serve_registry_socket(
                 resp = await _answer(
                     registry, ctx, req,
                     tool_filter=tool_filter, permissions=permissions, hooks=hooks,
+                    on_stop=on_stop,
                 )
                 writer.write((json.dumps(resp) + "\n").encode())
                 await writer.drain()
@@ -145,8 +161,12 @@ async def serve_registry_socket(
     tcp = _parse_address(socket_path)
     if tcp is not None:
         host, port = tcp
-        return await asyncio.start_server(handle, host=host, port=port)
-    return await asyncio.start_unix_server(handle, path=socket_path)
+        return await asyncio.start_server(
+            handle, host=host, port=port, limit=STREAM_LINE_LIMIT,
+        )
+    return await asyncio.start_unix_server(
+        handle, path=socket_path, limit=STREAM_LINE_LIMIT,
+    )
 
 
 def _token_ok(expected: str, presented: Any) -> bool:
@@ -164,28 +184,42 @@ async def _gate_call(
     *,
     permissions: PermissionEngine | None,
     hooks: HookBus | None,
+    on_stop: OnStop | None = None,
 ) -> ToolOutcome:
     """PreToolUse hook → PermissionEngine → dispatch → PostToolUse, the order
     ``NativeLoop._gated_call`` uses, for a caller with no user on the far
     end: an ``ask`` verdict has nobody to ask and becomes the non-interactive
     denial.
+
+    The hook contract is the native loop's: a PreToolUse ``deny`` or
+    ``stop`` refuses the call (``stop`` also ends the turn through
+    ``on_stop``), a ``permissionDecision`` of ``allow`` skips the permission
+    gate and ``ask`` forces one, ``updatedInput`` replaces the arguments; a
+    PostToolUse ``deny`` or ``additionalContext`` rides back to the model
+    appended to the result, and a PostToolUse ``stop`` ends the turn after
+    it.
     """
-    from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE
+    from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, hook_reminder
     from fluid.permissions.engine import non_interactive_denial
 
+    hook_permission: str | None = None
+    hook_reason: str | None = None
     if hooks is not None:
         decision = await hooks.emit(
             PRE_TOOL_USE, {"name": name, "input": args, "tool_use_id": None},
         )
-        if decision.action == "deny":
-            return ToolOutcome(
-                text=f"blocked by hook: {decision.note or 'denied'}", is_error=True,
-            )
+        if decision.action == "deny" or decision.stop:
+            reason = decision.note or ("stopped by hook" if decision.stop else "denied")
+            if decision.stop and on_stop is not None:
+                await on_stop(reason)
+            return ToolOutcome(text=f"blocked by hook: {reason}", is_error=True)
         if decision.action == "modify" and decision.replacement_input is not None:
             args = decision.replacement_input
+        hook_permission = decision.permission_decision
+        hook_reason = decision.note
     spec = registry.get(name)
-    if permissions is not None and spec is not None:
-        decided = permissions.decide(spec, args)
+    if permissions is not None and spec is not None and hook_permission != "allow":
+        decided = permissions.decide(spec, args, cwd=ctx.cwd)
         verdict = decided.decision
         deny_message: str | None = decided.deny_message()
         if verdict == "allow" and permissions.note_execution(name, args):
@@ -194,6 +228,11 @@ async def _gate_call(
                 name, "doom-loop guard: this exact tool call was repeated "
                 "several times in a row",
             )
+        elif verdict == "allow" and hook_permission == "ask":
+            verdict = "deny"
+            deny_message = non_interactive_denial(
+                name, hook_reason or "a PreToolUse hook asked for confirmation",
+            )
         elif verdict == "ask":
             verdict = "deny"
             deny_message = non_interactive_denial(name)
@@ -201,11 +240,29 @@ async def _gate_call(
             return ToolOutcome(text=deny_message or "permission denied", is_error=True)
     outcome = await registry.dispatch(name, args, ctx)
     if hooks is not None:
-        await hooks.emit(
+        decision = await hooks.emit(
             POST_TOOL_USE,
             {"name": name, "tool_use_id": None, "input": args,
              "output": outcome.text, "is_error": outcome.is_error},
         )
+        additions: list[str] = []
+        if decision.stop:
+            reason = decision.note or "stopped by hook"
+            if on_stop is not None:
+                await on_stop(reason)
+        elif decision.action == "deny":
+            additions.append(hook_reminder(
+                "PostToolUse hook feedback", decision.note or "blocked by hook",
+            ))
+        if decision.additional_context:
+            additions.append(hook_reminder(
+                "PostToolUse hook context", decision.additional_context,
+            ))
+        if additions:
+            outcome = replace(
+                outcome, text="\n\n".join([outcome.text, *additions]).strip(),
+                content_id=None, window_of=None,
+            )
     return outcome
 
 
@@ -215,6 +272,7 @@ async def _answer(
     tool_filter: Callable[[str], bool] | None = None,
     permissions: PermissionEngine | None = None,
     hooks: HookBus | None = None,
+    on_stop: OnStop | None = None,
 ) -> dict[str, Any]:
     op = req.get("op")
     if op == "list":
@@ -239,7 +297,7 @@ async def _answer(
             return {"text": f"tool not available in this session: {name}", "is_error": True}
         outcome = await _gate_call(
             registry, ctx, name, req.get("arguments") or {},
-            permissions=permissions, hooks=hooks,
+            permissions=permissions, hooks=hooks, on_stop=on_stop,
         )
         # MRTR: the tool paused to ask the user something (AskUser,
         # StopPlanning). This bridge is a request/response socket with no event
@@ -293,8 +351,8 @@ def write_bundled_config(
     """Write an ``.mcp.json``-style config and return it.
 
     Includes the bundled server (only when the registry actually exposes
-    inproc/builtin tools that pass ``tool_filter``) plus any ``user_servers``
-    passed straight through.
+    inproc/builtin tools that pass ``tool_filter``) plus any ``user_servers``,
+    each rewritten from fluid's config shape into the CLI's.
     """
     servers: dict[str, Any] = {}
     specs = [
@@ -303,11 +361,31 @@ def write_bundled_config(
     ]
     if specs:
         servers[server_name] = bundled_server_config(socket_path, token)
-    if user_servers:
-        servers.update(user_servers)
+    for name, server in (user_servers or {}).items():
+        servers[name] = cli_server_entry(server)
     config = {"mcpServers": servers}
     Path(path).write_text(json.dumps(config, indent=2))
     return config
+
+
+def cli_server_entry(server: dict[str, Any]) -> dict[str, Any]:
+    """A fluid ``[mcp.<name>]`` entry in the CLI's ``.mcp.json`` shape.
+
+    fluid names the transport ``transport`` (``stdio``, ``http``,
+    ``streamable_http``); the CLI names it ``type`` and calls the streamable
+    transport plain ``http``. An entry that already carries ``type`` is left
+    as written.
+    """
+    entry = dict(server)
+    transport = entry.pop("transport", None)
+    if "type" not in entry:
+        if transport in (None, "stdio"):
+            entry["type"] = "stdio"
+        elif transport == "streamable_http":
+            entry["type"] = "http"
+        else:
+            entry["type"] = str(transport)
+    return entry
 
 
 # ─── Child side: MCP stdio server proxying to the parent socket ──────────────
@@ -319,9 +397,11 @@ async def _socket_rpc(
     """One request/response round-trip against the parent's bridge socket."""
     tcp = _parse_address(socket_path)
     if tcp is not None:
-        reader, writer = await asyncio.open_connection(*tcp)
+        reader, writer = await asyncio.open_connection(*tcp, limit=STREAM_LINE_LIMIT)
     else:
-        reader, writer = await asyncio.open_unix_connection(socket_path)
+        reader, writer = await asyncio.open_unix_connection(
+            socket_path, limit=STREAM_LINE_LIMIT,
+        )
     if token is not None:
         req = {**req, "token": token}
     try:

@@ -30,6 +30,7 @@ builtins registry, a permission engine, and an optional code-mode session.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import tomllib
@@ -37,6 +38,8 @@ from pathlib import Path
 from typing import Any
 
 from fluid.config.model import HarnessConfig
+
+logger = logging.getLogger(__name__)
 
 # ─── built-in defaults ───────────────────────────────────────────────────────
 
@@ -47,6 +50,10 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "skills_dir": None,
     "continual": False,
     "continual_model": None,
+    # A native provider name whose client runs synthesis passes. Unset, the
+    # session's own provider is used; the delegated ``claude`` leg has no
+    # native client, so without this it journals but never synthesizes.
+    "continual_provider": None,
     "anchor_budget": 1,
     "cwd": ".",
     "max_tokens": None,
@@ -398,6 +405,8 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
         out["continual"] = _coerce_bool(env["FLUID_CONTINUAL"])
     if "FLUID_CONTINUAL_MODEL" in env:
         out["continual_model"] = env["FLUID_CONTINUAL_MODEL"]
+    if "FLUID_CONTINUAL_PROVIDER" in env:
+        out["continual_provider"] = env["FLUID_CONTINUAL_PROVIDER"]
     if "FLUID_ANCHOR_BUDGET" in env:
         try:
             out["anchor_budget"] = int(env["FLUID_ANCHOR_BUDGET"])
@@ -656,6 +665,137 @@ def _build_provider_client(config: HarnessConfig, provider_name: str):
     return client
 
 
+def _wire_continual(
+    config: HarnessConfig,
+    *,
+    ctx: Any,
+    bus: Any,
+    session_id: str | None,
+    model: str,
+    client: Any | None,
+) -> tuple[Any, Any | None]:
+    """The skill store and, when ``client`` is given, its synthesizer.
+
+    Wires the Recall builtin (``recall_store``) and, under ``continual``, the
+    Remember builtin (``continual_journal``) onto ``ctx`` so both legs of the
+    engine serve them. ``client`` is the ProviderClient synthesis passes run
+    on; None keeps the journal without a synthesizer, which is what the
+    delegated leg gets when no ``continual_provider`` is configured.
+    """
+    from fluid.codemode.skills import SkillStore, project_key_for
+
+    skills = SkillStore(config.skills_dir)  # None → ~/.fluid/skills
+    try:
+        # Opportunistic lifecycle pass (interval-gated, deterministic,
+        # archive-not-delete). Best-effort: curation must never block an
+        # engine build.
+        skills.curate()
+    except Exception:
+        pass
+    # The Recall builtin searches this store (live + archived memories,
+    # saved skills); wiring the handle makes the tool visible.
+    ctx.extra.setdefault("recall_store", skills)
+    if not config.continual:
+        return skills, None
+
+    synthesizer = None
+    if client is not None:
+        from fluid.codemode.continual import Synthesizer
+
+        on_change: Any = None
+        if bus is not None:
+            from fluid.events.model import ContinualUpdate
+
+            _bus, _sid = bus, session_id or ""
+
+            async def _announce(changes: list[str]) -> None:
+                # Learning that lands invisibly might as well not have
+                # happened — announce what the pass changed.
+                await _bus.publish(ContinualUpdate(
+                    session_id=_sid, changes=tuple(changes),
+                ))
+
+            on_change = _announce
+
+        # Phase 2.3: the synthesizer sees the SESSION model id (so a
+        # guidance-proposal stem can be validated against it) and the raw
+        # guidance file(s) currently matching it (so proposals amend the
+        # file instead of overwriting blind). Gated on the "user" setting
+        # source like the prompt-side guidance load.
+        guidance_snapshot: dict[str, str] = {}
+        if "user" in config.setting_sources:
+            try:
+                from fluid.context.guidance import guidance_sources
+
+                guidance_snapshot = guidance_sources(model)
+            except Exception:
+                pass
+
+        # continual_model pins synthesis to one model so skill quality does
+        # not drift with the session's provider choice. Passes are background
+        # and best-effort (see continual.py).
+        synthesizer = Synthesizer(
+            client, config.continual_model or model, skills,
+            project=project_key_for(config.cwd),
+            on_change=on_change,
+            session_model=model,
+            guidance_snapshot=guidance_snapshot or None,
+        )
+
+    def _remember(text: str, scope: str | None = None) -> None:
+        # The Remember builtin's write path: journal a high-salience entry
+        # and, when a synthesizer is running, pull its next pass forward.
+        entry: dict[str, Any] = {"kind": "remember", "text": text}
+        if scope:
+            entry["scope"] = scope
+        skills.journal_append(entry)
+        if synthesizer is not None:
+            synthesizer.mark_urgent()
+            synthesizer.kick()
+
+    ctx.extra.setdefault("continual_journal", _remember)
+    return skills, synthesizer
+
+
+def _mcp_server_map(
+    config: HarnessConfig, disabled_mcp: Any, child_env: dict[str, str] | None,
+) -> dict[str, Any]:
+    """The MCP servers a session connects: config, project mcp.json, plugins.
+
+    Plugin servers join the set with a config-declared server of the same
+    name winning (gated like every other plugin component: the "user" source
+    must be enabled and plugin discovery on). ``disabledMcpServers`` applies
+    to the whole map; ``enabledMcpjsonServers`` was applied where the project
+    mcp.json files were read (load_config). The settings ``env`` reaches each
+    stdio server's spawn environment under the server's own ``env`` (the MCP
+    SDK layers that over its default environment); HTTP servers have no
+    child process.
+    """
+    mcp_servers = dict(config.mcp)
+    if "user" in config.setting_sources and config.instruction_files.discover_plugins:
+        from fluid.context.plugins import discover_plugins, plugin_mcp_servers
+
+        try:
+            for name, server in plugin_mcp_servers(
+                discover_plugins(config.cwd, sources=config.setting_sources)
+            ).items():
+                mcp_servers.setdefault(name, server)
+        except Exception:  # noqa: BLE001 — CE11: a broken plugin never blocks the build
+            pass
+    for name in disabled_mcp:
+        mcp_servers.pop(name, None)
+    if child_env:
+        for name, server in list(mcp_servers.items()):
+            if server.get("transport", "stdio") != "stdio":
+                continue
+            own = server.get("env")
+            mcp_servers[name] = {
+                **server,
+                "env": {**child_env, **(own if isinstance(own, dict) else {})},
+            }
+    return mcp_servers
+
+
 def build_engine(
     config: HarnessConfig,
     store,
@@ -759,6 +899,33 @@ def build_engine(
             register_config_hooks(hooks, config.hooks, cwd=config.cwd)
         if permissions is None:
             permissions = _build_permissions(config, settings)
+        if bus is None:
+            from fluid.events.bus import EventBus
+
+            bus = EventBus()
+        # Continual learning rides this leg too: the journal is fed from the
+        # tool results the CLI reports, Recall and Remember reach the model
+        # over the bundled bridge, and synthesis runs when a native provider
+        # is configured for it (``continual_provider``); the CLI itself is not
+        # a client the synthesizer can call.
+        journal = None
+        if config.continual:
+            from fluid.codemode.journal import ToolJournal
+
+            synth_client = None
+            if config.continual_provider:
+                synth_client = _build_provider_client(config, config.continual_provider)
+            else:
+                logger.warning(
+                    "continual: the claude provider has no native client for "
+                    "synthesis; set continual_provider to a native provider "
+                    "or the journal is kept without synthesis passes"
+                )
+            skills, synthesizer = _wire_continual(
+                config, ctx=ctx, bus=bus, session_id=session_id, model=model,
+                client=synth_client,
+            )
+            journal = ToolJournal(skills, synthesizer)
 
         return DelegatedLoop(
             store=store,
@@ -777,6 +944,8 @@ def build_engine(
             disallowed_tools=list(disallowed_tools) or None,
             permissions=permissions,
             hooks=hooks,
+            journal=journal,
+            mcp_servers=_mcp_server_map(config, disabled_mcp, child_env) or None,
         )
 
     # Native providers.
@@ -805,74 +974,13 @@ def build_engine(
     codemode = None
     journal = None
     if config.code_mode or config.continual:
-        from fluid.codemode.skills import SkillStore, project_key_for
-
-        skills = SkillStore(config.skills_dir)  # None → ~/.fluid/skills
-        try:
-            # Opportunistic lifecycle pass (interval-gated, deterministic,
-            # archive-not-delete). Best-effort: curation must never block an
-            # engine build.
-            skills.curate()
-        except Exception:
-            pass
-        # The Recall builtin searches this store (live + archived memories,
-        # saved skills); wiring the handle makes the tool visible.
-        ctx.extra.setdefault("recall_store", skills)
-        synthesizer = None
-        if config.continual:
-            from fluid.codemode.continual import Synthesizer
-
-            on_change: Any = None
-            if bus is not None:
-                from fluid.events.model import ContinualUpdate
-
-                _bus, _sid = bus, session_id or ""
-
-                async def _announce(changes: list[str]) -> None:
-                    # Learning that lands invisibly might as well not have
-                    # happened — announce what the pass changed.
-                    await _bus.publish(ContinualUpdate(
-                        session_id=_sid, changes=tuple(changes),
-                    ))
-
-                on_change = _announce
-
-            # Phase 2.3: the synthesizer sees the SESSION model id (so a
-            # guidance-proposal stem can be validated against it) and the raw
-            # guidance file(s) currently matching it (so proposals amend the
-            # file instead of overwriting blind). Gated on the "user" setting
-            # source like the prompt-side guidance load.
-            guidance_snapshot: dict[str, str] = {}
-            if "user" in config.setting_sources:
-                try:
-                    from fluid.context.guidance import guidance_sources
-
-                    guidance_snapshot = guidance_sources(model)
-                except Exception:
-                    pass
-
-            # Session provider; continual_model pins synthesis to one model so
-            # skill quality doesn't drift with the session's provider choice.
-            # Passes are background and best-effort (see continual.py).
-            synthesizer = Synthesizer(
-                client, config.continual_model or model, skills,
-                project=project_key_for(config.cwd),
-                on_change=on_change,
-                session_model=model,
-                guidance_snapshot=guidance_snapshot or None,
-            )
-
-            def _remember(text: str, scope: str | None = None) -> None:
-                # The Remember builtin's write path: journal a high-salience
-                # entry and pull the next synthesis pass forward.
-                entry: dict[str, Any] = {"kind": "remember", "text": text}
-                if scope:
-                    entry["scope"] = scope
-                skills.journal_append(entry)
-                synthesizer.mark_urgent()
-                synthesizer.kick()
-
-            ctx.extra.setdefault("continual_journal", _remember)
+        synth_client = client
+        if config.continual and config.continual_provider:
+            synth_client = _build_provider_client(config, config.continual_provider)
+        skills, synthesizer = _wire_continual(
+            config, ctx=ctx, bus=bus, session_id=session_id, model=model,
+            client=synth_client if config.continual else None,
+        )
         if config.code_mode:
             from fluid.codemode.session import CodeModeSession
 
@@ -884,37 +992,7 @@ def build_engine(
 
             journal = ToolJournal(skills, synthesizer)
 
-    # Plugin MCP servers join the lazy-connect set; a config-declared server of
-    # the same name always wins. Gated like every other plugin component: the
-    # "user" source must be enabled and plugin discovery on.
-    mcp_servers = dict(config.mcp)
-    if "user" in config.setting_sources and config.instruction_files.discover_plugins:
-        from fluid.context.plugins import discover_plugins, plugin_mcp_servers
-
-        try:
-            for name, server in plugin_mcp_servers(
-                discover_plugins(config.cwd, sources=config.setting_sources)
-            ).items():
-                mcp_servers.setdefault(name, server)
-        except Exception:  # noqa: BLE001 — CE11: a broken plugin never blocks the build
-            pass
-    # ``disabledMcpServers`` applies to the whole map (config, mcp.json and
-    # plugin servers alike); ``enabledMcpjsonServers`` was applied where the
-    # project mcp.json files were read (load_config).
-    for name in disabled_mcp:
-        mcp_servers.pop(name, None)
-    # The settings ``env`` reaches each stdio server's spawn environment under
-    # the server's own ``env`` (the MCP SDK layers that over its default
-    # environment); HTTP servers have no child process.
-    if child_env:
-        for name, server in list(mcp_servers.items()):
-            if server.get("transport", "stdio") != "stdio":
-                continue
-            own = server.get("env")
-            mcp_servers[name] = {
-                **server,
-                "env": {**child_env, **(own if isinstance(own, dict) else {})},
-            }
+    mcp_servers = _mcp_server_map(config, disabled_mcp, child_env)
 
     from fluid.context.compaction import CompactionConfig
     from fluid.context.trim import TrimConfig

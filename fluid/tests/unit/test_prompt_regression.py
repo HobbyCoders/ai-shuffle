@@ -280,3 +280,91 @@ def test_code_mode_addendum_explains_deferred_tools() -> None:
         PromptProfile(tools=frozenset(BUILTIN_TOOL_NAMES), code_mode=True, model="claude")
     )
     assert "load one with ToolSearch" not in code_mode_text
+
+
+
+# ─── the delegated ``claude`` leg ────────────────────────────────────────────
+
+
+def _delegated_config(tmp_path, **overrides):
+    return HarnessConfig.from_dict(
+        deep_merge(BUILTIN_DEFAULTS, {
+            "cwd": str(tmp_path),
+            "default_provider": "claude",
+            "continual": True,
+            "code_mode": True,
+            "skills_dir": str(tmp_path / "skills"),
+            **overrides,
+        })
+    )
+
+
+async def _bridge_listing(engine) -> set[str]:
+    """The tool names the bundled bridge would announce for ``engine``."""
+    from fluid.tools.mcp.bundled_server import _answer
+
+    listed = await _answer(
+        engine.registry, engine.ctx, {"op": "list"},
+        tool_filter=engine._bridge_tool_permitted,
+    )
+    return {t["name"] for t in listed["tools"]}
+
+
+async def test_native_only_tools_are_exactly_the_ones_the_bridge_cannot_list(tmp_path):
+    """The literal in prompt.py must agree with the registry: a builtin is
+    native-only when the delegated engine's tool context lacks one of the
+    capabilities it requires."""
+    from fluid.cli.config import make_engine
+    from fluid.cli.prompt import NATIVE_ONLY_TOOL_NAMES
+    from fluid.store.jsonl import JsonlStore
+
+    engine = make_engine(
+        _delegated_config(tmp_path), JsonlStore(tmp_path / "store"), provider_name="claude",
+    )
+    try:
+        listed = await _bridge_listing(engine)
+    finally:
+        await engine.aclose()
+    assert set(BUILTIN_TOOL_NAMES) - listed == set(NATIVE_ONLY_TOOL_NAMES)
+
+
+async def test_delegated_prompt_names_only_tools_the_cli_can_reach(tmp_path):
+    """PRM-1: the prompt the ``claude`` leg ships names no tool the bundled
+    bridge does not list, and tells the model about the MCP prefix."""
+    from fluid.cli.config import make_engine, resolved_prompt
+    from fluid.cli.prompt import DELEGATED_TOOL_PREFIX, NATIVE_ONLY_TOOL_NAMES
+    from fluid.store.jsonl import JsonlStore
+
+    config = _delegated_config(tmp_path)
+    engine = make_engine(config, JsonlStore(tmp_path / "store"), provider_name="claude")
+    try:
+        listed = await _bridge_listing(engine)
+        text = engine.system
+    finally:
+        await engine.aclose()
+    assert text == resolved_prompt(config, provider_name="claude").text
+    mentioned = mentioned_tool_names(text)
+    assert mentioned <= listed, sorted(mentioned - listed)
+    assert not mentioned & set(NATIVE_ONLY_TOOL_NAMES)
+    assert DELEGATED_TOOL_PREFIX in text
+    # The native prompt for the same config still names the recall tools.
+    native = resolved_prompt(config, provider_name="anthropic").text
+    assert "HistoryExpand" in native and DELEGATED_TOOL_PREFIX not in native
+
+
+def test_delegated_prompt_drops_the_code_mode_addendum(tmp_path, capsys):
+    """PRM-2: ``--continual`` implies code mode, but the delegated engine has
+    no run_python; the addendum stays out and the user is told."""
+    from fluid.cli.config import code_mode_unavailable, resolved_prompt
+    from fluid.cli.prompt import code_mode_addendum
+
+    config = _delegated_config(tmp_path)
+    assert code_mode_addendum(config, provider_name="anthropic") is not None
+    assert code_mode_addendum(config, provider_name="claude") is None
+    text = resolved_prompt(config, provider_name="claude").text
+    assert "run_python" not in text and "# Code mode" not in text
+    assert "run_python" in resolved_prompt(config, provider_name="anthropic").text
+    assert code_mode_unavailable(config, "claude")
+    assert code_mode_unavailable(config, "anthropic") is None
+    off = _delegated_config(tmp_path, code_mode=False, continual=False)
+    assert code_mode_unavailable(off, "claude") is None

@@ -1197,3 +1197,411 @@ async def test_delegated_loop_serves_bridge_with_token_and_gates(tmp_path) -> No
         assert "permission denied by a configured rule" in gated["text"]
     finally:
         await loop.aclose()
+
+
+
+# ─── Batch 6: the Claude-CLI leg as a daily driver ───────────────────────────
+
+
+async def _run_one_turn(loop: DelegatedLoop, text: str = "hi") -> list:
+    await loop.submit(UserTurn(content=text))
+    await loop.wait_turn()
+    return loop.bus.log(loop.session_id)
+
+
+async def test_oversize_tool_result_frame_does_not_kill_the_turn() -> None:
+    """ENG-6: a 300 KB tool_result user frame (the CLI echoes whole results)
+    is far over asyncio's 64 KiB default line limit; the turn must still
+    complete with the result delivered whole."""
+    loop = _make_loop("k")
+    try:
+        events = await _run_one_turn(loop)
+        assert not [e for e in events if isinstance(e, ErrorEvent)]
+        result = next(e for e in events if isinstance(e, ToolResult))
+        assert len(result.output) == 300_000 and result.name == "Read"
+        assert isinstance(events[-1], TurnComplete)
+        # The next turn on the same process is healthy too: no desync.
+        events = await _run_one_turn(loop, "again")
+        assert isinstance(events[-1], TurnComplete)
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.parametrize("scenario", ["l", "m"])
+async def test_dead_resume_handle_is_dropped_and_the_turn_replayed(scenario) -> None:
+    """ENG-15: a --resume handle the CLI rejects (by exiting without frames,
+    or with an error result) is cleared, the CLI restarted without it, and
+    the same turn replayed once. The session ends the turn with a real
+    TurnComplete and the fresh handle persisted, instead of failing forever
+    with the stale one."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    await store.set_cli_session_id(sid, "cli-dead")
+    loop = _make_loop(scenario, store=store, session_id=sid, cli_session_id="cli-dead")
+    try:
+        events = await _run_one_turn(loop)
+        types = [type(e).__name__ for e in events]
+        assert "TurnComplete" in types and "ErrorEvent" not in types
+        assert types.count("TurnStarted") == 1  # one turn, replayed inside
+        assert loop.cli_session_id == "cli-sess-123"
+        # A second turn rides the fresh process without another restart.
+        events = await _run_one_turn(loop, "again")
+        assert isinstance(events[-1], TurnComplete)
+    finally:
+        await loop.aclose()
+    assert (await store.get_session(sid)).cli_session_id == "cli-sess-123"
+
+
+async def test_failed_result_becomes_an_error_event_not_a_completion() -> None:
+    """ENG-15: ``is_error`` on the result is a failed turn. It is reported as
+    an ErrorEvent naming the CLI's errors, never as TurnComplete, and no
+    retry happens because the turn had already produced frames."""
+    loop = _make_loop("n")
+    try:
+        events = await _run_one_turn(loop)
+        assert not [e for e in events if isinstance(e, TurnComplete)]
+        error = events[-1]
+        assert isinstance(error, ErrorEvent)
+        assert "error_during_execution" in error.message
+        assert "tool crashed" in error.message and "stream reset" in error.message
+        assert loop.cli_session_id == "cli-sess-123"  # no handle dropped
+        # The mapper reports the same thing directly.
+        mapper = _mapper()
+        mapped = mapper.feed({
+            "type": "result", "subtype": "error_during_execution", "is_error": True,
+            "result": "boom",
+        })
+        assert mapped.is_result and mapped.error == "claude reported error_during_execution: boom"
+        assert not [e for e in mapped.events if isinstance(e, TurnComplete)]
+    finally:
+        await loop.aclose()
+
+
+async def test_turn_cap_result_still_completes_the_turn() -> None:
+    """``error_max_turns`` carries ``is_error`` too, but a cap is a stop
+    reason (the native loop's call cap completes the turn the same way)."""
+    loop = _make_loop("o")
+    try:
+        events = await _run_one_turn(loop)
+        done = events[-1]
+        assert isinstance(done, TurnComplete) and done.stop_reason == "error_max_turns"
+    finally:
+        await loop.aclose()
+
+
+async def test_interrupt_while_parked_on_a_permission_ends_the_turn() -> None:
+    """The turn's reader parks on the permission future while holding
+    stdout; an Interrupt must release it (as a denial) rather than leave the
+    CLI and the reader each waiting on the other."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop("b", store=store, session_id=sid)
+
+    async def interrupter() -> None:
+        async for e in loop.bus.subscribe(sid):
+            if isinstance(e, PermissionRequest):
+                await loop.submit(Interrupt())
+                return
+
+    from fluid.events.model import Interrupted
+
+    watcher = asyncio.create_task(interrupter())
+    try:
+        await loop.submit(UserTurn(content="weather?"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=10)
+        await watcher
+        events = loop.bus.log(sid)
+        denied = next(e for e in events if isinstance(e, ToolResult))
+        assert denied.is_error
+        assert isinstance(events[-1], Interrupted)
+    finally:
+        await loop.aclose()
+
+
+async def test_allow_always_sticks_for_the_session_and_is_echoed_to_the_cli() -> None:
+    """``allow_always`` used to be answered as a one-shot allow. Now the
+    CLI's own ``permission_suggestions`` go back as ``updatedPermissions``
+    and the loop remembers the tool, so the next request for it is answered
+    without a prompt."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop("b", store=store, session_id=sid)
+    frames = _spy_on_frames(loop)
+
+    async def responder() -> None:
+        async for e in loop.bus.subscribe(sid):
+            if isinstance(e, PermissionRequest):
+                await loop.submit(RespondPermission(
+                    request_id=e.request_id, decision="allow_always",
+                ))
+                return
+
+    watcher = asyncio.create_task(responder())
+    try:
+        await loop.submit(UserTurn(content="weather?"))
+        await loop.wait_turn()
+        await watcher
+        answers = [
+            f for f in frames if f.get("type") == "control_response"
+        ]
+        assert answers and answers[0]["response"]["response"]["behavior"] == "allow"
+        assert answers[0]["response"]["response"]["updatedPermissions"] == [{
+            "type": "addRules", "behavior": "allow", "destination": "session",
+            "rules": [{"toolName": "mcp__fluid_bundled__get_weather"}],
+        }]
+        first = loop.bus.last_seq(sid)
+        # Second turn, same tool: no prompt, the call runs.
+        await loop.submit(UserTurn(content="and now?"))
+        await loop.wait_turn()
+        later = [e for e in loop.bus.log(sid) if e.seq > first]
+        assert not [e for e in later if isinstance(e, PermissionRequest)]
+        result = next(e for e in later if isinstance(e, ToolResult))
+        assert not result.is_error and "sunny" in result.output
+    finally:
+        await loop.aclose()
+
+
+async def test_argv_carries_strict_mcp_config_with_the_written_config(tmp_path) -> None:
+    """The child connects the servers fluid wrote and none of the user's own:
+    --strict-mcp-config rides with --mcp-config, and the config is written
+    even when it names no server, so the flag always applies."""
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake", claude_cmd=_cmd(),
+        registry=ToolRegistry(),
+        mcp_servers={"docs": {"transport": "streamable_http", "url": "http://x/mcp"}},
+    )
+    try:
+        await loop._start_bundled_server()
+        argv = loop._build_argv()
+        i = argv.index("--mcp-config")
+        assert argv[i + 1] == loop._mcp_config_path
+        assert argv[i + 2] == "--strict-mcp-config"
+        written = json.loads(Path(loop._mcp_config_path).read_text())["mcpServers"]
+        assert written == {"docs": {"type": "http", "url": "http://x/mcp"}}
+    finally:
+        await loop.aclose()
+
+    empty = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake", claude_cmd=_cmd(), registry=ToolRegistry(),
+    )
+    try:
+        await empty._start_bundled_server()
+        assert empty._socket_server is None  # nothing to serve ...
+        assert "--strict-mcp-config" in empty._build_argv()  # ... still strict
+        assert json.loads(Path(empty._mcp_config_path).read_text()) == {"mcpServers": {}}
+    finally:
+        await empty.aclose()
+
+
+def test_user_servers_are_rewritten_into_the_cli_shape() -> None:
+    from fluid.tools.mcp.bundled_server import cli_server_entry
+
+    assert cli_server_entry({"command": "srv", "args": ["-x"]}) == {
+        "type": "stdio", "command": "srv", "args": ["-x"],
+    }
+    assert cli_server_entry({"transport": "http", "url": "u"}) == {"type": "http", "url": "u"}
+    assert cli_server_entry({"transport": "streamable_http", "url": "u"}) == {
+        "type": "http", "url": "u",
+    }
+    assert cli_server_entry({"type": "sse", "url": "u"}) == {"type": "sse", "url": "u"}
+
+
+async def test_failure_before_the_user_frame_still_ends_the_turn() -> None:
+    """A failure between the turn's start and its first frame used to sit
+    outside the error guard: no terminal event, and events() waited
+    forever. Now it ends the turn with an ErrorEvent."""
+
+    class Exploding(MemoryStore):
+        async def append(self, session_id, node):  # type: ignore[override]
+            raise RuntimeError("disk on fire")
+
+    loop = _make_loop("a", store=Exploding())
+    try:
+        await loop.submit(UserTurn(content="hi"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=10)
+        events = loop.bus.log(loop.session_id)
+        assert isinstance(events[-1], ErrorEvent) and "disk on fire" in events[-1].message
+    finally:
+        await loop.aclose()
+
+
+async def test_hook_stop_on_a_bridge_call_ends_the_turn_as_the_native_loop_does() -> None:
+    """A hook's ``continue: false`` on a bridge-served tool is reported as
+    the turn's terminal ErrorEvent once the CLI's result lands."""
+    loop = _make_loop("a")
+    try:
+        await loop._ensure_session()
+        await loop._hook_stop("no more shells")
+        await loop.submit(UserTurn(content="hi"))
+        await loop.wait_turn()
+        events = loop.bus.log(loop.session_id)
+        assert isinstance(events[-1], ErrorEvent)
+        assert events[-1].message == "stopped by hook: no more shells"
+        assert events[-1].retriable is False
+        assert loop._hook_stop_reason is None
+    finally:
+        await loop.aclose()
+
+
+async def test_bridge_honours_hook_permission_decisions_and_stops(tmp_path) -> None:
+    from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, HookBus, HookDecision
+    from fluid.permissions.engine import PermissionEngine
+
+    reg = _builtin_registry()
+    ctx = ToolCtx(cwd=str(tmp_path))
+    (tmp_path / "hello.txt").write_text("hi")
+    read = {"op": "call", "name": "Read", "arguments": {"file_path": str(tmp_path / "hello.txt")}}
+    stops: list[str] = []
+
+    async def on_stop(reason: str) -> None:
+        stops.append(reason)
+
+    # permissionDecision: allow skips a policy that would otherwise prompt
+    # (and, with nobody to prompt, deny).
+    bus = HookBus()
+    bus.on(PRE_TOOL_USE, lambda _e, _p: _decide(HookDecision(permission_decision="allow")))
+    allowed = await _answer(
+        reg, ctx, read, permissions=PermissionEngine("always_ask"), hooks=bus,
+    )
+    assert allowed["is_error"] is False and "hi" in allowed["text"]
+
+    # permissionDecision: ask forces a prompt the bridge cannot show.
+    bus = HookBus()
+    bus.on(PRE_TOOL_USE, lambda _e, _p: _decide(
+        HookDecision(permission_decision="ask", note="double-check reads"),
+    ))
+    asked = await _answer(
+        reg, ctx, read, permissions=PermissionEngine("never_ask"), hooks=bus,
+    )
+    assert asked["is_error"] is True and "double-check reads" in asked["text"]
+
+    # PreToolUse stop: refused, and the loop is told to end the turn.
+    bus = HookBus()
+    bus.on(PRE_TOOL_USE, lambda _e, _p: _decide(HookDecision(stop=True, note="enough")))
+    stopped = await _answer(reg, ctx, read, hooks=bus, on_stop=on_stop)
+    assert stopped == {"text": "blocked by hook: enough", "is_error": True}
+    assert stops == ["enough"]
+
+    # PostToolUse deny and additionalContext ride back on the result; a
+    # PostToolUse stop ends the turn after it.
+    bus = HookBus()
+    bus.on(POST_TOOL_USE, lambda _e, _p: _decide(
+        HookDecision(action="deny", note="lint failed", additional_context="run ruff"),
+    ))
+    fed_back = await _answer(reg, ctx, read, hooks=bus)
+    assert fed_back["is_error"] is False
+    assert "PostToolUse hook feedback:\nlint failed" in fed_back["text"]
+    assert "PostToolUse hook context:\nrun ruff" in fed_back["text"]
+    bus = HookBus()
+    bus.on(POST_TOOL_USE, lambda _e, _p: _decide(HookDecision(stop=True, note="done now")))
+    await _answer(reg, ctx, read, hooks=bus, on_stop=on_stop)
+    assert stops == ["enough", "done now"]
+
+
+async def _decide(decision):
+    return decision
+
+
+@pytest.mark.parametrize("transport", ["unix", "tcp"])
+async def test_bridge_carries_oversize_arguments_and_results(transport, tmp_path) -> None:
+    """A Write of a large file, or a large result, is one JSON line on the
+    bridge socket; both sides read past asyncio's default line limit."""
+    if transport == "unix" and not hasattr(socket, "AF_UNIX"):
+        pytest.skip("no AF_UNIX on this platform")
+    reg = ToolRegistry()
+
+    @tool("echo", "echo", {"type": "object", "properties": {"text": {"type": "string"}}})
+    async def echo(args: dict) -> dict:
+        return {"content": [{"type": "text", "text": args["text"]}]}
+
+    reg.register_inproc(create_inproc_server("big", [echo]))
+    address = (
+        str(tmp_path / "big.sock") if transport == "unix" else "tcp:127.0.0.1:0"
+    )
+    server = await serve_registry_socket(reg, address, ToolCtx(), token="t")
+    try:
+        if transport == "tcp":
+            address = f"tcp:127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        payload = "y" * 400_000
+        reply = await _socket_rpc(
+            address, {"op": "call", "name": "mcp__big__echo", "arguments": {"text": payload}}, "t",
+        )
+        assert reply["is_error"] is False and reply["text"] == payload
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+class _Journal:
+    def __init__(self) -> None:
+        self.events: list[tuple] = []
+        self.closed = False
+
+    def begin_turn(self) -> None:
+        self.events.append(("begin",))
+
+    def record_event(self, kind: str, text: str) -> None:
+        self.events.append(("event", kind, text))
+
+    def record_tool(self, name: str, input: dict, output: str, is_error: bool) -> None:
+        self.events.append(("tool", name, input, output, is_error))
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_delegated_turns_feed_the_continual_journal() -> None:
+    """Continual learning on this leg: the user text, every tool result
+    (with the input the CLI reported for it) and the final assistant text
+    are journaled, and closing the loop closes the journal."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    journal = _Journal()
+    loop = DelegatedLoop(
+        store=store, model="claude-fake", claude_cmd=_cmd(), session_id=sid,
+        env={"FAKE_CLAUDE_SCENARIO": "b"}, journal=journal,
+    )
+
+    async def responder() -> None:
+        async for e in loop.bus.subscribe(sid):
+            if isinstance(e, PermissionRequest):
+                await loop.submit(RespondPermission(request_id=e.request_id, decision="allow"))
+                return
+
+    watcher = asyncio.create_task(responder())
+    try:
+        await loop.submit(UserTurn(content="weather in Paris?"))
+        await loop.wait_turn()
+        await watcher
+    finally:
+        await loop.aclose()
+    assert journal.events == [
+        ("begin",),
+        ("event", "user", "weather in Paris?"),
+        ("tool", "mcp__fluid_bundled__get_weather", {"city": "Paris"}, "Paris: sunny, 21C", False),
+        ("event", "assistant", "It is sunny in Paris."),
+    ]
+    assert journal.closed
+
+
+def test_delegated_engine_is_built_with_the_journal_and_recall_wiring(tmp_path) -> None:
+    """The loader used to return the delegated engine before any continual
+    wiring: no journal, no Recall, no Remember. Now the leg gets all three,
+    and a synthesizer only when a native provider is named for it."""
+    from fluid.config.loader import BUILTIN_DEFAULTS, build_engine, deep_merge
+    from fluid.config.model import HarnessConfig
+
+    base = {
+        "cwd": str(tmp_path), "continual": True, "skills_dir": str(tmp_path / "skills"),
+    }
+    config = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, base))
+    engine = build_engine(config, MemoryStore(), provider_name="claude")
+    assert isinstance(engine, DelegatedLoop)
+    assert engine._journal is not None and engine._journal._synthesizer is None
+    assert "recall_store" in engine.ctx.extra and "continual_journal" in engine.ctx.extra
+
+    with_provider = HarnessConfig.from_dict(deep_merge(
+        BUILTIN_DEFAULTS, {**base, "continual_provider": "anthropic"},
+    ))
+    engine = build_engine(with_provider, MemoryStore(), provider_name="claude")
+    assert engine._journal._synthesizer is not None

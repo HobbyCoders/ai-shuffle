@@ -189,7 +189,10 @@ forge a steering marker.
 `PreToolUse` hooks run before the permission engine, so a hook denial never
 reaches a permission prompt and a hook `allow` skips it. The order of the full
 gate is: tool-surface check, hooks, permission rules, dispatch, then
-`PostToolUse` hooks.
+`PostToolUse` hooks. The same contract holds on the other two dispatch paths:
+a tool called from inside a code-mode cell, and a Fluid tool served to the
+`claude` CLI over the bundled bridge. On the bridge a `continue: false` ends
+the turn once the CLI's result lands.
 
 ## What you see
 

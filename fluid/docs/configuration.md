@@ -53,6 +53,7 @@ the start directory sits under it.
 | `code_mode` | `false` | Expose tools through the sandboxed Python kernel (`run_python`) instead of as individual tool calls. Adds the code-mode addendum to the CLI prompt. |
 | `continual` | `false` | Journal the session and synthesize reusable skills in the background. Under `code_mode` the journal records executed cells; without it, a per-tool-call journal is kept, so plain JSON sessions learn too. `--continual` turns this and `code_mode` on together. |
 | `continual_model` | none | Pin skill synthesis to one model id regardless of the session's model. |
+| `continual_provider` | none | A native provider name whose client runs the synthesis passes. Unset, the session's provider does. The `claude` provider has no native client, so without this it keeps the journal and serves Recall and Remember but never synthesizes. |
 | `anchor_budget` | `1` | Retention budget for the harness-evolution commit gate (`fluid evolve propose`): anchor regressions a proposed change may cause and still commit. `0` = strict stability. |
 | `skills_dir` | none (`~/.fluid/skills`) | Root directory for persistent code-mode skills. |
 | `cwd` | `"."` | Working directory for config discovery, instruction files, tools, and the prompt's environment block. |
@@ -320,6 +321,31 @@ informational: nothing in the turn depends on it, and it never reaches the
 model. Subscribers use it to show, log, or check the tools the child actually
 has.
 
+What the child CLI is given, and what it is not:
+
+- The system prompt is Fluid's, compiled for that leg: the native-only
+  builtins (`HistoryExpand`, `HistorySearch`, `ToolSearch`, `Plan`,
+  `StopPlanning`) are left out, since the bundled bridge cannot serve them,
+  and the prompt tells the model that Fluid's tools appear under the
+  `mcp__fluid_bundled__` prefix. `code_mode` is ignored on this leg, with a
+  note on stderr: the CLI runs its own tool loop and has no `run_python`.
+- MCP servers come only from the config Fluid writes: the bundled bridge plus
+  every `[mcp.<name>]` entry (rewritten into the CLI's `.mcp.json` shape).
+  The CLI is started with `--strict-mcp-config`, so servers named in its own
+  settings files are not connected.
+- The `--resume` handle is kept per session. A handle the CLI rejects (its
+  own store was pruned, or the id came from another machine) is dropped, the
+  CLI restarted without it, and the turn replayed once into a fresh CLI
+  conversation; the new handle is what gets stored.
+- A result the CLI marks as failed ends the turn with an error, not a
+  completion. The one exception is `error_max_turns`, a stop reason.
+- `continual = true` journals the turn and every tool result the CLI reports,
+  and serves `Recall` and `Remember` over the bridge. Synthesis passes need a
+  native provider, named with `continual_provider`.
+- An `allow_always` answer to a permission prompt is remembered for the
+  session (scoped the way the native engine scopes it), and the CLI's own
+  `permission_suggestions` are echoed back so it stops asking too.
+
 A working OpenRouter setup, end to end:
 
 ```toml
@@ -410,6 +436,7 @@ Config overrides, applied as layer 5 (`env_overrides` in the loader):
 | `FLUID_SETTING_SOURCES` | `setting_sources` (comma list of `user`/`project`/`local`; empty = none) |
 | `FLUID_CONTINUAL` | `continual` |
 | `FLUID_CONTINUAL_MODEL` | `continual_model` |
+| `FLUID_CONTINUAL_PROVIDER` | `continual_provider` |
 | `FLUID_ANCHOR_BUDGET` | `anchor_budget` (ignored if not an integer) |
 | `FLUID_MAX_TOKENS` | `max_tokens` (ignored if not an integer) |
 | `FLUID_MAX_CALLS` | `max_model_calls` (ignored if not an integer) |

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,9 @@ def resolved_prompt(
     date. ``extra_system`` (per-run text) and, under code mode, the code-mode
     addendum ride as ``extra_blocks`` after everything else. Native agent
     definitions are always included when instruction discovery is enabled.
+    ``provider_name`` picks the engine leg the prompt is for: the delegated
+    ``claude`` provider gets a prompt without the native-only tools and
+    without the code-mode addendum, since that engine serves neither.
 
     The compiler places the environment block after the instruction stack and
     the skills/agents indexes, so the daily date change invalidates only the
@@ -82,7 +86,12 @@ def resolved_prompt(
     return compile_prompt(
         PromptInputs(
             base=base,
-            extra_blocks=[b for b in (code_mode_addendum(config), extra_system) if b],
+            extra_blocks=[
+                b for b in (
+                    code_mode_addendum(config, provider_name=provider_name),
+                    extra_system,
+                ) if b
+            ],
             cwd=config.cwd,
             include_env=True,
             include_global_instructions=enabled and config.instruction_files.discover_global,
@@ -100,9 +109,34 @@ def resolved_prompt(
     )
 
 
-def resolved_system(config: HarnessConfig, *, extra_system: str | None = None) -> str | None:
+def resolved_system(
+    config: HarnessConfig,
+    *,
+    extra_system: str | None = None,
+    provider_name: str | None = None,
+) -> str | None:
     """The compiled CLI system prompt as a plain string."""
-    return resolved_prompt(config, extra_system=extra_system).text
+    return resolved_prompt(
+        config, extra_system=extra_system, provider_name=provider_name
+    ).text
+
+
+def code_mode_unavailable(config: HarnessConfig, provider_name: str | None) -> str | None:
+    """Why this run cannot honour ``code_mode``, or None when it can.
+
+    ``--continual`` switches code mode on, and a config file may set it, but
+    the delegated ``claude`` engine has no ``run_python``: the CLI owns the
+    tool loop. The engine ignores the flag; this is the message that tells the
+    user so instead of leaving them to wonder why cells never run.
+    """
+    from fluid.cli.prompt import is_delegated_provider
+
+    if not config.code_mode or not is_delegated_provider(config, provider_name):
+        return None
+    return (
+        "code mode is not available on the claude provider (the CLI runs its "
+        "own tool loop); continuing without it"
+    )
 
 
 def make_engine(
@@ -126,6 +160,9 @@ def make_engine(
     subagents (the REPL passes its own y/N prompt; one-shot runs deny).
     ``background_host=False`` skips the host, leaving Task/Monitor unavailable.
     """
+    unavailable = code_mode_unavailable(config, provider_name)
+    if unavailable:
+        print(f"fluid: {unavailable}", file=sys.stderr)
     compiled = resolved_prompt(
         config, extra_system=extra_system, provider_name=provider_name
     )

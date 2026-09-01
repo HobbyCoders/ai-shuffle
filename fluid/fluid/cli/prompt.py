@@ -64,6 +64,20 @@ BUILTIN_TOOL_NAMES: tuple[str, ...] = (
 
 _FULL_TOOLSET = frozenset(BUILTIN_TOOL_NAMES)
 
+# Builtins only the native loop can serve. Each needs a host capability that
+# NativeLoop alone wires onto the tool context (recall over its own context
+# ledger, the deferred catalog, plan-mode control), so on the delegated
+# ``claude`` CLI leg the bundled bridge never lists them and the prompt must
+# not name them. The regression test derives the same set from the registry.
+NATIVE_ONLY_TOOL_NAMES: tuple[str, ...] = (
+    "HistoryExpand", "HistorySearch", "ToolSearch", "Plan", "StopPlanning",
+)
+
+# The MCP server the delegated leg publishes fluid's tools under, and the
+# name the CLI derives from it: ``Note`` is listed as ``mcp__fluid_bundled__Note``.
+DELEGATED_SERVER_NAME = "fluid_bundled"
+DELEGATED_TOOL_PREFIX = f"mcp__{DELEGATED_SERVER_NAME}__"
+
 # Code-mode tool names prose may reference (the addendum's surface).
 CODE_MODE_TOOL_NAMES: tuple[str, ...] = (
     "run_python", "list_tools", "search_tools", "read_tool_docs",
@@ -246,6 +260,10 @@ class PromptProfile:
 
     tools: frozenset[str] = _FULL_TOOLSET
     code_mode: bool = False
+    # The session runs inside the ``claude`` CLI: fluid's tools reach the
+    # model through the bundled MCP server, under a prefix, and code mode is
+    # unavailable whatever the config says.
+    delegated: bool = False
     continual: bool = False  # the learner's # Memory section may appear
     instructions: bool = True  # the instruction stack may appear
     nested: bool = True  # nested AGENTS.md reminders may appear
@@ -272,8 +290,15 @@ def profile_for(
     anchor-replay runner stages a candidate guidance state there); the
     ``setting_sources`` gate still applies, so a config that excludes user
     settings loads no guidance either way.
+
+    ``provider_name`` also decides the engine leg. Under the delegated
+    ``claude`` provider the surface loses the native-only builtins and the
+    code-mode flag, because that engine can serve neither.
     """
     tools = effective_builtin_tools(config.tools.allowed, config.tools.disallowed)
+    delegated = is_delegated_provider(config, provider_name)
+    if delegated:
+        tools = delegated_builtin_tools(tools)
     inst = config.instruction_files
     identity = (config.identity or "").strip() or None
     if identity is None and config.identity_file:
@@ -287,7 +312,8 @@ def profile_for(
         extra_guidance = load_guidance_files(model, home=guidance_home)
     return PromptProfile(
         tools=tools,
-        code_mode=config.code_mode,
+        code_mode=config.code_mode and not delegated,
+        delegated=delegated,
         continual=config.continual,
         instructions=inst.enabled and (inst.discover_global or inst.discover_project),
         nested=inst.enabled and inst.discover_nested,
@@ -310,6 +336,19 @@ def effective_builtin_tools(
         names = {n for n in names if any(fnmatch(n, p) for p in allowed)}
     names -= {n for n in names if any(fnmatch(n, p) for p in disallowed)}
     return frozenset(names)
+
+
+def delegated_builtin_tools(tools: frozenset[str]) -> frozenset[str]:
+    """The part of ``tools`` the delegated ``claude`` leg can actually serve."""
+    return tools - frozenset(NATIVE_ONLY_TOOL_NAMES)
+
+
+def is_delegated_provider(config: HarnessConfig, provider_name: str | None) -> bool:
+    """True when the session's provider runs the ``claude`` CLI subprocess."""
+    try:
+        return config.provider(provider_name).kind == "delegated_claude"
+    except KeyError:
+        return False
 
 
 def _bullets(section_header: str, bullets: list[str]) -> str | None:
@@ -409,6 +448,20 @@ def _tools_section(p: PromptProfile) -> str | None:
         "together; serialize only when one call's input depends on another's "
         "result."
     )
+    if p.delegated and t:
+        example = next((n for n in ("Note", "AskUser", "Monitor", "Read") if n in t), None)
+        example_text = (
+            f" (`{DELEGATED_TOOL_PREFIX}{example}` is {example})" if example else ""
+        )
+        bullets.append(
+            "- This session runs inside the Claude Code CLI. The harness's "
+            f"own tools are served by the `{DELEGATED_SERVER_NAME}` MCP "
+            "server, so a tool this prompt calls by a plain name is listed to "
+            f"you with the `{DELEGATED_TOOL_PREFIX}` prefix{example_text}. "
+            "The CLI's built-in tools keep their plain names; where both "
+            "offer one, either works, and the prefixed one runs under this "
+            "harness's permission rules."
+        )
     if "Monitor" in t and "Task" in t:
         bullets.append(
             "- For anything slow — test suites, builds, dev servers, watchers "
@@ -859,8 +912,17 @@ def default_base_prompt(
     )
 
 
-def code_mode_addendum(config: HarnessConfig | None = None) -> str | None:
-    """The code-mode block for this config, or ``None`` when code mode is off."""
+def code_mode_addendum(
+    config: HarnessConfig | None = None, *, provider_name: str | None = None,
+) -> str | None:
+    """The code-mode block for this config, or ``None`` when code mode is off.
+
+    Also ``None`` under the delegated ``claude`` provider: that engine has no
+    ``run_python``, so the block would describe a route that does not exist.
+    """
     if config is None or not config.code_mode:
         return None
-    return compose_code_mode_addendum(profile_for(config).tools)
+    profile = profile_for(config, provider_name=provider_name)
+    if not profile.code_mode:
+        return None
+    return compose_code_mode_addendum(profile.tools)

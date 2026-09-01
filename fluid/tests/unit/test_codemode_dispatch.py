@@ -159,3 +159,61 @@ async def test_hook_deny_short_circuits_host_call() -> None:
     result = await _run(registry, bridge, code)
     assert result.error is not None
     assert "blocked by hook: nope" in result.error
+
+
+
+# ─── Batch 6: the hook contract on in-kernel calls ───────────────────────────
+
+
+async def test_host_bridge_honours_hook_stop_and_permission_decisions(tmp_path) -> None:
+    """The code-mode bridge follows the JSON path's hook contract: a
+    PreToolUse stop refuses the call and tells the engine to end the turn,
+    ``permissionDecision: allow`` skips the permission gate, and PostToolUse
+    feedback rides back on the result."""
+    from fluid.codemode.bridge import HostBridge
+    from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, HookBus, HookDecision
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins import register_builtins
+    from fluid.tools.registry import ToolCtx, ToolRegistry
+
+    reg = ToolRegistry()
+    register_builtins(reg)
+    ctx = ToolCtx(cwd=str(tmp_path))
+    (tmp_path / "hello.txt").write_text("hi")
+    args = {"file_path": str(tmp_path / "hello.txt")}
+    stops: list[str] = []
+
+    async def decide(decision):
+        return decision
+
+    bus = HookBus()
+    bus.on(PRE_TOOL_USE, lambda _e, _p: decide(HookDecision(stop=True, note="halt")))
+    bridge = HostBridge(reg, PermissionEngine("never_ask"), hooks=bus, ctx=ctx, on_stop=stops.append)
+    reply = await bridge.on_host_call("Read", args)
+    assert reply.denied and reply.message == "blocked by hook: halt"
+    assert stops == ["halt"]
+
+    # An always_ask policy with no permission handler denies; the hook's
+    # allow lifts that.
+    bus = HookBus()
+    bus.on(PRE_TOOL_USE, lambda _e, _p: decide(HookDecision(permission_decision="allow")))
+    bridge = HostBridge(reg, PermissionEngine("always_ask"), hooks=bus, ctx=ctx)
+    reply = await bridge.on_host_call("Read", args)
+    assert not reply.denied and reply.result.endswith("hi")
+    bare = HostBridge(reg, PermissionEngine("always_ask"), ctx=ctx)
+    assert (await bare.on_host_call("Read", args)).denied
+
+    bus = HookBus()
+    bus.on(POST_TOOL_USE, lambda _e, _p: decide(
+        HookDecision(action="deny", note="lint failed", additional_context="run ruff", stop=False),
+    ))
+    bridge = HostBridge(reg, PermissionEngine("never_ask"), hooks=bus, ctx=ctx, on_stop=stops.append)
+    reply = await bridge.on_host_call("Read", args)
+    assert reply.result.startswith("1	hi")
+    assert "PostToolUse hook feedback:\nlint failed" in reply.result
+    assert "PostToolUse hook context:\nrun ruff" in reply.result
+    bus = HookBus()
+    bus.on(POST_TOOL_USE, lambda _e, _p: decide(HookDecision(stop=True, note="done")))
+    bridge = HostBridge(reg, PermissionEngine("never_ask"), hooks=bus, ctx=ctx, on_stop=stops.append)
+    await bridge.on_host_call("Read", args)
+    assert stops == ["halt", "done"]

@@ -66,6 +66,23 @@ class HookDecision:
 HookCallback = Callable[[str, dict[str, Any]], Awaitable["HookDecision | None"]]
 
 
+def hook_reminder(label: str, text: str) -> str:
+    """Hook-supplied text as a system-reminder block for the model.
+
+    The text is defanged first, so a hook's output cannot close the block
+    early or forge a steering marker. Shared by every dispatch path that
+    appends PostToolUse feedback to a result: the native loop, the code-mode
+    bridge and the delegated leg's bundled bridge.
+    """
+    from fluid.tools.hardening import defang_harness_markers
+
+    return (
+        "<system-reminder>\n"
+        f"{label}:\n{defang_harness_markers(text).strip()}\n"
+        "</system-reminder>"
+    )
+
+
 class HookBus:
     def __init__(self) -> None:
         self._hooks: dict[str, list[HookCallback]] = {}

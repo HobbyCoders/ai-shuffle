@@ -35,8 +35,10 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from dataclasses import replace
+
 from fluid.codemode.kernel import HostReply
-from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, HookBus
+from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, HookBus, hook_reminder
 from fluid.permissions.engine import (
     PROMPT_DENIAL,
     PermissionEngine,
@@ -61,6 +63,10 @@ OnInputRequired = Callable[
     [str, str | None, InputRequired], Awaitable[dict[str, Any] | None]
 ]
 
+# A hook answered ``continue: false`` on an in-kernel call: the engine is told
+# the reason and ends the turn once the running cell returns.
+OnStop = Callable[[str], None]
+
 
 class HostBridge:
     def __init__(
@@ -76,10 +82,12 @@ class HostBridge:
         tool_filter: Callable[[str], bool] | None = None,
         plan_mode: Callable[[], bool] | None = None,
         result_budget: int | None = None,
+        on_stop: OnStop | None = None,
     ) -> None:
         self._registry = registry
         self._permissions = permissions
         self._hooks = hooks
+        self._on_stop = on_stop
         self._on_permission = on_permission
         self._on_input_required = on_input_required
         self._ctx = ctx or ToolCtx()
@@ -145,24 +153,40 @@ class HostBridge:
 
         tool_input: dict[str, Any] = dict(kwargs)
 
-        # PreToolUse hook (deny short-circuits; modify rewrites the input).
+        # PreToolUse hook: deny and stop short-circuit (stop also ends the
+        # turn), modify rewrites the input, a permission decision of "allow"
+        # skips the permission gate and "ask" forces a prompt.
+        hook_permission: str | None = None
         if self._hooks is not None:
             decision = await self._hooks.emit(
                 PRE_TOOL_USE, {"name": tool_name, "input": tool_input}
             )
-            if decision.action == "deny":
-                return HostReply(denied=True, message=f"blocked by hook: {decision.note}")
+            if decision.action == "deny" or decision.stop:
+                reason = decision.note or ("stopped by hook" if decision.stop else "denied")
+                if decision.stop and self._on_stop is not None:
+                    self._on_stop(reason)
+                return HostReply(denied=True, message=f"blocked by hook: {reason}")
             if decision.action == "modify" and decision.replacement_input is not None:
                 tool_input = decision.replacement_input
+            hook_permission = decision.permission_decision
 
         # PermissionEngine: allow / deny / ask, plus the doom-loop guard.
-        decided = self._permissions.decide(spec, tool_input)
-        verdict = decided.decision
+        if hook_permission == "allow":
+            verdict = "allow"
+            decided = None
+        else:
+            decided = self._permissions.decide(spec, tool_input)
+            verdict = decided.decision
         if verdict != "deny" and self._doom_loop:
             if self._permissions.note_execution(tool_name, tool_input):
                 verdict = "ask"
+        if verdict == "allow" and hook_permission == "ask":
+            verdict = "ask"
         if verdict == "deny":
-            return HostReply(denied=True, message=decided.deny_message())
+            return HostReply(
+                denied=True,
+                message=decided.deny_message() if decided is not None else "permission denied",
+            )
         if verdict == "ask":
             if self._on_permission is None:
                 return HostReply(
@@ -194,15 +218,36 @@ class HostBridge:
             )
 
         if self._hooks is not None:
-            await self._hooks.emit(
+            decision = await self._hooks.emit(
                 POST_TOOL_USE,
                 {
                     "name": tool_name,
                     "input": tool_input,
+                    "output": outcome.text,
                     "result": outcome.text,
                     "is_error": outcome.is_error,
                 },
             )
+            # Same contract as the JSON path: a block's reason and any added
+            # context ride back to the model on the result; a stop ends the
+            # turn once this cell returns.
+            additions: list[str] = []
+            if decision.stop:
+                if self._on_stop is not None:
+                    self._on_stop(decision.note or "stopped by hook")
+            elif decision.action == "deny":
+                additions.append(hook_reminder(
+                    "PostToolUse hook feedback", decision.note or "blocked by hook",
+                ))
+            if decision.additional_context:
+                additions.append(hook_reminder(
+                    "PostToolUse hook context", decision.additional_context,
+                ))
+            if additions:
+                outcome = replace(
+                    outcome, text="\n\n".join([outcome.text, *additions]).strip(),
+                    content_id=None, window_of=None,
+                )
 
         if outcome.is_error and not outcome.soft_error:
             return HostReply(error=outcome.text)

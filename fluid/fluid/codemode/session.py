@@ -372,11 +372,21 @@ class CodeModeSession:
         # No engine ⇒ allow-all, matching the JSON path (which skips gating when
         # ``permissions is None``).
         permissions = loop.permissions or PermissionEngine("never_ask")
+
+        # A hook's ``continue: false`` on an in-kernel call ends the turn the
+        # way it does on the JSON path: the loop reads the reason once the
+        # cell's result is recorded. Loops without that seam get no stop.
+        on_stop = None
+        if hasattr(loop, "_hook_stop_reason"):
+            def on_stop(reason: str) -> None:
+                loop._hook_stop_reason = reason
+
         bridge = HostBridge(
             self._registry, permissions,
             hooks=loop.hooks, on_permission=_on_permission,
             on_input_required=on_input_required, ctx=loop.ctx,
             tool_filter=self.tool_filter, plan_mode=self.plan_mode,
+            on_stop=on_stop,
             # What this surface actually delivers: a result over the ref
             # threshold reaches the cell as a ResultRef stub, not as text the
             # model reads (see ToolCtx.result_budget).

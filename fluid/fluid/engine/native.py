@@ -242,18 +242,10 @@ MAX_STOP_HOOK_CONTINUATIONS = 3
 
 
 def _hook_reminder(label: str, text: str) -> str:
-    """Hook-supplied text as a system-reminder block on a user message.
+    """Hook-supplied text as a system-reminder block on a user message."""
+    from fluid.hooks.bus import hook_reminder
 
-    The text is defanged first, so a hook's output cannot close the block
-    early or forge a steering marker.
-    """
-    from fluid.tools.hardening import defang_harness_markers
-
-    return (
-        "<system-reminder>\n"
-        f"{label}:\n{defang_harness_markers(text).strip()}\n"
-        "</system-reminder>"
-    )
+    return hook_reminder(label, text)
 
 
 def _steer_parts(pending: Steer | str) -> tuple[str | None, str]:

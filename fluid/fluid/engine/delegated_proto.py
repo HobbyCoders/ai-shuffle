@@ -32,6 +32,11 @@ Frame vocabulary handled (see ``claude_agent_sdk`` message_parser + query.py):
     (dedupe); ``message_start`` is what clears that state, one message at a time.
   * ``{"type":"result","subtype":...,"total_cost_usd":...,"num_turns":...}`` —
     TurnComplete (+ a fallback Usage if no assistant frame carried usage).
+    A result with ``is_error`` set is a failed turn: the mapper reports it
+    as ``Mapped.error`` and emits no TurnComplete, so the loop can decide
+    between an ErrorEvent and a retry. The one exception is
+    ``error_max_turns``: a turn cap is a stop reason, not a failure, and
+    completes the turn the way the native loop's call cap does.
   * ``{"type":"rate_limit_event","rate_limit_info":{...}}`` — RateLimit.
   * ``{"type":"control_request","request":{"subtype":"can_use_tool",...}}`` —
     a PermissionRequest event plus a ``PermissionBridge`` the loop uses to answer
@@ -94,6 +99,18 @@ def stop_reason_from_subtype(subtype: str | None) -> str:
     if subtype in (None, "success"):
         return "end_turn"
     return subtype
+
+
+def result_error_message(frame: dict[str, Any]) -> str:
+    """What a failed ``result`` frame says went wrong, for the ErrorEvent."""
+    subtype = str(frame.get("subtype") or "error")
+    errors = frame.get("errors")
+    if isinstance(errors, list) and errors:
+        detail = "; ".join(str(e) for e in errors if e)
+    else:
+        result = frame.get("result")
+        detail = result.strip() if isinstance(result, str) else ""
+    return f"claude reported {subtype}: {detail}" if detail else f"claude reported {subtype}"
 
 
 def flatten_tool_content(content: Any) -> str:
@@ -163,6 +180,9 @@ class PermissionBridge:
     tool_use_id: str
     input: dict[str, Any]
     risk: str = "safe"
+    # The CLI's own ``permission_suggestions``: the rules it would add for an
+    # "always allow" answer, echoed back as ``updatedPermissions``.
+    suggestions: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -192,6 +212,8 @@ class Mapped:
     permission: PermissionBridge | None = None
     control_reply: ControlReply | None = None
     is_result: bool = False
+    # Set with ``is_result`` when the CLI reported the turn as failed.
+    error: str | None = None
 
 
 # ─── Stateful mapper ─────────────────────────────────────────────────────────
@@ -219,6 +241,9 @@ class StreamJsonMapper:
         self.cli_mcp_servers: tuple[dict[str, Any], ...] | None = None
 
         self._tool_names: dict[str, str] = {}  # tool_use_id → tool name
+        # tool_use_id → input, kept so a tool_result can be journaled with
+        # the arguments that produced it.
+        self.tool_inputs: dict[str, dict[str, Any]] = {}
         self._usage_emitted = False
         self._last_node_id: str = user_node_id
         # Dedupe: block indices already streamed via stream_event for the CURRENT
@@ -240,6 +265,11 @@ class StreamJsonMapper:
         # per-block frame of a message repeats that message's usage verbatim, so
         # without this a two-block message double-counts its tokens and cost.
         self._usage_msg_id: str | None = None
+
+    @property
+    def produced_nodes(self) -> bool:
+        """True once an assistant or tool-result frame was mapped this turn."""
+        return self._last_node_id != self.user_node_id
 
     # ─── frame dispatch ──────────────────────────────────────────────────
 
@@ -353,6 +383,7 @@ class StreamJsonMapper:
                 name = block.get("name", "")
                 inp = block.get("input", {}) or {}
                 self._tool_names[tid] = name
+                self.tool_inputs[tid] = inp
                 content.append(ToolUseBlock(id=tid, name=name, input=inp))
                 if not streamed:
                     # Order mirrors NativeLoop: BlockStart, BlockStop, then ToolUse.
@@ -463,6 +494,8 @@ class StreamJsonMapper:
                     args = json.loads(block["args"]) if block["args"] else {}
                 except (json.JSONDecodeError, ValueError):
                     args = {}
+                if block["tool_use_id"]:
+                    self.tool_inputs[block["tool_use_id"]] = args
                 events.append(self._tool_use(block["tool_use_id"] or "", block["name"] or "", args))
         # usage(message_delta) / message_stop from the partial stream are
         # ignored: Usage is emitted once from the assistant frame.
@@ -474,6 +507,10 @@ class StreamJsonMapper:
         events: list[Event] = []
         if not self._usage_emitted and usage:
             events.append(self._usage_event(self._last_node_id, usage))
+        if frame.get("is_error") and subtype != "error_max_turns":
+            # A failed turn: no TurnComplete. The loop turns this into an
+            # ErrorEvent, or retries when a stale --resume handle caused it.
+            return Mapped(events=events, is_result=True, error=result_error_message(frame))
         num_turns = frame.get("num_turns") or 1
         events.append(TurnComplete(
             session_id=self.session_id, node_id=self._last_node_id, turn_id=self.turn_id,
@@ -502,9 +539,14 @@ class StreamJsonMapper:
         tid = req.get("tool_use_id") or ""
         inp = req.get("input", {}) or {}
         risk = req.get("risk", "safe")
+        raw_suggestions = req.get("permission_suggestions")
+        suggestions = tuple(
+            s for s in raw_suggestions if isinstance(s, dict)
+        ) if isinstance(raw_suggestions, list) else ()
         bridge = PermissionBridge(
             cli_request_id=frame.get("request_id", ""), fluid_request_id=fluid_rid,
             tool_name=tool_name, tool_use_id=tid, input=inp, risk=risk,
+            suggestions=suggestions,
         )
         event = PermissionRequest(
             session_id=self.session_id, turn_id=self.turn_id, request_id=fluid_rid,

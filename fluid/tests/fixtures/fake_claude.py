@@ -31,6 +31,18 @@ sequence on stdout, selected by ``FAKE_CLAUDE_SCENARIO``:
                             frame until a control_request arrives and answers
                             it before the result frame — what a real CLI does
                             when the loop asks for a per-call context snapshot.
+  k  oversize frame:        a tool turn whose tool_result user frame is far
+                            over asyncio's default 64 KiB line limit.
+  l  dead resume, silent:   with ``--resume`` the process exits at once with
+                            no frames (what the real CLI does for an unknown
+                            id); without it, behaves like (a).
+  m  dead resume, error:    with ``--resume`` the first turn answers with an
+                            ``error_during_execution`` result and no other
+                            frame; without it, behaves like (a).
+  n  failed turn:           an assistant frame, then a result with
+                            ``is_error`` and an ``errors`` list.
+  o  turn cap:              like (a) but the result is ``error_max_turns``
+                            with ``is_error`` set.
 
 ``claude --version`` prints a version line and exits (the loop's version guard).
 Frames model the real vocabulary (``claude_agent_sdk`` message_parser + query.py).
@@ -88,8 +100,8 @@ def assistant_frame(sid: str, content: list[dict], stop_reason: str, usage: dict
     }
 
 
-def result_frame(sid: str, subtype: str = "success") -> dict:
-    return {
+def result_frame(sid: str, subtype: str = "success", **extra) -> dict:
+    frame = {
         "type": "result",
         "subtype": subtype,
         "duration_ms": 12,
@@ -103,6 +115,8 @@ def result_frame(sid: str, subtype: str = "success") -> dict:
             "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
         },
     }
+    frame.update(extra)
+    return frame
 
 
 def stream_event(sid: str, event: dict) -> dict:
@@ -129,7 +143,10 @@ def turn_tool(sid: str) -> None:
             "tool_name": tool_name,
             "input": args,
             "tool_use_id": tid,
-            "permission_suggestions": [],
+            "permission_suggestions": [{
+                "type": "addRules", "behavior": "allow", "destination": "session",
+                "rules": [{"toolName": tool_name}],
+            }],
         },
     })
     resp = wait_for("control_response")
@@ -228,6 +245,28 @@ def turn_inline_context(sid: str) -> None:
     emit(result_frame(sid))
 
 
+def turn_oversize(sid: str) -> None:
+    """A tool result the CLI echoes whole: 300 KB in one user frame."""
+    tid = "toolu_fake_big"
+    emit(assistant_frame(
+        sid, [{"type": "tool_use", "id": tid, "name": "Read", "input": {"file_path": "big.txt"}}],
+        "tool_use",
+    ))
+    emit({"type": "user", "session_id": sid, "message": {"role": "user", "content": [{
+        "type": "tool_result", "tool_use_id": tid,
+        "content": [{"type": "text", "text": "x" * 300_000}], "is_error": False,
+    }]}})
+    emit(assistant_frame(sid, [{"type": "text", "text": "Read it all."}], "end_turn"))
+    emit(result_frame(sid))
+
+
+def turn_failed(sid: str) -> None:
+    emit(assistant_frame(sid, [{"type": "text", "text": "Trying..."}], "end_turn"))
+    emit(result_frame(
+        sid, "error_during_execution", errors=["tool crashed", "stream reset"],
+    ))
+
+
 def turn_partial(sid: str) -> None:
     emit(stream_event(sid, {"type": "message_start", "message": {"usage": {"input_tokens": 9}}}))
     emit(stream_event(sid, {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}))
@@ -257,6 +296,9 @@ def main() -> int:
     if scenario == "c":
         expect = os.environ.get("FAKE_CLAUDE_EXPECT_RESUME")
         assert resume == expect, f"--resume mismatch: got {resume!r}, expected {expect!r}"
+    if scenario == "l" and resume is not None:
+        print(f"No conversation found with session ID: {resume}", file=sys.stderr)
+        return 1
 
     session_id = resume or "cli-sess-123"
     emit({"type": "system", "subtype": "init", "session_id": session_id,
@@ -277,6 +319,18 @@ def main() -> int:
         if scenario == "i":
             turn_with_deferred_control(session_id, deferred_control)
             deferred_control = None
+        elif scenario == "k":
+            turn_oversize(session_id)
+        elif scenario == "m" and resume is not None:
+            emit(result_frame(
+                session_id, "error_during_execution",
+                result=f"No conversation found with session ID: {resume}",
+            ))
+        elif scenario == "n":
+            turn_failed(session_id)
+        elif scenario == "o":
+            emit(assistant_frame(session_id, [{"type": "text", "text": "Still going."}], "end_turn"))
+            emit(result_frame(session_id, "error_max_turns"))
         elif scenario == "j":
             turn_inline_context(session_id)
         elif scenario == "b":

@@ -29,8 +29,18 @@ The process is kept alive across turns; ``cli_session_id`` (from the ``init``
 frame) is the ``--resume`` handle for reconnecting to the same CLI conversation.
 It is written back to the store's ``SessionMeta`` every time it changes, so a
 process restart can hand the CLI a handle it actually recognises instead of an
-fluid session id. The same frame announces the child's tool surface, kept on the
-loop as ``cli_tools`` / ``cli_mcp_servers`` and published as ``DelegatedSurface``.
+fluid session id. A handle the CLI no longer accepts (its own store was pruned,
+or the id came from another machine) makes the first turn fail before any
+frame is mapped; the loop then drops the handle, restarts the CLI without
+``--resume`` and replays the turn once, so a stale handle costs a fresh CLI
+conversation rather than a session that fails forever while reporting success.
+The same frame announces the child's tool surface, kept on the loop as
+``cli_tools`` / ``cli_mcp_servers`` and published as ``DelegatedSurface``.
+
+Continual learning rides along when the loader wires a ``journal``: every
+tool result the CLI reports is journaled with the input that produced it, the
+user and assistant text of each turn become episodic entries, and Recall and
+Remember reach the model through the bundled bridge like any other builtin.
 """
 
 from __future__ import annotations
@@ -61,7 +71,9 @@ from fluid.events.model import (
     ErrorEvent,
     Event,
     Interrupted,
+    PermissionRequest,
     SteerDelivered,
+    ToolResult,
     TurnComplete,
     TurnStarted,
     Usage,
@@ -79,6 +91,7 @@ from fluid.events.ops import (
 )
 from fluid.messages import Image, Message, Text
 from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
+from fluid.tools.mcp.bundled_server import STREAM_LINE_LIMIT
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
 if TYPE_CHECKING:
@@ -162,6 +175,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         settings: str | None = None,
         permissions: PermissionEngine | None = None,
         hooks: HookBus | None = None,
+        journal: Any | None = None,
     ) -> None:
         self.store = store
         self.model = model
@@ -188,6 +202,25 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # native loop's hook + permission treatment. Optional; None skips.
         self.permissions = permissions
         self.hooks = hooks
+        # The continual journal (fluid.codemode.journal.ToolJournal), fed from
+        # the frames the CLI reports; None when learning is off.
+        self._journal = journal
+        # "Allow always" answers to the CLI's own permission prompts, keyed by
+        # tool name. Scoped the way PermissionEngine.allow_always scopes: the
+        # registry spec of the same name (Bash) narrows it to the programs the
+        # call ran; a tool without one is allowed outright. The CLI also gets
+        # its ``permission_suggestions`` echoed back as ``updatedPermissions``,
+        # so a CLI that honours them never asks again either way.
+        self._always_allowed: dict[str, set[str] | None] = {}
+        # The --resume handle the live process was spawned with, and how many
+        # turns it has completed. A first turn that fails before mapping a
+        # single frame on a resumed process means the handle is dead.
+        self._spawn_resume: str | None = None
+        self._proc_results = 0
+        # A hook on a bridge-served call answered ``continue: false``: the
+        # reason, reported as the turn's ErrorEvent once the CLI's result
+        # lands (the native loop ends its turn the same way).
+        self._hook_stop_reason: str | None = None
         # Per-session shared secret every bridge request must carry. The socket
         # (a loopback port on Windows) is reachable by any local process; the
         # token is what makes it the CLI child's and nobody else's.
@@ -340,15 +373,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 await self._turn_task
             except asyncio.CancelledError:
                 pass
-        if self._proc is not None and self._proc.returncode is None:
+        await self._stop_process()
+        if self._journal is not None:
             try:
-                self._proc.terminate()
-                await asyncio.wait_for(self._proc.wait(), timeout=5)
-            except (TimeoutError, ProcessLookupError):
-                try:
-                    self._proc.kill()
-                except ProcessLookupError:
-                    pass
+                await self._journal.aclose()
+            except Exception:
+                logger.debug("closing the continual journal failed", exc_info=True)
         if self._socket_server is not None:
             self._socket_server.close()
             try:
@@ -394,6 +424,37 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             env.update(self.env)
         return env
 
+    async def _stop_process(self, *, grace: float = 5.0) -> None:
+        """End the CLI process and everything it spawned.
+
+        Closing stdin is the stream-json CLI's own exit signal, and the clean
+        path lets it shut down its MCP children itself. A process still alive
+        after ``grace`` seconds is killed as a tree: on POSIX the CLI runs in
+        its own session so its whole process group goes, on Windows
+        ``taskkill /T`` walks the descendants. Plain ``terminate()`` reached
+        only the CLI and left those children orphaned.
+        """
+        proc, self._proc = self._proc, None
+        if proc is None or proc.returncode is not None:
+            return
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except Exception:  # noqa: BLE001 — a closed pipe is the goal
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=grace)
+            return
+        except (TimeoutError, ProcessLookupError):
+            pass
+        from fluid.tools.builtins.bash import kill_tree
+
+        await kill_tree(proc)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except Exception:  # noqa: BLE001 — best effort; the loop is closing
+            pass
+
     def _bridge_tool_permitted(self, name: str) -> bool:
         """The session tool restriction, applied to a bridge-served tool.
 
@@ -435,8 +496,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             s for s in self.registry.list_tools(loaded_only=True)
             if s.source in ("inproc", "builtin") and self._bridge_tool_permitted(s.name)
         ]
-        if not specs and not self.mcp_servers:
-            return
+        # Written even when it names no server: the config is what carries
+        # --strict-mcp-config, and an empty one is how the child is told to
+        # connect none of the user's own servers.
         tmpdir = tempfile.mkdtemp(prefix="fluid-delegated-")
         self._mcp_config_path = os.path.join(tmpdir, "mcp.json")
         use_unix = hasattr(socket, "AF_UNIX")
@@ -450,6 +512,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 tool_filter=self._bridge_tool_permitted,
                 permissions=self.permissions,
                 hooks=self.hooks,
+                on_stop=self._hook_stop,
             )
             if not use_unix:
                 # Port 0 was an ask for *any* free port — resolve what we got so
@@ -477,7 +540,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self.cli_session_id:
             argv += ["--resume", self.cli_session_id]
         if self._mcp_config_path:
-            argv += ["--mcp-config", self._mcp_config_path]
+            # Strict: the child connects the servers fluid wrote (the bundled
+            # bridge plus the session's configured servers) and none of the
+            # ones its own settings files name.
+            argv += ["--mcp-config", self._mcp_config_path, "--strict-mcp-config"]
         if self.append_system_prompt:
             argv += ["--append-system-prompt", self.append_system_prompt]
         elif self.system:
@@ -501,6 +567,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             return self._proc
         await self._version_guard()
         await self._start_bundled_server()
+        spawn_kwargs: dict[str, Any] = {}
+        if os.name != "nt":
+            # Own session, so _stop_process can kill the CLI's whole process
+            # group without touching ours.
+            spawn_kwargs["start_new_session"] = True
+        self._spawn_resume = self.cli_session_id
+        self._proc_results = 0
         self._proc = await asyncio.create_subprocess_exec(
             *self._build_argv(),
             stdin=asyncio.subprocess.PIPE,
@@ -508,6 +581,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             stderr=asyncio.subprocess.DEVNULL,
             cwd=self.cwd,
             env=self._child_env(),
+            limit=STREAM_LINE_LIMIT,
+            **spawn_kwargs,
         )
         return self._proc
 
@@ -519,45 +594,41 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         turn_id = new_id("turn")
         self._background_turn_terminal = False
         self._active_turn_id = turn_id
-        reused = self._proc is not None and self._proc.returncode is None
+        mapper: StreamJsonMapper | None = None
+        # Everything from here to the result sits under one guard: a failure
+        # anywhere in it must still end the turn with a terminal event, or
+        # ``events()`` waits forever for one.
         try:
-            proc = await self._ensure_process()
-        except Exception as exc:
-            await self._emit_terminal_with_park(ErrorEvent(
-                session_id=sid, turn_id=turn_id, message=f"spawn failed: {exc!r}"
+            # The CLI comes up before the user node is written: a wake whose
+            # spawn fails must stay undelivered so the lifecycle retries it.
+            reused = self._proc is not None and self._proc.returncode is None
+            try:
+                await self._ensure_process()
+            except Exception as exc:
+                await self._emit_terminal_with_park(ErrorEvent(
+                    session_id=sid, turn_id=turn_id, message=f"spawn failed: {exc!r}"
+                ))
+                return
+            if reused:
+                async with self._stdout_lock:
+                    await self._discard_stale_stdout()
+            content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
+            user_node = SessionNode(
+                node_id=new_id("node"),
+                parent_id=op.parent_node_id or meta.head_node_id,
+                message=Message(role="user", content=content),
+            )
+            await self.store.append(sid, user_node)
+            await self._mark_background_woken(op, sid, user_node.node_id, turn_id)
+            # TurnStarted is emitted here (not from the init frame): a
+            # persistent CLI process emits `init` only once, so per-turn
+            # parity with NativeLoop requires the loop to own this event.
+            await self._emit(TurnStarted(
+                session_id=sid, node_id=user_node.node_id, turn_id=turn_id,
+                model=self.model, provider=self.provider,
             ))
-            self._active_turn_id = None
-            return
-        if reused:
-            async with self._stdout_lock:
-                await self._discard_stale_stdout()
-
-        content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
-        user_node = SessionNode(
-            node_id=new_id("node"),
-            parent_id=op.parent_node_id or meta.head_node_id,
-            message=Message(role="user", content=content),
-        )
-        await self.store.append(sid, user_node)
-        await self._mark_background_woken(op, sid, user_node.node_id, turn_id)
-        # TurnStarted is emitted here (not from the init frame): a persistent CLI
-        # process emits `init` only once, so per-turn parity with NativeLoop
-        # requires the loop to own this event.
-        await self._emit(TurnStarted(
-            session_id=sid, node_id=user_node.node_id, turn_id=turn_id,
-            model=self.model, provider=self.provider,
-        ))
-
-        mapper = StreamJsonMapper(
-            session_id=sid, turn_id=turn_id, model=self.model,
-            provider=self.provider, user_node_id=user_node.node_id,
-        )
-        try:
-            await self._write_frame({"type": "user", "message": {
-                "role": "user", "content": _content_to_cli(content),
-            }})
-            async with self._stdout_lock:
-                await self._read_until_result(sid, turn_id, mapper, user_node)
+            self._journal_turn_start(content)
+            mapper = await self._drive_turn(sid, turn_id, user_node, content)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -567,9 +638,128 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         finally:
             self._active_turn_id = None
             self._pending_usage_snapshots.clear()
-            if mapper.cli_session_id and mapper.cli_session_id != self.cli_session_id:
+            if (
+                mapper is not None
+                and mapper.cli_session_id
+                and mapper.cli_session_id != self.cli_session_id
+            ):
                 self.cli_session_id = mapper.cli_session_id
                 self._persist_cli_session_id(sid, mapper.cli_session_id)
+
+    async def _drive_turn(
+        self, sid: str, turn_id: str, user_node: SessionNode, content: list[Any],
+    ) -> StreamJsonMapper | None:
+        """Write the user frame and read to the result, emitting the terminal
+        event; the mapper that saw the result, or None when the retry's CLI
+        could not be spawned.
+
+        One retry: when the process was spawned with ``--resume`` and its
+        first turn fails before a single frame is mapped, the handle is what
+        the CLI rejected. The handle is dropped (and cleared in the store),
+        the process restarted without it, and the same user frame replayed
+        into a fresh CLI conversation.
+        """
+        mapper: StreamJsonMapper | None = None
+        for attempt in (1, 2):
+            if attempt == 2:
+                # The retry runs on a fresh process (the rejected handle's
+                # was stopped), so there is no stale stdout to drain.
+                try:
+                    await self._ensure_process()
+                except Exception as exc:
+                    await self._emit_terminal_with_park(ErrorEvent(
+                        session_id=sid, turn_id=turn_id, message=f"spawn failed: {exc!r}"
+                    ))
+                    return mapper
+            mapper = StreamJsonMapper(
+                session_id=sid, turn_id=turn_id, model=self.model,
+                provider=self.provider, user_node_id=user_node.node_id,
+            )
+            failure: str | None
+            try:
+                await self._write_frame({"type": "user", "message": {
+                    "role": "user", "content": _content_to_cli(content),
+                }})
+            except (OSError, RuntimeError) as exc:
+                # The CLI closed stdin before reading a turn: with a resume
+                # handle in play that is the rejected-handle exit.
+                failure = f"claude stdin closed before the turn was sent: {exc!r}"
+            else:
+                async with self._stdout_lock:
+                    failure = await self._read_until_result(sid, turn_id, mapper, user_node)
+            if failure is None:
+                return mapper
+            if attempt == 1 and self._resume_handle_rejected(mapper):
+                logger.warning(
+                    "claude did not accept --resume %s (%s); starting a fresh "
+                    "CLI conversation", self._spawn_resume, failure,
+                )
+                await self._drop_resume_handle(sid)
+                continue
+            await self._emit_terminal_with_park(
+                ErrorEvent(session_id=sid, turn_id=turn_id, message=failure)
+            )
+            return mapper
+        return mapper
+
+    async def _hook_stop(self, reason: str) -> None:
+        """A bridge-served tool's hook ended the turn: ask the CLI to stop
+        after this result, and remember why for the terminal event."""
+        self._hook_stop_reason = reason
+        try:
+            await self._send_control({"subtype": "interrupt"})
+        except Exception:  # noqa: BLE001 — the result frame still ends the turn
+            logger.debug("interrupt after hook stop failed", exc_info=True)
+
+    def _resume_handle_rejected(self, mapper: StreamJsonMapper) -> bool:
+        """A first turn on a resumed process failed before mapping any frame."""
+        return (
+            self._spawn_resume is not None
+            and self._proc_results == 0
+            and not mapper.produced_nodes
+        )
+
+    async def _drop_resume_handle(self, sid: str) -> None:
+        self.cli_session_id = None
+        self._spawn_resume = None
+        self._persist_cli_session_id(sid, None)
+        await self._stop_process(grace=1.0)
+
+    # ─── continual journal ───────────────────────────────────────────────
+
+    def _journal_turn_start(self, content: list[Any]) -> None:
+        if self._journal is None:
+            return
+        try:
+            self._journal.begin_turn()
+            text = " ".join(
+                getattr(block, "text", "") for block in content
+                if isinstance(block, Text)
+            ).strip()
+            self._journal.record_event("user", text)
+        except Exception:  # noqa: BLE001 — learning never breaks a turn
+            logger.debug("journal turn start failed", exc_info=True)
+
+    def _journal_event(self, event: Event, mapper: StreamJsonMapper) -> None:
+        """Feed the journal from the mapped stream: one entry per tool
+        result (with the input the CLI reported for that call)."""
+        if self._journal is None or not isinstance(event, ToolResult):
+            return
+        try:
+            self._journal.record_tool(
+                event.name, mapper.tool_inputs.get(event.tool_use_id, {}),
+                event.output, event.is_error,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("journal tool record failed", exc_info=True)
+
+    def _journal_turn_end(self, message: Message | None) -> None:
+        if self._journal is None or message is None:
+            return
+        try:
+            self._journal.record_event("assistant", message.text())
+        except Exception:  # noqa: BLE001
+            logger.debug("journal turn end failed", exc_info=True)
 
     # ─── mid-turn steering ───────────────────────────────────────────────
 
@@ -630,8 +820,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             steers=[{"id": op.id, "text": op.text}],
         ))
 
-    def _persist_cli_session_id(self, session_id: str, cli_session_id: str) -> None:
-        """Write the refreshed ``--resume`` handle back to the store.
+    def _persist_cli_session_id(
+        self, session_id: str, cli_session_id: str | None,
+    ) -> None:
+        """Write the refreshed ``--resume`` handle (or its removal) to the store.
 
         Fire-and-forget: this runs from the turn's ``finally`` (possibly while
         the task is being cancelled), so it must not await. Stores predating
@@ -693,16 +885,18 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
     async def _read_until_result(
         self, sid: str, turn_id: str, mapper: StreamJsonMapper, user_node: SessionNode,
-    ) -> None:
+    ) -> str | None:
+        """Map frames until the turn's result. None on a completed turn (its
+        TurnComplete or Interrupted already emitted); otherwise the failure,
+        with no terminal event emitted yet, for the caller to report or
+        retry."""
         assert self._proc is not None and self._proc.stdout is not None
         parent = user_node
+        last_assistant: Message | None = None
         while True:
             line = await self._proc.stdout.readline()
             if not line:
-                await self._emit_terminal_with_park(ErrorEvent(
-                    session_id=sid, turn_id=turn_id, message="claude stream closed before result",
-                ))
-                return
+                return "claude stream closed before result"
             text = line.decode(errors="replace").strip()
             if not text:
                 continue
@@ -715,11 +909,37 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if mapper.cli_tools is not None and mapper.cli_tools != self.cli_tools:
                 self.cli_tools = mapper.cli_tools
                 self.cli_mcp_servers = mapper.cli_mcp_servers
+            # An earlier "allow always" covers this request: answer it without
+            # surfacing a prompt the host already answered.
+            auto_allow = mapped.permission is not None and self._session_allows(
+                mapped.permission.tool_name, mapped.permission.input,
+            )
+            if auto_allow:
+                mapped.events = [
+                    e for e in mapped.events if not isinstance(e, PermissionRequest)
+                ]
             for event in mapped.events:
+                if isinstance(event, TurnComplete) and self._hook_stop_reason is not None:
+                    reason, self._hook_stop_reason = self._hook_stop_reason, None
+                    event = ErrorEvent(
+                        session_id=sid, node_id=event.node_id, turn_id=turn_id,
+                        message=f"stopped by hook: {reason}", retriable=False,
+                        usage=event.usage, cost_usd=event.cost_usd,
+                        num_model_calls=event.num_model_calls,
+                    )
+                elif isinstance(event, TurnComplete) and self._interrupted.is_set():
+                    # The CLI honoured the interrupt and closed the turn; say
+                    # so the way the native loop does, cost and usage kept.
+                    event = Interrupted(
+                        session_id=sid, node_id=event.node_id, turn_id=turn_id,
+                        usage=event.usage, cost_usd=event.cost_usd,
+                        num_model_calls=event.num_model_calls,
+                    )
                 if isinstance(event, (TurnComplete, Interrupted, ErrorEvent)):
                     await self._emit_terminal_with_park(event)
                 else:
                     await self._emit(event)
+                self._journal_event(event, mapper)
                 if isinstance(event, Usage) and event.node_id:
                     await self._ask_usage_snapshot(event.node_id)
             if mapped.message is not None and mapped.node_id is not None:
@@ -728,8 +948,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 )
                 await self.store.append(sid, node)
                 parent = node
+                if mapped.message.role == "assistant":
+                    last_assistant = mapped.message
             if mapped.permission is not None:
-                await self._handle_permission(mapped.permission)
+                if auto_allow:
+                    await self._write_control_response(
+                        mapped.permission.cli_request_id, True, mapped.permission.input,
+                    )
+                else:
+                    await self._handle_permission(mapped.permission)
             if mapped.control_reply is not None:
                 # A control call issued while this turn runs: the turn owns
                 # stdout, so its reader is what delivers the answer.
@@ -739,17 +966,41 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # Snapshots the CLI never got round to answering die with the
                 # turn — their Usage event already reported context_usage=None.
                 self._pending_usage_snapshots.clear()
-                return
+                if mapped.error is not None:
+                    self._hook_stop_reason = None
+                    return mapped.error
+                self._proc_results += 1
+                self._journal_turn_end(last_assistant)
+                return None
 
     # ─── permission bridge ───────────────────────────────────────────────
 
     async def _handle_permission(self, bridge: PermissionBridge) -> None:
+        """Answer a ``can_use_tool`` request by parking on the host's
+        ``RespondPermission`` (the reader emitted the PermissionRequest).
+
+        The wait also ends on an Interrupt. The turn's reader is what is
+        parked here, holding stdout, so without that exit an interrupt could
+        never be delivered: the CLI would sit on its unanswered request and
+        the reader would sit on the future, each waiting for the other.
+        """
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._pending_permissions[bridge.fluid_request_id] = fut
+        interrupt_wait = asyncio.create_task(self._interrupted.wait())
         try:
-            resp: RespondPermission = await fut
+            done, _ = await asyncio.wait(
+                {fut, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if fut not in done:
+                await self._write_control_response(
+                    bridge.cli_request_id, False, bridge.input,
+                    message="interrupted while awaiting permission",
+                )
+                return
+            resp: RespondPermission = fut.result()
         finally:
+            interrupt_wait.cancel()
             self._pending_permissions.pop(bridge.fluid_request_id, None)
         allow = resp.decision in ("allow", "allow_always")
         # An allow may carry a rewritten input (the SDK's ``updatedInput``) —
@@ -759,16 +1010,57 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         input = bridge.input
         if allow and resp.updated_input is not None:
             input = resp.updated_input
+        suggestions: tuple[dict[str, Any], ...] = ()
+        if resp.decision == "allow_always":
+            self._remember_allow(bridge.tool_name, input)
+            suggestions = bridge.suggestions
         await self._write_control_response(
             bridge.cli_request_id, allow, input, message=resp.message,
+            permissions=suggestions,
         )
+
+    def _registry_spec(self, tool_name: str) -> Any | None:
+        """The registry spec behind a CLI tool name, bridged prefix or not."""
+        if self.registry is None:
+            return None
+        base = tool_name[len(_BUNDLED_PREFIX):] if tool_name.startswith(_BUNDLED_PREFIX) else tool_name
+        return self.registry.get(base)
+
+    def _remember_allow(self, tool_name: str, input: dict[str, Any]) -> None:
+        """Record an ``allow_always`` answer for the rest of the session,
+        scoped by the tool's own labels when the registry knows the tool."""
+        spec = self._registry_spec(tool_name)
+        scope = spec.scope_of(input) if spec is not None else None
+        if scope is None:
+            self._always_allowed[tool_name] = None
+            return
+        current = self._always_allowed.get(tool_name, set())
+        if current is None:
+            return
+        current.update(scope)
+        self._always_allowed[tool_name] = current
+
+    def _session_allows(self, tool_name: str, input: dict[str, Any]) -> bool:
+        if tool_name not in self._always_allowed:
+            return False
+        allowed = self._always_allowed[tool_name]
+        if allowed is None:
+            return True
+        spec = self._registry_spec(tool_name)
+        scope = spec.scope_of(input) if spec is not None else None
+        return scope is not None and scope <= allowed
 
     async def _write_control_response(
         self, cli_request_id: str, allow: bool, input: dict[str, Any],
         *, message: str | None = None,
+        permissions: tuple[dict[str, Any], ...] = (),
     ) -> None:
         if allow:
             response_data: dict[str, Any] = {"behavior": "allow", "updatedInput": input}
+            if permissions:
+                # The CLI's own suggested rules for "always allow", handed
+                # back so it stops asking about matching calls itself.
+                response_data["updatedPermissions"] = list(permissions)
         else:
             # The CLI turns this message into the denied call's tool_result
             # text, so it is the only place a caller can explain the outcome to
@@ -1015,15 +1307,22 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         return True
 
     async def _send_interrupt(self) -> None:
-        """Send the documented interrupt control_request; fall back to SIGINT."""
+        """Send the documented interrupt control_request; fall back to SIGINT.
+
+        The fallback is POSIX-only: Windows has no SIGINT to send a child
+        (``send_signal`` raises there), and the only alternative is a hard
+        kill, which is ``aclose``'s job, not an interrupt's.
+        """
         if self._proc is None or self._proc.returncode is not None:
             return
         try:
             await self._send_control({"subtype": "interrupt"})
         except Exception:
+            if os.name == "nt":
+                return
             try:
                 self._proc.send_signal(signal.SIGINT)
-            except ProcessLookupError:
+            except (ProcessLookupError, OSError):
                 pass
 
     async def _write_frame(self, frame: dict[str, Any]) -> None:
