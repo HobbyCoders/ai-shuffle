@@ -28,7 +28,8 @@ def describe(tools: frozenset[str] | None = None) -> str:
     """ListAgents' description, specialized to the session's tool surface."""
     has = (lambda name: tools is None or name in tools)
     send_route = (
-        " Send to one with SendMessage, using the row's name as `to`."
+        " Send to one with SendMessage, using the row's name as `to` — a "
+        "finished agent is reachable too, and a message resumes it."
         if has("SendMessage")
         else ""
     )
@@ -63,7 +64,7 @@ SPEC = ToolSpec(
                 "type": "boolean",
                 "description": (
                     "List only agents still working (default false: finished "
-                    "ones are listed too, so you can see what already ran)."
+                    "ones are listed too, and can be messaged)."
                 ),
             },
         },

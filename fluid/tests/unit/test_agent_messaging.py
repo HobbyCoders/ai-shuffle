@@ -247,15 +247,30 @@ async def test_unknown_name_reports_the_roster(tmp_path) -> None:
     assert "ListAgents" in outcome.text
 
 
-async def test_messaging_a_finished_worker_says_so(tmp_path) -> None:
+def test_a_finished_worker_resolves_as_a_resume_target(tmp_path) -> None:
+    """Not an error: a finished agent is a route with no engine on it yet."""
+    host = _host(tmp_path)
+    finished = _worker(host, "research", "task_aaaaaaaaaaaa", status="finished")
+
+    target, error = host._resolve_target("research")
+
+    assert error is None and target is not None
+    assert target.name == "research"
+    assert target.engine is None
+    assert target.worker is finished
+
+
+def test_a_live_agent_beats_a_finished_namesake(tmp_path) -> None:
+    """Resuming a finished twin while the live one works would split the
+    conversation across two sessions, so the live one always wins."""
     host = _host(tmp_path)
     _worker(host, "research", "task_aaaaaaaaaaaa", status="finished")
+    live = _worker(host, "research", "task_bbbbbbbbbbbb")
 
-    outcome = await host.agent_message({"to": "research", "message": "hi"}, ToolCtx())
+    target, error = host._resolve_target("research")
 
-    assert outcome.is_error
-    assert "already finished" in outcome.text
-    assert "report comes back on its own" in outcome.text
+    assert error is None and target is not None and target.worker is live
+    assert target.engine is not None
 
 
 async def test_a_shared_name_asks_for_a_ref(tmp_path) -> None:
@@ -266,10 +281,12 @@ async def test_a_shared_name_asks_for_a_ref(tmp_path) -> None:
     outcome = await host.agent_message({"to": "research", "message": "hi"}, ToolCtx())
     assert outcome.is_error
     assert "research [aaaaaa]" in outcome.text and "research [bbbbbb]" in outcome.text
+    # The status rides along, so the model can tell which one it wants.
+    assert "(running)" in outcome.text
 
     # ...and the ref form picks one out.
     target, error = host._resolve_target("research [aaaaaa]")
-    assert error is None and target is not None and target[0] == "research"
+    assert error is None and target is not None and target.name == "research"
 
 
 async def test_delivery_submits_an_agent_message_naming_the_sender(tmp_path) -> None:
@@ -454,3 +471,78 @@ async def test_parent_messages_a_running_background_subagent(tmp_path) -> None:
     assert "only needs to be approximate" in carried
     assert PEER_OPEN_PREFIX in carried and "main" in carried
     assert STEER_OPEN not in carried
+
+
+async def test_messaging_a_finished_subagent_resumes_it_over_its_transcript(
+    tmp_path,
+) -> None:
+    """The resume path end to end: the worker finishes, the parent messages it
+    anyway, and it comes back on its own session — its first report still in
+    context — as a fresh background task the parent parks and wakes on."""
+    provider = RoutingProvider(
+        parent=[_task_call(), _send_call("research"), _text("thanks")],
+        child=[_text("The answer is 42."), _text("Roughly 40, then.")],
+    )
+    store = MemoryStore()
+    meta = await store.create_session()
+    engine = make_engine(
+        _config(tmp_path, permission={"approval_policy": "never_ask"}),
+        store, provider=provider, session_id=meta.session_id,
+    )
+    host = host_of(engine)
+    assert isinstance(host, CliHost)
+    try:
+        await engine.submit(UserTurn(content="research it"))
+        for _ in range(400):
+            await engine.wait_turn()
+            if not host.pending() and provider.parent_calls >= 3:
+                break
+            await asyncio.sleep(0.02)
+        await host.wait_idle()
+        await engine.wait_turn()
+        workers = [w for w in host.workers.values() if w.kind == "task"]
+    finally:
+        await host.aclose()
+        await engine.aclose()
+
+    # Two workers under one name, sharing one session: the original and its
+    # resume. The resume is a distinct task id, which is what lets its
+    # completion travel the ordinary park/wake route a second time.
+    assert len(workers) == 2
+    assert {w.name for w in workers} == {"research"}
+    assert len({w.task_id for w in workers}) == 2
+    assert len({w.worker_session_id for w in workers}) == 1
+    # Only two sessions exist in the store — the parent's and the worker's.
+    # A resume that opened a third would have lost the transcript.
+    assert len(store._sessions) == 2
+
+    # The resumed child saw its own earlier report, then the peer message.
+    second = _all_text(provider.child_requests[-1])
+    assert "The answer is 42." in second
+    assert "only needs to be approximate" in second
+    assert PEER_OPEN_PREFIX in second and "main" in second
+
+    # And the parent was told a resume happened, not a plain delivery.
+    assert "was resumed over its own transcript" in _all_text(provider.requests[-1])
+
+
+async def test_a_resume_needs_a_stored_session(tmp_path) -> None:
+    host = _host(tmp_path)
+    worker = _worker(host, "research", "task_aaaaaaaaaaaa", status="finished")
+    worker.worker_session_id = None
+
+    outcome = await host.agent_message({"to": "research", "message": "again"}, ToolCtx())
+
+    assert outcome.is_error and "no stored session" in outcome.text
+
+
+async def test_a_closing_host_refuses_to_resume(tmp_path) -> None:
+    """Resuming during shutdown would start work nothing is left to collect."""
+    host = _host(tmp_path)
+    worker = _worker(host, "research", "task_aaaaaaaaaaaa", status="finished")
+    worker.worker_session_id = "sess_1"
+    await host.aclose()
+
+    outcome = await host.agent_message({"to": "research", "message": "again"}, ToolCtx())
+
+    assert outcome.is_error and "shutting down" in outcome.text

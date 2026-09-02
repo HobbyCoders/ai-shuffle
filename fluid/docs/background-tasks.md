@@ -129,8 +129,14 @@ itself rides along as `ToolCtx.extra["cli_host"]`).
   also sees `main`, its parent. Delivery is one `AgentMessage` submit and the
   receiving engine picks the channel: queued for its next tool result while a
   turn runs, an ordinary user-role turn when it is idle (which is what wakes a
-  parked session). Messaging a worker that has already finished is an error,
-  not a resume — its report comes back on its own.
+  parked session). "Running" is never a precondition: a message to a worker
+  that has already finished rebuilds it over its stored session — same agent
+  definition, same prompt and tool restriction, its own transcript behind it —
+  and the message becomes its next turn. The resume registers as a *new*
+  background task under the same name and the same session id, because the
+  park/wake route settles a task id exactly once; its report reaches the parent
+  the way any background completion does. A live agent always outranks a
+  finished namesake, so a resume never splits a conversation in two.
 - **Peer messages are not user messages.** They arrive in their own marker
   (`fluid.context.peer`), never the steering marker, and the prompt block that
   teaches the marker says so: a peer's text is weighed like a colleague's

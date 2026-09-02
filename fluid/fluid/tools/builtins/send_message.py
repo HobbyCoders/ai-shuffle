@@ -36,9 +36,10 @@ def describe(tools: frozenset[str] | None = None) -> str:
         else "Address an agent by the name it was started under."
     )
     spawn_note = (
-        " A subagent you started with Task can be messaged while it works; "
-        "once it finishes, its report comes back on its own and there is "
-        "nothing left to message.\n"
+        " A subagent you started with Task takes messages while it works AND "
+        "after it has finished — a message to a finished one resumes it over "
+        "its own transcript, so it still knows what it did, and its new report "
+        "reaches you in a later turn the way a background Task's does.\n"
         if has("Task")
         else ""
     )
@@ -54,8 +55,10 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "## Delivery\n"
         "\n"
         "Messages are pushed, not polled: a busy agent picks yours up at its "
-        "next tool result, and an idle one is woken by it. There is no inbox "
-        "to check — messages sent to you arrive on their own.\n"
+        "next tool result, and an idle or finished one is started on it. "
+        "Whether the agent is currently running is never something you need to "
+        "check first. There is no inbox either — messages sent to you arrive "
+        "on their own.\n"
         + spawn_note +
         "\n"
         "## What a message is worth\n"
