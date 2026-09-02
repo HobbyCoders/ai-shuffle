@@ -236,14 +236,22 @@ def revert_subagent_to_defaults(subagent_id: str) -> Optional[SubagentRow]:
     )
 
 
-def has_subagent_been_modified(subagent_id: str) -> bool:
-    """True when a built-in agent differs from its in-repo definition."""
-    current = get_subagent(subagent_id)
-    if not current or not current.get("is_builtin"):
-        return False
-    defaults = _code_defaults(subagent_id)
+def builtin_subagent_is_modified(agent: Optional[dict]) -> Optional[bool]:
+    """Compare an agent row (or subagent view) against its in-repo definition.
+
+    Pure: no queries, so list endpoints can call it per row. Returns ``None``
+    when the row is not a built-in with a code definition, otherwise whether
+    name, description, prompt, tools, or model differ. Skills, memory, and
+    MCP servers are user-owned extras and never count as modifications.
+    """
+    if not agent or not agent.get("is_builtin"):
+        return None
+    defaults = _code_defaults(agent["id"])
     if not defaults:
-        return False
+        return None
+    current = agent if "prompt" in agent else _agent_to_subagent(agent)
+    if not current:
+        return None
     return (
         current["name"] != defaults.get("name")
         or current["description"] != (defaults.get("description") or "")
@@ -251,6 +259,11 @@ def has_subagent_been_modified(subagent_id: str) -> bool:
         or (current["tools"] or None) != (defaults.get("tools") or None)
         or (current["model"] or None) != (defaults.get("model") or None)
     )
+
+
+def has_subagent_been_modified(subagent_id: str) -> bool:
+    """True when a built-in agent differs from its in-repo definition."""
+    return bool(builtin_subagent_is_modified(get_subagent(subagent_id)))
 
 
 # ============================================================================

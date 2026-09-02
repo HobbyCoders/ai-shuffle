@@ -66,17 +66,25 @@ class UnifiedSubagentItem(BaseModel):
 
 
 def _check_profile_modified(profile: dict) -> None:
-    """Set is_modified on a built-in profile by comparing to seed defaults."""
+    """Set is_modified on a built-in agent by comparing to its defaults.
+
+    Built-in subagents (general-purpose, Explore, Plan, frontend-designer)
+    compare against their code definitions in BUILTIN_SUBAGENTS; the
+    profile-defaults seam is kept for any future built-in profile.
+    """
     if not profile.get("is_builtin"):
         return
     defaults = get_builtin_profile_defaults(profile["id"])
-    if not defaults:
+    if defaults:
+        profile["is_modified"] = (
+            profile.get("name") != defaults["name"]
+            or profile.get("description") != defaults["description"]
+            or profile.get("config") != defaults["config"]
+        )
         return
-    profile["is_modified"] = (
-        profile.get("name") != defaults["name"]
-        or profile.get("description") != defaults["description"]
-        or profile.get("config") != defaults["config"]
-    )
+    modified = database.builtin_subagent_is_modified(profile)
+    if modified is not None:
+        profile["is_modified"] = modified
 
 
 @router.get("/templates")
@@ -799,20 +807,26 @@ async def restore_profile_defaults(
             )
 
         defaults = get_builtin_profile_defaults(profile_id)
-        if not defaults:
+        if defaults:
+            profile = database.update_profile(
+                profile_id=profile_id,
+                name=defaults["name"],
+                description=defaults["description"],
+                config=defaults["config"],
+                allow_builtin=True
+            )
+        elif database.revert_subagent_to_defaults(profile_id):
+            # Built-in subagent: restore name/description/prompt/tools/model
+            # from BUILTIN_SUBAGENTS, keeping user-owned skills/memory/MCP.
+            profile = database.get_profile(profile_id)
+        else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"No known defaults for built-in profile: {profile_id}"
             )
 
-        profile = database.update_profile(
-            profile_id=profile_id,
-            name=defaults["name"],
-            description=defaults["description"],
-            config=defaults["config"],
-            allow_builtin=True
-        )
-
+        profile["session_count"] = database.get_profile_session_count(profile_id)
+        _check_profile_modified(profile)
         return profile
 
     return await run_sync(_load)
