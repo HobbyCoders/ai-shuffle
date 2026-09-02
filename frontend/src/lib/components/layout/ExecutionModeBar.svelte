@@ -610,20 +610,22 @@
 				<span class="ctx-chip-label">worktree</span>
 			</label>
 
-			<!-- New worktree: create a branch and stage it as the worktree branch. -->
-			<button
-				type="button"
-				class="ctx-chip ctx-chip-icon new-wt-chip"
-				onclick={openNewWorktree}
-				aria-label="New worktree from {baseBranch}"
-				title="New worktree from {baseBranch}"
-			>
-				<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-					<path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12z"/>
-					<path d="M8 7.5v3.5M6.25 9.25h3.5"/>
-				</svg>
-				{#if sheetMode}<span class="ctx-chip-label">New worktree from {baseBranch}</span>{/if}
-			</button>
+			<!-- Desktop pill row only — the mobile sheet already has Auto / from
+			     {base} plus New branch in the worktree dropdown. -->
+			{#if !sheetMode}
+				<button
+					type="button"
+					class="ctx-chip ctx-chip-icon new-wt-chip"
+					onclick={openNewWorktree}
+					aria-label="New worktree from {baseBranch}"
+					title="New worktree from {baseBranch}"
+				>
+					<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12z"/>
+						<path d="M8 7.5v3.5M6.25 9.25h3.5"/>
+					</svg>
+				</button>
+			{/if}
 		{/if}
 	</div>
 
@@ -684,8 +686,7 @@
 
 	.sheet-mode .mode-trigger,
 	.sheet-mode .branch-trigger,
-	.sheet-mode .wt-chip,
-	.sheet-mode .new-wt-chip {
+	.sheet-mode .wt-chip {
 		width: 100%;
 		height: 52px;
 		padding: 0 14px;
@@ -698,8 +699,7 @@
 
 	.sheet-mode .mode-trigger-label,
 	.sheet-mode .branch-name,
-	.sheet-mode .wt-chip .ctx-chip-label,
-	.sheet-mode .new-wt-chip .ctx-chip-label {
+	.sheet-mode .wt-chip .ctx-chip-label {
 		flex: 1;
 		max-width: none;
 		text-align: left;

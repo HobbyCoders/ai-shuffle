@@ -7,8 +7,8 @@
 	 *      repository / branch / worktree) floating ABOVE the box with a gap, in
 	 *      both the new-chat and active states.
 	 *   2. The box — a flat hairline rectangle holding the Tiptap editor with
-	 *      the @/slash autocomplete panels, the return-glyph send cluster at its
-	 *      top-right (send · send-while-streaming · Stop · creating-worktree
+	 *      the @/slash autocomplete panels, the return-glyph send cluster on its
+	 *      right (send · send-while-streaming · Stop · creating-worktree
 	 *      spinner), and the ControlsDock's bare-text controls row. The dictate
 	 *      and voice-call buttons are passed to the dock as its `voiceActions`
 	 *      snippet so they stay bound to this component's recording state.
@@ -738,7 +738,7 @@
 			<div class="context-pill-row"><ContextPillBar /></div>
 
 			<!-- The box: a flat hairline rectangle holding the editor, the send
-			     cluster at its top-right, and the bare-text controls row. -->
+			     cluster on the right, and the bare-text controls row. -->
 			<div class="chat-island" bind:this={islandRef}>
 				<!-- The editor. The whole area forwards pointer events to the Tiptap
 				     editor so the padding around the text line is clickable too — an
@@ -793,12 +793,13 @@
 						/>
 					</div>
 
-					<!-- Send cluster (mockup `.send`): the return glyph at the box's
-					     top-right, accent-coloured once there is something to send.
-					     Typing during a turn does not replace Stop: the send goes out
-					     as a pending message and the turn keeps running, so Stop stays
-					     one click away beside it. Stop is an informed choice when
-					     background agents are live — StopButton confirms first. -->
+					<!-- Send cluster (mockup `.send`): the return glyph on the right
+					     of the editor row, vertically centred in that row, accent-
+					     coloured once there is something to send. Typing during a
+					     turn does not replace Stop: the send goes out as a pending
+					     message and the turn keeps running, so Stop stays one click
+					     away beside it. Stop is an informed choice when background
+					     agents are live — StopButton confirms first. -->
 					<div class="send-cluster">
 						{#if $activeSession.isCreatingWorktree}
 							<!-- Creating worktree - show spinner -->
@@ -990,17 +991,16 @@
 	}
 
 	/* ===== SEND CLUSTER (mockup `.send`) =====
-	   Top-right of the box, on the first text line. A flex sibling of the
-	   editor rather than an absolutely positioned overlay, so the text never
-	   runs under it and the mobile collapsed row keeps it at the end of the
-	   single input line. */
+	   Right side of the editor row, vertically centred in that row. A flex
+	   sibling of the editor rather than an absolutely positioned overlay, so
+	   the text never runs under it and the mobile collapsed row keeps it at
+	   the end of the single input line. */
 	.send-cluster {
 		display: flex;
 		align-items: center;
+		align-self: center;
 		gap: 4px;
 		flex-shrink: 0;
-		/* Centre a 24px button on the editor's ~22px first line. */
-		margin-top: -1px;
 	}
 
 	.send-btn {
@@ -1108,10 +1108,6 @@
 			border-radius: 10px;
 		}
 
-		.send-cluster {
-			margin-top: -5px;
-		}
-
 		.mobile-collapsed .chat-island {
 			min-height: 50px;
 			border-radius: 14px;
@@ -1133,10 +1129,6 @@
 			min-height: 48px;
 			align-items: center;
 			padding: 7px 8px 7px 16px;
-		}
-
-		.mobile-collapsed .send-cluster {
-			margin-top: 0;
 		}
 	}
 

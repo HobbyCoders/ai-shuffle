@@ -108,11 +108,12 @@ describe('ChatInput mobile collapsed surface', () => {
 	});
 
 	it('hides the controls row while keeping the send and stop cluster on the input line', () => {
-		// The send / stop cluster lives in the input area (top-right of the box),
-		// not in the controls row, so the whole row can go when idle.
+		// The send / stop cluster lives in the input area (right of the editor
+		// row), not in the controls row, so the whole row can go when idle.
 		expect(ruleBody('.mobile-collapsed :global(.controls-dock)')).toMatch(/display:\s*none;/);
 		expect(chatInput).toContain('class="send-cluster"');
-		expect(ruleBody('.mobile-collapsed .send-cluster')).not.toMatch(/display:\s*none;/);
+		expect(chatInput).toMatch(/\.send-cluster\s*\{[^}]*align-self:\s*center;/);
+		expect(mobileStyles).not.toMatch(/\.send-cluster\s*\{[^}]*display:\s*none;/);
 		expect(mobileStyles).not.toContain('.controls-right');
 	});
 
