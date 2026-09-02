@@ -83,20 +83,20 @@
 <div class="selector-wrapper" class:sheet-mode={sheetMode} bind:this={profileDropdownRef}>
 	<button
 		type="button"
-		class="context-selector-btn {$activeSession.profile ? '' : 'unset'}"
+		class="ctx-chip context-selector-btn {$activeSession.profile ? '' : 'unset'}"
+		class:open={showProfileDropdown}
 		onclick={handleProfileClick}
 		title="Change agent"
+		aria-label="Agent: {selectedProfileName}"
 		aria-haspopup="menu"
 		aria-expanded={showProfileDropdown}
 	>
-		<div class="selector-icon">
-			<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-			</svg>
-		</div>
-		<span class="selector-text">{selectedProfileName}</span>
-		<svg class="chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 9l-7 7-7-7" />
+		<svg class="selector-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+		</svg>
+		<span class="ctx-chip-label selector-text">{selectedProfileName}</span>
+		<svg class="ctx-chip-chev" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 		</svg>
 	</button>
 
@@ -155,90 +155,42 @@
 		margin-top: 6px;
 	}
 
-	/* The mockup's `.pill.agent`: standard pill metrics with a primary-tinted
-	   border and a teal glyph, so the agent reads as the composer's subject. */
+	/* The agent chip is the first item in the composer's context row. It shares
+	   the `.ctx-chip` look (app.css) and only differs from its neighbours by
+	   carrying the foreground colour: the agent reads as the composer's subject. */
 	.context-selector-btn {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		height: 26px;
-		padding: 0 9px;
-		background: var(--scrim);
-		border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
-		border-radius: 999px;
-		color: var(--muted-foreground);
-		font-size: 12px;
-		cursor: pointer;
-		transition: border-color 0.13s ease, color 0.13s ease, background-color 0.13s ease;
-		white-space: nowrap;
-	}
-
-	.context-selector-btn:hover {
-		border-color: color-mix(in oklch, var(--primary) 55%, transparent);
 		color: var(--foreground);
 	}
 
-	.context-selector-btn:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 1px;
-	}
-
+	/* No agent picked (or none exist): amber so the missing choice is visible. */
 	.context-selector-btn.unset {
-		border-color: var(--warning);
 		color: var(--warning);
 	}
 
 	.context-selector-btn.unset:hover {
-		background: color-mix(in oklch, var(--warning) 10%, transparent);
+		background: color-mix(in oklch, var(--warning) 12%, var(--muted));
 		color: var(--warning);
 	}
 
 	.selector-icon {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		flex-shrink: 0;
+		width: 12px;
+		height: 12px;
 	}
 
-	.selector-icon svg {
-		color: var(--primary);
-	}
-
-	/* The unset state repaints the whole pill amber, glyph included. */
-	.context-selector-btn.unset .selector-icon svg {
+	.context-selector-btn.unset .selector-icon,
+	.context-selector-btn.unset .ctx-chip-chev {
 		color: var(--warning);
 	}
 
 	.selector-text {
-		font-size: 12px;
-		font-weight: 500;
-		color: var(--foreground);
-		line-height: 1;
-		letter-spacing: 0.01em;
 		max-width: 80px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.context-selector-btn.unset .selector-text {
-		color: inherit;
 	}
 
 	/* Desktop: allow wider name */
 	@media (min-width: 1081px) {
 		.selector-text {
-			max-width: 140px;
+			max-width: 160px;
 		}
-	}
-
-	/* Chevron — sized to match the git buttons' ChevronDown (11px), not animated */
-	.chevron {
-		width: 11px;
-		height: 11px;
-		flex-shrink: 0;
-		color: inherit;
-		opacity: 0.6;
 	}
 
 	/* ===== DROPDOWN MENU ===== */
@@ -317,12 +269,5 @@
 			max-width: none;
 		}
 
-		/* Keep the same pill metrics as the branch selector / worktree badge
-		   (26px) so all context pills line up at the same height on mobile. */
-		.context-selector-btn {
-			height: 26px;
-			padding: 0 9px;
-			font-size: 12px;
-		}
 	}
 </style>

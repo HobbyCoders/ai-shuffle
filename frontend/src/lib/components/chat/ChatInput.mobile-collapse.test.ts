@@ -17,6 +17,14 @@ const mobileStyles = chatInput.slice(
 	chatInput.indexOf('@media (prefers-reduced-motion: reduce)')
 );
 
+/** The declarations of the first `selector { … }` rule inside the mobile block. */
+function ruleBody(selector: string): string {
+	const start = mobileStyles.indexOf(`${selector} {`);
+	if (start === -1) return '';
+	const end = mobileStyles.indexOf('}', start);
+	return mobileStyles.slice(start, end);
+}
+
 const idleCompactComposer: MobileComposerCollapseState = {
 	compact: true,
 	hasDraft: false,
@@ -99,14 +107,13 @@ describe('ChatInput mobile collapsed surface', () => {
 		);
 	});
 
-	it('hides secondary controls while preserving the primary send and stop buttons', () => {
-		expect(mobileStyles).toContain('.mobile-collapsed :global(.mobile-controls)');
-		expect(mobileStyles).toContain(
-			'.mobile-collapsed :global(.controls-right > button:not(.send-btn):not(.stop-btn))'
-		);
-		expect(mobileStyles).toContain(
-			'.mobile-collapsed :global(.controls-right > .voice-btn-wrapper)'
-		);
+	it('hides the controls row while keeping the send and stop cluster on the input line', () => {
+		// The send / stop cluster lives in the input area (top-right of the box),
+		// not in the controls row, so the whole row can go when idle.
+		expect(ruleBody('.mobile-collapsed :global(.controls-dock)')).toMatch(/display:\s*none;/);
+		expect(chatInput).toContain('class="send-cluster"');
+		expect(ruleBody('.mobile-collapsed .send-cluster')).not.toMatch(/display:\s*none;/);
+		expect(mobileStyles).not.toContain('.controls-right');
 	});
 
 	it('no longer carries a send-later button to hide', () => {

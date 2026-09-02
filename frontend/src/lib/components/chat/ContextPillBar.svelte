@@ -1,25 +1,26 @@
 <script lang="ts">
 	/**
-	 * ContextPillBar - A row of context pills shown directly above the chat input.
+	 * ContextPillBar - the loose row of context chips that floats above the
+	 * chat composer box: agent · | · runner · repository · branch · worktree.
 	 *
-	 * Hosts the session's context selectors (profile + branch) that used to live
-	 * in the page header, decluttering the header. The branch pill is shown only
-	 * when a git project is available and GitHub CLI is authenticated (matching
-	 * the header's previous gate); the profile pill is always available.
+	 * New session (no messages yet): every chip is a selector, because the
+	 * execution context (runner / repository / branch / worktree) has to be
+	 * chosen before the first send. The runner and worktree chips come from
+	 * ExecutionModeBar; the repository chip and the local-mode branch chip are
+	 * rendered here and handed to it as its `between` snippet so the DOM order
+	 * matches the visual order. GitHub auth gates the runner/branch/worktree
+	 * controls, as before.
 	 *
-	 * When the interactive branch pill is suppressed (GitHub CLI not
-	 * authenticated) but the session still has project/worktree context worth
-	 * showing, a context badge takes its place. A remote-runner badge is a
-	 * menu (re-pin / continue-here / unpin); otherwise it is read-only.
+	 * Active chat: the same row, now describing the session's context. The
+	 * agent chip stays a selector and the branch chip stays the checkout
+	 * selector where it was available before; the runner chip is read-only
+	 * unless the session runs on another install, in which case it keeps the
+	 * "Move this session" menu (re-pin / continue-here / unpin). A degraded
+	 * session (queued work, no runner online) shows a read-only warning chip.
 	 *
-	 * In the empty/new-session state the ExecutionModeBar (Local/Worktree toggle)
-	 * is hosted here too, next to the profile pill, so all pre-send session
-	 * controls share one row above the input. In local mode the interactive
-	 * BranchSelector pill sits alongside it (the ExecutionModeBar only carries its
-	 * own branch picker in worktree mode). Once the chat is active the toggle gives
-	 * way to the read-only branch pill / context badge.
-	 *
-	 * The pill dropdowns open upward since this bar sits just above the input.
+	 * `sheetMode` renders the same selectors as stacked rows inside the mobile
+	 * controls sheet. The chip dropdowns open upward since this row sits just
+	 * above the input.
 	 */
 	import { onDestroy } from 'svelte';
 	import ProfileSelector from './ProfileSelector.svelte';
@@ -37,7 +38,7 @@
 	import { listInstalls, getClusterGitState, type Install } from '$lib/api/installs';
 	import { adoptSession, unpinSession, moveSession } from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
-	import { FolderClosed, GitBranch, Monitor, MonitorOff, ChevronDown, Loader2 } from 'lucide-svelte';
+	import { FolderClosed, GitBranch, Monitor, MonitorOff, Check, Loader2 } from 'lucide-svelte';
 	import type { EligibilityMap } from '$lib/components/layout/execution-mode-eligibility';
 
 	interface Props {
@@ -55,7 +56,7 @@
 
 	// The sessions-board summary row for the active session — source of the
 	// server-derived ownership/health fields (degraded, is_remote, device name +
-	// online) the read-only context badge reads.
+	// online) the read-only context chips read.
 	const sessionRow = $derived(
 		$sessions.find((s) => s.id === $activeSession.sessionId) ?? null
 	);
@@ -64,13 +65,13 @@
 	// runner online).
 	const degraded = $derived(sessionRow?.degraded ?? false);
 
-	// New-session state: no messages yet. Here the execution-mode toggle (+ branch
-	// picker) is shown next to the profile pill so the user can choose Local vs
-	// Worktree before sending. GitHub auth is required for worktree controls.
+	// New-session state: no messages yet. Every chip is a selector here.
 	const isEmptyState = $derived($activeSession.messages.length === 0);
 
-	// Interactive branch pill in an active chat. Remote / degraded occupy this
-	// slot with the runner menu (or the read-only degraded badge) instead.
+	const isWorktreeSession = $derived(!!($activeSession.worktreeId || $activeSession.worktreeBranch));
+
+	// Interactive branch chip in an active chat. Remote / degraded sessions show
+	// read-only context instead.
 	const showBranch = $derived(
 		shouldShowBranchPill({
 			messageCount: $activeSession.messages.length,
@@ -81,7 +82,7 @@
 		})
 	);
 
-	// New-session screen: show the branch pill in LOCAL mode, where the
+	// New-session screen: show the checkout-branch chip in LOCAL mode, where the
 	// ExecutionModeBar has no branch picker of its own. In worktree mode that bar
 	// owns branch selection (which branch to base the worktree on), so we don't
 	// add a second branch control. See contextPills.shouldShowEmptyStateBranchPill.
@@ -96,15 +97,13 @@
 		})
 	);
 
-	// Read-only context badge (project/worktree indicator) shown in place of the
-	// interactive branch pill when that pill is suppressed but context remains —
-	// see contextPills.computeContextBadge for the full gating. Mutually exclusive
-	// with showBranch by construction.
+	// Read-only context (runner / degraded / unauthenticated branch) for an
+	// active chat — see contextPills.computeContextBadge for the gating.
 	const badge = $derived(
 		computeContextBadge({
 			messageCount: $activeSession.messages.length,
 			projectName,
-			isWorktree: !!($activeSession.worktreeId || $activeSession.worktreeBranch),
+			isWorktree: isWorktreeSession,
 			selectedWorktreeBranch: $activeSession.selectedWorktreeBranch,
 			worktreeBranch: $activeSession.worktreeBranch,
 			githubAuthenticated: $githubAuthenticated,
@@ -114,6 +113,17 @@
 			deviceOnline: sessionRow?.device_online ?? false
 		})
 	);
+
+	// Branch shown read-only in an active chat when the interactive chip is not
+	// available: the worktree's branch, else the checkout's current branch.
+	const readOnlyBranch = $derived.by(() => {
+		if (badge?.branch) return badge.branch;
+		if (isWorktreeSession) {
+			return $activeSession.selectedWorktreeBranch || $activeSession.worktreeBranch || null;
+		}
+		if ($activeSession.project) return $gitStatus?.current_branch ?? null;
+		return null;
+	});
 
 	let showCreateBranchModal = $state(false);
 
@@ -131,7 +141,7 @@
 			installs: runnerInstalls,
 			eligibility: runnerEligibility,
 			hasProject: !!(sessionRow?.project_id || sessionRow?.project_v2_id),
-			isWorktree: !!($activeSession.worktreeId || $activeSession.worktreeBranch)
+			isWorktree: isWorktreeSession
 		})
 	);
 
@@ -215,55 +225,67 @@
 	onDestroy(() => closeDropdown('runner'));
 
 	// The voice-call start affordance no longer lives here (ruling VM19): it is
-	// an action button in ChatInput's send-button cluster (VoiceCallButton),
-	// next to the STT mic and the send button.
+	// an action button in the composer's controls row (VoiceCallButton).
 </script>
 
 <svelte:window onclick={handleRunnerClickOutside} onkeydown={handleRunnerKeydown} />
 
-<div class="context-pill-bar" class:sheet-mode={sheetMode}>
+{#snippet repoChip()}
+	{#if projectName && !sheetMode}
+		<span class="ctx-chip repo-chip" title="Repository: {projectName}">
+			<FolderClosed size={12} strokeWidth={1.6} aria-hidden="true" />
+			<span class="ctx-chip-label repo-name">{projectName}</span>
+		</span>
+	{/if}
+{/snippet}
+
+<div class="context-pill-bar" class:sheet-mode={sheetMode} role="toolbar" aria-label="Session context">
 	<ProfileSelector {sheetMode} />
+	<span class="ctx-sep" aria-hidden="true"></span>
+
 	{#if isEmptyState}
 		{#if $githubAuthenticated}
-			<ExecutionModeBar {sheetMode} />
+			<ExecutionModeBar {sheetMode}>
+				{#snippet between()}
+					{@render repoChip()}
+					{#if showEmptyStateBranch}
+						<BranchSelector
+							{sheetMode}
+							projectName={sheetMode ? projectName : null}
+							onClickNewBranch={() => (showCreateBranchModal = true)}
+						/>
+					{/if}
+				{/snippet}
+			</ExecutionModeBar>
+		{:else}
+			{@render repoChip()}
 		{/if}
-		{#if showEmptyStateBranch}
-			<BranchSelector
-				{sheetMode}
-				{projectName}
-				onClickNewBranch={() => (showCreateBranchModal = true)}
-			/>
-		{/if}
-	{:else if showBranch}
-		<BranchSelector
-			{sheetMode}
-			{projectName}
-			onClickNewBranch={() => (showCreateBranchModal = true)}
-		/>
-	{:else if badge}
-		{#if badge.runner && !badge.degraded}
+	{:else}
+		<!-- Runner: read-only "Local", the remote runner with its move menu, or
+		     the degraded warning. -->
+		{#if badge?.degraded}
+			<span class="ctx-chip readonly degraded" title={badge.title}>
+				<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
+				<span class="ctx-chip-label">Read-only — no runner online</span>
+			</span>
+		{:else if badge?.runner}
 			<div class="runner-badge-wrap" bind:this={runnerMenuRef}>
 				<button
 					type="button"
-					class="context-badge runner"
+					class="ctx-chip runner"
 					class:open={showRunnerMenu}
 					title={badge.title}
+					aria-label="Runner: {badge.runner.deviceName}{badge.runner.online ? '' : ' (offline)'}"
 					aria-haspopup="menu"
 					aria-expanded={showRunnerMenu}
 					onclick={toggleRunnerMenu}
 				>
-					{#if projectName}
-						<FolderClosed size={13} strokeWidth={1.5} />
-						<span class="pill-label project-name">{projectName}</span>
-						<span class="separator">/</span>
-					{/if}
 					{#if badge.runner.online}
-						<Monitor size={13} strokeWidth={1.5} />
+						<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />
 					{:else}
-						<MonitorOff size={13} strokeWidth={1.5} />
+						<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
 					{/if}
-					<span class="pill-label">{badge.runner.deviceName}</span>
-					<ChevronDown size={11} strokeWidth={1.5} />
+					<span class="ctx-chip-label">{badge.runner.deviceName}</span>
 				</button>
 				{#if showRunnerMenu}
 					<div class="runner-dropdown" role="menu" aria-label="Move this session">
@@ -283,7 +305,7 @@
 									title={item.title}
 									onclick={() => runMenuAction(item)}
 								>
-									<span class="pill-label">{item.label}</span>
+									<span class="ctx-chip-label">{item.label}</span>
 								</button>
 							{/each}
 						{/if}
@@ -291,38 +313,39 @@
 				{/if}
 			</div>
 		{:else}
+			<span class="ctx-chip readonly" title="Runs on this device">
+				<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />
+				<span class="ctx-chip-label">Local</span>
+			</span>
+		{/if}
+
+		{@render repoChip()}
+
+		{#if showBranch}
+			<BranchSelector
+				{sheetMode}
+				projectName={sheetMode ? projectName : null}
+				onClickNewBranch={() => (showCreateBranchModal = true)}
+			/>
+		{:else if readOnlyBranch}
+			<span class="ctx-chip readonly" title="Branch: {readOnlyBranch}">
+				<GitBranch size={12} strokeWidth={1.6} aria-hidden="true" />
+				<span class="ctx-chip-label branch-name">{readOnlyBranch}</span>
+			</span>
+		{/if}
+
+		{#if $activeSession.project && !badge?.degraded}
 			<span
-				class="context-badge"
-				class:runner={badge.runner}
-				class:degraded={badge.degraded}
-				title={badge.title}
+				class="ctx-chip readonly wt-indicator"
+				title={isWorktreeSession ? 'Runs in an isolated git worktree' : 'Runs in the main checkout'}
 			>
-				{#if badge.degraded}
-					<MonitorOff size={13} strokeWidth={1.5} />
-					<span class="pill-label">Read-only — no runner online</span>
-				{:else}
-					{#if projectName}
-						<FolderClosed size={13} strokeWidth={1.5} />
-						<span class="pill-label project-name">{projectName}</span>
-						{#if badge.branch || badge.runner}<span class="separator">/</span>{/if}
-					{/if}
-					{#if badge.runner}
-						{#if badge.runner.online}
-							<Monitor size={13} strokeWidth={1.5} />
-						{:else}
-							<MonitorOff size={13} strokeWidth={1.5} />
-						{/if}
-						<span class="pill-label">{badge.runner.deviceName}</span>
-					{/if}
-					{#if badge.branch}
-						<GitBranch size={13} strokeWidth={1.5} />
-						<span class="pill-label branch-name">{badge.branch}</span>
-					{/if}
-				{/if}
+				<span class="ctx-chip-cb" class:checked={isWorktreeSession} aria-hidden="true">
+					<Check size={9} strokeWidth={2.6} />
+				</span>
+				<span class="ctx-chip-label">worktree</span>
 			</span>
 		{/if}
 	{/if}
-
 </div>
 
 {#if $activeSession.project}
@@ -335,13 +358,9 @@
 {/if}
 
 <style>
-	/* The composer island's top pill row (mockup `.pillrow`). It sits INSIDE the
-	   glass island now, so it carries no surface of its own — just the row
-	   metrics. Its dropdowns (agent, execution mode, branch) open upward and out
-	   of the island; the explicit stacking level keeps them below the input area's
-	   @/slash autocomplete panels, which is the order the old markup had.
-	   `flex-wrap` lets the execution-mode bar's worktree error banner drop to its
-	   own line instead of squeezing the pills. */
+	/* The chip row floats above the composer box with a visible gap (mockup
+	   `.ctx`). Its dropdowns open upward; the stacking level keeps them below
+	   the input area's @/slash autocomplete panels. */
 	.context-pill-bar {
 		position: relative;
 		z-index: 10;
@@ -349,7 +368,7 @@
 		flex-wrap: wrap;
 		align-items: center;
 		gap: 6px;
-		padding: 9px 10px 0;
+		margin: 0 0 10px 2px;
 		min-width: 0;
 	}
 
@@ -359,7 +378,11 @@
 		flex-direction: column;
 		align-items: stretch;
 		gap: 8px;
-		padding: 0;
+		margin: 0;
+	}
+
+	.sheet-mode .ctx-sep {
+		display: none;
 	}
 
 	.runner-badge-wrap {
@@ -367,34 +390,32 @@
 		min-width: 0;
 	}
 
-	/* Project/worktree context badge — same pill metrics as the BranchSelector.
-	   A span is read-only; a button (remote runner) opens the re-pin menu. */
-	.context-badge {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		height: 26px;
-		max-width: 100%;
-		min-width: 0;
-		padding: 0 9px;
-		background: var(--scrim);
-		border: 1px solid var(--border);
-		border-radius: 999px;
-		color: var(--muted-foreground);
-		font-size: 12px;
-		white-space: nowrap;
+	/* Read-only chips describe the context without inviting a click. */
+	.ctx-chip.readonly {
 		cursor: default;
 	}
 
-	.sheet-mode .context-badge,
+	.repo-name {
+		max-width: 140px;
+	}
+
+	.branch-name {
+		max-width: min(180px, 38vw);
+	}
+
+	.sheet-mode .ctx-chip,
 	.sheet-mode .runner-badge-wrap {
 		width: 100%;
 	}
 
-	.sheet-mode .context-badge {
+	.sheet-mode .ctx-chip {
 		height: 52px;
 		padding: 0 14px;
+		gap: 8px;
+		border: 1px solid var(--border-subtle);
 		border-radius: 14px;
+		background: color-mix(in oklch, var(--muted) 55%, var(--card));
+		font-size: 0.86rem;
 	}
 
 	.sheet-mode .runner-dropdown {
@@ -402,21 +423,6 @@
 		width: 100%;
 		max-width: none;
 		margin-top: 6px;
-	}
-
-	.context-badge :global(svg) {
-		color: var(--subtle-foreground);
-	}
-
-	button.context-badge {
-		cursor: pointer;
-		font: inherit;
-	}
-
-	button.context-badge:hover,
-	button.context-badge.open {
-		border-color: var(--primary);
-		color: var(--foreground);
 	}
 
 	.runner-dropdown {
@@ -427,7 +433,7 @@
 		max-width: min(320px, calc(100vw - 24px));
 		max-height: 320px;
 		overflow-y: auto;
-		background: var(--card);
+		background: var(--popover);
 		border: 1px solid var(--border);
 		border-radius: calc(var(--radius, 0.75rem) * 0.83);
 		box-shadow: var(--shadow-l);
@@ -460,7 +466,7 @@
 	}
 
 	.runner-item:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--foreground) 8%, transparent);
+		background: var(--hover-overlay);
 	}
 
 	.runner-item.disabled,
@@ -479,58 +485,31 @@
 		}
 	}
 
-	/* Remote-placed session: subtle accent so the runner indicator is
-	   distinguishable from a local/worktree branch badge. */
-	.context-badge.runner {
+	/* Remote-placed session: a primary tint so the runner chip is
+	   distinguishable from the local one. */
+	.ctx-chip.runner {
 		color: var(--primary);
-		border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
-		background: color-mix(in oklch, var(--primary) 8%, transparent);
+		background: color-mix(in oklch, var(--primary) 12%, var(--muted));
 	}
 
-	.context-badge.runner :global(svg) {
+	.ctx-chip.runner :global(svg) {
 		color: var(--primary);
 	}
 
 	/* V2 Q7 degraded session: read-only, no runner online. Warning accent so it
 	   reads as an advisory (informational — there is no adopt/action here). */
-	.context-badge.degraded {
+	.ctx-chip.degraded {
 		color: var(--warning);
-		border-color: color-mix(in oklch, var(--warning) 40%, var(--border));
-		background: color-mix(in oklch, var(--warning) 10%, transparent);
+		background: color-mix(in oklch, var(--warning) 12%, var(--muted));
 	}
 
-	.context-badge.degraded :global(svg) {
+	.ctx-chip.degraded :global(svg) {
 		color: var(--warning);
 	}
 
-
-	.context-badge :global(svg) {
-		flex-shrink: 0;
-	}
-
-	.pill-label {
-		line-height: 1;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		min-width: 0;
-	}
-
-	.project-name {
-		max-width: 120px;
-	}
-
-	/* The branch segment reads as a ref, so it gets the mono treatment the
-	   mockup's `.branchtxt` uses. */
-	.branch-name {
-		max-width: min(180px, 38vw);
-		font-family: var(--font-mono);
-		font-size: 11px;
-	}
-
-	.separator {
-		color: var(--muted-foreground);
-		opacity: 0.4;
-		flex-shrink: 0;
+	/* The tick inside the read-only worktree indicator must beat the generic
+	   muted svg colour on chips. */
+	.wt-indicator :global(.ctx-chip-cb svg) {
+		color: var(--primary-foreground);
 	}
 </style>

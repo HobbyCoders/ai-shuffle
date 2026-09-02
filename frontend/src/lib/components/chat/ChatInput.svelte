@@ -1,17 +1,21 @@
 <script lang="ts">
 	/**
-	 * ChatInput - the Studio Noir glass composer island.
+	 * ChatInput - the split-chips composer (mockup: docs/design/composer-split-chips.mockup.html).
 	 *
-	 * One rounded glass container holds two rows:
-	 *   1. input area — Tiptap editor + the @/slash autocomplete panels. In the
-	 *      new-chat empty state a ContextPillBar row sits above it so execution
-	 *      mode / branch can be chosen before the first send.
-	 *   2. foot row   — ControlsDock (summary chip + context ring + attach)
-	 *      with the dictate / voice-call / send cluster passed in as its
-	 *      `actions` snippet.
+	 * Three stacked parts, top to bottom:
+	 *   1. ContextPillBar — the loose row of context chips (agent / runner /
+	 *      repository / branch / worktree) floating ABOVE the box with a gap, in
+	 *      both the new-chat and active states.
+	 *   2. The box — a flat hairline rectangle holding the Tiptap editor with
+	 *      the @/slash autocomplete panels, the return-glyph send cluster at its
+	 *      top-right (send · send-while-streaming · Stop · creating-worktree
+	 *      spinner), and the ControlsDock's bare-text controls row. The dictate
+	 *      and voice-call buttons are passed to the dock as its `voiceActions`
+	 *      snippet so they stay bound to this component's recording state.
+	 *   3. A dim keyboard-hint line under the box.
 	 *
-	 * Delegates voice recording to VoiceRecorder, controls dock to ControlsDock,
-	 * and drag-and-drop to DragDropOverlay.
+	 * Delegates voice recording to VoiceRecorder, controls to ControlsDock, and
+	 * drag-and-drop to the inline overlay.
 	 */
 	import { tick, onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
@@ -38,6 +42,7 @@
 	import StopButton from './StopButton.svelte';
 	import ControlsDock from './ControlsDock.svelte';
 	import ContextPillBar from './ContextPillBar.svelte';
+	import { CornerDownLeft } from 'lucide-svelte';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips } from './tiptap/serialization';
 
 	interface Command {
@@ -290,13 +295,6 @@
 		mobileComposerDestroyed = true;
 		if (mobileReconcileRaf !== null) cancelAnimationFrame(mobileReconcileRaf);
 	});
-
-	// Get selected agent name for display in placeholder
-	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'agent');
-
-	// New-chat state: the only place the context pill row (execution mode /
-	// branch / agent) still renders inside the island — see the markup note.
-	const isEmptyState = $derived($activeSession.messages.length === 0);
 
 	onMount(() => {
 		document.addEventListener('pointerdown', handleDocumentPointerDown);
@@ -732,22 +730,19 @@
 			onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}
 			onpointerdown={keepMobileComposerExpanded}
 		>
-			<!-- Main Island: one glass container -->
-			<div class="chat-island" bind:this={islandRef}>
-				<!-- Context pills (agent + execution mode / branch) render ONLY in
-				     the new-chat empty state: execution mode must be chosen before
-				     the first send. Once a chat is active they move into the
-				     ControlsDock's controls popover — the island stays a pure
-				     composer. Mobile hides this row entirely; the mobile sheet's
-				     Chat-setup section carries the same selectors there. -->
-				{#if isEmptyState}
-					<div class="context-pill-row"><ContextPillBar /></div>
-				{/if}
+			<!-- Context chips: agent · runner · repository · branch · worktree.
+			     A loose row floating ABOVE the box with a visible gap, in both the
+			     new-chat and active states (ContextPillBar decides which chips are
+			     selectors and which are read-only). Mobile hides this row; the
+			     mobile sheet's Chat-setup section carries the same selectors. -->
+			<div class="context-pill-row"><ContextPillBar /></div>
 
-				<!-- Row 2: the editor. The whole area forwards pointer events to
-				     the Tiptap editor so the padding above/below the text line is
-				     clickable too — an empty composer reads as one target, not a
-				     thin strip between two dead zones. The autocomplete panels
+			<!-- The box: a flat hairline rectangle holding the editor, the send
+			     cluster at its top-right, and the bare-text controls row. -->
+			<div class="chat-island" bind:this={islandRef}>
+				<!-- The editor. The whole area forwards pointer events to the Tiptap
+				     editor so the padding around the text line is clickable too — an
+				     empty composer reads as one target. The autocomplete panels
 				     (positioned upward OUTSIDE this element) are unaffected: they are
 				     never inside this element's event path. -->
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -780,7 +775,7 @@
 
 						<TiptapEditor
 							bind:this={editorRef}
-							placeholder="Message {selectedProfileName} — @ files, / commands"
+							placeholder="Describe a task or ask a question"
 							initialContent={initialComposerDraft}
 							disabled={!$anyCredential}
 							onTextChange={(text) => {
@@ -797,14 +792,49 @@
 							}}
 						/>
 					</div>
+
+					<!-- Send cluster (mockup `.send`): the return glyph at the box's
+					     top-right, accent-coloured once there is something to send.
+					     Typing during a turn does not replace Stop: the send goes out
+					     as a pending message and the turn keeps running, so Stop stays
+					     one click away beside it. Stop is an informed choice when
+					     background agents are live — StopButton confirms first. -->
+					<div class="send-cluster">
+						{#if $activeSession.isCreatingWorktree}
+							<!-- Creating worktree - show spinner -->
+							<button type="button" class="send-btn creating-worktree" disabled title="Creating worktree..." aria-label="Creating worktree">
+								<svg class="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+									<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
+								</svg>
+							</button>
+						{:else if $activeSession.isStreaming}
+							{#if plainTextValue.trim()}
+								<button type="submit" class="send-btn" title="Send — Enter" aria-label="Send">
+									<CornerDownLeft size={13} strokeWidth={2.2} aria-hidden="true" />
+								</button>
+							{/if}
+							<StopButton
+								activeTasks={$activeSession.activeTasks}
+								onStop={() => activeSession.stopGeneration()}
+							/>
+						{:else}
+							<button
+								type="submit"
+								class="send-btn"
+								disabled={!inputValue.trim() || !$anyCredential || isUploading || isRecording || isTranscribing}
+								title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.worktreeIntent === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
+								aria-label="Send"
+							>
+								<CornerDownLeft size={13} strokeWidth={2.2} aria-hidden="true" />
+							</button>
+						{/if}
+					</div>
 				</div>
 
-				<!-- Row 3: foot row. ControlsDock owns the model / effort / permission
-				     pills, the context ring and the attach button; the
-				     dictate / voice-call / send cluster is handed to it as a snippet so
-				     the whole right-hand cluster of the mockup's footrow lines up in one
-				     flex row. The snippet renders inside the form, so the submit
-				     buttons below still submit it. -->
+				<!-- Controls row. ControlsDock owns permission mode, attach, model,
+				     effort and the context ring; the dictate and voice-call buttons
+				     are handed to it as a snippet so they stay bound to this
+				     component's recording state and render inside the form. -->
 				<ControlsDock
 					{isUploading}
 					onAttachClick={triggerFileUpload}
@@ -814,7 +844,7 @@
 						else scheduleMobileComposerReconciliation();
 					}}
 				>
-					{#snippet actions()}
+					{#snippet voiceActions()}
 						<!-- Voice Input (delegated to VoiceRecorder component) -->
 						<VoiceRecorder
 							onTranscription={handleTranscription}
@@ -827,47 +857,16 @@
 						     nothing when voice mode is off or the surface doesn't
 						     qualify (active non-voice chat). -->
 						<VoiceCallButton disabled={isUploading || isRecording || isTranscribing} />
-
-						{#if $activeSession.isCreatingWorktree}
-							<!-- Creating worktree - show spinner -->
-							<button type="button" class="send-btn creating-worktree" disabled title="Creating worktree...">
-								<svg class="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
-								</svg>
-							</button>
-						{:else if $activeSession.isStreaming}
-							<!-- Typing during a turn no longer replaces Stop: the send goes
-							     out as a pending message and the turn keeps running, so
-							     stopping it stays one click away. Send sits to the left of
-							     Stop, and only while there is something to send. -->
-							{#if plainTextValue.trim()}
-								<button type="submit" class="send-btn" title="Send — Enter">
-									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.3" d="m5 12 7-7 7 7M12 19V5" />
-									</svg>
-								</button>
-							{/if}
-							<!-- Stop is an informed choice when background agents are live:
-							     the SDK interrupt cancels the agents too, so StopButton
-							     confirms first. -->
-							<StopButton
-								activeTasks={$activeSession.activeTasks}
-								onStop={() => activeSession.stopGeneration()}
-							/>
-						{:else}
-							<button
-								type="submit"
-								class="send-btn"
-								disabled={!inputValue.trim() || !$anyCredential || isUploading || isRecording || isTranscribing}
-								title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.worktreeIntent === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
-							>
-								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.3" d="m5 12 7-7 7 7M12 19V5" />
-								</svg>
-							</button>
-						{/if}
 					{/snippet}
 				</ControlsDock>
+			</div>
+
+			<!-- Dim hint line under the box (mockup `.hint`). Desktop only: on
+			     mobile Enter inserts a newline, so the shortcut would be wrong. -->
+			<div class="composer-hint" aria-hidden="true">
+				<span><kbd>@</kbd> files</span>
+				<span><kbd>/</kbd> commands</span>
+				<span><kbd>shift ↵</kbd> newline</span>
 			</div>
 		</form>
 	</div>
@@ -888,14 +887,16 @@
 		}
 	}
 
-	/* `.dockinner` — the composer shares the transcript column's 768px measure.
-	   Also the positioning context for the drag overlay. */
+	/* Mockup `.composer` — shares the transcript column's 768px measure. Also
+	   the positioning context for the drag overlay. */
 	.chat-input-container {
 		position: relative;
 		max-width: 48rem;
 		margin: 0 auto;
 	}
 
+	/* The chip row floats above the box; ContextPillBar supplies the gap (its
+	   bottom margin) and the wrapping. */
 	.context-pill-row {
 		min-width: 0;
 	}
@@ -910,7 +911,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		border-radius: 20px;
+		border-radius: calc(var(--radius, 10px) + 2px);
 		animation: fadeIn 0.2s ease;
 	}
 
@@ -933,54 +934,41 @@
 		flex-shrink: 0;
 	}
 
-	/* ===== THE GLASS ISLAND =====
-	   One container for the composer rows. `overflow` stays VISIBLE (unlike the
-	   mockup, which has no live dropdowns): every popover in the composer — the
-	   @/slash autocomplete panels, the empty-state agent/branch/mode menus, the
-	   controls popover and the context-usage popover — opens upward and out of
-	   these bounds, and clipping them would make them unreachable. */
+	/* ===== THE BOX (mockup `.box`) =====
+	   A flat rectangle: 1px hairline, the theme radius (10px), card fill, no
+	   glass. It deliberately establishes NO stacking context (no backdrop-filter,
+	   no z-index) so the rows order themselves against the chip row above:
+	   chip row (z 10, set in ContextPillBar) < input area (z 20; its @/slash
+	   panels open upward over the chips) < controls row (z 30, set in
+	   ControlsDock; its popovers paint over the message box). `overflow` stays
+	   VISIBLE: every popover in the composer opens out of these bounds, and
+	   clipping them would make them unreachable. */
 	.chat-island {
 		position: relative;
 		display: flex;
 		flex-direction: column;
-		border-radius: 20px;
+		border-radius: var(--radius, 10px);
 		border: 1px solid var(--border);
-		background: var(--glass);
-		/* One switch for the whole app's compositing budget — see the
-		   "COMPOSITING BUDGET" block in app.css. Was blur(22px) saturate(160%),
-		   the heaviest backdrop-filter in the app and sitting directly over the
-		   scrolling transcript; now 8px, and `none` (with an opaque --glass)
-		   under prefers-reduced-transparency or the low-end profile. */
-		backdrop-filter: var(--fx-glass-backdrop);
-		-webkit-backdrop-filter: var(--fx-glass-backdrop);
-		box-shadow: inset 0 1px 0 0 var(--glass-highlight);
-		transition: border-color 0.2s ease, box-shadow 0.2s ease;
+		background: var(--card);
+		transition: border-color 0.2s ease;
 	}
 
 	.chat-island:focus-within {
-		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
-		box-shadow:
-			inset 0 1px 0 0 var(--glass-highlight),
-			0 0 32px -12px var(--glow);
+		border-color: var(--border-strong);
 	}
 
-	/* ===== ROW 1.5 — the editor =====
-	   The island's `backdrop-filter` establishes a stacking context, so the rows
-	   are ordered explicitly inside it: the (empty-state-only) pill row
-	   (z-index 10, set in ContextPillBar) sits below the input area, whose
-	   @/slash panels must stay on top of it, and the foot row (z-index 30, set
-	   in ControlsDock) is above both so its upward popovers paint over the
-	   message box. */
+	/* ===== THE EDITOR ROW ===== */
 	.input-area {
 		position: relative;
 		z-index: 20;
-		padding: 10px 14px 6px;
-		min-height: 62px;
 		display: flex;
 		align-items: flex-start;
+		gap: 8px;
+		padding: 12px 12px 4px 14px;
+		min-height: 70px;
 	}
 
-	/* Desktop: the empty editor stretches to the island's full upper region, so
+	/* Desktop: the empty editor stretches to the box's full upper region, so
 	   the caret lands where the user clicked instead of snapping to a one-line
 	   strip. Once typing grows past that the natural height takes over. Mobile
 	   keeps its compact metrics — there the composer collapses/focuses as one
@@ -1001,27 +989,36 @@
 		background: transparent;
 	}
 
-	/* ===== SEND BUTTON — teal, with the mockup's glow ===== */
-	.send-btn {
+	/* ===== SEND CLUSTER (mockup `.send`) =====
+	   Top-right of the box, on the first text line. A flex sibling of the
+	   editor rather than an absolutely positioned overlay, so the text never
+	   runs under it and the mobile collapsed row keeps it at the end of the
+	   single input line. */
+	.send-cluster {
 		display: flex;
 		align-items: center;
-		justify-content: center;
-		width: 30px;
-		height: 30px;
-		margin-left: 3px;
+		gap: 4px;
+		flex-shrink: 0;
+		/* Centre a 24px button on the editor's ~22px first line. */
+		margin-top: -1px;
+	}
+
+	.send-btn {
+		display: grid;
+		place-items: center;
+		width: 24px;
+		height: 24px;
 		padding: 0;
 		background: var(--primary);
 		border: none;
-		border-radius: 10px;
+		border-radius: 6px;
+		color: var(--primary-foreground);
 		cursor: pointer;
-		box-shadow: 0 0 18px -4px var(--glow);
-		transition: filter 0.13s ease, box-shadow 0.13s ease, background-color 0.13s ease;
-		flex-shrink: 0;
+		transition: background-color 0.12s ease, color 0.12s ease, filter 0.12s ease;
 	}
 
 	.send-btn:hover:not(:disabled) {
 		filter: brightness(1.08);
-		box-shadow: 0 0 22px -2px var(--glow);
 	}
 
 	.send-btn:active:not(:disabled) {
@@ -1029,32 +1026,45 @@
 	}
 
 	.send-btn:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 1px;
+		outline: 1px solid var(--primary);
+		outline-offset: 2px;
 	}
 
-	.send-btn svg {
-		color: var(--primary-foreground);
-	}
-
+	/* Nothing to send yet: the quiet return glyph the mockup shows at rest. */
 	.send-btn:disabled {
-		background: var(--scrim);
-		box-shadow: none;
-		cursor: not-allowed;
-	}
-
-	.send-btn:disabled svg {
+		background: var(--muted);
 		color: var(--subtle-foreground);
+		cursor: default;
 	}
 
-	/* Creating worktree state - keep the primary fill with the spinner */
-	.send-btn.creating-worktree {
+	/* Creating worktree: keep the accent fill behind the spinner. */
+	.send-btn.creating-worktree,
+	.send-btn.creating-worktree:disabled {
 		background: var(--primary);
+		color: var(--primary-foreground);
 		cursor: wait;
 	}
 
-	.send-btn.creating-worktree svg {
-		color: var(--primary-foreground);
+	.send-cluster :global(.stop-btn) {
+		width: 24px;
+		height: 24px;
+		border-radius: 6px;
+	}
+
+	/* ===== HINT LINE (mockup `.hint`) ===== */
+	.composer-hint {
+		display: flex;
+		justify-content: flex-end;
+		gap: 12px;
+		margin: 8px 4px 0;
+		color: var(--subtle-foreground);
+		font-size: 11px;
+		line-height: 1;
+	}
+
+	.composer-hint kbd {
+		font: inherit;
+		color: var(--muted-foreground);
 	}
 
 	@keyframes fadeIn {
@@ -1062,8 +1072,9 @@
 		to { opacity: 1; }
 	}
 
-	/* T3-style mobile composer: an idle chat shrinks to a single pill. Focusing
-	   restores the context and controls rows; a successful send blurs it again. */
+	/* T3-style mobile composer: an idle chat shrinks to a single input line with
+	   the send glyph at its end. Focusing restores the controls row; a
+	   successful send blurs it again. */
 	@media (max-width: 1080px) {
 		.chat-input-wrapper {
 			padding: 12px 0.5rem calc(0.5rem + env(safe-area-inset-bottom, 0px));
@@ -1071,33 +1082,38 @@
 		}
 
 		.chat-island {
-			border-radius: 18px;
+			border-radius: 16px;
 			transition:
 				border-radius 180ms ease,
-				border-color 180ms ease,
-				box-shadow 180ms ease;
+				border-color 180ms ease;
 		}
 
-		/* Profile, branch and worktree setup now live in the mobile controls sheet. */
-		.context-pill-row {
+		/* Profile, branch and worktree setup live in the mobile controls sheet;
+		   the keyboard hint describes desktop keys only. */
+		.context-pill-row,
+		.composer-hint {
 			display: none;
 		}
 
 		.input-area {
 			min-height: 56px;
-			padding: 10px 12px 4px;
+			padding: 10px 10px 4px 12px;
 		}
 
-		.send-btn {
-			width: 38px;
-			height: 38px;
-			border-radius: 12px;
+		/* Thumb-sized primary action. */
+		.send-btn,
+		.send-cluster :global(.stop-btn) {
+			width: 34px;
+			height: 34px;
+			border-radius: 10px;
+		}
+
+		.send-cluster {
+			margin-top: -5px;
 		}
 
 		.mobile-collapsed .chat-island {
 			min-height: 50px;
-			flex-direction: row;
-			align-items: center;
 			border-radius: 14px;
 		}
 
@@ -1105,22 +1121,22 @@
 			display: none;
 		}
 
-		.mobile-collapsed :global(.mobile-controls),
-		.mobile-collapsed :global(.controls-right > button:not(.send-btn):not(.stop-btn)),
-		.mobile-collapsed :global(.controls-right > .voice-btn-wrapper) {
+		/* Collapsed: the controls row goes away entirely. The send / stop
+		   cluster lives in the input area, so the primary action stays on the
+		   single remaining line. */
+		.mobile-collapsed :global(.controls-dock) {
 			display: none;
 		}
 
 		.mobile-collapsed .input-area {
 			min-width: 0;
 			min-height: 48px;
-			flex: 1;
-			padding: 12px 4px 10px 16px;
+			align-items: center;
+			padding: 7px 8px 7px 16px;
 		}
 
-		.mobile-collapsed :global(.controls-dock) {
-			width: auto;
-			padding: 5px 6px 5px 0;
+		.mobile-collapsed .send-cluster {
+			margin-top: 0;
 		}
 	}
 

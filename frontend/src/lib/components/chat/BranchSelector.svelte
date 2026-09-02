@@ -146,10 +146,14 @@
 <div class="branch-selector" class:sheet-mode={sheetMode} bind:this={dropdownRef}>
 	<button
 		type="button"
-		class="pill branch-btn"
+		class="ctx-chip pill branch-btn"
 		class:locked={branchLocked}
+		class:open={showDropdown}
 		onclick={toggleDropdown}
 		disabled={branchLocked}
+		aria-label={displayBranch ? `Branch: ${displayBranch}` : 'Select branch'}
+		aria-haspopup="menu"
+		aria-expanded={showDropdown}
 		title={isWorktreeMode
 			? `Worktree branch: ${currentBranch ?? 'unknown'}`
 			: isStreaming
@@ -159,22 +163,20 @@
 					: 'Select branch'}
 	>
 		{#if projectName}
-			<FolderClosed size={13} strokeWidth={1.5} />
-			<span class="pill-label project-name">{projectName}</span>
+			<FolderClosed size={12} strokeWidth={1.6} />
+			<span class="ctx-chip-label project-name">{projectName}</span>
 			{#if displayBranch}<span class="separator">/</span>{/if}
 		{/if}
-		<GitBranch size={13} strokeWidth={1.5} />
+		<GitBranch size={12} strokeWidth={1.6} />
 		{#if displayBranch}
-			<span class="pill-label branch-name">{displayBranch}</span>
+			<span class="ctx-chip-label branch-name">{displayBranch}</span>
 		{/if}
 		{#if checkingOut}
 			<Loader2 size={11} strokeWidth={2} class="spin" />
-		{:else if isWorktreeMode}
-			<Lock size={10} strokeWidth={1.5} />
-		{:else if isStreaming}
-			<Lock size={10} strokeWidth={1.5} />
-		{:else}
-			<ChevronDown size={11} strokeWidth={1.5} />
+		{:else if isWorktreeMode || isStreaming}
+			<Lock size={10} strokeWidth={1.6} />
+		{:else if sheetMode}
+			<ChevronDown size={11} strokeWidth={1.6} />
 		{/if}
 	</button>
 
@@ -280,8 +282,11 @@
 		max-width: none;
 	}
 
+	/* A button centres its text by default; the stretched label must read as
+	   a row, left-aligned like the other sheet rows. */
 	.sheet-mode .branch-name {
 		flex: 1;
+		text-align: left;
 	}
 
 	.sheet-mode .branch-dropdown {
@@ -293,44 +298,8 @@
 		margin-top: 6px;
 	}
 
-	/* Pill button — the composer island's `.pill` metrics (mockup): 26px tall,
-	   fully rounded, `--scrim` fill on a hairline border. */
-	.pill {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		height: 26px;
-		max-width: 100%;
-		min-width: 0;
-		padding: 0 9px;
-		background: var(--scrim);
-		border: 1px solid var(--border);
-		border-radius: 999px;
-		color: var(--muted-foreground);
-		font-size: 12px;
-		cursor: pointer;
-		transition: border-color 0.13s ease, color 0.13s ease, background-color 0.13s ease;
-		white-space: nowrap;
-	}
-
-	.pill:hover:not(:disabled) {
-		border-color: var(--border-strong);
-		color: var(--foreground);
-	}
-
-	.pill:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 1px;
-	}
-
-	.pill :global(svg:first-child) {
-		color: var(--subtle-foreground);
-	}
-
-	.pill:disabled {
-		cursor: default;
-	}
-
+	/* The branch chip: `.ctx-chip` from app.css carries the metrics; only the
+	   locked state and the label widths are specific to this component. */
 	.pill.locked {
 		opacity: 0.85;
 	}
@@ -339,23 +308,12 @@
 		flex-shrink: 0;
 	}
 
-	.pill-label {
-		line-height: 1;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		min-width: 0;
-	}
-
 	.project-name {
 		max-width: 120px;
 	}
 
-	/* A git ref reads as code, so it takes the mockup's `.branchtxt` treatment. */
 	.branch-name {
 		max-width: min(180px, 38vw);
-		font-family: var(--font-mono);
-		font-size: 11px;
 	}
 
 	.separator {

@@ -28,16 +28,22 @@
 	} from './execution-mode-eligibility';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch, gitStatus } from '$lib/stores/git.svelte';
 	import { ChevronDown, ChevronRight, Cloud, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
-	import { untrack } from 'svelte';
+	import { untrack, type Snippet } from 'svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 	import Banner from '$lib/components/Banner.svelte';
 
 	interface Props {
 		/** Stack the mode and worktree selectors as full-width mobile-sheet rows. */
 		sheetMode?: boolean;
+		/**
+		 * Chips the parent wants rendered between the runner chip and the worktree
+		 * chips (the repository chip and, in local mode, the checkout branch chip)
+		 * so the row reads runner · repo · branch · worktree in DOM order.
+		 */
+		between?: Snippet;
 	}
 
-	let { sheetMode = false }: Props = $props();
+	let { sheetMode = false, between }: Props = $props();
 
 	// --- UI state ---
 	let showBranchDropdown = $state(false);
@@ -323,6 +329,14 @@
 		showCreateModal = true;
 	}
 
+	// The "new worktree" chip: the created branch is staged as the worktree
+	// branch (handleBranchCreated), which only means something in worktree
+	// mode, so flip the mode on first.
+	function openNewWorktree() {
+		if (!worktreeOn) setMode('worktree');
+		openCreateModal();
+	}
+
 	function handleBranchCreated(branchName: string) {
 		// Branch was already created by CreateBranchModal; stage it as the worktree
 		// branch (create_new_branch=false). The worktree itself is created at send
@@ -337,34 +351,33 @@
 
 <div class="execution-mode-bar" class:sheet-mode={sheetMode}>
 	<div class="mode-bar-row">
-		<!-- Mode dropdown pill: shows the base mode (Local) plus a worktree marker,
-		     and on click opens an upward menu with Local as a radio and a Worktree
-		     checkbox at the bottom. Worktree is gated to any git repo; for a non-git
-		     project only Local is offered and the mode is forced to Local above. -->
+		<!-- Runner chip: this device or a cloud runner. Opens an upward menu with
+		     Local as a radio plus the Cloud accordion. The worktree modifier is
+		     its own checkbox chip further along the row. -->
 		<div class="mode-selector" bind:this={modeDropdownRef}>
 			<button
 				type="button"
-				class="mode-trigger"
+				class="ctx-chip mode-trigger"
 				class:open={showModeDropdown}
 				onclick={toggleModeDropdown}
 				title={deviceIntent ? `Run this session on ${deviceIntent.name}` : 'Run this session on this device'}
+				aria-label="Runner: {deviceIntent ? deviceIntent.name : 'Local'}"
 				aria-haspopup="menu"
 				aria-expanded={showModeDropdown}
 			>
 				{#if deviceIntent}
-					<Cloud size={13} strokeWidth={1.5} />
+					<Cloud size={12} strokeWidth={1.6} />
 				{:else}
-					<Monitor size={13} strokeWidth={1.5} />
+					<Monitor size={12} strokeWidth={1.6} />
 				{/if}
-				<span class="mode-trigger-label">{deviceIntent ? deviceIntent.name : 'Local'}</span>
-				{#if worktreeOn}
-					<GitFork size={12} strokeWidth={1.5} class="wt-marker" />
+				<span class="ctx-chip-label mode-trigger-label">{deviceIntent ? deviceIntent.name : 'Local'}</span>
+				{#if sheetMode}
+					<ChevronDown size={12} strokeWidth={1.5} />
 				{/if}
-				<ChevronDown size={12} strokeWidth={1.5} />
 			</button>
 
 			{#if showModeDropdown}
-				<div class="mode-dropdown branch-dropdown" role="menu">
+				<div class="mode-dropdown branch-dropdown" role="menu" aria-label="Runner selection">
 					<!-- Base mode: Local -->
 					<button
 						type="button"
@@ -425,42 +438,34 @@
 							{/if}
 						</div>
 					{/if}
-
-					<!-- Worktree modifier: orthogonal checkbox at the bottom. -->
-					{#if isGitRepo}
-						<div class="branch-divider"></div>
-						<button
-							type="button"
-							class="branch-item wt-check-item"
-							onclick={toggleWorktree}
-							title="Run in an isolated git worktree."
-							role="menuitemcheckbox"
-							aria-checked={worktreeOn}
-						>
-							<span class="wt-checkbox" class:checked={worktreeOn}>
-								{#if worktreeOn}<Check size={11} strokeWidth={3} />{/if}
-							</span>
-							<GitFork size={13} strokeWidth={1.5} />
-							<span class="branch-item-name">Worktree</span>
-						</button>
-					{/if}
 				</div>
 			{/if}
 		</div>
+
+		<!-- Repository chip and, in local mode, the checkout branch chip — owned
+		     by the parent row so they can sit between the runner and the worktree
+		     chips. -->
+		{@render between?.()}
 
 		<!-- Branch selector (shown when worktree mode active) -->
 		{#if $activeSession.worktreeIntent === 'worktree'}
 			<div class="branch-selector" bind:this={dropdownRef}>
 			<button
 				type="button"
-				class="branch-trigger"
+				class="ctx-chip branch-trigger"
 				class:auto-mode={isAutoMode}
+				class:open={showBranchDropdown}
 				onclick={toggleDropdown}
+				aria-label="Worktree branch: {currentBranch}"
+				aria-haspopup="menu"
+				aria-expanded={showBranchDropdown}
 				title={isAutoMode ? 'Branch will be auto-generated from your message. Click to select a specific branch.' : `Current branch: ${currentBranch}`}
 			>
-				<GitBranch size={12} strokeWidth={1.5} />
-				<span class="branch-name">{currentBranch}</span>
-				<ChevronDown size={12} strokeWidth={1.5} />
+				<GitBranch size={12} strokeWidth={1.6} />
+				<span class="ctx-chip-label branch-name">{currentBranch}</span>
+				{#if sheetMode}
+					<ChevronDown size={12} strokeWidth={1.5} />
+				{/if}
 			</button>
 
 			{#if showBranchDropdown}
@@ -546,13 +551,19 @@
 			<div class="branch-selector" bind:this={baseDropdownRef}>
 				<button
 					type="button"
-					class="branch-trigger"
+					class="ctx-chip branch-trigger"
+					class:open={showBaseDropdown}
 					onclick={toggleBaseDropdown}
+					aria-label="Base branch: {baseBranch}"
+					aria-haspopup="menu"
+					aria-expanded={showBaseDropdown}
 					title={`New worktree branch will be created from ${baseBranch}. Click to change the base branch.`}
 				>
-					<GitBranch size={12} strokeWidth={1.5} />
-					<span class="branch-name">from {baseBranch}</span>
-					<ChevronDown size={12} strokeWidth={1.5} />
+					<GitBranch size={12} strokeWidth={1.6} />
+					<span class="ctx-chip-label branch-name">from {baseBranch}</span>
+					{#if sheetMode}
+						<ChevronDown size={12} strokeWidth={1.5} />
+					{/if}
 				</button>
 
 				{#if showBaseDropdown}
@@ -586,6 +597,33 @@
 				{/if}
 			</div>
 		{/if}
+		{/if}
+
+		<!-- Worktree modifier: a checkbox chip. Orthogonal to the runner choice
+		     (D7) and only offered for a git repository. -->
+		{#if isGitRepo}
+			<label class="ctx-chip wt-chip" title="Run in an isolated git worktree.">
+				<input type="checkbox" checked={worktreeOn} onchange={toggleWorktree} />
+				<span class="ctx-chip-cb" class:checked={worktreeOn} aria-hidden="true">
+					<Check size={9} strokeWidth={2.6} />
+				</span>
+				<span class="ctx-chip-label">worktree</span>
+			</label>
+
+			<!-- New worktree: create a branch and stage it as the worktree branch. -->
+			<button
+				type="button"
+				class="ctx-chip ctx-chip-icon new-wt-chip"
+				onclick={openNewWorktree}
+				aria-label="New worktree from {baseBranch}"
+				title="New worktree from {baseBranch}"
+			>
+				<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12z"/>
+					<path d="M8 7.5v3.5M6.25 9.25h3.5"/>
+				</svg>
+				{#if sheetMode}<span class="ctx-chip-label">New worktree from {baseBranch}</span>{/if}
+			</button>
 		{/if}
 	</div>
 
@@ -645,17 +683,23 @@
 	}
 
 	.sheet-mode .mode-trigger,
-	.sheet-mode .branch-trigger {
+	.sheet-mode .branch-trigger,
+	.sheet-mode .wt-chip,
+	.sheet-mode .new-wt-chip {
 		width: 100%;
 		height: 52px;
 		padding: 0 14px;
-		border-color: var(--border-subtle);
+		gap: 8px;
+		border: 1px solid var(--border-subtle);
 		border-radius: 14px;
 		background: color-mix(in oklch, var(--muted) 55%, var(--card));
+		font-size: 0.86rem;
 	}
 
 	.sheet-mode .mode-trigger-label,
-	.sheet-mode .branch-name {
+	.sheet-mode .branch-name,
+	.sheet-mode .wt-chip .ctx-chip-label,
+	.sheet-mode .new-wt-chip .ctx-chip-label {
 		flex: 1;
 		max-width: none;
 		text-align: left;
@@ -673,44 +717,17 @@
 
 	.mode-bar-row {
 		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
 		gap: 6px;
 		max-width: 100%;
 	}
 
-	/* Mode dropdown pill — the composer island's `.pill` metrics (mockup) */
+	/* Runner chip — `.ctx-chip` (app.css) carries the look. */
 	.mode-selector {
 		position: relative;
 		flex-shrink: 0;
 		min-width: 0;
-	}
-
-	.mode-trigger {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		height: 26px;
-		padding: 0 9px;
-		background: var(--scrim);
-		border: 1px solid var(--border);
-		border-radius: 999px;
-		color: var(--muted-foreground);
-		font-size: 12px;
-		cursor: pointer;
-		transition: border-color 0.13s ease, color 0.13s ease, background-color 0.13s ease;
-		white-space: nowrap;
-		max-width: 100%;
-	}
-
-	.mode-trigger:hover,
-	.mode-trigger.open {
-		border-color: var(--border-strong);
-		color: var(--foreground);
-	}
-
-	.mode-trigger:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 1px;
 	}
 
 	.mode-trigger :global(svg) {
@@ -718,34 +735,14 @@
 		color: var(--subtle-foreground);
 	}
 
-
-	/* Small worktree marker on the trigger pill when the checkbox is on. */
-	.mode-trigger :global(svg.wt-marker) {
-		color: var(--primary);
+	/* The worktree checkbox chip's tick must beat the generic muted svg colour. */
+	.wt-chip :global(.ctx-chip-cb svg) {
+		color: var(--primary-foreground);
 	}
 
-	/* Worktree checkbox row in the mode menu. */
-	.wt-checkbox {
-		width: 15px;
-		height: 15px;
-		border: 1.5px solid var(--border);
-		border-radius: 4px;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		flex-shrink: 0;
-		transition: background-color 120ms ease, border-color 120ms ease;
-	}
-
-	.wt-checkbox.checked {
-		background: var(--primary);
-		border-color: var(--primary);
-	}
-
-	/* Wins over the generic `.branch-item :global(svg)` muted color so the tick
-	   reads as white on the filled primary box. */
-	.wt-checkbox :global(svg) {
-		color: var(--primary-foreground) !important;
+	.new-wt-chip svg {
+		width: 12px;
+		height: 12px;
 	}
 
 	/* Cloud accordion: an inline section inside the mode menu (no flyout). */
@@ -786,14 +783,8 @@
 		opacity: 0.75;
 	}
 
-	/* The mode name is the pill's subject, so it takes the foreground weight the
-	   mockup's `.pill .k` uses. */
 	.mode-trigger-label {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		color: var(--foreground);
-		font-weight: 500;
+		max-width: min(160px, 40vw);
 	}
 
 	/* Mode dropdown — reuses .branch-dropdown visuals; anchored to the pill's left
@@ -810,55 +801,19 @@
 		min-width: 0;
 	}
 
-	.branch-trigger {
-		display: flex;
-		align-items: center;
-		gap: 5px;
-		height: 26px;
-		padding: 0 9px;
-		background: var(--scrim);
-		border: 1px solid var(--border);
-		border-radius: 999px;
-		color: var(--muted-foreground);
-		font-size: 12px;
-		cursor: pointer;
-		transition: border-color 0.13s ease, color 0.13s ease, background-color 0.13s ease;
-		max-width: 100%;
-		min-width: 0;
-	}
-
-	.branch-trigger:hover {
-		border-color: var(--border-strong);
-		color: var(--foreground);
-	}
-
-	.branch-trigger:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 1px;
-	}
-
 	.branch-trigger :global(svg) {
+		flex-shrink: 0;
 		color: var(--subtle-foreground);
 	}
 
-	.branch-trigger.auto-mode {
-		border-style: dashed;
-		color: var(--muted-foreground);
-		opacity: 0.8;
+	/* "Auto": no branch staged yet — the name is generated from the first
+	   message, so the chip reads as a placeholder rather than a choice. */
+	.branch-trigger.auto-mode .branch-name {
+		font-style: italic;
 	}
 
-	.branch-trigger.auto-mode:hover {
-		opacity: 1;
-	}
-
-	/* A git ref reads as code — the mockup's `.branchtxt` treatment. */
 	.branch-name {
 		max-width: min(180px, 40vw);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font-family: var(--font-mono);
-		font-size: 11px;
 	}
 
 	/* Branch dropdown */

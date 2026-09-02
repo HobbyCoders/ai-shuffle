@@ -1419,3 +1419,110 @@ button, a, .clickable {
 	height: 2.25rem;
 }
 
+/* ── Composer context chips ─────────────────────────────────────────────────
+   The small filled chips that float above the chat composer (agent, runner,
+   repository, branch, worktree). Shared by ProfileSelector, ExecutionModeBar,
+   BranchSelector and ContextPillBar, so the look lives here once. Components
+   layer their own scoped rules (sheet-mode rows, open/unset states) on top. */
+.ctx-chip {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	height: 22px;
+	max-width: 100%;
+	min-width: 0;
+	padding: 0 7px;
+	background: var(--muted);
+	border: 0;
+	border-radius: 5px;
+	color: var(--muted-foreground);
+	font: inherit;
+	font-size: 12px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	transition: background-color 0.12s ease, color 0.12s ease;
+}
+button.ctx-chip,
+label.ctx-chip {
+	cursor: pointer;
+}
+button.ctx-chip:hover:not(:disabled),
+label.ctx-chip:hover,
+button.ctx-chip.open {
+	background: color-mix(in oklch, var(--muted) 82%, var(--foreground));
+	color: var(--foreground);
+}
+button.ctx-chip:disabled {
+	cursor: default;
+}
+.ctx-chip:focus-visible,
+.ctx-chip:has(input:focus-visible) {
+	outline: 1px solid var(--primary);
+	outline-offset: 2px;
+}
+.ctx-chip > svg,
+.ctx-chip > :where(span, div) > svg {
+	flex-shrink: 0;
+	color: var(--subtle-foreground);
+}
+.ctx-chip.ctx-chip-icon {
+	padding: 0 5px;
+}
+.ctx-chip .ctx-chip-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+/* Trailing chevron on menu chips: smaller and dimmer than the leading glyph. */
+.ctx-chip .ctx-chip-chev {
+	width: 10px;
+	height: 10px;
+	margin-left: -1px;
+	color: var(--subtle-foreground);
+	opacity: 0.8;
+}
+/* The checkbox-style worktree chip: a real (visually hidden) input drives a
+   12px box that fills with the accent when checked. */
+.ctx-chip input[type='checkbox'] {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	opacity: 0;
+	pointer-events: none;
+}
+.ctx-chip .ctx-chip-cb {
+	display: grid;
+	place-items: center;
+	width: 12px;
+	height: 12px;
+	border-radius: 3px;
+	box-shadow: inset 0 0 0 1px var(--subtle-foreground);
+	background: transparent;
+	flex-shrink: 0;
+	transition: background-color 0.12s ease, box-shadow 0.12s ease;
+}
+.ctx-chip .ctx-chip-cb > svg {
+	width: 9px;
+	height: 9px;
+	color: var(--primary-foreground);
+	display: none;
+}
+.ctx-chip .ctx-chip-cb.checked {
+	background: var(--primary);
+	box-shadow: none;
+}
+.ctx-chip .ctx-chip-cb.checked > svg {
+	display: block;
+}
+/* Hairline separator between chip groups. */
+.ctx-sep {
+	width: 1px;
+	height: 12px;
+	margin: 0 2px;
+	background: var(--border-strong);
+	flex-shrink: 0;
+}
+

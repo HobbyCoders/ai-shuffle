@@ -1,33 +1,39 @@
 <script lang="ts">
 	/**
-	 * ControlsDock — the composer island's foot row.
+	 * ControlsDock — the bare-text controls row at the foot of the composer box
+	 * (mockup: docs/design/composer-split-chips.mockup.html).
 	 *
-	 * Left: ONE summary chip ("Model · Effort · Access") that opens the desktop
-	 * controls popover — chat-setup pills (agent / execution mode / branch),
-	 * the model picker, the effort slider with the Fast tier, and tool access —
-	 * followed by the context-usage ring with its own detail popover. Right:
-	 * the attach button, then whatever the parent passes in the `actions`
-	 * snippet — ChatInput uses it for the dictate / voice-call / send cluster
-	 * so the whole right-hand group shares one flex row.
+	 * Desktop, left to right:
+	 *   permission mode as plain text (opens the tool-access menu) · "+" attach ·
+	 *   the dictate mic and voice-call buttons ChatInput passes in as the
+	 *   `voiceActions` snippet · a small chevron that opens the full controls
+	 *   popover (model picker, effort slider with the Fast tier, tool access).
+	 * Right, left to right:
+	 *   model name as plain text (opens the model picker) · effort as a filled
+	 *   tag (opens the compact effort popover) · the context-usage ring.
 	 *
-	 * Mobile keeps its primary actions inline and moves the configuration
-	 * matrix into MobileComposerControlsSheet (the sliders trigger below).
+	 * Only one dock popover is open at a time; the ring's own popover closes
+	 * itself on any outside click, so the two never stack.
+	 *
+	 * Mobile keeps the attach / mic / voice actions inline, shows the settings
+	 * trigger + ring on the left, and moves the configuration matrix into
+	 * MobileComposerControlsSheet. The send button is not here on any viewport:
+	 * it sits at the top-right of the box, inside ChatInput's input area.
 	 *
 	 * Computer use is a GLOBAL toggle (Settings → Chat & Input), not a composer
 	 * control: the dock neither shows a toggle nor polls status. Halting it for a
 	 * session is the Stop button's job.
 	 */
-	import type { Snippet } from 'svelte';
+	import { tick, type Snippet } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { anyCredential } from '$lib/stores/auth.svelte';
-	import { profiles } from '$lib/stores/app-data.svelte';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import EffortSliderCard from './EffortSliderCard.svelte';
+	import EffortPopoverCard from './EffortPopoverCard.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
-	import ContextPillBar from './ContextPillBar.svelte';
-	import { SlidersHorizontal } from 'lucide-svelte';
+	import { ChevronDown, Plus, SlidersHorizontal } from 'lucide-svelte';
 	import {
 		getModelLabel,
 		getDefaultModel,
@@ -47,46 +53,77 @@
 	interface Props {
 		isUploading: boolean;
 		onAttachClick: () => void;
-		/** Trailing buttons for the right cluster (dictate / voice call / send). */
-		actions?: Snippet;
+		/** The dictate mic and voice-call buttons, rendered right after attach. */
+		voiceActions?: Snippet;
 		/** Lets ChatInput keep its compact mobile surface expanded while the sheet is open. */
 		onSheetOpenChange?: (open: boolean) => void;
 	}
 
-	let { isUploading, onAttachClick, actions, onSheetOpenChange }: Props = $props();
+	let { isUploading, onAttachClick, voiceActions, onSheetOpenChange }: Props = $props();
 
-	// Desktop: one popover hosts every run-binding control. Opening it closes the
-	// context-usage popover implicitly — they are separate components, but only
-	// one summary surface should be open at a time.
-	let controlsPopoverOpen = $state(false);
-	let summaryWrapRef = $state<HTMLDivElement | null>(null);
-	function setControlsPopoverOpen(open: boolean) {
-		controlsPopoverOpen = open;
-	}
-	function toggleControlsPopover() {
-		controlsPopoverOpen = !controlsPopoverOpen;
+	// ── Desktop popovers ──────────────────────────────────────────────
+	// Four anchored popovers, one open at a time: the permission menu, the
+	// model picker, the compact effort card and the full controls popover.
+	type DockPopover = 'permission' | 'model' | 'effort' | 'controls';
+	let openPopover = $state<DockPopover | null>(null);
+	let dockRef = $state<HTMLDivElement | null>(null);
+	// Vertical room above the row, measured when a popover opens. The popovers
+	// open upward, and in the new-chat state the box sits mid-screen, so a
+	// fixed height would push the tall ones past the top of the viewport.
+	let popoverRoom = $state<number | null>(null);
+	let permissionWrapRef = $state<HTMLDivElement | null>(null);
+	let modelWrapRef = $state<HTMLDivElement | null>(null);
+	let effortWrapRef = $state<HTMLDivElement | null>(null);
+	let controlsWrapRef = $state<HTMLDivElement | null>(null);
+
+	function wrapFor(kind: DockPopover): HTMLDivElement | null {
+		switch (kind) {
+			case 'permission':
+				return permissionWrapRef;
+			case 'model':
+				return modelWrapRef;
+			case 'effort':
+				return effortWrapRef;
+			case 'controls':
+				return controlsWrapRef;
+		}
 	}
 
-	function handlePopoverOutsideClick(e: MouseEvent) {
-		if (!controlsPopoverOpen || !summaryWrapRef) return;
-		if (!(e.target instanceof Node)) return;
-		if (summaryWrapRef.contains(e.target)) return;
-		controlsPopoverOpen = false;
+	function measurePopoverRoom() {
+		if (!dockRef) return;
+		// Minus the 10px anchor gap and a 12px margin from the viewport edge.
+		popoverRoom = Math.max(220, Math.floor(dockRef.getBoundingClientRect().top - 22));
 	}
 
-	function handlePopoverWindowKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape' && controlsPopoverOpen) {
+	function togglePopover(kind: DockPopover) {
+		openPopover = openPopover === kind ? null : kind;
+		if (openPopover) void tick().then(measurePopoverRoom);
+	}
+
+	function closePopover() {
+		openPopover = null;
+	}
+
+	function handleDocumentClick(e: MouseEvent) {
+		if (!openPopover) return;
+		const wrap = wrapFor(openPopover);
+		if (!wrap || !(e.target instanceof Node) || wrap.contains(e.target)) return;
+		openPopover = null;
+	}
+
+	function handleWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape' && openPopover) {
 			e.stopPropagation();
-			setControlsPopoverOpen(false);
+			closePopover();
 		}
 	}
 
 	$effect(() => {
-		document.addEventListener('click', handlePopoverOutsideClick);
-		window.addEventListener('keydown', handlePopoverWindowKeydown);
+		document.addEventListener('click', handleDocumentClick);
+		window.addEventListener('keydown', handleWindowKeydown);
 		return () => {
-			document.removeEventListener('click', handlePopoverOutsideClick);
-			window.removeEventListener('keydown', handlePopoverWindowKeydown);
+			document.removeEventListener('click', handleDocumentClick);
+			window.removeEventListener('keydown', handleWindowKeydown);
 		};
 	});
 
@@ -101,7 +138,6 @@
 	// carries no model. The user picks the binding when the chat is created —
 	// seeded from whatever they picked last — and may change it mid-session;
 	// every send carries it, and the backend stores it on the session row.
-	const activeProfile = $derived($profiles.find((p) => p.id === $activeSession.profile));
 	const effortValue = $derived($activeSession.effortLevelOverride);
 	const permissionValue = $derived($activeSession.permissionModeOverride ?? 'default');
 	const attachDisabled = $derived(
@@ -109,8 +145,6 @@
 	);
 
 	// ── Model override ──────────────────────────────────────────────
-	// Terse, family-level blurbs — the dropdown surfaces one line of "why pick
-	// this" without turning into a spec sheet.
 	// Live model-switch options — the FULL provider-grouped library (PA13), built
 	// by the shared catalog helper so the dock, the mobile sheet and the
 	// profile/agent editor can never disagree about naming or grouping. Provider
@@ -128,7 +162,7 @@
 
 	// ── Fast service tier ───────────────────────────────────────────
 	// Offered only on models that carry the tier (Claude Opus, OpenAI GPT-5 on
-	// an OpenAI/Codex provider row). It rides the effort dropdown because both
+	// an OpenAI/Codex provider row). It rides the effort popover because both
 	// are knobs on how hard — and how fast — the turn runs.
 	const fastMode = $derived($activeSession.fastMode);
 	const fastSupported = $derived(isFastModeCapable(modelValue));
@@ -160,8 +194,8 @@
 	const selectedModelLabel = $derived(getModelLabel(modelValue));
 	const actualModelLabel = $derived(getModelLabel(liveModel));
 	const requestedModelLabel = $derived(getModelLabel(liveRequestedModel));
-	// When rerouted the pill shows the ACTUAL model (what's really running);
-	// otherwise it shows the selection.
+	// When rerouted the model text shows the ACTUAL model (what's really
+	// running); otherwise it shows the selection.
 	const modelButtonLabel = $derived(rerouted ? actualModelLabel : selectedModelLabel);
 	const modelWarnTitle = $derived(
 		rerouted
@@ -170,14 +204,6 @@
 	);
 	const modelNotice = $derived(
 		rerouted ? `Running ${actualModelLabel} instead of ${requestedModelLabel}` : undefined
-	);
-	// Provider sub-label on the model pill (mockup: "Fable 5 · Claude"). It is the
-	// brand group the SELECTED model belongs to, reused verbatim from the dropdown
-	// options so the pill and the menu can't name the same account differently.
-	// Suppressed while rerouted — the pill then shows the ACTUAL model, whose
-	// group we haven't resolved, and a stale brand would be worse than none.
-	const modelSubLabel = $derived(
-		rerouted ? null : modelOptions.find((o) => o.value === modelValue)?.group ?? null
 	);
 
 	// Single owner of usage-limit fetching. A shared in-flight promise dedupes
@@ -197,7 +223,7 @@
 		return usageFetchInFlight;
 	}
 
-	// Populate the pill on load AND keep it right when the viewed/composed session
+	// Populate the ring on load AND keep it right when the viewed/composed session
 	// moves to a DIFFERENT install (e.g. opening an offloaded session), whose usage
 	// bucket may be missing or stale — the snapshot broadcast can lag switching by
 	// up to the poll interval. The FIRST run always fetches (initial populate,
@@ -248,63 +274,143 @@
 		{ value: 'max', label: 'Max', description: 'Maximum reasoning depth' }
 	];
 
-	// The summary chip reads "Model · Effort · Access". Effort shows its
-	// overridden level when one is set; access always names the effective mode
-	// (it defaults to 'default' → Ask, never blank).
-	const chipEffortLabel = $derived(
+	// Effort shows its pinned level when one is set, else "Auto" (the model's
+	// own default); access always names the effective mode (it defaults to
+	// 'default' → Ask, never blank).
+	const effortLabel = $derived(
 		effortValue ? (effortLevels.find((m) => m.value === effortValue)?.label ?? 'Effort') : 'Auto'
 	);
-	const chipPermissionLabel = $derived(
+	const permissionLabel = $derived(
 		permissionModes.find((m) => m.value === permissionValue)?.label ?? 'Ask'
 	);
-	function handleChipKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape' && controlsPopoverOpen) {
-			e.stopPropagation();
-			setControlsPopoverOpen(false);
-		}
-	}
+	const permissionDescription = $derived(
+		permissionModes.find((m) => m.value === permissionValue)?.description ?? ''
+	);
 </script>
 
-<div class="controls-dock">
-	<!-- Left: ONE summary chip, then the context ring -->
-	<div class="controls-left desktop-controls">
-		<div class="controls-summary-wrap" bind:this={summaryWrapRef}>
+<div
+	class="controls-dock"
+	bind:this={dockRef}
+	style:--dock-pop-max={popoverRoom != null ? `${popoverRoom}px` : undefined}
+>
+	<!-- Mobile: the settings trigger and the ring lead the row; the
+	     configuration matrix lives in one native-style bottom sheet. -->
+	<div class="mobile-controls">
+		<button
+			type="button"
+			class="mobile-settings-trigger"
+			class:warn={rerouted}
+			onclick={() => setMobileSheetOpen(true)}
+			aria-haspopup="dialog"
+			aria-expanded={mobileSheetOpen}
+			aria-label={`Open chat controls. Current model: ${modelButtonLabel}`}
+		>
+			<SlidersHorizontal size={16} strokeWidth={1.8} aria-hidden="true" />
+		</button>
+		<ContextUsageBar onOpenChange={(o) => { if (o) void refreshUsageLimits(true); }} />
+	</div>
+
+	<!-- Left group: permission · attach · mic · voice · more -->
+	<div class="dock-group dock-left">
+		<div class="dock-pop-wrap desktop-controls" bind:this={permissionWrapRef}>
 			<button
 				type="button"
-				class="controls-summary-chip"
-				class:open={controlsPopoverOpen}
-				class:warn={rerouted}
-				onclick={toggleControlsPopover}
-				onkeydown={handleChipKeydown}
-				title={rerouted && modelWarnTitle
-					? modelWarnTitle
-					: `Model ${modelButtonLabel} · effort ${chipEffortLabel} · access ${chipPermissionLabel}`}
+				class="dock-txt"
+				class:open={openPopover === 'permission'}
+				onclick={() => togglePopover('permission')}
+				title={`Tool access: ${permissionLabel} — ${permissionDescription}`}
+				aria-haspopup="menu"
+				aria-expanded={openPopover === 'permission'}
+				aria-label="Permission mode: {permissionLabel}"
+			>{permissionLabel}</button>
+
+			{#if openPopover === 'permission'}
+				<div
+					class="dock-menu permission-menu"
+					role="menu"
+					aria-label="Tool access"
+					data-composer-owned-overlay="true"
+				>
+					<div class="access-list">
+						{#each permissionModes as mode (mode.value)}
+							<button
+								type="button"
+								class="access-row"
+								class:selected={mode.value === permissionValue}
+								onclick={() => {
+									activeSession.setPermissionModeOverride(mode.value);
+									closePopover();
+								}}
+								role="menuitemradio"
+								aria-checked={mode.value === permissionValue}
+								title={mode.description}
+							>
+								<span class="access-copy">
+									<strong>{mode.label}</strong>
+									<small>{mode.description}</small>
+								</span>
+								{#if mode.value === permissionValue}
+									<svg class="w-3.5 h-3.5 access-check" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+									</svg>
+								{/if}
+							</button>
+						{/each}
+					</div>
+				</div>
+			{/if}
+		</div>
+
+		<!-- Attach stays in the primary action cluster on every viewport. -->
+		<button
+			type="button"
+			onclick={onAttachClick}
+			disabled={attachDisabled}
+			class="dock-ico attach-btn"
+			aria-label="Attach file"
+			title={isUploading
+				? 'Uploading...'
+				: (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id) ?? 'Attach file')}
+		>
+			{#if isUploading}
+				<svg class="w-[14px] h-[14px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+					<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+				</svg>
+			{:else}
+				<Plus size={14} strokeWidth={1.8} aria-hidden="true" />
+			{/if}
+		</button>
+
+		<!-- Dictate / voice call, supplied by ChatInput -->
+		{@render voiceActions?.()}
+
+		<!-- Everything in one place: the full controls popover. -->
+		<div class="dock-pop-wrap desktop-controls" bind:this={controlsWrapRef}>
+			<button
+				type="button"
+				class="dock-ico small"
+				class:open={openPopover === 'controls'}
+				onclick={() => togglePopover('controls')}
 				aria-haspopup="dialog"
-				aria-expanded={controlsPopoverOpen}
-				aria-label={`Chat controls — model ${modelButtonLabel}, effort ${chipEffortLabel}, access ${chipPermissionLabel}`}
+				aria-expanded={openPopover === 'controls'}
+				aria-label="More input options"
+				title="More input options"
 			>
-				<span class="chip-label">{modelButtonLabel}</span>
-				<span class="chip-sep">·</span>
-				<span class="chip-label muted">{chipEffortLabel}</span>
-				<span class="chip-sep">·</span>
-				<span class="chip-label muted">{chipPermissionLabel}</span>
+				<ChevronDown size={11} strokeWidth={2} aria-hidden="true" />
 			</button>
 
-			{#if controlsPopoverOpen}
+			{#if openPopover === 'controls'}
 				<!-- The desktop counterpart of the mobile sheet: every run-binding
-				     control in one panel. Chat-setup pills first (agent / execution
-				     mode / branch), then model, effort + Fast, and tool access. -->
+				     control in one panel — model, effort + Fast, and tool access.
+				     Chat setup (agent / runner / repository / branch / worktree) is
+				     the chip row above the box, so it is not repeated here. -->
 				<div
 					class="controls-popover"
 					role="dialog"
 					aria-label="Chat controls"
 					data-composer-owned-overlay="true"
 				>
-					<section class="popover-section">
-						<div class="section-label"><SlidersHorizontal size={14} strokeWidth={1.8} /><span>Chat setup</span></div>
-						<div class="setup-pills"><ContextPillBar /></div>
-					</section>
-
 					<section class="popover-section">
 						<div class="section-label"><span>Model</span></div>
 						<ModelPickerPanel
@@ -316,9 +422,9 @@
 							onContextChoiceSelect={(choice) => activeSession.setContextWindowChoice(choice)}
 							onSelect={(v) => {
 								activeSession.setModelOverride(v);
-								setControlsPopoverOpen(false);
+								closePopover();
 							}}
-							onRequestClose={() => setControlsPopoverOpen(false)}
+							onRequestClose={closePopover}
 						/>
 					</section>
 
@@ -363,55 +469,80 @@
 				</div>
 			{/if}
 		</div>
+	</div>
+
+	<!-- Right group (desktop): model · effort · ring -->
+	<div class="dock-group dock-right desktop-controls">
+		<div class="dock-pop-wrap" bind:this={modelWrapRef}>
+			<button
+				type="button"
+				class="dock-txt model-btn"
+				class:open={openPopover === 'model'}
+				class:warn={rerouted}
+				onclick={() => togglePopover('model')}
+				title={modelWarnTitle ?? `Model: ${modelButtonLabel}`}
+				aria-haspopup="listbox"
+				aria-expanded={openPopover === 'model'}
+				aria-label="Model: {modelButtonLabel}"
+			>{modelButtonLabel}</button>
+
+			{#if openPopover === 'model'}
+				<div
+					class="dock-menu model-menu"
+					role="dialog"
+					aria-label="Choose model"
+					data-composer-owned-overlay="true"
+				>
+					<ModelPickerPanel
+						groups={modelCatalog.groups}
+						options={modelCatalog.options}
+						value={modelValue}
+						notice={modelNotice}
+						contextChoice={$activeSession.contextWindowChoice}
+						onContextChoiceSelect={(choice) => activeSession.setContextWindowChoice(choice)}
+						onSelect={(v) => {
+							activeSession.setModelOverride(v);
+							closePopover();
+						}}
+						onRequestClose={closePopover}
+					/>
+				</div>
+			{/if}
+		</div>
+
+		<div class="dock-pop-wrap" bind:this={effortWrapRef}>
+			<button
+				type="button"
+				class="dock-tag effort-btn"
+				class:open={openPopover === 'effort'}
+				onclick={() => togglePopover('effort')}
+				title={effortValue ? `Reasoning effort: ${effortLabel}` : 'Reasoning effort: model default'}
+				aria-haspopup="dialog"
+				aria-expanded={openPopover === 'effort'}
+				aria-label="Effort: {effortLabel}"
+			>{effortLabel}</button>
+
+			{#if openPopover === 'effort'}
+				<div
+					class="dock-menu effort-menu"
+					role="dialog"
+					aria-label="Reasoning effort"
+					data-composer-owned-overlay="true"
+				>
+					<EffortPopoverCard
+						options={effortLevels}
+						value={effortValue}
+						onSelect={(v) => activeSession.setEffortLevelOverride(v)}
+						{fastSupported}
+						fastEnabled={fastMode}
+						onToggleFast={() => activeSession.setFastMode(!fastMode)}
+					/>
+				</div>
+			{/if}
+		</div>
 
 		<!-- Context-usage ring (16px SVG arc + its popover) -->
 		<ContextUsageBar onOpenChange={(o) => { if (o) void refreshUsageLimits(true); }} />
-	</div>
-
-	<!-- Mobile keeps the primary actions visible and moves the configuration
-	     matrix into one native-style bottom sheet, matching T3's composer. -->
-	<div class="mobile-controls">
-		<button
-			type="button"
-			class="mobile-settings-trigger"
-			class:warn={rerouted}
-			onclick={() => setMobileSheetOpen(true)}
-			aria-haspopup="dialog"
-			aria-expanded={mobileSheetOpen}
-			aria-label={`Open chat controls. Current model: ${modelButtonLabel}`}
-		>
-			<SlidersHorizontal size={16} strokeWidth={1.8} aria-hidden="true" />
-		</button>
-		<ContextUsageBar onOpenChange={(o) => { if (o) void refreshUsageLimits(true); }} />
-	</div>
-
-	<!-- Right: attach, then the parent's action cluster -->
-	<div class="controls-right">
-		<!-- Attach stays in the primary action cluster on every viewport. -->
-		<button
-			type="button"
-			onclick={onAttachClick}
-			disabled={attachDisabled}
-			class="dock-action-btn"
-			aria-label="Attach file"
-			title={isUploading
-				? 'Uploading...'
-				: (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id) ?? 'Attach file')}
-		>
-			{#if isUploading}
-				<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-					<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-				</svg>
-			{:else}
-				<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-				</svg>
-			{/if}
-		</button>
-
-		<!-- Dictate / voice call / send, supplied by ChatInput -->
-		{@render actions?.()}
 	</div>
 </div>
 
@@ -438,124 +569,209 @@
 />
 
 <style>
-	/* ===== FOOT ROW (mockup `.footrow`) =====
-	   No surface of its own — the island above provides the glass. */
+	/* ===== CONTROLS ROW (mockup `.controls`) =====
+	   No surface of its own — the box above provides the hairline frame. */
 	.controls-dock {
-		/* The override dropdowns and the context-usage popover inside this row open
-		   UPWARD, so they overlap the input area directly above them. That area sets
-		   `z-index: 20` inside the island's stacking context (established by its
-		   backdrop-filter), so without an explicit z-index here the whole row — and
-		   its z-50 popups — would stack below the message box and render behind it.
-		   Lifting the row above the input area keeps them fully visible on top. */
+		/* Every popover in this row opens UPWARD over the input area directly
+		   above it. That area sets `z-index: 20`, so the row is lifted above it
+		   to keep its popovers fully visible. */
 		position: relative;
 		z-index: 30;
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		padding: 6px 8px 8px 10px;
+		gap: 12px;
+		padding: 4px 10px 10px 14px;
 		overflow: visible;
 	}
 
-	.controls-left {
+	.dock-group {
 		display: flex;
 		align-items: center;
-		gap: 6px;
+		gap: 4px;
 		min-width: 0;
 	}
 
-	/* ===== SUMMARY CHIP + CONTROLS POPOVER =====
-	   The desktop counterpart of the mobile sheet's overview page: one pill
-	   summarizing the session's run binding (model · effort · access), opening
-	   a single panel that hosts every binding control. */
-	.controls-summary-wrap {
+	/* `margin-left: auto` (not a second flex:1 half) so the left group keeps
+	   its natural width and the right group hugs the box edge. */
+	.dock-right {
+		margin-left: auto;
+	}
+
+	.dock-pop-wrap {
 		position: relative;
 		min-width: 0;
-	}
-
-	.controls-summary-chip {
 		display: flex;
 		align-items: center;
-		gap: 5px;
-		height: 26px;
+	}
+
+	/* ===== PLAIN-TEXT CONTROLS (mockup `.txt`) ===== */
+	.dock-txt {
+		display: inline-flex;
+		align-items: center;
 		max-width: 100%;
 		min-width: 0;
-		padding: 0 10px;
-		background: var(--scrim);
-		border: 1px solid var(--border);
-		border-radius: 999px;
-		color: var(--foreground);
-		font-size: 12px;
-		cursor: pointer;
+		padding: 3px 5px;
+		background: transparent;
+		border: 0;
+		border-radius: 4px;
+		color: var(--muted-foreground);
+		font: inherit;
+		font-size: 12.5px;
+		font-weight: 500;
+		line-height: 1;
 		white-space: nowrap;
-		transition: border-color 0.13s ease, color 0.13s ease, background-color 0.13s ease;
-	}
-
-	.controls-summary-chip:hover,
-	.controls-summary-chip.open {
-		border-color: var(--border-strong);
-		background: color-mix(in oklch, var(--scrim) 70%, var(--popover));
-	}
-
-	.controls-summary-chip:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 1px;
-	}
-
-	/* Reroute: amber chip — the same treatment the old model pill carried, so the
-	   "running something else" signal keeps its established look. */
-	.controls-summary-chip.warn,
-	.controls-summary-chip.warn:hover {
-		background: color-mix(in oklch, var(--warning) 10%, transparent);
-		border-color: color-mix(in oklch, var(--warning) 50%, var(--border));
-		color: var(--warning);
-	}
-
-	.chip-label {
 		overflow: hidden;
 		text-overflow: ellipsis;
+		cursor: pointer;
+		transition: background-color 0.12s ease, color 0.12s ease;
+	}
+
+	.dock-txt:hover,
+	.dock-txt.open {
+		background: var(--muted);
+		color: var(--foreground);
+	}
+
+	.model-btn {
+		max-width: min(220px, 30vw);
+		display: block;
+	}
+
+	/* Reroute: amber text — the same treatment the old model pill carried, so
+	   the "running something else" signal keeps its established look. */
+	.model-btn.warn,
+	.model-btn.warn:hover,
+	.model-btn.warn.open {
+		color: var(--warning);
+		background: color-mix(in oklch, var(--warning) 10%, transparent);
+	}
+
+	/* ===== ICON BUTTONS (mockup `.ico`) ===== */
+	.dock-ico {
+		display: grid;
+		place-items: center;
+		width: 24px;
+		height: 24px;
+		padding: 0;
+		background: transparent;
+		border: 0;
+		border-radius: 5px;
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: background-color 0.12s ease, color 0.12s ease;
+	}
+
+	.dock-ico:hover:not(:disabled),
+	.dock-ico.open {
+		background: var(--muted);
+		color: var(--foreground);
+	}
+
+	.dock-ico:disabled {
+		opacity: 0.35;
+		cursor: not-allowed;
+	}
+
+	.dock-ico.small {
+		width: 20px;
+	}
+
+	/* The mic and voice-call buttons ChatInput passes in take the same 24px
+	   footprint as the row's own icon buttons. */
+	.dock-left :global(.voice-btn),
+	.dock-left :global(.voice-call-btn) {
+		width: 24px;
+		height: 24px;
+		border-radius: 5px;
+	}
+
+	.dock-left :global(.voice-btn-wrapper) {
+		border-radius: 5px;
+	}
+
+	/* ===== EFFORT TAG (mockup `.tag`) ===== */
+	.dock-tag {
+		display: inline-flex;
+		align-items: center;
+		padding: 4px 7px;
+		background: var(--muted);
+		border: 0;
+		border-radius: 4px;
+		color: var(--foreground);
+		font: inherit;
+		font-size: 11.5px;
+		font-weight: 500;
 		line-height: 1;
-		font-weight: 600;
-		letter-spacing: 0.01em;
+		white-space: nowrap;
+		cursor: pointer;
+		transition: background-color 0.12s ease, box-shadow 0.12s ease;
 	}
 
-	.chip-label.muted {
-		color: var(--muted-foreground);
-		font-weight: 400;
+	.dock-tag:hover {
+		background: color-mix(in oklch, var(--muted) 82%, var(--foreground));
 	}
 
-	.controls-summary-chip.warn .chip-label.muted {
-		color: color-mix(in oklch, var(--warning) 75%, transparent);
+	.dock-tag.open {
+		background: color-mix(in oklch, var(--muted) 82%, var(--foreground));
+		box-shadow: inset 0 0 0 1px var(--border-strong);
 	}
 
-	.chip-sep {
-		color: var(--muted-foreground);
-		opacity: 0.45;
-		flex-shrink: 0;
+	.dock-txt:focus-visible,
+	.dock-ico:focus-visible,
+	.dock-tag:focus-visible {
+		outline: 1px solid var(--primary);
+		outline-offset: 2px;
 	}
 
-	/* Opens UPWARD from the foot row — same anchor convention as the override
-	   dropdowns it replaces and the context-usage popover beside it. */
+	/* ===== POPOVERS =====
+	   All open UPWARD from the row — same anchor convention as the ring's
+	   popover beside them. Left-group popovers hang off their left edge, the
+	   right group's off their right edge, so nothing spills past the box. */
+	.dock-menu,
 	.controls-popover {
 		position: absolute;
-		bottom: calc(100% + 8px);
-		left: 0;
-		width: min(380px, calc(100vw - 24px));
-		max-height: min(640px, calc(100dvh - 140px));
-		overflow-y: auto;
-		overscroll-behavior: contain;
+		bottom: calc(100% + 10px);
 		background: var(--popover);
 		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 1.3);
+		border-radius: calc(var(--radius, 0.75rem) * 0.8);
 		box-shadow: var(--shadow-l);
-		padding: 12px;
 		z-index: 60;
-		animation: controls-popover-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+		animation: dock-popover-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+	}
+
+	.permission-menu {
+		left: 0;
+		width: min(280px, calc(100vw - 24px));
+		padding: 4px;
+	}
+
+	.model-menu {
+		right: 0;
+		width: min(380px, calc(100vw - 24px));
+		padding: 6px;
+		--mpp-width: 100%;
+		--mpp-height: min(346px, calc(var(--dock-pop-max, 400px) - 14px));
+	}
+
+	.effort-menu {
+		right: -6px;
+		width: min(280px, calc(100vw - 24px));
+	}
+
+	.controls-popover {
+		left: 0;
+		width: min(380px, calc(100vw - 24px));
+		max-height: min(640px, var(--dock-pop-max, calc(100dvh - 140px)));
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		border-radius: calc(var(--radius, 0.75rem) * 1.3);
+		padding: 12px;
 		display: flex;
 		flex-direction: column;
 		gap: 14px;
 	}
 
-	@keyframes controls-popover-in {
+	@keyframes dock-popover-in {
 		from {
 			opacity: 0;
 			transform: translateY(4px);
@@ -585,30 +801,6 @@
 		letter-spacing: 0.05em;
 	}
 
-	.popover-section .section-label :global(svg) {
-		width: 14px;
-		height: 14px;
-		flex-shrink: 0;
-	}
-
-	/* Chat-setup pills reuse ContextPillBar verbatim; the wrapper just keeps its
-	   upward dropdowns inside the popover's scroll bounds visually. */
-	.setup-pills :global(.context-pill-bar) {
-		padding: 0;
-		z-index: auto;
-	}
-
-	.setup-pills :global(.selector-dropdown),
-	.setup-pills :global(.branch-dropdown),
-	.setup-pills :global(.runner-dropdown) {
-		position: static;
-		width: 100%;
-		min-width: 0;
-		max-width: none;
-		margin-top: 6px;
-		box-shadow: none;
-	}
-
 	.access-list {
 		display: flex;
 		flex-direction: column;
@@ -616,6 +808,13 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: calc(var(--radius, 0.75rem) * 0.9);
 		overflow: hidden;
+	}
+
+	/* Inside the plain permission menu the list is the popover itself. */
+	.permission-menu .access-list {
+		background: transparent;
+		border: 0;
+		border-radius: 0;
 	}
 
 	.access-row {
@@ -631,6 +830,12 @@
 		text-align: left;
 		cursor: pointer;
 		transition: background-color 0.13s ease;
+	}
+
+	.permission-menu .access-row {
+		border-bottom: 0;
+		border-radius: calc(var(--radius, 0.75rem) * 0.6);
+		padding: 7px 10px;
 	}
 
 	.access-row:last-child {
@@ -672,15 +877,7 @@
 		color: var(--primary);
 	}
 
-	/* `margin-left: auto` (not a second flex:1 half) so the pills on the left keep
-	   their natural width and the action cluster hugs the right edge. */
-	.controls-right {
-		display: flex;
-		align-items: center;
-		gap: 2px;
-		margin-left: auto;
-	}
-
+	/* ===== MOBILE ===== */
 	.mobile-controls {
 		display: none;
 		align-items: center;
@@ -715,37 +912,6 @@
 		outline-offset: 1px;
 	}
 
-	/* ===== ICON BUTTONS (mockup `.fbtn`) ===== */
-	.dock-action-btn {
-		position: relative;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 30px;
-		height: 30px;
-		background: transparent;
-		border: none;
-		border-radius: 9px;
-		cursor: pointer;
-		color: var(--subtle-foreground);
-		transition: background-color 0.13s ease, color 0.13s ease;
-	}
-
-	.dock-action-btn:hover:not(:disabled) {
-		background: var(--scrim);
-		color: var(--foreground);
-	}
-
-	.dock-action-btn:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 1px;
-	}
-
-	.dock-action-btn:disabled {
-		opacity: 0.3;
-		cursor: not-allowed;
-	}
-
 	@media (max-width: 1080px) {
 		.controls-dock {
 			gap: 3px;
@@ -760,20 +926,22 @@
 			display: flex;
 		}
 
-		.controls-right {
+		/* Attach / mic / voice hug the right edge; the settings trigger and
+		   ring lead the row. */
+		.dock-left {
+			margin-left: auto;
 			gap: 0;
 		}
 
-		.controls-right :global(.voice-btn),
-		.controls-right :global(.voice-call-btn),
-		.controls-right :global(.stop-btn) {
+		.dock-ico,
+		.dock-left :global(.voice-btn),
+		.dock-left :global(.voice-call-btn) {
 			width: 36px;
 			height: 36px;
+			border-radius: 11px;
 		}
 
-		.dock-action-btn {
-			width: 36px;
-			height: 36px;
+		.dock-left :global(.voice-btn-wrapper) {
 			border-radius: 11px;
 		}
 	}
