@@ -543,3 +543,69 @@ def test_blank_plugin_refs_are_ignored(tmp_path, monkeypatch, bad) -> None:
     proj = _setup(tmp_path, monkeypatch, enabled=False)
     _write(proj / ".fluid" / "settings.json", json.dumps({"enabledPlugins": {bad: True}}))
     assert discover_plugins(proj) == []
+
+
+# ─── Skill-tool name resolution ──────────────────────────────────────────────
+
+
+def _one_skill_plugin(home: Path, plugin: str, skill: str, body: str) -> None:
+    """Cache a single-skill plugin under ``testmp`` and enable it."""
+    root = home / ".fluid" / "plugins" / "cache" / "testmp" / plugin / "1.0.0"
+    _write(
+        root / ".claude-plugin" / "plugin.json",
+        json.dumps({"name": plugin, "version": "1.0.0"}),
+    )
+    _write(
+        root / "skills" / skill / "SKILL.md",
+        f"---\nname: {skill}\ndescription: d\n---\n{body}",
+    )
+
+
+async def test_skill_tool_accepts_the_bare_name_of_a_namespaced_skill(
+    tmp_path, monkeypatch
+) -> None:
+    """A plugin whose skill shares its name is indexed ``unslop:unslop``, and a
+    model reading that routinely asks for ``unslop`` — which used to cost a
+    failed call before the retry."""
+    from fluid.tools.builtins.skill import handler
+    from fluid.tools.registry import ToolCtx
+
+    home = tmp_path / "home"
+    _set_home(monkeypatch, home)
+    _one_skill_plugin(home, "unslop", "unslop", "UNSLOP BODY")
+    _write(
+        home / ".fluid" / "settings.json",
+        json.dumps({"enabledPlugins": {"unslop@testmp": True}}),
+    )
+    proj = tmp_path / "proj"
+    (proj / ".git").mkdir(parents=True)
+    assert [s.name for s in discover_skills(proj, include_plugins=True)] == [
+        "unslop:unslop"
+    ]
+
+    for asked in ("unslop:unslop", "unslop", "UnSlop"):
+        out = await handler({"name": asked}, ToolCtx(cwd=str(proj)))
+        assert not out.is_error, out.text
+        assert "UNSLOP BODY" in out.text
+
+
+async def test_skill_tool_never_guesses_between_two_namespaces(
+    tmp_path, monkeypatch
+) -> None:
+    from fluid.tools.builtins.skill import handler
+    from fluid.tools.registry import ToolCtx
+
+    home = tmp_path / "home"
+    _set_home(monkeypatch, home)
+    _one_skill_plugin(home, "alpha", "review", "ALPHA BODY")
+    _one_skill_plugin(home, "beta", "review", "BETA BODY")
+    _write(
+        home / ".fluid" / "settings.json",
+        json.dumps({"enabledPlugins": {"alpha@testmp": True, "beta@testmp": True}}),
+    )
+    proj = tmp_path / "proj"
+    (proj / ".git").mkdir(parents=True)
+
+    out = await handler({"name": "review"}, ToolCtx(cwd=str(proj)))
+    assert out.is_error
+    assert "alpha:review" in out.text and "beta:review" in out.text

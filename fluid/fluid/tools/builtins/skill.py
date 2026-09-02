@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fluid.context.instructions import discover_skills, parse_frontmatter
+from fluid.context.instructions import Skill, discover_skills, parse_frontmatter
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 
@@ -39,6 +39,35 @@ def _note_usage(skill_path: str) -> None:
     except OSError:
         pass
 
+
+def _local(name: str) -> str:
+    """The part after the ``<plugin>:`` prefix, lowercased."""
+    return name.rsplit(":", 1)[-1].lower()
+
+
+def _resolve(skills: list[Skill], name: str) -> tuple[Skill | None, list[str]]:
+    """Find the requested skill, tolerating the plugin namespace.
+
+    Plugin skills are indexed as ``<plugin>:<name>``, and a model reading
+    ``unslop:unslop`` in the prompt routinely asks for ``unslop`` — a first
+    call wasted on an error it then has to retry. So: exact match, then
+    case-insensitive, then a match on the local name from either side (bare
+    request against a namespaced skill, or the reverse). Ambiguity is never
+    guessed; the candidates come back for the caller to report.
+    """
+    exact = next((s for s in skills if s.name == name), None)
+    if exact is not None:
+        return exact, []
+    folded = [s for s in skills if s.name.lower() == name.lower()]
+    if len(folded) == 1:
+        return folded[0], []
+    local = _local(name)
+    candidates = [s for s in skills if _local(s.name) == local]
+    if len(candidates) == 1:
+        return candidates[0], []
+    return None, sorted(s.name for s in candidates)
+
+
 SPEC = ToolSpec(
     name="Skill",
     description=(
@@ -47,8 +76,10 @@ SPEC = ToolSpec(
         "system prompt (name + description only — bodies load on demand "
         "here); no such section means none are installed. When the task at "
         "hand is one a listed skill covers, call this first and follow the "
-        "loaded instructions in place of your default approach. Calling with "
-        "an unknown name returns the list of known skills."
+        "loaded instructions in place of your default approach. Plugin "
+        "skills are listed as '<plugin>:<name>'; either spelling resolves "
+        "while it is unambiguous. Calling with an unknown name returns the "
+        "list of known skills."
     ),
     input_schema={
         "type": "object",
@@ -74,8 +105,16 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         ctx.cwd, include_global=user_on, include_project=project_on,
         include_plugins=user_on,
     )
-    match = next((s for s in skills if s.name == name), None)
+    match, ambiguous = _resolve(skills, name)
     if match is None:
+        if ambiguous:
+            return ToolOutcome(
+                text=(
+                    f"ambiguous skill: {name}. Several match: "
+                    f"{', '.join(ambiguous)} — ask for one by its full name."
+                ),
+                is_error=True,
+            )
         known = ", ".join(sorted(s.name for s in skills)) or "(none discovered)"
         return ToolOutcome(
             text=f"unknown skill: {name}. Available: {known}", is_error=True
