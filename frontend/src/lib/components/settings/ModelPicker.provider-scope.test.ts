@@ -109,7 +109,7 @@ describe('ModelPicker provider scope', () => {
 
 	it('keeps native Claude choices separate from configured providers', async () => {
 		const onSelect = vi.fn();
-		const { getByRole, queryByText } = render(ModelPicker, {
+		const { getByRole, queryByText, queryByRole } = render(ModelPicker, {
 			props: {
 				value: 'sonnet',
 				onSelect,
@@ -126,6 +126,7 @@ describe('ModelPicker provider scope', () => {
 		expect(queryByText('GPT-5.6')).toBeNull();
 		expect(queryByText('Qwen 3')).toBeNull();
 		expect(queryByText('Custom…')).toBeNull();
+		expect(queryByRole('tab', { name: /all providers/i })).toBeNull();
 
 		await fireEvent.click(list.getByRole('option', { name: /Haiku/ }));
 		expect(onSelect).toHaveBeenCalledWith('haiku');

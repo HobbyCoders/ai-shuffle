@@ -305,16 +305,16 @@
 		<div class="set-group">
 			<div class="set-grouphead">
 				<h3><Settings />Provider models</h3>
-				<p>Choose the model this agent runs on when another agent on that provider dispatches it. The model may be on any provider. Leave a row empty to hide this agent from callers on that provider.</p>
+				<p>Choose the model this agent runs on when another agent on that provider dispatches it. Claude uses subscription models; other rows can pick any provider. Leave a row empty to hide this agent from callers on that provider.</p>
 			</div>
 			<div class="set-row">
 				<div class="lab"><h4>Claude</h4><p>When the caller is on native Claude.</p></div>
 				<div class="ctl">
 					<ModelPicker
 						value={subagentPickerValue(NATIVE_PROVIDER_KEY, profileForm.provider_models[NATIVE_PROVIDER_KEY])}
+						providerScope={NATIVE_PROVIDER_KEY}
 						allowEmpty
 						allowCustom={false}
-						startOnAll
 						onSelect={(value) => setProviderModel(NATIVE_PROVIDER_KEY, value)}
 					/>
 				</div>
@@ -331,7 +331,6 @@
 							value={subagentPickerValue(provider.id, profileForm.provider_models[provider.id])}
 							allowEmpty
 							allowCustom={false}
-							startOnAll
 							onSelect={(value) => setProviderModel(provider.id, value)}
 						/>
 					</div>
@@ -352,7 +351,6 @@
 						allowEmpty
 						emptyLabel="Not available in voice calls"
 						allowCustom={false}
-						startOnAll
 						onSelect={(value) => setProviderModel(VOICE_PROVIDER_KEY, value)}
 					/>
 				</div>

@@ -108,4 +108,38 @@ describe('ModelPickerPanel', () => {
 		expect(within(list).getByRole('option', { name: /sonnet/i })).toBeTruthy();
 		expect(within(list).queryByRole('option', { name: /grok 4/i })).toBeNull();
 	});
+
+	it('omits All providers when startOnAll is off, even if value is a Claude model', async () => {
+		const grok = {
+			key: 'grok-row',
+			name: 'Grok',
+			subtext: 'API',
+			glyph: 'grok' as const,
+			isApi: true
+		};
+		const mixedOptions = [
+			...options,
+			{
+				value: 'prov:grok-row:grok-4',
+				label: 'Grok 4',
+				description: 'grok-4',
+				groupKey: 'grok-row',
+				group: 'Grok',
+				groupSubtext: 'API'
+			}
+		];
+		render(ModelPickerPanel, {
+			props: {
+				groups: [...groups, grok],
+				options: mixedOptions,
+				value: 'sonnet',
+				onSelect: vi.fn()
+			}
+		});
+
+		expect(screen.queryByRole('tab', { name: /all providers/i })).toBeNull();
+		const list = screen.getByRole('listbox', { name: 'Model' });
+		expect(within(list).getByRole('option', { name: /sonnet/i })).toBeTruthy();
+		expect(within(list).queryByRole('option', { name: /grok 4/i })).toBeNull();
+	});
 });

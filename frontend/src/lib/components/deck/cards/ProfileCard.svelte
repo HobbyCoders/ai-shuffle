@@ -11,7 +11,7 @@
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import { toast } from '$lib/stores/toast';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
-	import { Users, Wrench, Bot, Settings, FileText, SlidersHorizontal, Check } from 'lucide-svelte';
+	import { Users, Wrench, Bot, Settings, FileText, SlidersHorizontal } from 'lucide-svelte';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data.svelte';
 	import { groups as groupsStore } from '$lib/stores/groups.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -207,6 +207,20 @@
 	// means. 'all'/'none' carry no list at all; 'allow'/'disallow' each own one.
 	let toolSelectionMode = $state<ToolSelectionMode>('all');
 
+	let saveTimer: ReturnType<typeof setTimeout> | null = null;
+	let saveInFlight = false;
+	let persistDirty = false;
+	let inFlightPromise: Promise<void> | null = null;
+	let lastPersisted = '';
+
+	function formSnapshot() {
+		return JSON.stringify({ form: profileForm, toolSelectionMode });
+	}
+
+	function markFormClean() {
+		lastPersisted = formSnapshot();
+	}
+
 	// Import handling
 	let profileImportInput: HTMLInputElement | undefined = $state();
 	let profileImporting = $state(false);
@@ -278,6 +292,7 @@
 		resetForm();
 		editingProfile = null;
 		viewMode = 'form';
+		markFormClean();
 	}
 
 	function openEditForm(profile: Profile) {
@@ -344,11 +359,14 @@
 
 		viewMode = 'form';
 		activeTab = 'general';
+		markFormClean();
 	}
 
-	function backToList() {
+	async function backToList() {
+		await flushPendingPersist();
 		viewMode = 'list';
 		resetForm();
+		editingProfile = null;
 	}
 
 	// Tool helpers. Both write into whichever list the current mode owns; in
@@ -415,10 +433,7 @@
 		}
 	}
 
-	// Save profile
-	async function saveProfile() {
-		if (!profileForm.name) return;
-
+	function buildProfilePayload() {
 		// `PUT /agents/{id}` replaces the whole config column, so a key left out
 		// here is genuinely cleared — that is how 'all'/'none' drop a stale list.
 		const config: any = {
@@ -494,31 +509,86 @@
 		};
 
 		const derivedId = profileForm.name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-		const data = {
+		return {
 			id: editingProfile ? editingProfile.id : derivedId,
 			name: profileForm.name,
 			description: profileForm.description || undefined,
 			config
 		};
-
-		try {
-			if (editingProfile) {
-				await tabsStore.updateProfile(data.id, {
-					name: data.name,
-					description: data.description,
-					config: data.config
-				});
-			} else {
-				await tabsStore.createProfile(data);
-			}
-		} catch (e: any) {
-			toast.push('Failed to save agent: ' + (e.detail || e.message || 'Unknown error'), { tone: 'error' });
-			return;
-		}
-
-		viewMode = 'list';
-		resetForm();
 	}
+
+	async function writeProfile() {
+		const data = buildProfilePayload();
+		if (editingProfile) {
+			await tabsStore.updateProfile(data.id, {
+				name: data.name,
+				description: data.description,
+				config: data.config
+			});
+		} else {
+			await tabsStore.createProfile(data);
+			editingProfile = {
+				id: data.id,
+				name: data.name,
+				description: data.description ?? null,
+				is_builtin: false,
+				is_modified: false,
+				config: data.config,
+				created_at: '',
+				updated_at: ''
+			};
+		}
+	}
+
+	function schedulePersist() {
+		if (saveTimer) clearTimeout(saveTimer);
+		saveTimer = setTimeout(() => {
+			saveTimer = null;
+			void persistNow();
+		}, 500);
+	}
+
+	function persistNow(): Promise<void> {
+		persistDirty = true;
+		if (saveInFlight && inFlightPromise) return inFlightPromise;
+		saveInFlight = true;
+		inFlightPromise = (async () => {
+			try {
+				while (persistDirty) {
+					persistDirty = false;
+					if (!profileForm.name) continue;
+					try {
+						await writeProfile();
+					} catch (e: any) {
+						toast.push('Failed to save agent: ' + (e.detail || e.message || 'Unknown error'), { tone: 'error' });
+					}
+				}
+			} finally {
+				saveInFlight = false;
+				inFlightPromise = null;
+				if (persistDirty) await persistNow();
+			}
+		})();
+		return inFlightPromise;
+	}
+
+	async function flushPendingPersist() {
+		const hadTimer = !!saveTimer;
+		if (saveTimer) {
+			clearTimeout(saveTimer);
+			saveTimer = null;
+		}
+		if (hadTimer || saveInFlight) {
+			await persistNow();
+		}
+	}
+
+	$effect(() => {
+		const snap = formSnapshot();
+		if (viewMode !== 'form') return;
+		if (snap === lastPersisted) return;
+		schedulePersist();
+	});
 
 	function handleRevertProfile(profileId: string) {
 		const profile = profiles.find(p => p.id === profileId);
@@ -633,6 +703,7 @@
 
 		viewMode = 'form';
 		activeTab = 'general';
+		markFormClean();
 	}
 
 	function handleGeneratedProfile(data: AgentExport | unknown) {
@@ -667,7 +738,7 @@
 
 {#if viewMode === 'form'}
 		<StudioEditorShell
-			title={editingProfile ? editingProfile.name : 'New Agent'}
+			title={profileForm.name || (editingProfile ? editingProfile.name : 'New Agent')}
 			subtitle={editingProfile ? 'Agent configuration' : 'Create a new agent'}
 			backLabel="Agents"
 			onBack={backToList}
@@ -709,13 +780,6 @@
 				onCreateGroup={createGroup}
 				onDeleteGroup={deleteGroup}
 			/>
-
-			{#snippet actions()}
-				<button type="button" class="ed-btn primary" onclick={saveProfile} disabled={!profileForm.name}>
-					<Check size={14} />
-					<span>Save</span>
-				</button>
-			{/snippet}
 		</StudioEditorShell>
 	{:else}
 		<!-- Build page: header-less card grid (heading + sub-nav live in BuildPage) -->
