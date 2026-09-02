@@ -23,7 +23,10 @@ import {
 	encodeProviderModel,
 	decodeProviderModel,
 	isProviderModel,
+	subagentPickerValue,
 	getModelLabel,
+	NATIVE_PROVIDER_KEY,
+	VOICE_PROVIDER_KEY,
 	PROVIDER_MODEL_PREFIX
 } from './models';
 
@@ -99,6 +102,31 @@ describe('provider-model codec — PA13 shared encode/decode', () => {
 
 	it('isProviderModel is true only for composites', () => {
 		expect(isProviderModel(encodeProviderModel('p', 'm'))).toBe(true);
+	});
+});
+
+describe('subagentPickerValue — Agents-tab wire value', () => {
+	it('passes composites and native/voice bare aliases through', () => {
+		const composite = encodeProviderModel('row-1', 'gpt-5');
+		expect(subagentPickerValue(NATIVE_PROVIDER_KEY, 'sonnet')).toBe('sonnet');
+		expect(subagentPickerValue(NATIVE_PROVIDER_KEY, composite)).toBe(composite);
+		expect(subagentPickerValue(VOICE_PROVIDER_KEY, 'opus')).toBe('opus');
+		expect(subagentPickerValue('openai-row', composite)).toBe(composite);
+	});
+
+	it('keeps a Claude alias bare under a provider key', () => {
+		expect(subagentPickerValue('openai-row', 'sonnet')).toBe('sonnet');
+	});
+
+	it('encodes a legacy bare provider-local id as a composite', () => {
+		expect(subagentPickerValue('openai-row', 'gpt-5')).toBe(
+			encodeProviderModel('openai-row', 'gpt-5')
+		);
+	});
+
+	it('treats empty as unavailable', () => {
+		expect(subagentPickerValue(NATIVE_PROVIDER_KEY, '')).toBe('');
+		expect(subagentPickerValue('openai-row', '  ')).toBe('');
 	});
 });
 

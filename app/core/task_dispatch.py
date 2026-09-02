@@ -551,6 +551,20 @@ def _file_agent_model_id(
             caller_profile_id, exc_info=True,
         )
         mapped = None
+    if mapped:
+        from app.core.agent_provider_models import (
+            decode_subagent_binding,
+            provider_key,
+        )
+
+        binding = decode_subagent_binding(provider_key(provider_id), mapped)
+        # File agents never switch legs — only a same-provider model id is
+        # usable as a fallback. Composites for another provider, and a Claude
+        # alias stored on this key, are ignored here.
+        if binding is not None and binding[0] == provider_id:
+            mapped = binding[1]
+        else:
+            mapped = None
     if mapped and mapped in curated:
         return mapped, None
 
@@ -583,14 +597,17 @@ async def dispatch_task_tool(
 ) -> Dict[str, Any]:
     """Dispatch through the exact provider-scoped subagent roster.
 
-    DB agents must be configured on the caller's effective provider. Fluid
-    file/plugin definitions remain available as a fallback and borrow the
-    caller's profile, provider, and selected model; they never switch legs.
+    DB agents must have an assignment for the caller's effective provider.
+    That assignment may name another leg; a pinned target then runs on its
+    own provider. Fluid file/plugin definitions remain available as a
+    fallback and borrow the caller's profile, provider, and selected model;
+    they never switch legs.
 
     ``roster`` replaces the caller-provider roster with an already-admitted
     one — the voice bridge passes ``available_voice_subagents()``, whose
     targets each PIN their own leg (``provider_pinned``): the worker then runs
-    on the target's provider/model, not on whatever funds the caller.
+    on the target's provider/model, not on whatever funds the caller. Chat
+    Task uses the same pin when an Agents-tab assignment names another leg.
     """
     from app.core import provider_agent
     from app.core.config import settings
@@ -616,7 +633,7 @@ async def dispatch_task_tool(
             "ok": False,
             "error": (
                 "Task does not accept a model override. The selected subagent's "
-                "model on the current provider is configured in the Agents UI."
+                "model is configured in the Agents UI."
             ),
         }
 
@@ -638,7 +655,8 @@ async def dispatch_task_tool(
         roster = available_subagents(caller_pid, effective_provider_id)
     target, roster_error = resolve_subagent(ref, roster)
     if target is not None and getattr(target, "provider_pinned", False):
-        # A pinned target (voice roster) chooses the worker's leg itself.
+        # A pinned target (voice roster, or a chat assignment that names
+        # another leg) chooses the worker's provider itself.
         effective_provider_id = target.provider_id or None
 
     # Fluid file/plugin definitions have no Agents-UI row. Keep them usable as

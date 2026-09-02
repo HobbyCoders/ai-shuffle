@@ -12,12 +12,11 @@
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
 	import {
-		encodeProviderModel,
-		decodeProviderModel,
 		getProviders,
 		getProviderDisplay,
 		NATIVE_PROVIDER_KEY,
-		VOICE_PROVIDER_KEY
+		VOICE_PROVIDER_KEY,
+		subagentPickerValue
 	} from '$lib/constants/models';
 	import { onMount } from 'svelte';
 
@@ -306,15 +305,15 @@
 		<div class="set-group">
 			<div class="set-grouphead">
 				<h3><Settings />Provider models</h3>
-				<p>Choose the model used when this agent runs as a subagent on each provider. An unavailable provider is never shown to a calling model.</p>
+				<p>Choose the model this agent runs on when another agent on that provider dispatches it. The model may be on any provider. Leave a row empty to hide this agent from callers on that provider.</p>
 			</div>
 			<div class="set-row">
-				<div class="lab"><h4>Claude</h4><p>Native Claude sessions.</p></div>
+				<div class="lab"><h4>Claude</h4><p>When the caller is on native Claude.</p></div>
 				<div class="ctl">
 					<ModelPicker
-						value={profileForm.provider_models[NATIVE_PROVIDER_KEY] || ''}
-						providerScope={NATIVE_PROVIDER_KEY}
+						value={subagentPickerValue(NATIVE_PROVIDER_KEY, profileForm.provider_models[NATIVE_PROVIDER_KEY])}
 						allowEmpty
+						allowCustom={false}
 						onSelect={(value) => setProviderModel(NATIVE_PROVIDER_KEY, value)}
 					/>
 				</div>
@@ -328,16 +327,10 @@
 					</div>
 					<div class="ctl">
 						<ModelPicker
-							value={profileForm.provider_models[provider.id]
-								? encodeProviderModel(provider.id, profileForm.provider_models[provider.id])
-								: ''}
-							providerScope={provider.id}
-							providerModelsOnly
+							value={subagentPickerValue(provider.id, profileForm.provider_models[provider.id])}
 							allowEmpty
-							onSelect={(value) => {
-								const decoded = decodeProviderModel(value);
-								setProviderModel(provider.id, decoded?.modelId || '');
-							}}
+							allowCustom={false}
+							onSelect={(value) => setProviderModel(provider.id, value)}
 						/>
 					</div>
 				</div>
@@ -367,7 +360,7 @@
 			<div class="set-grouphead grouphead-row">
 				<div>
 					<h3><Bot />Available subagents</h3>
-					<p>Choose which DB agents are listed and dispatchable. The current provider further limits this list to agents with a model assigned above.</p>
+					<p>Choose which DB agents are listed and dispatchable. The current provider further limits this list to agents with a model assigned for it.</p>
 				</div>
 				{#if invocableAgents.length > 0 && !invokeAll}
 					<div class="head-acts">

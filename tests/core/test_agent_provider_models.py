@@ -101,6 +101,8 @@ def test_provider_roster_rejects_uncurated_assignment(mock_db, monkeypatch):
     roster = available_subagents("caller", "provider-1")
 
     assert [(target.id, target.model) for target in roster] == [("good", "gpt-5")]
+    assert roster[0].provider_pinned is False
+    assert roster[0].provider_id is None
 
 
 def test_disabled_provider_has_no_roster(mock_db, monkeypatch):
@@ -433,3 +435,151 @@ def test_voice_roster_drops_a_disabled_provider(mock_db):
         {"provider_models": {VOICE_PROVIDER_KEY: "prov:row-off:m"}},
     )
     assert available_voice_subagents() == ()
+
+
+def test_decode_subagent_binding_shapes():
+    from app.core.agent_provider_models import decode_subagent_binding
+
+    assert decode_subagent_binding("__native__", "sonnet") == (None, "sonnet")
+    assert decode_subagent_binding("__native__", "prov:row-1:meta/llama:free") == (
+        "row-1",
+        "meta/llama:free",
+    )
+    # New UI: a Claude alias under a provider key is the native leg.
+    assert decode_subagent_binding("openai-row", "sonnet") == (None, "sonnet")
+    assert decode_subagent_binding("openai-row", "claude-opus-4-7") == (
+        None,
+        "claude-opus-4-7",
+    )
+    # Legacy: a bare non-Claude id under a provider key stays on that provider.
+    assert decode_subagent_binding("openai-row", "gpt-5") == ("openai-row", "gpt-5")
+    assert decode_subagent_binding("openai-row", "prov:row-2:llama") == (
+        "row-2",
+        "llama",
+    )
+    assert decode_subagent_binding("openai-row", "prov:broken") is None
+    assert decode_subagent_binding("openai-row", "") is None
+    assert decode_subagent_binding("", "sonnet") is None
+
+
+def test_native_roster_admits_cross_provider_composite(mock_db, monkeypatch):
+    from app.db import database
+
+    database.create_profile(
+        "caller",
+        "Caller",
+        None,
+        {"model": "opus", "enabled_agents": ["cross", "native-helper"]},
+    )
+    database.create_profile(
+        "cross",
+        "Cross",
+        None,
+        {"provider_models": {NATIVE_PROVIDER_KEY: "prov:row-1:gpt-5"}},
+    )
+    database.create_profile(
+        "native-helper",
+        "Native Helper",
+        None,
+        {"provider_models": {NATIVE_PROVIDER_KEY: "sonnet"}},
+    )
+    monkeypatch.setattr(
+        database,
+        "get_model_provider",
+        lambda *args, **kwargs: {"id": "row-1", "enabled": True},
+    )
+    monkeypatch.setattr(
+        "app.core.provider_agent.validate_provider_model",
+        lambda *a, **kw: SimpleNamespace(ok=True),
+    )
+
+    roster = available_subagents("caller", None)
+    by_id = {t.id: t for t in roster}
+    assert set(by_id) == {"cross", "native-helper"}
+    assert by_id["cross"].model == "gpt-5"
+    assert by_id["cross"].provider_id == "row-1"
+    assert by_id["cross"].provider_pinned is True
+    assert by_id["native-helper"].model == "sonnet"
+    assert by_id["native-helper"].provider_pinned is False
+    assert by_id["native-helper"].provider_id is None
+
+
+def test_provider_roster_pins_native_alias_and_other_provider(mock_db, monkeypatch):
+    from app.db import database
+
+    database.create_profile("caller", "Caller", None, {"model": "sonnet"})
+    database.create_profile(
+        "claude-on-openai",
+        "Claude On OpenAI",
+        None,
+        {"provider_models": {"provider-1": "sonnet"}},
+    )
+    database.create_profile(
+        "other-leg",
+        "Other Leg",
+        None,
+        {"provider_models": {"provider-1": "prov:row-2:llama"}},
+    )
+    database.create_profile(
+        "legacy-same",
+        "Legacy Same",
+        None,
+        {"provider_models": {"provider-1": "gpt-5"}},
+    )
+
+    def get_provider(provider_id, *args, **kwargs):
+        return {"id": provider_id, "enabled": True}
+
+    monkeypatch.setattr(database, "get_model_provider", get_provider)
+    monkeypatch.setattr(
+        "app.core.provider_agent.validate_provider_model",
+        lambda *a, **kw: SimpleNamespace(ok=True),
+    )
+
+    roster = available_subagents("caller", "provider-1")
+    by_id = {t.id: t for t in roster}
+    assert set(by_id) == {"claude-on-openai", "other-leg", "legacy-same"}
+    assert by_id["claude-on-openai"].model == "sonnet"
+    assert by_id["claude-on-openai"].provider_id is None
+    assert by_id["claude-on-openai"].provider_pinned is True
+    assert by_id["other-leg"].model == "llama"
+    assert by_id["other-leg"].provider_id == "row-2"
+    assert by_id["other-leg"].provider_pinned is True
+    assert by_id["legacy-same"].model == "gpt-5"
+    assert by_id["legacy-same"].provider_pinned is False
+    assert by_id["legacy-same"].provider_id is None
+
+
+def test_disabled_target_provider_drops_only_that_agent(mock_db, monkeypatch):
+    from app.db import database
+
+    database.create_profile(
+        "caller",
+        "Caller",
+        None,
+        {"model": "opus", "enabled_agents": ["good", "bad"]},
+    )
+    database.create_profile(
+        "good",
+        "Good",
+        None,
+        {"provider_models": {NATIVE_PROVIDER_KEY: "sonnet"}},
+    )
+    database.create_profile(
+        "bad",
+        "Bad",
+        None,
+        {"provider_models": {NATIVE_PROVIDER_KEY: "prov:row-off:m"}},
+    )
+
+    def get_provider(provider_id, *args, **kwargs):
+        return {"id": provider_id, "enabled": provider_id != "row-off"}
+
+    monkeypatch.setattr(database, "get_model_provider", get_provider)
+    monkeypatch.setattr(
+        "app.core.provider_agent.validate_provider_model",
+        lambda *a, **kw: SimpleNamespace(ok=True),
+    )
+
+    roster = available_subagents("caller", None)
+    assert [t.id for t in roster] == ["good"]

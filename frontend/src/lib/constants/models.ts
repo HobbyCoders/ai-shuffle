@@ -28,6 +28,7 @@ export {
 	encodeProviderModel,
 	decodeProviderModel,
 	isProviderModel,
+	subagentPickerValue,
 	getModels,
 	getProviders,
 	getClaudeAuth,

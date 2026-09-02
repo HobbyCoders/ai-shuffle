@@ -127,7 +127,7 @@ The top-level object has `id`, `name`, `description`, `is_builtin`, `is_modified
 |-------|------|-------------|
 | `system_prompt` | object | `{type: "preset"\|"custom", preset, content, append, inject_env_details}` |
 | `thinking_mode` | string | `default`, `think`, `think_harder`, `ultra_think` |
-| `provider_models` | object | Model to run this agent on when another agent dispatches it as a subagent, keyed by provider (`__native__` for Claude). The one model binding an agent still owns |
+| `provider_models` | object | Model to run this agent on when another agent dispatches it as a subagent, keyed by the **caller's** provider (`__native__` for Claude). Values are a Claude alias or a `prov:<providerId>:<modelId>` composite and may name any leg. Missing key = unavailable to callers on that provider. The one model binding an agent still owns |
 | `tool_selection_mode` | string | `all`, `none`, `allow`, or `disallow` — decides what the two lists below mean. `all` and `none` carry no list |
 | `allowed_tools` | string[] | The tool surface in `allow` mode. Exact names or `fnmatch` patterns (a whole MCP server saves as `mcp__<server>__*`) |
 | `disallowed_tools` | string[] | The block list in `disallow` mode. Same entry shapes |

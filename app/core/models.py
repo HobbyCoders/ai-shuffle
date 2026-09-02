@@ -105,11 +105,13 @@ class ProfileConfig(BaseModel):
     # with the provider's ANTHROPIC_BASE_URL / auth token and mitigation flags
     # (see ``environment.apply_provider_env``) instead of native Anthropic auth.
     provider: Optional[str] = None  # model_providers.id; None = native Anthropic
-    # Model used when this agent is invoked as a subagent on each provider.
+    # Model used when this agent is invoked as a subagent from each provider.
     # ``__native__`` is the native-Claude key; every other key is a
-    # ``model_providers.id``. Missing key = do not expose this agent as a
-    # subagent on that provider. The legacy provider/model pair above remains
-    # the default top-level chat binding.
+    # ``model_providers.id``. Values are a Claude alias or a
+    # ``prov:<providerId>:<modelId>`` composite (any leg). Missing key = do
+    # not expose this agent as a subagent to callers on that provider. The
+    # legacy provider/model pair above remains the default top-level chat
+    # binding.
     provider_models: Optional[Dict[str, str]] = None
     permission_mode: Optional[str] = None  # default, auto, acceptEdits, plan, bypassPermissions
     thinking_mode: Optional[str] = "default"  # default, disabled, adaptive, think, think_harder, ultra_think

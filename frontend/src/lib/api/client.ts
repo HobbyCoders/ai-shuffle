@@ -291,7 +291,7 @@ export interface AuthStatus {
 export interface ProfileConfig {
 	model?: string;
 	provider?: string | null;  // model_providers.id this model runs through; unset/null = native Anthropic
-	provider_models?: Record<string, string>;  // subagent model by provider; __native__ = native Claude, missing key = unavailable
+	provider_models?: Record<string, string>;  // subagent model by caller provider; values are a Claude alias or prov:<id>:<model> (any leg). __native__ = native Claude callers; missing key = unavailable
 	allowed_tools?: string[];
 	disallowed_tools?: string[];
 	tool_selection_mode?: 'all' | 'none' | 'allow' | 'disallow';  // UI-only: persists the editor dropdown so it round-trips even when the tool list is empty

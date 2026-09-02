@@ -146,6 +146,25 @@ export function isProviderModel(value: string | null | undefined): boolean {
 	return decodeProviderModel(value) !== null;
 }
 
+/**
+ * Wire value for an Agents-tab ModelPicker given a stored `provider_models` entry.
+ *
+ * Stored values are a Claude alias, a `prov:` composite, or (legacy) a bare
+ * model id meaning "on this provider key". The unscoped picker needs composites
+ * to highlight a provider row and bare aliases to highlight Claude.
+ */
+export function subagentPickerValue(
+	key: string,
+	stored: string | null | undefined
+): string {
+	const value = (stored || '').trim();
+	if (!value) return '';
+	if (isProviderModel(value)) return value;
+	if (key === NATIVE_PROVIDER_KEY || key === VOICE_PROVIDER_KEY) return value;
+	if (isPresetModel(value)) return normalizeModel(value) || value;
+	return encodeProviderModel(key, value);
+}
+
 /** A curated model offered by an admin-configured non-Anthropic gateway. */
 export interface ProviderModel {
 	id: string;

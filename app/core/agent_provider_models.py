@@ -6,8 +6,10 @@ chat sessions stopped reading an agent's model in v79 — they carry their own,
 picked at creation — so the legacy ``config.provider`` / ``config.model`` pair
 survives here only as a fallback for agents configured before that move.
 
-The current caller provider chooses the map entry; a model-authored Task call
-never chooses or changes providers.
+The current caller provider chooses the map **entry**. That entry may name any
+leg — a native Claude alias or a ``prov:<providerId>:<modelId>`` composite —
+and a mismatch pins the worker onto the named provider. A model-authored Task
+call never chooses or changes providers.
 """
 
 from __future__ import annotations
@@ -36,6 +38,51 @@ VOICE_PROVIDER_KEY = "__voice__"
 def provider_key(provider_id: str | None) -> str:
     """Return the config-map key for a provider binding."""
     return str(provider_id).strip() if provider_id else NATIVE_PROVIDER_KEY
+
+
+def _load_provider_row(provider_id: str) -> Any:
+    """Return a ``model_providers`` row, or ``None`` on lookup failure."""
+    from app.db import database
+
+    try:
+        return database.get_model_provider(provider_id, include_token=False)
+    except TypeError:
+        # Test doubles and older database adapters may not accept the
+        # include_token keyword.
+        try:
+            return database.get_model_provider(provider_id)
+        except Exception:
+            logger.debug("Could not load subagent provider", exc_info=True)
+            return None
+    except Exception:
+        logger.debug("Could not load subagent provider", exc_info=True)
+        return None
+
+
+def _validated_provider_model(
+    provider_id: str, model: str, provider: Any
+) -> bool:
+    """True when ``model`` is a curated, enabled assignment on ``provider``."""
+    if not provider or not provider.get("enabled"):
+        return False
+    from app.core.provider_agent import validate_provider_model
+
+    try:
+        validation = validate_provider_model(
+            provider_id,
+            model,
+            provider_row=provider,
+            require_servable=False,
+        )
+    except Exception:
+        logger.debug(
+            "Could not validate subagent model %s on provider %s",
+            model,
+            provider_id,
+            exc_info=True,
+        )
+        return False
+    return bool(getattr(validation, "ok", False))
 
 
 def normalized_provider_models(config: Mapping[str, Any]) -> dict[str, str]:
@@ -86,10 +133,10 @@ class SubagentTarget:
     # the background whatever the call asks for, so the contract must not offer
     # ``mode`` as if it were a live choice.
     background_default: bool = False
-    # A target normally runs on the CALLER's provider (the map entry the caller
-    # provider selected). A voice-mode target carries its own leg instead:
-    # ``provider_pinned`` says ``provider_id`` (``None`` = native Claude) is the
-    # leg the worker must run on, whatever the caller is funded by.
+    # A target normally runs on the CALLER's provider. ``provider_pinned`` says
+    # ``provider_id`` (``None`` = native Claude) is the leg the worker must run
+    # on instead — voice assignments always pin, and a chat Task assignment pins
+    # when its stored value names a different provider than the caller.
     provider_id: str | None = None
     provider_pinned: bool = False
 
@@ -121,8 +168,10 @@ def available_subagents(
     """Return the exact Task roster for a caller and its current provider.
 
     Availability is the intersection of the caller's optional invoke allowlist
-    and agents with a valid model assignment on the current provider. The same
-    function feeds Task's schema and its runtime admission check.
+    and agents with a valid model assignment **for** the current provider. The
+    assignment itself may name another leg; those targets come back pinned so
+    dispatch runs the worker there. The same function feeds Task's schema and
+    its runtime admission check.
     """
     if not caller_profile_id:
         return ()
@@ -159,33 +208,23 @@ def available_subagents(
             else None
         )
 
-    # Fail closed for a non-native provider that is missing, disabled, or has
-    # no valid curated target model. Do not reuse ProviderAgent's retired
-    # cross-provider gateway gate here: Task stays on the caller's provider,
-    # and Fluid already serves providers such as OpenRouter natively.
-    provider = None
+    # Fail closed when the CALLER's provider is missing or disabled — the parent
+    # could not be running on it. A *target* assignment that names a bad
+    # provider is skipped per-agent below, not treated as an empty roster.
+    provider_cache: dict[str, Any] = {}
     if provider_id:
-        try:
-            provider = database.get_model_provider(provider_id, include_token=False)
-        except TypeError:
-            # Test doubles and older database adapters may not accept the
-            # include_token keyword.
-            try:
-                provider = database.get_model_provider(provider_id)
-            except Exception:
-                logger.debug("Could not load subagent provider", exc_info=True)
-                return ()
-        except Exception:
-            logger.debug("Could not load subagent provider", exc_info=True)
+        caller_provider = _load_provider_row(provider_id)
+        if not caller_provider or not caller_provider.get("enabled"):
             return ()
-        if not provider or not provider.get("enabled"):
-            return ()
+        provider_cache[provider_id] = caller_provider
     targets = []
     try:
         rows = database.get_all_profiles() or []
     except Exception:
         logger.debug("Could not list profiles for subagent discovery", exc_info=True)
         return ()
+    caller_key = provider_id or None
+    map_key = provider_key(provider_id)
     for row in rows:
         target_id = str(row.get("id") or "").strip()
         if not target_id or target_id == caller_profile_id:
@@ -194,30 +233,24 @@ def available_subagents(
             continue
 
         config = row.get("config") or {}
-        model = model_for_provider(config, provider_id)
-        if not model:
+        binding = decode_subagent_binding(
+            map_key, model_for_provider(config, provider_id)
+        )
+        if binding is None:
             continue
-        if provider_id:
-            from app.core.provider_agent import validate_provider_model
+        target_provider_id, model = binding
 
-            try:
-                validation = validate_provider_model(
-                    provider_id,
-                    model,
-                    provider_row=provider,
-                    require_servable=False,
+        if target_provider_id:
+            if target_provider_id not in provider_cache:
+                provider_cache[target_provider_id] = _load_provider_row(
+                    target_provider_id
                 )
-            except Exception:
-                logger.debug(
-                    "Could not validate subagent model %s on provider %s",
-                    model,
-                    provider_id,
-                    exc_info=True,
-                )
-                continue
-            if not validation.ok:
+            if not _validated_provider_model(
+                target_provider_id, model, provider_cache[target_provider_id]
+            ):
                 continue
 
+        pinned = target_provider_id != caller_key
         targets.append(
             SubagentTarget(
                 id=target_id,
@@ -230,22 +263,30 @@ def available_subagents(
                 background_default=is_read_only_tool_surface(
                     config.get("allowed_tools")
                 ),
+                provider_id=target_provider_id if pinned else None,
+                provider_pinned=pinned,
             )
         )
 
     return tuple(sorted(targets, key=lambda target: (target.name.casefold(), target.id)))
 
 
-def decode_voice_binding(value: Any) -> tuple[str | None, str] | None:
-    """``(provider_id, model_id)`` for a stored voice assignment, else ``None``.
+def decode_subagent_binding(
+    key: str, value: Any
+) -> tuple[str | None, str] | None:
+    """``(provider_id, model_id)`` for a stored Task assignment, else ``None``.
 
-    A bare model id is the native Claude leg (``provider_id=None``); a
-    ``prov:<providerId>:<modelId>`` composite names a provider row. Anything
-    empty or malformed reads as "not assigned".
+    A ``prov:<providerId>:<modelId>`` composite names that provider row. A bare
+    Claude alias is the native leg, even when stored under a caller-provider
+    key (the Agents tab lets every row pick any model). A bare non-Claude id
+    under a provider key is the pre-unscoped legacy shape: that model on that
+    provider. Empty or malformed reads as "not assigned".
     """
     if not isinstance(value, str) or not value.strip():
         return None
-    from app.core.query_options import decode_provider_model
+    if not isinstance(key, str) or not key.strip():
+        return None
+    from app.core.query_options import decode_provider_model, is_native_claude_model
 
     text = value.strip()
     decoded = decode_provider_model(text)
@@ -253,7 +294,22 @@ def decode_voice_binding(value: Any) -> tuple[str | None, str] | None:
         return decoded
     if text.startswith("prov:"):
         return None  # a composite with a missing half — not a native id
-    return None, text
+    clean_key = key.strip()
+    if (
+        clean_key in (NATIVE_PROVIDER_KEY, VOICE_PROVIDER_KEY)
+        or is_native_claude_model(text)
+    ):
+        return None, text
+    return clean_key, text
+
+
+def decode_voice_binding(value: Any) -> tuple[str | None, str] | None:
+    """``(provider_id, model_id)`` for a stored voice assignment, else ``None``.
+
+    Voice values use the same codec as Task assignments on ``__voice__``: a bare
+    model id is the native Claude leg; a composite names a provider row.
+    """
+    return decode_subagent_binding(VOICE_PROVIDER_KEY, value)
 
 
 def available_voice_subagents(
@@ -294,33 +350,10 @@ def available_voice_subagents(
 
         if provider_id:
             if provider_id not in provider_cache:
-                try:
-                    provider_cache[provider_id] = database.get_model_provider(
-                        provider_id, include_token=False
-                    )
-                except TypeError:
-                    try:
-                        provider_cache[provider_id] = database.get_model_provider(provider_id)
-                    except Exception:
-                        provider_cache[provider_id] = None
-                except Exception:
-                    provider_cache[provider_id] = None
-            provider = provider_cache[provider_id]
-            if not provider or not provider.get("enabled"):
-                continue
-            from app.core.provider_agent import validate_provider_model
-
-            try:
-                validation = validate_provider_model(
-                    provider_id, model, provider_row=provider, require_servable=False,
-                )
-            except Exception:
-                logger.debug(
-                    "Could not validate voice subagent model %s on provider %s",
-                    model, provider_id, exc_info=True,
-                )
-                continue
-            if not validation.ok:
+                provider_cache[provider_id] = _load_provider_row(provider_id)
+            if not _validated_provider_model(
+                provider_id, model, provider_cache[provider_id]
+            ):
                 continue
 
         targets.append(
@@ -588,8 +621,9 @@ def parent_subagent_guidance(
         "# Subagent delegation\n"
         "Configured agents are exposed to you as subagents through Task. "
         "Task's schema lists the only DB and file/plugin subagents available "
-        "on the current provider, including each assigned model. Use only those "
-        "IDs; if the list is empty, do not call Task.\n"
+        "from the current provider, including each assigned model (which may "
+        "run on another provider). Use only those IDs; if the list is empty, "
+        "do not call Task.\n"
         "A subagent receives an isolated session, not this conversation, so give "
         "it a self-contained brief with relevant context and expected output. "
         "Delegate independent or context-heavy work; handle quick direct work "

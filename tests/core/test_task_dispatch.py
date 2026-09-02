@@ -369,6 +369,47 @@ def test_dispatch_stays_on_caller_provider_and_uses_target_assignment(
     assert seen["model_id"] == "gpt-5"
 
 
+def test_cross_provider_assignment_pins_the_worker(agents, monkeypatch):
+    """A composite stored under the caller's map key pins the worker to that leg."""
+    from types import SimpleNamespace
+
+    from app.core import agent_provider_models as apm
+
+    agents.create_profile(
+        "cross-helper",
+        "Cross Helper",
+        None,
+        {"provider_models": {apm.NATIVE_PROVIDER_KEY: "prov:row-or:meta/llama"}},
+    )
+    _mk_session(agents, "s-cross", "root-agent")
+    monkeypatch.setattr(td, "_credential_gap", lambda provider_id: None)
+    monkeypatch.setattr(
+        agents,
+        "get_model_provider",
+        lambda *a, **k: {"id": "row-or", "enabled": True},
+    )
+    monkeypatch.setattr(
+        "app.core.provider_agent.validate_provider_model",
+        lambda *a, **kw: SimpleNamespace(ok=True),
+    )
+    seen = {}
+
+    async def fake_worker(**kwargs):
+        seen.update(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-cross", report="done")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = asyncio.run(td.dispatch_task_tool(
+            {"agent": "cross-helper", "prompt": "go"},
+            caller_session_id="s-cross",
+            caller_provider_id=None,
+        ))
+
+    assert payload["ok"] is True
+    assert seen["provider_id"] == "row-or"
+    assert seen["model_id"] == "meta/llama"
+
+
 def test_worker_system_prompt_uses_subagent_role_and_real_depth(monkeypatch):
     monkeypatch.setattr(td, "_is_worker_session", lambda session_id: True)
     monkeypatch.setattr(td, "caller_chain", lambda session_id: ([], "root", 2))
