@@ -23,7 +23,7 @@
 	 * trigger and no positioning — the parent owns the popover chrome and sizes
 	 * the panel via `--mpp-height` / `--mpp-width`.
 	 */
-	import { Search, Star } from 'lucide-svelte';
+	import { LayoutGrid, Search, Star } from 'lucide-svelte';
 	import { tick } from 'svelte';
 	import ProviderGlyph from './ProviderGlyph.svelte';
 	import type { PickerGroup, PickerOption } from '$lib/constants/model-picker';
@@ -61,6 +61,12 @@
 		onContextChoiceSelect?: (choice: ContextWindowChoice) => void;
 		/** Escape pressed inside the search box. */
 		onRequestClose?: () => void;
+		/**
+		 * Open on an All-providers list instead of the group that owns `value`.
+		 * Subagent pickers use this so a Claude (or Grok, …) row still shows
+		 * every connected provider's models without a rail click.
+		 */
+		startOnAll?: boolean;
 	}
 
 	let {
@@ -74,10 +80,12 @@
 		ariaLabel = 'Model',
 		contextChoice,
 		onContextChoiceSelect,
-		onRequestClose
+		onRequestClose,
+		startOnAll = false
 	}: Props = $props();
 
 	const FAVORITES = '__favorites__';
+	const ALL = '__all__';
 
 	let query = $state('');
 	let searchEl = $state<HTMLInputElement | null>(null);
@@ -98,16 +106,19 @@
 	);
 
 	// ---- rail selection -------------------------------------------------------
-	// Initial rail pick: favorites when any exist, else the group owning the
-	// current value, else the first group. Re-validated whenever the catalog
-	// changes so a vanished provider can't leave the rail pointing at nothing.
+	// Initial rail pick: All (when requested), else favorites when any exist,
+	// else the group owning the current value, else the first group.
+	// Re-validated whenever the catalog changes so a vanished provider can't
+	// leave the rail pointing at nothing.
 	let railKey = $state<string | null>(null);
 	const currentGroupKey = $derived(options.find((o) => o.value === value)?.groupKey ?? null);
 	const effectiveRailKey = $derived.by(() => {
 		// Favorites stays addressable even while empty, so its rail button has a
 		// useful empty state instead of disappearing after the final unstar.
 		if (railKey === FAVORITES) return FAVORITES;
+		if (railKey === ALL) return ALL;
 		if (railKey && groups.some((g) => g.key === railKey)) return railKey;
+		if (startOnAll) return ALL;
 		if (currentGroupKey) return currentGroupKey;
 		if (hasFavorites) return FAVORITES;
 		return groups[0]?.key ?? null;
@@ -121,6 +132,7 @@
 	const visibleOptions = $derived.by<PickerOption[]>(() => {
 		if (isSearching) return options.filter((o) => matchesPickerQuery(o, query));
 		if (effectiveRailKey === FAVORITES) return favoriteOptions;
+		if (effectiveRailKey === ALL) return options;
 		return options.filter((o) => o.groupKey === effectiveRailKey);
 	});
 	const visibleLeading = $derived(isSearching ? [] : leadingRows);
@@ -130,7 +142,7 @@
 	// (searching / favorites) or the rail is hidden and the user has no other
 	// cue; on a single-provider page it would repeat the rail's selection.
 	const showProviderLine = $derived(
-		isSearching || effectiveRailKey === FAVORITES || !showRail
+		isSearching || effectiveRailKey === FAVORITES || effectiveRailKey === ALL || !showRail
 	);
 
 	function groupFor(o: PickerOption): PickerGroup | undefined {
@@ -218,6 +230,20 @@
 				<Star size={18} class="mpp-rail-star" />
 			</button>
 			<div class="mpp-rail-sep" aria-hidden="true"></div>
+			{#if startOnAll}
+				<button
+					type="button"
+					role="tab"
+					class="mpp-rail-btn"
+					class:selected={effectiveRailKey === ALL}
+					aria-selected={effectiveRailKey === ALL}
+					aria-label="All providers"
+					title="All providers"
+					onclick={() => pickRail(ALL)}
+				>
+					<LayoutGrid size={18} />
+				</button>
+			{/if}
 			{#each groups as g (g.key)}
 				<button
 					type="button"

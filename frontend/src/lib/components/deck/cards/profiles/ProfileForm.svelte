@@ -314,6 +314,7 @@
 						value={subagentPickerValue(NATIVE_PROVIDER_KEY, profileForm.provider_models[NATIVE_PROVIDER_KEY])}
 						allowEmpty
 						allowCustom={false}
+						startOnAll
 						onSelect={(value) => setProviderModel(NATIVE_PROVIDER_KEY, value)}
 					/>
 				</div>
@@ -330,6 +331,7 @@
 							value={subagentPickerValue(provider.id, profileForm.provider_models[provider.id])}
 							allowEmpty
 							allowCustom={false}
+							startOnAll
 							onSelect={(value) => setProviderModel(provider.id, value)}
 						/>
 					</div>
@@ -350,6 +352,7 @@
 						allowEmpty
 						emptyLabel="Not available in voice calls"
 						allowCustom={false}
+						startOnAll
 						onSelect={(value) => setProviderModel(VOICE_PROVIDER_KEY, value)}
 					/>
 				</div>

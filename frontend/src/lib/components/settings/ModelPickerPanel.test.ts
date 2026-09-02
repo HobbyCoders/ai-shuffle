@@ -69,4 +69,43 @@ describe('ModelPickerPanel', () => {
 		await fireEvent.change(context, { target: { value: 'standard' } });
 		expect(onContextChoiceSelect).toHaveBeenCalledWith('standard');
 	});
+
+	it('startOnAll lists every provider even when value belongs to Claude', async () => {
+		const grok = {
+			key: 'grok-row',
+			name: 'Grok',
+			subtext: 'API',
+			glyph: 'grok' as const,
+			isApi: true
+		};
+		const mixedOptions = [
+			...options,
+			{
+				value: 'prov:grok-row:grok-4',
+				label: 'Grok 4',
+				description: 'grok-4',
+				groupKey: 'grok-row',
+				group: 'Grok',
+				groupSubtext: 'API'
+			}
+		];
+		render(ModelPickerPanel, {
+			props: {
+				groups: [...groups, grok],
+				options: mixedOptions,
+				value: 'sonnet',
+				onSelect: vi.fn(),
+				startOnAll: true
+			}
+		});
+
+		expect(screen.getByRole('tab', { name: /all providers/i })).toBeTruthy();
+		const list = screen.getByRole('listbox', { name: 'Model' });
+		expect(within(list).getByRole('option', { name: /sonnet/i })).toBeTruthy();
+		expect(within(list).getByRole('option', { name: /grok 4/i })).toBeTruthy();
+
+		await fireEvent.click(screen.getByRole('tab', { name: /^claude/i }));
+		expect(within(list).getByRole('option', { name: /sonnet/i })).toBeTruthy();
+		expect(within(list).queryByRole('option', { name: /grok 4/i })).toBeNull();
+	});
 });

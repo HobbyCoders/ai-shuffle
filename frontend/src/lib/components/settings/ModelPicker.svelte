@@ -45,6 +45,11 @@
 		 * surface as a failed call much later.
 		 */
 		allowCustom?: boolean;
+		/**
+		 * Open the panel on an All-providers list (every catalog row, with
+		 * provider sublines). Used by subagent assignment pickers.
+		 */
+		startOnAll?: boolean;
 	}
 
 	let {
@@ -55,7 +60,8 @@
 		providerScope,
 		allowEmpty = false,
 		emptyLabel = 'Unavailable as subagent',
-		allowCustom = true
+		allowCustom = true,
+		startOnAll = false
 	}: Props = $props();
 
 	const catalog = $derived(buildModelPickerCatalog({ providerModelsOnly, providerScope }));
@@ -170,6 +176,7 @@
 				onSelect={selectOption}
 				{leadingRows}
 				{trailingRows}
+				{startOnAll}
 				onRequestClose={() => (open = false)}
 			/>
 		</div>
