@@ -35,6 +35,7 @@ from app.core import (
     encryption,
     grok_rate_limit_resets,
     model_catalog_presets,
+    model_registry,
     xai_oauth,
 )
 from app.db import database as db
@@ -358,7 +359,11 @@ def _upstream_context_length(entry: Dict[str, Any]) -> Optional[int]:
     return None
 
 
-def _parse_models_response(payload: Any) -> List[Dict[str, Any]]:
+def _parse_models_response(
+    payload: Any,
+    *,
+    provider_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """Normalize an upstream ``/models`` body into ``[{id, label}]``.
 
     Handles both OpenAI-style ``{"data": [{"id": ...}]}`` and a bare list of
@@ -371,6 +376,10 @@ def _parse_models_response(payload: Any) -> List[Dict[str, Any]]:
     It used to be dropped here, which forced every model on the row to share the
     row's single ``context_window`` column — wrong the moment one model on the
     row has a different window.
+
+    OpenRouter catalog names (``Anthropic: Claude Fable 5.1``) have the author
+    prefix stripped when ``provider_type`` is ``openrouter`` — see
+    ``display_provider_model_label``.
     """
     if isinstance(payload, dict):
         raw = payload.get("data")
@@ -396,6 +405,7 @@ def _parse_models_response(payload: Any) -> List[Dict[str, Any]]:
             continue
         if not model_id:
             continue
+        label = model_registry.display_provider_model_label(label, provider_type)
         model: Dict[str, Any] = {"id": model_id, "label": label}
         if context_window is not None:
             model["context_window"] = context_window
@@ -422,6 +432,7 @@ async def fetch_upstream_models(
     token: Optional[str],
     *,
     client: Optional[httpx.AsyncClient] = None,
+    provider_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Fetch + normalize a provider's ``GET {base_url}/v1/models`` catalog.
 
@@ -457,7 +468,7 @@ async def fetch_upstream_models(
         payload = resp.json()
     except Exception as e:  # noqa: BLE001 — malformed upstream body
         raise UpstreamModelsError("invalid_json") from e
-    return _parse_models_response(payload)
+    return _parse_models_response(payload, provider_type=provider_type)
 
 
 def _row_with_token_flags(provider_id: str) -> Optional[Dict[str, Any]]:
@@ -683,7 +694,8 @@ async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
     from app.core.http_client import get_http_client
     try:
         models = await fetch_upstream_models(
-            row["base_url"], auth_token, client=get_http_client()
+            row["base_url"], auth_token, client=get_http_client(),
+            provider_type=row.get("provider_type"),
         )
     except UpstreamModelsError as e:
         raise HTTPException(

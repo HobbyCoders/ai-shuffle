@@ -185,6 +185,27 @@ class TestUpstreamPath:
             {"id": "meta-llama/llama-3.1", "label": "meta-llama/llama-3.1"},
         ]
 
+    def test_openrouter_strips_author_prefix_from_names(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        _unlock(mock_db)
+        _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
+
+        def _handler(request):
+            return httpx.Response(200, json={"data": [
+                {"id": "anthropic/claude-fable-5.1",
+                 "name": "Anthropic: Claude Fable 5.1"},
+                {"id": "z-ai/glm-5.3-flash", "name": "Z.ai: GLM 5.3 Flash"},
+            ]})
+
+        _install_mock_transport(monkeypatch, _handler)
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["models"] == [
+            {"id": "anthropic/claude-fable-5.1", "label": "Claude Fable 5.1"},
+            {"id": "z-ai/glm-5.3-flash", "label": "GLM 5.3 Flash"},
+        ]
+
     def test_bare_list_shape(self, authenticated_client, mock_db, monkeypatch):
         _unlock(mock_db)
         _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
@@ -275,6 +296,27 @@ class TestHelperParsing:
             {"label": "no id"}, {"id": "keep", "label": "Keep"}, 42,
         ]})
         assert out == [{"id": "keep", "label": "Keep"}]
+
+    def test_parse_strips_openrouter_author_prefix(self):
+        out = mp_api._parse_models_response(
+            {"data": [
+                {"id": "anthropic/claude-fable-5.1",
+                 "name": "Anthropic: Claude Fable 5.1"},
+                {"id": "z-ai/glm-5.3", "name": "Z.ai: GLM 5.3"},
+                {"id": "x-ai/grok-4.6", "name": "Grok 4.6"},
+            ]},
+            provider_type="openrouter",
+        )
+        assert [m["label"] for m in out] == [
+            "Claude Fable 5.1", "GLM 5.3", "Grok 4.6",
+        ]
+
+    def test_parse_keeps_author_prefix_for_non_openrouter(self):
+        out = mp_api._parse_models_response(
+            {"data": [{"id": "x", "name": "Anthropic: Claude Fable 5.1"}]},
+            provider_type="custom",
+        )
+        assert out == [{"id": "x", "label": "Anthropic: Claude Fable 5.1"}]
 
     def test_parse_carries_through_upstream_context_length(self):
         """OpenRouter-shaped windows survive normalization as ``context_window``.

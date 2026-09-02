@@ -150,6 +150,26 @@ def get_model_label(value: Optional[str]) -> str:
     return value if value else "Default"
 
 
+def display_provider_model_label(
+    label: Any,
+    provider_type: Optional[str] = None,
+) -> Any:
+    """Picker-facing name for a gateway catalog entry.
+
+    OpenRouter names models ``{author}: {name}`` (e.g. ``Anthropic: Claude
+    Fable 5.1``). The picker already groups by the OpenRouter row, so the
+    author prefix is noise — drop it. Other provider types, and names that
+    are not in that shape, pass through unchanged. Non-strings are returned
+    as-is so callers can keep ``None`` labels.
+    """
+    if not isinstance(label, str) or provider_type != "openrouter":
+        return label
+    if ": " not in label:
+        return label
+    rest = label.split(": ", 1)[1].strip()
+    return rest or label
+
+
 def get_model_family(value: Optional[str]) -> Optional[ModelFamily]:
     """Resolved family, or ``None`` for unknown/custom values."""
     match = get_model(value)
@@ -338,7 +358,9 @@ def _providers_payload() -> List[Dict[str, object]]:
             "models": [
                 {
                     "id": model.get("id"),
-                    "label": model.get("label"),
+                    "label": display_provider_model_label(
+                        model.get("label"), row.get("provider_type")
+                    ),
                     # Per-model context window: the model's own value, then the
                     # preset roster, then the row's column (see
                     # ``resolve_provider_context_window``). The row column alone

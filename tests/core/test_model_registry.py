@@ -91,6 +91,20 @@ def test_preset_detection():
     assert m.is_preset_model("") is False
 
 
+def test_openrouter_display_label_strips_author_prefix():
+    assert m.display_provider_model_label(
+        "Anthropic: Claude Fable 5.1", "openrouter"
+    ) == "Claude Fable 5.1"
+    assert m.display_provider_model_label("Z.ai: GLM 5.3", "openrouter") == "GLM 5.3"
+    assert m.display_provider_model_label("Grok 4.6", "openrouter") == "Grok 4.6"
+    # Non-OpenRouter catalogs keep the prefix; empty rest keeps the original.
+    assert m.display_provider_model_label(
+        "Anthropic: Claude Fable 5.1", "custom"
+    ) == "Anthropic: Claude Fable 5.1"
+    assert m.display_provider_model_label("Author: ", "openrouter") == "Author: "
+    assert m.display_provider_model_label(None, "openrouter") is None
+
+
 def test_label_and_family_resolve_through_legacy_ids():
     assert m.get_model_label("sonnet") == "Sonnet"
     # No more " 1M" decoration — the window is not a variant any more.
@@ -276,6 +290,24 @@ class TestRegistryPayloadProviders:
             }],
             "default_model": "openai/gpt-5.6",
         }
+
+    def test_openrouter_model_labels_drop_author_prefix(self, mock_db):
+        """Stored OpenRouter catalog names include the author; the picker does not."""
+        db.create_model_provider(
+            provider_id="prov-or-prefix",
+            name="OpenRouter",
+            provider_type="openrouter",
+            base_url="https://openrouter.ai/api",
+            models=[
+                {"id": "anthropic/claude-fable-5.1",
+                 "label": "Anthropic: Claude Fable 5.1"},
+                {"id": "x-ai/grok-4.6", "label": "Grok 4.6"},
+            ],
+            enabled=True,
+        )
+        models = m.registry_payload()["providers"][0]["models"]
+        assert models[0]["label"] == "Claude Fable 5.1"
+        assert models[1]["label"] == "Grok 4.6"
 
     def test_model_entries_carry_provider_context_and_output_metadata(self, mock_db):
         """Chunk D.4 additive keys: each model entry echoes the provider row's
