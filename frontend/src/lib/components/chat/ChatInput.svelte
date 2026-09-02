@@ -954,21 +954,18 @@
 		position: relative;
 		z-index: 20;
 		display: flex;
-		align-items: flex-start;
+		align-items: center;
 		gap: 8px;
 		padding: 12px 12px 4px 14px;
 		min-height: 70px;
 	}
 
-	/* Desktop: the empty editor stretches to the box's full upper region, so
-	   the caret lands where the user clicked instead of snapping to a one-line
-	   strip. Once typing grows past that the natural height takes over. Mobile
-	   keeps its compact metrics — there the composer collapses/focuses as one
-	   surface already. (.tiptap-editor is TiptapEditor's scoped root; its inner
-	   ProseMirror div inherits the stretch from the flex column.) */
+	/* Desktop: give the empty editor a taller hit area. The caret and
+	   placeholder stay vertically centred in that box (TiptapEditor) so they
+	   line up with the send button. Don't stretch ProseMirror itself — that
+	   parked the caret at the top while the placeholder sat in the middle. */
 	@media (min-width: 1081px) {
-		.textarea-wrapper :global(.tiptap-editor),
-		.textarea-wrapper :global(.tiptap-editor .ProseMirror) {
+		.textarea-wrapper :global(.tiptap-editor) {
 			min-height: 3.4em;
 		}
 	}

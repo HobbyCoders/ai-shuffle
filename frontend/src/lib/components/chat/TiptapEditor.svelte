@@ -277,8 +277,11 @@
 		max-height: 300px;
 		overflow-y: auto;
 		display: flex;
-		/* Use flex-start so content starts at top and scrollbar works properly */
-		align-items: flex-start;
+		flex-direction: column;
+		/* Center the caret and placeholder in the empty min-height box; `safe`
+		   falls back to start once the content is taller than the box so the
+		   scrollbar still works. */
+		justify-content: safe center;
 	}
 
 	.tiptap-editor.disabled {
@@ -304,17 +307,15 @@
 		margin: 0;
 	}
 
-	/* Empty-state placeholder: vertically centered in the editor box, left-aligned
-	   with typed text. The ::before drops out as soon as the paragraph has content. */
+	/* Placeholder sits on the text line so it shares the caret's vertical
+	   position. height: 0 keeps it out of layout, matching TipTap's default. */
 	.tiptap-editor :global(.ProseMirror p.is-editor-empty:first-child::before) {
 		content: attr(data-placeholder);
 		color: var(--subtle-foreground);
 		font-weight: 400;
 		pointer-events: none;
-		position: absolute;
-		left: 0;
-		top: 50%;
-		transform: translateY(-50%);
+		float: left;
+		height: 0;
 	}
 
 	/* File chip node styling */
