@@ -57,7 +57,7 @@ def import_homes(tmp_path, monkeypatch):
     return source, destination
 
 
-def test_different_provider_instructions_become_review_sidecars(import_homes) -> None:
+def test_different_provider_instructions_are_concatenated(import_homes) -> None:
     source, destination = import_homes
     codex = _write(source / ".codex" / "AGENTS.md", "codex rules")
     claude = _write(source / ".claude" / "CLAUDE.md", "claude rules")
@@ -66,8 +66,9 @@ def test_different_provider_instructions_become_review_sidecars(import_homes) ->
     instructions = [item for item in preview["items"] if "global_instruction" in item["kind"]]
 
     assert [item["source"] for item in instructions] == [str(claude), str(codex)]
-    assert [item["status"] for item in instructions] == ["ready", "ready"]
-    assert all("imports" in item["destination"] for item in instructions)
+    assert [item["status"] for item in instructions] == ["ready", "duplicate"]
+    combined = instructions[0]
+    assert combined["destination"] == str(destination / ".fluid" / "AGENTS.md")
     assert preview["source_untouched"] is True
     assert preview["overwrite_existing"] is False
     assert {category["id"] for category in preview["categories"]} >= {"global_instructions"}
@@ -75,15 +76,48 @@ def test_different_provider_instructions_become_review_sidecars(import_homes) ->
 
     result = service.apply_import(
         token=preview["token"],
+        selected_item_ids=[combined["id"]],
+        source_home=str(source),
+    )
+
+    agents = destination / ".fluid" / "AGENTS.md"
+    assert agents.read_text(encoding="utf-8") == (
+        f"# From: {claude}\nclaude rules\n\n# From: {codex}\ncodex rules\n"
+    )
+    assert codex.read_text() == "codex rules"
+    assert claude.read_text() == "claude rules"
+    assert len(result["imported"]) == 1
+
+
+def test_different_provider_instructions_become_review_sidecars(import_homes) -> None:
+    source, destination = import_homes
+    codex = _write(source / ".codex" / "AGENTS.md", "codex rules")
+    claude = _write(source / ".claude" / "CLAUDE.md", "claude rules")
+    native = _write(destination / ".fluid" / "AGENTS.md", "native rules")
+
+    preview = service.preview_import(source_home=str(source))
+    instructions = [item for item in preview["items"] if "global_instruction" in item["kind"]]
+
+    assert [item["source"] for item in instructions] == [str(claude), str(codex)]
+    assert [item["status"] for item in instructions] == ["ready", "ready"]
+    assert all("imports" in item["destination"] for item in instructions)
+    assert native.read_text() == "native rules"
+    assert preview["source_untouched"] is True
+    assert preview["overwrite_existing"] is False
+
+    result = service.apply_import(
+        token=preview["token"],
         selected_item_ids=[instructions[0]["id"]],
         source_home=str(source),
     )
 
-    assert not (destination / ".fluid" / "AGENTS.md").exists()
+    assert native.read_text() == "native rules"
     assert Path(instructions[0]["destination"]).read_text() == "claude rules"
     assert codex.read_text() == "codex rules"
     assert claude.read_text() == "claude rules"
-    assert len(result["imported"]) == 1
+    # Sidecar writes are not activations; Fluid reports them skipped.
+    assert result["imported"] == []
+    assert len(result["skipped"]) == 1
 
 
 def test_apply_rejects_stale_preview(import_homes) -> None:

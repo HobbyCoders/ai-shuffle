@@ -107,7 +107,9 @@ def _serialize_items(plan: Any) -> list[dict[str, Any]]:
         status = item.status
         message = item.message
         project_path = item.provenance.get("project_path") if item.kind == "project_registration" else None
-        if project_path and status == "ready":
+        # Fluid marks these diagnostic (it will not touch a database). The host
+        # owns AI Shuffle registration, so remap regardless of Fluid's status.
+        if project_path:
             source = str(Path(project_path).expanduser().resolve())
             destination = source
             status, message = _project_status(Path(source), existing, claimed)

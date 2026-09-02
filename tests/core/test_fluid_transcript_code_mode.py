@@ -68,6 +68,7 @@ def _insert_events(session_id, events):
 def _tool_use(tool_use_id, name, input_):
     return {
         "_cls": "ToolUse",
+        "_v": 1,
         "session_id": "ses_code",
         "node_id": None,
         "turn_id": "turn_1",
@@ -82,6 +83,7 @@ def _tool_use(tool_use_id, name, input_):
 def _tool_result(tool_use_id, name, output, is_error=False):
     return {
         "_cls": "ToolResult",
+        "_v": 1,
         "session_id": "ses_code",
         "node_id": None,
         "turn_id": "turn_1",
