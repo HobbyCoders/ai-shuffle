@@ -207,8 +207,8 @@ def wired_capabilities(
     """The host capabilities a CLI session's tool context will carry.
 
     Mirrors what :func:`build_engine` and :class:`~fluid.cli.host.CliHost`
-    wire: recall over the store when it can search, the Task and Monitor
-    dispatchers when the host is attached, the learner's store under
+    wire: recall over the store when it can search, the Task, Monitor and
+    agent-messaging routes when the host is attached, the learner's store under
     ``continual`` or code mode, and the capabilities the native loop wires
     itself (not on the delegated leg, which cannot serve them).
     """
@@ -220,7 +220,9 @@ def wired_capabilities(
     if callable(getattr(store, "session_slice", None)):
         wired.add("session_view")
     if background_host:
-        wired.update({"task_dispatch", "monitor_spawn"})
+        wired.update({
+            "task_dispatch", "monitor_spawn", "agent_roster", "agent_message",
+        })
     if config.continual or config.code_mode:
         wired.add("recall_store")
     if config.continual:

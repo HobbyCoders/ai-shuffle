@@ -68,13 +68,15 @@ def fence_untrusted(text: str, source: str) -> str:
 # ─── harness-marker defanging ────────────────────────────────────────────────
 
 # fluid's own trusted control channels. Genuine instances are appended by the
-# ENGINE after dispatch (nested-instruction reminders, delivered steers), so
+# ENGINE after dispatch (nested-instruction reminders, delivered steers and
+# peer messages), so
 # any occurrence inside a tool result's own text — a README the model Read, a
 # kernel cell's stdout, an MCP payload — is spoofing: content trying to borrow
 # the authority the base prompt grants these exact markers. Defanged, not
 # blocked: the surrounding result is still legitimate data.
 _SYSTEM_REMINDER_RE = re.compile(r"<(\s*/?\s*)system-reminder(\s*)>", re.IGNORECASE)
 _STEER_MARKER_RE = re.compile(r"\[(/?)user interjection", re.IGNORECASE)
+_PEER_MARKER_RE = re.compile(r"\[(/?)agent message", re.IGNORECASE)
 
 
 def defang_harness_markers(text: str) -> str:
@@ -86,6 +88,8 @@ def defang_harness_markers(text: str) -> str:
         text = _SYSTEM_REMINDER_RE.sub(r"<\1system•reminder\2>", text)
     if "user interjection" in lowered:
         text = _STEER_MARKER_RE.sub(r"[\1user•interjection", text)
+    if "agent message" in lowered:
+        text = _PEER_MARKER_RE.sub(r"[\1agent•message", text)
     return text
 
 

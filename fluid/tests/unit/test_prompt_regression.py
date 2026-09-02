@@ -395,7 +395,10 @@ def test_plan_mode_leaves_matches_the_registry() -> None:
     for name in ("Task", "Monitor", "WebFetch"):
         assert name in PLAN_SPEC.description and name in ENTER_RESULT
     assert "the shell" in PLAN_SPEC.description
-    assert "While planning, Bash, Edit, Monitor, Task, WebFetch, Write are off" in DEFAULT_BASE_PROMPT
+    assert (
+        "While planning, Bash, Edit, Monitor, SendMessage, Task, WebFetch, "
+        "Write are off"
+    ) in DEFAULT_BASE_PROMPT
 
 
 def test_tool_capabilities_match_the_registry() -> None:

@@ -13,6 +13,15 @@ child engine needs :class:`~fluid.config.model.HarnessConfig` and
 Nothing here is CLI-specific beyond that dependency, so another in-process host
 may reuse :class:`CliHost` as is.
 
+It is also the messaging host: ``agent_roster`` lists the workers it holds (plus
+``main``, inside a worker) and ``agent_message`` resolves one of those names to
+an engine and submits an ``AgentMessage`` to it. Choosing the delivery channel
+is the receiving engine's job, not this module's, so a sender never races the
+receiver's busy/idle state. A name that resolves to a *finished* worker is
+resumed first — rebuilt over its stored session, registered as a new background
+task, and started on the message — so being alive is never a precondition for
+being reachable.
+
 Two worker kinds, one lifecycle:
 
 * ``monitor_spawn`` runs a shell command as a detached asyncio subprocess,
@@ -42,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import os
 import re
@@ -59,7 +69,12 @@ from fluid.events.model import (
     PermissionRequest,
     TurnComplete,
 )
-from fluid.events.ops import BackgroundTaskFinished, RespondPermission, UserTurn
+from fluid.events.ops import (
+    AgentMessage,
+    BackgroundTaskFinished,
+    RespondPermission,
+    UserTurn,
+)
 from fluid.store.base import new_id
 from fluid.tools.builtins._util import strip_ansi
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome
@@ -89,6 +104,32 @@ async def deny_permission(event: PermissionRequest) -> str:
     return "deny"
 
 
+# ``name [ref]`` — the address form ListAgents prints and SendMessage accepts.
+# The ref is only ever needed to break a tie between two agents sharing a name,
+# so it stays short enough to type and long enough not to collide.
+_REF_CHARS = 6
+_ADDRESS_RE = re.compile(r"^(?P<name>.*?)\s*\[(?P<ref>[^\[\]]+)\]$")
+
+
+def _ref_of(task_id: str) -> str:
+    """The disambiguating ref for a worker's task id."""
+    return task_id[-_REF_CHARS:]
+
+
+def _split_ref(to: str) -> tuple[str, str | None]:
+    """Split an address into ``(name, ref)``; ref is None when none was given."""
+    match = _ADDRESS_RE.match(to.strip())
+    if match is None:
+        return to.strip(), None
+    return match.group("name").strip(), match.group("ref").strip()
+
+
+def _engine_busy(engine: Any | None) -> bool:
+    """True while ``engine`` is running a turn (so a message would queue)."""
+    turn = getattr(engine, "_turn_task", None)
+    return turn is not None and not turn.done()
+
+
 @dataclass
 class Worker:
     """One host-owned background unit — a monitored process or a child agent."""
@@ -96,6 +137,16 @@ class Worker:
     task_id: str
     kind: str  # "monitor" | "task"
     description: str
+    # The address a peer messages this worker by (Task's ``label``, else the
+    # agent name). Not unique on its own — ``ref`` disambiguates.
+    name: str = ""
+    # The child engine, while it is alive. Cleared once the worker is closed,
+    # which is how a peer message tells "still running" from "needs resuming".
+    engine: Any | None = None
+    # The agent definition this worker was built from (None for the generic
+    # subagent). Kept so a resume rebuilds the same worker — same prompt, same
+    # tool restriction, same model — over its stored session.
+    definition: Any = None
     task: asyncio.Task | None = None
     process: asyncio.subprocess.Process | None = None
     worker_session_id: str | None = None
@@ -144,6 +195,21 @@ class Worker:
         return head + tail
 
 
+@dataclass
+class _Target:
+    """What an address resolved to.
+
+    ``engine`` set means the receiver can take a message right now. ``engine``
+    None with a ``worker`` means the agent has finished and its session is
+    waiting to be resumed — which is a route, not a dead end, so the two cases
+    share a type instead of one of them being an error.
+    """
+
+    name: str
+    engine: Any | None = None
+    worker: Worker | None = None
+
+
 class CliHost:
     """Owns the CLI's background workers and wires them into an engine.
 
@@ -163,6 +229,8 @@ class CliHost:
         provider_name: str | None = None,
         permission_responder: PermissionResponder | None = None,
         nested: bool = False,
+        parent: CliHost | None = None,
+        identity: str = "main",
     ) -> None:
         self.config = config
         self.store = store
@@ -172,6 +240,12 @@ class CliHost:
             permission_responder or deny_permission
         )
         self.nested = nested
+        # The host serving the session that started this one, and the name
+        # this session answers to there. Together they are the ``main`` route:
+        # a worker addresses its parent, and the parent sees the worker's name
+        # on the message.
+        self.parent = parent
+        self.identity = identity
         self.engine: Any | None = None
         self.workers: dict[str, Worker] = {}
         self._closed = False
@@ -187,6 +261,10 @@ class CliHost:
         ctx.extra["monitor_spawn"] = self.monitor_spawn
         if not self.nested:
             ctx.extra["task_dispatch"] = self.task_dispatch
+        # Messaging is wired in a worker too — that is the leg that lets one
+        # talk back to the conversation that started it.
+        ctx.extra["agent_roster"] = self.agent_roster
+        ctx.extra["agent_message"] = self.agent_message
         ctx.extra["cli_host"] = self
         if self.provider is None:
             self.provider = getattr(engine, "provider", None)
@@ -335,16 +413,22 @@ class CliHost:
         agent_name = str(input.get("agent") or "").strip()
         definition = self._find_agent(agent_name, ctx)
         label = input.get("label") or agent_name or "subagent"
-        worker = Worker(task_id=new_id("task"), kind="task", description=str(label))
+        worker = Worker(
+            task_id=new_id("task"), kind="task", description=str(label),
+            name=str(label), definition=definition,
+        )
         try:
             child = await self._build_child(definition, worker)
         except Exception as exc:  # noqa: BLE001
             return ToolOutcome(text=f"could not start subagent: {exc}", is_error=True)
+        worker.engine = child
         self.workers[worker.task_id] = worker
 
         if input.get("mode", "sync") == "background":
             worker.task = asyncio.create_task(
-                self._run_child_detached(worker, child, worker.worker_session_id, prompt),
+                self._run_child_detached(
+                    worker, child, worker.worker_session_id, UserTurn(content=prompt),
+                ),
                 name=f"fluid-task-{worker.task_id}",
             )
             return BackgroundTaskReceipt(
@@ -355,8 +439,11 @@ class CliHost:
 
         worker.task = asyncio.current_task()
         try:
-            status, text = await self._run_child(child, worker.worker_session_id, prompt)
+            status, text = await self._run_child(
+                child, worker.worker_session_id, UserTurn(content=prompt),
+            )
         finally:
+            worker.engine = None
             await child.aclose()
         worker.status = status
         worker.summary = text
@@ -393,6 +480,208 @@ class CliHost:
                 "already finished", worker.task_id, decision.note,
             )
 
+    # ── ListAgents / SendMessage ──
+
+    def agent_roster(self, input: dict[str, Any], ctx: ToolCtx) -> list[dict[str, Any]]:
+        """The agents this session can address, newest first.
+
+        A worker is listed while it can still be reached and for as long as
+        the host remembers it: a finished one is worth seeing (it says what
+        already ran) even though messaging it fails. ``main`` appears only
+        inside a worker, where there is a parent to talk to.
+        """
+        rows: list[dict[str, Any]] = []
+        if self.parent is not None:
+            rows.append({
+                "name": "main",
+                "ref": None,
+                "status": "running" if _engine_busy(self.parent.engine) else "idle",
+                "description": "the conversation that started you",
+                "kind": "parent",
+            })
+        running_only = bool(input.get("running_only"))
+        for worker in reversed(list(self.workers.values())):
+            if worker.kind != "task":
+                continue
+            if running_only and worker.done:
+                continue
+            rows.append({
+                "name": worker.name or worker.description,
+                "ref": _ref_of(worker.task_id),
+                "status": worker.status,
+                "description": worker.description,
+                "kind": "subagent",
+                "task_id": worker.task_id,
+                "worker_session_id": worker.worker_session_id,
+            })
+        return rows
+
+    async def agent_message(self, input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+        """Deliver one peer message, or explain precisely why it went nowhere.
+
+        Resolution happens here rather than in the tool so the engine handoff
+        is one hop: whatever ``to`` names becomes an engine, and the
+        ``AgentMessage`` op decides for itself whether that engine is busy
+        (queue it) or idle (wake it). Nothing polls, and nothing here has to
+        guess at the receiver's state.
+
+        An agent that has already finished is rebuilt over its stored session
+        first, so "running" is never a precondition for reaching one — the
+        message is what starts it working again.
+        """
+        to = str(input.get("to") or "").strip()
+        target, error = self._resolve_target(to)
+        if target is None:
+            return ToolOutcome(
+                text=error or f"could not resolve {to!r}", is_error=True,
+            )
+        message = AgentMessage(
+            text=str(input.get("message") or ""), sender=self.identity,
+        )
+        if target.engine is None:
+            assert target.worker is not None  # _resolve_target's invariant
+            worker, error = await self._resume_worker(target.worker, ctx, message)
+            if worker is None:
+                return ToolOutcome(
+                    text=error or f"could not resume {target.name}", is_error=True,
+                )
+            return ToolOutcome(
+                text=(
+                    f"{target.name} had finished, so it was resumed over its "
+                    "own transcript and is now working on your message. It "
+                    "runs in the background: its report reaches you in a later "
+                    "turn, the way a background Task's does."
+                ),
+                ui={"resumed": worker.task_id, "session": worker.worker_session_id},
+            )
+        try:
+            await target.engine.submit(message)
+        except Exception as exc:  # noqa: BLE001 — a closing engine refuses ops
+            return ToolOutcome(
+                text=f"could not deliver to {target.name}: {exc}", is_error=True,
+            )
+        return ToolOutcome(
+            text=(
+                f"Delivered to {target.name}. It picks the message up at its "
+                "next tool result if it is working, or starts a turn on it if "
+                "it was idle — nothing to wait for here."
+            )
+        )
+
+    async def _resume_worker(
+        self, worker: Worker, ctx: ToolCtx, message: AgentMessage,
+    ) -> tuple[Worker | None, str | None]:
+        """Rebuild a finished worker over its stored session, ready for a turn.
+
+        The resumed run is registered as a NEW background task rather than a
+        second life for the old one: its completion has to travel the ordinary
+        park/wake route, and that route settles a task id exactly once. Same
+        name, same session, same agent definition — a fresh id.
+        """
+        if self._closed:
+            return None, "this host is shutting down; nothing can be resumed."
+        session_id = worker.worker_session_id
+        if not session_id:
+            return None, (
+                f"{worker.name or worker.description} has no stored session to "
+                "resume from."
+            )
+        resumed = Worker(
+            task_id=new_id("task"), kind="task", description=worker.description,
+            name=worker.name, definition=worker.definition,
+        )
+        try:
+            child = await self._build_child(
+                worker.definition, resumed, session_id=session_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return None, f"could not resume {worker.name or worker.description}: {exc}"
+        resumed.engine = child
+        self.workers[resumed.task_id] = resumed
+        resumed.task = asyncio.create_task(
+            self._run_child_detached(resumed, child, session_id, message),
+            name=f"fluid-task-{resumed.task_id}",
+        )
+        # Register the run with the parent engine the way Task's background
+        # mode does, or its completion would arrive for a task nothing is
+        # waiting on — no park, no wake, and a report that goes nowhere.
+        started = (ctx.extra or {}).get("background_task_started")
+        if started is not None:
+            notified = started(BackgroundTaskReceipt(
+                task_id=resumed.task_id,
+                worker_session_id=session_id,
+                description=resumed.description,
+            ))
+            if inspect.isawaitable(notified):
+                await notified
+        return resumed, None
+
+    def _resolve_target(self, to: str) -> tuple[_Target | None, str | None]:
+        """``to`` as a :class:`_Target`, or ``(None, <why not>)``.
+
+        A target with no ``engine`` is a finished worker the caller may resume;
+        one with an engine is ready to take a message now.
+        """
+        if not to:
+            return None, "SendMessage needs a recipient."
+        name, ref = _split_ref(to)
+        if name.lower() == "main" and ref is None:
+            if self.parent is None:
+                return None, (
+                    "You are the main conversation — there is no `main` to "
+                    "message from here."
+                )
+            if self.parent.engine is None:
+                return None, "The parent conversation is no longer running."
+            return _Target(name="main", engine=self.parent.engine), None
+
+        matches = [
+            w for w in self.workers.values()
+            if w.kind == "task" and (
+                w.task_id == to
+                or (w.name or w.description) == name
+                or _ref_of(w.task_id) == (ref or name)
+            )
+        ]
+        if ref is not None:
+            matches = [w for w in matches if _ref_of(w.task_id) == ref]
+        if not matches:
+            known = self.agent_roster({}, ToolCtx())
+            listing = ", ".join(
+                f"{r['name']} [{r['ref']}]" if r["ref"] else str(r["name"])
+                for r in known
+            )
+            return None, (
+                f"No agent named {to!r} in this session."
+                + (f" Reachable: {listing}." if listing else "")
+                + " Use ListAgents for the current roster."
+            )
+        # Latest wins on a shared name, but a live agent always beats a
+        # finished one: resuming a finished namesake while its twin is still
+        # working would split the conversation across two sessions.
+        live = [w for w in matches if not w.done]
+        candidates = live or matches
+        if len(candidates) > 1 and ref is None:
+            refs = ", ".join(
+                f"{w.name or w.description} [{_ref_of(w.task_id)}] ({w.status})"
+                for w in candidates
+            )
+            return None, (
+                f"{name!r} names {len(candidates)} agents. Address one by its "
+                f"ref: {refs}."
+            )
+        worker = candidates[-1]
+        display = worker.name or worker.description
+        if worker.done:
+            # No engine: agent_message resumes it over its stored session.
+            return _Target(name=display, worker=worker), None
+        if worker.engine is None:
+            return None, (
+                f"{display} is running but cannot take messages (it was "
+                "started synchronously and this session is blocked on it)."
+            )
+        return _Target(name=display, engine=worker.engine, worker=worker), None
+
     def _find_agent(self, name: str, ctx: ToolCtx) -> Any | None:
         registry = (ctx.extra or {}).get("agent_registry")
         if isinstance(registry, dict) and name in registry:
@@ -406,7 +695,9 @@ class CliHost:
                 return definition
         return None
 
-    async def _build_child(self, definition: Any | None, worker: Worker) -> Any:
+    async def _build_child(
+        self, definition: Any | None, worker: Worker, *, session_id: str | None = None,
+    ) -> Any:
         from fluid.config.loader import build_engine
         from fluid.context.compiler import PromptInputs, compile_prompt
         from fluid.tools.builtins import (
@@ -415,8 +706,14 @@ class CliHost:
         )
         from fluid.tools.registry import ToolRegistry
 
-        meta = await self.store.create_session(cwd=self.config.cwd)
-        worker.worker_session_id = meta.session_id
+        # A resume binds the worker's stored session instead of opening a new
+        # one: the child comes back with its own transcript behind it, which is
+        # the whole difference between resuming an agent and starting a fresh
+        # one that happens to share its name.
+        if session_id is None:
+            meta = await self.store.create_session(cwd=self.config.cwd)
+            session_id = meta.session_id
+        worker.worker_session_id = session_id
 
         body = (definition.body.strip() if definition is not None else "") or GENERIC_SUBAGENT_PROMPT
         from fluid.codemode.skills import DEFAULT_SKILLS_ROOT
@@ -494,12 +791,12 @@ class CliHost:
             self.store,
             provider=self.provider,
             provider_name=self.provider_name,
-            session_id=meta.session_id,
+            session_id=session_id,
             system=compiled.text,
             system_sections=compiled,
             registry=registry,
             permissions=permissions,
-            ctx=ToolCtx(cwd=self.config.cwd, session_id=meta.session_id),
+            ctx=ToolCtx(cwd=self.config.cwd, session_id=session_id),
             allowed_tools=allowed,
             disallowed_tools=disallowed,
             # One learner per store: the worker journals into the parent's
@@ -515,6 +812,7 @@ class CliHost:
             self.config, self.store,
             provider=self.provider, provider_name=self.provider_name,
             permission_responder=self.permission_responder, nested=True,
+            parent=self, identity=worker.name or worker.description,
         ).attach(child)
         return child
 
@@ -526,9 +824,15 @@ class CliHost:
                 return synthesizer
         return None
 
-    async def _run_child(self, child: Any, session_id: str, prompt: str) -> tuple[str, str]:
-        """Run one child turn to completion. Returns ``(status, final_text)``."""
-        await child.submit(UserTurn(content=prompt))
+    async def _run_child(self, child: Any, session_id: str, op: Any) -> tuple[str, str]:
+        """Run one child turn to completion. Returns ``(status, final_text)``.
+
+        ``op`` is whatever starts the turn: a ``UserTurn`` for a fresh brief,
+        an ``AgentMessage`` when a peer resumes a worker over its stored
+        session. Both start a turn on an idle engine, so nothing below cares
+        which arrived.
+        """
+        await child.submit(op)
         status = "finished"
         error: str | None = None
         async with contextlib.aclosing(
@@ -564,16 +868,17 @@ class CliHost:
         return status, text or "(the subagent returned no text)"
 
     async def _run_child_detached(
-        self, worker: Worker, child: Any, session_id: str, prompt: str
+        self, worker: Worker, child: Any, session_id: str, op: Any
     ) -> None:
         try:
-            status, text = await self._run_child(child, session_id, prompt)
+            status, text = await self._run_child(child, session_id, op)
         except asyncio.CancelledError:
             worker.summary = "subagent cancelled"
             raise
         except Exception as exc:  # noqa: BLE001
             status, text = "failed", f"subagent crashed: {exc}"
         finally:
+            worker.engine = None
             try:
                 await child.aclose()
             except Exception:  # noqa: BLE001

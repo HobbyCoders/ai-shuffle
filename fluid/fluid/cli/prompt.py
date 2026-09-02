@@ -59,7 +59,7 @@ BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "Read", "Grep", "Glob", "Write", "Edit", "Bash", "Skill", "Note", "Task",
     "Monitor", "ToolSearch", "HistoryExpand", "HistorySearch", "Ledger",
     "AskUser", "SessionSearch", "SessionView", "WebFetch", "WebSearch",
-    "Plan", "StopPlanning", "Remember", "Recall",
+    "Plan", "StopPlanning", "Remember", "Recall", "ListAgents", "SendMessage",
 )
 
 _FULL_TOOLSET = frozenset(BUILTIN_TOOL_NAMES)
@@ -67,7 +67,9 @@ _FULL_TOOLSET = frozenset(BUILTIN_TOOL_NAMES)
 # What plan mode takes off the surface: every builtin with static write or
 # destructive risk. A literal, like the names above; the regression test
 # checks it against ``plan_mode_blocks`` over the real registry.
-PLAN_MODE_LEAVES: tuple[str, ...] = ("Bash", "Edit", "Monitor", "Task", "WebFetch", "Write")
+PLAN_MODE_LEAVES: tuple[str, ...] = (
+    "Bash", "Edit", "Monitor", "SendMessage", "Task", "WebFetch", "Write",
+)
 
 # Builtins only the native loop can serve. Each needs a host capability that
 # NativeLoop alone wires onto the tool context (recall over its own context
@@ -90,11 +92,13 @@ DELEGATED_TOOL_PREFIX = f"mcp__{DELEGATED_SERVER_NAME}__"
 TOOL_CAPABILITIES: dict[str, tuple[str, ...]] = {
     "HistoryExpand": ("history_recall",),
     "HistorySearch": ("history_recall",),
+    "ListAgents": ("agent_roster",),
     "Monitor": ("monitor_spawn",),
     "Plan": ("plan_mode_control",),
     "StopPlanning": ("plan_mode_control",),
     "Recall": ("recall_store",),
     "Remember": ("continual_journal",),
+    "SendMessage": ("agent_message",),
     "SessionSearch": ("session_search",),
     "SessionView": ("session_view",),
     "Task": ("task_dispatch",),
@@ -775,6 +779,19 @@ def _steering_section(p: PromptProfile) -> str:
     return PROMPT_BLOCK
 
 
+def _peer_message_section(p: PromptProfile) -> str | None:
+    """How to read a message from another agent — only where one can arrive.
+
+    Gated on SendMessage rather than ListAgents: the marker shows up in a
+    session that can be messaged, and the block's job is to keep a peer's text
+    from being read with the user's authority."""
+    if "SendMessage" not in p.tools:
+        return None
+    from fluid.context.peer import PROMPT_BLOCK
+
+    return PROMPT_BLOCK
+
+
 def _ending_section(p: PromptProfile) -> str:
     text = """\
 ## Ending a turn
@@ -806,6 +823,7 @@ def compose_base_prompt(profile: PromptProfile | None = None) -> str:
         _instructions_section(p),
         _context_section(p),
         _steering_section(p),
+        _peer_message_section(p),
         _environment_section(p),
         _ending_section(p),
         *model_guidance_blocks(p.model, p.model_guidance),
