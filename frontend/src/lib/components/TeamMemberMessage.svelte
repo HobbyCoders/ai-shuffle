@@ -148,30 +148,30 @@
 	<summary class="team-summary w-full min-w-0 px-4 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
 		<!-- Status icon -->
 		{#if status === 'running'}
-			<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<svg class="w-4 h-4 text-primary animate-spin shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 			</svg>
 		{:else if status === 'completed'}
-			<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<svg class="w-4 h-4 text-green-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 			</svg>
 		{:else if status === 'error'}
-			<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<svg class="w-4 h-4 text-red-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 			</svg>
 		{:else if status === 'killed'}
-			<svg class="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<svg class="w-4 h-4 text-amber-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<rect x="6" y="6" width="12" height="12" rx="1" stroke-width="2" />
 			</svg>
 		{/if}
 
 		<!-- Team icon (people) -->
-		<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+		<svg class="w-4 h-4 text-primary shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
 		</svg>
 
 		<!-- Team / teammate pill -->
-		<span class="px-1.5 py-0.5 text-xs font-medium {pillStyle} rounded-full flex-shrink-0 truncate max-w-[16rem]">
+		<span class="px-1.5 py-0.5 text-xs font-medium {pillStyle} rounded-full shrink-0 truncate max-w-[16rem]">
 			{pillLabel}
 		</span>
 
@@ -182,8 +182,8 @@
 
 		<!-- Tool count -->
 		{#if childCounts.toolUse > 0}
-			<span class="text-muted-foreground flex-shrink-0">•</span>
-			<span class="text-xs text-muted-foreground flex-shrink-0">
+			<span class="text-muted-foreground shrink-0">•</span>
+			<span class="text-xs text-muted-foreground shrink-0">
 				{childCounts.completedTools}/{childCounts.toolUse} tools
 			</span>
 		{/if}
@@ -192,18 +192,18 @@
 		{#if message.agentUsage}
 			{@const usageText = formatUsage(message.agentUsage)}
 			{#if usageText}
-				<span class="text-muted-foreground flex-shrink-0">•</span>
-				<span class="text-xs text-muted-foreground flex-shrink-0">{usageText}</span>
+				<span class="text-muted-foreground shrink-0">•</span>
+				<span class="text-xs text-muted-foreground shrink-0">{usageText}</span>
 			{/if}
 		{/if}
 
-		<div class="ml-auto flex items-center gap-2 flex-shrink-0">
+		<div class="ml-auto flex items-center gap-2 shrink-0">
 			{#if canKill}
 				<button
 					type="button"
 					onclick={handleKill}
 					disabled={killing}
-					class="min-h-[32px] px-2.5 py-1 text-xs font-medium rounded border border-red-500/40 text-red-600 hover:bg-red-500/10 active:bg-red-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+					class="min-h-[32px] px-2.5 py-1 text-xs font-medium rounded-sm border border-red-500/40 text-red-600 hover:bg-red-500/10 active:bg-red-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
 					aria-label="Kill teammate"
 				>
 					{killing ? 'Killing\u2026' : 'Kill'}
@@ -238,12 +238,12 @@
 			</div>
 		{/if}
 
-		<div class="max-h-[32rem] overflow-y-auto">
+		<div class="max-h-128 overflow-y-auto">
 			<!-- Initial prompt -->
 			{#if message.agentPrompt}
 				<div class="px-4 py-3 border-b border-border/50">
 					<div class="text-xs text-muted-foreground mb-1 font-medium">Initial prompt</div>
-					<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{message.agentPrompt}</pre>
+					<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap wrap-break-word font-mono">{message.agentPrompt}</pre>
 				</div>
 			{/if}
 
@@ -277,10 +277,10 @@
 					{:else if child.type === 'text'}
 						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">
 							<div class="flex items-start gap-2">
-								<svg class="w-4 h-4 text-primary flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<svg class="w-4 h-4 text-primary shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
 								</svg>
-								<div class="text-sm text-foreground whitespace-pre-wrap break-words">
+								<div class="text-sm text-foreground whitespace-pre-wrap wrap-break-word">
 									{child.content}
 								</div>
 							</div>
@@ -305,7 +305,7 @@
 					{#if toolResultHasImage(message.content)}
 						{@html sanitizeHtml(renderToolResult(message.content))}
 					{:else}
-						<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.content}</pre>
+						<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap wrap-break-word font-mono">{message.content}</pre>
 					{/if}
 				</div>
 			{/if}

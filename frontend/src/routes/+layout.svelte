@@ -186,7 +186,7 @@ import { syncFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 {#if !initialized}
 	<div class="min-h-screen flex items-center justify-center">
 		<div class="text-center">
-			<div class="animate-spin w-8 h-8 border-2 border-[var(--color-primary)] border-t-transparent rounded-full mx-auto mb-4"></div>
+			<div class="animate-spin w-8 h-8 border-2 border-primary border-t-transparent rounded-full mx-auto mb-4"></div>
 			<p class="text-gray-400">Loading...</p>
 		</div>
 	</div>

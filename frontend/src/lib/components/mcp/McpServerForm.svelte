@@ -151,7 +151,7 @@
 	>
 		<!-- Backdrop -->
 		<button
-			class="absolute inset-0 bg-background/80 backdrop-blur-sm"
+			class="absolute inset-0 bg-background/80 backdrop-blur-xs"
 			onclick={onClose}
 			aria-label="Close"
 		></button>
@@ -198,7 +198,7 @@
 						bind:value={name}
 						disabled={isEditing}
 						placeholder="my-mcp-server"
-						class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
+						class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring disabled:opacity-50"
 					/>
 					<p class="text-xs text-muted-foreground mt-1">
 						Alphanumeric with hyphens/underscores only
@@ -272,7 +272,7 @@
 							type="text"
 							bind:value={command}
 							placeholder="node, python, npx, etc."
-							class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+							class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
 						/>
 					</div>
 
@@ -286,7 +286,7 @@
 							type="text"
 							bind:value={argsText}
 							placeholder="./server.js --port 3000"
-							class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+							class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
 						/>
 						<p class="text-xs text-muted-foreground mt-1">
 							Space-separated arguments
@@ -303,7 +303,7 @@
 							type="url"
 							bind:value={url}
 							placeholder="https://api.example.com/mcp"
-							class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+							class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
 						/>
 					</div>
 
@@ -329,13 +329,13 @@
 											type="text"
 											bind:value={pair.key}
 											placeholder="Header name"
-											class="flex-1 px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+											class="flex-1 px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground text-sm focus:outline-hidden focus:ring-2 focus:ring-ring"
 										/>
 										<input
 											type="text"
 											bind:value={pair.value}
 											placeholder="Value (supports $&#123;VAR&#125;)"
-											class="flex-1 px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+											class="flex-1 px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground text-sm focus:outline-hidden focus:ring-2 focus:ring-ring"
 										/>
 										<button
 											type="button"
@@ -378,13 +378,13 @@
 										type="text"
 										bind:value={pair.key}
 										placeholder="VARIABLE_NAME"
-										class="flex-1 px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+										class="flex-1 px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground text-sm focus:outline-hidden focus:ring-2 focus:ring-ring"
 									/>
 									<input
 										type="text"
 										bind:value={pair.value}
 										placeholder="Value (supports $&#123;VAR:-default&#125;)"
-										class="flex-1 px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+										class="flex-1 px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground text-sm focus:outline-hidden focus:ring-2 focus:ring-ring"
 									/>
 									<button
 										type="button"
@@ -414,7 +414,7 @@
 						type="text"
 						bind:value={description}
 						placeholder="What this server provides"
-						class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+						class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
 					/>
 				</div>
 			</div>

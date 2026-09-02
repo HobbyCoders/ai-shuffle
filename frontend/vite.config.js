@@ -1,8 +1,9 @@
 import { sveltekit } from '@sveltejs/kit/vite';
+import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-	plugins: [sveltekit()],
+	plugins: [tailwindcss(), sveltekit()],
 	build: {
 		// Post-split budget. The primary route no longer carries the feature
 		// panels (Settings/Notes/Build/Docs/Stats/Automations/Files/Browser/

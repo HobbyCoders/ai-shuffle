@@ -557,7 +557,7 @@
 	>
 		<!-- Backdrop -->
 		<button
-			class="absolute inset-0 bg-background/80 backdrop-blur-sm"
+			class="absolute inset-0 bg-background/80 backdrop-blur-xs"
 			onclick={closeReconnect}
 			aria-label="Close"
 		></button>
@@ -619,7 +619,7 @@
 	>
 		<!-- Backdrop -->
 		<button
-			class="absolute inset-0 bg-background/80 backdrop-blur-sm"
+			class="absolute inset-0 bg-background/80 backdrop-blur-xs"
 			onclick={closeClaudeSignIn}
 			aria-label="Close"
 		></button>

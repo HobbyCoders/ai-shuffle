@@ -39,7 +39,7 @@ describe('MediaLightbox', () => {
 		// content-visibility / overflow containment that would otherwise trap it.
 		expect(el!.parentElement).toBe(document.body);
 		// High stacking + full-viewport cover so it's truly front-and-center.
-		expect(el!.className).toContain('z-[300]');
+		expect(el!.className).toContain('z-300');
 		expect(el!.className).toContain('fixed');
 		expect(el!.className).toContain('inset-0');
 	});
@@ -54,7 +54,7 @@ describe('MediaLightbox', () => {
 		expect(img.getAttribute('src')).toBe(PNG);
 		// Mobile: full viewport. Desktop (sm:) falls back to a framed size.
 		expect(img.className).toContain('max-w-[100vw]');
-		expect(img.className).toContain('max-h-[100dvh]');
+		expect(img.className).toContain('max-h-dvh');
 		expect(img.className).toContain('sm:max-w-[92vw]');
 	});
 
@@ -65,7 +65,7 @@ describe('MediaLightbox', () => {
 
 		const video = dialog()!.querySelector('video') as HTMLVideoElement;
 		expect(video).not.toBeNull();
-		expect(video.className).toContain('max-h-[100dvh]');
+		expect(video.className).toContain('max-h-dvh');
 	});
 
 	it('tears the overlay back down when closed', async () => {

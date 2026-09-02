@@ -271,7 +271,7 @@
 {#if $lightbox.open}
 	<div
 		use:portal
-		class="fixed inset-0 z-[300] flex items-center justify-center bg-black/85 backdrop-blur-sm"
+		class="fixed inset-0 z-300 flex items-center justify-center bg-black/85 backdrop-blur-xs"
 		role="dialog"
 		aria-modal="true"
 		aria-label="Media preview"
@@ -313,10 +313,10 @@
 		     fullscreen on mobile (100vw/100dvh, no rounding); framed on >=sm.
 		     overflow-visible so the zoomed image can spill past this box and be
 		     panned across the whole viewport. -->
-		<div class="max-w-[100vw] max-h-[100dvh] sm:max-w-[92vw] sm:max-h-[88vh] flex items-center justify-center" role="presentation" onclick={(e) => e.stopPropagation()}>
+		<div class="max-w-[100vw] max-h-dvh sm:max-w-[92vw] sm:max-h-[88vh] flex items-center justify-center" role="presentation" onclick={(e) => e.stopPropagation()}>
 			{#if $lightbox.type === 'video'}
 				<!-- svelte-ignore a11y_media_has_caption -->
-				<video src={$lightbox.src} controls autoplay playsinline class="max-w-[100vw] max-h-[100dvh] sm:max-w-[92vw] sm:max-h-[88vh] sm:rounded-lg shadow-2xl"></video>
+				<video src={$lightbox.src} controls autoplay playsinline class="max-w-[100vw] max-h-dvh sm:max-w-[92vw] sm:max-h-[88vh] sm:rounded-lg shadow-2xl"></video>
 			{:else}
 				<!-- Pinch / scroll to zoom, drag to pan when zoomed, tap / click
 				     (or Enter / Space) to toggle 2x. The button uses
@@ -332,7 +332,7 @@
 						bind:this={imgEl}
 						src={$lightbox.src}
 						alt="Preview"
-						class="max-w-[100vw] max-h-[100dvh] sm:max-w-[92vw] sm:max-h-[88vh] sm:rounded-lg shadow-2xl object-contain select-none {scale > 1 ? 'cursor-grab' : 'cursor-zoom-in'}"
+						class="max-w-[100vw] max-h-dvh sm:max-w-[92vw] sm:max-h-[88vh] sm:rounded-lg shadow-2xl object-contain select-none {scale > 1 ? 'cursor-grab' : 'cursor-zoom-in'}"
 						style="transform: translate({tx}px, {ty}px) scale({scale}); transition: {animate ? 'transform 200ms ease' : 'none'}; touch-action: none; will-change: transform;"
 						draggable="false"
 						onpointerdown={onPointerDown}

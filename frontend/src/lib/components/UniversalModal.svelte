@@ -86,7 +86,7 @@
 	>
 		<!-- Dark overlay backdrop -->
 		<button
-			class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+			class="absolute inset-0 bg-black/60 backdrop-blur-xs"
 			onclick={onClose}
 			aria-label="Close modal"
 		></button>
@@ -141,7 +141,7 @@
 								onclick={() => onTabChange?.(tab.id)}
 								class="
 									px-4 py-2.5 text-sm font-medium rounded-t-lg transition-all whitespace-nowrap
-									border-b-2 -mb-[1px]
+									border-b-2 -mb-px
 									{activeTab === tab.id
 										? 'text-primary border-primary bg-primary/5'
 										: 'text-muted-foreground hover:text-foreground border-transparent hover:border-muted-foreground/30'}

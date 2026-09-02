@@ -104,7 +104,7 @@
 	loadTags();
 </script>
 
-<div class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+<div class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs">
 	<div class="bg-background border border-border rounded-2xl shadow-2xl w-full max-w-md max-h-[80vh] max-sm:max-h-full flex flex-col">
 		<!-- Header -->
 		<div class="flex items-center justify-between px-5 py-4 border-b border-border">
@@ -137,7 +137,7 @@
 						type="text"
 						bind:value={newTagName}
 						placeholder="Tag name..."
-						class="flex-1 px-3 py-2 rounded-lg bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+						class="flex-1 px-3 py-2 rounded-lg bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/50"
 						onkeypress={(e) => e.key === 'Enter' && handleCreateTag()}
 					/>
 					<div class="flex items-center gap-1">
@@ -180,7 +180,7 @@
 									<input
 										type="text"
 										bind:value={editName}
-										class="flex-1 px-2 py-1 rounded bg-muted/50 border border-border text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+										class="flex-1 px-2 py-1 rounded-sm bg-muted/50 border border-border text-foreground text-sm focus:outline-hidden focus:ring-2 focus:ring-primary/50"
 										onkeypress={(e) => e.key === 'Enter' && saveEdit()}
 									/>
 									<div class="flex items-center gap-1">
@@ -214,7 +214,7 @@
 								{:else}
 									<!-- View mode -->
 									<span
-										class="w-4 h-4 rounded-full flex-shrink-0"
+										class="w-4 h-4 rounded-full shrink-0"
 										style="background-color: {tag.color}"
 									></span>
 									<span class="flex-1 text-sm text-foreground">{tag.name}</span>

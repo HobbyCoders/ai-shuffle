@@ -287,7 +287,7 @@
 
 <!-- User Question Panel -->
 <div
-	class="card-system question-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-sm"
+	class="card-system question-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-xs"
 	style="
 		border-color: var(--border);
 		background: var(--card);
@@ -299,7 +299,7 @@
 	<div class="flex items-center gap-3 px-4 py-3 border-b border-border/40">
 		<!-- Icon -->
 		<div
-			class="flex-shrink-0 w-9 h-9 rounded-xl border flex items-center justify-center"
+			class="shrink-0 w-9 h-9 rounded-xl border flex items-center justify-center"
 			style="
 				background: color-mix(in oklch, var(--muted) 50%, var(--card));
 				border-color: var(--border);
@@ -338,7 +338,7 @@
 
 		<!-- Progress Indicator (for multi-question) -->
 		{#if !isSingleQuestion}
-			<div class="flex-shrink-0 flex items-center gap-1">
+			<div class="shrink-0 flex items-center gap-1">
 				{#each data.questions as _, idx}
 					<button
 						type="button"
@@ -375,7 +375,7 @@
 		<button
 			type="button"
 			onclick={handleDismiss}
-			class="uq-close-btn flex-shrink-0"
+			class="uq-close-btn shrink-0"
 			aria-label="Dismiss question without answering"
 			title="Dismiss without answering"
 		>
@@ -408,7 +408,7 @@
 								{/if}
 								<p class="text-xs text-muted-foreground">{question.question}</p>
 								<p
-									class="text-sm font-medium mt-1 break-words"
+									class="text-sm font-medium mt-1 wrap-break-word"
 									class:text-foreground={!isSkipped(idx)}
 									class:uq-skipped-answer={isSkipped(idx)}
 								>
@@ -418,7 +418,7 @@
 							<button
 								type="button"
 								onclick={() => goToQuestion(idx)}
-								class="uq-edit-btn flex-shrink-0 p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors opacity-0 group-hover:opacity-100 hover-actions"
+								class="uq-edit-btn shrink-0 p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors opacity-0 group-hover:opacity-100 hover-actions"
 								aria-label="Edit answer"
 							>
 								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -461,7 +461,7 @@
 						>
 							<div class="flex items-start gap-3">
 								<!-- Checkbox/Radio indicator -->
-								<div class="flex-shrink-0 mt-0.5">
+								<div class="shrink-0 mt-0.5">
 									{#if currentQuestion.multiSelect}
 										<div class="checkbox-indicator {isSelected(currentStep, option.label) ? 'checked' : ''}">
 											{#if isSelected(currentStep, option.label)}
@@ -495,7 +495,7 @@
 						class="option-card {showOther[currentStep] ? 'selected' : ''}"
 					>
 						<div class="flex items-start gap-3">
-							<div class="flex-shrink-0 mt-0.5">
+							<div class="shrink-0 mt-0.5">
 								{#if currentQuestion.multiSelect}
 									<div class="checkbox-indicator {showOther[currentStep] ? 'checked' : ''}">
 										{#if showOther[currentStep]}
@@ -560,7 +560,7 @@
 	<div class="px-4 py-3 border-t border-border/40 bg-card/20">
 		<div class="flex items-center justify-between gap-3">
 			<!-- Back Button -->
-			<div class="flex-shrink-0">
+			<div class="shrink-0">
 				{#if !isFirstQuestion || isReviewStep}
 					<button
 						type="button"
@@ -578,7 +578,7 @@
 			</div>
 
 			<!-- Next/Submit Button -->
-			<div class="flex-shrink-0">
+			<div class="shrink-0">
 				{#if isReviewStep}
 					<button
 						type="button"
@@ -625,12 +625,12 @@
 		<!-- Keyboard Hints -->
 		<div class="mt-2 flex items-center justify-center gap-3 text-[10px] text-muted-foreground">
 			<span class="flex items-center gap-1">
-				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">Enter</kbd>
+				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded-sm text-[9px] font-mono">Enter</kbd>
 				<span>{isReviewStep ? 'Submit' : isSingleQuestion ? 'Submit' : isLastQuestion ? 'Review' : 'Next'}</span>
 			</span>
 			{#if !isFirstQuestion || isReviewStep}
 				<span class="flex items-center gap-1">
-					<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">Esc</kbd>
+					<kbd class="px-1.5 py-0.5 bg-muted/50 rounded-sm text-[9px] font-mono">Esc</kbd>
 					<span>Back</span>
 				</span>
 			{/if}

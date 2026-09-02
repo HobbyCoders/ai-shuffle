@@ -57,11 +57,11 @@
 					<!-- Animated microphone with audio rings -->
 					<div class="audio-rings">
 						<div
-							class="ring ring-1"
+							class="audio-ring audio-ring-1"
 							style="transform: scale({1 + $globalSttState.audioLevel * 0.5}); opacity: {0.3 + $globalSttState.audioLevel * 0.4}"
 						></div>
 						<div
-							class="ring ring-2"
+							class="audio-ring audio-ring-2"
 							style="transform: scale({1 + $globalSttState.audioLevel * 0.8}); opacity: {0.2 + $globalSttState.audioLevel * 0.3}"
 						></div>
 					</div>
@@ -181,7 +181,7 @@
 		justify-content: center;
 	}
 
-	.ring {
+	.audio-ring {
 		position: absolute;
 		width: 26px;
 		height: 26px;
@@ -190,11 +190,11 @@
 		transition: transform 0.1s ease-out, opacity 0.1s ease-out;
 	}
 
-	.ring-1 {
+	.audio-ring-1 {
 		opacity: 0.3;
 	}
 
-	.ring-2 {
+	.audio-ring-2 {
 		opacity: 0.2;
 	}
 

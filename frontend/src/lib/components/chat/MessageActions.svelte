@@ -253,7 +253,7 @@
 				{/if}
 			</p>
 
-			<div class="bg-muted/50 rounded p-2 mb-4 text-sm text-foreground">
+			<div class="bg-muted/50 rounded-sm p-2 mb-4 text-sm text-foreground">
 				<span class="{messageRole === 'user' ? 'text-blue-400' : 'text-orange-400'} font-medium">
 					{messageRole === 'user' ? 'You:' : 'Assistant:'}
 				</span>
@@ -292,21 +292,21 @@
 			{/if}
 
 			{#if rewindError}
-				<div class="bg-destructive/10 border border-destructive/30 text-destructive text-sm px-3 py-2 rounded mb-4">
+				<div class="bg-destructive/10 border border-destructive/30 text-destructive text-sm px-3 py-2 rounded-sm mb-4">
 					{rewindError}
 				</div>
 			{/if}
 
 			<div class="flex justify-end gap-2">
 				<button
-					class="px-3 py-1.5 text-sm rounded border border-border msg-action-btn transition-colors"
+					class="px-3 py-1.5 text-sm rounded-sm border border-border msg-action-btn transition-colors"
 					onclick={handleRewindCancel}
 					disabled={isRewinding}
 				>
 					Cancel
 				</button>
 				<button
-					class="px-3 py-1.5 text-sm rounded bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors disabled:opacity-50"
+					class="px-3 py-1.5 text-sm rounded-sm bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors disabled:opacity-50"
 					onclick={handleRewindConfirm}
 					disabled={isRewinding}
 				>

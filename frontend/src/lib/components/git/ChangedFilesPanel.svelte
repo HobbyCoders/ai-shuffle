@@ -384,7 +384,7 @@
 <svelte:window onkeydown={handleKeydown} onresize={handleResize} />
 
 {#snippet statusIcon(status: string)}
-	<span class={`flex-shrink-0 ${statusColor(status)}`}>
+	<span class={`shrink-0 ${statusColor(status)}`}>
 		{#if status === 'A'}
 			<Plus size={14} strokeWidth={2} />
 		{:else if status === 'M'}

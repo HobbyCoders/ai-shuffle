@@ -1,8 +1,120 @@
 /* Playfair Display - self-hosted via fontsource (avoids CSP issues with Google Fonts) */
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+
+/* Tailwind v4 discovers template sources itself (project root, honouring
+   .gitignore). The docs markdown is prose, not markup — keep it out of the
+   scan so stray words can't seed utilities into the bundle. */
+@source not './lib/docs/content';
+
+/* `dark:` follows the `.dark` class the theme store sets on <html>, never the
+   OS preference (was `darkMode: 'class'` in tailwind.config.js). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ============================================================
+   DESIGN TOKENS → UTILITIES  (was theme.extend in tailwind.config.js)
+
+   `inline` makes each utility reference the underlying custom property
+   directly (`background-color: var(--primary)`), so utilities track the
+   .dark / .light switch and runtime preset overrides. Without it Tailwind
+   would resolve `--color-primary: var(--primary)` once, on :root.
+   `reference` stops Tailwind re-emitting these as `--color-*` variables on
+   :root — nothing reads them, and the shadow entries below would otherwise
+   be emitted as `--shadow-s: var(--shadow-s)`.
+   ============================================================ */
+@theme inline reference {
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-ring: var(--ring);
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+
+	--color-primary: var(--primary);
+	--color-primary-foreground: var(--primary-foreground);
+
+	--color-secondary: var(--secondary);
+	--color-secondary-foreground: var(--secondary-foreground);
+
+	--color-destructive: var(--destructive);
+	--color-destructive-foreground: var(--destructive-foreground);
+
+	--color-success: var(--success);
+	--color-success-foreground: var(--success-foreground);
+
+	--color-warning: var(--warning);
+	--color-warning-foreground: var(--warning-foreground);
+
+	--color-info: var(--info);
+	--color-info-foreground: var(--info-foreground);
+
+	--color-muted: var(--muted);
+	--color-muted-foreground: var(--muted-foreground);
+
+	--color-accent: var(--accent);
+	--color-accent-foreground: var(--accent-foreground);
+
+	--color-popover: var(--popover);
+	--color-popover-foreground: var(--popover-foreground);
+
+	--color-card: var(--card);
+	--color-card-foreground: var(--card-foreground);
+
+	--color-selection: var(--selection);
+	--color-selection-ring: var(--selection-ring);
+	--color-selection-glow: var(--selection-glow);
+	--color-selection-text: var(--selection-text);
+
+	/* Studio Noir token pass-through */
+	--color-subtle-foreground: var(--subtle-foreground);
+	--color-border-strong: var(--border-strong);
+
+	--color-sidebar: var(--sidebar);
+	--color-sidebar-foreground: var(--sidebar-foreground);
+	--color-sidebar-border: var(--sidebar-border);
+	--color-sidebar-accent: var(--sidebar-accent);
+	--color-sidebar-accent-active: var(--sidebar-accent-active);
+	--color-sidebar-muted: var(--sidebar-muted);
+
+	--color-scrim: var(--scrim);
+	--color-code-bg: var(--code-bg);
+
+	/* Radius scale keyed off the --radius token. `rounded-sm` keeps
+	   Tailwind's default 0.25rem: it is the v4 name for what v3 called a
+	   bare `rounded`. */
+	--radius-lg: var(--radius);
+	--radius-md: calc(var(--radius) - 2px);
+
+	/* Utility names deliberately match the token names (`shadow-s` →
+	   `var(--shadow-s)`, defined in @layer base below). */
+	--shadow-s: var(--shadow-s);
+	--shadow-m: var(--shadow-m);
+	--shadow-l: var(--shadow-l);
+	--shadow-selection: var(--selection-shadow);
+	--shadow-selection-subtle: var(--selection-shadow-subtle);
+
+	--background-color-hover-overlay: var(--hover-overlay);
+	--background-color-active-overlay: var(--active-overlay);
+	--background-color-input-bg: var(--input-bg);
+	--background-color-input-hover: var(--input-bg-hover);
+	--background-color-input-focus: var(--input-bg-focus);
+	--background-color-status-success: var(--status-success-bg);
+	--background-color-status-warning: var(--status-warning-bg);
+	--background-color-status-error: var(--status-error-bg);
+	--background-color-status-info: var(--status-info-bg);
+	--background-color-selection: var(--selection-bg);
+	--background-color-selection-emphasis: var(--selection-bg-emphasis);
+
+	--border-color-subtle: var(--border-subtle);
+	--border-color-input-border: var(--input-border);
+	--border-color-input-hover: var(--input-border-hover);
+	--border-color-status-success: var(--status-success-border);
+	--border-color-status-warning: var(--status-warning-border);
+	--border-color-status-error: var(--status-error-border);
+	--border-color-status-info: var(--status-info-border);
+	--border-color-selection: var(--selection-ring);
+
+	--text-color-placeholder: var(--input-placeholder);
+}
 
 @layer base {
 	/* ========================================
@@ -493,9 +605,22 @@
 		transition: background-color 0.3s ease, color 0.3s ease;
 	}
 
+	/* Tailwind v4 preflight defaults borders to currentcolor (v3: gray-200);
+	   everything borders with the theme token instead. */
+	*,
+	::before,
+	::after {
+		border-color: var(--border);
+	}
+
+	/* Tailwind v4 preflight no longer gives buttons a pointer cursor. */
+	button:not(:disabled),
+	[role="button"]:not(:disabled) {
+		cursor: pointer;
+	}
+
 	/* Smoother transitions */
 	* {
-		border-color: var(--border);
 		transition-property: background-color, border-color, color, fill, stroke, opacity, box-shadow, transform;
 		transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
 		transition-duration: 150ms;

@@ -176,7 +176,7 @@
 				bind:value={key}
 				placeholder="sk-or-…"
 				disabled={creating}
-				class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
+				class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring disabled:opacity-50"
 			/>
 		</div>
 
@@ -232,7 +232,7 @@
 				type="text"
 				bind:value={filter}
 				placeholder="Filter models…"
-				class="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+				class="w-full px-3 py-2 bg-background border border-border rounded-lg text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring"
 			/>
 			<div class="flex flex-col gap-0.5 max-h-72 overflow-y-auto rounded-lg border border-border p-1">
 				{#each filteredResults as r (r.id)}
@@ -241,7 +241,7 @@
 							type="checkbox"
 							checked={r.checked}
 							onchange={() => toggleResult(r.id)}
-							class="flex-shrink-0 cursor-pointer"
+							class="shrink-0 cursor-pointer"
 						/>
 						<span class="font-mono text-xs truncate">{r.id}</span>
 						{#if r.label && r.label !== r.id}

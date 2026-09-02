@@ -16,7 +16,7 @@
 	let { name, class: extraClass = '' }: Props = $props();
 
 	const icon = $derived(getToolIconType(name));
-	const cls = $derived(`w-4 h-4 text-primary flex-shrink-0 ${extraClass}`.trim());
+	const cls = $derived(`w-4 h-4 text-primary shrink-0 ${extraClass}`.trim());
 </script>
 
 {#if icon === 'image'}

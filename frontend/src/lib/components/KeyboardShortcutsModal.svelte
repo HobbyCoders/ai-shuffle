@@ -45,7 +45,7 @@
 							{#each shortcuts as shortcut}
 								<div class="flex items-center justify-between py-2 px-3 rounded-lg bg-muted/30">
 									<span class="text-sm text-foreground">{shortcut.description}</span>
-									<kbd class="px-2 py-1 text-xs font-mono bg-muted border border-border rounded text-muted-foreground">
+									<kbd class="px-2 py-1 text-xs font-mono bg-muted border border-border rounded-sm text-muted-foreground">
 										{formatShortcut(shortcut)}
 									</kbd>
 								</div>
@@ -64,7 +64,7 @@
 			<!-- Tip at the bottom -->
 			<div class="pt-4 border-t border-border">
 				<p class="text-xs text-muted-foreground text-center">
-					Press <kbd class="px-1.5 py-0.5 text-xs font-mono bg-muted border border-border rounded">Esc</kbd> to close this dialog
+					Press <kbd class="px-1.5 py-0.5 text-xs font-mono bg-muted border border-border rounded-sm">Esc</kbd> to close this dialog
 				</p>
 			</div>
 		</div>

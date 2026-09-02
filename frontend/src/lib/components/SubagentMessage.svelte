@@ -231,12 +231,12 @@
 	<!-- Expanded content: indented past the icon gutter like every other
 	     expanded tool row -->
 	<div class="sa-body">
-		<div class="max-h-[32rem] overflow-y-auto">
+		<div class="max-h-128 overflow-y-auto">
 			<!-- Initial prompt section -->
 			{#if message.agentPrompt}
 				<div class="px-4 py-3 border-b border-border/50">
 					<div class="text-xs text-muted-foreground mb-1 font-medium">Prompt</div>
-					<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{message.agentPrompt}</pre>
+					<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap wrap-break-word font-mono">{message.agentPrompt}</pre>
 				</div>
 			{/if}
 
@@ -272,10 +272,10 @@
 						<!-- Text child (subagent's text output) -->
 						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">
 							<div class="flex items-start gap-2">
-								<svg class="w-4 h-4 text-primary flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<svg class="w-4 h-4 text-primary shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
 								</svg>
-								<div class="text-sm text-foreground whitespace-pre-wrap break-words">
+								<div class="text-sm text-foreground whitespace-pre-wrap wrap-break-word">
 									{child.content}
 								</div>
 							</div>
@@ -316,7 +316,7 @@
 					{#if toolResultHasMedia(message.content)}
 						{@html sanitizeHtml(renderToolResult(message.content))}
 					{:else if payload}
-						<div class="text-sm text-foreground whitespace-pre-wrap break-words">
+						<div class="text-sm text-foreground whitespace-pre-wrap wrap-break-word">
 							{payload.message}
 						</div>
 						{#if payload.rest}
@@ -324,12 +324,12 @@
 								<summary class="text-xs text-muted-foreground cursor-pointer list-none">
 									Show raw error payload
 								</summary>
-								<pre class="mt-1 text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{payload.rest}</pre>
+								<pre class="mt-1 text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap wrap-break-word font-mono">{payload.rest}</pre>
 							</details>
 						{/if}
 					{:else}
 						<pre
-							class="text-xs overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono {statusInfo.isError
+							class="text-xs overflow-x-auto max-h-48 whitespace-pre-wrap wrap-break-word font-mono {statusInfo.isError
 								? 'text-foreground'
 								: 'text-muted-foreground'}"
 						>{message.content}</pre>

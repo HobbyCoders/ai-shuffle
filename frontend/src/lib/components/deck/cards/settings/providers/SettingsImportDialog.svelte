@@ -294,7 +294,7 @@
 >
 	<button
 		type="button"
-		class="absolute inset-0 bg-background/80 backdrop-blur-sm"
+		class="absolute inset-0 bg-background/80 backdrop-blur-xs"
 		aria-label="Close provider settings import"
 		tabindex="-1"
 		disabled={busy}
@@ -319,7 +319,7 @@
 				type="button"
 				onclick={requestClose}
 				disabled={busy}
-				class="-mr-3 grid min-h-11 min-w-11 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+				class="-mr-3 grid min-h-11 min-w-11 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
 				aria-label="Close"
 			>
 				<X class="h-5 w-5" />

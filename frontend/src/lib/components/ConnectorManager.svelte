@@ -716,7 +716,7 @@
 										</div>
 
 										<!-- Actions -->
-										<div class="flex items-center gap-1.5 flex-shrink-0">
+										<div class="flex items-center gap-1.5 shrink-0">
 											<!-- Toggle Switch (canonical .switch pattern) -->
 											<button
 												type="button"
@@ -876,7 +876,7 @@
 															<span class="log-col-event">{log.event_type}</span>
 															<span class="log-col-dir">
 																<span
-																	class="px-1.5 py-0.5 rounded text-xs {log.direction === 'outbound' ? 'log-dir-out' : 'log-dir-in'}"
+																	class="px-1.5 py-0.5 rounded-sm text-xs {log.direction === 'outbound' ? 'log-dir-out' : 'log-dir-in'}"
 																>
 																	{log.direction}
 																</span>
@@ -921,7 +921,7 @@
 			<div class="flex items-center gap-3">
 				<button
 					onclick={cancelForm}
-					class="p-1.5 text-muted-foreground hover:text-foreground rounded transition-colors hover:bg-secondary/50"
+					class="p-1.5 text-muted-foreground hover:text-foreground rounded-sm transition-colors hover:bg-secondary/50"
 					title="Back to list"
 				>
 					<svg
@@ -1010,7 +1010,7 @@
 			<div class="flex items-center gap-3">
 				<button
 					onclick={cancelForm}
-					class="p-1.5 text-muted-foreground hover:text-foreground rounded transition-colors hover:bg-secondary/50"
+					class="p-1.5 text-muted-foreground hover:text-foreground rounded-sm transition-colors hover:bg-secondary/50"
 					title="Back"
 				>
 					<svg
@@ -1058,7 +1058,7 @@
 							type="text"
 							bind:value={formName}
 							placeholder="e.g., My Telegram Bot"
-							class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+							class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors"
 						/>
 					</div>
 
@@ -1071,7 +1071,7 @@
 							<select
 								id="connector-api-user"
 								bind:value={formApiUserId}
-								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground focus:outline-none focus:border-primary transition-colors"
+								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground focus:outline-hidden focus:border-primary transition-colors"
 							>
 								<option value="">Auto-create dedicated user</option>
 								{#each apiUsers as user}
@@ -1103,7 +1103,7 @@
 											type="password"
 											bind:value={formConfig[field.key]}
 											placeholder={field.placeholder || ''}
-											class="flex-1 min-w-0 px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors font-mono"
+											class="flex-1 min-w-0 px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors font-mono"
 										/>
 										<button
 											type="button"
@@ -1157,7 +1157,7 @@
 															type="checkbox"
 															checked={selectedGuildIds.has(g.id)}
 															onchange={() => toggleGuild(g.id)}
-															class="w-4 h-4 rounded border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
+															class="w-4 h-4 rounded-sm border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
 														/>
 														<span class="picker-item-name">{g.name}</span>
 														{#if g.error}
@@ -1179,7 +1179,7 @@
 											type="text"
 											bind:value={formConfig[field.key]}
 											placeholder={field.placeholder || 'Comma-separated guild IDs'}
-											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors"
 										/>
 										{#if field.description}<p class="text-xs text-muted-foreground mt-1">{field.description}</p>{/if}
 									</div>
@@ -1205,7 +1205,7 @@
 																type="checkbox"
 																checked={selectedChannelIds.has(c.id)}
 																onchange={() => toggleChannel(c.id)}
-																class="w-4 h-4 rounded border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
+																class="w-4 h-4 rounded-sm border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
 															/>
 															<span class="picker-item-name">#{c.name}</span>
 														</label>
@@ -1225,7 +1225,7 @@
 											type="text"
 											bind:value={formConfig[field.key]}
 											placeholder={field.placeholder || 'Comma-separated channel IDs'}
-											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors"
 										/>
 										{#if field.description}<p class="text-xs text-muted-foreground mt-1">{field.description}</p>{/if}
 									</div>
@@ -1239,7 +1239,7 @@
 											type="text"
 											bind:value={formConfig[field.key]}
 											placeholder={field.placeholder || ''}
-											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors"
 										/>
 										{#if field.description}<p class="text-xs text-muted-foreground mt-1">{field.description}</p>{/if}
 									</div>
@@ -1259,7 +1259,7 @@
 												bind:value={customPrefix}
 												oninput={syncCustomPrefix}
 												placeholder="e.g., !!"
-												class="mt-2 w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors font-mono"
+												class="mt-2 w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors font-mono"
 											/>
 										{/if}
 										{#if field.description}<p class="text-xs text-muted-foreground mt-1">{field.description}</p>{/if}
@@ -1279,7 +1279,7 @@
 											bind:value={formConfig[field.key]}
 											placeholder={field.placeholder || ''}
 											rows="3"
-											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors resize-vertical"
+											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors resize-vertical"
 										></textarea>
 									{:else if field.type === 'password'}
 										<input
@@ -1287,7 +1287,7 @@
 											type="password"
 											bind:value={formConfig[field.key]}
 											placeholder={field.placeholder || ''}
-											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors font-mono"
+											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors font-mono"
 										/>
 									{:else}
 										<input
@@ -1295,7 +1295,7 @@
 											type="text"
 											bind:value={formConfig[field.key]}
 											placeholder={field.placeholder || ''}
-											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+											class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors"
 										/>
 									{/if}
 									{#if field.description}
@@ -1321,7 +1321,7 @@
 										type="checkbox"
 										checked={formEvents.includes(event)}
 										onchange={() => toggleEvent(event)}
-										class="w-4 h-4 rounded border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
+										class="w-4 h-4 rounded-sm border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
 									/>
 									<span
 										class="text-sm text-foreground group-hover:text-primary transition-colors"

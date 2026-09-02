@@ -415,7 +415,7 @@
 								type="text"
 								bind:value={formName}
 								placeholder="e.g., Discord Bot, Mobile App"
-								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors"
 							/>
 						</div>
 
@@ -427,7 +427,7 @@
 								type="text"
 								bind:value={formDescription}
 								placeholder="Optional description"
-								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors"
+								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors"
 							/>
 						</div>
 					</div>
@@ -438,7 +438,7 @@
 						<select
 							id="api-user-project"
 							bind:value={formProjectId}
-							class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground focus:outline-none focus:border-primary transition-colors"
+							class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground focus:outline-hidden focus:border-primary transition-colors"
 						>
 							<option value="">None</option>
 							{#each projects as project}
@@ -475,7 +475,7 @@
 							<select
 								id="api-user-effort"
 								bind:value={formEffort}
-								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground focus:outline-none focus:border-primary transition-colors"
+								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground focus:outline-hidden focus:border-primary transition-colors"
 							>
 								{#each effortLevels as level}
 									<option value={level.value}>{level.label} — {level.description}</option>
@@ -510,7 +510,7 @@
 											type="checkbox"
 											checked={formProfileIds.includes(profile.id)}
 											onchange={() => toggleProfile(profile.id)}
-											class="w-4 h-4 rounded border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
+											class="w-4 h-4 rounded-sm border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
 										/>
 										<span class="text-sm text-foreground">{profile.name}</span>
 										{#if profile.description}
@@ -529,7 +529,7 @@
 							<input
 								type="checkbox"
 								bind:checked={formWebLoginAllowed}
-								class="w-4 h-4 rounded border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
+								class="w-4 h-4 rounded-sm border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
 							/>
 							<span class="text-sm text-foreground">Allow web login</span>
 						</label>
@@ -538,7 +538,7 @@
 								<input
 									type="checkbox"
 									bind:checked={formIsActive}
-									class="w-4 h-4 rounded border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
+									class="w-4 h-4 rounded-sm border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
 								/>
 								<span class="text-sm text-foreground">Active</span>
 							</label>
@@ -580,12 +580,12 @@
 							<div class="flex-1 min-w-0">
 								<!-- Avatar + Name + Status -->
 								<div class="flex items-center gap-2.5">
-									<span class="w-8 h-8 rounded-full bg-primary/15 text-primary text-xs font-semibold flex items-center justify-center flex-shrink-0 uppercase">
+									<span class="w-8 h-8 rounded-full bg-primary/15 text-primary text-xs font-semibold flex items-center justify-center shrink-0 uppercase">
 										{user.name.slice(0, 2)}
 									</span>
 									<div class="min-w-0">
 										<div class="flex items-center gap-2">
-											<span class={`w-2 h-2 rounded-full flex-shrink-0 ${user.is_active ? 'bg-success' : 'bg-muted-foreground'}`}></span>
+											<span class={`w-2 h-2 rounded-full shrink-0 ${user.is_active ? 'bg-success' : 'bg-muted-foreground'}`}></span>
 											<span class="text-sm font-medium text-foreground truncate">{user.name}</span>
 											<span class="text-xs text-muted-foreground">({user.id})</span>
 										</div>
@@ -598,35 +598,35 @@
 								<!-- Badges -->
 								<div class="flex flex-wrap items-center gap-1.5 mt-2">
 									{#if user.model}
-										<span class="px-1.5 py-0.5 bg-primary/20 text-primary text-xs rounded font-medium" title="Preconfigured model">
+										<span class="px-1.5 py-0.5 bg-primary/20 text-primary text-xs rounded-sm font-medium" title="Preconfigured model">
 											{user.model}
 										</span>
 									{/if}
 									{#if user.effort}
-										<span class="px-1.5 py-0.5 bg-primary/10 text-primary text-xs rounded" title="Preconfigured effort">
+										<span class="px-1.5 py-0.5 bg-primary/10 text-primary text-xs rounded-sm" title="Preconfigured effort">
 											effort: {user.effort}
 										</span>
 									{/if}
 									{#if getProjectName(user.project_id)}
-										<span class="px-1.5 py-0.5 bg-primary/20 text-primary text-xs rounded">
+										<span class="px-1.5 py-0.5 bg-primary/20 text-primary text-xs rounded-sm">
 											{getProjectName(user.project_id)}
 										</span>
 									{/if}
 									{#if user.profile_ids && user.profile_ids.length > 0}
-										<span class="px-1.5 py-0.5 bg-accent/30 text-accent-foreground text-xs rounded">
+										<span class="px-1.5 py-0.5 bg-accent/30 text-accent-foreground text-xs rounded-sm">
 											{user.profile_ids.length} agent{user.profile_ids.length !== 1 ? 's' : ''}
 										</span>
 									{/if}
-									<span class="px-1.5 py-0.5 bg-success/15 text-success text-xs rounded" title="Permission requests funnel to the connector">
+									<span class="px-1.5 py-0.5 bg-success/15 text-success text-xs rounded-sm" title="Permission requests funnel to the connector">
 										ask
 									</span>
 									{#if user.web_login_allowed}
-										<span class="px-1.5 py-0.5 bg-muted text-muted-foreground text-xs rounded">
+										<span class="px-1.5 py-0.5 bg-muted text-muted-foreground text-xs rounded-sm">
 											web login
 										</span>
 									{/if}
 									{#if !user.is_active}
-										<span class="px-1.5 py-0.5 bg-destructive/20 text-destructive text-xs rounded">
+										<span class="px-1.5 py-0.5 bg-destructive/20 text-destructive text-xs rounded-sm">
 											disabled
 										</span>
 									{/if}
@@ -640,11 +640,11 @@
 							</div>
 
 							<!-- Actions -->
-							<div class="flex items-center gap-1 flex-shrink-0">
+							<div class="flex items-center gap-1 shrink-0">
 								<!-- Edit -->
 								<button
 									onclick={() => startEdit(user)}
-									class="p-1.5 text-muted-foreground hover:text-foreground action-btn rounded transition-colors"
+									class="p-1.5 text-muted-foreground hover:text-foreground action-btn rounded-sm transition-colors"
 									title="Edit"
 								>
 									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -654,7 +654,7 @@
 								<!-- Rotate Key -->
 								<button
 									onclick={() => handleRotateKey(user.id)}
-									class="p-1.5 text-muted-foreground hover:text-warning action-btn rounded transition-colors"
+									class="p-1.5 text-muted-foreground hover:text-warning action-btn rounded-sm transition-colors"
 									title="Rotate API key"
 								>
 									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -665,20 +665,20 @@
 								{#if deletingId === user.id}
 									<button
 										onclick={() => handleDelete(user.id)}
-										class="px-2 py-1 text-xs text-destructive-foreground bg-destructive rounded transition-colors"
+										class="px-2 py-1 text-xs text-destructive-foreground bg-destructive rounded-sm transition-colors"
 									>
 										Confirm
 									</button>
 									<button
 										onclick={() => { deletingId = null; }}
-										class="px-2 py-1 text-xs text-foreground bg-secondary rounded transition-colors"
+										class="px-2 py-1 text-xs text-foreground bg-secondary rounded-sm transition-colors"
 									>
 										Cancel
 									</button>
 								{:else}
 									<button
 										onclick={() => { deletingId = user.id; }}
-										class="p-1.5 text-muted-foreground hover:text-destructive action-btn rounded transition-colors"
+										class="p-1.5 text-muted-foreground hover:text-destructive action-btn rounded-sm transition-colors"
 										title="Delete"
 									>
 										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -695,10 +695,10 @@
 								<button
 									onclick={() => toggleSessions(user.id)}
 									aria-expanded={expandedSessions.has(user.id)}
-									class="sessions-toggle flex items-center gap-1.5 text-xs font-medium text-muted-foreground rounded px-1 py-0.5 -ml-1 transition-colors"
+									class="sessions-toggle flex items-center gap-1.5 text-xs font-medium text-muted-foreground rounded-sm px-1 py-0.5 -ml-1 transition-colors"
 								>
 									<svg
-										class={`w-3.5 h-3.5 flex-shrink-0 transition-transform ${expandedSessions.has(user.id) ? 'rotate-90' : ''}`}
+										class={`w-3.5 h-3.5 shrink-0 transition-transform ${expandedSessions.has(user.id) ? 'rotate-90' : ''}`}
 										fill="none" stroke="currentColor" viewBox="0 0 24 24"
 									>
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
@@ -712,7 +712,7 @@
 									<button
 										onclick={refreshSessions}
 										disabled={sessionsRefreshing}
-										class="sessions-toggle p-1 text-muted-foreground rounded transition-colors disabled:opacity-50"
+										class="sessions-toggle p-1 text-muted-foreground rounded-sm transition-colors disabled:opacity-50"
 										title="Refresh sessions"
 									>
 										<svg class={`w-3.5 h-3.5 ${sessionsRefreshing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -738,23 +738,23 @@
 													<span class="text-xs font-medium text-foreground truncate flex-1 min-w-0">
 														{sessionLabel(session)}
 													</span>
-													<span class="text-[10px] text-muted-foreground flex-shrink-0">
+													<span class="text-[10px] text-muted-foreground shrink-0">
 														{formatRelativeTime(session.updated_at)}
 													</span>
 												</div>
 												<div class="flex flex-wrap items-center gap-1.5 mt-1.5">
 													{#if session.status}
-														<span class="px-1.5 py-0.5 bg-muted text-muted-foreground text-[10px] rounded">
+														<span class="px-1.5 py-0.5 bg-muted text-muted-foreground text-[10px] rounded-sm">
 															{session.status}
 														</span>
 													{/if}
 													{#if getProfileName(session.profile_id)}
-														<span class="px-1.5 py-0.5 bg-accent/30 text-accent-foreground text-[10px] rounded truncate max-w-[45%]">
+														<span class="px-1.5 py-0.5 bg-accent/30 text-accent-foreground text-[10px] rounded-sm truncate max-w-[45%]">
 															{getProfileName(session.profile_id)}
 														</span>
 													{/if}
 													{#if getProjectName(session.project_id)}
-														<span class="px-1.5 py-0.5 bg-primary/20 text-primary text-[10px] rounded truncate max-w-[45%]">
+														<span class="px-1.5 py-0.5 bg-primary/20 text-primary text-[10px] rounded-sm truncate max-w-[45%]">
 															{getProjectName(session.project_id)}
 														</span>
 													{/if}

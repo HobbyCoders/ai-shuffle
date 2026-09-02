@@ -530,7 +530,7 @@
 				<div class="space-y-4">
 					<div class="bg-primary/10 border border-primary/30 rounded-lg p-4">
 						<div class="flex items-start gap-3">
-							<FolderOpen size={20} strokeWidth={1.5} class="text-primary mt-0.5 flex-shrink-0" />
+							<FolderOpen size={20} strokeWidth={1.5} class="text-primary mt-0.5 shrink-0" />
 							<div>
 								<h3 class="text-foreground font-medium mb-1">Select Workspace Folder</h3>
 								<p class="text-muted-foreground text-sm">
@@ -549,7 +549,7 @@
 					<!-- Selected path display -->
 					{#if workspacePath}
 						<div class="text-sm text-foreground font-mono bg-muted/50 px-3 py-2 rounded-lg border border-border flex items-center gap-2">
-							<FolderOpen size={14} strokeWidth={1.5} class="text-primary flex-shrink-0" />
+							<FolderOpen size={14} strokeWidth={1.5} class="text-primary shrink-0" />
 							<span class="truncate">{workspacePath}</span>
 						</div>
 					{/if}
@@ -690,7 +690,7 @@
 								{#each providers.current.providers as provider (provider.id)}
 									<div class="flex items-center justify-between gap-2 bg-muted/30 border border-border rounded-lg px-3 py-2">
 										<span class="text-sm text-foreground truncate">{provider.name}</span>
-										<span class="text-xs text-muted-foreground flex-shrink-0">{provider.provider_type}</span>
+										<span class="text-xs text-muted-foreground shrink-0">{provider.provider_type}</span>
 									</div>
 								{/each}
 							</div>
@@ -877,7 +877,7 @@
 								{#each providers.current.providers as provider (provider.id)}
 									<div class="flex items-center justify-between gap-2 bg-muted/30 border border-border rounded-lg px-3 py-2">
 										<span class="text-sm text-foreground truncate">{provider.name}</span>
-										<span class="text-xs text-muted-foreground flex-shrink-0">{provider.provider_type}</span>
+										<span class="text-xs text-muted-foreground shrink-0">{provider.provider_type}</span>
 									</div>
 								{/each}
 							</div>

@@ -133,7 +133,7 @@
 >
 	<!-- Backdrop -->
 	<button
-		class="absolute inset-0 bg-background/80 backdrop-blur-sm"
+		class="absolute inset-0 bg-background/80 backdrop-blur-xs"
 		onclick={requestClose}
 		aria-label="Close"
 	></button>
@@ -180,7 +180,7 @@
 							onclick={() => (step = choice.step)}
 							class="flex items-center gap-4 text-left p-4 rounded-xl border border-border bg-background hover:border-foreground/40 hover:bg-muted transition-colors"
 						>
-							<span class="flex-shrink-0 grid place-items-center w-11 h-11 rounded-lg bg-muted text-foreground">
+							<span class="shrink-0 grid place-items-center w-11 h-11 rounded-lg bg-muted text-foreground">
 								<Icon class="w-5 h-5" />
 							</span>
 							<span class="min-w-0">

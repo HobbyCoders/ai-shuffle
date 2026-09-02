@@ -83,14 +83,14 @@
 {#if open}
 	<div
 		use:portal
-		class="fixed inset-0 z-[200] flex items-center justify-center p-4"
+		class="fixed inset-0 z-200 flex items-center justify-center p-4"
 		role="dialog"
 		aria-modal="true"
 		aria-labelledby="confirm-title"
 		tabindex="-1"
 	>
 		<button
-			class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+			class="absolute inset-0 bg-black/60 backdrop-blur-xs"
 			onclick={onCancel}
 			aria-label={cancelLabel}
 		></button>

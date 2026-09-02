@@ -284,7 +284,7 @@
 {#if isPlanApproval}
 <!-- Plan Approval Panel -->
 <div
-	class="card-system permission-panel plan-approval-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-sm"
+	class="card-system permission-panel plan-approval-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-xs"
 	style="
 		border-color: color-mix(in oklch, var(--purple, #8b5cf6) 40%, var(--border));
 		background: var(--card);
@@ -299,7 +299,7 @@
 	>
 		<!-- Plan Icon -->
 		<div
-			class="flex-shrink-0 w-9 h-9 rounded-xl border flex items-center justify-center shadow-sm"
+			class="shrink-0 w-9 h-9 rounded-xl border flex items-center justify-center shadow-xs"
 			style="
 				background: color-mix(in oklch, var(--purple, #8b5cf6) 15%, var(--card));
 				border-color: color-mix(in oklch, var(--purple, #8b5cf6) 30%, transparent);
@@ -331,7 +331,7 @@
 		<!-- Queue Badge -->
 		{#if queueCount > 1}
 			<div
-				class="flex-shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-lg border"
+				class="shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-lg border"
 				style="
 					background: color-mix(in oklch, var(--muted-foreground) 10%, transparent);
 					border-color: color-mix(in oklch, var(--muted-foreground) 20%, transparent);
@@ -424,11 +424,11 @@
 		<!-- Keyboard Hints -->
 		<div class="mt-2 flex items-center justify-center gap-3 text-[10px] text-muted-foreground">
 			<span class="flex items-center gap-1">
-				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">Enter</kbd>
+				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded-sm text-[9px] font-mono">Enter</kbd>
 				<span>Approve</span>
 			</span>
 			<span class="flex items-center gap-1">
-				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">Esc</kbd>
+				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded-sm text-[9px] font-mono">Esc</kbd>
 				<span>Reject</span>
 			</span>
 		</div>
@@ -438,7 +438,7 @@
 {:else}
 <!-- Permission Request Panel -->
 <div
-	class="card-system permission-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-sm"
+	class="card-system permission-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-xs"
 	style="
 		border-color: var(--border);
 		background: var(--card);
@@ -450,7 +450,7 @@
 	<div class="flex items-center gap-3 px-4 py-3 border-b border-border/40">
 		<!-- Tool Icon -->
 		<div
-			class="flex-shrink-0 w-9 h-9 rounded-xl border flex items-center justify-center shadow-sm"
+			class="shrink-0 w-9 h-9 rounded-xl border flex items-center justify-center shadow-xs"
 			style="
 				background: color-mix(in oklch, var(--muted) 50%, var(--card));
 				border-color: var(--border);
@@ -466,7 +466,7 @@
 			<h3 id="permission-title" class="text-sm font-semibold text-foreground flex items-center gap-2">
 				<span class="truncate">{enrichedTitle}</span>
 				<span
-					class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-md border flex-shrink-0"
+					class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-md border shrink-0"
 					style="
 						background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
 						color: var(--muted-foreground);
@@ -482,7 +482,7 @@
 		<!-- Queue Badge -->
 		{#if queueCount > 1}
 			<div
-				class="flex-shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-lg border"
+				class="shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-lg border"
 				style="
 					background: color-mix(in oklch, var(--muted-foreground) 10%, transparent);
 					border-color: color-mix(in oklch, var(--muted-foreground) 20%, transparent);
@@ -631,11 +631,11 @@
 		<!-- Keyboard Hints -->
 		<div class="mt-2 flex flex-wrap items-center justify-center gap-3 text-[10px] text-muted-foreground">
 			<span class="flex items-center gap-1">
-				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">Enter</kbd>
+				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded-sm text-[9px] font-mono">Enter</kbd>
 				<span>Approve</span>
 			</span>
 			<span class="flex items-center gap-1">
-				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">Esc</kbd>
+				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded-sm text-[9px] font-mono">Esc</kbd>
 				<span>Deny</span>
 			</span>
 		</div>

@@ -55,7 +55,7 @@
 >
 	<!-- Backdrop -->
 	<button
-		class="absolute inset-0 bg-background/80 backdrop-blur-sm"
+		class="absolute inset-0 bg-background/80 backdrop-blur-xs"
 		onclick={onClose}
 		aria-label="Close"
 	></button>

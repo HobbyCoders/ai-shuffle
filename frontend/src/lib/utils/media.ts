@@ -91,8 +91,8 @@ function overlayButtons(url: string, filename: string): string {
 	const u = escAttr(url);
 	const f = escAttr(filename);
 	return `<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 transition-opacity">
-			<button type="button" class="media-expand-btn p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Expand" aria-label="Expand">${EXPAND_ICON}</button>
-			<a href="${u}" download="${f}" class="media-download-btn p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download" aria-label="Download">${DOWNLOAD_ICON}</a>
+			<button type="button" class="media-expand-btn p-1.5 rounded-sm bg-black/60 text-white hover:bg-black/80 transition-colors" title="Expand" aria-label="Expand">${EXPAND_ICON}</button>
+			<a href="${u}" download="${f}" class="media-download-btn p-1.5 rounded-sm bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download" aria-label="Download">${DOWNLOAD_ICON}</a>
 		</div>`;
 }
 
@@ -107,14 +107,14 @@ export function mediaHtml(kind: MediaKind, url: string, label = '', filename?: s
 
 	if (kind === 'image') {
 		return `<div class="generated-media-container relative my-4 inline-block">
-			<img src="${u}" alt="${alt}" class="media-zoomable max-w-full max-h-[500px] [aspect-ratio:auto_3/2] rounded-lg shadow-lg border border-border cursor-zoom-in" />
+			<img src="${u}" alt="${alt}" class="media-zoomable max-w-full max-h-[500px] aspect-[auto_3/2] rounded-lg shadow-lg border border-border cursor-zoom-in" />
 			${overlayButtons(url, name)}
 		</div>`;
 	}
 
 	if (kind === 'video') {
 		return `<div class="generated-media-container relative my-4 inline-block">
-			<video src="${u}" controls playsinline preload="metadata" class="max-w-full max-h-[500px] [aspect-ratio:auto_3/2] rounded-lg shadow-lg border border-border">
+			<video src="${u}" controls playsinline preload="metadata" class="max-w-full max-h-[500px] aspect-[auto_3/2] rounded-lg shadow-lg border border-border">
 				Your browser does not support the video tag.
 			</video>
 			${overlayButtons(url, name)}
@@ -125,7 +125,7 @@ export function mediaHtml(kind: MediaKind, url: string, label = '', filename?: s
 	const f = escAttr(name);
 	return `<div class="generated-media-container generated-audio my-4 flex items-center gap-2 max-w-md rounded-lg border border-border bg-muted/30 px-3 py-2">
 		<audio src="${u}" controls preload="metadata" class="flex-1 min-w-0" title="${alt}"></audio>
-		<a href="${u}" download="${f}" class="media-download-btn flex-shrink-0 p-1.5 rounded text-muted-foreground hover:text-foreground transition-colors no-underline" title="Download audio" aria-label="Download audio">${DOWNLOAD_ICON}</a>
+		<a href="${u}" download="${f}" class="media-download-btn shrink-0 p-1.5 rounded-sm text-muted-foreground hover:text-foreground transition-colors no-underline" title="Download audio" aria-label="Download audio">${DOWNLOAD_ICON}</a>
 	</div>`;
 }
 

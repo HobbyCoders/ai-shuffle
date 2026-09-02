@@ -881,7 +881,7 @@
 			onkeydown={onHookKeydown}
 		>
 			<!-- Hook icon -->
-			<Webhook class="w-4 h-4 text-primary/80 flex-shrink-0" strokeWidth={2} />
+			<Webhook class="w-4 h-4 text-primary/80 shrink-0" strokeWidth={2} />
 
 			<!-- Primary label -->
 			<span class="text-sm font-medium text-foreground truncate min-w-0">
@@ -890,7 +890,7 @@
 
 			<!-- Matcher chip -->
 			{#if hookEventData.matcher}
-				<span class="hook-matcher-chip flex-shrink-0 px-1.5 py-0.5 text-[10px] font-mono rounded bg-muted/60 text-muted-foreground border border-border/50 truncate max-w-[140px]"
+				<span class="hook-matcher-chip shrink-0 px-1.5 py-0.5 text-[10px] font-mono rounded-sm bg-muted/60 text-muted-foreground border border-border/50 truncate max-w-[140px]"
 					title={hookEventData.matcher}
 				>
 					{hookEventData.matcher}
@@ -899,7 +899,7 @@
 
 			<!-- Decision badge -->
 			{#if hookEventData.decision}
-				<span class="flex-shrink-0 px-1.5 py-0.5 text-[10px] uppercase tracking-wide font-semibold rounded border {getDecisionBadgeClasses(hookEventData.decision)}">
+				<span class="shrink-0 px-1.5 py-0.5 text-[10px] uppercase tracking-wide font-semibold rounded-sm border {getDecisionBadgeClasses(hookEventData.decision)}">
 					{hookEventData.decision}
 				</span>
 			{/if}
@@ -909,7 +909,7 @@
 
 			<!-- Time chip -->
 			{#if hookEventData.timestamp}
-				<span class="hidden sm:inline text-[10px] text-muted-foreground/70 flex-shrink-0 font-mono tabular-nums">
+				<span class="hidden sm:inline text-[10px] text-muted-foreground/70 shrink-0 font-mono tabular-nums">
 					{formatHookTime(hookEventData.timestamp)}
 				</span>
 			{/if}
@@ -917,7 +917,7 @@
 			<!-- Chevron (only when there's something to expand) -->
 			{#if hasHookDetails}
 				<ChevronDown
-					class="w-3.5 h-3.5 text-muted-foreground/70 flex-shrink-0 transition-transform duration-150 {hookExpanded ? 'rotate-180' : ''}"
+					class="w-3.5 h-3.5 text-muted-foreground/70 shrink-0 transition-transform duration-150 {hookExpanded ? 'rotate-180' : ''}"
 				/>
 			{/if}
 		</div>
@@ -926,31 +926,31 @@
 			<div class="px-3 pb-3 pt-1 border-t border-border/40 bg-muted/20 space-y-2">
 				{#if hookEventData.tool_name}
 					<div class="hook-detail-row flex items-baseline gap-2">
-						<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 flex-shrink-0">Tool</span>
+						<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 shrink-0">Tool</span>
 						<span class="text-xs font-mono text-foreground break-all">{hookEventData.tool_name}</span>
 					</div>
 				{/if}
 				{#if hookEventData.matcher}
 					<div class="hook-detail-row flex items-baseline gap-2">
-						<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 flex-shrink-0">Matcher</span>
+						<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 shrink-0">Matcher</span>
 						<span class="text-xs font-mono text-foreground break-all">{hookEventData.matcher}</span>
 					</div>
 				{/if}
 				{#if hookEventData.reason}
 					<div class="hook-detail-row flex items-baseline gap-2">
-						<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 flex-shrink-0">Reason</span>
-						<span class="text-xs text-foreground whitespace-pre-wrap break-words">{hookEventData.reason}</span>
+						<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 shrink-0">Reason</span>
+						<span class="text-xs text-foreground whitespace-pre-wrap wrap-break-word">{hookEventData.reason}</span>
 					</div>
 				{/if}
 				{#if hookEventData.system_message}
 					<div class="hook-detail-row flex items-baseline gap-2">
-						<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 flex-shrink-0">Message</span>
-						<span class="text-xs text-muted-foreground whitespace-pre-wrap break-words">{hookEventData.system_message}</span>
+						<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 shrink-0">Message</span>
+						<span class="text-xs text-muted-foreground whitespace-pre-wrap wrap-break-word">{hookEventData.system_message}</span>
 					</div>
 				{/if}
 				<!-- Time visible on mobile only when expanded -->
 				<div class="sm:hidden hook-detail-row flex items-baseline gap-2">
-					<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 flex-shrink-0">Time</span>
+					<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 shrink-0">Time</span>
 					<span class="text-xs font-mono text-muted-foreground tabular-nums">{formatHookTime(hookEventData.timestamp)}</span>
 				</div>
 			</div>
@@ -965,20 +965,20 @@
 					{#if isTaskSubtype}
 						<!-- Status icon — three-way, matching ToolUseMessage's convention -->
 						{#if formatted.taskStatus === 'running' || formatted.taskStatus === 'pending'}
-							<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<svg class="w-4 h-4 text-primary animate-spin shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 							</svg>
 						{:else if formatted.taskStatus === 'failed' || formatted.taskStatus === 'error' || formatted.taskStatus === 'killed'}
-							<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<svg class="w-4 h-4 text-red-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 							</svg>
 						{:else}
-							<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<svg class="w-4 h-4 text-green-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 							</svg>
 						{/if}
 						<!-- Task icon (bot) — matches ToolUseMessage's Task entry -->
-						<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+						<svg class="w-4 h-4 text-primary shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
 							<rect x="3" y="11" width="18" height="10" rx="2"/>
 							<circle cx="12" cy="5" r="2"/>
 							<path d="M12 7v4"/>
@@ -988,51 +988,51 @@
 					{:else}
 						<!-- Status icon -->
 						{#if formatted.badgeColor === 'green'}
-							<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<svg class="w-4 h-4 text-green-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 							</svg>
 						{:else if formatted.badgeColor === 'red'}
-							<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<svg class="w-4 h-4 text-red-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 							</svg>
 						{:else}
-							<svg class="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<svg class="w-4 h-4 text-muted-foreground shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 							</svg>
 						{/if}
 						<!-- Hook icon (lightning bolt) -->
-						<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+						<svg class="w-4 h-4 text-primary shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
 							<path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
 						</svg>
 					{/if}
 					<!-- Title -->
-					<span class="text-sm font-medium text-foreground flex-shrink-0">{formatted.title}</span>
+					<span class="text-sm font-medium text-foreground shrink-0">{formatted.title}</span>
 					<!-- Status chip (task subtypes only) — muted pill, matching a tool card -->
 					{#if isTaskSubtype && formatted.badge}
-						<span class="text-[10px] font-medium px-1.5 py-0.5 rounded border border-border bg-muted text-muted-foreground flex-shrink-0 uppercase tracking-wide">{formatted.badge}</span>
+						<span class="text-[10px] font-medium px-1.5 py-0.5 rounded-sm border border-border bg-muted text-muted-foreground shrink-0 uppercase tracking-wide">{formatted.badge}</span>
 					{/if}
 					<!-- Content summary -->
 					{#if formatted.content}
-						<span class="text-muted-foreground flex-shrink-0">&bull;</span>
+						<span class="text-muted-foreground shrink-0">&bull;</span>
 						<span class="text-sm text-muted-foreground truncate min-w-0" title={formatted.content}>{formatted.content}</span>
 					{/if}
 					<!-- Chevron -->
-					<svg class="w-4 h-4 text-muted-foreground ml-auto flex-shrink-0 transition-transform group-open/hook:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<svg class="w-4 h-4 text-muted-foreground ml-auto shrink-0 transition-transform group-open/hook:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 					</svg>
 				</summary>
 				{#if formatted.rawInput || formatted.rawOutput}
 					<div class="sys-body space-y-2">
 						{#if formatted.rawInput}
-							<div class="p-2 bg-muted/50 rounded border border-zinc-500/20">
+							<div class="p-2 bg-muted/50 rounded-sm border border-zinc-500/20">
 								<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Input</div>
-								<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{formatted.rawInput}</pre>
+								<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap wrap-break-word font-mono">{formatted.rawInput}</pre>
 							</div>
 						{/if}
 						{#if formatted.rawOutput}
-							<div class="p-2 bg-muted/50 rounded border border-zinc-500/20">
+							<div class="p-2 bg-muted/50 rounded-sm border border-zinc-500/20">
 								<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Output</div>
-								<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{formatted.rawOutput}</pre>
+								<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap wrap-break-word font-mono">{formatted.rawOutput}</pre>
 							</div>
 						{/if}
 					</div>
@@ -1048,38 +1048,38 @@
 					<!-- Still in flight: spinner, not a settled check/cross. A
 					     spent card whose resume is running spins again so the
 					     wait for the provider is visible. -->
-					<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<svg class="w-4 h-4 text-primary animate-spin shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 					</svg>
 				{:else if retryRecovered || formatted.badgeColor === 'green'}
-					<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<svg class="w-4 h-4 text-green-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 					</svg>
 				{:else if formatted.badgeColor === 'red'}
-					<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<svg class="w-4 h-4 text-red-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 					</svg>
 				{:else}
 					<!-- Static icon for non-terminal states (not spinner) -->
-					<svg class="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<svg class="w-4 h-4 text-muted-foreground shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 					</svg>
 				{/if}
 				<!-- Hook icon (lightning bolt) -->
-				<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+				<svg class="w-4 h-4 text-primary shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
 					<path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
 				</svg>
 				<!-- Title -->
-				<span class="text-sm font-medium text-foreground flex-shrink-0">{formatted.title}</span>
+				<span class="text-sm font-medium text-foreground shrink-0">{formatted.title}</span>
 				<!-- Badge chip -->
 				{#if formatted.badge}
-					<span class="px-1.5 py-0.5 text-[10px] rounded flex-shrink-0 {getBadgeClasses(formatted.badgeColor || 'gray')}">
+					<span class="px-1.5 py-0.5 text-[10px] rounded-sm shrink-0 {getBadgeClasses(formatted.badgeColor || 'gray')}">
 						{formatted.badge}
 					</span>
 				{/if}
 				<!-- Content summary -->
 				{#if formatted.content}
-					<span class="text-muted-foreground flex-shrink-0">&bull;</span>
+					<span class="text-muted-foreground shrink-0">&bull;</span>
 					<span class="text-sm text-muted-foreground truncate min-w-0" title={formatted.content}>{formatted.content}</span>
 				{/if}
 				<!--
@@ -1091,7 +1091,7 @@
 				{#if canRetry}
 					<button
 						type="button"
-						class="retry-chip ml-auto flex-shrink-0"
+						class="retry-chip ml-auto shrink-0"
 						data-testid="provider-retry-button"
 						disabled={retryInFlight}
 						onclick={handleRetry}
@@ -1110,20 +1110,20 @@
 		<div class="w-full sys-flat">
 			<details class="group/sys">
 				<summary class="sys-summary sys-row w-full flex items-center gap-2 min-w-0 cursor-pointer list-none">
-					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<svg class="w-4 h-4 text-primary shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
 					</svg>
-					<span class="text-sm font-medium text-foreground flex-shrink-0">{formatted.title}</span>
+					<span class="text-sm font-medium text-foreground shrink-0">{formatted.title}</span>
 					{#if formatted.badge}
-						<span class="px-1.5 py-0.5 text-[10px] rounded flex-shrink-0 {getBadgeClasses(formatted.badgeColor || 'gray')}">
+						<span class="px-1.5 py-0.5 text-[10px] rounded-sm shrink-0 {getBadgeClasses(formatted.badgeColor || 'gray')}">
 							{formatted.badge}
 						</span>
 					{/if}
 					{#if formatted.content}
-						<span class="text-muted-foreground flex-shrink-0">&bull;</span>
+						<span class="text-muted-foreground shrink-0">&bull;</span>
 						<span class="text-sm text-muted-foreground truncate min-w-0" title={formatted.content}>{formatted.content}</span>
 					{/if}
-					<svg class="w-4 h-4 text-muted-foreground ml-auto flex-shrink-0 transition-transform group-open/sys:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<svg class="w-4 h-4 text-muted-foreground ml-auto shrink-0 transition-transform group-open/sys:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 					</svg>
 				</summary>
@@ -1133,7 +1133,7 @@
 							{@html sanitizeHtml(renderMarkdown(formatted.content))}
 						</div>
 					{:else}
-						<pre class="text-xs text-muted-foreground overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatted.content}</pre>
+						<pre class="text-xs text-muted-foreground overflow-x-auto whitespace-pre-wrap wrap-break-word font-mono">{formatted.content}</pre>
 					{/if}
 				</div>
 			</details>

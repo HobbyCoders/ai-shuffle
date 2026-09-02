@@ -105,13 +105,13 @@
 
 	function getStatusColor(status: string): string {
 		switch (status) {
-			case 'A': return 'bg-[var(--status-success-bg)] text-success ring-[var(--status-success-border)]';
-			case 'M': return 'bg-[var(--status-warning-bg)] text-warning ring-[var(--status-warning-border)]';
-			case 'D': return 'bg-[var(--status-error-bg)] text-destructive ring-[var(--status-error-border)]';
-			case 'R': return 'bg-[var(--status-info-bg)] text-info ring-[var(--status-info-border)]';
-			case '?': return 'bg-[var(--status-info-bg)] text-info ring-[var(--status-info-border)]';
-			case 'U': return 'bg-[var(--status-warning-bg)] text-warning ring-[var(--status-warning-border)]';
-			default: return 'bg-[var(--status-pending-bg)] text-muted-foreground ring-[var(--status-pending-border)]';
+			case 'A': return 'bg-(--status-success-bg) text-success ring-(--status-success-border)';
+			case 'M': return 'bg-(--status-warning-bg) text-warning ring-(--status-warning-border)';
+			case 'D': return 'bg-(--status-error-bg) text-destructive ring-(--status-error-border)';
+			case 'R': return 'bg-(--status-info-bg) text-info ring-(--status-info-border)';
+			case '?': return 'bg-(--status-info-bg) text-info ring-(--status-info-border)';
+			case 'U': return 'bg-(--status-warning-bg) text-warning ring-(--status-warning-border)';
+			default: return 'bg-(--status-pending-bg) text-muted-foreground ring-(--status-pending-border)';
 		}
 	}
 
@@ -154,10 +154,10 @@
 <div class="flex flex-col h-full bg-background text-foreground">
 	<!-- Sticky Header (hidden when embedded) -->
 	{#if !embedded}
-		<header class="sticky top-0 z-10 flex items-center gap-3 px-4 py-3 bg-[var(--background)]/95 backdrop-blur-sm border-b border-border min-h-[52px]">
+		<header class="sticky top-0 z-10 flex items-center gap-3 px-4 py-3 bg-(--background)/95 backdrop-blur-xs border-b border-border min-h-[52px]">
 			<button
 				onclick={onClose}
-				class="flex items-center justify-center w-8 h-8 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shrink-0 focus:outline-none focus:ring-2 focus:ring-ring"
+				class="flex items-center justify-center w-8 h-8 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shrink-0 focus:outline-hidden focus:ring-2 focus:ring-ring"
 				aria-label="Back to file list"
 			>
 				<ArrowLeft size={18} />
@@ -195,7 +195,7 @@
 			</div>
 		{:else if error}
 			<div class="flex flex-col items-center justify-center py-20 gap-2 px-4">
-				<div class="text-sm text-destructive bg-[var(--status-error-bg)] border border-[var(--status-error-border)] rounded-lg px-4 py-3 max-w-md text-center">
+				<div class="text-sm text-destructive bg-(--status-error-bg) border border-(--status-error-border) rounded-lg px-4 py-3 max-w-md text-center">
 					{error}
 				</div>
 			</div>
@@ -242,7 +242,7 @@
 			</div>
 
 			{#if diffResponse?.truncated}
-				<div class="sticky bottom-0 flex items-center justify-center gap-2 px-4 py-2.5 bg-[var(--status-warning-bg)] border-t border-[var(--status-warning-border)] text-warning text-xs font-medium">
+				<div class="sticky bottom-0 flex items-center justify-center gap-2 px-4 py-2.5 bg-(--status-warning-bg) border-t border-(--status-warning-border) text-warning text-xs font-medium">
 					Diff output was truncated — only showing partial changes
 				</div>
 			{/if}
@@ -259,7 +259,7 @@
 						<div class="flex diff-line-header">
 							<div class="gutter-col diff-header-gutter">···</div>
 							<div class="gutter-col diff-header-gutter">···</div>
-							<div class="flex-1 px-3 font-mono text-[11px] diff-header-text whitespace-pre select-none leading-[1.375rem]">
+							<div class="flex-1 px-3 font-mono text-[11px] diff-header-text whitespace-pre select-none leading-5.5">
 								{line.content}
 							</div>
 						</div>
@@ -292,7 +292,7 @@
 			</div>
 
 			{#if diffResponse?.truncated}
-				<div class="sticky bottom-0 flex items-center justify-center gap-2 px-4 py-2.5 bg-[var(--status-warning-bg)] border-t border-[var(--status-warning-border)] text-warning text-xs font-medium">
+				<div class="sticky bottom-0 flex items-center justify-center gap-2 px-4 py-2.5 bg-(--status-warning-bg) border-t border-(--status-warning-border) text-warning text-xs font-medium">
 					Diff output was truncated — only showing partial changes
 				</div>
 			{/if}

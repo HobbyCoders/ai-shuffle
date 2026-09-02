@@ -473,7 +473,7 @@
 			<!-- svelte-ignore a11y_click_events_have_key_events -->
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<div
-				class="prose prose-sm abody max-w-none break-words"
+				class="prose prose-sm abody max-w-none wrap-break-word"
 				style="overflow-wrap: anywhere; word-break: break-word;"
 				onclick={handleProseClick}
 			>

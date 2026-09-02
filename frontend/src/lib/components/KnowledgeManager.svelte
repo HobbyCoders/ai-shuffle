@@ -181,7 +181,7 @@
 	loadDocuments();
 </script>
 
-<div class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+<div class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs">
 	<div class="bg-background border border-border rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] max-sm:max-h-full flex flex-col">
 		<!-- Header -->
 		<div class="flex items-center justify-between px-5 py-4 border-b border-border">
@@ -254,7 +254,7 @@
 							type="text"
 							bind:value={searchQuery}
 							placeholder="Search knowledge base..."
-							class="w-full pl-10 pr-4 py-2 rounded-lg bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+							class="w-full pl-10 pr-4 py-2 rounded-lg bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/50"
 							onkeypress={(e) => e.key === 'Enter' && handleSearch()}
 						/>
 					</div>
@@ -285,7 +285,7 @@
 								{#each searchResults as result}
 									<div class="p-3 rounded-lg bg-muted/50 border border-border">
 										<div class="flex items-center gap-2 mb-1">
-											<span class="text-xs font-mono px-1.5 py-0.5 rounded bg-primary/20 text-primary">
+											<span class="text-xs font-mono px-1.5 py-0.5 rounded-sm bg-primary/20 text-primary">
 												{result.filename}
 											</span>
 											<span class="text-xs text-muted-foreground">
@@ -325,7 +325,7 @@
 					<div class="space-y-2">
 						{#each documents as doc (doc.id)}
 							<div class="flex items-center gap-3 p-3 rounded-lg bg-muted/50 border border-border group">
-								<span class="w-8 h-8 rounded-lg bg-primary/20 text-primary text-xs font-mono flex items-center justify-center flex-shrink-0">
+								<span class="w-8 h-8 rounded-lg bg-primary/20 text-primary text-xs font-mono flex items-center justify-center shrink-0">
 									{getFileIcon(doc.content_type)}
 								</span>
 								<div class="flex-1 min-w-0">
@@ -412,7 +412,7 @@
 
 <!-- Preview modal -->
 {#if previewDocument}
-	<div class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+	<div class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-60 flex items-center justify-center bg-black/50 backdrop-blur-xs">
 		<div class="bg-background border border-border rounded-xl shadow-2xl w-full max-w-lg max-h-[70vh] max-sm:max-h-full flex flex-col">
 			<div class="flex items-center justify-between px-4 py-3 border-b border-border">
 				<h3 class="font-medium text-foreground">{previewDocument.filename}</h3>
