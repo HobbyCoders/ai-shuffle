@@ -13,6 +13,12 @@ child engine needs :class:`~fluid.config.model.HarnessConfig` and
 Nothing here is CLI-specific beyond that dependency, so another in-process host
 may reuse :class:`CliHost` as is.
 
+It is also the messaging host: ``agent_roster`` lists the workers it holds (plus
+``main``, inside a worker) and ``agent_message`` resolves one of those names to
+an engine and submits an ``AgentMessage`` to it. Choosing the delivery channel
+is the receiving engine's job, not this module's, so a sender never races the
+receiver's busy/idle state.
+
 Two worker kinds, one lifecycle:
 
 * ``monitor_spawn`` runs a shell command as a detached asyncio subprocess,
@@ -59,7 +65,12 @@ from fluid.events.model import (
     PermissionRequest,
     TurnComplete,
 )
-from fluid.events.ops import BackgroundTaskFinished, RespondPermission, UserTurn
+from fluid.events.ops import (
+    AgentMessage,
+    BackgroundTaskFinished,
+    RespondPermission,
+    UserTurn,
+)
 from fluid.store.base import new_id
 from fluid.tools.builtins._util import strip_ansi
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome
@@ -89,6 +100,32 @@ async def deny_permission(event: PermissionRequest) -> str:
     return "deny"
 
 
+# ``name [ref]`` — the address form ListAgents prints and SendMessage accepts.
+# The ref is only ever needed to break a tie between two agents sharing a name,
+# so it stays short enough to type and long enough not to collide.
+_REF_CHARS = 6
+_ADDRESS_RE = re.compile(r"^(?P<name>.*?)\s*\[(?P<ref>[^\[\]]+)\]$")
+
+
+def _ref_of(task_id: str) -> str:
+    """The disambiguating ref for a worker's task id."""
+    return task_id[-_REF_CHARS:]
+
+
+def _split_ref(to: str) -> tuple[str, str | None]:
+    """Split an address into ``(name, ref)``; ref is None when none was given."""
+    match = _ADDRESS_RE.match(to.strip())
+    if match is None:
+        return to.strip(), None
+    return match.group("name").strip(), match.group("ref").strip()
+
+
+def _engine_busy(engine: Any | None) -> bool:
+    """True while ``engine`` is running a turn (so a message would queue)."""
+    turn = getattr(engine, "_turn_task", None)
+    return turn is not None and not turn.done()
+
+
 @dataclass
 class Worker:
     """One host-owned background unit — a monitored process or a child agent."""
@@ -96,6 +133,13 @@ class Worker:
     task_id: str
     kind: str  # "monitor" | "task"
     description: str
+    # The address a peer messages this worker by (Task's ``label``, else the
+    # agent name). Not unique on its own — ``ref`` disambiguates.
+    name: str = ""
+    # The child engine, while it is alive. Cleared once the worker is closed:
+    # a message has nowhere to go after that, and saying so beats submitting
+    # into a shut engine.
+    engine: Any | None = None
     task: asyncio.Task | None = None
     process: asyncio.subprocess.Process | None = None
     worker_session_id: str | None = None
@@ -163,6 +207,8 @@ class CliHost:
         provider_name: str | None = None,
         permission_responder: PermissionResponder | None = None,
         nested: bool = False,
+        parent: CliHost | None = None,
+        identity: str = "main",
     ) -> None:
         self.config = config
         self.store = store
@@ -172,6 +218,12 @@ class CliHost:
             permission_responder or deny_permission
         )
         self.nested = nested
+        # The host serving the session that started this one, and the name
+        # this session answers to there. Together they are the ``main`` route:
+        # a worker addresses its parent, and the parent sees the worker's name
+        # on the message.
+        self.parent = parent
+        self.identity = identity
         self.engine: Any | None = None
         self.workers: dict[str, Worker] = {}
         self._closed = False
@@ -187,6 +239,10 @@ class CliHost:
         ctx.extra["monitor_spawn"] = self.monitor_spawn
         if not self.nested:
             ctx.extra["task_dispatch"] = self.task_dispatch
+        # Messaging is wired in a worker too — that is the leg that lets one
+        # talk back to the conversation that started it.
+        ctx.extra["agent_roster"] = self.agent_roster
+        ctx.extra["agent_message"] = self.agent_message
         ctx.extra["cli_host"] = self
         if self.provider is None:
             self.provider = getattr(engine, "provider", None)
@@ -335,11 +391,15 @@ class CliHost:
         agent_name = str(input.get("agent") or "").strip()
         definition = self._find_agent(agent_name, ctx)
         label = input.get("label") or agent_name or "subagent"
-        worker = Worker(task_id=new_id("task"), kind="task", description=str(label))
+        worker = Worker(
+            task_id=new_id("task"), kind="task", description=str(label),
+            name=str(label),
+        )
         try:
             child = await self._build_child(definition, worker)
         except Exception as exc:  # noqa: BLE001
             return ToolOutcome(text=f"could not start subagent: {exc}", is_error=True)
+        worker.engine = child
         self.workers[worker.task_id] = worker
 
         if input.get("mode", "sync") == "background":
@@ -357,6 +417,7 @@ class CliHost:
         try:
             status, text = await self._run_child(child, worker.worker_session_id, prompt)
         finally:
+            worker.engine = None
             await child.aclose()
         worker.status = status
         worker.summary = text
@@ -392,6 +453,138 @@ class CliHost:
                 "SubagentStop hook asked to block %s (%s) but the worker had "
                 "already finished", worker.task_id, decision.note,
             )
+
+    # ── ListAgents / SendMessage ──
+
+    def agent_roster(self, input: dict[str, Any], ctx: ToolCtx) -> list[dict[str, Any]]:
+        """The agents this session can address, newest first.
+
+        A worker is listed while it can still be reached and for as long as
+        the host remembers it: a finished one is worth seeing (it says what
+        already ran) even though messaging it fails. ``main`` appears only
+        inside a worker, where there is a parent to talk to.
+        """
+        rows: list[dict[str, Any]] = []
+        if self.parent is not None:
+            rows.append({
+                "name": "main",
+                "ref": None,
+                "status": "running" if _engine_busy(self.parent.engine) else "idle",
+                "description": "the conversation that started you",
+                "kind": "parent",
+            })
+        running_only = bool(input.get("running_only"))
+        for worker in reversed(list(self.workers.values())):
+            if worker.kind != "task":
+                continue
+            if running_only and worker.done:
+                continue
+            rows.append({
+                "name": worker.name or worker.description,
+                "ref": _ref_of(worker.task_id),
+                "status": worker.status,
+                "description": worker.description,
+                "kind": "subagent",
+                "task_id": worker.task_id,
+                "worker_session_id": worker.worker_session_id,
+            })
+        return rows
+
+    async def agent_message(self, input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+        """Deliver one peer message, or explain precisely why it went nowhere.
+
+        Resolution happens here rather than in the tool so the engine handoff
+        is one hop: whatever ``to`` names becomes an engine, and the
+        ``AgentMessage`` op decides for itself whether that engine is busy
+        (queue it) or idle (wake it). Nothing polls, and nothing here has to
+        guess at the receiver's state.
+        """
+        to = str(input.get("to") or "").strip()
+        target, error = self._resolve_target(to)
+        if target is None:
+            return ToolOutcome(
+                text=error or f"could not resolve {to!r}", is_error=True,
+            )
+        name, engine = target
+        try:
+            await engine.submit(AgentMessage(
+                text=str(input.get("message") or ""), sender=self.identity,
+            ))
+        except Exception as exc:  # noqa: BLE001 — a closing engine refuses ops
+            return ToolOutcome(
+                text=f"could not deliver to {name}: {exc}", is_error=True,
+            )
+        return ToolOutcome(
+            text=(
+                f"Delivered to {name}. It picks the message up at its next "
+                "tool result if it is working, or starts a turn on it if it "
+                "was idle — nothing to wait for here."
+            )
+        )
+
+    def _resolve_target(self, to: str) -> tuple[tuple[str, Any] | None, str | None]:
+        """``to`` as ``((name, engine), None)`` or ``(None, <why not>)``."""
+        if not to:
+            return None, "SendMessage needs a recipient."
+        name, ref = _split_ref(to)
+        if name.lower() == "main" and ref is None:
+            if self.parent is None:
+                return None, (
+                    "You are the main conversation — there is no `main` to "
+                    "message from here."
+                )
+            if self.parent.engine is None:
+                return None, "The parent conversation is no longer running."
+            return ("main", self.parent.engine), None
+
+        matches = [
+            w for w in self.workers.values()
+            if w.kind == "task" and (
+                w.task_id == to
+                or (w.name or w.description) == name
+                or _ref_of(w.task_id) == (ref or name)
+            )
+        ]
+        if ref is not None:
+            matches = [w for w in matches if _ref_of(w.task_id) == ref]
+        if not matches:
+            known = self.agent_roster({}, ToolCtx())
+            listing = ", ".join(
+                f"{r['name']} [{r['ref']}]" if r["ref"] else str(r["name"])
+                for r in known
+            )
+            return None, (
+                f"No agent named {to!r} in this session."
+                + (f" Reachable: {listing}." if listing else "")
+                + " Use ListAgents for the current roster."
+            )
+        # Latest wins on a shared name, but only among agents still running:
+        # messaging the newest of several is a defensible default; silently
+        # picking a finished one over a live one is not.
+        live = [w for w in matches if not w.done]
+        if not live:
+            worker = matches[-1]
+            return None, (
+                f"{worker.name or worker.description} has already "
+                f"{worker.status}; there is nothing left to message. Its "
+                "report comes back on its own."
+            )
+        if len(live) > 1 and ref is None:
+            refs = ", ".join(
+                f"{w.name or w.description} [{_ref_of(w.task_id)}]" for w in live
+            )
+            return None, (
+                f"{name!r} names {len(live)} running agents. Address one by "
+                f"its ref: {refs}."
+            )
+        worker = live[-1]
+        if worker.engine is None:
+            return None, (
+                f"{worker.name or worker.description} is running but cannot "
+                "take messages (it was started synchronously and this session "
+                "is blocked on it)."
+            )
+        return (worker.name or worker.description, worker.engine), None
 
     def _find_agent(self, name: str, ctx: ToolCtx) -> Any | None:
         registry = (ctx.extra or {}).get("agent_registry")
@@ -515,6 +708,7 @@ class CliHost:
             self.config, self.store,
             provider=self.provider, provider_name=self.provider_name,
             permission_responder=self.permission_responder, nested=True,
+            parent=self, identity=worker.name or worker.description,
         ).attach(child)
         return child
 
@@ -574,6 +768,7 @@ class CliHost:
         except Exception as exc:  # noqa: BLE001
             status, text = "failed", f"subagent crashed: {exc}"
         finally:
+            worker.engine = None
             try:
                 await child.aclose()
             except Exception:  # noqa: BLE001

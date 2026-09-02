@@ -40,12 +40,14 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
-        # fluid's own control channels: a genuine system-reminder or steering
-        # marker is emitted by the harness, never written in a context file —
+        # fluid's own control channels: a genuine system-reminder, steering
+        # or peer-message marker is emitted by the harness, never written in a
+        # context file —
         # one appearing in an AGENTS.md/identity/memory entry is spoofing.
         "harness-marker",
         re.compile(
-            r"<\s*/?\s*system-reminder\s*>|\[/?user interjection",
+            r"<\s*/?\s*system-reminder\s*>|\[/?user interjection"
+            r"|\[/?agent message",
             re.IGNORECASE,
         ),
     ),

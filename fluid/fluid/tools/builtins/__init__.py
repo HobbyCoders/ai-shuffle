@@ -14,12 +14,14 @@ from fluid.tools.builtins import (
     history_expand,
     history_search,
     ledger,
+    list_agents,
     monitor,
     note,
     plan,
     read,
     recall,
     remember,
+    send_message,
     session_search,
     session_view,
     skill,
@@ -34,6 +36,7 @@ _MODULES = (
     read, grep, glob, write, edit, bash, skill, note, task, monitor,
     tool_search, history_expand, history_search, ledger,
     session_search, session_view, ask_user, web, plan, remember, recall,
+    list_agents, send_message,
 )
 
 # Tools whose descriptions specialize to the session's permitted surface —
@@ -57,6 +60,8 @@ _DESCRIBERS = {
     "WebSearch": web.describe_search,
     "Remember": remember.describe,
     "Recall": recall.describe,
+    "ListAgents": list_agents.describe,
+    "SendMessage": send_message.describe,
 }
 
 

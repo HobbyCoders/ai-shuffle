@@ -108,9 +108,9 @@ than a failure.
 ## Standalone CLI host
 
 `fluid chat` and `fluid run` are a first-class host: `fluid.cli.config.make_engine`
-attaches a `fluid.cli.host.CliHost` to every engine it builds, which injects both
-`task_dispatch` and `monitor_spawn` (the host itself rides along as
-`ToolCtx.extra["cli_host"]`).
+attaches a `fluid.cli.host.CliHost` to every engine it builds, which injects
+`task_dispatch`, `monitor_spawn`, `agent_roster` and `agent_message` (the host
+itself rides along as `ToolCtx.extra["cli_host"]`).
 
 - **Monitor** runs the command as a detached asyncio subprocess, buffers
   stdout+stderr (head + tail, capped), and submits `BackgroundTaskFinished`
@@ -123,6 +123,20 @@ attaches a `fluid.cli.host.CliHost` to every engine it builds, which injects bot
   themselves (no recursive fan-out) but do get `Monitor`. `mode="sync"` runs
   inline; `mode="background"` detaches and reports the child's final assistant
   text as the summary.
+- **ListAgents / SendMessage** address the workers the host is holding. A row
+  is `name [ref]` — `name` is Task's `label` (or the agent name) and `ref` the
+  tail of the task id, needed only when two live workers share a name; a child
+  also sees `main`, its parent. Delivery is one `AgentMessage` submit and the
+  receiving engine picks the channel: queued for its next tool result while a
+  turn runs, an ordinary user-role turn when it is idle (which is what wakes a
+  parked session). Messaging a worker that has already finished is an error,
+  not a resume — its report comes back on its own.
+- **Peer messages are not user messages.** They arrive in their own marker
+  (`fluid.context.peer`), never the steering marker, and the prompt block that
+  teaches the marker says so: a peer's text is weighed like a colleague's
+  suggestion, cannot authorize anything, and never outranks the user. Incoming
+  text is defanged on the way in, so a worker cannot forge a `[user
+  interjection]` inside its own message.
 - **Permissions**: the child inherits the parent's approval policy and rules.
   Its permission prompts route to the host's `permission_responder` — the REPL
   wires in its own y/N prompt; the one-shot `run` path denies with a message

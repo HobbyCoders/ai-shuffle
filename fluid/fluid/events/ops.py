@@ -67,6 +67,27 @@ class Steer(Op):
 
 
 @dataclass(kw_only=True)
+class AgentMessage(Op):
+    """A message from one agent to another, delivered without interrupting it.
+
+    Steer's sibling for peer traffic, and deliberately not Steer itself: the
+    steering marker carries the user's authority (see
+    :mod:`fluid.context.peer`). Delivery adapts to what the receiver is doing —
+    queued for its next tool result while a turn runs, started as an ordinary
+    user-role turn when it is idle — so a sender never has to race the
+    receiver's state.
+
+    ``sender`` is the name the receiver sees in the marker. ``id`` is the same
+    optional correlation handle Steer takes; a mid-turn delivery receipts on
+    ``SteerDelivered`` alongside the user's own interjections.
+    """
+
+    text: str
+    sender: str
+    id: str | None = None
+
+
+@dataclass(kw_only=True)
 class BackgroundTaskFinished(Op):
     """Record a detached worker's terminal result and optionally wake its parent."""
 

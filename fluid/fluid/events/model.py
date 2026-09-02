@@ -190,7 +190,9 @@ class SteerDelivered(Event):
     Emitted once per delivery batch, immediately after the ``ToolResult`` that
     carries the markers, and only when the text is irrevocably attached.
     ``steers`` holds one record per delivered steer in submission order:
-    ``{"id": <the Steer's id, or None>, "text": <the user's text>}``.
+    ``{"id": <the Steer's id, or None>, "text": <the user's text>}``. A peer's
+    ``AgentMessage``, which shares this queue and this receipt, carries an
+    extra ``"from"`` naming the sender; the key's absence marks the user's own.
 
     A host with a durable queue retires an entry the moment its id shows up
     here. An id that never arrives was never seen by the model: the engine

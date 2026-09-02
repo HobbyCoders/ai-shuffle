@@ -92,6 +92,7 @@ from fluid.events.ops import (
     BackgroundTaskFinished,
     Fork,
     Handoff,
+    AgentMessage,
     Interrupt,
     Op,
     RespondPermission,
@@ -248,16 +249,20 @@ def _hook_reminder(label: str, text: str) -> str:
     return hook_reminder(label, text)
 
 
-def _steer_parts(pending: Steer | str) -> tuple[str | None, str]:
-    """Split a queued steer into ``(id, text)``.
+def _steer_parts(pending: Steer | AgentMessage | str) -> tuple[str | None, str, str | None]:
+    """Split a queued interjection into ``(id, text, sender)``.
 
     The queue normally holds Steer ops, but a bare string is accepted so
     callers that pushed text straight onto ``_pending_steers`` keep working;
-    such a steer simply has no correlation id.
+    such a steer simply has no correlation id. ``sender`` is None for the
+    user's own steers and the peer's name for an AgentMessage — which is what
+    picks the marker the text is rendered in (fluid.context.peer).
     """
     if isinstance(pending, str):
-        return (None, pending)
-    return (pending.id, pending.text)
+        return (None, pending, None)
+    if isinstance(pending, AgentMessage):
+        return (pending.id, pending.text, pending.sender)
+    return (pending.id, pending.text, None)
 
 
 @dataclass
@@ -733,8 +738,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._turn_task: asyncio.Task | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
         self._pending_questions: dict[str, asyncio.Future] = {}
-        # Mid-turn steers awaiting the next tool result (see the Steer op).
-        self._pending_steers: list[Steer | str] = []
+        # Mid-turn user steers and peer messages awaiting the next tool
+        # result (see the Steer and AgentMessage ops).
+        self._pending_steers: list[Steer | AgentMessage | str] = []
         # Set once a sticky-routed call comes back empty: this loop instance
         # never sends the routing key again (see _agent_loop).
         self._sticky_poisoned = False
@@ -1142,6 +1148,25 @@ class NativeLoop(BackgroundLifecycleMixin):
                 raise RuntimeError(
                     "no turn is running — send a normal message instead of a steer"
                 )
+        elif isinstance(op, AgentMessage):
+            # A peer's text, delivered on whichever channel the receiver's
+            # current state leaves open — the branch is taken here, without
+            # awaiting, so a sender never has to check "is it busy?" and race
+            # the answer. Busy: queue like a steer, rendered in the peer marker
+            # so it cannot borrow the user's authority. Idle: an ordinary turn,
+            # which is what wakes a parked session.
+            from fluid.tools.hardening import defang_harness_markers
+
+            text = defang_harness_markers(op.text)
+            if self._turn_task is not None and not self._turn_task.done():
+                self._pending_steers.append(replace(op, text=text))
+            else:
+                from fluid.context.peer import format_peer_message
+
+                self._interrupted.clear()
+                self._turn_task = asyncio.create_task(self._run_turn(UserTurn(
+                    content=format_peer_message(op.sender, text).strip(),
+                )))
         elif isinstance(op, RespondPermission):
             fut = self._pending_permissions.get(op.request_id)
             if fut is not None and not fut.done():
@@ -3306,13 +3331,18 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._journal.record_tool(
                 name, input or {}, outcome.text, outcome.is_error
             )
-        delivered: list[tuple[str | None, str]] = []
+        delivered: list[tuple[str | None, str, str | None]] = []
         if self._pending_steers:
+            from fluid.context.peer import format_peer_message
             from fluid.context.steering import format_steer
 
             delivered = [_steer_parts(pending) for pending in self._pending_steers]
             self._pending_steers.clear()
-            steers = "".join(format_steer(text) for _, text in delivered)
+            steers = "".join(
+                format_steer(text) if sender is None
+                else format_peer_message(sender, text)
+                for _, text, sender in delivered
+            )
             # The steer is new information appended to the payload, so the
             # tool's content_id no longer describes this text. Dropping it
             # keeps code mode from collapsing this result into a pointer at an
@@ -3330,7 +3360,15 @@ class NativeLoop(BackgroundLifecycleMixin):
             # its durable copy of every id listed here.
             await self._emit(SteerDelivered(
                 session_id=sid, turn_id=turn_id,
-                steers=[{"id": steer_id, "text": text} for steer_id, text in delivered],
+                # ``from`` appears only on a peer's message: the record for a
+                # user steer keeps the shape hosts already parse, and its
+                # absence is what says "this one was the user".
+                steers=[
+                    {"id": steer_id, "text": text}
+                    if sender is None
+                    else {"id": steer_id, "text": text, "from": sender}
+                    for steer_id, text, sender in delivered
+                ],
             ))
         return outcome
 

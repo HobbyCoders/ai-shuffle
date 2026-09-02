@@ -32,6 +32,7 @@ from fluid.events.model import (
     register_event_type,
 )
 from fluid.events.ops import (
+    AgentMessage,
     BackgroundTaskFinished,
     Fork,
     Handoff,
@@ -47,6 +48,7 @@ from fluid.events.ops import (
 )
 
 __all__ = [
+    "AgentMessage",
     "BackgroundTaskFinished",
     "BlockStart",
     "BlockStop",
