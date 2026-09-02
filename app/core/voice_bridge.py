@@ -61,8 +61,13 @@ Deliberately NOT here (scope fences):
 * No worker teardown. Dispatched agents SURVIVE hangup (ruling VM12): ``stop``
   cancels only the bridge's own tasks — it must never call ``teardown_workers``
   or any other worker-stopping API.
-* No direct-work tools for the voice model, ever (ruling VM16). The tool
-  surface is exactly the four dispatch/telemetry calls above.
+* No file-editing or shell tools for the voice model, ever (ruling VM16, as
+  amended 2026-09). The voice agent is a coordinator: substantive work — code,
+  files, commands, codebase research — always goes to a worker through
+  ``dispatch_agent``. What it MAY do directly is what a user expects of an
+  assistant they talk to: the app-configuration tools (automations, hooks,
+  agents, MCP servers, connectors, subagents) are bridged onto the sideband as
+  realtime function tools (``_app_tools``) and serviced in-process.
 
 Robustness rule (mirrors the recorder): a bridge bug must never take down the
 call or the request that started it — the read loop swallows and logs per-event
@@ -106,67 +111,129 @@ SIDEBAND_RETRY_DELAYS: Tuple[float, ...] = (0.75, 1.5)
 # only delays the error the user needs to see.
 SIDEBAND_RETRYABLE_STATUSES = frozenset({404, 408, 425, 429, 500, 502, 503, 504})
 
-# The delegation-first coordinator contract (ruling VM16, user-dictated text —
-# do not paraphrase it).
+# The voice agent's system prompt. Written for a SPOKEN channel: it has to
+# survive being read by a realtime model that answers in audio, so it leads
+# with the two rules that matter (delegate real work, talk like a person) and
+# keeps everything else to one line each.
 VOICE_INSTRUCTIONS = (
-    "You are the ai-shuffle voice agent — the user's coding coworker. You are a "
-    "COORDINATOR only: you never do substantive work yourself. For anything "
-    "beyond a trivial single-tool-call answer (a status check, listing agents), "
-    "dispatch the work to a worker agent with dispatch_agent and keep the "
-    "conversation going. Acknowledge the ask in one short sentence, dispatch, "
-    "then tell the user you've got an agent on it. When a completion update "
-    "arrives, tell the user what landed and ask if there's anything else they'd "
-    "like. Keep every reply short, natural and spoken-style — no markdown, no "
-    "lists, no code read-outs. If a worker asks for permission to use a tool, "
-    "read the request to the user in one short sentence and act only on their "
-    "explicit spoken yes or no, via respond_approval. Never invent results; if "
-    "you don't know, use check_agent or say you don't know."
+    "You are the AI Shuffle voice agent: a calm, capable operator the user "
+    "talks to out loud. AI Shuffle is the app where the user's AI coding "
+    "agents live, and you act on the user's behalf inside it.\n"
+    "\n"
+    "How you work:\n"
+    "- You are a coordinator. Coding, editing files, running commands, "
+    "investigating a codebase, or any other substantive work goes to a worker "
+    "agent through dispatch_agent. Never claim to have done such work "
+    "yourself, and never promise to do it later.\n"
+    "- Everything else you do directly and immediately with your tools: "
+    "checking on work, listing agents, and managing automations, hooks, "
+    "agents, MCP servers and connectors.\n"
+    "- dispatch_agent returns at once; the worker runs in the background and "
+    "you will be told when it finishes. Say you have put an agent on it, "
+    "then keep the conversation going. Never poll, wait, or narrate progress "
+    "you have not been told about.\n"
+    "- Give a worker a complete brief: it cannot hear this conversation, so "
+    "put the goal, the relevant details and what 'done' looks like in the "
+    "prompt.\n"
+    "- If the user changes their mind, adds detail, or wants something "
+    "different from a worker that is already on a task, use message_agent "
+    "to redirect that worker instead of dispatching a second one. Use "
+    "stop_agent when they cancel the work.\n"
+    "- A message starting with [agent update] is a note from the system, not "
+    "the user: tell the user what landed in one or two sentences and ask "
+    "whether they want anything else.\n"
+    "- A message starting with [approval needed] is a worker asking for "
+    "permission: read the request to the user in one short sentence and act "
+    "only on their explicit spoken yes or no, through respond_approval. Never "
+    "approve on your own.\n"
+    "- Before creating, changing or deleting configuration, say what you are "
+    "about to do in one sentence. For anything destructive, wait for an "
+    "explicit yes.\n"
+    "\n"
+    "How you speak:\n"
+    "- This is a voice conversation: short, natural, spoken sentences. No "
+    "markdown, no bullet lists, and do not read out code, identifiers or "
+    "URLs unless asked.\n"
+    "- Lead with the gist. Offer detail only when the user asks for it.\n"
+    "- For a clear request, just act. Confirm your understanding first only "
+    "when the request is genuinely ambiguous.\n"
+    "- If something fails, say so plainly and suggest the next step. Never "
+    "invent results: use check_agent, or say you do not know.\n"
+    "- Answer in the language the user speaks to you in."
 )
 
 #: Back-compat alias — VW3 shipped the placeholder under this name.
 VOICE_INSTRUCTIONS_V1 = VOICE_INSTRUCTIONS
 
+# Appended when the app-configuration tools are declared on the sideband —
+# the operating rules those tools need, condensed for a spoken channel.
+APP_TOOLS_INSTRUCTIONS = (
+    "App configuration:\n"
+    "- You can manage automations, hooks, agents, MCP servers, connectors and "
+    "subagents directly. Call getConfigCapabilities once when you first need "
+    "to know valid event types, trigger types or connector names.\n"
+    "- List before you create, so you never make a duplicate.\n"
+    "- An automation runs an agent on a schedule with real tool access and "
+    "real cost: always set a per-run cost cap and a daily run cap, and say "
+    "what schedule you set.\n"
+    "- Never read secrets, tokens or webhook URLs aloud.\n"
+    "- Connector logins and API keys need the Settings screen; tell the user "
+    "where to go instead of trying to enter them yourself."
+)
+
+# The note injected at the start of a browser call (never on a wake-word
+# session, which must stay silent until the user speaks). A first-time call
+# gets a greeting; a rejoined session gets a welcome back keyed off the
+# history seed the instructions already carry.
+GREETING_PROMPT = (
+    "[call started] The user just joined the call. If your instructions "
+    "contain a 'Conversation so far' section, welcome them back in one short "
+    "sentence that mentions what was last being worked on; otherwise greet "
+    "them in one short, warm sentence and ask what they would like to do. Do "
+    "not list your capabilities."
+)
+
 # Default per-mode appendices for native-app sessions (the Android voice
 # assistant). A native client reports its launch mode on call attach
 # (``session_mode``); browser calls send none and get the base prompt only.
-# All three prompts (the base VOICE_INSTRUCTIONS and these two) are
-# runtime-overridable via Settings → Voice (voice_instructions*), stored in
-# system_settings; these constants are the fallbacks and the UI's
-# reset-to-default text.
 DEFAULT_COMMAND_INSTRUCTIONS = (
-    "You are also the user's hands-free phone assistant, speaking through "
-    "their Android phone, and this session was started by wake word — the "
-    "user may be driving and cannot touch the phone. You can act on the "
-    "phone with the device tools the session declares (calls, texts, "
-    "notifications, apps, navigation, alarms, timers, calendar, "
-    "location, end_session). Handle the request quickly, by voice alone, then say a "
-    "very short confirmation and call end_session — do not ask 'anything "
-    "else?' and do not keep the session open. If the user stays silent, "
-    "call end_session. Execute actions immediately without asking for "
-    "confirmation — EXCEPT send_sms: its body is transcribed speech, so "
-    "first call it without confirmed=true, read the message back in one "
-    "short sentence, and send with confirmed=true only after a spoken yes. "
-    "If a contact lookup is ambiguous the tool will say so — ask which one, "
+    "Hands-free mode: you are also the user's phone assistant, speaking "
+    "through their Android phone, and this session was started by wake word. "
+    "The user may be driving and cannot touch the phone.\n"
+    "- Stay completely silent until the user speaks. Never speak first.\n"
+    "- You can act on the phone with the device tools the session declares "
+    "(calls, texts, notifications, apps, navigation, alarms, timers, "
+    "calendar, location, end_session). Use them immediately, without "
+    "asking for confirmation, except send_sms: its body is transcribed "
+    "speech, so call it without confirmed=true first, read the message back "
+    "in one short sentence, and send with confirmed=true only after a spoken "
+    "yes.\n"
+    "- If a contact lookup is ambiguous the tool says so: ask which one, "
     "briefly. If a tool reports a missing permission, say so in a few words "
-    "and move on. NEVER speak first: stay completely silent until the user "
-    "says something. Keep every reply to ONE short sentence — no greetings, "
-    "no explanations of what you are doing."
+    "and move on.\n"
+    "- Handle the request, say a very short confirmation, then call "
+    "end_session. Do not ask 'anything else?' and do not keep the session "
+    "open. If the user goes silent, call end_session.\n"
+    "- Keep every reply to one short sentence: no greetings, no explaining "
+    "what you are doing."
 )
 
 DEFAULT_CHAT_INSTRUCTIONS = (
-    "You are also the user's phone assistant, speaking through their "
-    "Android phone. You can act on the phone with the device tools the "
-    "session declares (calls, texts, notifications, apps, navigation, "
-    "alarms, timers, calendar, location, end_session). Execute actions immediately "
-    "without asking for confirmation — EXCEPT send_sms: its body is "
-    "transcribed speech, so first call it without confirmed=true, read the "
-    "message back in one short sentence, and send with confirmed=true only "
-    "after a spoken yes. If a contact lookup is ambiguous the tool will say "
-    "so — ask which one, briefly. If a tool reports a missing permission, "
-    "say so in a few words and move on. NEVER speak first: stay silent "
-    "until the user says something. Keep replies short and spoken-style. "
-    "When the user says goodbye, \"that's all\", or asks you to hang up, "
-    "say a short goodbye and call end_session."
+    "Phone mode: you are also the user's phone assistant, speaking through "
+    "their Android phone.\n"
+    "- Stay silent until the user speaks. Never speak first.\n"
+    "- You can act on the phone with the device tools the session declares "
+    "(calls, texts, notifications, apps, navigation, alarms, timers, "
+    "calendar, location, end_session). Use them immediately, without "
+    "asking for confirmation, except send_sms: its body is transcribed "
+    "speech, so call it without confirmed=true first, read the message back "
+    "in one short sentence, and send with confirmed=true only after a spoken "
+    "yes.\n"
+    "- If a contact lookup is ambiguous the tool says so: ask which one, "
+    "briefly. If a tool reports a missing permission, say so in a few words "
+    "and move on.\n"
+    "- Keep replies short and spoken. When the user says goodbye, 'that's "
+    "all', or asks you to hang up, say a short goodbye and call end_session."
 )
 
 #: session_mode → default appendix (the route composes stored overrides).
@@ -185,11 +252,12 @@ VOICE_TOOLS: List[Dict[str, Any]] = [
         "type": "function",
         "name": "dispatch_agent",
         "description": (
-            "Spin up an ai-shuffle worker agent to actually do a piece of work "
-            "(write code, investigate, run commands). Returns IMMEDIATELY with a "
-            "task id — the worker keeps running in the background and you will "
-            "be told when it finishes, so never wait or poll for it. Tell the "
-            "user you have an agent on it and carry on the conversation."
+            "Hand a piece of real work (writing code, editing files, running "
+            "commands, investigating a codebase) to an AI Shuffle worker agent. "
+            "Returns IMMEDIATELY with a task id — the worker keeps running in "
+            "the background and you will be told when it finishes, so never "
+            "wait or poll for it. Tell the user you have an agent on it and "
+            "carry on the conversation."
         ),
         "parameters": {
             "type": "object",
@@ -248,6 +316,54 @@ VOICE_TOOLS: List[Dict[str, Any]] = [
             "currently active in this session."
         ),
         "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "type": "function",
+        "name": "message_agent",
+        "description": (
+            "Send a follow-up to a worker agent you dispatched: a change of "
+            "direction, extra detail, a correction, or a new request that "
+            "builds on what it already did. A running worker gets the message "
+            "mid-work; a finished worker resumes with its full context. Use "
+            "this when the user changes their mind about work in progress "
+            "instead of dispatching a second agent. Returns immediately — you "
+            "will be told when the worker finishes again."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The task id returned by dispatch_agent.",
+                },
+                "message": {
+                    "type": "string",
+                    "description": (
+                        "What to tell the worker, in text. Be explicit about "
+                        "what changes and what stays the same."
+                    ),
+                },
+            },
+            "required": ["task_id", "message"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "stop_agent",
+        "description": (
+            "Stop a worker agent you dispatched. Use it when the user cancels "
+            "the work or no longer wants it. Only after the user asked for it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The task id returned by dispatch_agent.",
+                },
+            },
+            "required": ["task_id"],
+        },
     },
     {
         "type": "function",
@@ -331,6 +447,9 @@ INJECTED_REPORT_MAX_CHARS = 1200
 # announced — it keeps running (ruling VM12) and stays readable via check_agent.
 WATCHER_MAX_SECONDS = 3600.0
 
+# Teardown reason stamped on a worker the user stopped by voice.
+VOICE_STOP_REASON = "voice_stop"
+
 # How often the bridge re-reads pending worker permission prompts.
 APPROVAL_POLL_SECONDS = 2.0
 
@@ -338,6 +457,13 @@ APPROVAL_POLL_SECONDS = 2.0
 MAX_LISTED_AGENTS = 40
 MAX_LISTED_TASKS = 20
 AGENT_DESCRIPTION_MAX_CHARS = 160
+
+# Bounds on the bridged app-tool results. A tool result is text the model has
+# to SPEAK the gist of, so a long listing is cut rather than shipped whole —
+# the full data is always one Settings screen away.
+APP_TOOL_OUTPUT_MAX_CHARS = 6000
+APP_TOOL_DESCRIPTION_MAX_CHARS = 1024
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # The roster appended to the instructions at attach time (VW5). Named agents in
 # the prompt are what make ``dispatch_agent(agent=...)`` land on a real target
@@ -561,6 +687,8 @@ class VoiceBridge:
         client_tools: Optional[List[Dict[str, Any]]] = None,
         client_instructions: Optional[str] = None,
         instructions_override: Optional[str] = None,
+        app_tools: Optional[List[Any]] = None,
+        greet: bool = False,
     ) -> None:
         self.session_id = session_id
         self.call_id = call_id
@@ -623,9 +751,30 @@ class VoiceBridge:
             t.get("name") for t in self._client_tools if t.get("name")
         }
         self._client_instructions = (client_instructions or "").strip()
-        # The route-composed prompt (settings overrides + mode appendix).
-        # None → the built-in VOICE_INSTRUCTIONS.
+        # The route-composed prompt (base + mode appendix). None → the
+        # built-in VOICE_INSTRUCTIONS.
         self._instructions_override = (instructions_override or "").strip() or None
+
+        # -- bridged app tools ---------------------------------------------
+        # SDK ``@tool`` objects (the app-config surface) the bridge declares as
+        # realtime function tools and services in-process. Keyed by name so a
+        # call is answered by exactly the handler that declared it; a name the
+        # realtime schema cannot carry is dropped at declaration time.
+        self._app_tools: Dict[str, Any] = {}
+        self._app_tool_schemas: List[Dict[str, Any]] = []
+        reserved = {t["name"] for t in VOICE_TOOLS}
+        for tool in app_tools or []:
+            schema = realtime_tool_from_sdk(tool)
+            if schema is None or schema["name"] in self._app_tools:
+                continue
+            if schema["name"] in reserved:
+                # The dispatch surface is ours; nothing may shadow it.
+                continue
+            self._app_tools[schema["name"]] = tool
+            self._app_tool_schemas.append(schema)
+        # Whether to open the call with a greeting (browser calls only — a
+        # wake-word session must stay silent until the user speaks).
+        self._greet = bool(greet)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -643,6 +792,7 @@ class VoiceBridge:
             "model": self.model,
             "usage": dict(self.usage),
             "estimated_cost_usd": estimate_cost_usd(self.model, self.usage),
+            "active_tasks": _active_task_count(self.session_id),
         }
 
     async def start(self) -> None:
@@ -688,6 +838,13 @@ class VoiceBridge:
         self._deadline_task = asyncio.create_task(
             self._duration_cap(), name=f"voice-deadline-{self.session_id}"
         )
+
+        # A browser call opens with the agent saying hello, so the user is
+        # never left wondering whether anyone is there. Rides AFTER the
+        # session.update so the greeting is spoken in the configured voice
+        # with the configured instructions.
+        if self._greet:
+            await self._inject(GREETING_PROMPT)
 
     async def stop(self, reason: str = "hangup") -> None:
         """Close the sideband and settle the bridge. Idempotent; never raises."""
@@ -792,6 +949,8 @@ class VoiceBridge:
         :meth:`_send_truncation_update`.
         """
         instructions = self._instructions_override or VOICE_INSTRUCTIONS
+        if self._app_tool_schemas:
+            instructions = f"{instructions}\n\n{APP_TOOLS_INSTRUCTIONS}"
         if self._client_instructions:
             # The native client's appendix (device tools like calls/SMS) rides
             # after the contract so the contract always leads.
@@ -813,6 +972,7 @@ class VoiceBridge:
                 # Client-declared device tools are appended verbatim (already
                 # sanitized by the route) and serviced by the client itself.
                 "tools": [dict(tool) for tool in VOICE_TOOLS]
+                + [dict(tool) for tool in self._app_tool_schemas]
                 + [dict(tool) for tool in self._client_tools],
                 "audio": {"input": {"turn_detection": dict(TURN_DETECTION_CONFIG)}},
             },
@@ -1040,8 +1200,14 @@ class VoiceBridge:
                 result = await self._tool_check_agent(args)
             elif name == "list_agents":
                 result = await self._tool_list_agents()
+            elif name == "message_agent":
+                result = await self._tool_message_agent(args)
+            elif name == "stop_agent":
+                result = await self._tool_stop_agent(args)
             elif name == "respond_approval":
                 result = await self._tool_respond_approval(args)
+            elif name in self._app_tools:
+                result = await self._tool_app(name, args)
             else:
                 result = {"ok": False, "error": f"Unknown tool '{name}'."}
         except asyncio.CancelledError:
@@ -1097,12 +1263,38 @@ class VoiceBridge:
         await self._caller_profile_id()
         return self._provider_id
 
+    async def _tool_app(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Run one bridged app tool and shape its result for the model.
+
+        The SDK handler answers in the MCP envelope (``content`` text parts,
+        ``isError``); the model wants one JSON object it can read the gist of.
+        The text is parsed back into JSON when it is JSON, bounded so a long
+        listing cannot swamp the realtime context, and never allowed to raise —
+        a tool bug becomes an error payload the model reads out.
+        """
+        tool = self._app_tools[name]
+        try:
+            raw = await tool.handler(dict(args))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — surfaced to the model instead
+            logger.warning(
+                "Voice: app tool %s failed for session %s", name, self.session_id,
+                exc_info=True,
+            )
+            return {"ok": False, "error": f"{name} failed: {exc}"}
+        return app_tool_result(raw)
+
     async def _tool_dispatch_agent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Spin up a background worker and ACK immediately (ruling VM10).
 
         The ack is the tool result — the model says "I've got an agent on it"
         and keeps talking. The completion arrives later, injected by the watcher
         this starts, which is what makes "I'll let you know when it lands" real.
+
+        The target comes from the VOICE roster (``available_voice_subagents``):
+        each entry pins the leg its worker runs on, so a worker is never funded
+        by the OpenAI Realtime row that funds the call.
         """
         from app.core import task_dispatch
 
@@ -1111,9 +1303,21 @@ class VoiceBridge:
             return {"ok": False, "error": "dispatch_agent needs a prompt."}
 
         label = (args.get("label") or "").strip() or None
+        roster = await self._voice_roster()
         agent = (args.get("agent") or "").strip()
         if not agent:
-            agent = await self._default_agent_ref() or ""
+            agent = _pick_default_agent(
+                _roster_rows(roster), preferred=await self._caller_profile_id(),
+            ) or ""
+        if not roster:
+            return {
+                "ok": False,
+                "error": (
+                    "No agent is set up for voice mode. Ask the user to open "
+                    "an agent in Settings and assign a model under Provider "
+                    "models → Voice."
+                ),
+            }
 
         payload = await task_dispatch.dispatch_task_tool(
             {
@@ -1125,6 +1329,7 @@ class VoiceBridge:
             caller_session_id=self.session_id,
             caller_profile_id=await self._caller_profile_id(),
             caller_provider_id=await self._caller_provider_id(),
+            roster=roster,
         )
         # dispatch_task_tool never raises; ok=False carries an actionable error
         # (unknown agent, depth/budget/cycle refusal) that the model reads out.
@@ -1155,24 +1360,25 @@ class VoiceBridge:
             self._ensure_approval_poller()
         return result
 
+    async def _voice_roster(self) -> tuple:
+        """The agents this call may dispatch — the voice-assigned ones."""
+        return await run_sync(_voice_roster_targets)
+
     async def _default_agent_ref(self) -> Optional[str]:
         """Agent to use when the model omits ``agent`` — DETERMINISTIC (VW5).
 
-        Two rules, in order: an agent whose id or name is literally "default"
-        (case-insensitive), else the alphabetically first eligible agent by
-        name. "Eligible" excludes the voice session's own profile, because
-        dispatching the caller's own agent is refused as a cycle by
-        ``task_dispatch``.
+        Three rules, in order: the agent the voice session was started with
+        (the user picked it on the new-chat screen, so "just get an agent on
+        it" means that one) when it is voice-assigned; else an agent whose id
+        or name is literally "default" (case-insensitive); else the
+        alphabetically first eligible agent by name.
 
         Stability is the point: "just get an agent on it" must land on the same
         worker every time, not on whatever the profile table happened to return
-        first. Returns None when there is nothing to pick, and the dispatch then
-        fails with task_dispatch's own "needs a target" error.
+        first. Returns None when there is nothing to pick.
         """
-        caller = await self._caller_profile_id()
-        provider_id = await self._caller_provider_id()
-        rows = await run_sync(_eligible_agent_rows, caller, provider_id)
-        return _pick_default_agent(rows)
+        rows = _roster_rows(await self._voice_roster())
+        return _pick_default_agent(rows, preferred=await self._caller_profile_id())
 
     async def _agent_roster(self) -> str:
         """The "Agents you can dispatch:" block appended to the instructions.
@@ -1180,10 +1386,158 @@ class VoiceBridge:
         Built from the SAME resolver the default pick and dispatch use, so a
         name the model reads back is always a name dispatch accepts.
         """
-        caller = await self._caller_profile_id()
-        provider_id = await self._caller_provider_id()
-        rows = await run_sync(_eligible_agent_rows, caller, provider_id)
-        return _agent_roster_text(rows)
+        return _agent_roster_text(_roster_rows(await self._voice_roster()))
+
+    async def _tool_message_agent(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Hand a follow-up to a dispatched worker — running or finished.
+
+        The worker is an ordinary session with its own transcript, so the
+        follow-up is a queued turn on it that carries the SAME binding as the
+        turn that launched it (provider, model, cwd, permission mode, prompt
+        append, tool surface — copied from the worker's latest turn row). While
+        the worker is mid-turn the runtime steers that row into the live turn
+        (delivered with its next tool result, the same path a typed message
+        takes in chat); once it goes idle the row runs as the next turn, with
+        the whole conversation so far. Either way a fresh watcher announces the
+        result, exactly like the original dispatch.
+        """
+        from app.core import turn_manager
+        from app.core.task_registry import task_registry
+        from app.db import turns as turns_db
+
+        task_id = (args.get("task_id") or "").strip()
+        message = (args.get("message") or "").strip()
+        if not task_id:
+            return {"ok": False, "error": "message_agent needs a task_id."}
+        if not message:
+            return {"ok": False, "error": "message_agent needs a message."}
+
+        record = await run_sync(task_registry.get_task, self.session_id, task_id)
+        if record is None or record.get("kind") != "agent":
+            return {
+                "ok": False,
+                "error": f"No worker agent '{task_id}' in this session.",
+                "task_id": task_id,
+            }
+        if record.get("status") == "killed":
+            return {
+                "ok": False,
+                "error": "That worker was stopped; dispatch a new agent instead.",
+                "task_id": task_id,
+            }
+
+        def _latest_binding():
+            live = turns_db.get_live_turn(task_id)
+            return live or turns_db.get_latest_turn(task_id)
+
+        latest = await run_sync(_latest_binding)
+        if not latest:
+            return {
+                "ok": False,
+                "error": "That worker has no turn to continue; dispatch a new agent.",
+                "task_id": task_id,
+            }
+        was_running = latest.get("state") not in ("completed", "aborted", "parked")
+
+        try:
+            turn_id = await turn_manager.submit_async(
+                task_id,
+                "queue",
+                prompt=message,
+                profile_id=latest.get("profile_id"),
+                project_id=latest.get("project_id"),
+                worktree_id=latest.get("worktree_id"),
+                overrides=dict(latest.get("overrides") or {}),
+            )
+        except Exception as exc:  # noqa: BLE001 — surfaced to the model
+            logger.warning(
+                "Voice: follow-up submit failed for worker %s", task_id, exc_info=True,
+            )
+            return {"ok": False, "error": f"Could not reach the worker: {exc}"}
+
+        steered = 0
+        if was_running:
+            try:
+                from app.core.session_runtime import try_steer_pending
+
+                steered = await try_steer_pending(task_id)
+            except Exception:  # noqa: BLE001 — the queue is the correctness path
+                logger.debug(
+                    "Voice: steer attempt failed for worker %s", task_id, exc_info=True,
+                )
+
+        label = record.get("subject") or record.get("label") or None
+        self._start_watcher(task_id, label)
+        self._ensure_approval_poller()
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "turn_id": turn_id,
+            "delivery": (
+                "steered into the running worker" if steered
+                else "queued — the worker picks it up as its next step"
+                if was_running
+                else "resumed the worker with its previous context"
+            ),
+            "note": (
+                "Delivered. The worker keeps running in the background — you "
+                "will be told when it finishes; do not poll."
+            ),
+        }
+
+    async def _tool_stop_agent(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Stop a dispatched worker on the user's say-so.
+
+        A live worker goes through the supervisor's single teardown path (card
+        settled, session killed, registry row closed) so the chat UI and the
+        voice call agree about what happened; a worker that is only running a
+        follow-up turn (its dispatch already returned) is interrupted through
+        the turn manager instead.
+        """
+        from app.core import provider_agent_supervisor as sup
+        from app.core import turn_manager
+        from app.core.task_registry import task_registry
+
+        task_id = (args.get("task_id") or "").strip()
+        if not task_id:
+            return {"ok": False, "error": "stop_agent needs a task_id."}
+
+        record = await run_sync(task_registry.get_task, self.session_id, task_id)
+        if record is None or record.get("kind") != "agent":
+            return {
+                "ok": False,
+                "error": f"No worker agent '{task_id}' in this session.",
+                "task_id": task_id,
+            }
+
+        worker = sup.get_worker(self.session_id, task_id)
+        if worker is not None:
+            try:
+                await sup.teardown_worker(
+                    worker,
+                    reason=VOICE_STOP_REASON,
+                    summary="Stopped by the user from the voice call.",
+                    preview="Stopped from the voice call.",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Voice: worker teardown failed for %s", task_id, exc_info=True,
+                )
+                return {"ok": False, "error": f"Could not stop the worker: {exc}"}
+            return {"ok": True, "task_id": task_id, "stopped": True}
+
+        try:
+            row = await turn_manager.interrupt_async(task_id, "stop")
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"Could not stop the worker: {exc}"}
+        if row is None:
+            return {
+                "ok": True,
+                "task_id": task_id,
+                "stopped": False,
+                "note": "That worker was not running — nothing to stop.",
+            }
+        return {"ok": True, "task_id": task_id, "stopped": True}
 
     async def _tool_check_agent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Status + bounded report for a dispatched worker.
@@ -1398,31 +1752,132 @@ def _parse_arguments(arguments: Any) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _eligible_agent_rows(
-    caller_profile_id: Optional[str], provider_id: Optional[str] = None
-) -> List[Dict[str, Any]]:
-    """Agent definitions this voice session may dispatch to.
+def _voice_roster_targets() -> tuple:
+    """The voice-dispatchable agent targets (sync — call via ``run_sync``).
 
-    The caller's own profile is excluded — ``task_dispatch`` refuses it as a
-    cycle, so offering it would only produce a failed dispatch the model has to
-    explain out loud.
+    Every agent with a voice assignment (Agents → Provider models → Voice),
+    each pinning the leg its worker runs on. Never raises: a listing failure
+    reads as "no agents", and the dispatch tool then explains what to set up.
     """
     try:
-        from app.core.agent_provider_models import available_subagents
+        from app.core.agent_provider_models import available_voice_subagents
 
-        targets = available_subagents(caller_profile_id, provider_id)
+        return available_voice_subagents()
     except Exception:  # noqa: BLE001
         logger.debug("Voice: agent listing failed", exc_info=True)
-        return []
+        return ()
+
+
+def _roster_rows(targets: Any) -> List[Dict[str, Any]]:
+    """Plain rows for the roster text, the default pick and ``list_agents``."""
     return [
         {
             "id": target.id,
             "name": target.name,
             "description": target.description,
             "model": target.model,
+            "provider_id": getattr(target, "provider_id", None),
         }
-        for target in targets
+        for target in targets or ()
     ]
+
+
+def realtime_tool_from_sdk(tool: Any) -> Optional[Dict[str, Any]]:
+    """Project one SDK ``@tool`` object onto the realtime function-tool shape.
+
+    ``None`` when the tool cannot be declared (a name the realtime schema
+    rejects). The SDK accepts two ``input_schema`` shapes — a full JSON schema,
+    or a ``{param: python type}`` mapping — and both are turned into the flat
+    ``parameters`` object the realtime API wants.
+    """
+    name = getattr(tool, "name", None)
+    if not isinstance(name, str) or not _TOOL_NAME_RE.match(name):
+        return None
+    description = str(getattr(tool, "description", "") or "")
+    schema = getattr(tool, "input_schema", None)
+    parameters: Dict[str, Any]
+    if isinstance(schema, dict) and isinstance(schema.get("type"), str) and "properties" in schema:
+        parameters = dict(schema)
+    elif isinstance(schema, dict):
+        parameters = {
+            "type": "object",
+            "properties": {
+                str(key): {"type": _json_type_name(value)} for key, value in schema.items()
+            },
+        }
+    else:
+        parameters = {"type": "object", "properties": {}}
+    return {
+        "type": "function",
+        "name": name,
+        "description": description[:APP_TOOL_DESCRIPTION_MAX_CHARS],
+        "parameters": parameters,
+    }
+
+
+def _json_type_name(python_type: Any) -> str:
+    if python_type is bool:
+        return "boolean"
+    if python_type is int:
+        return "integer"
+    if python_type is float:
+        return "number"
+    if python_type in (list, tuple):
+        return "array"
+    if python_type is dict:
+        return "object"
+    return "string"
+
+
+def app_tool_result(raw: Any) -> Dict[str, Any]:
+    """Turn an SDK tool handler's MCP envelope into one bounded JSON object.
+
+    Text parts are joined; JSON text is parsed back so the model sees fields,
+    not an escaped string; a non-JSON reply is carried as ``text``. ``isError``
+    becomes ``ok: false`` so every tool on the sideband reports failure the
+    same way. Output past :data:`APP_TOOL_OUTPUT_MAX_CHARS` is cut with a
+    marker — the model speaks a gist, and the full data lives in Settings.
+    """
+    if not isinstance(raw, dict):
+        return {"ok": True, "text": str(raw)[:APP_TOOL_OUTPUT_MAX_CHARS]}
+    texts: List[str] = []
+    for part in raw.get("content") or []:
+        if isinstance(part, dict) and part.get("type") == "text":
+            texts.append(str(part.get("text") or ""))
+    text = "\n".join(t for t in texts if t).strip()
+    is_error = bool(raw.get("isError"))
+
+    payload: Dict[str, Any]
+    parsed: Any = None
+    if text:
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            parsed = None
+    if isinstance(parsed, dict):
+        payload = dict(parsed)
+        if "success" in payload and "ok" not in payload:
+            payload["ok"] = bool(payload.pop("success"))
+        payload.setdefault("ok", not is_error)
+        if is_error:
+            payload["ok"] = False
+    else:
+        payload = {"ok": not is_error}
+        if text:
+            payload["error" if is_error else "text"] = text
+
+    encoded = json.dumps(payload, default=str)
+    if len(encoded) > APP_TOOL_OUTPUT_MAX_CHARS:
+        payload = {
+            "ok": payload.get("ok", True),
+            "truncated": True,
+            "text": encoded[:APP_TOOL_OUTPUT_MAX_CHARS],
+            "note": (
+                "The result was cut for length — summarise what is visible and "
+                "point the user at Settings for the full list."
+            ),
+        }
+    return payload
 
 
 def _agent_sort_key(row: Dict[str, Any]) -> Tuple[str, str]:
@@ -1431,8 +1886,16 @@ def _agent_sort_key(row: Dict[str, Any]) -> Tuple[str, str]:
     return (name, str(row.get("id") or ""))
 
 
-def _pick_default_agent(rows: List[Dict[str, Any]]) -> Optional[str]:
-    """Rule 1: an agent literally called "default". Rule 2: first by name."""
+def _pick_default_agent(
+    rows: List[Dict[str, Any]], preferred: Optional[str] = None
+) -> Optional[str]:
+    """Rule 0: ``preferred`` when it is in the roster (the agent the voice
+    session was started with). Rule 1: an agent literally called "default".
+    Rule 2: first by name."""
+    if preferred:
+        for row in rows:
+            if row.get("id") == preferred:
+                return row["id"]
     for row in rows:
         for key in ("id", "name"):
             value = row.get(key)
@@ -1556,6 +2019,19 @@ def _agent_task_status(session_id: str, task_id: str) -> Dict[str, Any]:
 
     try:
         from app.core import provider_agent as pa
+        from app.db import turns as turns_db
+
+        # A follow-up (message_agent) runs AFTER the registry row settled, so
+        # the row alone would read "completed" while the worker is busy again.
+        busy = False
+        try:
+            busy = turns_db.session_has_unsettled_turns(task_id)
+        except Exception:  # noqa: BLE001
+            busy = False
+        if busy:
+            payload["status"] = "running"
+            payload["note"] = "Still working — no report yet."
+            return payload
 
         outcome = pa.final_turn_outcome(task_id)
         if outcome.get("terminal_found"):
@@ -1610,10 +2086,7 @@ def _list_agents_payload(session_id: str) -> Dict[str, Any]:
 
     agents: List[Dict[str, Any]] = []
     try:
-        session = database.get_session(session_id) or {}
-        rows = _eligible_agent_rows(
-            session.get("profile_id"), session.get("provider_id")
-        )
+        rows = _roster_rows(_voice_roster_targets())
         for row in rows[:MAX_LISTED_AGENTS]:
             entry = {"id": row.get("id"), "name": row.get("name") or row.get("id")}
             description = (row.get("description") or "").strip()
@@ -1637,6 +2110,19 @@ def _list_agents_payload(session_id: str) -> Dict[str, Any]:
         logger.debug("Voice: task listing failed", exc_info=True)
 
     return {"ok": True, "agents": agents, "active_tasks": tasks}
+
+
+def _active_task_count(session_id: str) -> int:
+    """How many worker agents are running for the session (in-memory read)."""
+    try:
+        from app.core.task_registry import task_registry
+
+        return len([
+            r for r in task_registry.get_active(session_id)
+            if (r or {}).get("kind") == "agent"
+        ])
+    except Exception:  # noqa: BLE001 — a glanceable count, never a failure
+        return 0
 
 
 def _answered_approval_decision(session_id: str, request_id: str) -> Optional[str]:
@@ -1757,6 +2243,7 @@ class VoiceCallRegistry:
                 "active": False, "connected": False,
                 "started_at": None, "model": None,
                 "usage": {}, "estimated_cost_usd": None,
+                "active_tasks": _active_task_count(session_id),
             }
         return bridge.state()
 
@@ -1772,6 +2259,8 @@ class VoiceCallRegistry:
         client_tools: Optional[List[Dict[str, Any]]] = None,
         client_instructions: Optional[str] = None,
         instructions_override: Optional[str] = None,
+        app_tools: Optional[List[Any]] = None,
+        greet: bool = False,
     ) -> VoiceBridge:
         """Attach the sideband, REPLACING any existing attachment.
 
@@ -1785,11 +2274,16 @@ class VoiceCallRegistry:
         whole call rather than restarting with each attachment (VW5). Only a
         hangup — or the cap itself — clears it.
 
+        ``greet`` asks for an opening greeting — honoured only on the FIRST
+        attach of a call: a replace-attach (the FE's silent re-handshake) must
+        not make the agent say hello again mid-conversation.
+
         The lock is held across the connect so two concurrent posts cannot both
         end up registered.
         """
         async with self._lock:
             previous = self._bridges.pop(session_id, None)
+            first_attach = previous is None and session_id not in self._epochs
             if previous is not None:
                 logger.info(
                     "Voice: replacing sideband for session %s (call %s -> %s)",
@@ -1810,6 +2304,8 @@ class VoiceCallRegistry:
                 client_tools=client_tools,
                 client_instructions=client_instructions,
                 instructions_override=instructions_override,
+                app_tools=app_tools,
+                greet=bool(greet) and first_attach,
             )
             # Only record the epoch once the connect actually succeeded — a
             # failed attach must not leave a clock running for a call that never

@@ -23,6 +23,8 @@ Deliberately small surface:
   Idempotent.
 * ``GET  /api/v1/voice/sessions/{id}/state`` — is a bridge attached, and is its
   sideband still connected.
+* ``GET  /api/v1/voice/agents`` — the agents a voice call can dispatch (those
+  with a voice assignment under Agents → Provider models → Voice).
 """
 
 import logging
@@ -135,6 +137,16 @@ class VoiceProvider(BaseModel):
     name: str
 
 
+class VoiceAgent(BaseModel):
+    """An agent the voice agent may dispatch, and the leg its worker runs on."""
+    id: str
+    name: str
+    description: str = ""
+    model: str
+    provider_id: Optional[str] = None
+    provider_name: str
+
+
 class VoiceSessionCreateRequest(BaseModel):
     """Start a voice session. Every field is optional.
 
@@ -212,6 +224,7 @@ class VoiceStateResponse(BaseModel):
     model: Optional[str] = None
     usage: Dict[str, int] = Field(default_factory=dict)
     estimated_cost_usd: Optional[float] = None
+    active_tasks: int = 0
 
 
 # ============================================================================
@@ -226,6 +239,47 @@ async def get_voice_providers(token: str = Depends(require_auth)):
     setup pointer (ruling VM3).
     """
     return await run_sync(list_eligible_voice_providers)
+
+
+def list_voice_agents() -> List[Dict[str, Any]]:
+    """The voice-dispatchable roster with a display name for each leg.
+
+    Synchronous (call via ``run_sync``). Read from the same resolver the bridge
+    dispatches through, so what Settings shows is exactly what a call can use.
+    """
+    from app.core.agent_provider_models import available_voice_subagents
+
+    names: Dict[str, str] = {}
+    out: List[Dict[str, Any]] = []
+    for target in available_voice_subagents():
+        provider_id = target.provider_id
+        if provider_id and provider_id not in names:
+            try:
+                row = database.get_model_provider(provider_id, include_token=False)
+            except TypeError:
+                row = database.get_model_provider(provider_id)
+            except Exception:
+                row = None
+            names[provider_id] = (row or {}).get("name") or provider_id
+        out.append({
+            "id": target.id,
+            "name": target.name,
+            "description": target.description,
+            "model": target.model,
+            "provider_id": provider_id,
+            "provider_name": names[provider_id] if provider_id else "Claude",
+        })
+    return out
+
+
+@router.get("/agents", response_model=List[VoiceAgent])
+async def get_voice_agents(token: str = Depends(require_auth)):
+    """List the agents a voice call can dispatch work to.
+
+    Empty is the Settings surface's cue to point at the Agents editor: an
+    agent joins this list by getting a model under Provider models → Voice.
+    """
+    return await run_sync(list_voice_agents)
 
 
 @router.post("/preview")
@@ -819,16 +873,27 @@ async def attach_voice_call(
                 session_id, exc_info=True,
             )
 
-    # Compose the agent's system prompt: the (Settings-overridable) base, plus
-    # the (Settings-overridable) appendix for the client's session mode. The
-    # bridge falls back to its built-in text when this comes out empty.
-    base = (voice_settings.get("voice_instructions") or "").strip() \
-        or voice_bridge.VOICE_INSTRUCTIONS
-    instructions_override = base
+    # Compose the agent's system prompt: the base contract, plus the appendix
+    # for the client's session mode (browser calls have none).
+    instructions_override = voice_bridge.VOICE_INSTRUCTIONS
     if session_mode is not None:
-        appendix = (voice_settings.get(f"voice_instructions_{session_mode}") or "").strip() \
-            or voice_bridge.DEFAULT_MODE_INSTRUCTIONS[session_mode]
-        instructions_override = f"{base}\n\n{appendix}"
+        appendix = voice_bridge.DEFAULT_MODE_INSTRUCTIONS[session_mode]
+        instructions_override = f"{instructions_override}\n\n{appendix}"
+
+    # The app-configuration tools the voice agent may use directly. Same
+    # admission rule as a chat session's app-config server: never for an
+    # API-key user, and only while the Settings toggle is on. Admin is
+    # asserted for the write tools exactly as chat does (``is_admin=True``)
+    # because the caller has already passed the same cookie/pairing gate.
+    app_tools: List[Any] = []
+    if voice_settings.get("voice_app_tools_enabled", True) and not session_row.get("api_user_id"):
+        app_tools = await run_sync(
+            _voice_app_tools, session_row.get("project_id"),
+        )
+
+    # A browser call opens with a greeting; a native session must stay silent
+    # until the user speaks (its mode appendix says so), so it never greets.
+    greet = session_mode is None
 
     provider_row = await run_sync(
         _resolve_provider_row,
@@ -849,6 +914,8 @@ async def attach_voice_call(
             client_tools=client_tools,
             client_instructions=client_instructions,
             instructions_override=instructions_override,
+            app_tools=app_tools,
+            greet=greet,
         )
     except HTTPException:
         raise
@@ -863,6 +930,35 @@ async def attach_voice_call(
         ) from exc
 
     return VoiceOkResponse()
+
+
+def _voice_app_tools(project_id: Optional[str]) -> List[Any]:
+    """The app-config ``@tool`` objects for a voice call (sync — ``run_sync``).
+
+    Scoped to the session's project like a chat session's server: project
+    hooks/automations resolve against it, and the MCP-server tools' local and
+    project scopes write under its directory. Never raises — a missing SDK or a
+    failing factory leaves the voice agent with dispatch only.
+    """
+    try:
+        from app.mcp.app_config_sdk import collect_app_config_tools
+
+        project_dir: Optional[str] = None
+        if project_id:
+            try:
+                from app.core.project_utils import get_project_working_dir
+
+                project = database.get_project(project_id)
+                if project:
+                    project_dir = get_project_working_dir(project)
+            except Exception:  # noqa: BLE001 — scope is a nicety
+                logger.debug("Voice: project dir lookup failed", exc_info=True)
+        return collect_app_config_tools(
+            is_admin=True, project_id=project_id, project_dir=project_dir,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("Voice: app-config tools unavailable", exc_info=True)
+        return []
 
 
 @router.post("/sessions/{session_id}/hangup", response_model=VoiceOkResponse)

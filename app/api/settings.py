@@ -506,7 +506,7 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
 # Voice mode (ruling VM13/VM17 — docs/VOICE_MODE_PLAN.md)
 # ============================================================================
 #
-# Five runtime-editable knobs stored as plain ``system_settings`` values (they
+# Six runtime-editable knobs stored as plain ``system_settings`` values (they
 # are NOT secrets — the OpenAI key itself lives encrypted on the model_providers
 # row the voice session is funded by, never here). Stored/read through the same
 # get_system_setting/set_system_setting helpers the security-instructions
@@ -537,44 +537,21 @@ VOICE_VOICE_KEY = "voice_voice"
 VOICE_PROVIDER_ID_KEY = "voice_provider_id"
 VOICE_MAX_CALL_MINUTES_KEY = "voice_max_call_minutes"
 
-# The voice agent's editable prompts. Empty/unset = use the built-in default
-# (the constants in app.core.voice_bridge). ``voice_instructions`` is the base
-# system prompt every voice call gets (web included); the command/chat variants
-# are appendices applied when a native client reports its ``session_mode`` on
-# call attach (the Android assistant's hands-free vs conversation modes).
-VOICE_INSTRUCTIONS_KEY = "voice_instructions"
-VOICE_INSTRUCTIONS_COMMAND_KEY = "voice_instructions_command"
-VOICE_INSTRUCTIONS_CHAT_KEY = "voice_instructions_chat"
-MAX_VOICE_INSTRUCTIONS_CHARS = 8000
-
-
-def _voice_instruction_defaults() -> dict:
-    """The built-in prompt texts (lazy import — voice_bridge is heavy)."""
-    from app.core import voice_bridge
-
-    return {
-        "base": voice_bridge.VOICE_INSTRUCTIONS,
-        "command": voice_bridge.DEFAULT_COMMAND_INSTRUCTIONS,
-        "chat": voice_bridge.DEFAULT_CHAT_INSTRUCTIONS,
-    }
+# Whether the voice agent may use the app-configuration tools (automations,
+# hooks, agents, MCP servers, connectors, subagents) directly. Off = the agent
+# can only dispatch work and report on it.
+VOICE_APP_TOOLS_KEY = "voice_app_tools_enabled"
+DEFAULT_VOICE_APP_TOOLS = True
 
 
 class VoiceSettingsResponse(BaseModel):
-    """Current voice-mode configuration.
-
-    The ``voice_instructions*`` fields are the STORED overrides — empty string
-    means "using the built-in default", whose text is provided alongside in
-    ``voice_instructions_defaults`` so a UI can show and reset to it.
-    """
+    """Current voice-mode configuration."""
     voice_mode_enabled: bool
     voice_model: str
     voice_voice: str
     voice_provider_id: Optional[str] = None
     voice_max_call_minutes: int
-    voice_instructions: str = ""
-    voice_instructions_command: str = ""
-    voice_instructions_chat: str = ""
-    voice_instructions_defaults: Dict[str, str] = {}
+    voice_app_tools_enabled: bool = True
 
 
 class VoiceSettingsUpdateRequest(BaseModel):
@@ -583,17 +560,13 @@ class VoiceSettingsUpdateRequest(BaseModel):
     ``voice_provider_id: null`` explicitly CLEARS the pinned provider (the
     resolver then falls back to "the single eligible row"), which is why the
     handler keys off ``model_fields_set`` rather than treating None as absent.
-    An empty string for any ``voice_instructions*`` field clears the override
-    (back to the built-in default).
     """
     voice_mode_enabled: Optional[bool] = None
     voice_model: Optional[str] = None
     voice_voice: Optional[str] = None
     voice_provider_id: Optional[str] = None
     voice_max_call_minutes: Optional[int] = None
-    voice_instructions: Optional[str] = None
-    voice_instructions_command: Optional[str] = None
-    voice_instructions_chat: Optional[str] = None
+    voice_app_tools_enabled: Optional[bool] = None
 
 
 def _truthy_setting(raw: Optional[str]) -> bool:
@@ -624,26 +597,27 @@ def get_voice_settings() -> dict:
 
     provider_id = (database.get_system_setting(VOICE_PROVIDER_ID_KEY) or "").strip() or None
 
+    raw_app_tools = database.get_system_setting(VOICE_APP_TOOLS_KEY)
+    app_tools = (
+        _truthy_setting(raw_app_tools)
+        if (raw_app_tools or "").strip()
+        else DEFAULT_VOICE_APP_TOOLS
+    )
+
     return {
         "voice_mode_enabled": _truthy_setting(database.get_system_setting(VOICE_MODE_ENABLED_KEY)),
         "voice_model": model,
         "voice_voice": voice,
         "voice_provider_id": provider_id,
         "voice_max_call_minutes": max_minutes,
-        "voice_instructions":
-            (database.get_system_setting(VOICE_INSTRUCTIONS_KEY) or "").strip(),
-        "voice_instructions_command":
-            (database.get_system_setting(VOICE_INSTRUCTIONS_COMMAND_KEY) or "").strip(),
-        "voice_instructions_chat":
-            (database.get_system_setting(VOICE_INSTRUCTIONS_CHAT_KEY) or "").strip(),
-        "voice_instructions_defaults": _voice_instruction_defaults(),
+        "voice_app_tools_enabled": app_tools,
     }
 
 
 @router.get("/voice", response_model=VoiceSettingsResponse)
 async def get_voice_settings_endpoint(token: str = Depends(require_auth)):
     """Get the current voice-mode settings (defaults applied)."""
-    # get_voice_settings() is eight synchronous reads — one hop for all of them.
+    # get_voice_settings() is six synchronous reads — one hop for all of them.
     return VoiceSettingsResponse(**await run_sync(get_voice_settings))
 
 
@@ -705,23 +679,11 @@ async def update_voice_settings(
                 VOICE_MODE_ENABLED_KEY, "true" if request.voice_mode_enabled else "false"
             )
 
-        for field, key in (
-            ("voice_instructions", VOICE_INSTRUCTIONS_KEY),
-            ("voice_instructions_command", VOICE_INSTRUCTIONS_COMMAND_KEY),
-            ("voice_instructions_chat", VOICE_INSTRUCTIONS_CHAT_KEY),
-        ):
-            if field in provided:
-                text = (getattr(request, field) or "").strip()
-                if len(text) > MAX_VOICE_INSTRUCTIONS_CHARS:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"{field} is limited to "
-                            f"{MAX_VOICE_INSTRUCTIONS_CHARS} characters."
-                        ),
-                    )
-                # Empty string clears the override → back to the built-in default.
-                database.set_system_setting(key, text)
+        if "voice_app_tools_enabled" in provided:
+            database.set_system_setting(
+                VOICE_APP_TOOLS_KEY,
+                "true" if request.voice_app_tools_enabled else "false",
+            )
 
         if "voice_provider_id" in provided:
             # Imported lazily: app.api.voice imports this module for the reader

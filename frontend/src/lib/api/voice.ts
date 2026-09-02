@@ -30,33 +30,37 @@ import { api, type ApiError } from './client';
 export const VOICE_MODELS = [
 	{
 		id: 'gpt-realtime-2.1',
-		label: 'gpt-realtime-2.1 (best, ~$0.05–0.45/min)',
+		label: 'GPT Realtime 2.1',
+		hint: 'Best quality · about $0.05–0.45 per minute',
 	},
 	{
 		id: 'gpt-realtime-2.1-mini',
-		label: 'gpt-realtime-2.1-mini (cheapest, ~$0.01–0.05/min)',
+		label: 'GPT Realtime 2.1 Mini',
+		hint: 'Cheapest · about $0.01–0.05 per minute',
 	},
 	{
 		id: 'gpt-realtime',
-		label: 'gpt-realtime (legacy)',
+		label: 'GPT Realtime (legacy)',
+		hint: 'Previous generation',
 	},
 ] as const;
 
 /**
  * The voices the realtime models can speak with (backend allowlist, VM21).
- * Marin and cedar are the gpt-realtime generation's recommended pair.
+ * Marin and cedar are the gpt-realtime generation's recommended pair; the
+ * one-word character notes are what the settings dropdown shows.
  */
 export const VOICE_VOICES = [
-	{ id: 'marin', label: 'Marin (default)' },
-	{ id: 'cedar', label: 'Cedar' },
-	{ id: 'alloy', label: 'Alloy' },
-	{ id: 'ash', label: 'Ash' },
-	{ id: 'ballad', label: 'Ballad' },
-	{ id: 'coral', label: 'Coral' },
-	{ id: 'echo', label: 'Echo' },
-	{ id: 'sage', label: 'Sage' },
-	{ id: 'shimmer', label: 'Shimmer' },
-	{ id: 'verse', label: 'Verse' },
+	{ id: 'marin', label: 'Marin', hint: 'Warm, natural · recommended' },
+	{ id: 'cedar', label: 'Cedar', hint: 'Calm, natural · recommended' },
+	{ id: 'alloy', label: 'Alloy', hint: 'Neutral, even' },
+	{ id: 'ash', label: 'Ash', hint: 'Soft, warm' },
+	{ id: 'ballad', label: 'Ballad', hint: 'Expressive, gentle' },
+	{ id: 'coral', label: 'Coral', hint: 'Bright, friendly' },
+	{ id: 'echo', label: 'Echo', hint: 'Deep, steady' },
+	{ id: 'sage', label: 'Sage', hint: 'Measured, thoughtful' },
+	{ id: 'shimmer', label: 'Shimmer', hint: 'Light, upbeat' },
+	{ id: 'verse', label: 'Verse', hint: 'Clear, versatile' },
 ] as const;
 
 export interface VoiceSettings {
@@ -65,27 +69,28 @@ export interface VoiceSettings {
 	voice_voice: string;
 	voice_provider_id: string | null;
 	voice_max_call_minutes: number;
-	/** Stored prompt overrides — empty string means "using the default". */
-	voice_instructions: string;
-	voice_instructions_command: string;
-	voice_instructions_chat: string;
-	/** The built-in prompt texts, for placeholder display and reset. */
-	voice_instructions_defaults: { base: string; command: string; chat: string };
+	/** May the voice agent manage automations, hooks, agents, MCP servers and connectors directly? */
+	voice_app_tools_enabled: boolean;
 }
 
-/**
- * Partial update. An explicit `null` provider clears the pinned provider; an
- * empty string for a `voice_instructions*` field clears that prompt override.
- */
+/** Partial update. An explicit `null` provider clears the pinned provider. */
 export interface VoiceSettingsUpdate {
 	voice_mode_enabled?: boolean;
 	voice_model?: string;
 	voice_voice?: string;
 	voice_provider_id?: string | null;
 	voice_max_call_minutes?: number;
-	voice_instructions?: string;
-	voice_instructions_command?: string;
-	voice_instructions_chat?: string;
+	voice_app_tools_enabled?: boolean;
+}
+
+/** An agent a voice call can dispatch, and the leg its worker runs on. */
+export interface VoiceAgent {
+	id: string;
+	name: string;
+	description: string;
+	model: string;
+	provider_id: string | null;
+	provider_name: string;
 }
 
 /** A `model_providers` row eligible to fund a realtime call (VM3). */
@@ -118,6 +123,8 @@ export interface VoiceCallState {
 	usage: Record<string, number>;
 	/** List-price estimate for `usage`, or null for an unpriced model. */
 	estimated_cost_usd: number | null;
+	/** Worker agents currently running for this session. */
+	active_tasks: number;
 }
 
 // ============================================================================
@@ -196,6 +203,11 @@ export async function isVoiceEnabled(): Promise<boolean> {
 
 export function getVoiceProviders(): Promise<VoiceProvider[]> {
 	return api.get<VoiceProvider[]>('/voice/providers');
+}
+
+/** The agents a voice call can dispatch (voice assignment under Agents → Provider models). */
+export function getVoiceAgents(): Promise<VoiceAgent[]> {
+	return api.get<VoiceAgent[]>('/voice/agents');
 }
 
 /**

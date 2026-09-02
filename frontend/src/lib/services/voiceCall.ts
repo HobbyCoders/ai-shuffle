@@ -74,6 +74,10 @@ export interface VoiceCallStoreState {
 	/** Non-fatal advisory rendered in the caption area (e.g. reconnect skipped). */
 	notice: string | null;
 	model: string | null;
+	/** True while the agent's audio is playing (WebRTC output-buffer events). */
+	agentSpeaking: boolean;
+	/** True while server VAD hears the user talking. */
+	userSpeaking: boolean;
 }
 
 const INITIAL: VoiceCallStoreState = {
@@ -87,6 +91,8 @@ const INITIAL: VoiceCallStoreState = {
 	startedAt: null,
 	notice: null,
 	model: null,
+	agentSpeaking: false,
+	userSpeaking: false,
 };
 
 export const voiceCallState = writable<VoiceCallStoreState>({ ...INITIAL });
@@ -308,6 +314,22 @@ function handleRealtimeEvent(raw: string): void {
 		case 'response.output_audio_transcript.done':
 			appendCaption(`a:${itemId}`, 'assistant', event.transcript ?? '', true);
 			break;
+		// Turn-taking signals — the WebRTC transport reports when the agent's
+		// audio actually starts/stops playing, and server VAD reports the user's
+		// speech. Both drive the dock's status line ("Speaking…" / "Listening").
+		case 'output_audio_buffer.started':
+			patch({ agentSpeaking: true });
+			break;
+		case 'output_audio_buffer.stopped':
+		case 'output_audio_buffer.cleared':
+			patch({ agentSpeaking: false });
+			break;
+		case 'input_audio_buffer.speech_started':
+			patch({ userSpeaking: true, agentSpeaking: false });
+			break;
+		case 'input_audio_buffer.speech_stopped':
+			patch({ userSpeaking: false });
+			break;
 		case 'error':
 			console.warn('[voice] realtime error event:', event.error ?? event);
 			break;
@@ -522,7 +544,13 @@ async function reconnect(): Promise<void> {
 		if (next.callId) await attachVoiceCall(sessionId, next.callId);
 
 		closeConnection(previous);
-		patch({ status: 'live', model: cred.model, notice: null });
+		patch({
+			status: 'live',
+			model: cred.model,
+			notice: null,
+			agentSpeaking: false,
+			userSpeaking: false,
+		});
 		armReconnectTimer();
 	} catch (e) {
 		if (myGeneration !== generation) return;

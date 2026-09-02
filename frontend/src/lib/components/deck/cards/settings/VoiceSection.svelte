@@ -3,10 +3,16 @@
 	 * VoiceSection — Settings → Voice (ruling VM17).
 	 *
 	 * Runtime-editable knobs backed by `GET/PUT /api/v1/settings/voice`:
-	 * the enable flag, the realtime model, the agent's voice (with per-voice
-	 * preview playback, VM21), which OpenAI API-key provider row funds calls,
-	 * and a cap on total call length. Load once, PUT on change — the PUT is a
+	 * the enable flag, the realtime model, the agent's voice (with a preview
+	 * of the selected one, VM21), which OpenAI API-key provider row funds
+	 * calls, whether the agent may manage app configuration directly, and a
+	 * cap on total call length. Load once, PUT on change — the PUT is a
 	 * partial update, and an explicit `null` provider clears the pin.
+	 *
+	 * The section also shows which agents a call can dispatch. That roster is
+	 * NOT edited here: an agent joins it by getting a model under its own
+	 * editor (Agents → Provider models → Voice), so this is a read-only mirror
+	 * with a pointer to the place that configures it.
 	 *
 	 * Two traps this section is written around:
 	 *
@@ -20,20 +26,24 @@
 	 *   caret.
 	 */
 	import { onDestroy, onMount } from 'svelte';
-	import { AudioLines, Play, Square } from 'lucide-svelte';
+	import { AudioLines, Bot, Play, Square, Wrench } from 'lucide-svelte';
 	import {
 		VOICE_MODELS,
 		VOICE_VOICES,
+		getVoiceAgents,
 		getVoiceProviders,
 		loadVoiceSettings,
 		previewVoice,
 		saveVoiceSettings,
+		type VoiceAgent,
 		type VoiceProvider,
 		type VoiceSettings,
 	} from '$lib/api/voice';
 
 	let settings = $state<VoiceSettings | null>(null);
 	let providers = $state<VoiceProvider[]>([]);
+	let agents = $state<VoiceAgent[]>([]);
+	let agentsLoaded = $state(false);
 	let loading = $state(true);
 	let saving = $state(false);
 	let error = $state('');
@@ -45,6 +55,9 @@
 		pendingMinutes ?? String(settings?.voice_max_call_minutes ?? '')
 	);
 
+	const selectedModel = $derived(VOICE_MODELS.find((m) => m.id === settings?.voice_model));
+	const selectedVoice = $derived(VOICE_VOICES.find((v) => v.id === settings?.voice_voice));
+
 	onMount(async () => {
 		try {
 			settings = await loadVoiceSettings();
@@ -53,12 +66,16 @@
 		} finally {
 			loading = false;
 		}
-		try {
-			providers = await getVoiceProviders();
-		} catch (e) {
-			// Non-fatal: the picker just shows its setup pointer.
-			console.warn('[voice] could not list eligible providers', e);
-		}
+		// Both lists are non-fatal: a failed read just shows the setup pointer.
+		const [providerList, agentList] = await Promise.allSettled([
+			getVoiceProviders(),
+			getVoiceAgents(),
+		]);
+		if (providerList.status === 'fulfilled') providers = providerList.value;
+		else console.warn('[voice] could not list eligible providers', providerList.reason);
+		if (agentList.status === 'fulfilled') agents = agentList.value;
+		else console.warn('[voice] could not list voice agents', agentList.reason);
+		agentsLoaded = true;
 	});
 
 	async function save(patch: Parameters<typeof saveVoiceSettings>[0]) {
@@ -89,93 +106,34 @@
 		void save({ voice_max_call_minutes: parsed });
 	}
 
-	// ---- Agent prompts (voice agent config) -------------------------------
-	// Three editable prompts with the same mid-edit guard as the minutes
-	// field: a non-null pending value means the user owns the textarea. The
-	// textarea always shows REAL text — the stored override, or the built-in
-	// default when none is set — so the user can edit parts of the default
-	// instead of retyping it. Committing text identical to the default (or
-	// clearing the field) stores no override; Reset restores the default.
-	type PromptField = 'voice_instructions' | 'voice_instructions_command' | 'voice_instructions_chat';
-	const PROMPTS: Array<{
-		field: PromptField;
-		defaultKey: 'base' | 'command' | 'chat';
-		title: string;
-		blurb: string;
-	}> = [
-		{
-			field: 'voice_instructions',
-			defaultKey: 'base',
-			title: 'Agent instructions',
-			blurb: 'The voice agent’s system prompt — personality and ground rules for every voice call (web and phone).'
-		},
-		{
-			field: 'voice_instructions_command',
-			defaultKey: 'command',
-			title: 'Hands-free (wake word) additions',
-			blurb: 'Appended when the phone app starts a session by wake word: one-shot tasks, hang up when done.'
-		},
-		{
-			field: 'voice_instructions_chat',
-			defaultKey: 'chat',
-			title: 'Conversation additions',
-			blurb: 'Appended when the phone app starts a session from the button, tile, or assist gesture.'
-		}
-	];
-	let pendingPrompts = $state<Record<string, string | null>>({});
-
-	function promptDefault(defaultKey: 'base' | 'command' | 'chat'): string {
-		return settings?.voice_instructions_defaults?.[defaultKey] ?? '';
-	}
-
-	function promptValue(field: PromptField, defaultKey: 'base' | 'command' | 'chat'): string {
-		return pendingPrompts[field] ?? (settings?.[field] || promptDefault(defaultKey));
-	}
-
-	function commitPrompt(field: PromptField, defaultKey: 'base' | 'command' | 'chat') {
-		const raw = pendingPrompts[field];
-		pendingPrompts[field] = null;
-		if (raw === null || raw === undefined) return;
-		const text = raw.trim();
-		const stored = settings?.[field] ?? '';
-		// Text matching the default (or an emptied field) means "no override".
-		const next = text === promptDefault(defaultKey) ? '' : text;
-		if (next === stored) return;
-		void save({ [field]: next });
-	}
-
-	function resetPrompt(field: PromptField) {
-		pendingPrompts[field] = null;
-		if (!settings?.[field]) return;
-		void save({ [field]: '' });
-	}
-
 	// ---- Voice preview (VM21) ---------------------------------------------
-	// One shared <audio> element; starting a preview stops whatever was playing.
-	// Fetched blobs are cached per voice so replays don't re-bill the TTS call.
-	let previewingVoice = $state<string | null>(null);
-	let loadingPreview = $state<string | null>(null);
+	// One shared <audio> element for the SELECTED voice; starting a preview
+	// stops whatever was playing. Fetched blobs are cached per voice so
+	// replays don't re-bill the TTS call.
+	let previewing = $state(false);
+	let loadingPreview = $state(false);
 	let previewAudio: HTMLAudioElement | null = null;
 	const previewCache = new Map<string, string>();
 
 	function stopPreview() {
 		previewAudio?.pause();
 		previewAudio = null;
-		previewingVoice = null;
+		previewing = false;
 	}
 
-	async function playPreview(voiceId: string) {
-		if (previewingVoice === voiceId) {
+	async function togglePreview() {
+		const voiceId = settings?.voice_voice;
+		if (!voiceId) return;
+		if (previewing) {
 			stopPreview();
 			return;
 		}
-		stopPreview();
 		if (loadingPreview) return;
 		error = '';
 		try {
 			let url = previewCache.get(voiceId);
 			if (!url) {
-				loadingPreview = voiceId;
+				loadingPreview = true;
 				const blob = await previewVoice(voiceId);
 				url = URL.createObjectURL(blob);
 				previewCache.set(voiceId, url);
@@ -185,14 +143,19 @@
 				if (previewAudio === audio) stopPreview();
 			};
 			previewAudio = audio;
-			previewingVoice = voiceId;
+			previewing = true;
 			await audio.play();
 		} catch (e: any) {
 			stopPreview();
 			error = e?.detail || 'Could not play the voice preview.';
 		} finally {
-			loadingPreview = null;
+			loadingPreview = false;
 		}
+	}
+
+	function changeVoice(voiceId: string) {
+		stopPreview();
+		void save({ voice_voice: voiceId });
 	}
 
 	onDestroy(() => {
@@ -202,11 +165,11 @@
 	});
 </script>
 
-<div class="set-group">
+<div class="set-group" data-testid="voice-section">
 	<div class="set-grouphead">
 		<h3><AudioLines />Voice</h3>
 		<p>
-			Talk to an agent that dispatches the work to other agents. Runs on OpenAI Realtime over a
+			Talk to an agent that hands the work to your other agents. Runs on OpenAI Realtime over a
 			direct browser connection — audio never passes through this server.
 		</p>
 	</div>
@@ -219,7 +182,7 @@
 		<div class="set-row">
 			<div class="lab">
 				<h4>Enable voice mode</h4>
-				<p>Adds a Voice option to the new-chat controls.</p>
+				<p>Adds a call button next to the send button in every new chat.</p>
 			</div>
 			<div class="ctl">
 				<button
@@ -235,97 +198,26 @@
 			</div>
 		</div>
 
-		<div class="set-row stack">
-			<div class="lab">
-				<h4>Realtime model</h4>
-				<p>Which speech-to-speech model answers. Cost is per minute of conversation.</p>
-			</div>
-			<div class="ctl">
-				<div class="model-list" role="radiogroup" aria-label="Realtime model">
-					{#each VOICE_MODELS as model}
-						<label class="model-opt" class:on={settings.voice_model === model.id}>
-							<input
-								type="radio"
-								name="voice-model"
-								value={model.id}
-								checked={settings.voice_model === model.id}
-								disabled={saving}
-								onchange={() => save({ voice_model: model.id })}
-							/>
-							<span>{model.label}</span>
-						</label>
-					{/each}
-				</div>
-			</div>
-		</div>
-
-		<div class="set-row stack">
-			<div class="lab">
-				<h4>Voice</h4>
-				<p>How the agent sounds. Press play to hear a short sample of each voice.</p>
-			</div>
-			<div class="ctl">
-				<div class="voice-list" role="radiogroup" aria-label="Agent voice">
-					{#each VOICE_VOICES as voice}
-						<label class="voice-opt" class:on={settings.voice_voice === voice.id}>
-							<input
-								type="radio"
-								name="voice-voice"
-								value={voice.id}
-								checked={settings.voice_voice === voice.id}
-								disabled={saving}
-								onchange={() => save({ voice_voice: voice.id })}
-							/>
-							<span class="voice-name">{voice.label}</span>
-							<button
-								type="button"
-								class="preview-btn"
-								class:playing={previewingVoice === voice.id}
-								disabled={loadingPreview !== null && loadingPreview !== voice.id}
-								aria-label={previewingVoice === voice.id
-									? `Stop the ${voice.id} preview`
-									: `Preview the ${voice.id} voice`}
-								title={previewingVoice === voice.id ? 'Stop preview' : 'Preview this voice'}
-								onclick={(e) => {
-									// A click on the play button must not toggle the radio.
-									e.preventDefault();
-									e.stopPropagation();
-									void playPreview(voice.id);
-								}}
-							>
-								{#if loadingPreview === voice.id}
-									<span class="preview-spinner" aria-hidden="true"></span>
-								{:else if previewingVoice === voice.id}
-									<Square size={11} strokeWidth={2} />
-								{:else}
-									<Play size={11} strokeWidth={2} />
-								{/if}
-							</button>
-						</label>
-					{/each}
-				</div>
-			</div>
-		</div>
-
-		<div class="set-row stack">
+		<div class="set-row">
 			<div class="lab">
 				<h4>Provider</h4>
-				<p>The OpenAI API-key row that funds calls.</p>
+				<p>The OpenAI API-key provider that funds calls.</p>
 			</div>
 			<div class="ctl">
 				{#if providers.length === 0}
 					<p class="msg err">
-						Add an OpenAI API-key provider in Settings → Providers (ChatGPT logins can't do
-						Realtime)
+						Add an OpenAI API-key provider in Settings → Providers. ChatGPT logins can't do
+						Realtime.
 					</p>
 				{:else}
 					<select
 						class="sel"
 						value={settings.voice_provider_id ?? ''}
 						disabled={saving}
+						aria-label="Voice provider"
 						onchange={(e) => save({ voice_provider_id: e.currentTarget.value || null })}
 					>
-						<option value="">Automatic (use the only eligible provider)</option>
+						<option value="">Automatic{providers.length === 1 ? ` (${providers[0].name})` : ''}</option>
 						{#each providers as provider}
 							<option value={provider.id}>{provider.name}</option>
 						{/each}
@@ -334,35 +226,62 @@
 			</div>
 		</div>
 
-		{#each PROMPTS as prompt}
-			<div class="set-row stack">
-				<div class="lab">
-					<h4>{prompt.title}</h4>
-					<p>{prompt.blurb}</p>
-				</div>
-				<div class="ctl">
-					<textarea
-						class="inp prompt"
-						rows="5"
-						value={promptValue(prompt.field, prompt.defaultKey)}
-						disabled={saving}
-						oninput={(e) => (pendingPrompts[prompt.field] = e.currentTarget.value)}
-						onblur={() => commitPrompt(prompt.field, prompt.defaultKey)}
-						aria-label={prompt.title}
-					></textarea>
-					{#if settings[prompt.field]}
-						<button
-							type="button"
-							class="reset-btn"
-							disabled={saving}
-							onclick={() => resetPrompt(prompt.field)}
-						>Reset to default</button>
-					{:else}
-						<p class="msg dim">This is the built-in default — edit any part of it to customize.</p>
-					{/if}
-				</div>
+		<div class="set-row">
+			<div class="lab">
+				<h4>Model</h4>
+				<p>{selectedModel?.hint ?? 'Which speech-to-speech model answers. Billed per minute of conversation.'}</p>
 			</div>
-		{/each}
+			<div class="ctl">
+				<select
+					class="sel"
+					value={settings.voice_model}
+					disabled={saving}
+					aria-label="Realtime model"
+					onchange={(e) => save({ voice_model: e.currentTarget.value })}
+				>
+					{#each VOICE_MODELS as model}
+						<option value={model.id}>{model.label}</option>
+					{/each}
+				</select>
+			</div>
+		</div>
+
+		<div class="set-row">
+			<div class="lab">
+				<h4>Voice</h4>
+				<p>{selectedVoice?.hint ?? 'How the agent sounds.'} Press play to hear a sample.</p>
+			</div>
+			<div class="ctl">
+				<select
+					class="sel"
+					value={settings.voice_voice}
+					disabled={saving}
+					aria-label="Agent voice"
+					onchange={(e) => changeVoice(e.currentTarget.value)}
+				>
+					{#each VOICE_VOICES as voice}
+						<option value={voice.id}>{voice.label}</option>
+					{/each}
+				</select>
+				<button
+					type="button"
+					class="preview-btn"
+					class:playing={previewing}
+					disabled={saving || (loadingPreview && !previewing)}
+					aria-label={previewing ? 'Stop the voice preview' : 'Preview the selected voice'}
+					title={previewing ? 'Stop preview' : 'Hear this voice'}
+					onclick={togglePreview}
+				>
+					{#if loadingPreview}
+						<span class="preview-spinner" aria-hidden="true"></span>
+					{:else if previewing}
+						<Square size={12} strokeWidth={2} />
+					{:else}
+						<Play size={12} strokeWidth={2} />
+					{/if}
+				</button>
+			</div>
+		</div>
 
 		<div class="set-row">
 			<div class="lab">
@@ -392,100 +311,92 @@
 	{/if}
 </div>
 
+{#if settings}
+	<div class="set-group" data-testid="voice-agent-section">
+		<div class="set-grouphead">
+			<h3><Bot />What the voice agent can do</h3>
+			<p>
+				The voice agent never edits files or runs commands itself. It hands that work to the
+				agents below and keeps you posted — and, optionally, manages the app directly.
+			</p>
+		</div>
+
+		<div class="set-row">
+			<div class="lab">
+				<h4><Wrench class="inline-icon" />Manage app configuration by voice</h4>
+				<p>
+					Let the agent create and change automations, hooks, agents, MCP servers and connectors
+					during a call. Off: it can only dispatch work and report on it.
+				</p>
+			</div>
+			<div class="ctl">
+				<button
+					type="button"
+					class="switch"
+					class:on={settings.voice_app_tools_enabled}
+					role="switch"
+					aria-checked={settings.voice_app_tools_enabled}
+					aria-label="Manage app configuration by voice"
+					disabled={saving}
+					onclick={() => save({ voice_app_tools_enabled: !settings?.voice_app_tools_enabled })}
+				><i></i></button>
+			</div>
+		</div>
+
+		<div class="set-row stack">
+			<div class="lab">
+				<h4>Agents available in calls</h4>
+				<p>
+					An agent joins this list when it has a model under
+					<strong>Agents → edit agent → Provider models → Voice</strong>. The agent you start the
+					call with is used by default; the rest can be asked for by name.
+				</p>
+			</div>
+			<div class="ctl">
+				{#if !agentsLoaded}
+					<p class="msg dim">Loading agents…</p>
+				{:else if agents.length === 0}
+					<p class="msg warn">
+						No agent has a voice model yet, so the voice agent can't dispatch any work. Open an
+						agent and set one under Provider models → Voice.
+					</p>
+				{:else}
+					<ul class="agent-list">
+						{#each agents as agent (agent.id)}
+							<li class="agent-row">
+								<span class="agent-name">{agent.name}</span>
+								{#if agent.description}<span class="agent-desc">{agent.description}</span>{/if}
+								<span class="agent-leg" title={agent.model}>{agent.provider_name} · {agent.model}</span>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</div>
+		</div>
+	</div>
+{/if}
+
 <style>
-	.model-list {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-	.model-opt {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 7px 10px;
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
-		font-size: 12.5px;
-		color: var(--foreground);
-		cursor: pointer;
-	}
-	.model-opt.on {
-		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
-		background: color-mix(in oklch, var(--primary) 8%, transparent);
-	}
 	.minutes {
 		width: 110px;
 	}
-
-	/* Voice agent prompt editors */
-	.prompt {
-		width: 100%;
-		min-height: 96px;
-		resize: vertical;
-		font-size: 12.5px;
-		line-height: 1.45;
-		font-family: inherit;
-	}
-	.reset-btn {
-		margin-top: 6px;
-		padding: 4px 10px;
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
-		background: var(--background);
-		color: var(--muted-foreground);
-		font-size: 12px;
-		cursor: pointer;
-	}
-	.reset-btn:hover:not(:disabled) {
-		color: var(--primary);
-		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
-	}
-	.msg.dim {
-		color: var(--muted-foreground);
-		margin-top: 6px;
+	.set-row .ctl .sel {
+		max-width: 260px;
 	}
 
-	/* Voice picker (VM21) — two-column grid of compact options, each carrying
-	   its own preview control. */
-	.voice-list {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-		gap: 6px;
-	}
-	.voice-opt {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 6px 8px 6px 10px;
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
-		font-size: 12.5px;
-		color: var(--foreground);
-		cursor: pointer;
-	}
-	.voice-opt.on {
-		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
-		background: color-mix(in oklch, var(--primary) 8%, transparent);
-	}
-	.voice-name {
-		flex: 1;
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
 	.preview-btn {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: 22px;
-		height: 22px;
+		width: 30px;
+		height: 30px;
 		flex-shrink: 0;
 		border: 1px solid var(--border);
 		border-radius: 50%;
 		background: var(--background);
 		color: var(--muted-foreground);
 		cursor: pointer;
+		transition: color 0.15s ease, border-color 0.15s ease;
 	}
 	.preview-btn:hover:not(:disabled) {
 		color: var(--primary);
@@ -501,8 +412,8 @@
 		background: color-mix(in oklch, var(--primary) 10%, transparent);
 	}
 	.preview-spinner {
-		width: 10px;
-		height: 10px;
+		width: 11px;
+		height: 11px;
 		border: 1.5px solid color-mix(in oklch, var(--primary) 35%, transparent);
 		border-top-color: var(--primary);
 		border-radius: 50%;
@@ -513,6 +424,59 @@
 			transform: rotate(360deg);
 		}
 	}
+
+	:global(.inline-icon) {
+		width: 14px;
+		height: 14px;
+		margin-right: 6px;
+		vertical-align: -2px;
+		color: var(--muted-foreground);
+	}
+
+	/* Read-only roster of voice-dispatchable agents. */
+	.agent-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.agent-row {
+		display: flex;
+		align-items: baseline;
+		gap: 10px;
+		min-width: 0;
+		padding: 7px 10px;
+		border: 1px solid var(--border);
+		border-radius: var(--radius, 0.75rem);
+		font-size: 12.5px;
+	}
+	.agent-name {
+		font-weight: 600;
+		color: var(--foreground);
+		white-space: nowrap;
+	}
+	.agent-desc {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--muted-foreground);
+	}
+	.agent-leg {
+		margin-left: auto;
+		flex-shrink: 0;
+		max-width: 45%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-family: var(--font-mono, monospace);
+		font-size: 11px;
+		color: var(--muted-foreground);
+	}
+
 	.msg {
 		margin: 0;
 		font-size: 12.5px;
@@ -522,5 +486,11 @@
 	}
 	.msg.err {
 		color: var(--destructive);
+	}
+	.msg.warn {
+		color: var(--warning, #d97706);
+	}
+	.msg.dim {
+		color: var(--muted-foreground);
 	}
 </style>

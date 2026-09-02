@@ -51,7 +51,13 @@
 
 	const statusLabel = $derived(
 		status === 'live'
-			? 'Listening'
+			? call.micMuted
+				? 'Mic muted'
+				: call.agentSpeaking
+					? 'Speaking…'
+					: call.userSpeaking
+						? 'Hearing you…'
+						: 'Listening'
 			: status === 'connecting'
 				? 'Connecting…'
 				: status === 'reconnecting'
@@ -75,17 +81,19 @@
 			ticker = null;
 		}
 	});
-	// Spend estimate (VW5) — read from the server, which is the only side that
-	// sees `response.done` usage. Deliberately slow (30s) and best-effort: this
-	// is a glanceable "what is this costing me", not a meter.
-	const COST_POLL_MS = 30_000;
+	// Server-side call state (VW5) — the spend estimate (only the server sees
+	// `response.done` usage) and how many worker agents are running. Polled
+	// slowly and best-effort: a glanceable status line, not a meter.
+	const COST_POLL_MS = 10_000;
 	let costUsd = $state<number | null>(null);
+	let activeTasks = $state(0);
 	let costTimer: ReturnType<typeof setInterval> | null = null;
 
 	async function pollCost() {
 		try {
 			const state = await getVoiceCallState(sessionId);
 			costUsd = state?.estimated_cost_usd ?? null;
+			activeTasks = state?.active_tasks ?? 0;
 		} catch {
 			/* a failed poll just leaves the last estimate on screen */
 		}
@@ -119,8 +127,12 @@
 		return `${m}:${String(s).padStart(2, '0')}`;
 	});
 
-	// Orb scale follows the mic level; muted or idle sits still.
+	// Orb scale follows the mic level; muted or idle sits still. While the
+	// agent talks the orb breathes on its own (CSS) instead of following the mic.
 	const orbScale = $derived(live && !call.micMuted ? 1 + Math.min(call.level, 1) * 0.55 : 1);
+	const workingLabel = $derived(
+		activeTasks === 1 ? '1 agent working' : activeTasks > 1 ? `${activeTasks} agents working` : ''
+	);
 </script>
 
 <!-- Composer slot (VM18): same outer metrics as .chat-input-wrapper /
@@ -137,14 +149,19 @@
 
 		<div class="vp-head">
 			<div class="orb-wrap" aria-hidden="true">
-				<span class="orb-pulse" style={`transform: scale(${orbScale});`}></span>
-				<span class="orb" class:on={live} class:muted={call.micMuted}></span>
+				<span
+					class="orb-pulse"
+					class:speaking={live && call.agentSpeaking}
+					style={live && call.agentSpeaking ? '' : `transform: scale(${orbScale});`}
+				></span>
+				<span class="orb" class:on={live} class:muted={call.micMuted} class:speaking={live && call.agentSpeaking}></span>
 			</div>
 			<div class="vp-title">
 				<h3>Voice agent</h3>
 				<p>
-					{statusLabel}
+					<span class="vp-status" class:speaking={live && call.agentSpeaking}>{statusLabel}</span>
 					{#if elapsed}<span class="vp-elapsed">· {elapsed}</span>{/if}
+					{#if mine && live && workingLabel}<span class="vp-working">· {workingLabel}</span>{/if}
 					{#if mine && call.model}<span class="vp-model">· {call.model}</span>{/if}
 					{#if mine && costLabel}<span
 							class="vp-cost"
@@ -264,8 +281,29 @@
 		background: color-mix(in oklch, var(--primary) 30%, transparent);
 		transition: transform 90ms linear;
 	}
+	.orb-pulse.speaking {
+		animation: orb-breathe 1.1s ease-in-out infinite;
+	}
+	.orb.speaking {
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 22%, transparent);
+	}
+	@keyframes orb-breathe {
+		0%,
+		100% {
+			transform: scale(1.05);
+		}
+		50% {
+			transform: scale(1.5);
+		}
+	}
 	.voice-dock:not(.live) .orb-pulse {
 		opacity: 0;
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.orb-pulse.speaking {
+			animation: none;
+			transform: scale(1.3);
+		}
 	}
 
 	.vp-title {
@@ -282,6 +320,12 @@
 		margin: 2px 0 0;
 		font-size: 12px;
 		color: var(--muted-foreground);
+	}
+	.vp-status.speaking {
+		color: var(--primary);
+	}
+	.vp-working {
+		color: var(--foreground);
 	}
 	.vp-elapsed,
 	.vp-model,

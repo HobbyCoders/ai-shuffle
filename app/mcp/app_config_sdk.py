@@ -248,6 +248,35 @@ def get_app_config_tool_names(is_admin: bool = True) -> List[str]:
     ]
 
 
+def collect_app_config_tools(
+    is_admin: bool = False,
+    project_id: Optional[str] = None,
+    project_dir: Optional[str] = None,
+) -> list:
+    """The raw ``@tool`` objects of the app-config surface, no server around them.
+
+    Shared by :func:`create_app_config_server` (chat sessions, wrapped in an
+    SDK MCP server) and the voice bridge, which declares the same tools on the
+    OpenAI Realtime sideband and calls their handlers in-process. Returns an
+    empty list when the SDK is unavailable — the caller degrades, never fails.
+    """
+    try:
+        import claude_agent_sdk  # noqa: F401 — the tool factories need @tool
+    except ImportError:
+        logger.debug("claude_agent_sdk not available — app-config tools disabled")
+        return []
+
+    all_tools: list = []
+    all_tools.extend(_create_discovery_tools())
+    all_tools.extend(_create_hook_tools(is_admin, project_id))
+    all_tools.extend(_create_automation_tools(is_admin, project_id))
+    all_tools.extend(_create_mcp_tools(is_admin, project_dir))
+    all_tools.extend(_create_profile_tools(is_admin))
+    all_tools.extend(_create_connector_tools(is_admin))
+    all_tools.extend(_create_subagent_tools(is_admin))
+    return all_tools
+
+
 def create_app_config_server(
     is_admin: bool = False,
     project_id: Optional[str] = None,
@@ -274,15 +303,7 @@ def create_app_config_server(
         logger.debug("claude_agent_sdk not available — app-config tools disabled")
         return None
 
-    all_tools: list = []
-    all_tools.extend(_create_discovery_tools())
-    all_tools.extend(_create_hook_tools(is_admin, project_id))
-    all_tools.extend(_create_automation_tools(is_admin, project_id))
-    all_tools.extend(_create_mcp_tools(is_admin, project_dir))
-    all_tools.extend(_create_profile_tools(is_admin))
-    all_tools.extend(_create_connector_tools(is_admin))
-    all_tools.extend(_create_subagent_tools(is_admin))
-
+    all_tools = collect_app_config_tools(is_admin, project_id, project_dir)
     if not all_tools:
         return None
 

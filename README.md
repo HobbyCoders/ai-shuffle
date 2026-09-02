@@ -24,6 +24,9 @@ Real-time streaming with WebSocket, rich text input (TipTap editor), `@file` aut
 ### Profiles
 Create specialized AI configurations with custom system prompts, model selection from a built-in model registry (Anthropic's Claude models by default; admins can also add OpenRouter, custom Anthropic-compatible gateways, or a Codex / ChatGPT-subscription provider), thinking modes, permission modes, tool allowlists, and per-profile subagent and plugin controls. Generate profiles from natural language descriptions.
 
+### Voice Mode
+Talk to a voice agent (OpenAI Realtime, direct browser connection) that hands real work to your agents, steers or stops them mid-task, relays their permission prompts, and can manage automations, hooks, agents, MCP servers and connectors by voice. Each agent opts in with a per-agent Voice model assignment.
+
 ### Sessions
 Multi-tab persistent sessions with full history. Fork conversations at any point, rewind to prior states, tag, favorite, search, group, and import/export. Token usage and cost tracking per session.
 

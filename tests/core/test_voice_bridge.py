@@ -395,7 +395,7 @@ async def test_registry_attach_and_state(mock_db, fake_sockets, registry):
     _mk_session()
     assert registry.state(SID) == {
         "active": False, "connected": False, "started_at": None, "model": None,
-        "usage": {}, "estimated_cost_usd": None,
+        "usage": {}, "estimated_cost_usd": None, "active_tasks": 0,
     }
 
     bridge = await registry.attach(
@@ -537,8 +537,25 @@ def _response_done_with_call(call_id="call-1", name="dispatch_agent", **args) ->
     }
 
 
+VOICE_PROFILES = [
+    # The voice session's own profile — no voice assignment of its own.
+    {"id": "default", "name": "Default", "config": {"model": "sonnet"}},
+    # Dispatchable from a call: a native Claude voice assignment.
+    {"id": "coder", "name": "Coder", "description": "writes code",
+     "config": {"provider_models": {"__voice__": "sonnet"}}},
+]
+
+
 @pytest.fixture
-def fake_dispatch(monkeypatch):
+def voice_roster(monkeypatch):
+    """Profiles with a voice assignment — the roster every dispatch test needs."""
+    from app.db import database
+
+    monkeypatch.setattr(database, "get_all_profiles", lambda: [dict(r) for r in VOICE_PROFILES])
+
+
+@pytest.fixture
+def fake_dispatch(monkeypatch, voice_roster):
     """Stub ``task_dispatch.dispatch_task_tool``; records every call."""
     from app.core import task_dispatch
 
@@ -551,6 +568,7 @@ def fake_dispatch(monkeypatch):
             "caller_session_id": caller_session_id,
             "caller_profile_id": caller_profile_id,
             "caller_provider_id": kw.get("caller_provider_id"),
+            "roster": kw.get("roster"),
         })
         return dict(result)
 
@@ -602,14 +620,15 @@ def fake_permissions(monkeypatch):
 # VW4 — tool declarations + instruction contract
 # ---------------------------------------------------------------------------
 
-async def test_session_update_declares_the_four_dispatch_tools(mock_db, fake_sockets):
+async def test_session_update_declares_the_dispatch_tools(mock_db, fake_sockets):
     _mk_session()
     bridge = await _bridge(fake_sockets)
 
     session = fake_sockets[0].session_update()["session"]
     tools = session["tools"]
     assert [t["name"] for t in tools] == [
-        "dispatch_agent", "check_agent", "list_agents", "respond_approval",
+        "dispatch_agent", "check_agent", "list_agents", "message_agent",
+        "stop_agent", "respond_approval",
     ]
     assert {t["type"] for t in tools} == {"function"}
     # Realtime schema is FLAT (no nested "function" object) and every tool
@@ -624,6 +643,8 @@ async def test_session_update_declares_the_four_dispatch_tools(mock_db, fake_soc
     }
     assert by_name["check_agent"]["parameters"]["required"] == ["task_id"]
     assert by_name["list_agents"]["parameters"]["properties"] == {}
+    assert by_name["message_agent"]["parameters"]["required"] == ["task_id", "message"]
+    assert by_name["stop_agent"]["parameters"]["required"] == ["task_id"]
     assert by_name["respond_approval"]["parameters"]["required"] == [
         "request_id", "decision",
     ]
@@ -639,8 +660,11 @@ async def test_instructions_are_the_delegation_first_contract(mock_db, fake_sock
 
     assert instructions == vb.VOICE_INSTRUCTIONS
     assert vb.VOICE_INSTRUCTIONS_V1 is vb.VOICE_INSTRUCTIONS   # VW3 alias holds
-    assert "COORDINATOR only" in instructions
+    assert "You are a coordinator" in instructions
     assert "dispatch_agent" in instructions and "respond_approval" in instructions
+    assert "message_agent" in instructions and "stop_agent" in instructions
+    # Spoken-channel rules travel with the contract.
+    assert "No markdown" in instructions
     await bridge.stop()
 
 
@@ -763,7 +787,9 @@ async def test_unknown_tool_returns_an_error_output(mock_db, fake_sockets):
     await bridge.stop()
 
 
-async def test_a_failing_tool_never_kills_the_call(mock_db, fake_sockets, monkeypatch):
+async def test_a_failing_tool_never_kills_the_call(
+    mock_db, fake_sockets, monkeypatch, voice_roster
+):
     from app.core import task_dispatch
 
     _mk_session()
@@ -1065,7 +1091,7 @@ async def test_list_agents_returns_definitions_and_active_tasks(
             "id": "coder",
             "name": "Coder",
             "description": "writes code",
-            "config": {"model": "sonnet"},
+            "config": {"provider_models": {"__voice__": "sonnet"}},
         }],
     )
     monkeypatch.setattr(
@@ -1100,8 +1126,10 @@ async def test_dispatch_without_an_agent_picks_a_default_definition(
     monkeypatch.setattr(
         database, "get_all_profiles",
         lambda: [
-            {"id": "default", "name": "Default", "config": {"model": "sonnet"}},
-            {"id": "coder", "name": "Coder", "config": {"model": "sonnet"}},
+            {"id": "default", "name": "Default",
+             "config": {"provider_models": {"__voice__": "sonnet"}}},
+            {"id": "coder", "name": "Coder",
+             "config": {"provider_models": {"__voice__": "sonnet"}}},
         ],
     )
     bridge = await _bridge(fake_sockets)
@@ -1110,9 +1138,35 @@ async def test_dispatch_without_an_agent_picks_a_default_definition(
     await _drain(bridge, sock)
     await _settle(bridge)
 
-    # Never the caller's own agent — task_dispatch refuses that as a cycle.
-    assert fake_dispatch[0]["args"]["agent"] == "coder"
+    # The agent the call was started with wins when it is voice-assigned.
+    assert fake_dispatch[0]["args"]["agent"] == "default"
     assert fake_dispatch[0]["caller_profile_id"] == "default"
+    # The voice roster rides along so dispatch pins each target's own leg.
+    roster = fake_dispatch[0]["roster"]
+    assert [t.id for t in roster] == ["coder", "default"]
+    assert all(t.provider_pinned for t in roster)
+    await bridge.stop()
+
+
+async def test_dispatch_with_no_voice_agents_explains_the_setup(
+    mock_db, fake_sockets, fake_dispatch, monkeypatch
+):
+    from app.db import database
+
+    _mk_session()
+    monkeypatch.setattr(database, "get_all_profiles", lambda: [
+        {"id": "default", "name": "Default", "config": {"model": "sonnet"}},
+    ])
+    bridge = await _bridge(fake_sockets)
+    sock = fake_sockets[0]
+    sock.push(_call_done(prompt="do a thing"))
+    await _drain(bridge, sock)
+    await _settle(bridge)
+
+    payload = json.loads(_items(sock, "function_call_output")[0]["output"])
+    assert payload["ok"] is False
+    assert "Voice" in payload["error"]
+    assert fake_dispatch == []                       # nothing was dispatched
     await bridge.stop()
 
 
@@ -1254,6 +1308,9 @@ def test_default_agent_prefers_one_literally_called_default():
         {"id": "p3", "name": "Alpha"},
     ]
     assert vb._pick_default_agent(rows) == "p2"
+    # The agent the call was started with beats both rules — when listed.
+    assert vb._pick_default_agent(rows, preferred="p3") == "p3"
+    assert vb._pick_default_agent(rows, preferred="nope") == "p2"
     assert vb._pick_default_agent([
         {"id": "default", "name": "Coordinator"}, {"id": "p9", "name": "Alpha"},
     ]) == "default"
@@ -1275,9 +1332,9 @@ async def test_the_default_pick_is_stable_across_row_order(
 
     _mk_session()                                   # session profile = "default"
     rows = [
-        {"id": "zeta", "name": "Zeta", "config": {"model": "sonnet"}},
-        {"id": "default", "name": "Default", "config": {"model": "sonnet"}},       # the caller — never eligible
-        {"id": "alpha", "name": "Alpha", "config": {"model": "sonnet"}},
+        {"id": "zeta", "name": "Zeta", "config": {"provider_models": {"__voice__": "sonnet"}}},
+        {"id": "default", "name": "Default", "config": {"model": "sonnet"}},       # no voice assignment
+        {"id": "alpha", "name": "Alpha", "config": {"provider_models": {"__voice__": "sonnet"}}},
     ]
     for ordering in (rows, list(reversed(rows))):
         monkeypatch.setattr(database, "get_all_profiles", lambda o=ordering: list(o))
@@ -1293,22 +1350,33 @@ async def test_instructions_carry_the_dispatchable_agent_roster(
 
     _mk_session()
     monkeypatch.setattr(database, "get_all_profiles", lambda: [
-        {"id": "default", "name": "Default", "config": {"model": "sonnet"}},       # the caller — excluded
+        {"id": "default", "name": "Default", "config": {"model": "sonnet"}},       # no voice assignment
         {"id": "coder", "name": "Coder",
          "description": "Writes code. Also reviews pull requests.",
-         "config": {"model": "sonnet"}},
-        {"id": "scout", "name": "Scout", "config": {"model": "sonnet"}},
+         "config": {"provider_models": {"__voice__": "sonnet"}}},
+        {"id": "scout", "name": "Scout",
+         "config": {"provider_models": {"__voice__": "prov:openrouter:meta/llama"}}},
     ])
+    monkeypatch.setattr(
+        database, "get_model_provider",
+        lambda pid, include_token=False: {"id": pid, "enabled": True},
+    )
+    from app.core import provider_agent as pa
+    from types import SimpleNamespace
+    monkeypatch.setattr(
+        pa, "validate_provider_model",
+        lambda *a, **kw: SimpleNamespace(ok=True),
+    )
     bridge = await _bridge(fake_sockets)
     instructions = fake_sockets[0].session_update()["session"]["instructions"]
 
-    # The VM16 contract text still leads, verbatim.
+    # The contract text still leads, verbatim.
     assert instructions.startswith(vb.VOICE_INSTRUCTIONS)
     roster = instructions[instructions.index(vb.ROSTER_HEADER):]
     assert "- Coder — Writes code." in roster
     assert "reviews pull requests" not in roster    # first sentence only
     assert "- Scout" in roster
-    assert "Default" not in roster                  # the caller is not offered
+    assert "Default" not in roster                  # not voice-assigned
     await bridge.stop()
 
 
@@ -1650,3 +1718,380 @@ async def test_registry_attach_passes_the_client_secret(mock_db, fake_sockets, r
     )
     assert fake_sockets[0].client_secret == "ek_secret"
     await registry.detach(SID)
+
+
+# ---------------------------------------------------------------------------
+# Worker steering — message_agent / stop_agent
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def worker_record(monkeypatch):
+    """A finished agent task in the registry plus its latest turn row."""
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    record = {"id": "worker-1", "kind": "agent", "status": "completed",
+              "subject": "dark mode"}
+    latest = {
+        "id": "turn-0", "state": "completed", "profile_id": "coder",
+        "project_id": None, "worktree_id": None,
+        "overrides": {"provider": "prov-x", "model": "gpt-5", "cwd": "/w"},
+    }
+    monkeypatch.setattr(
+        task_registry, "get_task",
+        lambda sid, tid: dict(record) if tid == "worker-1" else None,
+    )
+    monkeypatch.setattr(turns_db, "get_live_turn", lambda sid: None)
+    monkeypatch.setattr(turns_db, "get_latest_turn", lambda sid: dict(latest))
+    return SimpleNamespaceDict(record=record, latest=latest)
+
+
+class SimpleNamespaceDict(dict):
+    def __getattr__(self, key):
+        return self[key]
+
+
+async def test_message_agent_resumes_a_finished_worker_with_its_binding(
+    mock_db, fake_sockets, idle_gate, worker_record, monkeypatch
+):
+    from app.core import turn_manager
+
+    submitted = []
+
+    async def _submit(session_id, source, **kw):
+        submitted.append((session_id, source, kw))
+        return "turn-1"
+
+    monkeypatch.setattr(turn_manager, "submit_async", _submit)
+
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    sock = fake_sockets[0]
+    sock.push(_call_done(
+        call_id="c-msg", name="message_agent",
+        task_id="worker-1", message="make the toggle default to dark",
+    ))
+    await _drain(bridge, sock)
+    await _settle(bridge)
+
+    # Queued on the WORKER session, as a steerable user-shaped turn, carrying
+    # the exact binding its launch turn ran with.
+    assert len(submitted) == 1
+    session_id, source, kw = submitted[0]
+    assert session_id == "worker-1" and source == "queue"
+    assert kw["prompt"] == "make the toggle default to dark"
+    assert kw["profile_id"] == "coder"
+    assert kw["overrides"] == {"provider": "prov-x", "model": "gpt-5", "cwd": "/w"}
+
+    payload = json.loads(_items(sock, "function_call_output")[0]["output"])
+    assert payload["ok"] is True
+    assert payload["turn_id"] == "turn-1"
+    assert "resumed" in payload["delivery"]
+    # A fresh watcher announces the follow-up's completion.
+    assert idle_gate.watched and idle_gate.watched[-1][0] == "worker-1"
+    await bridge.stop()
+
+
+async def test_message_agent_steers_a_running_worker(
+    mock_db, fake_sockets, idle_gate, worker_record, monkeypatch
+):
+    from app.core import session_runtime, turn_manager
+    from app.db import turns as turns_db
+
+    live = dict(worker_record.latest, id="turn-live", state="running")
+    monkeypatch.setattr(turns_db, "get_live_turn", lambda sid: dict(live))
+
+    async def _submit(session_id, source, **kw):
+        return "turn-2"
+
+    steered = []
+
+    async def _steer(session_id):
+        steered.append(session_id)
+        return 1
+
+    monkeypatch.setattr(turn_manager, "submit_async", _submit)
+    monkeypatch.setattr(session_runtime, "try_steer_pending", _steer)
+
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    sock = fake_sockets[0]
+    sock.push(_call_done(
+        call_id="c-msg", name="message_agent", task_id="worker-1", message="also add tests",
+    ))
+    await _drain(bridge, sock)
+    await _settle(bridge)
+
+    assert steered == ["worker-1"]
+    payload = json.loads(_items(sock, "function_call_output")[0]["output"])
+    assert payload["ok"] is True
+    assert "steered" in payload["delivery"]
+    await bridge.stop()
+
+
+async def test_message_agent_rejects_unknown_and_stopped_workers(
+    mock_db, fake_sockets, worker_record, monkeypatch
+):
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    sock = fake_sockets[0]
+    sock.push(_call_done(call_id="c-1", name="message_agent", task_id="nope", message="x"))
+    worker_record.record["status"] = "killed"
+    sock.push(_call_done(call_id="c-2", name="message_agent", task_id="worker-1", message="x"))
+    sock.push(_call_done(call_id="c-3", name="message_agent", task_id="worker-1"))
+    await _drain(bridge, sock)
+    await _settle(bridge)
+
+    outputs = {o["call_id"]: json.loads(o["output"]) for o in _items(sock, "function_call_output")}
+    assert outputs["c-1"]["ok"] is False and "nope" in outputs["c-1"]["error"]
+    assert outputs["c-2"]["ok"] is False and "stopped" in outputs["c-2"]["error"]
+    assert outputs["c-3"]["ok"] is False and "message" in outputs["c-3"]["error"]
+    await bridge.stop()
+
+
+async def test_stop_agent_tears_down_a_live_worker(
+    mock_db, fake_sockets, worker_record, monkeypatch
+):
+    from app.core import provider_agent_supervisor as sup
+
+    record = object()
+    torn = []
+
+    async def _teardown(rec, *, reason, summary, preview):
+        torn.append((rec, reason))
+        return {}
+
+    monkeypatch.setattr(sup, "get_worker", lambda parent, wid: record if wid == "worker-1" else None)
+    monkeypatch.setattr(sup, "teardown_worker", _teardown)
+
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    sock = fake_sockets[0]
+    sock.push(_call_done(call_id="c-stop", name="stop_agent", task_id="worker-1"))
+    await _drain(bridge, sock)
+    await _settle(bridge)
+
+    assert torn == [(record, vb.VOICE_STOP_REASON)]
+    payload = json.loads(_items(sock, "function_call_output")[0]["output"])
+    assert payload == {"ok": True, "task_id": "worker-1", "stopped": True}
+    await bridge.stop()
+
+
+async def test_stop_agent_interrupts_a_follow_up_turn_when_no_worker_is_live(
+    mock_db, fake_sockets, worker_record, monkeypatch
+):
+    from app.core import provider_agent_supervisor as sup
+    from app.core import turn_manager
+
+    monkeypatch.setattr(sup, "get_worker", lambda parent, wid: None)
+    interrupted = []
+
+    async def _interrupt(session_id, mode, **kw):
+        interrupted.append((session_id, mode))
+        return {"id": "turn-live"} if session_id == "worker-1" else None
+
+    monkeypatch.setattr(turn_manager, "interrupt_async", _interrupt)
+
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    sock = fake_sockets[0]
+    sock.push(_call_done(call_id="c-stop", name="stop_agent", task_id="worker-1"))
+    await _drain(bridge, sock)
+    await _settle(bridge)
+
+    assert interrupted == [("worker-1", "stop")]
+    payload = json.loads(_items(sock, "function_call_output")[0]["output"])
+    assert payload["stopped"] is True
+    await bridge.stop()
+
+
+def test_check_agent_reports_a_follow_up_as_running(mock_db, monkeypatch):
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    monkeypatch.setattr(
+        task_registry, "get_task",
+        lambda sid, tid: {"id": tid, "kind": "agent", "status": "completed", "subject": "x"},
+    )
+    monkeypatch.setattr(turns_db, "session_has_unsettled_turns", lambda sid: True)
+    payload = vb._agent_task_status(SID, "worker-1")
+    assert payload["status"] == "running"
+    assert "no report yet" in payload["note"]
+
+
+# ---------------------------------------------------------------------------
+# Bridged app tools
+# ---------------------------------------------------------------------------
+
+class _FakeSdkTool:
+    def __init__(self, name, handler, schema=None, description="does a thing"):
+        self.name = name
+        self.description = description
+        self.input_schema = schema if schema is not None else {
+            "type": "object", "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        }
+        self.handler = handler
+
+
+def _envelope(payload, is_error=False):
+    out = {"content": [{"type": "text", "text": json.dumps(payload)}]}
+    if is_error:
+        out["isError"] = True
+    return out
+
+
+async def test_app_tools_are_declared_after_the_dispatch_tools(mock_db, fake_sockets):
+    async def _handler(args):
+        return _envelope({"success": True, "automations": []})
+
+    _mk_session()
+    bridge = vb.VoiceBridge(
+        SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=5,
+        app_tools=[
+            _FakeSdkTool("listAutomations", _handler),
+            _FakeSdkTool("bad name!", _handler),              # undeclarable
+            _FakeSdkTool("listAutomations", _handler),        # duplicate
+            _FakeSdkTool("dispatch_agent", _handler),         # cannot shadow ours
+        ],
+    )
+    await bridge.start()
+    session = fake_sockets[0].session_update()["session"]
+    names = [t["name"] for t in session["tools"]]
+    assert names == [
+        "dispatch_agent", "check_agent", "list_agents", "message_agent",
+        "stop_agent", "respond_approval", "listAutomations",
+    ]
+    declared = next(t for t in session["tools"] if t["name"] == "listAutomations")
+    assert declared["type"] == "function"
+    assert declared["parameters"]["required"] == ["name"]
+    # The operating rules for those tools ride the instructions.
+    assert vb.APP_TOOLS_INSTRUCTIONS in session["instructions"]
+    await bridge.stop()
+
+
+async def test_app_tool_calls_round_trip_through_the_sdk_handler(mock_db, fake_sockets):
+    seen = []
+
+    async def _handler(args):
+        seen.append(args)
+        return _envelope({"success": True, "automation": {"id": "a1", "name": args["name"]}})
+
+    async def _failing(args):
+        return _envelope({"success": False, "error": "Admin access required"}, is_error=True)
+
+    async def _exploding(args):
+        raise RuntimeError("db down")
+
+    _mk_session()
+    bridge = vb.VoiceBridge(
+        SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=5,
+        app_tools=[
+            _FakeSdkTool("createAutomation", _handler),
+            _FakeSdkTool("deleteHook", _failing),
+            _FakeSdkTool("listHooks", _exploding),
+        ],
+    )
+    await bridge.start()
+    sock = fake_sockets[0]
+    sock.push({
+        "type": "response.function_call_arguments.done",
+        "call_id": "c-create", "name": "createAutomation",
+        "arguments": json.dumps({"name": "x"}),
+    })
+    sock.push(_call_done(call_id="c-del", name="deleteHook"))
+    sock.push(_call_done(call_id="c-list", name="listHooks"))
+    await _drain(bridge, sock)
+    await _settle(bridge)
+
+    outputs = {o["call_id"]: json.loads(o["output"]) for o in _items(sock, "function_call_output")}
+    assert outputs["c-create"]["ok"] is True
+    assert outputs["c-create"]["automation"]["id"] == "a1"
+    assert outputs["c-del"]["ok"] is False
+    assert "Admin access" in outputs["c-del"]["error"]
+    assert outputs["c-list"]["ok"] is False and "db down" in outputs["c-list"]["error"]
+    assert bridge.active is True
+    await bridge.stop()
+
+
+def test_app_tool_result_shapes():
+    assert vb.app_tool_result(_envelope({"success": True, "count": 2})) == {
+        "count": 2, "ok": True,
+    }
+    assert vb.app_tool_result(_envelope({"success": False, "error": "no"}, True)) == {
+        "error": "no", "ok": False,
+    }
+    assert vb.app_tool_result({"content": [{"type": "text", "text": "plain words"}]}) == {
+        "ok": True, "text": "plain words",
+    }
+    assert vb.app_tool_result("weird") == {"ok": True, "text": "weird"}
+    big = vb.app_tool_result(_envelope({"success": True, "rows": ["x" * 100] * 200}))
+    assert big["truncated"] is True and big["ok"] is True
+    assert len(big["text"]) <= vb.APP_TOOL_OUTPUT_MAX_CHARS
+
+
+def test_realtime_tool_from_sdk_handles_both_schema_shapes():
+    async def _h(args):
+        return {}
+
+    full = vb.realtime_tool_from_sdk(_FakeSdkTool("listX", _h))
+    assert full["parameters"]["required"] == ["name"]
+    simple = vb.realtime_tool_from_sdk(_FakeSdkTool("simple", _h, schema={"count": int, "on": bool}))
+    assert simple["parameters"] == {
+        "type": "object",
+        "properties": {"count": {"type": "integer"}, "on": {"type": "boolean"}},
+    }
+    bare = _FakeSdkTool("nothing", _h)
+    bare.input_schema = None
+    assert vb.realtime_tool_from_sdk(bare)["parameters"] == {"type": "object", "properties": {}}
+    assert vb.realtime_tool_from_sdk(_FakeSdkTool("has space", _h)) is None
+    assert vb.realtime_tool_from_sdk(_FakeSdkTool("x" * 65, _h)) is None
+
+
+# ---------------------------------------------------------------------------
+# Greeting
+# ---------------------------------------------------------------------------
+
+async def test_a_greeting_is_injected_after_the_session_update(mock_db, fake_sockets):
+    _mk_session()
+    bridge = vb.VoiceBridge(
+        SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=5, greet=True,
+    )
+    await bridge.start()
+    types = _frame_types(fake_sockets[0])
+    assert types[:2] == ["session.update", "session.update"]
+    messages = _items(fake_sockets[0], "message")
+    assert len(messages) == 1
+    assert messages[0]["content"][0]["text"] == vb.GREETING_PROMPT
+    assert types[-1] == "response.create"
+    await bridge.stop()
+
+
+async def test_no_greeting_by_default(mock_db, fake_sockets):
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    assert _items(fake_sockets[0], "message") == []
+    await bridge.stop()
+
+
+async def test_registry_greets_only_on_the_first_attach(mock_db, fake_sockets, registry):
+    _mk_session()
+    await registry.attach(SID, "rtc_a", api_key=KEY, model=MODEL, max_call_minutes=5, greet=True)
+    await registry.attach(SID, "rtc_b", api_key=KEY, model=MODEL, max_call_minutes=5, greet=True)
+    assert len(_items(fake_sockets[0], "message")) == 1      # first attach greets
+    assert _items(fake_sockets[1], "message") == []          # replace-attach is silent
+    await registry.detach(SID)
+    # A NEW call on the same session (after hangup) greets again.
+    await registry.attach(SID, "rtc_c", api_key=KEY, model=MODEL, max_call_minutes=5, greet=True)
+    assert len(_items(fake_sockets[2], "message")) == 1
+    await registry.detach(SID)
+
+
+def test_state_carries_the_running_worker_count(mock_db, monkeypatch, registry):
+    from app.core.task_registry import task_registry
+
+    monkeypatch.setattr(
+        task_registry, "get_active",
+        lambda sid: [{"kind": "agent", "status": "running"}, {"kind": "shell", "status": "running"}],
+    )
+    assert registry.state(SID)["active_tasks"] == 1

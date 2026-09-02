@@ -32,14 +32,6 @@ from app.db import database as db
 VOICE_SETTINGS = "/api/v1/settings/voice"
 VOICE_ROOT = "/api/v1/voice"
 
-# The built-in voice-agent prompt texts, echoed by GET /settings/voice so the
-# UI can show and reset to them.
-INSTRUCTION_DEFAULTS = {
-    "base": voice_bridge.VOICE_INSTRUCTIONS,
-    "command": voice_bridge.DEFAULT_COMMAND_INSTRUCTIONS,
-    "chat": voice_bridge.DEFAULT_CHAT_INSTRUCTIONS,
-}
-
 RAW_KEY = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
 
 
@@ -106,6 +98,7 @@ class TestUnauthenticated:
         ("get", VOICE_SETTINGS),
         ("put", VOICE_SETTINGS),
         ("get", f"{VOICE_ROOT}/providers"),
+        ("get", f"{VOICE_ROOT}/agents"),
         ("post", f"{VOICE_ROOT}/preview"),
         ("post", f"{VOICE_ROOT}/sessions"),
         ("post", f"{VOICE_ROOT}/sessions/s1/secret"),
@@ -133,10 +126,7 @@ class TestVoiceSettings:
             "voice_voice": "marin",
             "voice_provider_id": None,
             "voice_max_call_minutes": 240,
-            "voice_instructions": "",
-            "voice_instructions_command": "",
-            "voice_instructions_chat": "",
-            "voice_instructions_defaults": INSTRUCTION_DEFAULTS,
+            "voice_app_tools_enabled": True,
         }
 
     def test_put_roundtrip(self, authenticated_client, mock_db):
@@ -147,6 +137,7 @@ class TestVoiceSettings:
             "voice_voice": "cedar",
             "voice_provider_id": pid,
             "voice_max_call_minutes": 30,
+            "voice_app_tools_enabled": False,
         })
         assert resp.status_code == 200, resp.text
         assert resp.json() == {
@@ -155,40 +146,21 @@ class TestVoiceSettings:
             "voice_voice": "cedar",
             "voice_provider_id": pid,
             "voice_max_call_minutes": 30,
-            "voice_instructions": "",
-            "voice_instructions_command": "",
-            "voice_instructions_chat": "",
-            "voice_instructions_defaults": INSTRUCTION_DEFAULTS,
+            "voice_app_tools_enabled": False,
         }
         # Persisted: a fresh GET returns the same values.
         assert authenticated_client.get(VOICE_SETTINGS).json() == resp.json()
 
-    def test_instructions_roundtrip_and_reset(self, authenticated_client, mock_db):
-        # Override two of the three prompts.
-        resp = authenticated_client.put(VOICE_SETTINGS, json={
-            "voice_instructions": "You are Jarvis.",
-            "voice_instructions_command": "Be extremely fast.",
-        })
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["voice_instructions"] == "You are Jarvis."
-        assert body["voice_instructions_command"] == "Be extremely fast."
-        assert body["voice_instructions_chat"] == ""
-        # Defaults are still echoed for the UI regardless of overrides.
-        assert body["voice_instructions_defaults"] == INSTRUCTION_DEFAULTS
-
-        # Empty string clears an override back to the built-in default.
-        resp = authenticated_client.put(VOICE_SETTINGS, json={"voice_instructions": ""})
-        assert resp.status_code == 200, resp.text
-        assert resp.json()["voice_instructions"] == ""
-        # The untouched override survives the partial update.
-        assert resp.json()["voice_instructions_command"] == "Be extremely fast."
-
-    def test_instructions_length_cap(self, authenticated_client, mock_db):
-        resp = authenticated_client.put(VOICE_SETTINGS, json={
-            "voice_instructions": "x" * 8001,
-        })
-        assert resp.status_code == 400
+    def test_prompt_overrides_are_gone(self, authenticated_client, mock_db):
+        """The prompt editors were removed: a stale stored override is ignored
+        and the API neither echoes nor accepts the old fields."""
+        db.set_system_setting("voice_instructions", "You are Jarvis.")
+        body = authenticated_client.get(VOICE_SETTINGS).json()
+        assert "voice_instructions" not in body
+        assert "voice_instructions_defaults" not in body
+        resp = authenticated_client.put(VOICE_SETTINGS, json={"voice_instructions": "x"})
+        assert resp.status_code == 200
+        assert "voice_instructions" not in resp.json()
 
     def test_partial_update_leaves_other_keys(self, authenticated_client, mock_db):
         authenticated_client.put(VOICE_SETTINGS, json={"voice_max_call_minutes": 15})
@@ -282,6 +254,48 @@ class TestVoiceProviders:
 # ============================================================================
 # Session creation
 # ============================================================================
+
+class TestVoiceAgents:
+    def test_empty_without_voice_assignments(self, authenticated_client, mock_db):
+        resp = authenticated_client.get(f"{VOICE_ROOT}/agents")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == []
+
+    def test_lists_voice_assigned_agents_with_their_leg(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        from types import SimpleNamespace
+        from app.core import provider_agent as pa
+
+        db.create_profile(
+            "coder", "Coder", "Writes code",
+            {"provider_models": {"__voice__": "sonnet"}},
+        )
+        _make_provider("prov-or", name="OpenRouter", provider_type="openrouter")
+        db.create_profile(
+            "scout", "Scout", None,
+            {"provider_models": {"__voice__": "prov:prov-or:meta/llama"}},
+        )
+        # A disabled provider's assignment is never offered.
+        _make_provider("prov-off", name="Off", enabled=False)
+        db.create_profile(
+            "ghost", "Ghost", None,
+            {"provider_models": {"__voice__": "prov:prov-off:x"}},
+        )
+        monkeypatch.setattr(
+            pa, "validate_provider_model", lambda *a, **kw: SimpleNamespace(ok=True),
+        )
+
+        resp = authenticated_client.get(f"{VOICE_ROOT}/agents")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == [
+            {"id": "coder", "name": "Coder", "description": "Writes code",
+             "model": "sonnet", "provider_id": None, "provider_name": "Claude"},
+            {"id": "scout", "name": "Scout", "description": "",
+             "model": "meta/llama", "provider_id": "prov-or",
+             "provider_name": "OpenRouter"},
+        ]
+
 
 class TestVoicePreview:
     def test_unknown_voice_returns_400(self, authenticated_client, mock_db):
@@ -680,6 +694,95 @@ class TestVoiceCallAttach:
 
         authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
 
+    def _tool_names(self, sock):
+        return [t["name"] for t in sock.sent[0]["session"]["tools"]]
+
+    def test_browser_attach_declares_app_tools_and_greets(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        _enable_voice()
+        _make_provider()
+        _mk_voice_session()
+
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
+        )
+        assert resp.status_code == 200, resp.text
+        names = self._tool_names(sidebands[0])
+        # Dispatch tools lead; the app-config surface follows; no file tools.
+        assert names[:6] == [
+            "dispatch_agent", "check_agent", "list_agents", "message_agent",
+            "stop_agent", "respond_approval",
+        ]
+        assert {"createAutomation", "listHooks", "createProfile", "listConnectors"} <= set(names)
+        assert not any(n in {"Edit", "Write", "Bash", "Read"} for n in names)
+        instructions = sidebands[0].sent[0]["session"]["instructions"]
+        assert instructions.startswith(voice_bridge.VOICE_INSTRUCTIONS)
+        assert voice_bridge.APP_TOOLS_INSTRUCTIONS in instructions
+        # The browser call opens with a greeting.
+        greetings = [
+            f for f in sidebands[0].sent
+            if f.get("type") == "conversation.item.create"
+            and f["item"].get("type") == "message"
+        ]
+        assert len(greetings) == 1
+        assert greetings[0]["item"]["content"][0]["text"] == voice_bridge.GREETING_PROMPT
+
+        # A reconnect (replace-attach) does not greet again.
+        authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_2"}
+        )
+        assert not [
+            f for f in sidebands[1].sent
+            if f.get("type") == "conversation.item.create"
+            and f["item"].get("type") == "message"
+        ]
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+
+    def test_app_tools_toggle_and_api_users_are_dispatch_only(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        _enable_voice(voice_app_tools_enabled="false")
+        _make_provider()
+        _mk_voice_session()
+        authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
+        )
+        assert len(self._tool_names(sidebands[0])) == 6
+        assert voice_bridge.APP_TOOLS_INSTRUCTIONS not in sidebands[0].sent[0]["session"]["instructions"]
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+
+        # Toggle on, but an API-key user's session never gets config tools.
+        _enable_voice(voice_app_tools_enabled="true")
+        db.create_api_user("api-1", "API One", "hash-1")
+        db.create_session(
+            session_id="voice-api-user", profile_id="default", title="Voice session",
+            provider_id="prov-openai", mode="voice", api_user_id="api-1",
+        )
+        authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/voice-api-user/call", json={"call_id": "rtc_2"}
+        )
+        assert len(self._tool_names(sidebands[1])) == 6
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/voice-api-user/hangup")
+
+    def test_native_attach_gets_the_mode_appendix_and_no_greeting(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        _enable_voice()
+        _make_provider()
+        _mk_voice_session()
+        authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call",
+            json={"call_id": "rtc_1", "session_mode": "chat"},
+        )
+        instructions = sidebands[0].sent[0]["session"]["instructions"]
+        assert voice_bridge.DEFAULT_CHAT_INSTRUCTIONS in instructions
+        assert not [
+            f for f in sidebands[0].sent
+            if f.get("type") == "conversation.item.create"
+        ]
+        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
+
     def test_command_attach_hides_the_session(
         self, authenticated_client, mock_db, sidebands, monkeypatch
     ):
@@ -894,7 +997,7 @@ class TestVoiceState:
         assert resp.status_code == 200, resp.text
         assert resp.json() == {
             "active": False, "connected": False, "started_at": None, "model": None,
-            "usage": {}, "estimated_cost_usd": None,
+            "usage": {}, "estimated_cost_usd": None, "active_tasks": 0,
         }
 
     def test_state_while_attached(self, authenticated_client, mock_db, sidebands):
@@ -919,7 +1022,7 @@ class TestVoiceState:
         ).json()
         assert after == {
             "active": False, "connected": False, "started_at": None, "model": None,
-            "usage": {}, "estimated_cost_usd": None,
+            "usage": {}, "estimated_cost_usd": None, "active_tasks": 0,
         }
 
     def test_state_for_a_chat_session_returns_404(self, authenticated_client, mock_db):

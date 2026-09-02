@@ -16,7 +16,8 @@
 		decodeProviderModel,
 		getProviders,
 		getProviderDisplay,
-		NATIVE_PROVIDER_KEY
+		NATIVE_PROVIDER_KEY,
+		VOICE_PROVIDER_KEY
 	} from '$lib/constants/models';
 	import { onMount } from 'svelte';
 
@@ -190,9 +191,11 @@
 
 	function providerAssignmentCount(agent: Subagent): number {
 		const config = agent.config || {};
+		// The voice entry is a leg choice, not a provider row — it does not
+		// count as one of the provider assignments a calling model sees.
 		const keys = new Set(
 			Object.entries(config.provider_models || {})
-				.filter(([key, value]) => key && typeof value === 'string' && value.trim())
+				.filter(([key, value]) => key && key !== VOICE_PROVIDER_KEY && typeof value === 'string' && value.trim())
 				.map(([key]) => key)
 		);
 		if (config.model) keys.add(config.provider || NATIVE_PROVIDER_KEY);
@@ -339,6 +342,25 @@
 					</div>
 				</div>
 			{/each}
+			<!-- Voice is not a provider: a voice call is funded by an OpenAI
+			     Realtime row, but the workers it dispatches can run on any leg.
+			     This picks that leg (native Claude or any provider model) and is
+			     what makes the agent dispatchable from a call at all. -->
+			<div class="set-row voice-row">
+				<div class="lab">
+					<h4>Voice<span class="hint"> · calls</span></h4>
+					<p>Model this agent runs on when the voice agent hands it work. Leave unset to keep it out of voice calls.</p>
+				</div>
+				<div class="ctl">
+					<ModelPicker
+						value={profileForm.provider_models[VOICE_PROVIDER_KEY] || ''}
+						allowEmpty
+						emptyLabel="Not available in voice calls"
+						allowCustom={false}
+						onSelect={(value) => setProviderModel(VOICE_PROVIDER_KEY, value)}
+					/>
+				</div>
+			</div>
 		</div>
 
 		<div class="set-group">

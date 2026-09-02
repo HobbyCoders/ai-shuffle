@@ -91,7 +91,7 @@ import json
 import logging
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 if TYPE_CHECKING:  # pragma: no cover — annotation-only; every DB import here is
     # deliberately lazy (see the function bodies), so the row types ride the
@@ -579,12 +579,18 @@ async def dispatch_task_tool(
     caller_provider_id: Any = _PROVIDER_UNSET,
     launch_tool_use_id: Optional[str] = None,
     agent_registry: Optional[Dict[str, Any]] = None,
+    roster: Optional[Sequence[Any]] = None,
 ) -> Dict[str, Any]:
     """Dispatch through the exact provider-scoped subagent roster.
 
     DB agents must be configured on the caller's effective provider. Fluid
     file/plugin definitions remain available as a fallback and borrow the
     caller's profile, provider, and selected model; they never switch legs.
+
+    ``roster`` replaces the caller-provider roster with an already-admitted
+    one — the voice bridge passes ``available_voice_subagents()``, whose
+    targets each PIN their own leg (``provider_pinned``): the worker then runs
+    on the target's provider/model, not on whatever funds the caller.
     """
     from app.core import provider_agent
     from app.core.config import settings
@@ -628,8 +634,12 @@ async def dispatch_task_tool(
     )
 
     ref = (args.get("agent") or "").strip()
-    roster = available_subagents(caller_pid, effective_provider_id)
+    if roster is None:
+        roster = available_subagents(caller_pid, effective_provider_id)
     target, roster_error = resolve_subagent(ref, roster)
+    if target is not None and getattr(target, "provider_pinned", False):
+        # A pinned target (voice roster) chooses the worker's leg itself.
+        effective_provider_id = target.provider_id or None
 
     # Fluid file/plugin definitions have no Agents-UI row. Keep them usable as
     # a fallback, but never let one shadow a stored DB agent that is unavailable

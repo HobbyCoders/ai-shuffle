@@ -32,6 +32,8 @@ function stateFor(sessionId: string | null, status: VoiceCallStatus): VoiceCallS
 		startedAt: null,
 		notice: null,
 		model: null,
+		agentSpeaking: false,
+		userSpeaking: false,
 	};
 }
 

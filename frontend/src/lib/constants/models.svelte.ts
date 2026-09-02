@@ -83,6 +83,15 @@ export const CUSTOM_VALUE = '__custom__';
 /** Reserved key used by agent `provider_models` maps for native Claude. */
 export const NATIVE_PROVIDER_KEY = '__native__';
 
+/**
+ * The voice-mode leg of an agent's subagent map (`config.provider_models`).
+ * Not a provider row: a voice call is funded by an OpenAI Realtime provider,
+ * but the workers it dispatches run wherever this entry says — a bare native
+ * model id, or a `prov:<providerId>:<modelId>` composite. Mirrors the backend's
+ * `VOICE_PROVIDER_KEY` (app/core/agent_provider_models.py).
+ */
+export const VOICE_PROVIDER_KEY = '__voice__';
+
 // ---------------------------------------------------------------------------
 // Provider-model composite codec (`prov:<providerId>:<modelId>`)
 // ---------------------------------------------------------------------------

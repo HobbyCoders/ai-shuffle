@@ -24,6 +24,14 @@ logger = logging.getLogger(__name__)
 # leg a stable JSON/UI key.
 NATIVE_PROVIDER_KEY = "__native__"
 
+# The voice agent is not a provider: a voice call is funded by an OpenAI
+# Realtime row, but the WORKERS it dispatches can run on any leg. This key in
+# ``config.provider_models`` holds the agent's voice-mode assignment — a bare
+# native model id (Claude) or a ``prov:<providerId>:<modelId>`` composite — and
+# is what makes an agent dispatchable from a voice call at all. Same sentinel
+# discipline as the native key: it can never collide with a provider row id.
+VOICE_PROVIDER_KEY = "__voice__"
+
 
 def provider_key(provider_id: str | None) -> str:
     """Return the config-map key for a provider binding."""
@@ -78,6 +86,12 @@ class SubagentTarget:
     # the background whatever the call asks for, so the contract must not offer
     # ``mode`` as if it were a live choice.
     background_default: bool = False
+    # A target normally runs on the CALLER's provider (the map entry the caller
+    # provider selected). A voice-mode target carries its own leg instead:
+    # ``provider_pinned`` says ``provider_id`` (``None`` = native Claude) is the
+    # leg the worker must run on, whatever the caller is funded by.
+    provider_id: str | None = None
+    provider_pinned: bool = False
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -216,6 +230,108 @@ def available_subagents(
                 background_default=is_read_only_tool_surface(
                     config.get("allowed_tools")
                 ),
+            )
+        )
+
+    return tuple(sorted(targets, key=lambda target: (target.name.casefold(), target.id)))
+
+
+def decode_voice_binding(value: Any) -> tuple[str | None, str] | None:
+    """``(provider_id, model_id)`` for a stored voice assignment, else ``None``.
+
+    A bare model id is the native Claude leg (``provider_id=None``); a
+    ``prov:<providerId>:<modelId>`` composite names a provider row. Anything
+    empty or malformed reads as "not assigned".
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    from app.core.query_options import decode_provider_model
+
+    text = value.strip()
+    decoded = decode_provider_model(text)
+    if decoded is not None:
+        return decoded
+    if text.startswith("prov:"):
+        return None  # a composite with a missing half — not a native id
+    return None, text
+
+
+def available_voice_subagents(
+    exclude_profile_id: str | None = None,
+) -> tuple[SubagentTarget, ...]:
+    """The roster a VOICE call may dispatch: agents with a voice assignment.
+
+    Voice mode has no caller provider to scope by — the call is funded by an
+    OpenAI Realtime row that says nothing about where a worker should run — so
+    eligibility is the agent's own ``__voice__`` entry, decoded into the leg it
+    pins. A provider-bound assignment is dropped (never offered) when its row is
+    missing or disabled, or the model fails the provider's validation, so a name
+    the voice model reads back is always one dispatch accepts.
+    """
+    from app.db import database
+
+    try:
+        rows = database.get_all_profiles() or []
+    except Exception:
+        logger.debug("Could not list profiles for voice subagent discovery", exc_info=True)
+        return ()
+
+    from app.core.builtin_subagents import is_read_only_tool_surface
+
+    provider_cache: dict[str, Any] = {}
+    targets: list[SubagentTarget] = []
+    for row in rows:
+        target_id = str(row.get("id") or "").strip()
+        if not target_id or target_id == exclude_profile_id:
+            continue
+        config = row.get("config") or {}
+        binding = decode_voice_binding(
+            normalized_provider_models(config).get(VOICE_PROVIDER_KEY)
+        )
+        if binding is None:
+            continue
+        provider_id, model = binding
+
+        if provider_id:
+            if provider_id not in provider_cache:
+                try:
+                    provider_cache[provider_id] = database.get_model_provider(
+                        provider_id, include_token=False
+                    )
+                except TypeError:
+                    try:
+                        provider_cache[provider_id] = database.get_model_provider(provider_id)
+                    except Exception:
+                        provider_cache[provider_id] = None
+                except Exception:
+                    provider_cache[provider_id] = None
+            provider = provider_cache[provider_id]
+            if not provider or not provider.get("enabled"):
+                continue
+            from app.core.provider_agent import validate_provider_model
+
+            try:
+                validation = validate_provider_model(
+                    provider_id, model, provider_row=provider, require_servable=False,
+                )
+            except Exception:
+                logger.debug(
+                    "Could not validate voice subagent model %s on provider %s",
+                    model, provider_id, exc_info=True,
+                )
+                continue
+            if not validation.ok:
+                continue
+
+        targets.append(
+            SubagentTarget(
+                id=target_id,
+                name=str(row.get("name") or target_id).strip() or target_id,
+                description=_clean_description(row.get("description")),
+                model=model,
+                background_default=is_read_only_tool_surface(config.get("allowed_tools")),
+                provider_id=provider_id,
+                provider_pinned=True,
             )
         )
 

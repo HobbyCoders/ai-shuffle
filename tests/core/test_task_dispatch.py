@@ -1188,3 +1188,51 @@ def test_discover_agent_registry_shape(file_agent_project):
     assert set(registry) == {"researcher"}
     assert registry["researcher"].body.strip().startswith("You are a careful")
     assert bt._discover_agent_registry(None) is None
+
+
+def test_roster_override_pins_the_targets_own_leg(agents, monkeypatch):
+    """A pinned roster (voice) decides the worker's provider, not the caller."""
+    from app.core import agent_provider_models as apm
+
+    _mk_session(agents, "s-voice", "root-agent")
+    monkeypatch.setattr(td, "_credential_gap", lambda provider_id: None)
+    seen = []
+
+    async def fake_worker(**kwargs):
+        seen.append(kwargs)
+        return WorkerOutcome(ok=True, session_id="w-voice", report="done")
+
+    roster = (
+        apm.SubagentTarget("helper", "Helper", "", "sonnet", provider_pinned=True),
+        apm.SubagentTarget(
+            "gpt-bound", "GPT Bound", "", "gpt-5",
+            provider_id="prov-x", provider_pinned=True,
+        ),
+    )
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        native = asyncio.run(td.dispatch_task_tool(
+            {"agent": "helper", "prompt": "go", "mode": "sync"},
+            caller_session_id="s-voice",
+            caller_provider_id="prov-openai-realtime",
+            roster=roster,
+        ))
+        bound = asyncio.run(td.dispatch_task_tool(
+            {"agent": "GPT Bound", "prompt": "go", "mode": "sync"},
+            caller_session_id="s-voice",
+            caller_provider_id="prov-openai-realtime",
+            roster=roster,
+        ))
+        # The roster is authoritative: an agent outside it is not dispatchable
+        # even though it exists as a profile.
+        outside = asyncio.run(td.dispatch_task_tool(
+            {"agent": "root-agent", "prompt": "go"},
+            caller_session_id="s-voice",
+            roster=roster,
+        ))
+
+    assert native["ok"] and seen[0]["provider_id"] is None
+    assert seen[0]["model_id"] == "sonnet"
+    assert bound["ok"] and seen[1]["provider_id"] == "prov-x"
+    assert seen[1]["model_id"] == "gpt-5"
+    assert outside["ok"] is False
+    assert "not available" in outside["error"]

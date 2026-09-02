@@ -350,3 +350,86 @@ def test_duplicate_subagent_names_require_an_id(mock_db):
     assert target is None
     assert "ambiguous" in error
     assert "helper-a" in error and "helper-b" in error
+
+
+# ─── voice roster ─────────────────────────────────────────────────────────────
+
+def test_decode_voice_binding_shapes():
+    from app.core.agent_provider_models import decode_voice_binding
+
+    assert decode_voice_binding("sonnet") == (None, "sonnet")
+    assert decode_voice_binding("  opus ") == (None, "opus")
+    assert decode_voice_binding("prov:row-1:meta/llama:free") == ("row-1", "meta/llama:free")
+    assert decode_voice_binding("prov:broken") is None
+    assert decode_voice_binding("") is None
+    assert decode_voice_binding(None) is None
+
+
+def test_voice_roster_is_the_voice_assigned_agents(mock_db, monkeypatch):
+    from types import SimpleNamespace
+    from app.core import provider_agent as pa
+    from app.core.agent_provider_models import (
+        VOICE_PROVIDER_KEY,
+        available_voice_subagents,
+    )
+    from app.db import database
+
+    database.create_profile("plain", "Plain", None, {"model": "opus"})
+    database.create_profile(
+        "native-voice", "Native Voice", "Helps by voice",
+        {"provider_models": {NATIVE_PROVIDER_KEY: "opus", VOICE_PROVIDER_KEY: "sonnet"}},
+    )
+    database.create_model_provider(
+        provider_id="row-1", name="Row", provider_type="openrouter",
+        base_url="https://x", auth_token="k", enabled=True,
+    )
+    database.create_profile(
+        "bound-voice", "Bound Voice", None,
+        {"provider_models": {VOICE_PROVIDER_KEY: "prov:row-1:meta/llama"}},
+    )
+    database.create_profile(
+        "missing-provider", "Missing", None,
+        {"provider_models": {VOICE_PROVIDER_KEY: "prov:nope:m"}},
+    )
+    database.create_profile(
+        "read-only", "Explorer", None,
+        {"provider_models": {VOICE_PROVIDER_KEY: "haiku"}, "allowed_tools": ["Read", "Grep"]},
+    )
+    monkeypatch.setattr(
+        pa, "validate_provider_model", lambda *a, **kw: SimpleNamespace(ok=True),
+    )
+
+    roster = available_voice_subagents()
+    by_id = {t.id: t for t in roster}
+    assert list(by_id) == ["bound-voice", "read-only", "native-voice"]
+    assert all(t.provider_pinned for t in roster)
+    assert by_id["native-voice"].provider_id is None
+    assert by_id["native-voice"].model == "sonnet"
+    assert by_id["bound-voice"].provider_id == "row-1"
+    assert by_id["bound-voice"].model == "meta/llama"
+    assert by_id["read-only"].background_default is True
+
+    # The voice key never leaks into a provider-scoped roster.
+    assert model_for_provider(
+        {"provider_models": {VOICE_PROVIDER_KEY: "sonnet"}}, None
+    ) is None
+    assert available_voice_subagents(exclude_profile_id="native-voice") and \
+        "native-voice" not in {t.id for t in available_voice_subagents("native-voice")}
+
+
+def test_voice_roster_drops_a_disabled_provider(mock_db):
+    from app.core.agent_provider_models import (
+        VOICE_PROVIDER_KEY,
+        available_voice_subagents,
+    )
+    from app.db import database
+
+    database.create_model_provider(
+        provider_id="row-off", name="Off", provider_type="openrouter",
+        base_url="https://x", auth_token="k", enabled=False,
+    )
+    database.create_profile(
+        "off-voice", "Off Voice", None,
+        {"provider_models": {VOICE_PROVIDER_KEY: "prov:row-off:m"}},
+    )
+    assert available_voice_subagents() == ()
