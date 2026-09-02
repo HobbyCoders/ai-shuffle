@@ -367,7 +367,9 @@ async def test_subprocess_popen_is_refused_by_audit_hook() -> None:
             timeout=10, on_host_call=_no_tools,
         )
         assert spawned.error is not None
-        assert "os.spawn is blocked" in spawned.error
+        # Windows raises ``os.spawn`` natively; POSIX implements spawnv in
+        # Python on top of ``fork``, so the guard names the first denied event.
+        assert "os.spawn is blocked" in spawned.error or "os.fork is blocked" in spawned.error
     finally:
         await k.stop()
 

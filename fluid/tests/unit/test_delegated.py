@@ -964,9 +964,15 @@ async def _rpc_lines(address: str, *reqs: dict) -> list:
     out = []
     try:
         for req in reqs:
-            writer.write(json.dumps(req).encode() + b"\n")
-            await writer.drain()
-            line = await reader.readline()
+            try:
+                writer.write(json.dumps(req).encode() + b"\n")
+                await writer.drain()
+                line = await reader.readline()
+            except (ConnectionError, OSError):
+                # The server hung up on an earlier request. A unix socket
+                # reports that from drain(); TCP loopback buffers the write
+                # and returns an empty read. Both mean "no answer".
+                line = b""
             out.append(json.loads(line) if line else None)
     finally:
         writer.close()

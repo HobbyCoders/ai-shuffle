@@ -688,6 +688,11 @@ def _boot(config: dict) -> None:
     _STDOUT_CAP = config.get("stdout_cap", truncate.DEFAULT_STDOUT_CAP)
     _CKPT_MAX_BYTES = int(config.get("checkpoint_max_bytes", 0) or 0)
     _apply_rlimit(config.get("mem_limit_bytes", 0))
+    # Importing a stdlib module whose .pyc is missing (a fresh interpreter,
+    # or a read-only install) makes importlib open the cache file for
+    # writing, which the guard refuses. The kernel never needs bytecode
+    # caches, so turn them off rather than widen the import carve-out.
+    sys.dont_write_bytecode = True
     # The hard boundary: an audit hook the interpreter consults at every
     # spawn/socket/open no matter which object the cell reached it through.
     # Installed before the namespace exists, so no cell ever runs without it.

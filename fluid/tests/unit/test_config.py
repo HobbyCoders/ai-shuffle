@@ -399,8 +399,10 @@ def test_system_config_path_per_platform() -> None:
 
     assert system_config_path("linux", {}) == Path("/etc/fluid/config.toml")
     assert system_config_path("darwin", {}) == Path("/etc/fluid/config.toml")
-    assert system_config_path("win32", {"ProgramData": r"D:\PD"}) == Path(r"D:\PD\fluid\config.toml")
-    assert system_config_path("win32", {}) == Path(r"C:\ProgramData\fluid\config.toml")
+    # Joined, not spelled with backslashes: on POSIX ``Path`` treats ``\`` as
+    # an ordinary character, so a literal ``D:\PD\fluid`` is one component.
+    assert system_config_path("win32", {"ProgramData": r"D:\PD"}) == Path(r"D:\PD") / "fluid" / "config.toml"
+    assert system_config_path("win32", {}) == Path(r"C:\ProgramData") / "fluid" / "config.toml"
 
 
 
