@@ -4,10 +4,9 @@
 	 * composer's effort tag (mockup: docs/design/composer-split-chips.mockup.html,
 	 * state 03).
 	 *
-	 * Header "Effort · <level>" with a help toggle, a five-stop slider with tick
-	 * marks, the stop names, Faster / Smarter end labels and a one-line
-	 * description of the current level. The Fast service tier rides along in
-	 * the header when the picked model carries it, so the compact card never
+	 * Header "Effort · <level>" with a five-stop slider, tick marks, the stop
+	 * names, and Faster / Smarter end labels. The Fast service tier rides along
+	 * in the header when the picked model carries it, so the compact card never
 	 * hides a knob the full controls popover offers.
 	 *
 	 * `value === null` means no level is pinned for the chat — the model runs at
@@ -15,7 +14,7 @@
 	 * sits on the middle stop without any stop reading as selected; the first
 	 * drag pins a level.
 	 */
-	import { CircleHelp, Zap } from 'lucide-svelte';
+	import { Zap } from 'lucide-svelte';
 
 	interface ControlOption {
 		value: string;
@@ -50,8 +49,6 @@
 	const currentLabel = $derived(pinned ? (current?.label ?? 'Effort') : 'Auto');
 	const progress = $derived(maxIndex > 0 ? (index / maxIndex) * 100 : 0);
 
-	let showHelp = $state(false);
-
 	function handleInput(event: Event) {
 		const option = options[Number((event.currentTarget as HTMLInputElement).value)];
 		if (option && option.value !== value) onSelect(option.value);
@@ -61,7 +58,11 @@
 <div class="effort-pop-card">
 	<div class="pop-head">
 		<span class="pop-title">Effort</span>
-		<span class="pop-value" data-effort-value>{currentLabel}</span>
+		<span class="pop-value-slot">
+			{#key currentLabel}
+				<span class="pop-value" data-effort-value>{currentLabel}</span>
+			{/key}
+		</span>
 		{#if fastSupported}
 			<button
 				type="button"
@@ -75,17 +76,6 @@
 				<Zap size={13} strokeWidth={2} aria-hidden="true" />
 			</button>
 		{/if}
-		<button
-			type="button"
-			class="pop-help"
-			class:on={showHelp}
-			onclick={() => (showHelp = !showHelp)}
-			aria-pressed={showHelp}
-			aria-label="What effort changes"
-			title="What effort changes"
-		>
-			<CircleHelp size={14} strokeWidth={1.6} aria-hidden="true" />
-		</button>
 	</div>
 
 	<!-- The track, fill and ticks are drawn by hand underneath a native range
@@ -118,19 +108,6 @@
 		{/each}
 	</div>
 	<div class="ends" aria-hidden="true"><span>Faster</span><span>Smarter</span></div>
-	<p class="pop-note">
-		{pinned
-			? (current?.description ?? '')
-			: 'Model default. Drag the slider to pin a level for this chat.'}
-	</p>
-
-	{#if showHelp}
-		<ul class="help-list">
-			{#each options as option (option.value)}
-				<li><strong>{option.label}</strong><span>{option.description}</span></li>
-			{/each}
-		</ul>
-	{/if}
 </div>
 
 <style>
@@ -152,48 +129,49 @@
 		color: var(--foreground);
 	}
 
-	.pop-value {
-		font-size: 13px;
-		color: var(--muted-foreground);
+	.pop-value-slot {
+		position: relative;
+		display: inline-grid;
+		align-items: center;
+		overflow: hidden;
 	}
 
-	.pop-help,
+	.pop-value {
+		grid-area: 1 / 1;
+		font-size: 13px;
+		color: var(--muted-foreground);
+		animation: pop-value-in 200ms ease-out;
+	}
+
+	@keyframes pop-value-in {
+		from {
+			opacity: 0;
+			transform: translateY(0.45em);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
 	.fast-toggle {
 		display: grid;
 		place-items: center;
 		width: 20px;
 		height: 20px;
+		margin-left: auto;
 		padding: 0;
 		background: transparent;
 		border: 0;
-		border-radius: 50%;
+		border-radius: 6px;
 		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: background-color 0.12s ease, color 0.12s ease;
 	}
 
-	.pop-help {
-		margin-left: auto;
-	}
-
-	.fast-toggle {
-		margin-left: auto;
-		border-radius: 6px;
-	}
-
-	.fast-toggle + .pop-help {
-		margin-left: 0;
-	}
-
-	.pop-help:hover,
 	.fast-toggle:hover {
 		background: var(--muted);
 		color: var(--foreground);
-	}
-
-	.pop-help.on {
-		color: var(--foreground);
-		background: var(--muted);
 	}
 
 	.fast-toggle.on {
@@ -205,7 +183,6 @@
 		fill: currentColor;
 	}
 
-	.pop-help:focus-visible,
 	.fast-toggle:focus-visible {
 		outline: 1px solid var(--primary);
 		outline-offset: 2px;
@@ -351,37 +328,9 @@
 		font-size: 11.5px;
 	}
 
-	.pop-note {
-		margin: 10px 0 0;
-		color: var(--muted-foreground);
-		font-size: 11.5px;
-		line-height: 1.4;
-	}
-
-	.help-list {
-		margin: 10px 0 0;
-		padding: 10px 0 0;
-		border-top: 1px solid var(--border);
-		list-style: none;
-		display: flex;
-		flex-direction: column;
-		gap: 5px;
-		font-size: 11.5px;
-		line-height: 1.4;
-	}
-
-	.help-list li {
-		display: flex;
-		gap: 8px;
-	}
-
-	.help-list strong {
-		flex: 0 0 52px;
-		color: var(--foreground);
-		font-weight: 600;
-	}
-
-	.help-list span {
-		color: var(--muted-foreground);
+	@media (prefers-reduced-motion: reduce) {
+		.pop-value {
+			animation: none;
+		}
 	}
 </style>

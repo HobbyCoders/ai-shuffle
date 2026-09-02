@@ -17,18 +17,19 @@ function slider(): HTMLInputElement {
 }
 
 describe('EffortPopoverCard', () => {
-	it('shows the pinned level, its description and a five-stop slider', () => {
+	it('shows the pinned level and a five-stop slider', () => {
 		render(EffortPopoverCard, { props: { options, value: 'high', onSelect: vi.fn() } });
 
 		expect(slider().max).toBe('4');
 		expect(slider().value).toBe('2');
 		expect(slider().getAttribute('aria-valuetext')).toBe('High');
 		expect(document.querySelector('[data-effort-value]')?.textContent).toBe('High');
-		expect(screen.getByText('Thorough reasoning')).toBeTruthy();
 		expect(screen.getByText('Faster')).toBeTruthy();
 		expect(screen.getByText('Smarter')).toBeTruthy();
 		expect(document.querySelectorAll('.stops span')).toHaveLength(5);
 		expect(document.querySelector('.stops .on')?.textContent).toBe('High');
+		expect(document.querySelector('.pop-note')).toBeNull();
+		expect(screen.queryByRole('button', { name: /what effort changes/i })).toBeNull();
 	});
 
 	it('emits the option at the dragged stop', async () => {
@@ -54,7 +55,7 @@ describe('EffortPopoverCard', () => {
 		expect(document.querySelector('[data-effort-value]')?.textContent).toBe('Auto');
 		expect(document.querySelector('.stops .on')).toBeNull();
 		expect(document.querySelector('.slider.unpinned')).toBeTruthy();
-		expect(screen.getByText(/model default/i)).toBeTruthy();
+		expect(document.querySelector('.pop-note')).toBeNull();
 	});
 
 	it('pins a level from the unpinned resting position', async () => {
@@ -79,12 +80,13 @@ describe('EffortPopoverCard', () => {
 		expect(screen.queryByRole('button', { name: 'Fast mode' })).toBeNull();
 	});
 
-	it('expands the level guide from the help button', async () => {
-		render(EffortPopoverCard, { props: { options, value: 'high', onSelect: vi.fn() } });
+	it('updates the header level when the pinned value changes', async () => {
+		const onSelect = vi.fn();
+		const view = render(EffortPopoverCard, { props: { options, value: 'high', onSelect } });
 
-		expect(screen.queryByText('Maximum reasoning depth')).toBeNull();
-		await fireEvent.click(screen.getByRole('button', { name: /what effort changes/i }));
-		expect(screen.getByText('Maximum reasoning depth')).toBeTruthy();
-		expect(document.querySelectorAll('.help-list li')).toHaveLength(5);
+		expect(document.querySelector('[data-effort-value]')?.textContent).toBe('High');
+		await view.rerender({ options, value: 'xhigh', onSelect });
+		expect(document.querySelector('[data-effort-value]')?.textContent).toBe('XHigh');
+		expect(slider().getAttribute('aria-valuetext')).toBe('XHigh');
 	});
 });

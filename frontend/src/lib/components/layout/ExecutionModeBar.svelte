@@ -7,8 +7,8 @@
 	 * clicking opens an upward menu with Local as the base mode and an
 	 * orthogonal Worktree checkbox) with an inline branch selector when
 	 * worktree mode is active. Includes "New Branch" creation modal. In Auto
-	 * mode a second pill lets the user pick the base branch the auto-created
-	 * worktree branch forks from.
+	 * mode the branch chip reads "Auto from {base}" and the base-branch picker
+	 * lives in that same dropdown.
 	 *
 	 * Uses the git store for worktree/branch data and syncWorktrees()
 	 * to clean up stale DB records on project change. Worktree creation is
@@ -52,9 +52,6 @@
 	// dropdown above; its own container ref so outside-click closes it independently).
 	let showModeDropdown = $state(false);
 	let modeDropdownRef = $state<HTMLDivElement | null>(null);
-	// Separate dropdown for the base-branch picker (only shown in Auto mode).
-	let showBaseDropdown = $state(false);
-	let baseDropdownRef = $state<HTMLDivElement | null>(null);
 	let loading = $state(false);
 	let lastSyncedProject = $state<string | null>(null);
 
@@ -119,6 +116,7 @@
 
 	// Base branch an auto-created worktree branch forks FROM (defaults to 'main').
 	const baseBranch = $derived($activeSession.worktreeBaseBranch || 'main');
+	const branchChipLabel = $derived(isAutoMode ? `Auto from ${baseBranch}` : currentBranch);
 
 	// Branches valid as a fork base. Unlike `filteredBranches` this keeps main/master,
 	// the checked-out branch, and branches that already have worktrees (any branch is a
@@ -285,17 +283,10 @@
 		}
 	}
 
-	function toggleBaseDropdown() {
-		showBaseDropdown = !showBaseDropdown;
-		if (showBaseDropdown && $activeSession.project) {
-			refreshWorktrees();
-		}
-	}
-
 	function selectBaseBranch(branch: Branch) {
 		const name = branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name;
 		activeSession.setWorktreeBaseBranch(name);
-		showBaseDropdown = false;
+		showBranchDropdown = false;
 	}
 
 	async function refreshWorktrees() {
@@ -317,9 +308,6 @@
 		if (showModeDropdown && modeDropdownRef && !modeDropdownRef.contains(e.target as Node)) {
 			showModeDropdown = false;
 		}
-		if (showBaseDropdown && baseDropdownRef && !baseDropdownRef.contains(e.target as Node)) {
-			showBaseDropdown = false;
-		}
 	}
 
 	// --- New Branch modal ---
@@ -327,14 +315,6 @@
 	function openCreateModal() {
 		showBranchDropdown = false;
 		showCreateModal = true;
-	}
-
-	// The "new worktree" chip: the created branch is staged as the worktree
-	// branch (handleBranchCreated), which only means something in worktree
-	// mode, so flip the mode on first.
-	function openNewWorktree() {
-		if (!worktreeOn) setMode('worktree');
-		openCreateModal();
 	}
 
 	function handleBranchCreated(branchName: string) {
@@ -456,13 +436,13 @@
 				class:auto-mode={isAutoMode}
 				class:open={showBranchDropdown}
 				onclick={toggleDropdown}
-				aria-label="Worktree branch: {currentBranch}"
+				aria-label="Worktree branch: {branchChipLabel}"
 				aria-haspopup="menu"
 				aria-expanded={showBranchDropdown}
-				title={isAutoMode ? 'Branch will be auto-generated from your message. Click to select a specific branch.' : `Current branch: ${currentBranch}`}
+				title={isAutoMode ? `Auto from ${baseBranch}. Branch will be auto-generated from your message.` : `Current branch: ${currentBranch}`}
 			>
 				<GitBranch size={12} strokeWidth={1.6} />
-				<span class="ctx-chip-label branch-name">{currentBranch}</span>
+				<span class="ctx-chip-label branch-name">{branchChipLabel}</span>
 				{#if sheetMode}
 					<ChevronDown size={12} strokeWidth={1.5} />
 				{/if}
@@ -488,6 +468,28 @@
 							<span class="auto-hint">from message</span>
 						</button>
 						<div class="branch-divider"></div>
+
+						{#if isAutoMode}
+							<div class="branch-section-label">Base branch</div>
+							{#each baseBranchOptions as branch}
+								<button
+									type="button"
+									class="branch-item"
+									class:active={(branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name) === baseBranch}
+									onclick={() => selectBaseBranch(branch)}
+								>
+									<GitBranch size={13} strokeWidth={1.5} />
+									<span class="branch-item-name">{branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name}</span>
+									<span class="branch-location-badge" class:remote={branch.remote}>
+										{branch.remote ? 'remote' : 'local'}
+									</span>
+								</button>
+							{/each}
+							{#if baseBranchOptions.length === 0}
+								<p class="branch-empty">No branches available</p>
+							{/if}
+							<div class="branch-divider"></div>
+						{/if}
 
 						<!-- Active Worktrees -->
 						{#if filteredWorktrees.length > 0}
@@ -544,59 +546,6 @@
 			{/if}
 		</div>
 
-		<!-- Base-branch picker: only shown in Auto mode, since the base branch only
-		     affects the NEW branch auto-created at send time. Once a specific branch
-		     or existing worktree is staged, there's nothing to fork from a base. -->
-		{#if isAutoMode}
-			<div class="branch-selector" bind:this={baseDropdownRef}>
-				<button
-					type="button"
-					class="ctx-chip branch-trigger"
-					class:open={showBaseDropdown}
-					onclick={toggleBaseDropdown}
-					aria-label="Base branch: {baseBranch}"
-					aria-haspopup="menu"
-					aria-expanded={showBaseDropdown}
-					title={`New worktree branch will be created from ${baseBranch}. Click to change the base branch.`}
-				>
-					<GitBranch size={12} strokeWidth={1.6} />
-					<span class="ctx-chip-label branch-name">from {baseBranch}</span>
-					{#if sheetMode}
-						<ChevronDown size={12} strokeWidth={1.5} />
-					{/if}
-				</button>
-
-				{#if showBaseDropdown}
-					<div class="branch-dropdown">
-						{#if loading}
-							<div class="branch-loading">
-								<Loader2 size={14} class="animate-spin" />
-								<span>Loading...</span>
-							</div>
-						{:else}
-							<div class="branch-section-label">Base branch</div>
-							{#each baseBranchOptions as branch}
-								<button
-									type="button"
-									class="branch-item"
-									class:active={(branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name) === baseBranch}
-									onclick={() => selectBaseBranch(branch)}
-								>
-									<GitBranch size={13} strokeWidth={1.5} />
-									<span class="branch-item-name">{branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name}</span>
-									<span class="branch-location-badge" class:remote={branch.remote}>
-										{branch.remote ? 'remote' : 'local'}
-									</span>
-								</button>
-							{/each}
-							{#if baseBranchOptions.length === 0}
-								<p class="branch-empty">No branches available</p>
-							{/if}
-						{/if}
-					</div>
-				{/if}
-			</div>
-		{/if}
 		{/if}
 
 		<!-- Worktree modifier: a checkbox chip. Orthogonal to the runner choice
@@ -609,23 +558,6 @@
 				</span>
 				<span class="ctx-chip-label">worktree</span>
 			</label>
-
-			<!-- Desktop pill row only — the mobile sheet already has Auto / from
-			     {base} plus New branch in the worktree dropdown. -->
-			{#if !sheetMode}
-				<button
-					type="button"
-					class="ctx-chip ctx-chip-icon new-wt-chip"
-					onclick={openNewWorktree}
-					aria-label="New worktree from {baseBranch}"
-					title="New worktree from {baseBranch}"
-				>
-					<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-						<path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12z"/>
-						<path d="M8 7.5v3.5M6.25 9.25h3.5"/>
-					</svg>
-				</button>
-			{/if}
 		{/if}
 	</div>
 
@@ -648,7 +580,7 @@
 	/* There is no standalone bar any more: this component renders inline in the
 	   ContextPillBar, which is now the composer island's top pill row. It flows as
 	   a pill group next to the agent pill — the mode/device pill plus, in worktree
-	   mode, the branch and base-branch pills. align-self keeps the row vertically
+	   mode, the merged Auto/branch chip. align-self keeps the row vertically
 	   centered against the agent pill; the optional error wraps underneath (the
 	   pill row wraps, so a full-width banner drops to its own line). */
 	.execution-mode-bar {
@@ -738,11 +670,6 @@
 	/* The worktree checkbox chip's tick must beat the generic muted svg colour. */
 	.wt-chip :global(.ctx-chip-cb svg) {
 		color: var(--primary-foreground);
-	}
-
-	.new-wt-chip svg {
-		width: 12px;
-		height: 12px;
 	}
 
 	/* Cloud accordion: an inline section inside the mode menu (no flyout). */

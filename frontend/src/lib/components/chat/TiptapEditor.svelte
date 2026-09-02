@@ -289,6 +289,7 @@
 	/* ProseMirror editor styles */
 	/* Composer body type (mockup `.inputarea`): 14.5px / 1.55. */
 	.tiptap-editor :global(.ProseMirror) {
+		position: relative;
 		outline: none;
 		width: 100%;
 		min-height: 24px;
@@ -303,14 +304,17 @@
 		margin: 0;
 	}
 
-	/* Placeholder styling */
+	/* Empty-state placeholder: vertically centered in the editor box, left-aligned
+	   with typed text. The ::before drops out as soon as the paragraph has content. */
 	.tiptap-editor :global(.ProseMirror p.is-editor-empty:first-child::before) {
 		content: attr(data-placeholder);
 		color: var(--subtle-foreground);
 		font-weight: 400;
 		pointer-events: none;
-		float: left;
-		height: 0;
+		position: absolute;
+		left: 0;
+		top: 50%;
+		transform: translateY(-50%);
 	}
 
 	/* File chip node styling */

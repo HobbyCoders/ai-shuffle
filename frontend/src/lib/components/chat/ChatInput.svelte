@@ -2,7 +2,7 @@
 	/**
 	 * ChatInput - the split-chips composer (mockup: docs/design/composer-split-chips.mockup.html).
 	 *
-	 * Three stacked parts, top to bottom:
+	 * Two stacked parts, top to bottom:
 	 *   1. ContextPillBar — the loose row of context chips (agent / runner /
 	 *      repository / branch / worktree) floating ABOVE the box with a gap, in
 	 *      both the new-chat and active states.
@@ -12,7 +12,6 @@
 	 *      spinner), and the ControlsDock's bare-text controls row. The dictate
 	 *      and voice-call buttons are passed to the dock as its `voiceActions`
 	 *      snippet so they stay bound to this component's recording state.
-	 *   3. A dim keyboard-hint line under the box.
 	 *
 	 * Delegates voice recording to VoiceRecorder, controls to ControlsDock, and
 	 * drag-and-drop to the inline overlay.
@@ -861,14 +860,6 @@
 					{/snippet}
 				</ControlsDock>
 			</div>
-
-			<!-- Dim hint line under the box (mockup `.hint`). Desktop only: on
-			     mobile Enter inserts a newline, so the shortcut would be wrong. -->
-			<div class="composer-hint" aria-hidden="true">
-				<span><kbd>@</kbd> files</span>
-				<span><kbd>/</kbd> commands</span>
-				<span><kbd>shift ↵</kbd> newline</span>
-			</div>
 		</form>
 	</div>
 </div>
@@ -1051,22 +1042,6 @@
 		border-radius: 6px;
 	}
 
-	/* ===== HINT LINE (mockup `.hint`) ===== */
-	.composer-hint {
-		display: flex;
-		justify-content: flex-end;
-		gap: 12px;
-		margin: 8px 4px 0;
-		color: var(--subtle-foreground);
-		font-size: 11px;
-		line-height: 1;
-	}
-
-	.composer-hint kbd {
-		font: inherit;
-		color: var(--muted-foreground);
-	}
-
 	@keyframes fadeIn {
 		from { opacity: 0; }
 		to { opacity: 1; }
@@ -1088,10 +1063,8 @@
 				border-color 180ms ease;
 		}
 
-		/* Profile, branch and worktree setup live in the mobile controls sheet;
-		   the keyboard hint describes desktop keys only. */
-		.context-pill-row,
-		.composer-hint {
+		/* Profile, branch and worktree setup live in the mobile controls sheet. */
+		.context-pill-row {
 			display: none;
 		}
 

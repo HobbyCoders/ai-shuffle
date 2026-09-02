@@ -1,5 +1,6 @@
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { createRawSnippet } from 'svelte';
 import ControlsDock from './ControlsDock.svelte';
 
 vi.hoisted(() => {
@@ -25,14 +26,19 @@ vi.mock('$lib/api/client', async (importOriginal) => {
 afterEach(() => cleanup());
 afterAll(() => vi.unstubAllGlobals());
 
-function renderDock() {
+function renderDock(props: Record<string, unknown> = {}) {
 	return render(ControlsDock, {
 		props: {
 			isUploading: false,
-			onAttachClick: vi.fn()
+			onAttachClick: vi.fn(),
+			...props
 		}
 	});
 }
+
+const voiceActions = createRawSnippet(() => ({
+	render: () => `<span data-testid="voice-snippet">voice</span>`
+}));
 
 describe('ControlsDock split controls', () => {
 	it('splits the old summary chip into permission, model and effort controls', () => {
@@ -43,22 +49,36 @@ describe('ControlsDock split controls', () => {
 		expect(screen.getByRole('button', { name: /^model:/i })).toBeTruthy();
 		expect(screen.getByRole('button', { name: /^effort:/i })).toBeTruthy();
 		expect(screen.getByRole('button', { name: /attach file/i })).toBeTruthy();
-		expect(screen.getByRole('button', { name: /more input options/i })).toBeTruthy();
+		expect(screen.queryByRole('button', { name: /more input options/i })).toBeNull();
 	});
 
-	it('orders the row permission · attach · more on the left, model · effort · ring on the right', () => {
+	it('orders the row permission · attach on the left, model · effort · ring on the right', () => {
 		const { container } = renderDock();
 
 		const left = container.querySelector('.dock-left');
 		const right = container.querySelector('.dock-right');
-		expect(left?.contains(screen.getByRole('button', { name: /^permission mode:/i }))).toBe(true);
-		expect(left?.contains(screen.getByRole('button', { name: /attach file/i }))).toBe(true);
-		expect(left?.contains(screen.getByRole('button', { name: /more input options/i }))).toBe(true);
+		const permission = screen.getByRole('button', { name: /^permission mode:/i });
+		const attach = screen.getByRole('button', { name: /attach file/i });
+		expect(left?.contains(permission)).toBe(true);
+		expect(left?.contains(attach)).toBe(true);
+		expect(permission.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 		expect(right?.contains(screen.getByRole('button', { name: /^model:/i }))).toBe(true);
 		expect(right?.contains(screen.getByRole('button', { name: /^effort:/i }))).toBe(true);
 		expect(right?.querySelector('.usage-context-wrapper')).toBeTruthy();
 		expect(left && right && (left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING))
 			.toBeTruthy();
+	});
+
+	it('places attach after the voice snippet in the left cluster', () => {
+		const { container } = renderDock({ voiceActions });
+
+		const left = container.querySelector('.dock-left');
+		const voice = left?.querySelector('[data-testid="voice-snippet"]');
+		const attach = screen.getByRole('button', { name: /attach file/i });
+		expect(voice).toBeInstanceOf(Element);
+		expect(left?.contains(attach)).toBe(true);
+		if (!(voice instanceof Element)) return;
+		expect(voice.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 	});
 
 	it('opens the compact effort popover from the effort tag', async () => {
@@ -94,18 +114,6 @@ describe('ControlsDock split controls', () => {
 
 		await fireEvent.keyDown(window, { key: 'Escape' });
 		expect(screen.queryByRole('menu', { name: /tool access/i })).toBeNull();
-	});
-
-	it('opens the full controls popover from the chevron without repeating chat setup', async () => {
-		renderDock();
-
-		await fireEvent.click(screen.getByRole('button', { name: /more input options/i }));
-
-		const dialog = screen.getByRole('dialog', { name: /^chat controls$/i });
-		expect(dialog.textContent).toMatch(/reasoning effort/i);
-		expect(dialog.textContent).toMatch(/tool access/i);
-		expect(dialog.textContent).not.toMatch(/chat setup/i);
-		expect(dialog.querySelector('.context-pill-bar')).toBeNull();
 	});
 
 	it('opens the model picker from the model text', async () => {

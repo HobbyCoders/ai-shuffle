@@ -4,10 +4,9 @@
 	 * (mockup: docs/design/composer-split-chips.mockup.html).
 	 *
 	 * Desktop, left to right:
-	 *   permission mode as plain text (opens the tool-access menu) · "+" attach ·
-	 *   the dictate mic and voice-call buttons ChatInput passes in as the
-	 *   `voiceActions` snippet · a small chevron that opens the full controls
-	 *   popover (model picker, effort slider with the Fast tier, tool access).
+	 *   permission mode as plain text (opens the tool-access menu) · the dictate
+	 *   mic and voice-call buttons ChatInput passes in as the `voiceActions`
+	 *   snippet · "+" attach.
 	 * Right, left to right:
 	 *   model name as plain text (opens the model picker) · effort as a filled
 	 *   tag (opens the compact effort popover) · the context-usage ring.
@@ -28,12 +27,11 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { anyCredential } from '$lib/stores/auth.svelte';
 	import ContextUsageBar from './ContextUsageBar.svelte';
-	import EffortSliderCard from './EffortSliderCard.svelte';
 	import EffortPopoverCard from './EffortPopoverCard.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
-	import { ChevronDown, Plus, SlidersHorizontal } from 'lucide-svelte';
+	import { Plus, SlidersHorizontal } from 'lucide-svelte';
 	import {
 		getModelLabel,
 		getDefaultModel,
@@ -53,7 +51,7 @@
 	interface Props {
 		isUploading: boolean;
 		onAttachClick: () => void;
-		/** The dictate mic and voice-call buttons, rendered right after attach. */
+		/** The dictate mic and voice-call buttons, rendered left of attach. */
 		voiceActions?: Snippet;
 		/** Lets ChatInput keep its compact mobile surface expanded while the sheet is open. */
 		onSheetOpenChange?: (open: boolean) => void;
@@ -62,9 +60,9 @@
 	let { isUploading, onAttachClick, voiceActions, onSheetOpenChange }: Props = $props();
 
 	// ── Desktop popovers ──────────────────────────────────────────────
-	// Four anchored popovers, one open at a time: the permission menu, the
-	// model picker, the compact effort card and the full controls popover.
-	type DockPopover = 'permission' | 'model' | 'effort' | 'controls';
+	// Three anchored popovers, one open at a time: the permission menu, the
+	// model picker, and the compact effort card.
+	type DockPopover = 'permission' | 'model' | 'effort';
 	let openPopover = $state<DockPopover | null>(null);
 	let dockRef = $state<HTMLDivElement | null>(null);
 	// Vertical room above the row, measured when a popover opens. The popovers
@@ -74,7 +72,6 @@
 	let permissionWrapRef = $state<HTMLDivElement | null>(null);
 	let modelWrapRef = $state<HTMLDivElement | null>(null);
 	let effortWrapRef = $state<HTMLDivElement | null>(null);
-	let controlsWrapRef = $state<HTMLDivElement | null>(null);
 
 	function wrapFor(kind: DockPopover): HTMLDivElement | null {
 		switch (kind) {
@@ -84,8 +81,6 @@
 				return modelWrapRef;
 			case 'effort':
 				return effortWrapRef;
-			case 'controls':
-				return controlsWrapRef;
 		}
 	}
 
@@ -310,7 +305,7 @@
 		<ContextUsageBar onOpenChange={(o) => { if (o) void refreshUsageLimits(true); }} />
 	</div>
 
-	<!-- Left group: permission · attach · mic · voice · more -->
+	<!-- Left group: permission · voice · attach -->
 	<div class="dock-group dock-left">
 		<div class="dock-pop-wrap desktop-controls" bind:this={permissionWrapRef}>
 			<button
@@ -361,6 +356,9 @@
 			{/if}
 		</div>
 
+		<!-- Dictate / voice call, supplied by ChatInput — left of attach. -->
+		{@render voiceActions?.()}
+
 		<!-- Attach stays in the primary action cluster on every viewport. -->
 		<button
 			type="button"
@@ -382,93 +380,6 @@
 			{/if}
 		</button>
 
-		<!-- Dictate / voice call, supplied by ChatInput -->
-		{@render voiceActions?.()}
-
-		<!-- Everything in one place: the full controls popover. -->
-		<div class="dock-pop-wrap desktop-controls" bind:this={controlsWrapRef}>
-			<button
-				type="button"
-				class="dock-ico small"
-				class:open={openPopover === 'controls'}
-				onclick={() => togglePopover('controls')}
-				aria-haspopup="dialog"
-				aria-expanded={openPopover === 'controls'}
-				aria-label="More input options"
-				title="More input options"
-			>
-				<ChevronDown size={11} strokeWidth={2} aria-hidden="true" />
-			</button>
-
-			{#if openPopover === 'controls'}
-				<!-- The desktop counterpart of the mobile sheet: every run-binding
-				     control in one panel — model, effort + Fast, and tool access.
-				     Chat setup (agent / runner / repository / branch / worktree) is
-				     the chip row above the box, so it is not repeated here. -->
-				<div
-					class="controls-popover"
-					role="dialog"
-					aria-label="Chat controls"
-					data-composer-owned-overlay="true"
-				>
-					<section class="popover-section">
-						<div class="section-label"><span>Model</span></div>
-						<ModelPickerPanel
-							groups={modelCatalog.groups}
-							options={modelCatalog.options}
-							value={modelValue}
-							notice={modelNotice}
-							contextChoice={$activeSession.contextWindowChoice}
-							onContextChoiceSelect={(choice) => activeSession.setContextWindowChoice(choice)}
-							onSelect={(v) => {
-								activeSession.setModelOverride(v);
-								closePopover();
-							}}
-							onRequestClose={closePopover}
-						/>
-					</section>
-
-					<section class="popover-section">
-						<div class="section-label"><span>Reasoning effort</span></div>
-						<EffortSliderCard
-							options={effortLevels}
-							value={effortValue}
-							onSelect={(v) => activeSession.setEffortLevelOverride(v)}
-							{fastSupported}
-							fastEnabled={fastMode}
-							onToggleFast={() => activeSession.setFastMode(!fastMode)}
-						/>
-					</section>
-
-					<section class="popover-section">
-						<div class="section-label"><span>Tool access</span></div>
-						<div class="access-list">
-							{#each permissionModes as mode (mode.value)}
-								<button
-									type="button"
-									class="access-row"
-									class:selected={mode.value === permissionValue}
-									onclick={() => activeSession.setPermissionModeOverride(mode.value)}
-									role="menuitemradio"
-									aria-checked={mode.value === permissionValue}
-									title={mode.description}
-								>
-									<span class="access-copy">
-										<strong>{mode.label}</strong>
-										<small>{mode.description}</small>
-									</span>
-									{#if mode.value === permissionValue}
-										<svg class="w-3.5 h-3.5 access-check" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-										</svg>
-									{/if}
-								</button>
-							{/each}
-						</div>
-					</section>
-				</div>
-			{/if}
-		</div>
 	</div>
 
 	<!-- Right group (desktop): model · effort · ring -->
@@ -661,8 +572,7 @@
 		transition: background-color 0.12s ease, color 0.12s ease;
 	}
 
-	.dock-ico:hover:not(:disabled),
-	.dock-ico.open {
+	.dock-ico:hover:not(:disabled) {
 		background: var(--muted);
 		color: var(--foreground);
 	}
@@ -670,10 +580,6 @@
 	.dock-ico:disabled {
 		opacity: 0.35;
 		cursor: not-allowed;
-	}
-
-	.dock-ico.small {
-		width: 20px;
 	}
 
 	/* The mic and voice-call buttons ChatInput passes in take the same 24px
@@ -727,8 +633,7 @@
 	   All open UPWARD from the row — same anchor convention as the ring's
 	   popover beside them. Left-group popovers hang off their left edge, the
 	   right group's off their right edge, so nothing spills past the box. */
-	.dock-menu,
-	.controls-popover {
+	.dock-menu {
 		position: absolute;
 		bottom: calc(100% + 10px);
 		background: var(--popover);
@@ -758,19 +663,6 @@
 		width: min(280px, calc(100vw - 24px));
 	}
 
-	.controls-popover {
-		left: 0;
-		width: min(380px, calc(100vw - 24px));
-		max-height: min(640px, var(--dock-pop-max, calc(100dvh - 140px)));
-		overflow-y: auto;
-		overscroll-behavior: contain;
-		border-radius: calc(var(--radius, 0.75rem) * 1.3);
-		padding: 12px;
-		display: flex;
-		flex-direction: column;
-		gap: 14px;
-	}
-
 	@keyframes dock-popover-in {
 		from {
 			opacity: 0;
@@ -780,25 +672,6 @@
 			opacity: 1;
 			transform: translateY(0);
 		}
-	}
-
-	.popover-section {
-		display: flex;
-		flex-direction: column;
-		gap: 7px;
-		min-width: 0;
-	}
-
-	.popover-section .section-label {
-		display: flex;
-		align-items: center;
-		gap: 7px;
-		margin: 0 2px;
-		color: var(--muted-foreground);
-		font-size: 10px;
-		font-weight: 700;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
 	}
 
 	.access-list {
