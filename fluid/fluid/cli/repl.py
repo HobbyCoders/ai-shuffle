@@ -95,6 +95,14 @@ class LineReader:
     read the signal handler abandons keeps blocking here; the line it finally
     gets is kept and answers the next request, so nothing typed after an
     interrupt is lost.
+
+    While it blocks, the thread keeps a reference to ``sys.stdin``. On a pipe,
+    ``input`` reads through the ``BufferedReader`` under its lock, and nothing
+    else holds the wrapper alive: clearing the ``sys`` module at shutdown
+    would drop the last reference, and closing the stream then needs the lock
+    this thread still holds, which CPython turns into a fatal abort (exit -6
+    instead of 130). A reference held by a frame that never unwinds keeps the
+    stream alive until the process ends, so shutdown never tries to close it.
     """
 
     def __init__(self, input_fn: Callable[[str], str]) -> None:
@@ -149,6 +157,7 @@ class LineReader:
                 outcome: tuple[Callable[[Any], None], Any] = (fut.set_result, line)
             else:
                 self._reading = True
+                keep_alive = sys.stdin  # noqa: F841 — see the class docstring
                 try:
                     line = self._input_fn("" if prompt is None else prompt)
                 except BaseException as exc:  # noqa: BLE001 — EOFError and whatever input_fn raises
