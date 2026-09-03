@@ -215,6 +215,7 @@
 </script>
 
 <div class="mpp" data-model-picker-panel>
+	<div class="mpp-body">
 	{#if showRail}
 		<div class="mpp-rail" role="tablist" aria-label="Providers">
 			<button
@@ -344,31 +345,41 @@
 				{@render plainRow(r)}
 			{/each}
 		</div>
-
-		{#if contextControl && contextChoice && onContextChoiceSelect}
-			<div class="mpp-context" data-model-context-control>
-				<label for="mpp-context-choice">
-					<span>Context</span>
-					<small>For {getModelLabel(value)}</small>
-				</label>
-				<div class="mpp-context-select-wrap">
-					<select
-						id="mpp-context-choice"
-						value={contextChoice}
-						aria-label="Context window"
-						onchange={(event) =>
-							onContextChoiceSelect(event.currentTarget.value as ContextWindowChoice)}
-					>
-						<option value="standard">{contextControl.standardLabel} · Normal</option>
-						<option value="1m">{contextControl.extendedLabel} · Extended</option>
-					</select>
-					<svg viewBox="0 0 20 20" aria-hidden="true">
-						<path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
-					</svg>
-				</div>
-			</div>
-		{/if}
 	</div>
+	</div>
+
+	{#if contextControl && contextChoice && onContextChoiceSelect}
+		<div class="mpp-context" data-model-context-control>
+			<div class="mpp-context-copy">
+				<span>Context</span>
+				<small>For {getModelLabel(value)}</small>
+			</div>
+			<div class="mpp-context-toggle" role="radiogroup" aria-label="Context window">
+				<button
+					type="button"
+					role="radio"
+					aria-checked={contextChoice === 'standard'}
+					aria-label="{contextControl.standardLabel} · Normal"
+					class:on={contextChoice === 'standard'}
+					onclick={() => onContextChoiceSelect('standard')}
+				>
+					{contextControl.standardLabel}
+					<span>Normal</span>
+				</button>
+				<button
+					type="button"
+					role="radio"
+					aria-checked={contextChoice === '1m'}
+					aria-label="{contextControl.extendedLabel} · Extended"
+					class:on={contextChoice === '1m'}
+					onclick={() => onContextChoiceSelect('1m')}
+				>
+					{contextControl.extendedLabel}
+					<span>Extended</span>
+				</button>
+			</div>
+		</div>
+	{/if}
 </div>
 
 {#snippet plainRow(r: ExtraRow)}
@@ -394,7 +405,7 @@
 	.mpp {
 		--mpp-hover: color-mix(in srgb, var(--popover) 90%, var(--foreground));
 		display: flex;
-		flex-direction: row;
+		flex-direction: column;
 		width: var(--mpp-width, 360px);
 		max-width: 100%;
 		height: var(--mpp-height, 346px);
@@ -404,6 +415,17 @@
 		background: var(--popover);
 		color: var(--popover-foreground);
 		font-size: 12.5px;
+	}
+
+	/* Rail + list scroll together; the context footer is a sibling so it cannot
+	   be clipped by this overflow box (the desktop composer popover is short). */
+	.mpp-body {
+		display: flex;
+		flex-direction: row;
+		flex: 1 1 auto;
+		min-width: 0;
+		min-height: 0;
+		overflow: hidden;
 	}
 
 	/* ---- rail ------------------------------------------------------------- */
@@ -680,7 +702,7 @@
 		box-shadow: 0 -8px 18px color-mix(in srgb, var(--popover) 72%, transparent);
 		flex-shrink: 0;
 	}
-	.mpp-context label {
+	.mpp-context-copy {
 		display: flex;
 		flex: 1;
 		min-width: 0;
@@ -690,7 +712,7 @@
 		font-size: 12px;
 		font-weight: 600;
 	}
-	.mpp-context label small {
+	.mpp-context-copy small {
 		overflow: hidden;
 		color: var(--muted-foreground);
 		font-size: 10px;
@@ -698,41 +720,46 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	.mpp-context-select-wrap {
-		position: relative;
+	.mpp-context-toggle {
+		display: flex;
 		flex: 0 0 auto;
-	}
-	.mpp-context select {
-		min-width: 126px;
-		height: 34px;
-		appearance: none;
-		padding: 0 30px 0 10px;
+		gap: 2px;
+		padding: 2px;
 		border: 1px solid var(--border);
 		border-radius: 8px;
 		background: var(--background);
-		color: var(--foreground);
+	}
+	.mpp-context-toggle button {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 4px;
+		height: 30px;
+		padding: 0 8px;
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--muted-foreground);
 		font: inherit;
 		font-size: 12px;
-		font-weight: 550;
+		font-weight: 600;
 		cursor: pointer;
 	}
-	.mpp-context select:hover {
-		border-color: var(--border-strong);
-		background: var(--muted);
+	.mpp-context-toggle button span {
+		font-size: 10px;
+		font-weight: 450;
+		opacity: 0.8;
 	}
-	.mpp-context select:focus-visible {
+	.mpp-context-toggle button:hover {
+		color: var(--foreground);
+	}
+	.mpp-context-toggle button.on {
+		background: var(--muted);
+		color: var(--foreground);
+		box-shadow: inset 0 0 0 1px var(--border-strong);
+	}
+	.mpp-context-toggle button:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: 1px;
-	}
-	.mpp-context-select-wrap > svg {
-		position: absolute;
-		top: 50%;
-		right: 8px;
-		width: 16px;
-		height: 16px;
-		transform: translateY(-50%);
-		color: var(--muted-foreground);
-		pointer-events: none;
 	}
 
 	.mpp-empty {

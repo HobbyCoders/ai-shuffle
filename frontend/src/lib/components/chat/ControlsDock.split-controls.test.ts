@@ -139,6 +139,25 @@ describe('ControlsDock split controls', () => {
 		expect(dialog.querySelector('[data-model-picker-panel]')).toBeTruthy();
 	});
 
+	it('pins context size selection in the desktop model picker', async () => {
+		renderDock();
+
+		await fireEvent.click(screen.getByRole('button', { name: /^model:/i }));
+
+		const dialog = screen.getByRole('dialog', { name: /choose model/i });
+		expect(dialog.querySelector('[data-model-context-control]')).toBeTruthy();
+		expect(screen.getByRole('radiogroup', { name: /context window/i })).toBeTruthy();
+		expect(screen.getByRole('radio', { name: /1m.*extended/i }).getAttribute('aria-checked')).toBe(
+			'true'
+		);
+
+		await fireEvent.click(screen.getByRole('radio', { name: /200k.*normal/i }));
+		expect(screen.getByRole('dialog', { name: /choose model/i })).toBeTruthy();
+		expect(screen.getByRole('radio', { name: /200k.*normal/i }).getAttribute('aria-checked')).toBe(
+			'true'
+		);
+	});
+
 	it('drops the tool-access control in the chat lane but keeps attach', () => {
 		setLane('chat');
 		const { container } = renderDock({ voiceActions });

@@ -692,7 +692,9 @@
 		width: min(380px, calc(100vw - 24px));
 		padding: 6px;
 		--mpp-width: 100%;
-		--mpp-height: min(346px, calc(var(--dock-pop-max, 400px) - 14px));
+		/* 400px = original 346px list + pinned context footer, so the 200k/1m
+		   control stays on-screen instead of being clipped by overflow. */
+		--mpp-height: min(400px, calc(var(--dock-pop-max, 454px) - 14px));
 	}
 
 	.effort-menu {

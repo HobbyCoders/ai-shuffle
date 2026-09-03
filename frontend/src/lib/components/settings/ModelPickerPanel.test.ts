@@ -63,10 +63,12 @@ describe('ModelPickerPanel', () => {
 			}
 		});
 
-		const context = screen.getByRole('combobox', { name: /context window/i }) as HTMLSelectElement;
-		expect(context.value).toBe('1m');
-		expect(screen.getByRole('option', { name: /200k.*normal/i })).toBeTruthy();
-		await fireEvent.change(context, { target: { value: 'standard' } });
+		expect(screen.getByRole('radiogroup', { name: /context window/i })).toBeTruthy();
+		expect(screen.getByRole('radio', { name: /1m.*extended/i }).getAttribute('aria-checked')).toBe(
+			'true'
+		);
+		expect(screen.getByRole('radio', { name: /200k.*normal/i })).toBeTruthy();
+		await fireEvent.click(screen.getByRole('radio', { name: /200k.*normal/i }));
 		expect(onContextChoiceSelect).toHaveBeenCalledWith('standard');
 	});
 

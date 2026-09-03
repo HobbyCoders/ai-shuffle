@@ -112,9 +112,11 @@ describe('MobileComposerControlsSheet', () => {
 		await fireEvent.click(screen.getByRole('button', { name: /model: sonnet/i }));
 
 		expect(document.querySelector('[data-model-picker-panel]')).toBeTruthy();
-		const context = screen.getByRole('combobox', { name: /context window/i }) as HTMLSelectElement;
-		expect(context.value).toBe('1m');
-		await fireEvent.change(context, { target: { value: 'standard' } });
+		expect(screen.getByRole('radiogroup', { name: /context window/i })).toBeTruthy();
+		expect(screen.getByRole('radio', { name: /1m.*extended/i }).getAttribute('aria-checked')).toBe(
+			'true'
+		);
+		await fireEvent.click(screen.getByRole('radio', { name: /200k.*normal/i }));
 		expect(onContextChoiceSelect).toHaveBeenCalledWith('standard');
 	});
 
