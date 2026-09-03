@@ -245,7 +245,10 @@ def _safe_json(value):
 #         everything from the start", which is exactly right for a summary that
 #         is a pure function of the entries.
 #     Also ``idx_projects_instance`` for boot's orphan-adoption scan (B11).
-SCHEMA_VERSION = 84
+# 85 (2026-09-02): persist pull-request lifecycle on sessions so the sidepanel
+#     can show PR Opened / PR Merged without a live GitHub poll. Additive
+#     nullable pr_number / pr_url / pr_state; NULL on every pre-existing row.
+SCHEMA_VERSION = 85
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -1990,6 +1993,18 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE sessions ADD COLUMN fast BOOLEAN")
         migrations_applied.append("sessions.fast")
 
+    # Persisted PR lifecycle for the sidepanel (v85). NULL on every pre-existing
+    # row = "no PR known"; the sidepanel then falls back to the open-PR poll.
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "pr_number"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN pr_number INTEGER")
+        migrations_applied.append("sessions.pr_number")
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "pr_url"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN pr_url TEXT")
+        migrations_applied.append("sessions.pr_url")
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "pr_state"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN pr_state TEXT")
+        migrations_applied.append("sessions.pr_state")
+
     # API-user run configuration. ``model`` / ``effort`` are the preconfigured
     # selection every connector/API session created FOR this user binds at
     # create_session (and re-binds on each connector turn, since ``connector``
@@ -2568,6 +2583,9 @@ from app.db.sessions import (  # noqa: F401
     unpin_session,
     set_session_project,
     set_session_branch,
+    update_session_pr_state,
+    list_sessions_by_pr_number,
+    list_sessions_for_branch,
     session_has_forks,
     get_session_forks,
     get_session_messages,

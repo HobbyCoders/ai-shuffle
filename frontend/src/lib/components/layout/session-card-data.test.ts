@@ -125,8 +125,21 @@ describe('deriveStatus', () => {
 		expect(deriveStatus({ ...base, openPr: true })).toBe('pr');
 	});
 
+	it('shows PR Opened from persisted pr_state even without the GitHub fallback', () => {
+		expect(deriveStatus({ ...base, prState: 'open' })).toBe('pr');
+	});
+
+	it('shows PR Merged while the session is still Active', () => {
+		expect(deriveStatus({ ...base, prState: 'merged', isActive: true })).toBe('pr_merged');
+	});
+
+	it('does not let the GitHub fallback override a persisted merged state', () => {
+		expect(deriveStatus({ ...base, prState: 'merged', openPr: true })).toBe('pr_merged');
+	});
+
 	it('keeps Working over PR while the turn is still in flight', () => {
 		expect(deriveStatus({ ...base, streaming: true, openPr: true })).toBe('working');
+		expect(deriveStatus({ ...base, streaming: true, prState: 'merged' })).toBe('working');
 	});
 
 	it('falls through to Done and Idle', () => {
@@ -137,6 +150,7 @@ describe('deriveStatus', () => {
 
 describe('status labels', () => {
 	it('labels the dynamic states', () => {
+		expect(STATUS_LABELS.pr_merged).toBe('PR Merged');
 		expect(STATUS_LABELS.working).toBe('Working');
 		expect(STATUS_LABELS.needs_permission).toBe('Needs Permission');
 		expect(STATUS_LABELS.has_question).toBe('Has Question');

@@ -51,6 +51,17 @@ async def persist_turn_end_state(session_id: str) -> None:
     except Exception:
         logger.debug("persisting parked_task_kind failed", exc_info=True)
 
+    # 1b. Persist any PR the agent opened/merged this turn so the sidepanel
+    # updates without waiting for a GitHub poll. Fire-and-forget: gh must not
+    # delay turn teardown.
+    try:
+        from app.core.session_pr_state import reconcile_session_pr
+
+        task = asyncio.create_task(reconcile_session_pr(session_id))
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+    except Exception:
+        logger.debug("scheduling PR reconcile failed", exc_info=True)
+
     # 2. Bring the coalesced session-summary fold current for this session.
     #
     # Deliberately LAST: every user-visible part of the turn is already done

@@ -322,6 +322,40 @@ describe('Sidebar session groups', () => {
 		expect(card?.querySelector('.status')?.textContent).toContain('Has Question');
 	});
 
+	it('shows PR Opened from persisted session state without polling GitHub', async () => {
+		mocks.sessions.set([
+			session('prsession', 'PR chat', 'visible-project', true, false, {
+				worktree_branch: 'wt/active',
+				pr_state: 'open',
+				pr_number: 7,
+				pr_url: 'https://x/pull/7',
+			}),
+		]);
+
+		render(Sidebar, { props: sidebarProps });
+
+		const card = screen.getByText('PR chat').closest('.scard');
+		expect(card?.querySelector('.status')?.textContent).toContain('PR Opened');
+		expect(mocks.getPullRequests).not.toHaveBeenCalled();
+	});
+
+	it('shows PR Merged while the session is still Active', async () => {
+		mocks.sessions.set([
+			session('prsession', 'PR chat', 'visible-project', true, false, {
+				worktree_branch: 'wt/active',
+				pr_state: 'merged',
+				pr_number: 7,
+				pr_url: 'https://x/pull/7',
+			}),
+		]);
+
+		render(Sidebar, { props: sidebarProps });
+
+		const card = screen.getByText('PR chat').closest('.scard');
+		expect(card?.querySelector('.status')?.textContent).toContain('PR Merged');
+		expect(mocks.getPullRequests).not.toHaveBeenCalled();
+	});
+
 	it('shows PR Opened when the session branch has an open PR', async () => {
 		mocks.getPullRequests.mockImplementation(async (_projectId: string, state: string) =>
 			state === 'open'

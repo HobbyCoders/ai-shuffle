@@ -16,6 +16,7 @@ export type SessionCardStatus =
 	| 'has_question'
 	| 'await'
 	| 'pr'
+	| 'pr_merged'
 	| 'done'
 	| 'idle';
 
@@ -25,6 +26,7 @@ export const STATUS_LABELS: Record<SessionCardStatus, string> = {
 	has_question: 'Has Question',
 	await: 'Awaiting input',
 	pr: 'PR Opened',
+	pr_merged: 'PR Merged',
 	done: 'Done',
 	idle: 'Idle'
 };
@@ -45,24 +47,28 @@ export function isLiveStatus(status: SessionCardStatus): boolean {
  * - streaming (activeSession.isStreaming / streamingSessions map)
  * - attention (backgroundPermissions map entry — the session is parked on one
  *   or more permission/question prompts; `kind` drives WHICH prompt label shows)
- * - openPr    (an open pull request exists with the session's branch as head)
+ * - prState   (persisted session PR lifecycle: open / merged / closed)
+ * - openPr    (fallback: an open pull request exists with the session's branch as head)
  * - is_active (the session is in the working set but its last turn finished)
  *
  * Precedence follows what needs the user most: a parked prompt outranks an
- * in-flight turn (a blocked session can still hold an open stream), and an
- * open PR outranks plain done.
+ * in-flight turn (a blocked session can still hold an open stream), and PR
+ * Opened / PR Merged outrank plain done so a merged PR stays visible while
+ * the session is still Active.
  */
 export function deriveStatus(input: {
 	streaming: boolean;
 	attention: { count: number; kind: 'permission' | 'question' } | null;
 	openPr?: boolean;
+	prState?: 'open' | 'merged' | 'closed' | null;
 	isActive: boolean;
 }): SessionCardStatus {
 	if (input.attention && input.attention.count > 0) {
 		return input.attention.kind === 'question' ? 'has_question' : 'needs_permission';
 	}
 	if (input.streaming) return 'working';
-	if (input.openPr) return 'pr';
+	if (input.prState === 'open' || (!input.prState && input.openPr)) return 'pr';
+	if (input.prState === 'merged') return 'pr_merged';
 	if (input.isActive) return 'done';
 	return 'idle';
 }

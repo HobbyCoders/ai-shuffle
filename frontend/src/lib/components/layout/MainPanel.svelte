@@ -587,7 +587,7 @@
 			title = gen.title;
 			body = body ?? gen.body;
 		}
-		const pr = await createPullRequest(projectId, { title, body: body ?? '', head, base });
+		const pr = await createPullRequest(projectId, { title, body: body ?? '', head, base, session_id: sessionId });
 		return { url: pr.url, number: pr.number };
 	}
 

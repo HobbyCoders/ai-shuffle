@@ -165,6 +165,9 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'is_remote',
 	'turn_count',
 	'total_cost_usd',
+	'pr_number',
+	'pr_url',
+	'pr_state',
 ]);
 
 /**

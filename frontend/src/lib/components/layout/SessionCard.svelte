@@ -19,6 +19,7 @@
 		AlertCircle,
 		CircleHelp,
 		GitPullRequest,
+		GitMerge,
 		ShieldQuestionMark,
 		Check,
 		Monitor,
@@ -297,9 +298,13 @@
 		{#if compact}
 			<span class="l1 cline">
 				<span class="ctitle">{title}</span>
-				{#if status === 'pr'}
-					<span class="status pr" title="Open pull request for this branch">
-						<GitPullRequest size={11} strokeWidth={2.2} />
+				{#if status === 'pr' || status === 'pr_merged'}
+					<span class="status {status}" title={status === 'pr_merged' ? 'Merged pull request' : 'Open pull request for this branch'}>
+						{#if status === 'pr_merged'}
+							<GitMerge size={11} strokeWidth={2.2} />
+						{:else}
+							<GitPullRequest size={11} strokeWidth={2.2} />
+						{/if}
 						{statusLabel}
 					</span>
 				{/if}
@@ -337,6 +342,8 @@
 						<CircleHelp size={11} strokeWidth={2.2} />
 					{:else if status === 'pr'}
 						<GitPullRequest size={11} strokeWidth={2.2} />
+					{:else if status === 'pr_merged'}
+						<GitMerge size={11} strokeWidth={2.2} />
 					{:else if status === 'done'}
 						<Check size={11} strokeWidth={2.6} />
 					{/if}
@@ -510,7 +517,8 @@
 	.status.needs_permission { color: var(--warning); }
 	.status.has_question,
 	.status.await { color: var(--amber); }
-	.status.pr { color: var(--success); }
+	.status.pr,
+	.status.pr_merged { color: var(--success); }
 	.status.done { color: var(--muted-foreground); }
 	.status.idle { color: var(--subtle-foreground); }
 	.status :global(svg) { flex: none; }

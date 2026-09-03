@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 84
+SCHEMA_VERSION = 85
 
 
 def create_postgres_schema(cursor) -> None:
@@ -237,6 +237,12 @@ def create_postgres_schema(cursor) -> None:
             -- queries used to carry (one index probe into ``turns`` per listed
             -- row AND per COUNT(*) row). NULL/FALSE = a normal session.
             is_worker BOOLEAN,
+            -- v85: persisted pull-request lifecycle for the sidepanel. NULL on
+            -- every pre-existing row (no PR known). pr_state is 'open' /
+            -- 'merged' / 'closed'.
+            pr_number INTEGER,
+            pr_url TEXT,
+            pr_state TEXT,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
             FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,

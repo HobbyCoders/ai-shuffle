@@ -1608,6 +1608,25 @@ describe('ws-message-handlers', () => {
 			expect(deps.appLoadSessions).not.toHaveBeenCalled();
 		});
 
+		it('merges persisted PR fields without a refetch', () => {
+			handlers.handleMessage({
+				type: 'user_session_updated',
+				session_id: 'session-1',
+				updates: {
+					pr_number: 12,
+					pr_url: 'https://github.com/o/r/pull/12',
+					pr_state: 'merged',
+				},
+			});
+
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', {
+				pr_number: 12,
+				pr_url: 'https://github.com/o/r/pull/12',
+				pr_state: 'merged',
+			});
+			expect(deps.appLoadSessions).not.toHaveBeenCalled();
+		});
+
 		it('falls back to a debounced refetch when the row is unknown locally', async () => {
 			vi.useFakeTimers();
 			try {

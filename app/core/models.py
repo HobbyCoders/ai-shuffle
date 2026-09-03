@@ -398,6 +398,11 @@ class Session(SessionBase):
     # keep using worktree_branch. The UI badge falls back to this when
     # worktree_branch is absent.
     branch: Optional[str] = None
+    # Persisted pull-request lifecycle (v85). NULL = unknown. The sidepanel
+    # renders PR Opened / PR Merged from these so a glance doesn't need GitHub.
+    pr_number: Optional[int] = None
+    pr_url: Optional[str] = None
+    pr_state: Optional[str] = None
     # Automation provenance — set when an automation run created this session.
     # Automation sessions run headless (no live watch surface), so the sessions
     # list badges them to differentiate from interactive chats.

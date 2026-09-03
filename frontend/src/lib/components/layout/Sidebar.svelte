@@ -181,6 +181,9 @@
 	const prProjects = $derived.by((): { projectId: string; branches: Set<string> }[] => {
 		const wanted = new Map<string, Set<string>>();
 		for (const s of sidebarSessions) {
+			// Persisted PR state is the source of truth; only poll GitHub for
+			// rows that have never been written (pre-migration / never reconciled).
+			if (s.pr_state) continue;
 			const branch = branchLabel(s);
 			if (!branch || !s.project_id) continue;
 			let set = wanted.get(s.project_id);
@@ -339,7 +342,8 @@
 					status: deriveStatus({
 						streaming: isStreaming(s.id),
 						attention: $backgroundPermissions.get(s.id) ?? null,
-						openPr: !!(branch && prSet?.has(branch)),
+						prState: s.pr_state ?? null,
+						openPr: !s.pr_state && !!(branch && prSet?.has(branch)),
 						isActive: !!s.is_active
 					}),
 					ts: sessionTimestamp(s)

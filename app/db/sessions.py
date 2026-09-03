@@ -115,6 +115,11 @@ class SessionRow(TypedDict):
     # List-visibility flag (v75): TRUE keeps the row out of the sessions-list
     # queries (wake-word "command" voice sessions); NULL/FALSE = visible.
     hidden: Optional[bool]
+    # Persisted PR lifecycle (v85). NULL = unknown; the sidepanel may still
+    # infer an open PR from GitHub. pr_state is 'open' / 'merged' / 'closed'.
+    pr_number: Optional[int]
+    pr_url: Optional[str]
+    pr_state: Optional[str]
 
 
 class SessionSearchResult(TypedDict):
@@ -1153,6 +1158,70 @@ def set_session_branch(
                 (branch, now, session_id),
             )
         return row_to_dict(cursor.fetchone())
+
+
+
+def update_session_pr_state(
+    session_id: str,
+    *,
+    pr_number: Optional[int] = None,
+    pr_url: Optional[str] = None,
+    pr_state: Optional[str] = None,
+) -> Optional[SessionRow]:
+    """Write persisted PR lifecycle fields on a session. Does not touch is_active.
+
+    Only columns whose argument is not None are updated, so a merge can flip
+    ``pr_state`` without re-supplying number/url. Returns the updated row, or
+    None when no such session exists.
+    """
+    _ph = ph()
+    now = datetime.now(timezone.utc).isoformat()
+    updates = [f"updated_at = {_ph}"]
+    values: list = [now]
+    if pr_number is not None:
+        updates.append(f"pr_number = {_ph}")
+        values.append(pr_number)
+    if pr_url is not None:
+        updates.append(f"pr_url = {_ph}")
+        values.append(pr_url)
+    if pr_state is not None:
+        updates.append(f"pr_state = {_ph}")
+        values.append(pr_state)
+    if len(updates) == 1:
+        return get_session(session_id)
+    values.append(session_id)
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph} RETURNING *",
+            values,
+        )
+        return row_to_dict(cursor.fetchone())
+
+
+def list_sessions_by_pr_number(pr_number: int) -> list:
+    """Sessions that already carry this pull-request number."""
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT * FROM sessions WHERE pr_number = {_ph}",
+            (pr_number,),
+        )
+        return [row_to_dict(r) for r in cursor.fetchall()]
+
+
+def list_sessions_for_branch(project_id: str, branch: str) -> list:
+    """Sessions on this project whose logical branch matches ``branch``."""
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT * FROM sessions WHERE project_id = {_ph}"
+            f" AND (worktree_branch = {_ph} OR branch = {_ph})",
+            (project_id, branch, branch),
+        )
+        return [row_to_dict(r) for r in cursor.fetchall()]
 
 
 def set_session_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:

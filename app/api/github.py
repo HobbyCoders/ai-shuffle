@@ -20,7 +20,7 @@ from app.core.github_service import (
     WorkflowRun,
 )
 from app.core.config import settings
-from app.db import database
+from app.core.session_pr_state import persist_pr_state
 from app.api.auth import require_auth, get_api_user_from_request
 from app.api.common import check_project_access, resolve_project_path
 
@@ -67,6 +67,9 @@ class CreatePullRequest(BaseModel):
     head: str = Field(..., min_length=1, description="Head branch name")
     base: str = Field(..., min_length=1, description="Base branch name")
     draft: bool = Field(default=False, description="Open the pull request as a draft")
+    session_id: Optional[str] = Field(
+        default=None, description="Session to persist PR Opened on for the sidepanel"
+    )
 
 
 class MergePullRequest(BaseModel):
@@ -374,6 +377,14 @@ async def create_pull_request(
     )
 
     await _broadcast_pr_changed(request, project_id, body.head)
+    await persist_pr_state(
+        session_id=body.session_id,
+        project_id=project_id,
+        branch=body.head,
+        pr_number=pr.number,
+        pr_url=pr.url,
+        pr_state="open",
+    )
 
     return pr_to_response(pr)
 
@@ -428,6 +439,22 @@ async def merge_pull_request(
     )
 
     await _broadcast_pr_changed(request, project_id, f"pr-#{number}-merged")
+    head = None
+    url = None
+    try:
+        merged_pr = await asyncio.to_thread(github_service.get_pull, repo, number)
+        if merged_pr:
+            head = merged_pr.head_branch
+            url = merged_pr.url
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not re-read merged PR #%s", number, exc_info=True)
+    await persist_pr_state(
+        project_id=project_id,
+        branch=head,
+        pr_number=number,
+        pr_url=url,
+        pr_state="merged",
+    )
 
     return {"status": "ok", "message": f"Pull request #{number} merged successfully"}
 
@@ -463,6 +490,23 @@ async def close_pull_request(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to close pull request #{number}: {error or 'unknown error'}"
         )
+
+    head = None
+    url = None
+    try:
+        closed_pr = await asyncio.to_thread(github_service.get_pull, repo, number)
+        if closed_pr:
+            head = closed_pr.head_branch
+            url = closed_pr.url
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not re-read closed PR #%s", number, exc_info=True)
+    await persist_pr_state(
+        project_id=project_id,
+        branch=head,
+        pr_number=number,
+        pr_url=url,
+        pr_state="closed",
+    )
 
     return {"status": "ok", "message": f"Pull request #{number} closed"}
 

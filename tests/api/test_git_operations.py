@@ -146,6 +146,35 @@ class TestExecuteFinish:
         mock_worktree_manager.cleanup_worktree.assert_awaited_once_with("wt-1", keep_branch=False)
         mock_github_service.merge_pull.assert_called_once_with("o/r", 7, "squash")
 
+    async def test_finish_persists_merged_and_keeps_session_active(
+        self, mock_git_service, mock_github_service, mock_worktree_manager
+    ):
+        from app.db import database
+
+        database.create_session(session_id="s1", profile_id="default", is_active=True)
+        mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
+        op = _finish_op(session_id="s1")
+        with patch.multiple(
+            gitops,
+            git_service=mock_git_service,
+            github_service=mock_github_service,
+            worktree_manager=mock_worktree_manager,
+        ):
+            await _execute_finish(
+                op, working_dir="/wd", worktree_id=None, repo="o/r",
+                pr_number=7, pr_url="https://github.com/o/r/pull/7",
+                feature_branch="feat/x", default_branch="main",
+                merge_method="squash", cleanup=False, session_id="s1",
+                status={"is_clean": True, "ahead": 0},
+            )
+
+        assert op.status == "done"
+        row = database.get_session("s1")
+        assert row["pr_state"] == "merged"
+        assert row["pr_number"] == 7
+        assert row["pr_url"] == "https://github.com/o/r/pull/7"
+        assert row["is_active"]
+
     async def test_happy_path_project_mode(self, mock_git_service, mock_github_service, mock_worktree_manager):
         mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
         op = _finish_op()

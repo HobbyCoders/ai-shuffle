@@ -44,6 +44,10 @@ export interface Session {
 	// branch here (no legacy worktree row). The branch badge falls back to this
 	// when worktree_branch is absent.
 	branch?: string | null;
+	/** Persisted pull-request lifecycle. Null = unknown. */
+	pr_number?: number | null;
+	pr_url?: string | null;
+	pr_state?: 'open' | 'merged' | 'closed' | null;
 	created_at: string;
 	updated_at: string;
 	// Cross-install (cluster) annotation — populated server-side when sessions

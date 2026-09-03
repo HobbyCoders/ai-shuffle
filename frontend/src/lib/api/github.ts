@@ -58,6 +58,7 @@ export interface CreatePullRequestRequest {
     body?: string;
     head: string;
     base: string;
+    session_id?: string;
 }
 
 export interface MergePullRequestRequest {

@@ -53,6 +53,7 @@ from app.api.git_ai import (
     generate_commit_message_for_dir,
     generate_pr_description_for_dir,
 )
+from app.core.session_pr_state import persist_pr_state
 
 logger = logging.getLogger(__name__)
 
@@ -529,6 +530,14 @@ async def _execute_finish(
         _invalidate_pr_state_cache(working_dir)
         op.result["pr_number"] = pr_number
         op.result["pr_url"] = pr_url
+        await persist_pr_state(
+            session_id=session_id,
+            project_id=op.project_id,
+            branch=feature_branch,
+            pr_number=pr_number,
+            pr_url=pr_url,
+            pr_state="merged",
+        )
 
         # --- cleanup ---------------------------------------------------------
         if cleanup:
@@ -625,11 +634,27 @@ async def _execute_ship(
 
         op.result["pr_number"] = pr_number
         op.result["pr_url"] = pr_url
+        await persist_pr_state(
+            session_id=session_id,
+            project_id=op.project_id,
+            branch=feature_branch,
+            pr_number=pr_number,
+            pr_url=pr_url,
+            pr_state="open",
+        )
 
         # --- merge -----------------------------------------------------------
         if not await _merge_step(op, repo, pr_number, merge_method):
             return
         _invalidate_pr_state_cache(working_dir)
+        await persist_pr_state(
+            session_id=session_id,
+            project_id=op.project_id,
+            branch=feature_branch,
+            pr_number=pr_number,
+            pr_url=pr_url,
+            pr_state="merged",
+        )
 
         # --- cleanup ---------------------------------------------------------
         if cleanup:
