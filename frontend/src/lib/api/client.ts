@@ -193,7 +193,24 @@ export class ApiClient {
 		return this.request<T>('DELETE', path);
 	}
 
-	async uploadFile(path: string, file: File, sessionId?: string, worktreeId?: string): Promise<FileUploadResponse> {
+	/**
+	 * POST one file as multipart to `endpoint`.
+	 *
+	 * The three optional fields are the union of what the two upload endpoints
+	 * take, and each is sent only when supplied. The project endpoint reads
+	 * `session_id`/`worktree_id` to pick the right uploads directory inside the
+	 * checkout; the projectless `/workspace/upload` reads `path` instead — the
+	 * workspace-relative subdirectory to land in (the chat lane's
+	 * `chat-uploads`). `destDir` rather than `path` on this side so it cannot be
+	 * confused with `endpoint`, which is the URL.
+	 */
+	async uploadFile(
+		endpoint: string,
+		file: File,
+		sessionId?: string,
+		worktreeId?: string,
+		destDir?: string
+	): Promise<FileUploadResponse> {
 		const formData = new FormData();
 		formData.append('file', file);
 		if (sessionId) {
@@ -202,8 +219,11 @@ export class ApiClient {
 		if (worktreeId) {
 			formData.append('worktree_id', worktreeId);
 		}
+		if (destDir) {
+			formData.append('path', destDir);
+		}
 
-		const response = await fetch(`${API_BASE}${path}`, {
+		const response = await fetch(`${API_BASE}${endpoint}`, {
 			method: 'POST',
 			credentials: 'include',
 			body: formData

@@ -1522,6 +1522,17 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     ):
         return True
 
+    # The session's sidepanel lane. The chat lane's read fence is built INTO the
+    # engine at connect time — a fluid permission rule on the native leg, a
+    # withheld ``--allowed-tools`` grant on the delegated one — so a client
+    # connected for one lane cannot be reused for another. The cwd comparison
+    # above almost always catches this on its own (a chat session runs in the
+    # uploads folder), but the fence must not depend on "almost always".
+    if getattr(old, "aih_session_mode", None) != getattr(
+        new_options, "aih_session_mode", None
+    ):
+        return True
+
     # Tool-surface restriction (ruling CE12) — stamped by ``query_options`` as
     # ``aih_tool_allowlist`` and frozen into the engine at connect time (fluid
     # never renegotiates a session's tool surface mid-flight), so a change can

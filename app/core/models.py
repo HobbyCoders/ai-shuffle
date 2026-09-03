@@ -7,6 +7,10 @@ from enum import Enum
 from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field, field_validator
 
+# Import-cycle safe: ``session_modes`` only imports ``tool_access``, which has
+# no app imports at all (the same discipline that lets the DB migrations use it).
+from app.core.session_modes import normalize_session_mode
+
 
 # ============================================================================
 # Authentication Models
@@ -426,12 +430,13 @@ class Session(SessionBase):
     # NULL on every pre-v81 row, which runs standard — left uncoalesced so the
     # client can tell "never picked" from an explicit off.
     fast: Optional[bool] = None
-    # Interaction mode (v74, ruling VM4 of docs/VOICE_MODE_PLAN.md): 'chat' (the
-    # default) or 'voice' (an OpenAI Realtime voice call). The column is
-    # nullable and NULL means chat, so the validator below coalesces — that
+    # Sidepanel mode: 'code' (the full agentic surface), 'chat' (web-only chat)
+    # or 'voice' (an OpenAI Realtime call — v74, ruling VM4). The column is
+    # nullable and NULL means 'code', so the validator below coalesces — that
     # covers every construction site at once (sessions are handed to FastAPI as
     # raw row dicts through ``response_model``, never built field-by-field).
-    mode: str = "chat"
+    # See ``app.core.session_modes`` for why NULL is the code case.
+    mode: str = "code"
     # List-visibility flag (v75): True keeps the session out of the sessions
     # list (wake-word "command" voice sessions are born hidden). The column is
     # nullable and NULL means visible, so the validator below coalesces — same
@@ -475,15 +480,15 @@ class Session(SessionBase):
     @field_validator("mode", mode="before")
     @classmethod
     def _coalesce_mode(cls, value):
-        """NULL/empty ``sessions.mode`` reads as 'chat' (ruling VM4).
+        """NULL/empty/unknown ``sessions.mode`` reads as 'code'.
 
-        Every session predating v74 carries NULL, and chat sessions keep
+        Every session predating v74 carries NULL, and code sessions keep
         carrying NULL, so the coalesce lives here rather than at each of the
-        many places a row dict is fed to this response model.
+        many places a row dict is fed to this response model. Routing through
+        ``normalize_session_mode`` also means a value the client has no branch
+        for can never leave the API.
         """
-        if value is None or (isinstance(value, str) and not value.strip()):
-            return "chat"
-        return value
+        return normalize_session_mode(value)
 
     @field_validator("hidden", mode="before")
     @classmethod

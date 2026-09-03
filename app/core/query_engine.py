@@ -2098,6 +2098,21 @@ async def _stream_to_websocket_impl(
             or "default"
         )
 
+    # A chat session is pinned to 'default' whatever that chain produced — its
+    # composer has no tool-access control to undo an inherited 'plan' (which the
+    # chat ceiling would deadlock) or an inherited bypass (which would switch off
+    # the very callback the ceiling leans on). Same coercion as
+    # build_options_from_profile, applied here because this build is independent.
+    from app.core.session_modes import (
+        narrow_tool_access_for_mode,
+        permission_mode_for_session_mode,
+        session_mode_of,
+    )
+
+    permission_mode = permission_mode_for_session_mode(
+        permission_mode, (session or {}).get("mode")
+    )
+
     logger.debug(f"[WS] Permission mode for session {session_id}: {permission_mode} (session binding: {(session or {}).get('permission_mode')}, agent config: {config.get('permission_mode')}, override: {overrides.get('permission_mode') if overrides else None})")
     logger.debug(f"[WS] broadcast_func provided: {broadcast_func is not None}")
 
@@ -2108,6 +2123,13 @@ async def _stream_to_websocket_impl(
     from app.core.tool_access import resolve_tool_access
 
     _tool_access = resolve_tool_access(config)
+    # ...and the session's sidepanel mode narrows that, exactly as
+    # ``build_options_from_profile`` does. This build is independent of the one
+    # inside the options builder, so without the same narrowing the callback
+    # would happily approve a tool the options surface excluded — a real
+    # divergence, not a redundancy.
+    session_mode = session_mode_of(session)
+    _tool_access = narrow_tool_access_for_mode(_tool_access, session_mode)
     allowed_tools = list(_tool_access.allowed or [])
     disallowed_tools = list(_tool_access.disallowed or [])
 
@@ -2232,6 +2254,10 @@ async def _stream_to_websocket_impl(
                     "permission_mode": permission_mode,
                     "allowed_tools": allowed_tools,
                     "disallowed_tools": disallowed_tools,
+                    # Re-stamped like the tool lists: the pooled client outlives
+                    # a single turn, so a stale mode here would let the callback
+                    # enforce the wrong lane's ceiling on a reused subprocess.
+                    "session_mode": session_mode,
                     "profile_id": profile_id,
                     "config": config,
                     "session_id": session_id,
@@ -2317,6 +2343,10 @@ async def _stream_to_websocket_impl(
             "permission_mode": permission_mode,
             "allowed_tools": allowed_tools,
             "disallowed_tools": disallowed_tools,
+            # The session's sidepanel lane. Lives here, beside the tool lists,
+            # because the chat ceiling has a path half the lists cannot express
+            # and the reuse path re-stamps it every turn.
+            "session_mode": session_mode,
             "profile_id": profile_id,
             "config": config,
             "session_id": session_id,
@@ -2372,6 +2402,49 @@ async def _stream_to_websocket_impl(
                 if _allowed and not matches_any(tool_name, _allowed):
                     logger.debug(f"[WS] Tool {tool_name} blocked by profile allowed_tools (not in whitelist)")
                     return PermissionResultDeny(message=f"Tool '{tool_name}' is not enabled in this profile")
+
+                # The path half of the chat ceiling. The name half above put
+                # Read on a chat session's surface so the model can open the
+                # files the user attached; that is the ONLY thing it may open.
+                # Reading the lane out of refs (not out of the enclosing scope)
+                # is what keeps a pooled client from enforcing the lane it was
+                # first built for after being reused by another session.
+                #
+                # This is the THIRD line of defence, not the first: neither
+                # runtime consults this callback for a call it has already
+                # decided to allow, so the fence is enforced primarily by the
+                # fluid rule pair (native) and by the cwd plus the withheld bare
+                # grant (delegated) — see ``app.core.session_modes``. Both of
+                # those funnel the calls they cannot decide to HERE, which is
+                # why the same predicate has to answer in all three places.
+                if refs.get("session_mode") == "chat":
+                    from app.core.session_modes import (
+                        CHAT_MODE_READ_TOOLS,
+                        chat_mode_read_permitted,
+                    )
+
+                    if not chat_mode_read_permitted(tool_name, tool_input):
+                        logger.debug(
+                            f"[WS] Tool {tool_name} blocked: chat session read "
+                            f"outside the chat uploads directory"
+                        )
+                        return PermissionResultDeny(
+                            message=(
+                                "A chat session can only read files attached to "
+                                "the chat itself. Its whole tool surface is web "
+                                "search, web fetch, and reading those "
+                                "attachments — open this path from a code "
+                                "session instead."
+                            )
+                        )
+                    if tool_name in CHAT_MODE_READ_TOOLS:
+                        # Inside the fence: approve without prompting. The user
+                        # uploaded this file to this chat a moment ago, and the
+                        # runtimes only route a read here when their own glob
+                        # was not certain enough to allow it themselves — asking
+                        # would be a prompt about the one thing the lane exists
+                        # to do, with no other answer available.
+                        return PermissionResultAllow(updated_input=tool_input)
 
                 # User-level "awaiting input" indicator. The per-socket question /
                 # permission event only reaches the tab that owns this query; fanning

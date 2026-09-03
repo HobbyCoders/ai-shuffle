@@ -5,7 +5,7 @@
 	 * Two stacked parts, top to bottom:
 	 *   1. ContextPillBar — the loose row of context chips (agent / runner /
 	 *      repository / branch / worktree) floating ABOVE the box with a gap, in
-	 *      both the new-chat and active states.
+	 *      both the new-chat and active states. Code lane only; see the markup.
 	 *   2. The box — a flat hairline rectangle holding the Tiptap editor with
 	 *      the @/slash autocomplete panels, the return-glyph send cluster on its
 	 *      right (send · send-while-streaming · Stop · creating-worktree
@@ -59,6 +59,27 @@
 	}
 
 	let { compact = false }: Props = $props();
+
+	// The lane this composer belongs to. `$activeSession.mode` — not the
+	// sidepanel's `appMode` — is the authority: it is the session's own mode
+	// once one is open, and only falls back to the sidepanel's pick on a fresh
+	// compose screen.
+	const composerMode = $derived($activeSession.mode);
+
+	// The invitation has to match the lane. Code mode dispatches work against a
+	// repository; chat and voice are plain conversations with nothing to point
+	// work at, so promising "a task" there would be a lie.
+	const composerPlaceholder = $derived(
+		composerMode === 'code' ? 'Describe a task or ask a question' : 'Ask anything'
+	);
+
+	// Attach and drop are live in the code AND chat lanes; only voice has no
+	// composer upload path at all. Chat uploads bypass the project endpoint (it
+	// has no project) and land in a shared workspace directory that the chat
+	// tool ceiling's `Read` is scoped to — see `chat_uploads_dir()` server-side.
+	// This one flag drives all three entry points (button, drag overlay, drop);
+	// splitting them is how you get a picker whose drop counterpart is dead.
+	const attachSupported = $derived(composerMode !== 'voice');
 
 	// Resolve the draft to seed the composer with. The in-memory store draft is
 	// authoritative, but it's wiped by a full page reload (e.g. a PWA update), so
@@ -375,7 +396,10 @@
 			isCreatingWorktree: $activeSession.isCreatingWorktree,
 			hasProfile: !!$activeSession.profile,
 			hasAnyProfile: $profiles.length > 0,
-			hasProject: !!$activeSession.project || !!$activeSession.projectV2Id
+			hasProject: !!$activeSession.project || !!$activeSession.projectV2Id,
+			// The project guard is a code-lane requirement; the projectless lanes
+			// would otherwise refuse every send.
+			mode: composerMode
 		});
 		if (block) {
 			if (block.notice) toast.push(block.notice.message, { tone: block.notice.tone });
@@ -555,8 +579,38 @@
 	}
 
 	// File upload
+	//
+	// The chat lane is projectless, so its files cannot go to the project
+	// endpoint. They go to one shared directory under the workspace root — not
+	// one per session, because a brand-new chat has no session id at the moment
+	// the user picks a file. `CHAT_MODE_TOOL_SURFACE` grants that lane a `Read`
+	// pinned to this directory, which is what makes the resulting @ref openable.
+	// Mirrors `CHAT_UPLOADS_DIRNAME` in app/core/session_modes.py.
+	const CHAT_UPLOADS_DIRNAME = 'chat-uploads';
+
+	/**
+	 * Upload one composer attachment to whichever endpoint this lane owns.
+	 * Both call sites (the picker and the drop handler) go through here so the
+	 * two can never drift onto different targets.
+	 */
+	function uploadComposerFile(file: File): Promise<FileUploadResponse> {
+		if (composerMode === 'chat') {
+			return api.uploadFile('/workspace/upload', file, undefined, undefined, CHAT_UPLOADS_DIRNAME);
+		}
+		return api.uploadFile(
+			`/projects/${$activeSession.project}/upload`,
+			file,
+			$activeSession.sessionId ?? undefined,
+			$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
+		);
+	}
+
 	function triggerFileUpload() {
-		const block = attachmentBlockReason($activeSession.project, $activeSession.projectV2Id);
+		const block = attachmentBlockReason(
+			$activeSession.project,
+			$activeSession.projectV2Id,
+			composerMode
+		);
 		if (block) {
 			errorMessage = block;
 			return;
@@ -567,18 +621,16 @@
 	async function handleFileUpload(event: Event) {
 		const input = event.target as HTMLInputElement;
 		const files = input.files;
-		if (!files || files.length === 0 || !$activeSession.project) return;
+		if (!files || files.length === 0) return;
+		// A code-lane upload needs the project in the URL; a chat-lane one has no
+		// project by construction and must not be turned away for missing it.
+		if (composerMode !== 'chat' && !$activeSession.project) return;
 
 		isUploading = true;
 		try {
 			for (const file of Array.from(files)) {
 				console.debug(`[Upload] Uploading file: "${file.name}" (${file.size} bytes)`);
-				const result = await api.uploadFile(
-					`/projects/${$activeSession.project}/upload`,
-					file,
-					$activeSession.sessionId ?? undefined,
-					$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
-				);
+				const result = await uploadComposerFile(file);
 				console.debug(`[Upload] Response for "${file.name}": filename="${result.filename}", path="${result.path}"`);
 				if (result.filename !== file.name && !result.filename.startsWith(file.name.replace(/\.[^.]+$/, ''))) {
 					console.warn(`[Upload] Filename mismatch! Uploaded "${file.name}" but server returned "${result.filename}"`);
@@ -618,6 +670,9 @@
 	function handleDragEnter(e: DragEvent) {
 		e.preventDefault();
 		e.stopPropagation();
+		// Voice has no upload target at all (and no attach button in the dock), so
+		// its drop zone never invites a drop it would only have to refuse.
+		if (!attachSupported) return;
 		isDragging = true;
 	}
 
@@ -646,8 +701,15 @@
 		isDragging = false;
 
 		if (!e.dataTransfer?.files?.length) return;
+		// Voice has nowhere to put a dropped file; ignore it rather than banner an
+		// error the user cannot act on.
+		if (!attachSupported) return;
 
-		const dropBlock = attachmentBlockReason($activeSession.project, $activeSession.projectV2Id);
+		const dropBlock = attachmentBlockReason(
+			$activeSession.project,
+			$activeSession.projectV2Id,
+			composerMode
+		);
 		if (dropBlock) {
 			errorMessage = dropBlock;
 			return;
@@ -656,12 +718,7 @@
 		isUploading = true;
 		try {
 			for (const file of Array.from(e.dataTransfer.files)) {
-				const result = await api.uploadFile(
-					`/projects/${$activeSession.project}/upload`,
-					file,
-					$activeSession.sessionId ?? undefined,
-					$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
-				);
+				const result = await uploadComposerFile(file);
 				editorRef?.insertFileChip({
 					path: result.path,
 					filename: result.filename,
@@ -733,8 +790,16 @@
 			     A loose row floating ABOVE the box with a visible gap, in both the
 			     new-chat and active states (ContextPillBar decides which chips are
 			     selectors and which are read-only). Mobile hides this row; the
-			     mobile sheet's Chat-setup section carries the same selectors. -->
-			<div class="context-pill-row"><ContextPillBar /></div>
+			     mobile sheet's Chat-setup section carries the same selectors.
+
+			     One row carries every project-shaped control the composer has, so
+			     dropping it is the whole of "chat mode hides the code controls" on
+			     desktop: chat and voice sessions bind no repository, worktree or
+			     agent, and a row of inapplicable selectors would only invite the
+			     user to configure something that cannot take effect. -->
+			{#if composerMode === 'code'}
+				<div class="context-pill-row"><ContextPillBar /></div>
+			{/if}
 
 			<!-- The box: a flat hairline rectangle holding the editor, the send
 			     cluster on the right, and the bare-text controls row. -->
@@ -774,7 +839,7 @@
 
 						<TiptapEditor
 							bind:this={editorRef}
-							placeholder="Describe a task or ask a question"
+							placeholder={composerPlaceholder}
 							initialContent={initialComposerDraft}
 							disabled={!$anyCredential}
 							onTextChange={(text) => {
@@ -853,9 +918,9 @@
 							bind:isTranscribing
 						/>
 
-						<!-- Voice call (VM19): starts/resumes a voice call. Renders
-						     nothing when voice mode is off or the surface doesn't
-						     qualify (active non-voice chat). -->
+						<!-- Voice call (VM19): re-opens the call on a voice session.
+						     Renders nothing anywhere else — a NEW voice session is
+						     started from the voice lane's own hero, not from here. -->
 						<VoiceCallButton disabled={isUploading || isRecording || isTranscribing} />
 					{/snippet}
 				</ControlsDock>

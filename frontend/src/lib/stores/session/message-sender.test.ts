@@ -166,6 +166,37 @@ describe('message-sender worktree send backstop', () => {
 	});
 });
 
+describe('message-sender session mode', () => {
+	it('stamps the lane on the query that creates the session', async () => {
+		const { deps, wsConn } = makeDeps(baseState({
+			sessionId: null,
+			worktreeIntent: 'local',
+			project: '',
+			mode: 'chat',
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.sendMessage('what is the weather');
+
+		const frame = wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any;
+		expect(frame.mode).toBe('chat');
+	});
+
+	it('omits the lane once the session row exists — the row already owns it', async () => {
+		const { deps, wsConn } = makeDeps(baseState({
+			sessionId: 'ses-1',
+			worktreeIntent: 'local',
+			mode: 'chat',
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.sendMessage('follow-up');
+
+		const frame = wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any;
+		expect(frame.mode).toBeUndefined();
+	});
+});
+
 describe('message-sender fast-mode override', () => {
 	it('sends fast: true when the session has fast mode on', async () => {
 		const { deps, wsConn } = makeDeps(baseState({

@@ -2,12 +2,14 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import {
 	createSessionSwitcher,
 	gateSnapshotPatch,
+	reconciledSessionMode,
 	type SessionSwitcherDeps,
 } from './session-switcher';
 import { feedController } from './v2/feed-controller';
 import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
+import { appMode } from '../sessionMode.svelte';
 
 // session-switcher looks up the session row in appData to tailor the load-error
 // message for remote (cross-install) sessions (B4). Mock it so tests can seed the
@@ -68,6 +70,7 @@ vi.mock('./v2/feed-controller', () => ({
 function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionState {
 	return {
 		sessionId: 'session-A',
+		mode: 'code',
 		title: 'Session A',
 		messages: [{ id: 'm1', role: 'user', content: 'hi' }],
 		isStreaming: false,
@@ -649,5 +652,138 @@ describe('gateSnapshotPatch (W7)', () => {
 			currentTaskCount: 2,
 		});
 		expect(gated.activeTasks).toBeUndefined();
+	});
+});
+
+describe('session mode lanes', () => {
+	beforeEach(() => {
+		_mockSessions.current = [];
+		localStorage.clear();
+		appMode.set('code');
+	});
+
+	it('takes an existing session lane from its row, never from the sidepanel pick', async () => {
+		// The user is browsing the chat lane, but opens a code session from a
+		// deep link / another device. The row wins, or the surface would render
+		// the stripped chat composer over a session that owns a worktree.
+		_mockSessions.current = [{ id: 'session-B' }];
+		appMode.set('chat');
+		const { switcher, getState } = makeSwitcher(fullState({ mode: 'chat' }));
+
+		await switcher.switchSession('session-B');
+		switcher.destroy();
+
+		expect(getState().mode).toBe('code');
+	});
+
+	it('reads a voice row lane and does not inherit the leaving session lane', async () => {
+		_mockSessions.current = [{ id: 'session-B', mode: 'voice' }];
+		const { switcher, getState } = makeSwitcher(fullState({ mode: 'chat' }));
+
+		await switcher.switchSession('session-B');
+		switcher.destroy();
+
+		expect(getState().mode).toBe('voice');
+	});
+
+	it('opens a new chat in the lane the sidepanel is showing', () => {
+		appMode.set('voice');
+		const { switcher, getState } = makeSwitcher(fullState());
+
+		switcher.newChat();
+		switcher.destroy();
+
+		expect(getState().mode).toBe('voice');
+	});
+
+	it('starts the projectless lanes with no repo, so no worktree can be cut', () => {
+		// The user was last in a code session on proj-A with the worktree toggle
+		// remembered as 'worktree'. Neither may follow them into chat mode: the
+		// chat composer has no project or branch control to undo it with.
+		localStorage.setItem('aihub_executionMode', 'worktree');
+		localStorage.setItem('aihub_selectedProject', 'proj-A');
+		appMode.set('chat');
+		const { switcher, getState } = makeSwitcher(fullState({
+			project: 'proj-A',
+			projectV2Id: 'pv2-a',
+			worktreeIntent: 'worktree',
+			worktreeBranch: 'feature/x',
+			selectedWorktreeBranch: 'feature/x',
+			worktreeId: 'wt-1',
+		}));
+
+		switcher.newChat();
+		switcher.destroy();
+
+		const s = getState();
+		expect(s.project).toBe('');
+		expect(s.projectV2Id).toBeNull();
+		expect(s.worktreeIntent).toBe('local');
+		expect(s.worktreeBranch).toBe('');
+		expect(s.selectedWorktreeBranch).toBeNull();
+		expect(s.worktreeId).toBeNull();
+	});
+
+	it('still restores the remembered project and worktree intent in code mode', () => {
+		localStorage.setItem('aihub_executionMode', 'worktree');
+		localStorage.setItem('aihub_selectedProject', 'proj-A');
+		const { switcher, getState } = makeSwitcher(fullState({ project: 'proj-A' }));
+
+		switcher.newChat();
+		switcher.destroy();
+
+		expect(getState().project).toBe('proj-A');
+		expect(getState().worktreeIntent).toBe('worktree');
+	});
+
+	it('does not carry a code-lane permission mode into chat or voice', () => {
+		// The chat and voice composers render no tool-access control, so an
+		// inherited 'plan' would be unchangeable for the life of the session —
+		// and undischargeable, the plan-exit tool not being on the chat ceiling.
+		localStorage.setItem('aihub_lastPermissionMode', 'plan');
+		appMode.set('chat');
+		const { switcher, getState } = makeSwitcher(fullState());
+
+		switcher.newChat();
+		switcher.destroy();
+
+		expect(getState().permissionModeOverride).toBeNull();
+	});
+
+	it('keeps restoring the permission mode for a code compose', () => {
+		localStorage.setItem('aihub_lastPermissionMode', 'plan');
+		const { switcher, getState } = makeSwitcher(fullState());
+
+		switcher.newChat();
+		switcher.destroy();
+
+		expect(getState().permissionModeOverride).toBe('plan');
+	});
+});
+
+describe('session-switcher · reconciledSessionMode', () => {
+	const rows = [
+		{ id: 'code-1', mode: null },
+		{ id: 'chat-1', mode: 'chat' },
+		{ id: 'voice-1', mode: 'voice' },
+		{ id: 'weird-1', mode: 'nonsense' },
+	];
+
+	it('reads the lane off the row, NULL included', () => {
+		expect(reconciledSessionMode('code-1', rows)).toBe('code');
+		expect(reconciledSessionMode('chat-1', rows)).toBe('chat');
+		expect(reconciledSessionMode('voice-1', rows)).toBe('voice');
+	});
+
+	it('normalizes an unknown value to the code lane', () => {
+		expect(reconciledSessionMode('weird-1', rows)).toBe('code');
+	});
+
+	it('defers to nothing when there is no session or no row', () => {
+		// Both cases must leave the caller's current mode alone rather than
+		// asserting 'code': an unbound compose owns its lane, and a session
+		// missing from the list (foreign, filtered, deleted) has no row to read.
+		expect(reconciledSessionMode(null, rows)).toBeNull();
+		expect(reconciledSessionMode('not-in-list', rows)).toBeNull();
 	});
 });

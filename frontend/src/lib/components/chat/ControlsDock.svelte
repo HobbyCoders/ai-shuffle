@@ -11,6 +11,13 @@
 	 *   model name as plain text (opens the model picker) · effort as a filled
 	 *   tag (opens the compact effort popover) · the context-usage ring.
 	 *
+	 * The permission control is CODE-LANE ONLY, on both viewports. Chat and voice
+	 * sessions run a fixed tool surface the user cannot widen, so a tool-access
+	 * menu there would offer a choice with nothing behind it. Attach is dropped
+	 * only in the voice lane, which has no composer upload path. Everything else
+	 * — dictate/call, model, effort, the usage ring and the mobile settings
+	 * trigger — is present in every lane.
+	 *
 	 * Only one dock popover is open at a time; the ring's own popover closes
 	 * itself on any outside click, so the two never stack.
 	 *
@@ -136,6 +143,22 @@
 	// every send carries it, and the backend stores it on the session row.
 	const effortValue = $derived($activeSession.effortLevelOverride);
 	const permissionValue = $derived($activeSession.permissionModeOverride ?? 'default');
+	// Chat and voice are projectless, web-only lanes with a fixed tool surface
+	// (decided server-side), so there is no access to grant.
+	const isCodeLane = $derived($activeSession.mode === 'code');
+	// Attach survives into the chat lane. Its uploads skip the project endpoint
+	// for a shared workspace directory, and the chat ceiling carries a `Read`
+	// scoped to that directory, so an attached file is genuinely readable there.
+	// Voice is the one lane with no upload path — the call surface has no
+	// composer to attach into.
+	const showAttach = $derived($activeSession.mode !== 'voice');
+
+	// Flipping lanes (or opening a chat session) unmounts the permission trigger.
+	// `openPopover` would stay pinned to it, and `handleDocumentClick` bails when
+	// the wrapper is gone — leaving the dock unable to open any other popover.
+	$effect(() => {
+		if (!isCodeLane && openPopover === 'permission') openPopover = null;
+	});
 	const attachDisabled = $derived(
 		!$anyCredential || isUploading || isRemoteOnlyCompose($activeSession.project, $activeSession.projectV2Id)
 	);
@@ -302,59 +325,67 @@
 		>
 			<SlidersHorizontal size={14} strokeWidth={1.8} aria-hidden="true" />
 		</button>
-		<div class="dock-pop-wrap desktop-controls" bind:this={permissionWrapRef}>
-			<button
-				type="button"
-				class="dock-txt"
-				class:open={openPopover === 'permission'}
-				onclick={() => togglePopover('permission')}
-				title={`Tool access: ${permissionLabel} — ${permissionDescription}`}
-				aria-haspopup="menu"
-				aria-expanded={openPopover === 'permission'}
-				aria-label="Permission mode: {permissionLabel}"
-			>{permissionLabel}</button>
+		{#if isCodeLane}
+			<div class="dock-pop-wrap desktop-controls" bind:this={permissionWrapRef}>
+				<button
+					type="button"
+					class="dock-txt"
+					class:open={openPopover === 'permission'}
+					onclick={() => togglePopover('permission')}
+					title={`Tool access: ${permissionLabel} — ${permissionDescription}`}
+					aria-haspopup="menu"
+					aria-expanded={openPopover === 'permission'}
+					aria-label="Permission mode: {permissionLabel}"
+				>{permissionLabel}</button>
 
-			{#if openPopover === 'permission'}
-				<div
-					class="dock-menu permission-menu"
-					role="menu"
-					aria-label="Tool access"
-					data-composer-owned-overlay="true"
-				>
-					<div class="access-list">
-						{#each permissionModes as mode (mode.value)}
-							<button
-								type="button"
-								class="access-row"
-								class:selected={mode.value === permissionValue}
-								onclick={() => {
-									activeSession.setPermissionModeOverride(mode.value);
-									closePopover();
-								}}
-								role="menuitemradio"
-								aria-checked={mode.value === permissionValue}
-								title={mode.description}
-							>
-								<span class="access-copy">
-									<strong>{mode.label}</strong>
-									<small>{mode.description}</small>
-								</span>
-								{#if mode.value === permissionValue}
-									<svg class="w-3.5 h-3.5 access-check" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-									</svg>
-								{/if}
-							</button>
-						{/each}
+				{#if openPopover === 'permission'}
+					<div
+						class="dock-menu permission-menu"
+						role="menu"
+						aria-label="Tool access"
+						data-composer-owned-overlay="true"
+					>
+						<div class="access-list">
+							{#each permissionModes as mode (mode.value)}
+								<button
+									type="button"
+									class="access-row"
+									class:selected={mode.value === permissionValue}
+									onclick={() => {
+										activeSession.setPermissionModeOverride(mode.value);
+										closePopover();
+									}}
+									role="menuitemradio"
+									aria-checked={mode.value === permissionValue}
+									title={mode.description}
+								>
+									<span class="access-copy">
+										<strong>{mode.label}</strong>
+										<small>{mode.description}</small>
+									</span>
+									{#if mode.value === permissionValue}
+										<svg class="w-3.5 h-3.5 access-check" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+										</svg>
+									{/if}
+								</button>
+							{/each}
+						</div>
 					</div>
-				</div>
-			{/if}
-		</div>
+				{/if}
+			</div>
+		{/if}
 
 		<!-- Dictate / voice call, supplied by ChatInput — left of attach. -->
 		{@render voiceActions?.()}
 
-		<!-- Attach stays in the primary action cluster on every viewport. -->
+		<!-- Attach stays in the primary action cluster on every viewport, in the
+		     code and chat lanes both. A code-lane upload lands in the project's
+		     or worktree's uploads dir; a chat-lane one lands in the workspace's
+		     shared chat-uploads dir. Either way it reaches the model as an @path
+		     it has to Read — which is exactly why the chat tool ceiling carries a
+		     Read pinned to that directory. Voice has no composer upload path. -->
+		{#if showAttach}
 		<button
 			type="button"
 			onclick={onAttachClick}
@@ -363,7 +394,11 @@
 			aria-label="Attach file"
 			title={isUploading
 				? 'Uploading...'
-				: (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id) ?? 'Attach file')}
+				: (attachmentBlockReason(
+						$activeSession.project,
+						$activeSession.projectV2Id,
+						$activeSession.mode
+					) ?? 'Attach file')}
 		>
 			{#if isUploading}
 				<svg class="w-[14px] h-[14px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -374,6 +409,7 @@
 				<Plus size={14} strokeWidth={1.8} aria-hidden="true" />
 			{/if}
 		</button>
+		{/if}
 
 	</div>
 
@@ -477,6 +513,7 @@
 	permissionOptions={permissionModes}
 	permissionValue={permissionValue}
 	onPermissionSelect={(value) => activeSession.setPermissionModeOverride(value)}
+	showCodeControls={isCodeLane}
 />
 
 <style>

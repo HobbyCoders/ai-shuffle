@@ -99,6 +99,7 @@ function createMockDeps(overrides?: Partial<MessageHandlerDeps>): MessageHandler
 function mockState(): ActiveSessionState {
 	return {
 		sessionId: 'session-1',
+		mode: 'code',
 		title: '',
 		messages: [],
 		isStreaming: false,

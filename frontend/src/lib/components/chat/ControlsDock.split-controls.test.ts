@@ -1,6 +1,8 @@
-import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
-import { createRawSnippet } from 'svelte';
+import { createRawSnippet, tick } from 'svelte';
+import { activeSession } from '$lib/stores/active-session';
+import { appMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
 import ControlsDock from './ControlsDock.svelte';
 
 vi.hoisted(() => {
@@ -23,7 +25,19 @@ vi.mock('$lib/api/client', async (importOriginal) => {
 	};
 });
 
-afterEach(() => cleanup());
+// The dock reads its lane off `$activeSession.mode`, and `newChat()` is what
+// stamps the sidepanel's lane onto a fresh compose surface — so it is also how
+// a test puts the dock in one. Every test starts (and leaves) the code lane.
+function setLane(mode: SessionMode) {
+	appMode.set(mode);
+	activeSession.newChat();
+}
+
+beforeEach(() => setLane('code'));
+afterEach(() => {
+	cleanup();
+	setLane('code');
+});
 afterAll(() => vi.unstubAllGlobals());
 
 function renderDock(props: Record<string, unknown> = {}) {
@@ -123,5 +137,50 @@ describe('ControlsDock split controls', () => {
 
 		const dialog = screen.getByRole('dialog', { name: /choose model/i });
 		expect(dialog.querySelector('[data-model-picker-panel]')).toBeTruthy();
+	});
+
+	it('drops the tool-access control in the chat lane but keeps attach', () => {
+		setLane('chat');
+		const { container } = renderDock({ voiceActions });
+
+		// A chat session's tool surface is fixed server-side, so there is nothing
+		// for a permission menu to grant.
+		expect(screen.queryByRole('button', { name: /^permission mode:/i })).toBeNull();
+		// Attach survives: chat uploads land in the workspace's shared
+		// chat-uploads dir, and the chat ceiling carries a Read scoped to it.
+		const attach = screen.getByRole('button', { name: /attach file/i });
+		expect(attach).toBeTruthy();
+		// Not captioned with the project advice — a projectless chat is the
+		// working state here, not a misconfiguration. (Whether the button is
+		// enabled depends on credentials, which this harness has none of.)
+		expect(attach.getAttribute('title')).toBe('Attach file');
+		// Everything else the chat composer keeps.
+		expect(screen.getByRole('button', { name: /^model:/i })).toBeTruthy();
+		expect(screen.getByRole('button', { name: /^effort:/i })).toBeTruthy();
+		expect(container.querySelector('[data-testid="voice-snippet"]')).toBeTruthy();
+		expect(container.querySelector('.usage-context-wrapper')).toBeTruthy();
+		expect(container.querySelector('.mobile-settings-trigger')).toBeTruthy();
+	});
+
+	it('drops attach in the voice lane, which has no composer upload path', () => {
+		setLane('voice');
+		renderDock({ voiceActions });
+
+		expect(screen.queryByRole('button', { name: /attach file/i })).toBeNull();
+	});
+
+	it('does not wedge the dock when the lane flips with the access menu open', async () => {
+		renderDock();
+		await fireEvent.click(screen.getByRole('button', { name: /^permission mode:/i }));
+		expect(screen.getByRole('menu', { name: /tool access/i })).toBeTruthy();
+
+		setLane('chat');
+		await tick();
+
+		expect(screen.queryByRole('menu', { name: /tool access/i })).toBeNull();
+		// The stranded popover would otherwise keep `openPopover` pinned to a
+		// trigger that no longer exists, and no outside click could clear it.
+		await fireEvent.click(screen.getByRole('button', { name: /^effort:/i }));
+		expect(screen.getByRole('dialog', { name: /reasoning effort/i })).toBeTruthy();
 	});
 });

@@ -89,4 +89,29 @@ describe('evaluateSubmitGuards', () => {
 		const block = evaluateSubmitGuards(ready({ hasProfile: false, hasProject: false }));
 		expect(block!.notice?.message).toMatch(/agent/i);
 	});
+
+	// The chat and voice lanes clear the project slice on every new compose and
+	// render no picker, so the project guard there would refuse every send with
+	// an instruction the user cannot carry out. Regression pin: chat mode was the
+	// lane the attachment work shipped into, and a blocked send makes attaching
+	// a file pointless.
+	it('lets a projectless chat-lane send proceed', () => {
+		expect(evaluateSubmitGuards(ready({ hasProject: false, mode: 'chat' }))).toBeNull();
+	});
+
+	it('lets a projectless voice-lane send proceed', () => {
+		expect(evaluateSubmitGuards(ready({ hasProject: false, mode: 'voice' }))).toBeNull();
+	});
+
+	it('still names the missing project in the code lane', () => {
+		const block = evaluateSubmitGuards(ready({ hasProject: false, mode: 'code' }));
+		expect(block!.notice).toEqual({ message: 'Select a project first.', tone: 'warning' });
+	});
+
+	// A projectless lane skips only the project guard; everything ahead of it in
+	// the chain still applies.
+	it('still blocks a chat-lane send with no agent selected', () => {
+		const block = evaluateSubmitGuards(ready({ hasProject: false, hasProfile: false, mode: 'chat' }));
+		expect(block!.notice?.message).toMatch(/agent/i);
+	});
 });

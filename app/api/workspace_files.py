@@ -12,14 +12,25 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Query, Form
+from fastapi import (
+    APIRouter, HTTPException, Depends, status, Request, UploadFile, File, Query, Form
+)
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.core.config import settings
 from app.db.async_database import run_sync
 from app.api.auth import require_auth
-from app.api.projects import format_file_size, get_file_extension
+# The size cap comes from the project upload rather than being restated here:
+# the composer's attach button posts to one endpoint or the other depending on
+# the session's lane, and a file the user can attach in one lane and not the
+# other would be a difference with no explanation behind it.
+from app.api.projects import (
+    MAX_UPLOAD_SIZE,
+    _read_upload_within_limit,
+    format_file_size,
+    get_file_extension,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -133,11 +144,26 @@ async def list_workspace_files(
 
 @router.post("/upload")
 async def upload_file(
+    request: Request,
     file: UploadFile = File(...),
     path: str = Form(default=""),
     token: str = Depends(require_auth)
 ):
     """Upload a file to the workspace."""
+    # Same two-stage cap as the project upload: a Content-Length pre-check so an
+    # oversized body is refused before it is streamed at all, then a chunked
+    # read that enforces the real limit without trusting that (spoofable)
+    # header. This endpoint used to be reachable only from the workspace file
+    # browser; the chat composer now points every attachment at it, so an
+    # uncapped ``await file.read()`` here would buffer whatever the user dragged
+    # onto the composer into the worker's memory.
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large. Maximum upload size is {MAX_UPLOAD_SIZE // (1024 * 1024)}MB"
+        )
+
     workspace = settings.effective_workspace_dir.resolve()
 
     if path:
@@ -164,10 +190,13 @@ async def upload_file(
             file_path = target_dir / f"{stem}_{counter}{suffix}"
             counter += 1
 
+    # Outside the try: an over-cap read raises HTTPException(413), and the
+    # blanket handler below would otherwise relabel it as a 500 "Failed to save
+    # file" — the one message that tells the user nothing about what to change.
+    content = await _read_upload_within_limit(file)
     try:
-        content = await file.read()
         file_path.write_bytes(content)
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to save uploaded file")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -179,6 +208,13 @@ async def upload_file(
     return {
         "filename": file_path.name,
         "path": relative_path.as_posix(),
+        # Absolute path too, matching the project upload's shape: the composer
+        # turns an attachment into an ``@<fullPath>`` reference for the agent to
+        # open, and a workspace-relative path would resolve against the wrong
+        # root for anything that is not running from the workspace itself.
+        # Forward slashes so the reference survives a round trip through the
+        # prompt text on Windows.
+        "full_path": file_path.as_posix(),
         "size": len(content),
         "sizeFormatted": format_file_size(len(content))
     }

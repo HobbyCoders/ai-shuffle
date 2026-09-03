@@ -30,6 +30,7 @@ import {
 	getPersistedWorktreeIntent, setPersistedWorktreeIntent,
 	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, getPersistedFastMode,
 	getPersistedContextWindowChoice, setPersistedRunBinding,
+	reconciledSessionMode,
 } from './session/session-switcher';
 
 // Extracted sub-modules
@@ -44,6 +45,7 @@ import { createDraftManager } from './session/draft-manager';
 import { sessionEphemeralCache } from './session-cache';
 import { getOrCreateDeviceId } from './device-id';
 import { appData } from './app-data.svelte';
+import { appMode, type SessionMode } from './sessionMode.svelte';
 import { git } from './git.svelte';
 import { untrack } from 'svelte';
 import { createStore, createSubscribers, shallowEqual } from './store-utils';
@@ -98,6 +100,13 @@ export const backgroundPermissions = {
 /** Full reactive state for the single active session. */
 export interface ActiveSessionState {
 	sessionId: string | null;
+	/** Which sidepanel lane this surface belongs to — the single thing every
+	 *  component reads to decide what to render, because it covers both cases
+	 *  uniformly: for an OPEN session it is the session row's own mode, and for
+	 *  a brand-new compose screen it is `appMode.current`. Components must not
+	 *  read `appMode` directly; doing so would repaint an open code session as
+	 *  chat the moment the user flipped the sidepanel switcher. */
+	mode: SessionMode;
 	title: string;
 	messages: ChatMessage[];
 	/** Whether a turn is live for this session.
@@ -250,9 +259,19 @@ export interface ActiveSessionState {
 	isHydrationSlow?: boolean;
 }
 
-/** Minimal shape persisted to the backend. */
+/** Minimal shape persisted to the backend.
+ *
+ *  `mode` is a SNAPSHOT, not the authority. The row still decides a session's
+ *  lane (switchSession reads it, and `reconcileSessionMode` re-reads it once
+ *  the session list lands). It is carried here anyway because the boot restore
+ *  adopts a sessionId long before any row is available, and the only other
+ *  value on hand at that moment is `appMode` — which lives in device-wide
+ *  localStorage and may have been moved by a different tab, repainting a
+ *  restored code session as chat (and vice versa). Restoring the snapshot
+ *  makes that first frame right; the reconcile makes it authoritative. */
 export interface PersistedSession {
 	sessionId: string | null;
+	mode?: SessionMode;
 	title: string;
 	profile: string;
 	project: string;
@@ -287,6 +306,9 @@ function getAuthToken(): string | null {
 function defaultState(): ActiveSessionState {
 	return {
 		sessionId: null,
+		// A fresh surface opens in whichever lane the sidepanel is showing;
+		// switchSession overwrites this from the session's own row.
+		mode: appMode.current,
 		title: 'New Chat',
 		messages: [],
 		isStreaming: false,
@@ -772,6 +794,34 @@ export const activeSession = {
 		);
 		activeSession.setProfile(fallback);
 		return true;
+	},
+
+	/**
+	 * Re-derive the open session's lane from its row once the session list has
+	 * loaded, and report the lane the surface settled in.
+	 *
+	 * The boot restore adopts a sessionId from a persisted snapshot, not from a
+	 * row — the row does not exist yet at that point in init(). The snapshot is
+	 * usually right, but it can be stale (it may come from the device-wide
+	 * server key written by a different tab), and the row is the stated
+	 * authority for a session's lane. So the caller reconciles once, right
+	 * after loadSessions() resolves, exactly like validateSelectedProfile above.
+	 *
+	 * Returns the settled mode for an open session so the caller can align the
+	 * sidepanel lane with it (a restored session the switcher is not showing is
+	 * a session the user cannot find in the list). Returns null for an unbound
+	 * compose or a sessionId that is not in the list — neither has a row to
+	 * defer to, so `mode` keeps whatever it already holds.
+	 */
+	reconcileSessionMode(sessionsList: { id: string; mode?: string | null }[]): SessionMode | null {
+		const sessionId = _state.sessionId;
+		const mode = reconciledSessionMode(sessionId, sessionsList);
+		if (!mode) return null;
+		if (mode !== _state.mode) {
+			console.debug(`[ActiveSession] reconcileSessionMode: ${_state.mode} -> ${mode} for ${sessionId}`);
+			_update(s => ({ ...s, mode }));
+		}
+		return mode;
 	},
 
 	setProject(projectId: string, projectV2Id?: string | null) {

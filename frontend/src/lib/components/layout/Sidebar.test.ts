@@ -119,6 +119,9 @@ vi.mock('$lib/components/deck/lazy/panels', async (importOriginal) => {
 
 import { tick } from 'svelte';
 import { sessionTimestamp } from './session-card-data';
+// Not mocked: the lane partition IS what the mode tests assert, so they drive
+// the real store. It is a module singleton, hence the reset in beforeEach.
+import { appMode } from '$lib/stores/sessionMode.svelte';
 import Sidebar from './Sidebar.svelte';
 
 function session(
@@ -170,6 +173,7 @@ const sidebarProps = {
 
 beforeEach(() => {
 	localStorage.clear();
+	appMode.set('code');
 	vi.mocked(sessionTimestamp).mockClear();
 	mocks.sessionsHasMore.set(false);
 	mocks.sessionsLoadingMore.set(false);
@@ -745,5 +749,151 @@ describe('Sidebar workspace nav prefetch', () => {
 		await fireEvent.click(row);
 
 		expect(onOpenFeature).toHaveBeenCalledWith('docs');
+	});
+});
+
+describe('Sidebar mode lanes', () => {
+	/** One session per lane, so every assertion below can name what leaked. */
+	function laneFixture() {
+		return [
+			// No `mode` at all: every row written before modes existed.
+			session('legacy', 'Legacy chat', 'visible-project', false),
+			session('coded', 'Code chat', 'visible-project', false, false, { mode: 'code' }),
+			session('chatty', 'Chat chat', null, false, false, { mode: 'chat' }),
+			session('spoken', 'Voice chat', null, false, false, { mode: 'voice' }),
+		];
+	}
+
+	function visibleTitles(): string[] {
+		return Array.from(document.querySelectorAll('.ctitle, .l2')).map(
+			(n) => n.textContent?.trim() ?? ''
+		);
+	}
+
+	it('lists pre-modes and explicit code rows in the code lane, and nothing else', () => {
+		mocks.sessions.set(laneFixture());
+
+		render(Sidebar, { props: sidebarProps });
+
+		expect(visibleTitles()).toEqual(['Legacy chat', 'Code chat']);
+	});
+
+	it('lists only chat rows in the chat lane', () => {
+		appMode.set('chat');
+		mocks.sessions.set(laneFixture());
+
+		render(Sidebar, { props: sidebarProps });
+
+		expect(visibleTitles()).toEqual(['Chat chat']);
+	});
+
+	it('lists only voice rows in the voice lane', () => {
+		appMode.set('voice');
+		mocks.sessions.set(laneFixture());
+
+		render(Sidebar, { props: sidebarProps });
+
+		expect(visibleTitles()).toEqual(['Voice chat']);
+	});
+
+	it('names the empty state after the lane', () => {
+		mocks.sessions.set([]);
+		appMode.set('voice');
+
+		render(Sidebar, { props: sidebarProps });
+
+		expect(document.querySelector('.empty')?.textContent).toBe('No voice sessions yet');
+	});
+
+	it('offers the project filter in code mode only', async () => {
+		mocks.sessions.set(laneFixture());
+
+		const { unmount } = render(Sidebar, { props: sidebarProps });
+		expect(screen.queryByRole('button', { name: /All projects/ })).toBeTruthy();
+		unmount();
+
+		for (const mode of ['chat', 'voice'] as const) {
+			appMode.set(mode);
+			const view = render(Sidebar, { props: sidebarProps });
+			// Chat and voice sessions are projectless — the menu could only ever
+			// offer "Ungrouped" — but the device filter still applies to both.
+			expect(screen.queryByRole('button', { name: /All projects/ })).toBeNull();
+			expect(screen.queryByRole('button', { name: /All devices/ })).toBeTruthy();
+			view.unmount();
+		}
+		await tick();
+	});
+
+	it('clears a project filter when the lane changes, so nothing is hidden by a control that is gone', async () => {
+		mocks.sessions.set(laneFixture());
+		render(Sidebar, { props: sidebarProps });
+
+		await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
+		await fireEvent.click(screen.getByRole('menuitem', { name: /Visible Project/ }));
+		expect(document.querySelector('.ghostrow.active')?.textContent).toContain('Visible Project');
+
+		await fireEvent.click(screen.getByRole('radio', { name: /Chat/ }));
+		await tick();
+		expect(screen.getByText('Chat chat')).toBeTruthy();
+
+		// Back in code mode the filter must be gone, not silently reapplied.
+		await fireEvent.click(screen.getByRole('radio', { name: /Code/ }));
+		await tick();
+		expect(screen.getByRole('button', { name: /All projects/ }).textContent).toContain('All projects');
+		expect(visibleTitles()).toEqual(['Legacy chat', 'Code chat']);
+	});
+
+	it('renders the three lanes as a radiogroup with the current one checked', () => {
+		render(Sidebar, { props: sidebarProps });
+
+		const radios = screen.getAllByRole('radio');
+		expect(radios.map((r) => r.textContent?.trim())).toEqual(['Code', 'Chat', 'Voice']);
+		expect(radios.map((r) => r.getAttribute('aria-checked'))).toEqual(['true', 'false', 'false']);
+	});
+
+	it('switches the store and lands on the new lane\'s compose screen', async () => {
+		const onNewSession = vi.fn();
+		mocks.sessions.set(laneFixture());
+		render(Sidebar, { props: { ...sidebarProps, onNewSession } });
+
+		await fireEvent.click(screen.getByRole('radio', { name: /Voice/ }));
+		await tick();
+
+		expect(appMode.current).toBe('voice');
+		// The session on screen belongs to the lane just left, so the switch has
+		// to navigate as well as filter.
+		expect(onNewSession).toHaveBeenCalledTimes(1);
+		expect(visibleTitles()).toEqual(['Voice chat']);
+	});
+
+	it('notifies onSelectMode after the store is already written', async () => {
+		const onSelectMode = vi.fn(() => expect(appMode.current).toBe('chat'));
+		render(Sidebar, { props: { ...sidebarProps, onSelectMode } });
+
+		await fireEvent.click(screen.getByRole('radio', { name: /Chat/ }));
+
+		expect(onSelectMode).toHaveBeenCalledWith('chat');
+	});
+
+	it('does nothing when the current lane is re-selected', async () => {
+		const onNewSession = vi.fn();
+		render(Sidebar, { props: { ...sidebarProps, onNewSession } });
+
+		await fireEvent.click(screen.getByRole('radio', { name: /Code/ }));
+
+		expect(onNewSession).not.toHaveBeenCalled();
+	});
+
+	it('moves lanes with the arrow keys', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		await fireEvent.keyDown(screen.getByRole('radio', { name: /Code/ }), { key: 'ArrowRight' });
+		expect(appMode.current).toBe('chat');
+
+		await fireEvent.keyDown(screen.getByRole('radio', { name: /Chat/ }), { key: 'ArrowLeft' });
+		expect(appMode.current).toBe('code');
+
+		await fireEvent.keyDown(screen.getByRole('radio', { name: /Code/ }), { key: 'End' });
+		expect(appMode.current).toBe('voice');
 	});
 });

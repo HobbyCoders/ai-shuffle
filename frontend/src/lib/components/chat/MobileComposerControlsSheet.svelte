@@ -44,6 +44,11 @@
 		fastSupported?: boolean;
 		fastEnabled?: boolean;
 		onToggleFast?: () => void;
+		/** Whether this composer is in the code lane. Chat and voice sessions have
+		 *  no project to set up and a fixed web-only tool surface, so the sheet
+		 *  drops the chat-setup and tool-access sections entirely rather than
+		 *  showing headings above controls that cannot apply. */
+		showCodeControls?: boolean;
 		permissionOptions: ControlOption[];
 		permissionValue: string | null;
 		onPermissionSelect: (value: string) => void;
@@ -66,6 +71,7 @@
 		fastSupported = false,
 		fastEnabled = false,
 		onToggleFast,
+		showCodeControls = true,
 		permissionOptions,
 		permissionValue,
 		onPermissionSelect
@@ -273,10 +279,12 @@
 				</div>
 			{:else}
 				<div class="sheet-scroll overview-scroll">
-					<section class="control-section">
-						<div class="section-label"><SlidersHorizontal size={16} strokeWidth={1.8} /><span>Chat setup</span></div>
-						<ContextPillBar sheetMode />
-					</section>
+					{#if showCodeControls}
+						<section class="control-section">
+							<div class="section-label"><SlidersHorizontal size={16} strokeWidth={1.8} /><span>Chat setup</span></div>
+							<ContextPillBar sheetMode />
+						</section>
+					{/if}
 
 					<section class="control-section">
 						<button
@@ -329,6 +337,7 @@
 							{/if}
 						</div>
 
+						{#if showCodeControls}
 						<div class="compact-field">
 							<button
 								type="button"
@@ -367,6 +376,7 @@
 								</div>
 							{/if}
 						</div>
+						{/if}
 
 						{#if fastSupported}
 							<label class="fast-check">

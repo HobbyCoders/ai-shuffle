@@ -7,11 +7,21 @@
 	 * - Single active view in the main panel (chat or feature page)
 	 * - SpotlightSearch (Cmd+K) for quick navigation
 	 * - Full keyboard shortcut support
+	 *
+	 * Session modes (code / chat / voice) are NOT threaded from here. AppLayout
+	 * and AppTopBar pass Sidebar's props one by one, so rather than widen two
+	 * intermediaries for a single store write, Sidebar sets `appMode` itself and
+	 * then calls the `onNewSession` it already receives — which is exactly the
+	 * "switching lanes lands you on that lane's compose screen" behaviour. What
+	 * this page still owns is the reverse direction: any path that opens or
+	 * creates a session has to put the sidepanel in the matching lane, which is
+	 * what handleOpenSession and handleNewSessionForProject do below.
 	 */
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import { appMode, normalizeSessionMode } from '$lib/stores/sessionMode.svelte';
 	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data.svelte';
 
 	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
@@ -69,9 +79,15 @@
 	}
 
 	/**
-	 * Create a new chat session with a specific project pre-selected
+	 * Create a new chat session with a specific project pre-selected.
+	 *
+	 * Only the projects panel calls this, and a project only means something in
+	 * the code lane — chat and voice sessions are projectless. So the lane is
+	 * forced first: picking a project out of a chat-lane sidepanel would
+	 * otherwise create a session the list beside it cannot show.
 	 */
 	function handleNewSessionForProject(projectId: string) {
+		appMode.set('code');
 		activeSession.newChat();
 		activeSession.setProject(projectId);
 
@@ -105,6 +121,13 @@
 		} : null;
 
 		const sessionTitle = session?.title || null;
+
+		// Follow the session into its lane. A deep link (/?session=<id>), a
+		// notification tap or a spotlight hit can name a session from a lane the
+		// sidepanel is not showing; without this the session opens in the main
+		// panel while the list beside it does not contain it. Unknown/absent
+		// `mode` normalizes to 'code', which is what every pre-modes row is.
+		appMode.set(normalizeSessionMode(session?.mode));
 
 		const openChat = () => {
 			activeSession.switchSession(sessionId, sessionProjectId, worktreeInfo, sessionTitle, sessionProjectV2Id);
@@ -211,6 +234,12 @@
 		// loaded profiles list before any new session is created.
 		activeSession.validateSelectedProfile(appData.current.profiles);
 
+		// Same reconciliation for the restored session's LANE. init() adopts a
+		// sessionId from a per-tab snapshot before any row exists, so this is the
+		// first moment the row — the authority for which lane a session belongs
+		// to — can be consulted.
+		const restoredMode = activeSession.reconcileSessionMode(appData.current.sessions);
+
 		// Sync layout.activeView with the restored session from activeSession.init().
 		// These two stores persist independently (localStorage vs backend API) and can
 		// diverge. Generally the backend-persisted session is authoritative, EXCEPT
@@ -222,9 +251,17 @@
 		const restoredSessionId = $activeSession?.sessionId ?? null;
 		const currentViewSessionId = $activeView?.type === 'chat' ? ($activeView.sessionId ?? null) : null;
 
+		// Pull the sidepanel over to the restored session's lane, so a reload never
+		// leaves the open session missing from the list beside it (the alignment
+		// handleOpenSession does for a click). Only on the branches that actually
+		// OPEN it: where the layout's explicit New Chat wins below, the lane the
+		// user last chose is the one that compose belongs in.
+		const followRestoredLane = () => { if (restoredMode) appMode.set(restoredMode); };
+
 		if (!$activeView) {
 			// No persisted layout view — open the restored session or a new chat
 			if (restoredSessionId) {
+				followRestoredLane();
 				layout.openChat(restoredSessionId);
 			} else {
 				handleNewSession();
@@ -236,7 +273,11 @@
 			activeSession.newChat();
 		} else if ($activeView.type === 'chat' && currentViewSessionId !== restoredSessionId) {
 			// Layout view and active session disagree — backend is authoritative
+			followRestoredLane();
 			layout.openChat(restoredSessionId);
+		} else {
+			// Layout and the restored session already agree (the ordinary reload).
+			followRestoredLane();
 		}
 
 		// Deep-link: the Android shell opens `/?session=<id>` when a notification

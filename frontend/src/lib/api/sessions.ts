@@ -3,6 +3,9 @@
  */
 
 import { api, fetchAndDownload, type RequestOptions } from './client';
+// Type-only: erased at build, so this cannot pull the store's runtime (and its
+// localStorage access) into the API layer.
+import type { SessionMode } from '$lib/stores/sessionMode.svelte';
 
 // ============================================================================
 // Session Types
@@ -82,7 +85,13 @@ export interface Session {
 	fast?: boolean | null;
 	/** Optional persisted concrete context ceiling once the backend stores the override. */
 	context_window?: number | null;
-	mode?: string;  // Interaction mode: 'chat' (default) or 'voice' (Realtime call)
+	/** Which sidepanel lane this session belongs to: 'code' (the full agentic
+	 *  workspace), 'chat' (web-only assistant) or 'voice' (Realtime call).
+	 *  Stored as NULL for code sessions — every row predating modes is one — so
+	 *  the server coalesces NULL to 'code' on read. Widened with `string`
+	 *  because an older install can still put an unrecognized value on the wire;
+	 *  run it through `normalizeSessionMode` rather than comparing directly. */
+	mode?: SessionMode | string;
 	v2_stream?: boolean;  // Per-session opt-in to the V2 streaming path (V2 Phase 1)
 	hidden?: boolean;  // List-hidden internal sessions (for example delegated workers)
 }

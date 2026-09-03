@@ -420,6 +420,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// Composer device pick. Creation-time only: the backend ignores it
 				// for an existing session.
 				target_instance_id: _state.deviceIntent?.id || undefined,
+				// Sidepanel mode for a NEW session. Creation-time only — the backend
+				// ignores it once the session row exists.
+				mode: _state.sessionId ? undefined : _state.mode,
 				// Staged upload paths this prompt references (D8). Remote-only
 				// compose has no local checkout — never send the list.
 				upload_paths: !remoteOnly && options?.pendingUploadPaths?.length

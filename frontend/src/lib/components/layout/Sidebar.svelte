@@ -2,11 +2,27 @@
 	/**
 	 * Sidebar - Studio Noir session navigator.
 	 *
-	 * A 256px black plane: brand header + new session, ghost rows (search and the
-	 * project / device filters), a scrollable list of three-line session cards
-	 * grouped Active / Settled, the archived shelf, and a collapsible
-	 * Workspace section of labeled nav rows that switches the MainPanel
-	 * deck views.
+	 * A 256px black plane: brand header + new session, the Code / Chat / Voice
+	 * lane switcher, ghost rows (search and the project / device filters), a
+	 * scrollable list of three-line session cards grouped Active / Settled, the
+	 * archived shelf, and a collapsible Workspace section of labeled nav rows
+	 * that switches the MainPanel deck views.
+	 *
+	 * MODE LANES. The panel shows one lane at a time and the lane is a hard
+	 * partition: a code session is never listed while Chat is selected, and vice
+	 * versa. Everything downstream of `sidebarSessions` — the project and device
+	 * filter options, `rows`, Active / Settled / Archived, and the set of
+	 * (project, branch) pairs the PR badges poll for — derives from that one
+	 * list, so the lane filter is applied there and nowhere else. Chat and voice
+	 * sessions are projectless, so the project filter row is hidden outside the
+	 * code lane rather than offering a menu holding only "Ungrouped".
+	 *
+	 * The switcher writes the lane to the shared `appMode` store itself rather
+	 * than routing through the page: AppLayout and AppTopBar thread this
+	 * component's props explicitly, and neither is worth widening for a store
+	 * write. It then calls `onNewSession`, because the session on screen belongs
+	 * to the lane just left. `onSelectMode` stays available for a host that
+	 * wants to observe the switch.
 	 *
 	 * Desktop hosts it beside the main panel; at ≤1080px the same component is
 	 * rendered inside AppTopBar's slide-in drawer, so every navigation path is
@@ -49,12 +65,15 @@
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { preloadPanelForView } from '$lib/components/deck/lazy/panels';
+	import { appMode, sessionMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
 	import SessionCard from './SessionCard.svelte';
+	import SessionModeSwitcher from './SessionModeSwitcher.svelte';
 	import {
 		branchLabel,
 		deriveStatus,
 		sessionTimestamp,
 		sessionDeviceId,
+		sessionModeOf,
 		projectKey,
 		isVisibleSidebarSession,
 		isArchived,
@@ -71,6 +90,9 @@
 		onOpenSession: (sessionId: string) => void;
 		onOpenFeature: (type: ViewType) => void;
 		onOpenSpotlight?: () => void;
+		/** Notified after the lane switcher has already written `appMode`.
+		 *  Optional: no host threads it today (see the mode-lane note above). */
+		onSelectMode?: (mode: SessionMode) => void;
 		/** Extra control for the header row (the drawer's close button). */
 		headerAction?: Snippet;
 	}
@@ -82,6 +104,7 @@
 		onOpenSession,
 		onOpenFeature,
 		onOpenSpotlight,
+		onSelectMode,
 		headerAction
 	}: Props = $props();
 
@@ -144,7 +167,13 @@
 	const activeId = $derived($activeSession.sessionId);
 	const projectsById = $derived(new Map($projects.map((p) => [p.id, p])));
 	const liveKeys = $derived(liveProjectKeys($projects, $clusterProjects));
-	const sidebarSessions = $derived($sessions.filter((s) => isVisibleSidebarSession(s, liveKeys)));
+	// One lane at a time. This is the ONLY place the mode partition is applied:
+	// the filter options, `rows`, the three groups and the PR-branch fetch set
+	// all derive from `sidebarSessions`, so a row excluded here is absent from
+	// every one of them.
+	const sidebarSessions = $derived(
+		$sessions.filter((s) => isVisibleSidebarSession(s, liveKeys) && sessionModeOf(s) === $sessionMode)
+	);
 
 	// The open session's streaming flag, narrowed to a SINGLE scalar (R2).
 	//
@@ -313,6 +342,14 @@
 	$effect(() => {
 		if (projectFilter && !projectOptions.some((p) => p.id === projectFilter)) projectFilter = null;
 	});
+	// Leaving the code lane clears the project filter outright. The effect above
+	// would eventually do it (no chat session matches a code project key), but
+	// only once `projectOptions` recomputes — and the row that would let you
+	// clear it by hand is hidden in the other two lanes, so a stale filter there
+	// could empty the list with no way back.
+	$effect(() => {
+		if ($sessionMode !== 'code') untrack(() => { projectFilter = null; });
+	});
 	$effect(() => {
 		if (deviceFilter && !deviceOptions.some((d) => d.id === deviceFilter)) deviceFilter = null;
 	});
@@ -368,6 +405,16 @@
 	);
 	const archivedCount = $derived(visibleSessions.filter(isArchived).length);
 	let archivedOpen = $state(false);
+
+	// Each lane names its own nothing-here state; "No sessions yet" under a
+	// voice-only list reads as though the whole app were empty.
+	const emptyLabel = $derived(
+		$sessionMode === 'chat'
+			? 'No chats yet'
+			: $sessionMode === 'voice'
+				? 'No voice sessions yet'
+				: 'No sessions yet'
+	);
 
 	// Keep the ticker in step with what's actually on screen. The prompt-parked
 	// states keep their live timer too — a session blocked on you is still live.
@@ -456,6 +503,18 @@
 		deviceFilter = id;
 		deviceMenuOpen = false;
 	}
+	/** Switch lanes. The sidebar owns the store write, then lands on the new
+	 *  lane's compose screen: the session on screen belongs to the lane just
+	 *  left and would otherwise sit there while the list beside it no longer
+	 *  contains it. */
+	function selectMode(mode: SessionMode) {
+		if (mode === $sessionMode) return;
+		closeMenus();
+		appMode.set(mode);
+		onSelectMode?.(mode);
+		onNewSession();
+	}
+
 	function pickFeature(type: ViewType) {
 		closeMenus();
 		onOpenFeature(type);
@@ -489,6 +548,8 @@
 	</header>
 
 	<div class="sb-rows">
+		<SessionModeSwitcher value={$sessionMode} onSelect={selectMode} />
+
 		{#if onOpenSpotlight}
 			<button class="ghostrow" onclick={onOpenSpotlight}>
 				<Search size={16} strokeWidth={1.85} />
@@ -497,33 +558,37 @@
 			</button>
 		{/if}
 
-		<div class="rowmenu" bind:this={projectMenuRef}>
-			<button
-				class="ghostrow"
-				class:active={!!projectFilter}
-				aria-haspopup="menu"
-				aria-expanded={projectMenuOpen}
-				onclick={() => { const next = !projectMenuOpen; closeMenus(); projectMenuOpen = next; }}
-			>
-				<FolderClosed size={16} strokeWidth={1.85} />
-				<span class="label">{projectFilterLabel}</span>
-				<ChevronDown class="chev" size={14} strokeWidth={2} />
-			</button>
-			{#if projectMenuOpen}
-				<div class="menu" role="menu">
-					<button class="menu-item" class:active={!projectFilter} role="menuitem" onclick={() => pickProject(null)}>
-						<span class="menu-label">All projects</span>
-						{#if !projectFilter}<Check size={14} strokeWidth={2} />{/if}
-					</button>
-					{#each projectOptions as opt (opt.id)}
-						<button class="menu-item" class:active={projectFilter === opt.id} role="menuitem" onclick={() => pickProject(opt.id)}>
-							<span class="menu-label">{opt.label}</span>
-							{#if projectFilter === opt.id}<Check size={14} strokeWidth={2} />{/if}
+		<!-- Chat and voice sessions carry no project, so outside the code lane this
+		     menu would only ever offer "Ungrouped". -->
+		{#if $sessionMode === 'code'}
+			<div class="rowmenu" bind:this={projectMenuRef}>
+				<button
+					class="ghostrow"
+					class:active={!!projectFilter}
+					aria-haspopup="menu"
+					aria-expanded={projectMenuOpen}
+					onclick={() => { const next = !projectMenuOpen; closeMenus(); projectMenuOpen = next; }}
+				>
+					<FolderClosed size={16} strokeWidth={1.85} />
+					<span class="label">{projectFilterLabel}</span>
+					<ChevronDown class="chev" size={14} strokeWidth={2} />
+				</button>
+				{#if projectMenuOpen}
+					<div class="menu" role="menu">
+						<button class="menu-item" class:active={!projectFilter} role="menuitem" onclick={() => pickProject(null)}>
+							<span class="menu-label">All projects</span>
+							{#if !projectFilter}<Check size={14} strokeWidth={2} />{/if}
 						</button>
-					{/each}
-				</div>
-			{/if}
-		</div>
+						{#each projectOptions as opt (opt.id)}
+							<button class="menu-item" class:active={projectFilter === opt.id} role="menuitem" onclick={() => pickProject(opt.id)}>
+								<span class="menu-label">{opt.label}</span>
+								{#if projectFilter === opt.id}<Check size={14} strokeWidth={2} />{/if}
+							</button>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		{/if}
 
 		<div class="rowmenu" bind:this={deviceMenuRef}>
 			<button
@@ -624,7 +689,7 @@
 		</button>
 		{#if !collapsedGroups.settled}
 			{#if visibleSettledRows.length === 0}
-				<p class="empty">No sessions yet</p>
+				<p class="empty">{emptyLabel}</p>
 			{:else}
 				<div class="cards">
 					{#each visibleSettledRows as row (row.session.id)}

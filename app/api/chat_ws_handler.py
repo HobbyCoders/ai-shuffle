@@ -24,6 +24,7 @@ from app.core.config import settings
 from app.core.connectors.manager import connector_manager
 from app.core.message_resolver import message_resolver, resolve_working_dir
 from app.core.permission_handler import is_plan_approval_text, permission_handler
+from app.core.session_modes import chat_mode_read_permitted, normalize_session_mode
 from app.core.session_title import derive_session_title
 from app.core.streaming_context import StreamingContext
 from app.core.sync_engine import sync_engine
@@ -952,6 +953,13 @@ class ChatWebSocketHandler:
         upload_paths = [
             p for p in (data.get("upload_paths") or []) if isinstance(p, str) and p
         ]
+        # Sidepanel mode for a NEW session (code / chat / voice). Creation-time
+        # only: an existing session's mode is settled on its row, so re-sending
+        # it here could never move a session between surfaces. The frontend
+        # never sends 'voice' on this path (voice sessions are minted by
+        # ``POST /voice/sessions``), but normalizing is what keeps an unknown
+        # string out of the row.
+        session_mode = normalize_session_mode(data.get("mode"))
 
         if not prompt:
             await self.send_json({"type": "error", "message": "Empty prompt"})
@@ -1033,7 +1041,18 @@ class ChatWebSocketHandler:
 
         # Create or get session
         if not session_id:
-            if upload_paths and not project_id:
+            # A chat-lane session is legitimately projectless AND carries
+            # attachments: its uploads go to the workspace's chat-uploads
+            # folder, not into a checkout. The membership test is the SAME
+            # function the permission callback later gates Read with, so the
+            # send only admits files the agent will actually be allowed to
+            # open. Everything else keeps today's refusal — a code-lane compose
+            # with no local checkout points the agent at files it cannot see.
+            chat_lane_uploads = bool(upload_paths) and session_mode == "chat" and all(
+                chat_mode_read_permitted("Read", {"file_path": p})
+                for p in upload_paths
+            )
+            if upload_paths and not project_id and not chat_lane_uploads:
                 from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT
 
                 await self.send_json({
@@ -1102,6 +1121,10 @@ class ChatWebSocketHandler:
                         permission_mode=(overrides or {}).get("permission_mode"),
                         context_window=(overrides or {}).get("context_window"),
                         fast=(overrides or {}).get("fast"),
+                        # The composer's sidepanel mode is likewise settled at
+                        # birth — 'code' persists as NULL, the same as every
+                        # session written before modes existed.
+                        mode=session_mode,
                         _conn=txn
                     )
                     _msg_role = "user"

@@ -7,6 +7,7 @@
  * session diffstat, the provider's display name — are simply not modelled.
  */
 import type { Session } from '$lib/api/client';
+import { normalizeSessionMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
 import { parseUTC } from '$lib/utils/dateFormatting';
 
 /** Status shown on a card's first line. */
@@ -216,6 +217,18 @@ export function isSidebarSession(s: Session): boolean {
 /** Sessions the sidebar may list: not hidden, and not from a removed project or device. */
 export function isVisibleSidebarSession(s: Session, liveKeys: Set<string>): boolean {
 	return isSidebarSession(s) && !isRemovedProjectSession(s, liveKeys) && !isRemovedDeviceSession(s);
+}
+
+/**
+ * Which sidepanel lane a row belongs to.
+ *
+ * `mode` is nullable on the server and was only ever written for voice calls,
+ * so every pre-modes row arrives with it absent — those are code sessions, and
+ * an unrecognised value falls back the same way rather than vanishing from all
+ * three lists.
+ */
+export function sessionModeOf(s: Session): SessionMode {
+	return normalizeSessionMode(s.mode);
 }
 
 /** Sessions the archive shelf owns (backend sets status='archived'). */

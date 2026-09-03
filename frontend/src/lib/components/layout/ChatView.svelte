@@ -6,9 +6,17 @@
 	 * Reads from the activeSession store — no props needed.
 	 *
 	 * Two states:
-	 * - Empty: WorkspaceSelector + ChatInput centered (the ChatInput's
+	 * - Empty: a per-lane hero + ChatInput centered (the ChatInput's
 	 *   ContextPillBar hosts the Local/Worktree execution-mode toggle above it)
 	 * - Active: MessageArea + ChatInput at bottom
+	 *
+	 * The empty state's hero depends on which LANE the surface belongs to
+	 * (`$activeSession.mode`): code gets the workspace picker, chat gets a
+	 * projectless conversation hero, voice gets a start-a-call hero. Only the hero
+	 * differs — an active transcript looks the same in every lane, because a
+	 * session's messages are a session's messages regardless of how it was
+	 * started. The one exception is the composer, which the brand-new voice lane
+	 * withholds; see `showComposer` below.
 	 *
 	 * Plus one in-place substitution (ruling VM18): while a voice call is up on
 	 * the session being VIEWED, the composer slot hosts the call controls instead
@@ -26,6 +34,8 @@
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
+	import ChatModeHero from './ChatModeHero.svelte';
+	import VoiceModeHero from './VoiceModeHero.svelte';
 	import VoiceCallPanel from '$lib/components/voice/VoiceCallPanel.svelte';
 	import { voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
 	import { RotateCcw } from 'lucide-svelte';
@@ -52,6 +62,12 @@
 	const isClearedSession = $derived(chatSurface === 'cleared');
 	const clearedTitle = $derived($activeSession.title?.trim() || 'Untitled');
 
+	// The lane this surface belongs to. The store carries it for BOTH an opened
+	// session (adopted from the row) and a brand-new compose screen (adopted from
+	// the sidepanel switcher), so this one read covers every case — no separate
+	// "what did the switcher say" lookup that could disagree with the session.
+	const surfaceMode = $derived($activeSession.mode);
+
 	// Voice (ruling VM18). The gate is the CALL, not the session's mode: a voice
 	// session with no call running is an ordinary chat, and only an in-flight call
 	// on the session currently being viewed takes over the composer slot. The
@@ -66,6 +82,20 @@
 	// mid-call. The transcript column takes over and fills in as the exchange
 	// lands.
 	const showEmptyHero = $derived(isEmptyState && !voiceCallActive);
+
+	// The ONE sanctioned exception to the always-mounted .input-slot rule (#665).
+	// That rule exists to protect the ChatInput subtree (Tiptap draft, open
+	// popovers, VoiceRecorder, dropdowns) across the empty → active flip WITHIN a
+	// session; a lane switch is a navigation between surfaces, not that flip, so
+	// unmounting here costs nothing the switch wasn't already going to cost.
+	//
+	// On the voice lane's brand-new screen the hero owns the only action — the
+	// user starts a call, they do not type — so a composer there would offer a
+	// text send with no session behind it. Every other case keeps the composer: an
+	// EXISTING voice session still needs it for its resume-call button and typed
+	// follow-ups, and a live call still swaps it for the call dock (VM18) rather
+	// than removing it.
+	const showComposer = $derived(!(surfaceMode === 'voice' && !$activeSession.sessionId));
 
 	// VM23 (user directive, 2026-08-15): while a call is live, worker permission
 	// requests are the VOICE agent's to relay — it reads them out and answers via
@@ -201,7 +231,7 @@
 		     its subtree (Tiptap draft, open context-usage popover, VoiceRecorder,
 		     dropdowns) survives the empty → active flip instead of being destroyed
 		     and remounted (#665). -->
-		<div class="empty-hero">
+		<div class="empty-hero" class:hero-only={!showComposer}>
 			{#if $activeSession.error}
 				<div class="empty-error-overlay">
 					<Banner severity="error" message={$activeSession.error} dismissible onDismiss={() => activeSession.clearError()} />
@@ -221,6 +251,13 @@
 						<h1 class="cleared-title" title={clearedTitle}>{clearedTitle}</h1>
 						<p class="cleared-hint">Conversation cleared — send a message to start fresh.</p>
 					</div>
+				{:else if surfaceMode === 'chat'}
+					<!-- Projectless conversation lane — no workspace to pick. -->
+					<ChatModeHero />
+				{:else if surfaceMode === 'voice'}
+					<!-- Voice lane, unbound: the hero carries the only action (start a
+					     call), and .input-slot is withheld — see showComposer. -->
+					<VoiceModeHero />
 				{:else}
 					<WorkspaceSelector
 						selectedProject={$activeSession.project}
@@ -270,20 +307,23 @@
 	     is never torn down at the isEmptyState boundary (#665). Only the `compact`
 	     prop and the surrounding layout classes change between states; the
 	     conditional strips below are siblings of ChatInput, not ancestors, so they
-	     never remount it. -->
-	<div class="input-slot" class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
-		{#if voiceCallActive && $activeSession.sessionId}
-			<!-- VM18: the call OWNS the composer slot while it is up. The ChatInput is
-			     unmounted here, not hidden — its draft is persisted on destroy (store
-			     + sessionStorage) and re-seeded on remount, which is the same
-			     round-trip a session switch already performs. -->
-			<VoiceCallPanel sessionId={$activeSession.sessionId} />
-		{:else}
-			<ChatInput compact={!showEmptyHero} />
-		{/if}
-	</div>
+	     never remount it. The `showComposer` gate is the single lane-level
+	     exception to that rule — see its derivation above. -->
+	{#if showComposer}
+		<div class="input-slot" class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
+			{#if voiceCallActive && $activeSession.sessionId}
+				<!-- VM18: the call OWNS the composer slot while it is up. The ChatInput is
+				     unmounted here, not hidden — its draft is persisted on destroy (store
+				     + sessionStorage) and re-seeded on remount, which is the same
+				     round-trip a session switch already performs. -->
+				<VoiceCallPanel sessionId={$activeSession.sessionId} />
+			{:else}
+				<ChatInput compact={!showEmptyHero} />
+			{/if}
+		</div>
+	{/if}
 
-	{#if showEmptyHero}
+	{#if showEmptyHero && showComposer}
 		<!-- Balances the flex:1 hero above so the hero + persistent input pair sits
 		     vertically centered — reproduces the old .empty-state
 		     justify-content:center grouping without wrapping the input in a
@@ -446,6 +486,14 @@
 		align-items: center;
 		width: 100%;
 		max-width: 768px;
+	}
+
+	/* Voice lane, unbound: no composer and therefore no bottom spacer to balance
+	   against, so the hero centres itself inside the whole region instead of
+	   bottom-anchoring against a partner that isn't there. */
+	.empty-hero.hero-only {
+		justify-content: center;
+		padding-bottom: 1rem;
 	}
 
 	.empty-bottom-spacer {

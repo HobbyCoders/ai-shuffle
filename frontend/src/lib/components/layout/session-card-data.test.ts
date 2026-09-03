@@ -7,6 +7,7 @@ import {
 	isRemovedProjectSession,
 	isVisibleSidebarSession,
 	liveProjectKeys,
+	sessionModeOf,
 	sessionTimestamp,
 	STATUS_LABELS,
 } from './session-card-data';
@@ -205,5 +206,27 @@ describe('sessionTimestamp', () => {
 
 		row.updated_at = '2026-08-20T13:00:00Z';
 		expect(sessionTimestamp(row)).toBe(Date.parse('2026-08-20T13:00:00Z'));
+	});
+});
+
+describe('sessionModeOf', () => {
+	it('reads a pre-modes row (no `mode` at all) as the code lane', () => {
+		// The column only ever held NULL or 'voice' before this feature, so every
+		// historical row must land in Code rather than in no lane at all.
+		expect(sessionModeOf(session())).toBe('code');
+		expect(sessionModeOf(session({ mode: undefined }))).toBe('code');
+	});
+
+	it('passes the three known lanes through', () => {
+		expect(sessionModeOf(session({ mode: 'code' }))).toBe('code');
+		expect(sessionModeOf(session({ mode: 'chat' }))).toBe('chat');
+		expect(sessionModeOf(session({ mode: 'voice' }))).toBe('voice');
+	});
+
+	it('falls back to code for a value it does not recognise', () => {
+		// A row written by a newer install (or garbage) must stay reachable in
+		// some lane instead of disappearing from all three lists.
+		expect(sessionModeOf(session({ mode: 'telepathy' }))).toBe('code');
+		expect(sessionModeOf(session({ mode: '' }))).toBe('code');
 	});
 });

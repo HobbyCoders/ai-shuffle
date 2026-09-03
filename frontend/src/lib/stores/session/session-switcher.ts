@@ -20,6 +20,7 @@ import { appData } from '../app-data.svelte';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
 import { resolveNewChatProject, resolveSessionProject } from './session-project';
+import { appMode, normalizeSessionMode, type SessionMode } from '../sessionMode.svelte';
 import {
 	contextChoiceFromWindow,
 	DEFAULT_CONTEXT_WINDOW_CHOICE,
@@ -134,6 +135,69 @@ export function setPersistedWorktreeIntent(mode: ExecutionMode): void {
 	if (typeof window !== 'undefined') {
 		localStorage.setItem('aihub_executionMode', mode);
 	}
+}
+
+/**
+ * The lane an OPEN session belongs to, re-derived from the session list.
+ *
+ * The boot restore adopts a sessionId from a per-tab snapshot, at a point in
+ * init() where no row exists yet — so the snapshot's lane is the best it can
+ * do. This closes that loop once the list has loaded: the row is the authority
+ * for a session's lane (same ruling switchSession follows), and a snapshot can
+ * be stale, since the fallback slot is the DEVICE key and any tab may have
+ * written it.
+ *
+ * `null` means "nothing to defer to" — no session is open, or its row is not in
+ * the list (a foreign/filtered/deleted session) — and the caller keeps the mode
+ * it already has rather than guessing 'code'.
+ */
+export function reconciledSessionMode(
+	sessionId: string | null,
+	sessions: { id: string; mode?: string | null }[],
+): SessionMode | null {
+	if (!sessionId) return null;
+	const row = sessions.find(s => s.id === sessionId);
+	if (!row) return null;
+	return normalizeSessionMode(row.mode);
+}
+
+/**
+ * The repository slice of a fresh compose, which depends on the lane it opens in.
+ *
+ * Chat and voice run projectless — neither surface renders a project picker, a
+ * branch picker or the Local/Worktree toggle. Restoring the last code-mode
+ * project and worktree intent into one of them would bind a checkout the user
+ * has no control to inspect or undo: the first message would quietly cut a
+ * branch in a repo they thought they had left behind. So those lanes clear the
+ * slice outright and only 'code' consults the remembered picks.
+ */
+type NewChatModeSlice = Pick<
+	ActiveSessionState,
+	'project' | 'projectV2Id' | 'worktreeIntent' | 'worktreeId' | 'worktreeBranch' | 'selectedWorktreeBranch'
+>;
+
+function newChatModeState(
+	mode: SessionMode,
+	ephemeral: { project: string; projectV2Id: string | null } | null | undefined,
+	fallbackProject: string,
+): NewChatModeSlice {
+	if (mode !== 'code') {
+		return {
+			project: '',
+			projectV2Id: null,
+			worktreeIntent: 'local',
+			worktreeId: null,
+			worktreeBranch: '',
+			selectedWorktreeBranch: null,
+		};
+	}
+	return {
+		...resolveNewChatProject(ephemeral, fallbackProject),
+		worktreeIntent: getPersistedWorktreeIntent(),
+		worktreeId: null,
+		worktreeBranch: '',
+		selectedWorktreeBranch: null,
+	};
 }
 
 /**
@@ -337,6 +401,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const state = getState();
 		return {
 			sessionId: state.sessionId,
+			// The lane this surface is in, so a reload paints the right one on the
+			// first frame instead of whatever lane the sidepanel happens to be
+			// showing on this device (see PersistedSession).
+			mode: state.mode,
 			title: state.title,
 			profile: state.profile,
 			project: state.project,
@@ -567,6 +635,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// a second device shows the model it actually runs on. NEVER fall
 			// back to s.X (the leaving session's state): that is what used to
 			// cascade one session's model/effort/permission into the next.
+			// The session's own row decides its lane — never the leaving session's
+			// mode, and never the sidepanel's current pick. Same reasoning as the
+			// run binding just below: a session opened on a second device has to
+			// land in the lane it was actually created in, whatever this tab is
+			// currently showing. A pre-modes row has mode NULL, which normalizes
+			// to 'code'.
+			mode: normalizeSessionMode(row?.mode),
 			modelOverride: ephemeral?.modelOverride ?? row?.model ?? null,
 			permissionModeOverride: ephemeral?.permissionModeOverride ?? row?.permission_mode ?? null,
 			effortLevelOverride: ephemeral?.effortLevelOverride ?? row?.effort ?? null,
@@ -733,10 +808,14 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// Restore new chat draft if one was saved earlier
 		const newChatEphemeral = sessionEphemeralCache.restore('__new_chat__');
 
+		// A new session is created into whichever lane the sidepanel is showing.
+		const mode = appMode.current;
+
 		// Single update: reset everything (including draft from ephemeral cache)
 		update(s => ({
 			...s,
 			sessionId: null,
+			mode,
 			// A fresh chat has no session to restore — cancel any pending boot
 			// restore (and any in-flight openChat load) so neither window can
 			// outlive the navigation into the New Chat compose screen.
@@ -745,10 +824,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			sessionProfileId: null,
 			currentQueryProfileId: null,
 			profile: getPersistedProfile() || s.profile,
-			...resolveNewChatProject(
-				newChatEphemeral,
-				getPersistedProject() || s.project,
-			),
 			messages: [],
 			isStreaming: false,
 			// A send in flight belonged to the session being left (S6), and a
@@ -775,7 +850,16 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// A fresh compose restores the complete last-used run binding. Existing
 			// sessions still restore their own row/cache values in switchSession().
 			modelOverride: getPersistedModel(),
-			permissionModeOverride: getPersistedPermissionMode(),
+			// ...except the permission mode outside the code lane. Only the code
+			// composer renders the tool-access control, so a chat or voice session
+			// that inherited the last code-lane pick would be stuck with it for
+			// life: reopening it restores 'chat' from the row, which keeps the
+			// control hidden. Inheriting 'plan' would be a deadlock (the plan-exit
+			// tool is not on the chat ceiling, so the turn could never leave plan
+			// mode) and inheriting 'bypassPermissions' would loosen a lane whose
+			// whole premise is a hard ceiling. null means "no session binding",
+			// so the backend settles it — and pins it for chat besides.
+			permissionModeOverride: mode === 'code' ? getPersistedPermissionMode() : null,
 			effortLevelOverride: getPersistedEffort(),
 			fastMode: getPersistedFastMode(),
 			contextWindowChoice: getPersistedContextWindowChoice(),
@@ -789,17 +873,19 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			draft: newChatEphemeral?.draft || '',
 			scrollTop: 0,
 			streamStartTime: null,
-			// Restore the user's last-toggled mode (Local/Worktree) for new chats
-			worktreeIntent: getPersistedWorktreeIntent(),
+			// Project + worktree slice, and the last-toggled Local/Worktree mode —
+			// restored for a code compose, cleared for the projectless lanes.
+			...newChatModeState(
+				mode,
+				newChatEphemeral,
+				getPersistedProject() || s.project,
+			),
 			// The device pick rides the new-chat draft's ephemeral entry (memory
 			// only) — restored alongside the draft, never from a preference.
 			deviceIntent: newChatEphemeral?.deviceIntent ?? null,
-			worktreeBranch: '',
 			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,
-			worktreeId: null,
 			worktreeMode: 'new' as const,
-			selectedWorktreeBranch: null,
 			isCreatingWorktree: false,
 			worktreeError: null,
 			worktreeDeleted: false,

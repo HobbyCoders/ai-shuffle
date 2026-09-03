@@ -163,6 +163,16 @@ def _append_system_block(prompt: Any, block: Optional[str]) -> Any:
     return f"{current}\n\n{block}" if current else block
 
 
+# The sidepanel mode a session belongs to, and the tool ceiling it imposes.
+# Same import discipline as ``tool_access`` below — it is the only thing
+# ``session_modes`` imports, so neither can close a cycle.
+from app.core.session_modes import (
+    ensure_chat_uploads_dir,
+    narrow_tool_access_for_mode,
+    permission_mode_for_session_mode,
+    session_mode_of,
+)
+
 # Tool access (ruling T2). ``resolve_tool_access`` is the one seam both legs
 # read; it lives in ``app.core.tool_access`` (no app imports, so the v82
 # migration and the API layer can use it too) and is re-exported here because
@@ -757,6 +767,36 @@ def build_options_from_profile(
     else:
         working_dir = str(settings.workspace_dir)
 
+    # ── The session's sidepanel lane, resolved BEFORE the cwd is final ───────
+    #
+    # The chat lane repoints the working directory below, and the cwd is already
+    # baked into the environment-details prompt block a few dozen lines down —
+    # so the lane has to be known here, not at the run-binding block further on.
+    # Read off the session row (the same snapshot the binding block reuses);
+    # ``session_row`` is only populated inside the session_id branch above, so a
+    # cwd-override or project-only spawn re-fetches or resolves to 'code'.
+    _binding_row = session_row
+    if _binding_row is None and session_id:
+        try:
+            _binding_row = database.get_session(session_id)
+        except Exception:  # noqa: BLE001 — a lookup failure falls back to config
+            _binding_row = None
+    session_mode = session_mode_of(_binding_row)
+
+    if session_mode == "chat":
+        # A chat session RUNS INSIDE its own uploads folder. This is not
+        # cosmetic and it is not about tidiness: it is half of the read fence.
+        # The delegated CLI auto-approves any read whose path resolves inside the
+        # session's working directory — before the permission-prompt tool, and so
+        # before anything the app could say about it. Left on the workspace root
+        # (the parent of every project checkout on this machine) that auto-
+        # approval would hand a projectless chat every .env and credential file
+        # under it. Pointed at the uploads folder, the CLI's own shortcut lands
+        # on exactly the files the fence was going to allow anyway, and every
+        # other path falls through to the callback that denies it.
+        working_dir = str(ensure_chat_uploads_dir())
+        working_dir_source = "chat uploads"
+
     # Fail fast when the resolved cwd doesn't exist: an invalid cwd otherwise
     # surfaces as an opaque OS-level spawn failure (WinError 267 "directory name
     # is invalid") deep inside the SDK subprocess connect. Shared-DB installs can
@@ -880,16 +920,12 @@ def build_options_from_profile(
     #
     # Agents used to pin a model, an effort level and a permission mode; now
     # the user picks them when the session is created and they live on the
-    # session row. Read the row ONCE here — the model/provider resolution
-    # further down uses the same snapshot. A session-LESS build (tests,
+    # session row. The row is read ONCE, up with the working directory — the
+    # chat lane's cwd is derived from it and had to be settled before the
+    # environment-details block rendered the path into the prompt — and every
+    # binding below reads that same snapshot. A session-LESS build (tests,
     # project-only spawns) has no row and falls through to the agent's config,
     # exactly as before.
-    _binding_row = session_row
-    if _binding_row is None and session_id:
-        try:
-            _binding_row = database.get_session(session_id)
-        except Exception:  # noqa: BLE001 — a lookup failure falls back to config
-            _binding_row = None
     _session_effort = (_binding_row or {}).get("effort")
     _session_fast = (_binding_row or {}).get("fast")
     _session_permission_mode = (_binding_row or {}).get("permission_mode")
@@ -922,6 +958,12 @@ def build_options_from_profile(
         or config.get("permission_mode")
         or "default"
     )
+    # The session's sidepanel mode overrules that chain for chat sessions, which
+    # always run on 'default' — see ``permission_mode_for_session_mode``.
+    # ``session_mode`` was resolved off ``_binding_row`` with the cwd above:
+    # ``session_row`` is None on a cwd-override spawn, and the mode must not
+    # depend on which branch happened to fetch the row.
+    permission_mode = permission_mode_for_session_mode(permission_mode, session_mode)
 
     # Create stderr callback to log CLI output
     # Note: We only log stderr, don't forward to frontend. The SDK sends proper
@@ -1113,6 +1155,21 @@ def build_options_from_profile(
     # "Disable all tools" now really is ``disallowed=["*"]`` on both legs
     # instead of an empty allow list every runtime path read as unrestricted.
     access = resolve_tool_access(config)
+    # The session's sidepanel mode is a CEILING over whatever the agent allows
+    # (see ``app.core.session_modes``): a chat session gets the general web
+    # tools plus a ``Read`` fenced to its own uploads directory, and nothing
+    # else, whichever agent it happens to be running. The fence on that Read is
+    # a path test no allow list can express, so it is enforced where the
+    # runtimes actually look — a fluid permission rule, the delegated CLI's
+    # working directory and its withheld bare grant — rather than here; the
+    # narrowing below is the NAME half only. This
+    # sits before every consumer of ``access`` below, so the AI-tools server and
+    # the app-config server drop out on their own — both are already filtered
+    # through ``tool_permitted(name, access.allowed, access.disallowed)``.
+    # (``session_mode`` was resolved with the run binding above, off the same
+    # row — the cwd-override spawn has no ``session_row`` but does have a
+    # binding row, and both legs must agree on the lane.)
+    access = narrow_tool_access_for_mode(access, session_mode)
     allowed_tools = list(access.allowed or [])
     disallowed_tools = list(access.disallowed or [])
 
@@ -1261,6 +1318,31 @@ def build_options_from_profile(
         final_allowed_tools = mcp_allowed_tools
     else:
         final_allowed_tools = list(allowed_tools) + mcp_allowed_tools
+
+    # Belt and braces for chat mode. Everything appended to ``mcp_allowed_tools``
+    # above — the builtin bridge tools, the ``mcp__<server>`` wildcards for every
+    # enabled built-in server, the computer-use names — is added UNCONDITIONALLY,
+    # without consulting ``access``; and a ``tools_preset`` would hand the leg the
+    # whole claude_code toolset while bypassing ``allowed_tools`` entirely. So the
+    # ceiling is re-applied to the final list rather than trusted to the narrowing
+    # above.
+    if session_mode == "chat":
+        # ``sdk_tools`` goes first: a preset hands the leg its whole built-in
+        # toolset without ever consulting ``allowed_tools``. Dropping it also
+        # means the preset branch's "MCP names only" list no longer applies, so
+        # the list is rebuilt the legacy way (surface + MCP names) before the
+        # ceiling filters it — otherwise a preset agent would land in chat mode
+        # with no tools at all, web ones included.
+        sdk_tools = None
+        final_allowed_tools = [
+            t
+            for t in (list(allowed_tools) + mcp_allowed_tools)
+            if tool_permitted(t, access.allowed, access.disallowed)
+        ]
+        if not final_allowed_tools and DENY_ALL not in disallowed_tools:
+            # An empty allow list reads as "unrestricted" on the runtime legs
+            # (ruling T2), so say the denial out loud instead.
+            disallowed_tools = [*disallowed_tools, DENY_ALL]
 
     # Build AI tool environment (API keys + provider settings) ONCE, then pass to both:
     # 1. MCP server creation (so Node.js tool subprocesses get the keys)
@@ -1523,6 +1605,14 @@ def build_options_from_profile(
             merged_add_dirs.append(notes_dir)
     except Exception:
         logger.exception("Failed to register notes dir as an accessible directory")
+    if session_mode == "chat":
+        # Not for the chat lane. ``add_dirs`` widens the set of directories the
+        # delegated CLI treats as "the working directory" for its read
+        # auto-approval, so every entry here is another folder the read fence
+        # would silently stop covering. The lane's whole file surface is its
+        # uploads folder — which is already the cwd — and nothing in it can
+        # @-reference a note.
+        merged_add_dirs = []
     if merged_add_dirs:
         options.add_dirs = merged_add_dirs
 
@@ -1653,6 +1743,15 @@ def build_options_from_profile(
     # request schemas, the ToolSearch catalog and dispatch, so an unselected
     # tool is invisible, unloadable and uncallable, instead of merely being
     # denied by ``can_use_tool`` after the model has already seen and called it.
+
+    # The session's sidepanel lane, carried to the adapter. The tool LISTS
+    # cannot express the chat lane's read fence — it is a path test — so the
+    # adapter needs the lane itself to build the fluid permission rule and to
+    # decide what the delegated CLI may be handed as a bare grant. Always
+    # stamped (not just for chat) so a pooled client comparing old/new options
+    # sees a lane CHANGE rather than an absent field on one side.
+    options.aih_session_mode = session_mode
+
     options.aih_tool_allowlist = intersect_tool_surfaces(
         access.allowed, _dispatch_surface
     )

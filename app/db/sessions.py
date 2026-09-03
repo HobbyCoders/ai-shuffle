@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, TypedDict
 
+from app.core.session_modes import normalize_session_mode, storage_session_mode
 from app.db.base import get_db, get_cursor, row_to_dict, rows_to_list, logger
 from app.db.compat import ph, sql_ilike
 
@@ -109,8 +110,10 @@ class SessionRow(TypedDict):
     # Per-session fast mode (v81): TRUE asks the leg for its expedited service,
     # NULL/FALSE runs standard.
     fast: Optional[bool]
-    # Interaction mode (v74, ruling VM4): 'voice' for an OpenAI Realtime call,
-    # NULL/'chat' for a normal chat session.
+    # Sidepanel mode: NULL for a 'code' session (the full agentic surface, and
+    # every row predating this column), 'chat' for the web-only chat surface,
+    # 'voice' for an OpenAI Realtime call (v74, ruling VM4). See
+    # ``app.core.session_modes``.
     mode: Optional[str]
     # List-visibility flag (v75): TRUE keeps the row out of the sessions-list
     # queries (wake-word "command" voice sessions); NULL/FALSE = visible.
@@ -545,10 +548,12 @@ def create_session(
             the selected model/provider's registered default.
         fast: Fast mode chosen for this session (v81), or ``None`` to leave the
             row unbound (the session runs at standard speed).
-        mode: Interaction mode for this session (ruling VM4) — ``'voice'`` for an
-            OpenAI Realtime voice call. ``None`` (the default, and every
-            pre-existing row) means chat; the API model coalesces NULL to
-            ``'chat'``.
+        mode: Sidepanel mode for this session — ``'chat'`` for the web-only
+            chat surface, ``'voice'`` for an OpenAI Realtime voice call (ruling
+            VM4), ``'code'``/``None`` for the ordinary agentic surface.
+            ``'code'`` (and anything unrecognized) persists as NULL, which is
+            what every pre-existing row carries; the API model coalesces it
+            back to ``'code'``.
         hidden: Keep this session out of the sessions-list queries (v75) —
             wake-word "command" voice sessions are born hidden so they never
             flash into "recent sessions". List-visibility only: the row is
@@ -619,7 +624,10 @@ def create_session(
                 resolved_provider_id = (_profile.get("config") or {}).get("provider") or None
         except Exception:  # noqa: BLE001 — binding is best-effort; NULL = native
             resolved_provider_id = None
-    resolved_mode = (mode or "").strip() or None
+    # ``'code'`` is stored as NULL so a new code session is indistinguishable
+    # from every row written before modes existed; normalizing first means an
+    # unknown string is filed as code rather than persisted verbatim.
+    resolved_mode = storage_session_mode(normalize_session_mode(mode))
     _ph = ph()
     columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "context_window", "fast", "mode", "hidden", "is_worker"]
     params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_context_window, selected_fast, resolved_mode, hidden, bool(is_worker)]

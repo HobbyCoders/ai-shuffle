@@ -320,3 +320,63 @@ describe('session-init · boot waterfall (S5)', () => {
 		expect(feedController.start).not.toHaveBeenCalled();
 	});
 });
+
+describe('session-init · the restored session keeps its own lane', () => {
+	beforeEach(() => {
+		sessionStorage.clear();
+	});
+
+	function persistedIn(mode: string | undefined, sessionId: string | null = 'persisted-1'): PersistedSession {
+		return {
+			sessionId,
+			mode,
+			title: 'Old chat',
+			profile: 'profile-1',
+			project: 'proj-1',
+			modelOverride: null,
+			permissionModeOverride: null,
+			effortLevelOverride: null,
+		} as PersistedSession;
+	}
+
+	it('restores the snapshot lane instead of the sidepanel pick', async () => {
+		// `appMode` is device-wide localStorage: another tab moving the switcher
+		// to Chat used to repaint THIS tab's restored code session as a chat one
+		// on reload, dropping the whole context pill bar off a code session.
+		const { init, getState, deps } = makeInit(persistedIn('code'));
+		deps.update((s) => ({ ...s, mode: 'chat' }));
+
+		await init();
+
+		expect(getState().mode).toBe('code');
+	});
+
+	it('restores a chat session into the chat lane from a code sidepanel', async () => {
+		const { init, getState, deps } = makeInit(persistedIn('chat'));
+		deps.update((s) => ({ ...s, mode: 'code' }));
+
+		await init();
+
+		expect(getState().mode).toBe('chat');
+	});
+
+	it('lands a pre-modes snapshot in the code lane', async () => {
+		const { init, getState, deps } = makeInit(persistedIn(undefined));
+		deps.update((s) => ({ ...s, mode: 'voice' }));
+
+		await init();
+
+		expect(getState().mode).toBe('code');
+	});
+
+	it('leaves an unbound compose on the sidepanel lane', async () => {
+		// No sessionId means no session to defer to — there, the sidepanel's
+		// pick IS the truth, and newChat has already stamped it.
+		const { init, getState, deps } = makeInit(persistedIn('code', null));
+		deps.update((s) => ({ ...s, mode: 'chat' }));
+
+		await init();
+
+		expect(getState().mode).toBe('chat');
+	});
+});

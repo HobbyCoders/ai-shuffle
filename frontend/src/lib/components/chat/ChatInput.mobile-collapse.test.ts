@@ -117,7 +117,40 @@ describe('ChatInput mobile collapsed surface', () => {
 		expect(mobileStyles).not.toContain('.controls-right');
 	});
 
+	it('renders the context chip row only in the code lane', () => {
+		// Chat and voice sessions bind no repository, worktree or agent, so the
+		// whole chip row goes rather than showing selectors that cannot apply.
+		expect(chatInput).toMatch(
+			/\{#if composerMode === 'code'\}\s*<div class="context-pill-row">/
+		);
+	});
+
 	it('no longer carries a send-later button to hide', () => {
 		expect(chatInput).not.toContain('send-later-btn');
+	});
+});
+
+describe('ChatInput attachments per lane', () => {
+	it('sends chat-lane uploads to the projectless workspace endpoint', () => {
+		// A chat session has no project to put the file under, so its uploads go
+		// to one shared workspace subdirectory that the lane's Read is scoped to.
+		expect(chatInput).toContain("const CHAT_UPLOADS_DIRNAME = 'chat-uploads'");
+		expect(chatInput).toContain("api.uploadFile('/workspace/upload'");
+	});
+
+	it('routes the picker and the drop handler through one upload helper', () => {
+		// Two call sites, one target decision. Letting them each pick an endpoint
+		// is how the button and the drop counterpart drift apart.
+		const callSites = chatInput.match(/await uploadComposerFile\(file\)/g) ?? [];
+		expect(callSites).toHaveLength(2);
+	});
+
+	it('gates attach, the drag overlay and the drop on the same lane flag', () => {
+		// Three entry points; miss one and the composer offers a picker whose drop
+		// counterpart is dead (or vice versa). Only voice has no upload path.
+		expect(chatInput).toMatch(/const attachSupported = \$derived\(composerMode !== 'voice'\)/);
+		const gates = chatInput.match(/if \(!attachSupported\) return;/g) ?? [];
+		expect(gates).toHaveLength(2);
+		expect(chatInput).not.toMatch(/if \(composerMode !== 'code'\) return;/);
 	});
 });

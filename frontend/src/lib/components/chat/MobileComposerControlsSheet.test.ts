@@ -59,10 +59,22 @@ describe('MobileComposerControlsSheet', () => {
 
 		const dialog = screen.getByRole('dialog', { name: /chat controls/i });
 		expect(dialog.parentElement).toBe(document.body.querySelector('.sheet-layer'));
+		expect(screen.getByText('Chat setup')).toBeTruthy();
 		expect(screen.getByRole('button', { name: /reasoning effort/i })).toBeTruthy();
 		expect(screen.getByRole('button', { name: /tool access/i })).toBeTruthy();
 		// Computer use is agent configuration now: no control for it here.
 		expect(screen.queryByRole('switch', { name: /computer control/i })).toBeNull();
+	});
+
+	it('drops chat setup and tool access outside the code lane', () => {
+		// A chat/voice composer has no project to configure and a fixed web-only
+		// tool surface, so both sections go rather than sit empty under a heading.
+		render(MobileComposerControlsSheet, { props: props({ showCodeControls: false }) });
+
+		expect(screen.queryByText('Chat setup')).toBeNull();
+		expect(screen.queryByRole('button', { name: /tool access/i })).toBeNull();
+		expect(screen.getByRole('button', { name: /model: sonnet/i })).toBeTruthy();
+		expect(screen.getByRole('button', { name: /reasoning effort/i })).toBeTruthy();
 	});
 
 	it('opens the model subpage, filters models, and applies a selection', async () => {

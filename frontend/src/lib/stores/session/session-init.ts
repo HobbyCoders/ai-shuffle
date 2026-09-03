@@ -13,6 +13,7 @@ import type { InternalMutableState } from './ws-message-handlers';
 // V2 Phase 1: the SSE-fed reducer owns the transcript; destroy() tears its feed down.
 import { feedController } from './v2/feed-controller';
 import { resolvePersistedProject } from './session-project';
+import { normalizeSessionMode } from '../sessionMode.svelte';
 import { DEFAULT_CONTEXT_WINDOW_CHOICE } from '$lib/constants/model-context';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
@@ -142,6 +143,19 @@ export function createSessionInit(deps: SessionInitDeps) {
 					update(s => ({
 						...s,
 						sessionId: persisted.sessionId ?? null,
+						// Lane. A restored EXISTING session must NOT inherit the
+						// lane the sidepanel happens to be showing: `appMode` is
+						// device-wide localStorage, so another tab moving the
+						// switcher would repaint this tab's restored code session
+						// as chat on reload (dropping the whole context pill bar),
+						// or hang the code controls off a restored chat session.
+						// The snapshot is the lane that session was actually open
+						// in; +page's reconcile re-reads the row once the session
+						// list lands and corrects a stale snapshot. An unbound
+						// compose keeps `appMode`'s pick — there, it IS the truth.
+						mode: persisted.sessionId
+							? normalizeSessionMode(persisted.mode)
+							: s.mode,
 						// Adopting a sessionId whose history hasn't rendered yet opens
 						// the restore-race window: the UI shows "New Chat" while sends
 						// would land in the old session. Mark it until onConnected's

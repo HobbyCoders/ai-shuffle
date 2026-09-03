@@ -10,6 +10,7 @@
  *   empty composer → upload in flight → worktree being created → no agent → no project.
  */
 import type { NotificationSeverity } from '$lib/stores/notifications';
+import type { SessionMode } from '$lib/stores/sessionMode.svelte';
 
 /** A user-facing reason a send was blocked, or `null` for a silent block. */
 export interface SubmitBlock {
@@ -38,6 +39,13 @@ export interface SubmitGuardInput {
 	hasAnyProfile: boolean;
 	/** A project is selected. */
 	hasProject: boolean;
+	/**
+	 * The lane this composer belongs to. Only the code lane has a project to
+	 * select, so only the code lane can be blocked for the lack of one — see the
+	 * project guard below. Defaults to 'code' so the pre-lanes callers keep their
+	 * behaviour.
+	 */
+	mode?: SessionMode;
 }
 
 /**
@@ -66,7 +74,11 @@ export function evaluateSubmitGuards(s: SubmitGuardInput): SubmitBlock | null {
 			? { notice: { message: 'Select an agent first.', tone: 'warning' } }
 			: { notice: { message: 'No agents yet — create one to start chatting.', tone: 'warning' } };
 	}
-	if (!s.hasProject) {
+	// Only the code lane binds a repository. Chat and voice are projectless by
+	// construction — `newChatModeState` clears the project slice for them and
+	// neither surface renders a picker — so demanding a project there refuses
+	// every send with advice the user has no control to follow.
+	if (!s.hasProject && (s.mode ?? 'code') === 'code') {
 		return { notice: { message: 'Select a project first.', tone: 'warning' } };
 	}
 

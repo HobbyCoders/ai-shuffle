@@ -116,6 +116,14 @@ HONORED:
     ``--allowed-tools``; because the claude CLI reads that flag as PERMISSION
     rules, this leg ALSO passes the complement as ``--disallowed-tools`` so the
     restriction is real there too (ruling T4 — see ``_delegated_disallowed``).
+  * ``extra["session_mode"]`` → the session's sidepanel lane
+    (``ClaudeAgentOptions.aih_session_mode``). Only the chat lane reads it, and
+    it reads it for things a tool LIST cannot say: a ``Read`` fenced to a
+    directory. Native → a ``PermissionEngine`` rule pair (``_chat_mode_rules``);
+    delegated → that tool held back from the CLI's bare grant
+    (``_delegated_allowed``), which is what makes the call reach the app's
+    permission callback at all. It also suppresses the code-mode kernel for the
+    lane, since fluid exempts code mode's own tools from the CE12 allowlist.
 
 DEGRADED / NOT YET HONORED (documented gaps — mechanical follow-up):
   * ``thinking`` — fluid manages thinking via provider caps, not passed through.
@@ -258,6 +266,7 @@ from fluid.events.ops import (
     UserTurn,
 )
 from fluid.permissions.engine import PermissionEngine
+from fluid.permissions.rules import Rule
 from fluid.providers.anthropic.client import AnthropicClient
 from fluid.providers.openai_responses.client import (
     API_URL as OPENAI_RESPONSES_URL,
@@ -460,7 +469,10 @@ class HarnessAdapter(ProviderAdapter):
                 # The CLI reads --allowed-tools as PERMISSION rules, so on this
                 # leg the list grants rather than restricts — the restriction
                 # comes from the complement passed as --disallowed-tools above.
-                allowed_tools=_tool_allowlist(options),
+                # That is also why the chat lane's fenced Read is held back from
+                # it (see _delegated_allowed): a bare grant here would approve
+                # the tool before the app's permission callback is consulted.
+                allowed_tools=_delegated_allowed(options),
                 claude_cmd=claude_cmd,
             )
         else:
@@ -637,7 +649,19 @@ class HarnessAdapter(ProviderAdapter):
                             synthesizer.kick()
 
                         native_ctx.extra.setdefault("continual_journal", _remember)
-                    if settings.fluid_code_mode and self._registry is not None:
+                    # Never for the chat lane. Code mode replaces the request
+                    # schemas with its four-tool surface and hands the model a
+                    # Python kernel — and fluid EXEMPTS those four from the CE12
+                    # allowlist (``NativeLoop._tool_permitted`` short-circuits on
+                    # ``source == CODE_MODE_SOURCE``), so the chat ceiling cannot
+                    # take ``run_python`` away by naming a narrower surface. A
+                    # lane sold as "the web plus the files you attach" must not
+                    # come with an interpreter, and the honest way to not have
+                    # one is to not build it. (``CHAT_MODE_DENIED_TOOLS`` denies
+                    # the same names as a second line; deny does survive the
+                    # exemption.)
+                    chat_lane = _session_mode(options) == "chat"
+                    if settings.fluid_code_mode and not chat_lane and self._registry is not None:
                         try:
                             codemode = CodeModeSession(
                                 self._registry, config=_codemode_kernel_config(),
@@ -953,6 +977,14 @@ class HarnessAdapter(ProviderAdapter):
         profile_id = getattr(sdk_options, "aih_profile_id", None)
         if profile_id:
             opts.extra["profile_id"] = profile_id
+        # The session's sidepanel lane (``app.core.session_modes``). The chat
+        # lane's ceiling has a PATH half the tool lists cannot express, and both
+        # of its real enforcement points live on this side of the boundary — the
+        # fluid permission rule and the delegated CLI's bare-name grant — so the
+        # lane has to travel with the options rather than be inferred from them.
+        session_mode = getattr(sdk_options, "aih_session_mode", None)
+        if session_mode:
+            opts.extra["session_mode"] = str(session_mode)
         # Whether the install's gh CLI is present and signed in (stamped by
         # query_options as ``aih_github_connected``, behind a TTL cache). Only
         # forwarded when true — the prompt's "# GitHub" section exists solely to
@@ -2409,7 +2441,12 @@ class HarnessAdapter(ProviderAdapter):
         mode = options.permission_mode or "default"
         policy = _PERMISSION_POLICY.get(mode, "on_write")
         plan_mode = mode == "plan"
-        return PermissionEngine(approval_policy=policy), plan_mode
+        return (
+            PermissionEngine(
+                approval_policy=policy, rules=_chat_mode_rules(options)
+            ),
+            plan_mode,
+        )
 
     def _wire_plan_mode_control(self, options: SessionOptions) -> None:
         """Wrap NativeLoop's PlanModeControl so Plan/StopPlanning persist + notify.
@@ -2870,6 +2907,89 @@ def _codemode_kernel_config() -> KernelConfig:
     nothing legitimate needs a cell to print more than the default allows.
     """
     return KernelConfig()
+
+
+def _session_mode(options: SessionOptions) -> str:
+    """The session's sidepanel lane — ``'code'`` when nothing said otherwise."""
+    value = options.extra.get("session_mode")
+    return value if isinstance(value, str) and value else "code"
+
+
+def _chat_mode_rules(options: SessionOptions) -> Optional[list]:
+    """fluid permission rules that fence the chat lane's ``Read`` — or None.
+
+    This is the NATIVE leg's half of the path ceiling, and it exists because the
+    policy axis alone would never consult anybody: fluid's ``Read`` is
+    ``risk="safe"``, a chat session is pinned to ``permission_mode 'default'``
+    (approval policy ``on_write``), and ``_policy_decision`` auto-allows a safe
+    tool under that policy. No permission event is emitted, so the app's
+    ``can_use_tool`` — and with it ``chat_mode_read_permitted`` — is never
+    reached. A RULE is checked before the policy (``PermissionEngine.decide``
+    matches rules first), so it is the only thing that can move that decision.
+
+    Two rules per fenced tool, and the order is the whole design — fluid's
+    ``match_rule`` is LAST-match-wins:
+
+    1. ``deny`` for every call, unconditionally.
+    2. ``allow`` for a path under the uploads glob, which overrides rule 1 for
+       exactly the files the user attached to this chat.
+
+    Rule 1 is ``deny`` rather than ``ask`` deliberately, even though an ask
+    would reach the app callback and get the same answer from the real
+    predicate. An ask has to be answered by somebody, and the app only builds
+    that callback for sessions with a live socket (``query_engine`` gates it on
+    ``broadcast_func``); a spawn without one would park the turn on a prompt
+    nobody can see instead of refusing the read. A ceiling that turns into a
+    hang when the responder is missing is not a ceiling. fluid's own path
+    matching is what makes the deny safe to be this blunt: rule 2 sees the
+    normalized, cwd-resolved, symlink-followed spellings of the path (see
+    ``fluid.permissions.rules.path_candidates``), so ``..`` and symlink games
+    cannot widen it, and the app callback still gets the last word on the
+    delegated leg, where these rules do not apply.
+    """
+    if _session_mode(options) != "chat":
+        return None
+    from app.core.session_modes import CHAT_MODE_READ_TOOLS, chat_mode_read_glob
+
+    glob = chat_mode_read_glob()
+    rules: list = []
+    for name in sorted(CHAT_MODE_READ_TOOLS):
+        rules.append(Rule(tool=name, decision="deny"))
+        rules.append(
+            Rule(tool=name, decision="allow", input_globs={"file_path": glob})
+        )
+    return rules
+
+
+def _delegated_allowed(options: SessionOptions) -> Optional[list]:
+    """``--allowed-tools`` for the delegated (claude CLI) leg.
+
+    Normally the session's whole surface, because on this leg the flag GRANTS
+    rather than restricts (the restriction is the complement in
+    ``_delegated_disallowed``). The chat lane is the exception: the pinned CLI
+    treats a BARE name in this flag as a blanket pre-approval and says so itself
+    — "Bare allowedTools entries auto-approve the whole tool before the callback
+    is consulted" — so granting ``Read`` here would retire the read fence before
+    it ever ran. Withholding the name leaves the tool perfectly callable (it is
+    still absent from ``--disallowed-tools``, which is what would remove it);
+    it just falls through to ``--permission-prompt-tool``, i.e. to the app
+    callback, which is where ``chat_mode_read_permitted`` lives.
+
+    The other half of that fence is the session cwd: the CLI auto-approves reads
+    inside its working directory without prompting either, and a chat session's
+    working directory IS the uploads folder (see ``query_options``), so the two
+    shortcuts now cover the same set of files rather than the whole workspace.
+    """
+    surface = _tool_allowlist(options)
+    if surface is None or _session_mode(options) != "chat":
+        return surface
+    from app.core.session_modes import CHAT_MODE_READ_TOOLS
+
+    granted = [name for name in surface if name not in CHAT_MODE_READ_TOOLS]
+    # An emptied grant must not degrade to "grant everything": ``_build_argv``
+    # omits the flag entirely for a falsy list, and on this leg the surface wall
+    # is ``--disallowed-tools``, which is built from the untouched surface.
+    return granted or None
 
 
 def _tool_allowlist(options: SessionOptions) -> Optional[list]:
