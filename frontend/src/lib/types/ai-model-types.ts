@@ -6,10 +6,13 @@
  */
 
 // ============================================================================
-// Provider Types — fal.ai only
+// Provider Types
 // ============================================================================
+//
+// Image/video/3D models are all fal.ai. Speech models (TTS/STT) can also be
+// served directly by OpenAI (GPT), so the provider union includes 'openai'.
 
-export type AIProvider = 'fal-ai';
+export type AIProvider = 'fal-ai' | 'openai';
 
 // ============================================================================
 // Image Model Types

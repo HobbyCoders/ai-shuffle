@@ -765,6 +765,21 @@ const VIBEVOICE_VOICES: TTSVoice[] = [
 	{ id: 'Sage [EN]', name: 'Sage', language: 'en', gender: 'neutral' }
 ];
 
+// OpenAI voice set — shared across gpt-4o-mini-tts / tts-1 / tts-1-hd
+const OPENAI_VOICES: TTSVoice[] = [
+	{ id: 'alloy', name: 'Alloy', language: 'en', gender: 'neutral', description: 'Default voice' },
+	{ id: 'ash', name: 'Ash', language: 'en', gender: 'male' },
+	{ id: 'ballad', name: 'Ballad', language: 'en', gender: 'male' },
+	{ id: 'coral', name: 'Coral', language: 'en', gender: 'female' },
+	{ id: 'echo', name: 'Echo', language: 'en', gender: 'male' },
+	{ id: 'fable', name: 'Fable', language: 'en', gender: 'neutral' },
+	{ id: 'onyx', name: 'Onyx', language: 'en', gender: 'male' },
+	{ id: 'nova', name: 'Nova', language: 'en', gender: 'female' },
+	{ id: 'sage', name: 'Sage', language: 'en', gender: 'neutral' },
+	{ id: 'shimmer', name: 'Shimmer', language: 'en', gender: 'female' },
+	{ id: 'verse', name: 'Verse', language: 'en', gender: 'male' }
+];
+
 // ============================================================================
 // TTS Models — fal.ai
 // ============================================================================
@@ -1000,6 +1015,73 @@ export const FAL_TTS_MODELS: TTSModel[] = [
 ];
 
 // ============================================================================
+// TTS Models — OpenAI (GPT)
+// ============================================================================
+
+export const OPENAI_TTS_MODELS: TTSModel[] = [
+	{
+		id: 'openai/gpt-4o-mini-tts',
+		name: 'gpt-4o-mini-tts',
+		displayName: 'GPT-4o mini TTS',
+		provider: 'openai',
+		description: 'OpenAI steerable TTS — natural voices with instruction-guided delivery',
+		capabilities: {
+			streaming: true,
+			ssml: false,
+			customVoices: false,
+			steerability: true,
+			multiSpeaker: false,
+			emotionControl: true
+		},
+		voices: OPENAI_VOICES,
+		outputFormats: ['mp3', 'opus', 'aac', 'flac', 'wav', 'pcm'],
+		speedRange: { min: 0.25, max: 4.0 },
+		maxInputLength: 4096,
+		pricePerMillion: 15.0
+	},
+	{
+		id: 'openai/tts-1',
+		name: 'tts-1',
+		displayName: 'OpenAI TTS-1',
+		provider: 'openai',
+		description: 'OpenAI low-latency TTS optimized for real-time playback',
+		capabilities: {
+			streaming: true,
+			ssml: false,
+			customVoices: false,
+			steerability: false,
+			multiSpeaker: false,
+			emotionControl: false
+		},
+		voices: OPENAI_VOICES,
+		outputFormats: ['mp3', 'opus', 'aac', 'flac', 'wav', 'pcm'],
+		speedRange: { min: 0.25, max: 4.0 },
+		maxInputLength: 4096,
+		pricePerMillion: 15.0
+	},
+	{
+		id: 'openai/tts-1-hd',
+		name: 'tts-1-hd',
+		displayName: 'OpenAI TTS-1 HD',
+		provider: 'openai',
+		description: 'OpenAI high-definition TTS for quality-first speech synthesis',
+		capabilities: {
+			streaming: true,
+			ssml: false,
+			customVoices: false,
+			steerability: false,
+			multiSpeaker: false,
+			emotionControl: false
+		},
+		voices: OPENAI_VOICES,
+		outputFormats: ['mp3', 'opus', 'aac', 'flac', 'wav', 'pcm'],
+		speedRange: { min: 0.25, max: 4.0 },
+		maxInputLength: 4096,
+		pricePerMillion: 30.0
+	}
+];
+
+// ============================================================================
 // STT Models — fal.ai
 // ============================================================================
 
@@ -1080,14 +1162,75 @@ export const FAL_STT_MODELS: STTModel[] = [
 ];
 
 // ============================================================================
+// STT Models — OpenAI (GPT)
+// ============================================================================
+
+export const OPENAI_STT_MODELS: STTModel[] = [
+	{
+		id: 'openai/gpt-4o-transcribe',
+		name: 'gpt-4o-transcribe',
+		displayName: 'GPT-4o Transcribe',
+		provider: 'openai',
+		description: 'OpenAI GPT-4o speech-to-text — high-accuracy transcription',
+		capabilities: {
+			realtime: false,
+			diarization: false,
+			translation: false,
+			timestamps: false,
+			punctuation: true
+		},
+		inputFormats: ['mp3', 'mp4', 'mpeg', 'mpga', 'm4a', 'wav', 'webm'],
+		languages: ['99 languages'],
+		maxFileSizeMB: 25,
+		pricePerMinute: 0.006
+	},
+	{
+		id: 'openai/gpt-4o-mini-transcribe',
+		name: 'gpt-4o-mini-transcribe',
+		displayName: 'GPT-4o mini Transcribe',
+		provider: 'openai',
+		description: 'OpenAI GPT-4o mini speech-to-text — fast, affordable transcription',
+		capabilities: {
+			realtime: false,
+			diarization: false,
+			translation: false,
+			timestamps: false,
+			punctuation: true
+		},
+		inputFormats: ['mp3', 'mp4', 'mpeg', 'mpga', 'm4a', 'wav', 'webm'],
+		languages: ['99 languages'],
+		maxFileSizeMB: 25,
+		pricePerMinute: 0.003
+	},
+	{
+		id: 'openai/whisper-1',
+		name: 'whisper-1',
+		displayName: 'OpenAI Whisper',
+		provider: 'openai',
+		description: 'OpenAI Whisper — 99+ language transcription and translation',
+		capabilities: {
+			realtime: false,
+			diarization: false,
+			translation: true,
+			timestamps: true,
+			punctuation: true
+		},
+		inputFormats: ['mp3', 'mp4', 'mpeg', 'mpga', 'm4a', 'wav', 'webm'],
+		languages: ['99 languages'],
+		maxFileSizeMB: 25,
+		pricePerMinute: 0.006
+	}
+];
+
+// ============================================================================
 // Combined Model Collections
 // ============================================================================
 
 export const ALL_IMAGE_MODELS: ImageModel[] = [...FAL_IMAGE_MODELS];
 export const ALL_VIDEO_MODELS: VideoModel[] = [...FAL_VIDEO_MODELS];
 export const ALL_3D_MODELS: Model3DModel[] = [...FAL_3D_MODELS];
-export const ALL_TTS_MODELS: TTSModel[] = [...FAL_TTS_MODELS];
-export const ALL_STT_MODELS: STTModel[] = [...FAL_STT_MODELS];
+export const ALL_TTS_MODELS: TTSModel[] = [...FAL_TTS_MODELS, ...OPENAI_TTS_MODELS];
+export const ALL_STT_MODELS: STTModel[] = [...FAL_STT_MODELS, ...OPENAI_STT_MODELS];
 
 // Convenience subsets — Image
 export const TEXT_TO_IMAGE_MODELS = FAL_IMAGE_MODELS.filter(m => m.capabilities.generation);

@@ -291,12 +291,18 @@ class TestModelValidation:
     """Test model validation helpers."""
 
     def test_valid_tts_models(self):
-        """Should identify valid TTS models (fal.ai identifiers post-consolidation)."""
+        """Should identify valid TTS models (fal.ai or OpenAI identifiers)."""
         from app.api.settings import TTS_MODELS
         valid_ids = set(TTS_MODELS.keys())
         assert len(valid_ids) > 0
-        # After the FAL consolidation (#175) every TTS model is a fal.ai identifier.
-        assert all(model_id.startswith("fal-ai/") for model_id in valid_ids)
+        # TTS models are served by fal.ai (post-consolidation #175) or OpenAI (GPT audio).
+        assert all(
+            model_id.startswith("fal-ai/") or model_id.startswith("openai/")
+            for model_id in valid_ids
+        )
+        # At least one of each provider is present.
+        assert any(model_id.startswith("fal-ai/") for model_id in valid_ids)
+        assert any(model_id.startswith("openai/") for model_id in valid_ids)
 
     # Image/video model validation removed with the IMAGE_MODELS / VIDEO_MODELS
     # catalogs (FAL consolidation, #175).
