@@ -425,6 +425,7 @@
 		<!-- Repository chip and, in local mode, the checkout branch chip — owned
 		     by the parent row so they can sit between the runner and the worktree
 		     chips. -->
+		<div class="branch-wt-row">
 		{@render between?.()}
 
 		<!-- Branch selector (shown when worktree mode active) -->
@@ -559,6 +560,7 @@
 				<span class="ctx-chip-label">worktree</span>
 			</label>
 		{/if}
+		</div>
 	</div>
 
 	<!-- Error shown below the pills row so it doesn't overflow on mobile -->
@@ -610,28 +612,56 @@
 		gap: 8px;
 	}
 
-	.sheet-mode .mode-selector,
-	.sheet-mode .branch-selector {
+	.branch-wt-row {
+		display: contents;
+	}
+
+	.sheet-mode .branch-wt-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+	}
+
+	.sheet-mode .mode-selector {
 		position: relative;
 		width: 100%;
 	}
 
+	.sheet-mode .branch-wt-row .branch-selector,
+	.sheet-mode .branch-wt-row :global(.branch-selector) {
+		position: relative;
+		flex: 1 1 0;
+		min-width: 0;
+		width: auto;
+	}
+
 	.sheet-mode .mode-trigger,
-	.sheet-mode .branch-trigger,
-	.sheet-mode .wt-chip {
+	.sheet-mode .branch-trigger {
 		width: 100%;
-		height: 52px;
-		padding: 0 14px;
+		height: 40px;
+		padding: 0 12px;
 		gap: 8px;
 		border: 1px solid var(--border-subtle);
-		border-radius: 14px;
+		border-radius: 12px;
+		background: color-mix(in oklch, var(--muted) 55%, var(--card));
+		font-size: 0.86rem;
+	}
+
+	.sheet-mode .wt-chip {
+		width: auto;
+		flex: 0 0 auto;
+		height: 40px;
+		padding: 0 12px;
+		gap: 8px;
+		border: 1px solid var(--border-subtle);
+		border-radius: 12px;
 		background: color-mix(in oklch, var(--muted) 55%, var(--card));
 		font-size: 0.86rem;
 	}
 
 	.sheet-mode .mode-trigger-label,
-	.sheet-mode .branch-name,
-	.sheet-mode .wt-chip .ctx-chip-label {
+	.sheet-mode .branch-name {
 		flex: 1;
 		max-width: none;
 		text-align: left;

@@ -321,6 +321,7 @@
 
 		{@render repoChip()}
 
+		<div class="branch-wt-row">
 		{#if showBranch}
 			<BranchSelector
 				{sheetMode}
@@ -345,6 +346,7 @@
 				<span class="ctx-chip-label">worktree</span>
 			</span>
 		{/if}
+		</div>
 	{/if}
 </div>
 
@@ -403,17 +405,45 @@
 		max-width: min(180px, 38vw);
 	}
 
+	.branch-wt-row {
+		display: contents;
+	}
+
+	.sheet-mode .branch-wt-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+	}
+
 	.sheet-mode .ctx-chip,
 	.sheet-mode .runner-badge-wrap {
 		width: 100%;
 	}
 
+	.sheet-mode .branch-wt-row :global(.branch-selector) {
+		flex: 1 1 0;
+		min-width: 0;
+		width: auto;
+	}
+
+	.sheet-mode .branch-wt-row .ctx-chip.readonly:not(.wt-indicator) {
+		flex: 1 1 0;
+		min-width: 0;
+		width: auto;
+	}
+
+	.sheet-mode .wt-indicator {
+		width: auto;
+		flex: 0 0 auto;
+	}
+
 	.sheet-mode .ctx-chip {
-		height: 52px;
-		padding: 0 14px;
+		height: 40px;
+		padding: 0 12px;
 		gap: 8px;
 		border: 1px solid var(--border-subtle);
-		border-radius: 14px;
+		border-radius: 12px;
 		background: color-mix(in oklch, var(--muted) 55%, var(--card));
 		font-size: 0.86rem;
 	}

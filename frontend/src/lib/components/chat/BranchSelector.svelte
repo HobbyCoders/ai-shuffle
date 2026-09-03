@@ -270,10 +270,10 @@
 
 	.sheet-mode .pill {
 		width: 100%;
-		height: 52px;
-		padding: 0 14px;
+		height: 40px;
+		padding: 0 12px;
 		border-color: var(--border-subtle);
-		border-radius: 14px;
+		border-radius: 12px;
 		background: color-mix(in oklch, var(--muted) 55%, var(--card));
 	}
 

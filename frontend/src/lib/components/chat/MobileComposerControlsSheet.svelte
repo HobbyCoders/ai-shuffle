@@ -3,14 +3,11 @@
 	import {
 		ArrowLeft,
 		Check,
+		ChevronDown,
 		ChevronRight,
-		Cpu,
-		Gauge,
-		ShieldCheck,
 		SlidersHorizontal
 	} from 'lucide-svelte';
 	import ContextPillBar from './ContextPillBar.svelte';
-	import EffortSliderCard from './EffortSliderCard.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import type { PickerGroup } from '$lib/constants/model-picker';
 	import type { ContextWindowChoice } from '$lib/constants/model-context';
@@ -75,7 +72,9 @@
 	}: Props = $props();
 
 	type SheetPage = 'overview' | 'models';
+	type SheetMenu = 'effort' | 'permission' | null;
 	let page = $state<SheetPage>('overview');
+	let openMenu = $state<SheetMenu>(null);
 	let sheetRef = $state<HTMLElement | null>(null);
 	let dragging = $state(false);
 	let dragOffset = $state(0);
@@ -101,14 +100,29 @@
 		return [...seen.values()];
 	});
 
+	const effortLabel = $derived(
+		effortValue
+			? (effortOptions.find((option) => option.value === effortValue)?.label ?? 'Effort')
+			: 'Auto'
+	);
+	const permissionLabel = $derived(
+		permissionOptions.find((option) => option.value === permissionValue)?.label ?? 'Ask'
+	);
+
+	function toggleMenu(menu: Exclude<SheetMenu, null>) {
+		openMenu = openMenu === menu ? null : menu;
+	}
+
 	function closeSheet() {
 		page = 'overview';
+		openMenu = null;
 		dragging = false;
 		dragOffset = 0;
 		onClose();
 	}
 
 	async function openModels() {
+		openMenu = null;
 		page = 'models';
 		await tick();
 		// Keep focus on the dialog so opening the picker does not summon a
@@ -265,50 +279,109 @@
 					</section>
 
 					<section class="control-section">
-						<div class="section-label"><Cpu size={15} strokeWidth={1.8} /><span>Model</span></div>
-						<button type="button" class="disclosure-row" onclick={openModels}>
-							<span class="disclosure-copy">
-								<strong>{modelLabel}</strong>
-								<small>{modelNotice ?? 'Model used for the next turn'}</small>
-							</span>
-							<ChevronRight size={18} strokeWidth={1.8} />
+						<button
+							type="button"
+							class="compact-select"
+							onclick={openModels}
+							aria-label="Model: {modelLabel}"
+						>
+							<span class="compact-k">Model</span>
+							<span class="compact-v">{modelLabel}</span>
+							<ChevronRight size={16} strokeWidth={1.8} />
 						</button>
-					</section>
 
-					<section class="control-section">
-						<div class="section-label"><Gauge size={15} strokeWidth={1.8} /><span>Reasoning effort</span></div>
-						<EffortSliderCard
-							options={effortOptions}
-							value={effortValue}
-							onSelect={onEffortSelect}
-							{fastSupported}
-							fastEnabled={fastEnabled ?? false}
-							{onToggleFast}
-						/>
-					</section>
-
-					<section class="control-section">
-						<div class="section-label"><ShieldCheck size={15} strokeWidth={1.8} /><span>Tool access</span></div>
-						<div class="option-card">
-							{#each permissionOptions as option (option.value)}
-								<button
-									type="button"
-									class="choice-row"
-									class:selected={option.value === permissionValue}
-									onclick={() => onPermissionSelect(option.value)}
-								>
-									<span class="choice-copy">
-										<span class="choice-title">
-											{option.label}
-										</span>
-										<span class="choice-description">{option.description}</span>
-									</span>
-									{#if option.value === permissionValue}<Check size={18} strokeWidth={2.2} />{/if}
-								</button>
-							{/each}
+						<div class="compact-field">
+							<button
+								type="button"
+								class="compact-select"
+								class:open={openMenu === 'effort'}
+								onclick={() => toggleMenu('effort')}
+								aria-haspopup="listbox"
+								aria-expanded={openMenu === 'effort'}
+								aria-label="Reasoning effort: {effortLabel}"
+							>
+								<span class="compact-k">Effort</span>
+								<span class="compact-v">{effortLabel}</span>
+								<ChevronDown size={16} strokeWidth={1.8} />
+							</button>
+							{#if openMenu === 'effort'}
+								<div class="compact-menu" role="listbox" aria-label="Reasoning effort">
+									{#each effortOptions as option (option.value)}
+										<button
+											type="button"
+											class="choice-row"
+											class:selected={option.value === effortValue}
+											role="option"
+											aria-selected={option.value === effortValue}
+											onclick={() => {
+												onEffortSelect(option.value);
+												openMenu = null;
+											}}
+										>
+											<span class="choice-copy">
+												<span class="choice-title">{option.label}</span>
+												<span class="choice-description">{option.description}</span>
+											</span>
+											{#if option.value === effortValue}<Check size={16} strokeWidth={2.2} />{/if}
+										</button>
+									{/each}
+								</div>
+							{/if}
 						</div>
-					</section>
 
+						<div class="compact-field">
+							<button
+								type="button"
+								class="compact-select"
+								class:open={openMenu === 'permission'}
+								onclick={() => toggleMenu('permission')}
+								aria-haspopup="listbox"
+								aria-expanded={openMenu === 'permission'}
+								aria-label="Tool access: {permissionLabel}"
+							>
+								<span class="compact-k">Tool access</span>
+								<span class="compact-v">{permissionLabel}</span>
+								<ChevronDown size={16} strokeWidth={1.8} />
+							</button>
+							{#if openMenu === 'permission'}
+								<div class="compact-menu" role="listbox" aria-label="Tool access">
+									{#each permissionOptions as option (option.value)}
+										<button
+											type="button"
+											class="choice-row"
+											class:selected={option.value === permissionValue}
+											role="option"
+											aria-selected={option.value === permissionValue}
+											onclick={() => {
+												onPermissionSelect(option.value);
+												openMenu = null;
+											}}
+										>
+											<span class="choice-copy">
+												<span class="choice-title">{option.label}</span>
+												<span class="choice-description">{option.description}</span>
+											</span>
+											{#if option.value === permissionValue}<Check size={16} strokeWidth={2.2} />{/if}
+										</button>
+									{/each}
+								</div>
+							{/if}
+						</div>
+
+						{#if fastSupported}
+							<label class="fast-check">
+								<input
+									type="checkbox"
+									checked={fastEnabled}
+									onchange={() => onToggleFast?.()}
+								/>
+								<span class="fast-copy">
+									<strong>Fast mode</strong>
+									<small>Faster output at a higher price. Switching clears the prompt cache.</small>
+								</span>
+							</label>
+						{/if}
+					</section>
 				</div>
 			{/if}
 		</div>
@@ -383,8 +456,8 @@
 		display: flex;
 		align-items: center;
 		gap: 10px;
-		min-height: 62px;
-		padding: 4px 16px 12px;
+		min-height: 48px;
+		padding: 2px 16px 10px;
 		border-bottom: 1px solid var(--border-subtle);
 		flex-shrink: 0;
 	}
@@ -433,19 +506,18 @@
 	}
 
 	.overview-scroll {
-		padding: 16px 14px calc(24px + env(safe-area-inset-bottom, 0px));
+		padding: 10px 14px calc(16px + env(safe-area-inset-bottom, 0px));
 	}
 
 	.control-section + .control-section {
-		margin-top: 20px;
+		margin-top: 12px;
 	}
 
-	.disclosure-row,
-	.option-card,
-	.effort-slider-card {
+	.compact-select,
+	.compact-menu {
 		background: color-mix(in oklch, var(--muted) 55%, var(--card));
 		border: 1px solid var(--border-subtle);
-		border-radius: 16px;
+		border-radius: 12px;
 		box-shadow: 0 1px 0 color-mix(in oklch, var(--foreground) 4%, transparent);
 	}
 
@@ -468,19 +540,89 @@
 		color: var(--subtle-foreground);
 	}
 
-	.disclosure-row {
+	.compact-field {
+		margin-top: 8px;
+	}
+
+	.compact-select {
 		width: 100%;
-		min-height: 64px;
+		height: 40px;
 		display: flex;
 		align-items: center;
-		gap: 10px;
-		padding: 10px 14px;
+		gap: 8px;
+		padding: 0 12px;
 		color: var(--foreground);
 		cursor: pointer;
 		text-align: left;
 	}
 
-	.disclosure-copy,
+	.compact-select.open {
+		box-shadow: inset 0 0 0 1px var(--border-strong);
+	}
+
+	.compact-k {
+		font-size: 0.75rem;
+		font-weight: 600;
+		color: var(--muted-foreground);
+		flex-shrink: 0;
+	}
+
+	.compact-v {
+		min-width: 0;
+		flex: 1;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		text-align: right;
+		font-size: 0.86rem;
+		font-weight: 600;
+	}
+
+	.compact-select :global(svg) {
+		flex-shrink: 0;
+		color: var(--muted-foreground);
+	}
+
+	.compact-menu {
+		margin-top: 6px;
+		overflow: hidden;
+	}
+
+	.fast-check {
+		display: flex;
+		align-items: flex-start;
+		gap: 10px;
+		margin-top: 10px;
+		padding: 4px 2px;
+		cursor: pointer;
+	}
+
+	.fast-check input {
+		width: 16px;
+		height: 16px;
+		margin-top: 3px;
+		flex-shrink: 0;
+		accent-color: var(--primary);
+	}
+
+	.fast-copy {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+	}
+
+	.fast-copy strong {
+		font-size: 0.86rem;
+		font-weight: 600;
+	}
+
+	.fast-copy small {
+		font-size: 0.72rem;
+		color: var(--muted-foreground);
+		line-height: 1.35;
+	}
+
 	.choice-copy {
 		min-width: 0;
 		flex: 1;
@@ -489,15 +631,6 @@
 		gap: 2px;
 	}
 
-	.disclosure-copy strong {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font-size: 0.9rem;
-		font-weight: 600;
-	}
-
-	.disclosure-copy small,
 	.choice-description {
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -506,17 +639,13 @@
 		color: var(--muted-foreground);
 	}
 
-	.option-card {
-		overflow: hidden;
-	}
-
 	.choice-row {
 		width: 100%;
-		min-height: 58px;
+		min-height: 44px;
 		display: flex;
 		align-items: center;
 		gap: 11px;
-		padding: 9px 13px;
+		padding: 8px 12px;
 		border: 0;
 		border-bottom: 1px solid var(--border-subtle);
 		background: transparent;
@@ -555,7 +684,6 @@
 	}
 
 	.choice-row:active,
-	.disclosure-row:active,
 	.header-button:active {
 		transform: scale(0.985);
 	}

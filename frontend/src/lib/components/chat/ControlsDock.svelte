@@ -14,10 +14,11 @@
 	 * Only one dock popover is open at a time; the ring's own popover closes
 	 * itself on any outside click, so the two never stack.
 	 *
-	 * Mobile keeps the attach / mic / voice actions inline, shows the settings
-	 * trigger + ring on the left, and moves the configuration matrix into
-	 * MobileComposerControlsSheet. The send button is not here on any viewport:
-	 * it sits at the top-right of the box, inside ChatInput's input area.
+	 * Mobile keeps the attach / mic / voice actions on the left (same order as
+	 * desktop), puts the settings trigger + ring on the right, and moves the
+	 * configuration matrix into MobileComposerControlsSheet. The send button is
+	 * not here on any viewport: it sits at the top-right of the box, inside
+	 * ChatInput's input area.
 	 *
 	 * Computer use is a GLOBAL toggle (Settings → Chat & Input), not a composer
 	 * control: the dock neither shows a toggle nor polls status. Halting it for a
@@ -288,23 +289,6 @@
 	bind:this={dockRef}
 	style:--dock-pop-max={popoverRoom != null ? `${popoverRoom}px` : undefined}
 >
-	<!-- Mobile: the settings trigger and the ring lead the row; the
-	     configuration matrix lives in one native-style bottom sheet. -->
-	<div class="mobile-controls">
-		<button
-			type="button"
-			class="mobile-settings-trigger"
-			class:warn={rerouted}
-			onclick={() => setMobileSheetOpen(true)}
-			aria-haspopup="dialog"
-			aria-expanded={mobileSheetOpen}
-			aria-label={`Open chat controls. Current model: ${modelButtonLabel}`}
-		>
-			<SlidersHorizontal size={16} strokeWidth={1.8} aria-hidden="true" />
-		</button>
-		<ContextUsageBar onOpenChange={(o) => { if (o) void refreshUsageLimits(true); }} />
-	</div>
-
 	<!-- Left group: permission · voice · attach -->
 	<div class="dock-group dock-left">
 		<div class="dock-pop-wrap desktop-controls" bind:this={permissionWrapRef}>
@@ -380,6 +364,23 @@
 			{/if}
 		</button>
 
+	</div>
+
+	<!-- Mobile: settings trigger + ring sit on the right, matching desktop's
+	     usage cluster. Voice / call / attach stay in dock-left. -->
+	<div class="mobile-controls">
+		<button
+			type="button"
+			class="mobile-settings-trigger"
+			class:warn={rerouted}
+			onclick={() => setMobileSheetOpen(true)}
+			aria-haspopup="dialog"
+			aria-expanded={mobileSheetOpen}
+			aria-label={`Open chat controls. Current model: ${modelButtonLabel}`}
+		>
+			<SlidersHorizontal size={16} strokeWidth={1.8} aria-hidden="true" />
+		</button>
+		<ContextUsageBar onOpenChange={(o) => { if (o) void refreshUsageLimits(true); }} />
 	</div>
 
 	<!-- Right group (desktop): model · effort · ring -->
@@ -797,12 +798,11 @@
 
 		.mobile-controls {
 			display: flex;
+			margin-left: auto;
 		}
 
-		/* Attach / mic / voice hug the right edge; the settings trigger and
-		   ring lead the row. */
+		/* Voice / call / attach stay left; settings + usage hug the right edge. */
 		.dock-left {
-			margin-left: auto;
 			gap: 0;
 		}
 

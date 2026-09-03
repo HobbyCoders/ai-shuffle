@@ -43,4 +43,23 @@ describe('ControlsDock mobile control order', () => {
 		expect(settings.compareDocumentPosition(contextUsage) & Node.DOCUMENT_POSITION_FOLLOWING)
 			.toBeTruthy();
 	});
+
+	it('places attach on the left and usage on the right', () => {
+		const { container } = render(ControlsDock, {
+			props: {
+				isUploading: false,
+				onAttachClick: vi.fn()
+			}
+		});
+		const left = container.querySelector('.dock-left');
+		const mobile = container.querySelector('.mobile-controls');
+		const attach = left?.querySelector('.attach-btn');
+		const contextUsage = mobile?.querySelector('.usage-context-wrapper');
+
+		expect(attach).toBeInstanceOf(Element);
+		expect(contextUsage).toBeInstanceOf(Element);
+		if (!(attach instanceof Element) || !(contextUsage instanceof Element)) return;
+		expect(attach.compareDocumentPosition(contextUsage) & Node.DOCUMENT_POSITION_FOLLOWING)
+			.toBeTruthy();
+	});
 });
