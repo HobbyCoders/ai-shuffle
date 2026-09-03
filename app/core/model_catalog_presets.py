@@ -1,17 +1,12 @@
-"""Built-in preset model catalogs for providers that can't be browsed.
+"""Built-in preset model catalogs used as enrollment seeds.
 
-Phase-2 Chunk D.2 — Codex / ChatGPT-subscription providers have NO browsable
-``/models`` endpoint: the roster (and per-plan caps) is server-enforced by the
-account behind the ``chatgpt-account-id`` header (F3 of
-``docs/MULTI_PROVIDER_PHASE2_PLAN.md``). So instead of a network fetch we hand
-the UI a preset, editable list that the admin curates into the provider's
-``models_json`` exactly like an OpenRouter fetch result.
+Refresh / ``POST .../fetch-models`` always pulls a live catalog (Codex
+``/backend-api/codex/models``, OpenAI/xAI/OpenRouter ``/models``). These
+rosters seed a new row so it is usable before the first live fetch, and
+``preset_kind_for`` classifies which live endpoint a row should hit.
 
-This is CONFIG-STYLE DATA, not logic: the constants below are meant to be
-edited in place when the GPT lineup changes. Each roster is **version-dependent**
-— this list only decides what shows up in the picker, never what the account or
-key is actually allowed to run. Unchecking an entry in the UI simply drops it
-from the curated set.
+This is CONFIG-STYLE DATA, not the picker source of truth. Unchecking an
+entry in the UI simply drops it from the curated set.
 
 Roster note (``CODEX_PRESET_MODELS``): this is the **live-confirmed** ChatGPT/
 Codex-subscription roster, not speculative naming. It was validated against the

@@ -4,7 +4,7 @@
 	 *
 	 * Dead-simple: one key field, one "Add" button, zero model picking. On submit:
 	 *   1. create the provider (`provider_type: 'xai'`, base `https://api.x.ai/v1`);
-	 *   2. fetch its catalog (`source:'preset'`, the built-in xAI roster);
+	 *   2. fetch its catalog (live xAI `/models`);
 	 *   3. persist the FULL roster as the provider's models;
 	 *   4. re-hydrate the registry;
 	 *   5. `onDone()`.

@@ -5,8 +5,7 @@
 	 * Dead-simple: one key field, one "Add" button, zero model picking. On submit:
 	 *   1. create the provider  (`createModelProvider`, so we get its `id` back —
 	 *      the store's `saveProvider` returns void, and we need the id for step 2);
-	 *   2. fetch its catalog     (`fetchProviderModels` → `source:'preset'`, the
-	 *      built-in OpenAI roster from `OPENAI_PRESET_MODELS`);
+	 *   2. fetch its catalog     (`fetchProviderModels` → live OpenAI `/models`);
 	 *   3. persist the FULL roster as the provider's models
 	 *      (`updateModelProvider(id, { models })`);
 	 *   4. re-hydrate the registry (`providers.refreshProviders()` — landmine L4);
@@ -57,8 +56,7 @@
 				});
 				createdId = created.id;
 			}
-			// Preset roster — the backend returns `source:'preset'` with the OpenAI
-			// lineup; persist the FULL roster, no user picking.
+			// Live OpenAI catalog; persist the FULL roster, no user picking.
 			const fetched = await providers.fetchProviderModels(createdId);
 			await updateModelProvider(createdId, { models: fetched.models ?? [] });
 			// Re-hydrate the model registry so the profile editor sees the new models.

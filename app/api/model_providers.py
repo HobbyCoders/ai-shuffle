@@ -123,10 +123,12 @@ class ModelProviderListResponse(BaseModel):
 class FetchModelsResponse(BaseModel):
     """Result of a catalog fetch for a provider.
 
-    ``source`` is ``"preset"`` for a ChatGPT/Codex provider (built-in roster, no
-    network) or ``"upstream"`` for a live ``GET {base_url}/v1/models`` fetch. The UI
-    check-selects from ``models`` and PATCHes the curated subset via the normal
-    update route — this endpoint never persists anything.
+    ``source`` is ``"upstream"`` for a live catalog pull. ChatGPT/Codex hits
+    ``GET https://chatgpt.com/backend-api/codex/models``; every other provider
+    hits its OpenAI-compatible ``/models`` URL. ``"preset"`` is retained only
+    so older clients still parse the field. The UI check-selects from
+    ``models`` and PATCHes the curated subset via the normal update route —
+    this endpoint never persists anything.
     """
     source: str
     models: List[Dict[str, Any]]
@@ -327,6 +329,16 @@ def _apply_token_flags(row: Dict[str, Any]) -> Dict[str, Any]:
 # unbounded list into the picker. Timeout mirrors the codex OAuth calls.
 _FETCH_MODELS_CAP = 2000
 _FETCH_TIMEOUT = 30.0
+_CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models"
+_CODEX_CLIENT_VERSION = "1.0.0"
+# Special-purpose Codex review model — not a general chat/agent option.
+_CODEX_EXCLUDED_MODEL_IDS = frozenset({"codex-auto-review"})
+_CATALOG_RECONNECT_CHATGPT = (
+    "Reconnect the ChatGPT/Codex provider before fetching models."
+)
+_CATALOG_RECONNECT_GROK = (
+    "Reconnect the Grok provider before fetching models."
+)
 
 
 class UpstreamModelsError(Exception):
@@ -366,10 +378,11 @@ def _parse_models_response(
 ) -> List[Dict[str, Any]]:
     """Normalize an upstream ``/models`` body into ``[{id, label}]``.
 
-    Handles both OpenAI-style ``{"data": [{"id": ...}]}`` and a bare list of
-    entries. Each entry may be an object (``id`` required; ``label``/``name``
-    optional, falling back to ``id``) or a bare string id. Entries without a
-    usable id are skipped. The list is capped at ``_FETCH_MODELS_CAP``.
+    Handles OpenAI-style ``{"data": [{"id": ...}]}``, Codex-style
+    ``{"models": [{"id": ...}]}``, and a bare list of entries. Each entry may
+    be an object (``id`` required; ``label``/``name`` optional, falling back
+    to ``id``) or a bare string id. Entries without a usable id are skipped.
+    The list is capped at ``_FETCH_MODELS_CAP``.
 
     An upstream-advertised per-model window (``context_length`` /
     ``top_provider.context_length``) is CARRIED THROUGH as ``context_window``.
@@ -383,6 +396,8 @@ def _parse_models_response(
     """
     if isinstance(payload, dict):
         raw = payload.get("data")
+        if not isinstance(raw, list):
+            raw = payload.get("models")
     else:
         raw = payload
     if not isinstance(raw, list):
@@ -427,6 +442,64 @@ def _parse_models_response(
     return models
 
 
+def _models_catalog_url(base_url: str) -> str:
+    """OpenAI-compatible models URL without doubling an already-versioned ``/v1``.
+
+    OpenAI/xAI rows store ``https://api.openai.com/v1`` (already versioned);
+    OpenRouter/custom rows store a host like ``https://openrouter.ai/api``.
+    """
+    base = (base_url or "").rstrip("/")
+    if not base:
+        raise UpstreamModelsError("missing_base_url")
+    if base.endswith("/v1"):
+        return f"{base}/models"
+    return f"{base}/v1/models"
+
+
+def _codex_catalog_headers(access_token: str, account_id: Optional[str]) -> Dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "User-Agent": codex_rate_limit_resets.CODEX_USER_AGENT,
+        "originator": "codex_cli_rs",
+        "OpenAI-Beta": "responses=experimental",
+        "Accept": "application/json",
+    }
+    if isinstance(account_id, str) and account_id.strip():
+        headers["chatgpt-account-id"] = account_id
+    return headers
+
+
+def _subscription_access_token(
+    provider_id: str, *, kind: str
+) -> Tuple[str, Optional[str]]:
+    """Decrypt the OAuth access token for a ChatGPT or SuperGrok row."""
+    reconnect = (
+        _CATALOG_RECONNECT_CHATGPT if kind == "chatgpt" else _CATALOG_RECONNECT_GROK
+    )
+    if not encryption.is_encryption_ready():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Encryption is locked. Log in again as admin (or set "
+                   "ADMIN_PASSWORD) before fetching provider models.",
+        )
+    stored = db.get_codex_tokens(provider_id)
+    if (
+        not stored
+        or stored.get("needs_reauth")
+        or not stored.get("codex_access_token")
+    ):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=reconnect)
+    try:
+        access = encryption.decrypt_value(stored["codex_access_token"])
+    except Exception as exc:  # noqa: BLE001 — never expose credential failures
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=reconnect
+        ) from exc
+    if not access:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=reconnect)
+    return access, stored.get("codex_account_id")
+
+
 async def fetch_upstream_models(
     base_url: str,
     token: Optional[str],
@@ -434,13 +507,7 @@ async def fetch_upstream_models(
     client: Optional[httpx.AsyncClient] = None,
     provider_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Fetch + normalize a provider's ``GET {base_url}/v1/models`` catalog.
-
-    Every provider that reaches this function (openrouter / custom /
-    anthropic-with-base — chatgpt/openai types get presets, see
-    ``app/core/model_catalog_presets.py``) is anthropic-compatible with the
-    convention ``{base_url}/v1/messages``, so the catalog lives at
-    ``{base_url}/v1/models``.
+    """Fetch + normalize a provider's OpenAI-compatible ``/models`` catalog.
 
     Injectable ``client`` (an ``httpx.AsyncClient`` over a ``MockTransport`` in
     tests) mirrors the ``app.core.codex_oauth`` convention; production passes the
@@ -448,7 +515,7 @@ async def fetch_upstream_models(
     ``Authorization: Bearer``. Raises :class:`UpstreamModelsError` on any non-2xx
     or transport failure.
     """
-    url = base_url.rstrip("/") + "/v1/models"
+    url = _models_catalog_url(base_url)
     headers = {"Authorization": f"Bearer {token}"} if token else {}
 
     owns_client = client is None
@@ -469,6 +536,123 @@ async def fetch_upstream_models(
     except Exception as e:  # noqa: BLE001 — malformed upstream body
         raise UpstreamModelsError("invalid_json") from e
     return _parse_models_response(payload, provider_type=provider_type)
+
+
+def _generic_auth_token(row: Dict[str, Any]) -> Optional[str]:
+    """Decrypt ``auth_token`` when present; None if the row has no API key."""
+    enc_token = row.get("auth_token")
+    if not enc_token:
+        return None
+    if not encryption.is_encryption_ready():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Encryption is locked. Log in again as admin (or set "
+                   "ADMIN_PASSWORD) before fetching provider models.",
+        )
+    return encryption.decrypt_value(enc_token)
+
+
+async def _fetch_codex_models(
+    provider_id: str, *, client: httpx.AsyncClient
+) -> List[Dict[str, Any]]:
+    """Live ``GET /backend-api/codex/models`` with Codex OAuth + one 401 retry."""
+    access_token, account_id = _subscription_access_token(
+        provider_id, kind="chatgpt"
+    )
+    params = {"client_version": _CODEX_CLIENT_VERSION}
+
+    async def _once(token: str, acct: Optional[str]) -> httpx.Response:
+        try:
+            return await client.get(
+                _CODEX_MODELS_URL,
+                headers=_codex_catalog_headers(token, acct),
+                params=params,
+                timeout=_FETCH_TIMEOUT,
+            )
+        except httpx.HTTPError as e:
+            raise UpstreamModelsError(str(e)) from e
+
+    resp = await _once(access_token, account_id)
+    if resp.status_code == 401:
+        try:
+            refreshed = await codex_token_refresh.refresh_on_401_once(
+                provider_id,
+                stale_access_token=access_token,
+                client=client,
+            )
+        except Exception as exc:  # noqa: BLE001 — refresh internals stay private
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=_CATALOG_RECONNECT_CHATGPT,
+            ) from exc
+        if not refreshed:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=_CATALOG_RECONNECT_CHATGPT,
+            )
+        access_token, account_id = _subscription_access_token(
+            provider_id, kind="chatgpt"
+        )
+        resp = await _once(access_token, account_id)
+        if resp.status_code == 401:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=_CATALOG_RECONNECT_CHATGPT,
+            )
+    if resp.status_code >= 400:
+        raise UpstreamModelsError(f"http_{resp.status_code}")
+    try:
+        payload = resp.json()
+    except Exception as e:  # noqa: BLE001 — malformed upstream body
+        raise UpstreamModelsError("invalid_json") from e
+    models = _parse_models_response(payload, provider_type="chatgpt")
+    return [m for m in models if m.get("id") not in _CODEX_EXCLUDED_MODEL_IDS]
+
+
+async def _fetch_upstream_with_grok_retry(
+    provider_id: str,
+    row: Dict[str, Any],
+    token: str,
+    *,
+    client: httpx.AsyncClient,
+) -> List[Dict[str, Any]]:
+    """SuperGrok catalog fetch: one 401 → refresh → retry."""
+    try:
+        return await fetch_upstream_models(
+            row["base_url"], token, client=client,
+            provider_type=row.get("provider_type"),
+        )
+    except UpstreamModelsError as exc:
+        if str(exc) != "http_401":
+            raise
+    from app.core import xai_token_refresh
+    try:
+        refreshed = await xai_token_refresh.refresh_on_401_once(
+            provider_id, stale_access_token=token, client=client,
+        )
+    except Exception as exc:  # noqa: BLE001 — refresh internals stay private
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_CATALOG_RECONNECT_GROK,
+        ) from exc
+    if not refreshed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_CATALOG_RECONNECT_GROK,
+        )
+    access, _ = _subscription_access_token(provider_id, kind="xai")
+    try:
+        return await fetch_upstream_models(
+            row["base_url"], access, client=client,
+            provider_type=row.get("provider_type"),
+        )
+    except UpstreamModelsError as exc:
+        if str(exc) == "http_401":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=_CATALOG_RECONNECT_GROK,
+            ) from exc
+        raise
 
 
 def _row_with_token_flags(provider_id: str) -> Optional[Dict[str, Any]]:
@@ -657,13 +841,15 @@ async def toggle_provider(provider_id: str, token: str = Depends(require_admin))
 
 @router.post("/{provider_id}/fetch-models", response_model=FetchModelsResponse)
 async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
-    """Fetch a provider's model catalog for the curation UI (phase-2 Chunk D.1/D.2).
+    """Fetch a provider's live model catalog for the curation UI.
 
-    Two sources, one endpoint:
-      * ChatGPT/Codex provider (``auth_mode == "chatgpt"``) → the built-in preset
-        roster, no network call (the roster is server-enforced upstream, F3).
-      * Any other provider → live ``GET {base_url}/v1/models`` with the provider's
-        decrypted auth token as ``Authorization: Bearer``.
+    Every provider is pulled from upstream on this call (Refresh models):
+      * ChatGPT/Codex → ``GET https://chatgpt.com/backend-api/codex/models``
+        with the subscription access token (one 401 refresh retry).
+      * SuperGrok → ``GET {base_url}/models`` with the Grok access token
+        (one 401 refresh retry).
+      * OpenAI / xAI API key / OpenRouter / custom → ``GET`` the
+        OpenAI-compatible ``/models`` URL with the decrypted API key.
 
     This route RETURNS the list only — the admin check-selects and persists the
     curated subset through the existing ``PATCH /{id}`` update route. There is no
@@ -674,29 +860,25 @@ async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
 
-    # Preset path: ChatGPT/Codex subscription — no browsable /models endpoint.
-    preset = model_catalog_presets.preset_models_for(row)
-    if preset is not None:
-        return FetchModelsResponse(source="preset", models=preset)
-
-    # Upstream path: decrypt the stored token (if any) and fetch live.
-    enc_token = row.get("auth_token")
-    auth_token: Optional[str] = None
-    if enc_token:
-        if not encryption.is_encryption_ready():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Encryption is locked. Log in again as admin (or set "
-                       "ADMIN_PASSWORD) before fetching provider models.",
-            )
-        auth_token = encryption.decrypt_value(enc_token)
-
+    kind = model_catalog_presets.preset_kind_for(row)
     from app.core.http_client import get_http_client
+    client = get_http_client()
     try:
-        models = await fetch_upstream_models(
-            row["base_url"], auth_token, client=get_http_client(),
-            provider_type=row.get("provider_type"),
-        )
+        if kind == "chatgpt":
+            models = await _fetch_codex_models(provider_id, client=client)
+        elif row.get("auth_mode") == "grok":
+            access, _ = _subscription_access_token(provider_id, kind="xai")
+            models = await _fetch_upstream_with_grok_retry(
+                provider_id, row, access, client=client,
+            )
+        else:
+            auth_token = _generic_auth_token(row)
+            models = await fetch_upstream_models(
+                row["base_url"], auth_token, client=client,
+                provider_type=row.get("provider_type"),
+            )
+    except HTTPException:
+        raise
     except UpstreamModelsError as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

@@ -1,13 +1,10 @@
 """API tests for the provider catalog-fetch route (phase-2 Chunk D.1/D.2).
 
 ``POST /api/v1/model-providers/{id}/fetch-models`` returns (never persists) a
-provider's model roster for the curation UI:
+provider's live model roster for the curation UI:
 
-* ChatGPT/Codex providers (``auth_mode == "chatgpt"``) → the built-in preset
-  roster, no network.
-* Everything else → a live ``GET {base_url}/models`` fetch, parsing both the
-  OpenAI ``{"data": [...]}`` shape and a bare list, capped at 2000 entries. The
-  decrypted auth token rides as ``Authorization: Bearer``.
+* ChatGPT/Codex → ``GET https://chatgpt.com/backend-api/codex/models``
+* OpenAI / xAI / OpenRouter / custom → OpenAI-compatible ``GET .../models``
 
 All upstream HTTP is stubbed via ``httpx.MockTransport`` — NO network. The
 shared client used by the route is swapped for a MockTransport-backed one via a
@@ -47,6 +44,16 @@ def _make_provider(
     )
 
 
+def _attach_subscription(*, auth_mode="chatgpt", account_id="acct-1"):
+    db.set_codex_token_bundle(
+        PROVIDER_ID,
+        access_token=encryption.encrypt_value("codex-access"),
+        refresh_token=encryption.encrypt_value("codex-refresh"),
+        account_id=account_id,
+        auth_mode=auth_mode,
+    )
+
+
 def _install_mock_transport(monkeypatch, handler):
     """Point the route's shared HTTP client at a MockTransport running ``handler``.
 
@@ -68,100 +75,187 @@ class TestUnauthenticated:
         assert resp.status_code in (401, 403), resp.status_code
 
 
-class TestPresetPath:
-    def test_chatgpt_provider_returns_preset(self, authenticated_client, mock_db):
+class TestLiveCatalogs:
+    def test_chatgpt_hits_codex_models_endpoint(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
         _unlock(mock_db)
-        _make_provider()
-        # Flip the provider into ChatGPT/Codex mode (what enrollment does).
-        db.update_model_provider(PROVIDER_ID, auth_mode="chatgpt")
+        _make_provider(
+            provider_type="chatgpt",
+            base_url="https://chatgpt.com/backend-api/codex",
+        )
+        _attach_subscription(auth_mode="chatgpt", account_id="acct-1")
 
+        captured = {}
+
+        def _handler(request):
+            captured["url"] = str(request.url)
+            captured["auth"] = request.headers.get("authorization")
+            captured["account"] = request.headers.get("chatgpt-account-id")
+            captured["originator"] = request.headers.get("originator")
+            captured["ua"] = request.headers.get("user-agent")
+            return httpx.Response(200, json={"models": [
+                {"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol"},
+                {"id": "gpt-5.6-terra"},
+                {"id": "codex-auto-review"},
+            ]})
+
+        _install_mock_transport(monkeypatch, _handler)
         resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert body["source"] == "preset"
-        assert body["models"] == model_catalog_presets.CODEX_PRESET_MODELS
-        # Every preset entry is a well-formed {id, label}.
-        for entry in body["models"]:
-            assert entry["id"] and entry["label"]
+        assert body["source"] == "upstream"
+        assert body["models"] == [
+            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"},
+            {"id": "gpt-5.6-terra", "label": "gpt-5.6-terra"},
+        ]
+        assert captured["url"].startswith(
+            "https://chatgpt.com/backend-api/codex/models"
+        )
+        assert "client_version=1.0.0" in captured["url"]
+        assert captured["auth"] == "Bearer codex-access"
+        assert captured["account"] == "acct-1"
+        assert captured["originator"] == "codex_cli_rs"
+        assert captured["ua"] == "codex_cli_rs/1.0.0"
 
-    def test_preset_path_makes_no_network_call(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
-        _make_provider()
-        db.update_model_provider(PROVIDER_ID, auth_mode="chatgpt")
-
-        def _boom(request):  # pragma: no cover — must never be reached
-            raise AssertionError("preset path must not hit the network")
-
-        _install_mock_transport(monkeypatch, _boom)
-        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
-        assert resp.status_code == 200, resp.text
-        assert resp.json()["source"] == "preset"
-
-    def test_chatgpt_provider_type_returns_codex_preset(self, authenticated_client, mock_db):
-        # New enrollments use provider_type='chatgpt' (plan PR1) — the preset
-        # selector must return the Codex roster from provider_type alone, even
-        # before any auth_mode bundle is persisted.
+    def test_chatgpt_without_tokens_returns_409(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
         _unlock(mock_db)
         _make_provider(provider_type="chatgpt",
                        base_url="https://chatgpt.com/backend-api/codex")
 
-        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["source"] == "preset"
-        assert body["models"] == model_catalog_presets.CODEX_PRESET_MODELS
+        def _boom(request):  # pragma: no cover
+            raise AssertionError("must 409 before any network call")
 
-    def test_openai_provider_type_returns_openai_preset(self, authenticated_client, mock_db):
-        # provider_type='openai' rows ship the public-API OpenAI roster with zero
-        # user model-picking (plan D4 / ruling PR3).
+        _install_mock_transport(monkeypatch, _boom)
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 409, resp.text
+
+    def test_chatgpt_401_refreshes_and_retries(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
         _unlock(mock_db)
-        _make_provider(provider_type="openai",
-                       base_url="https://api.openai.com/v1")
+        _make_provider(
+            provider_type="chatgpt",
+            base_url="https://chatgpt.com/backend-api/codex",
+        )
+        _attach_subscription()
+        calls = {"n": 0}
 
+        def _handler(request):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(401, json={"error": "unauthorized"})
+            return httpx.Response(200, json={"models": [{"id": "gpt-5.6-sol"}]})
+
+        _install_mock_transport(monkeypatch, _handler)
+
+        async def _refresh(provider_id, stale_access_token=None, client=None):
+            db.set_codex_token_bundle(
+                PROVIDER_ID,
+                access_token=encryption.encrypt_value("codex-access-2"),
+                refresh_token=encryption.encrypt_value("codex-refresh-2"),
+                account_id="acct-1",
+                auth_mode="chatgpt",
+            )
+            return True
+
+        monkeypatch.setattr(mp_api.codex_token_refresh, "refresh_on_401_once", _refresh)
         resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
         assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["source"] == "preset"
-        assert body["models"] == model_catalog_presets.OPENAI_PRESET_MODELS
-        # The OpenAI roster is distinct from the Codex roster.
-        assert body["models"] != model_catalog_presets.CODEX_PRESET_MODELS
+        assert resp.json()["models"] == [
+            {"id": "gpt-5.6-sol", "label": "gpt-5.6-sol"},
+        ]
+        assert calls["n"] == 2
 
-    def test_xai_provider_type_returns_xai_preset(self, authenticated_client, mock_db):
+    def test_openai_live_catalog_does_not_double_v1(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
         _unlock(mock_db)
-        _make_provider(provider_type="xai", base_url="https://api.x.ai/v1")
+        _make_provider(
+            provider_type="openai",
+            base_url="https://api.openai.com/v1",
+            auth_token=encryption.encrypt_value(RAW_TOKEN),
+        )
 
+        captured = {}
+
+        def _handler(request):
+            captured["url"] = str(request.url)
+            return httpx.Response(200, json={"data": [
+                {"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol"},
+                {"id": "gpt-5.7"},
+            ]})
+
+        _install_mock_transport(monkeypatch, _handler)
         resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert body["source"] == "preset"
-        assert body["models"] == model_catalog_presets.XAI_PRESET_MODELS
+        assert body["source"] == "upstream"
+        assert body["models"] == [
+            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"},
+            {"id": "gpt-5.7", "label": "gpt-5.7"},
+        ]
+        assert captured["url"] == "https://api.openai.com/v1/models"
+        row = db.get_model_provider(PROVIDER_ID)
+        assert not (row.get("models_json") or [])
 
-    def test_grok_provider_type_returns_xai_preset(self, authenticated_client, mock_db):
+    def test_xai_live_catalog_does_not_double_v1(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        _unlock(mock_db)
+        _make_provider(
+            provider_type="xai",
+            base_url="https://api.x.ai/v1",
+            auth_token=encryption.encrypt_value(RAW_TOKEN),
+        )
+
+        captured = {}
+
+        def _handler(request):
+            captured["url"] = str(request.url)
+            captured["auth"] = request.headers.get("authorization")
+            return httpx.Response(200, json={"data": [
+                {"id": "grok-4.6"},
+                {"id": "grok-4.7"},
+            ]})
+
+        _install_mock_transport(monkeypatch, _handler)
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["source"] == "upstream"
+        assert [m["id"] for m in body["models"]] == ["grok-4.6", "grok-4.7"]
+        assert captured["url"] == "https://api.x.ai/v1/models"
+        assert captured["auth"] == f"Bearer {RAW_TOKEN}"
+
+    def test_grok_subscription_uses_oauth_token(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
         _unlock(mock_db)
         _make_provider(provider_type="grok", base_url="https://api.x.ai/v1")
+        _attach_subscription(auth_mode="grok")
 
+        captured = {}
+
+        def _handler(request):
+            captured["url"] = str(request.url)
+            captured["auth"] = request.headers.get("authorization")
+            return httpx.Response(200, json={"data": [{"id": "grok-4.6"}]})
+
+        _install_mock_transport(monkeypatch, _handler)
         resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
         assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["source"] == "preset"
-        assert body["models"] == model_catalog_presets.XAI_PRESET_MODELS
-
-    def test_grok_auth_mode_returns_xai_preset(self, authenticated_client, mock_db):
-        _unlock(mock_db)
-        _make_provider()
-        db.update_model_provider(PROVIDER_ID, auth_mode="grok")
-
-        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
-        assert resp.status_code == 200, resp.text
-        assert resp.json()["models"] == model_catalog_presets.XAI_PRESET_MODELS
+        assert resp.json()["source"] == "upstream"
+        assert captured["url"] == "https://api.x.ai/v1/models"
+        assert captured["auth"] == "Bearer codex-access"
 
     def test_codex_roster_excludes_codex_auto_review(self):
         # codex-auto-review is special-purpose — must never appear in the picker.
         ids = {entry["id"] for entry in model_catalog_presets.CODEX_PRESET_MODELS}
         assert "codex-auto-review" not in ids
-        # Sanity: the live-confirmed roster ids are present (spike 2026-07-18).
-        assert {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
-                "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"} == ids
+        assert "codex-auto-review" in mp_api._CODEX_EXCLUDED_MODEL_IDS
 
 
 class TestUpstreamPath:
@@ -377,3 +471,24 @@ class TestHelperParsing:
     def test_parse_non_list_returns_empty(self):
         assert mp_api._parse_models_response({"data": "nope"}) == []
         assert mp_api._parse_models_response(123) == []
+
+    def test_parse_codex_models_key(self):
+        out = mp_api._parse_models_response({"models": [
+            {"id": "gpt-5.6-sol"},
+            {"id": "gpt-5.7", "name": "GPT-5.7"},
+        ]})
+        assert out == [
+            {"id": "gpt-5.6-sol", "label": "gpt-5.6-sol"},
+            {"id": "gpt-5.7", "label": "GPT-5.7"},
+        ]
+
+    def test_models_catalog_url_avoids_double_v1(self):
+        assert mp_api._models_catalog_url("https://api.openai.com/v1") == (
+            "https://api.openai.com/v1/models"
+        )
+        assert mp_api._models_catalog_url("https://openrouter.ai/api") == (
+            "https://openrouter.ai/api/v1/models"
+        )
+        assert mp_api._models_catalog_url("https://api.x.ai/v1/") == (
+            "https://api.x.ai/v1/models"
+        )

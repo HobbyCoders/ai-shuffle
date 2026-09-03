@@ -125,8 +125,9 @@ export async function toggleModelProvider(id: string): Promise<ModelProvider> {
 /**
  * Result of a catalog fetch for a provider (phase-2 Chunk D).
  *
- * `source` is `"preset"` for a ChatGPT/Codex provider (built-in roster, no
- * network) or `"upstream"` for a live `GET {base_url}/models` fetch. The caller
+ * `source` is `"upstream"` for a live catalog pull (Codex `/codex/models` or
+ * the provider's OpenAI-compatible `/models`). `"preset"` remains in the union
+ * for older payloads. The caller
  * check-selects from `models` and persists the curated subset via
  * `updateModelProvider(id, { models })` — this call itself persists nothing.
  */

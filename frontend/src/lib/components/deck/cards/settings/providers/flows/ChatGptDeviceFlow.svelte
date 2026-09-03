@@ -206,8 +206,7 @@
 
 	/**
 	 * Auto-seed the ChatGPT provider's model roster on completion (mirrors
-	 * OpenAiKeyFlow): fetch its catalog (`source:'preset'` — the built-in Codex
-	 * roster) and persist the FULL returned list. Best-effort: a fetch/persist
+	 * OpenAiKeyFlow): fetch its live Codex catalog and persist the FULL returned list. Best-effort: a fetch/persist
 	 * hiccup must not block the enrollment from completing.
 	 *
 	 * RECONNECT exception: never clobber a curated subset. When reconnecting an
