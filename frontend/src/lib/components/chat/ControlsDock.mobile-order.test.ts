@@ -26,25 +26,7 @@ afterEach(() => cleanup());
 afterAll(() => vi.unstubAllGlobals());
 
 describe('ControlsDock mobile control order', () => {
-	it('places chat settings before context usage', () => {
-		const { container } = render(ControlsDock, {
-			props: {
-				isUploading: false,
-				onAttachClick: vi.fn()
-			}
-		});
-		const mobileControls = container.querySelector('.mobile-controls');
-		const settings = mobileControls?.querySelector('.mobile-settings-trigger');
-		const contextUsage = mobileControls?.querySelector('.usage-context-wrapper');
-
-		expect(settings).toBeInstanceOf(Element);
-		expect(contextUsage).toBeInstanceOf(Element);
-		if (!(settings instanceof Element) || !(contextUsage instanceof Element)) return;
-		expect(settings.compareDocumentPosition(contextUsage) & Node.DOCUMENT_POSITION_FOLLOWING)
-			.toBeTruthy();
-	});
-
-	it('places attach on the left and usage on the right', () => {
+	it('places chat settings first on the left, then attach, with usage on the right', () => {
 		const { container } = render(ControlsDock, {
 			props: {
 				isUploading: false,
@@ -53,12 +35,23 @@ describe('ControlsDock mobile control order', () => {
 		});
 		const left = container.querySelector('.dock-left');
 		const mobile = container.querySelector('.mobile-controls');
+		const settings = left?.querySelector('.mobile-settings-trigger');
 		const attach = left?.querySelector('.attach-btn');
 		const contextUsage = mobile?.querySelector('.usage-context-wrapper');
 
+		expect(settings).toBeInstanceOf(Element);
 		expect(attach).toBeInstanceOf(Element);
 		expect(contextUsage).toBeInstanceOf(Element);
-		if (!(attach instanceof Element) || !(contextUsage instanceof Element)) return;
+		if (
+			!(settings instanceof Element) ||
+			!(attach instanceof Element) ||
+			!(contextUsage instanceof Element)
+		) {
+			return;
+		}
+		expect(settings.classList.contains('dock-ico')).toBe(true);
+		expect(settings.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING)
+			.toBeTruthy();
 		expect(attach.compareDocumentPosition(contextUsage) & Node.DOCUMENT_POSITION_FOLLOWING)
 			.toBeTruthy();
 	});

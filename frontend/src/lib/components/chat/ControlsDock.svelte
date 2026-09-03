@@ -14,11 +14,11 @@
 	 * Only one dock popover is open at a time; the ring's own popover closes
 	 * itself on any outside click, so the two never stack.
 	 *
-	 * Mobile keeps the attach / mic / voice actions on the left (same order as
-	 * desktop), puts the settings trigger + ring on the right, and moves the
-	 * configuration matrix into MobileComposerControlsSheet. The send button is
-	 * not here on any viewport: it sits at the top-right of the box, inside
-	 * ChatInput's input area.
+	 * Mobile puts the settings trigger first on the left (same icon button as
+	 * mic / call / attach), then those actions, and the usage ring on the right.
+	 * The configuration matrix lives in MobileComposerControlsSheet. The send
+	 * button is not here on any viewport: it sits at the top-right of the box,
+	 * inside ChatInput's input area.
 	 *
 	 * Computer use is a GLOBAL toggle (Settings → Chat & Input), not a composer
 	 * control: the dock neither shows a toggle nor polls status. Halting it for a
@@ -291,6 +291,17 @@
 >
 	<!-- Left group: permission · voice · attach -->
 	<div class="dock-group dock-left">
+		<button
+			type="button"
+			class="dock-ico mobile-only mobile-settings-trigger"
+			class:warn={rerouted}
+			onclick={() => setMobileSheetOpen(true)}
+			aria-haspopup="dialog"
+			aria-expanded={mobileSheetOpen}
+			aria-label={`Open chat controls. Current model: ${modelButtonLabel}`}
+		>
+			<SlidersHorizontal size={14} strokeWidth={1.8} aria-hidden="true" />
+		</button>
 		<div class="dock-pop-wrap desktop-controls" bind:this={permissionWrapRef}>
 			<button
 				type="button"
@@ -366,20 +377,8 @@
 
 	</div>
 
-	<!-- Mobile: settings trigger + ring sit on the right, matching desktop's
-	     usage cluster. Voice / call / attach stay in dock-left. -->
+	<!-- Mobile: usage ring on the right. Settings lives in dock-left. -->
 	<div class="mobile-controls">
-		<button
-			type="button"
-			class="mobile-settings-trigger"
-			class:warn={rerouted}
-			onclick={() => setMobileSheetOpen(true)}
-			aria-haspopup="dialog"
-			aria-expanded={mobileSheetOpen}
-			aria-label={`Open chat controls. Current model: ${modelButtonLabel}`}
-		>
-			<SlidersHorizontal size={16} strokeWidth={1.8} aria-hidden="true" />
-		</button>
 		<ContextUsageBar onOpenChange={(o) => { if (o) void refreshUsageLimits(true); }} />
 	</div>
 
@@ -752,38 +751,19 @@
 	}
 
 	/* ===== MOBILE ===== */
-	.mobile-controls {
+	.mobile-controls,
+	.mobile-only {
 		display: none;
+	}
+
+	.mobile-controls {
 		align-items: center;
 		gap: 3px;
 		min-width: 0;
 	}
 
-	.mobile-settings-trigger {
-		display: flex;
-		position: relative;
-		width: 36px;
-		height: 34px;
-		flex: 0 0 36px;
-		align-items: center;
-		justify-content: center;
-		gap: 6px;
-		padding: 0;
-		border: 1px solid var(--border);
-		border-radius: 999px;
-		background: var(--scrim);
-		color: var(--muted-foreground);
-		cursor: pointer;
-	}
-
 	.mobile-settings-trigger.warn {
 		color: var(--warning, var(--primary));
-		border-color: color-mix(in oklch, var(--warning, var(--primary)) 36%, var(--border));
-	}
-
-	.mobile-settings-trigger:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 1px;
 	}
 
 	@media (max-width: 1080px) {
@@ -796,12 +776,16 @@
 			display: none;
 		}
 
+		.mobile-only {
+			display: grid;
+		}
+
 		.mobile-controls {
 			display: flex;
 			margin-left: auto;
 		}
 
-		/* Voice / call / attach stay left; settings + usage hug the right edge. */
+		/* Settings · voice · call · attach on the left; usage on the right. */
 		.dock-left {
 			gap: 0;
 		}
