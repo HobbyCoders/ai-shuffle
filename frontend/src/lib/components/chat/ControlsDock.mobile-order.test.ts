@@ -50,6 +50,8 @@ describe('ControlsDock mobile control order', () => {
 			return;
 		}
 		expect(settings.classList.contains('dock-ico')).toBe(true);
+		expect(settings.classList.contains('composer-mobile-only')).toBe(true);
+		expect(settings.classList.contains('mobile-only')).toBe(false);
 		expect(settings.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING)
 			.toBeTruthy();
 		expect(attach.compareDocumentPosition(contextUsage) & Node.DOCUMENT_POSITION_FOLLOWING)

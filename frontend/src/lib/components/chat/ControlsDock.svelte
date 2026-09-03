@@ -316,7 +316,7 @@
 	<div class="dock-group dock-left">
 		<button
 			type="button"
-			class="dock-ico mobile-only mobile-settings-trigger"
+			class="dock-ico composer-mobile-only mobile-settings-trigger"
 			class:warn={rerouted}
 			onclick={() => setMobileSheetOpen(true)}
 			aria-haspopup="dialog"
@@ -789,7 +789,7 @@
 
 	/* ===== MOBILE ===== */
 	.mobile-controls,
-	.mobile-only {
+	.composer-mobile-only {
 		display: none;
 	}
 
@@ -813,7 +813,7 @@
 			display: none;
 		}
 
-		.mobile-only {
+		.composer-mobile-only {
 			display: grid;
 		}
 
