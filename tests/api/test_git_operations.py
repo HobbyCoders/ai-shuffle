@@ -375,6 +375,73 @@ class TestExecuteFinish:
         mock_git_service.checkout.assert_not_called()
         mock_git_service.delete_branch.assert_not_called()
 
+    async def test_linked_worktree_cleanup_removes_worktree_not_checkout_main(
+        self, mock_git_service, mock_github_service, mock_worktree_manager, tmp_path
+    ):
+        """V2 branch sessions have no worktree_id. Their cwd is a linked git
+        worktree; checking out main there fails because main is already held by
+        the base checkout. Finish must ``git worktree remove`` instead.
+        """
+        main = tmp_path / "main"
+        wt = main / ".fluid" / "worktrees" / "feat-x"
+        wt.mkdir(parents=True)
+        gitdir = main / ".git" / "worktrees" / "feat-x"
+        (wt / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+
+        mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
+        mock_git_service.remove_worktree.return_value = True
+        op = _finish_op()
+        with patch.multiple(
+            gitops,
+            git_service=mock_git_service,
+            github_service=mock_github_service,
+            worktree_manager=mock_worktree_manager,
+        ), patch("app.db.checkouts.archive_checkout_by_path", return_value=None):
+            await _execute_finish(
+                op, working_dir=str(wt), worktree_id=None, repo="o/r",
+                pr_number=7, pr_url="u", feature_branch="feat/x", default_branch="main",
+                merge_method="squash", cleanup=True, session_id=None,
+                status={"ahead": 0},
+            )
+
+        assert op.status == "done"
+        assert _step_status(op, "cleanup") == "done"
+        assert op.result["worktree_deleted"] is True
+        mock_git_service.remove_worktree.assert_called_once_with(str(main), str(wt), True)
+        mock_git_service.delete_branch.assert_called_once_with(str(main), "feat/x", True)
+        mock_git_service.checkout.assert_not_called()
+        mock_worktree_manager.cleanup_worktree.assert_not_called()
+
+    async def test_linked_worktree_cleanup_failure_is_warning(
+        self, mock_git_service, mock_github_service, mock_worktree_manager, tmp_path
+    ):
+        main = tmp_path / "main"
+        wt = main / ".fluid" / "worktrees" / "feat-x"
+        wt.mkdir(parents=True)
+        gitdir = main / ".git" / "worktrees" / "feat-x"
+        (wt / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+
+        mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
+        mock_git_service.remove_worktree.return_value = False
+        op = _finish_op()
+        with patch.multiple(
+            gitops,
+            git_service=mock_git_service,
+            github_service=mock_github_service,
+            worktree_manager=mock_worktree_manager,
+        ):
+            await _execute_finish(
+                op, working_dir=str(wt), worktree_id=None, repo="o/r",
+                pr_number=7, pr_url="u", feature_branch="feat/x", default_branch="main",
+                merge_method="squash", cleanup=True, session_id=None,
+                status={"ahead": 0},
+            )
+
+        assert op.status == "done"
+        assert _step_status(op, "cleanup") == "warning"
+        mock_git_service.checkout.assert_not_called()
+        mock_git_service.delete_branch.assert_not_called()
+
 
 # =============================================================================
 # Executor: ship (step-set construction)

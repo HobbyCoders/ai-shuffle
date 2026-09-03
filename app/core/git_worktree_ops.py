@@ -163,6 +163,22 @@ class GitWorktreeMixin:
             logger.error(f"Error adding worktree: {e}")
             return False, str(e)
 
+    def _registered_worktree_path(self, main_dir: str, path: str) -> str:
+        """Return the path git itself has registered for this worktree.
+
+        ``git worktree remove`` matches the path it recorded, which on Windows
+        may differ in slash style or drive-letter case from the path we stored.
+        Fall back to ``path`` when listing fails or nothing matches.
+        """
+        target = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+        for wt in self.list_worktrees(main_dir):
+            registered = wt.get("path")
+            if not registered:
+                continue
+            if os.path.normcase(os.path.normpath(os.path.abspath(registered))) == target:
+                return registered
+        return path
+
     def remove_worktree(
         self,
         main_dir: str,
@@ -191,20 +207,26 @@ class GitWorktreeMixin:
 
             sever_summary = sever_runtime_links(path)
             if sever_summary["errors"]:
+                # Do not hand the directory to git while a junction may still
+                # be attached — continuing is how the main checkout's
+                # node_modules got deleted.
                 logger.warning(
-                    "Severing runtime links in %s hit errors (continuing): %s",
+                    "Severing runtime links in %s hit errors; refusing git "
+                    "worktree remove: %s",
                     path,
                     sever_summary["errors"],
                 )
+                return False
 
+            registered = self._registered_worktree_path(main_dir, path)
             args = ["worktree", "remove"]
             if force:
                 args.append("--force")
-            args.append(path)
+            args.append(registered)
 
             result = self._run_git(main_dir, args, timeout=30)
             if result.returncode == 0:
-                logger.debug(f"Removed worktree at {path}")
+                logger.debug(f"Removed worktree at {registered}")
                 if _native_reader is not None:
                     _native_reader.invalidate_repo(main_dir)
                 return True

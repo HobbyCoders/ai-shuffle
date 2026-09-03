@@ -824,7 +824,11 @@ class WorktreeManager:
             success = self.git_service.remove_worktree(main_dir, worktree_abs_path, force=True)
             if not success:
                 logger.warning(f"Failed to remove git worktree at {worktree_abs_path}")
-                # Continue to mark as removed in database
+                return False
+        else:
+            # Directory already gone — drop git's administrative entry so a
+            # later branch delete is not blocked by a stale worktree record.
+            self.git_service.prune_worktrees(main_dir)
 
         # Optionally delete the branch
         if not keep_branch:
@@ -834,6 +838,15 @@ class WorktreeManager:
             if branch_name != default_branch:
                 self.git_service.delete_branch(main_dir, branch_name, force=True)
                 logger.debug(f"Deleted branch {branch_name}")
+
+        try:
+            project_id = (repo or {}).get("project_id") or (project or {}).get("id")
+            if project_id:
+                checkouts_db.archive_checkout_by_path(project_id, worktree_abs_path)
+        except Exception:
+            logger.debug(
+                "Could not archive checkout for worktree %s", worktree_id, exc_info=True
+            )
 
         # Mark as completed (preserve record for session reopen). Its own hop:
         # the session teardown and the git worktree removal above sit between

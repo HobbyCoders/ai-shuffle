@@ -327,3 +327,26 @@ def set_checkout_status(checkout_id: str, status: str) -> Optional[Dict[str, Any
         )
         row = cursor.fetchone()
     return _row(row)
+
+
+def archive_checkout_by_path(project_id: str, path: str) -> Optional[Dict[str, Any]]:
+    """Mark the checkout whose path matches ``path`` as archived.
+
+    Comparison is case- and slash-insensitive so Windows and POSIX spellings
+    of the same directory hit the same row. Returns the updated row, the
+    already-archived row, or ``None`` when nothing matches.
+    """
+    if not project_id or not path:
+        return None
+    target = os.path.normcase(os.path.normpath(path))
+    for row in list_checkouts(project_id):
+        raw = row.get("path") or ""
+        if os.path.normcase(os.path.normpath(raw)) != target:
+            continue
+        if row.get("status") == "archived":
+            return row
+        cid = row.get("id")
+        if not cid:
+            return None
+        return set_checkout_status(cid, "archived")
+    return None

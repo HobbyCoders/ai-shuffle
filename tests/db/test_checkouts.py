@@ -98,6 +98,19 @@ def test_status_transition(project):
     assert checkouts.set_checkout_status("no-such-id", "active") is None
 
 
+def test_archive_checkout_by_path(project):
+    c = checkouts.upsert_checkout(
+        project["id"], "runnerA", "/work/feat", branch="feat-x"
+    )
+    updated = checkouts.archive_checkout_by_path(project["id"], "/work/feat")
+    assert updated is not None and updated["id"] == c["id"]
+    assert updated["status"] == "archived"
+    again = checkouts.archive_checkout_by_path(project["id"], "/work/feat")
+    assert again is not None and again["id"] == c["id"]
+    assert checkouts.archive_checkout_by_path(project["id"], "/no/such") is None
+    assert checkouts.archive_checkout_by_path("", "/work/feat") is None
+
+
 def test_get_missing_returns_none(project):
     assert checkouts.get_checkout(project["id"], "ghost") is None
 

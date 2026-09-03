@@ -27,6 +27,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
@@ -305,6 +306,106 @@ def _project_has_other_active_session(project_id: str, exclude_session_id: Optio
     return False
 
 
+def _is_linked_worktree(path: str) -> bool:
+    """True when ``path`` is a git-linked worktree (``.git`` is a file)."""
+    try:
+        return Path(path).joinpath(".git").is_file()
+    except OSError:
+        return False
+
+
+def _main_dir_for_linked_worktree(working_dir: str) -> Optional[str]:
+    """Resolve the main repository directory from a linked worktree's ``.git`` file.
+
+    The file is ``gitdir: <main>/.git/worktrees/<name>``. Walking three parents
+    off that gitdir yields ``<main>``. Returns None when the file is missing or
+    not in that shape — callers must not guess.
+    """
+    git_file = Path(working_dir) / ".git"
+    try:
+        if not git_file.is_file():
+            return None
+        text = git_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    first = text.splitlines()[0].strip()
+    if not first.lower().startswith("gitdir:"):
+        return None
+    gitdir = first.split(":", 1)[1].strip()
+    if not gitdir:
+        return None
+    gitdir_path = Path(gitdir)
+    if not gitdir_path.is_absolute():
+        gitdir_path = Path(working_dir) / gitdir_path
+    if gitdir_path.parent.name != "worktrees":
+        return None
+    return str(gitdir_path.parent.parent.parent)
+
+
+async def _release_session_cwd(session_id: Optional[str]) -> None:
+    """Drop the SDK subprocess (and its Monitor shells) so Windows will unlock CWD."""
+    if not session_id:
+        return
+    try:
+        from app.core.session_pool import get_session_pool
+
+        await get_session_pool().remove(session_id)
+    except Exception:
+        logger.debug("cleanup: session pool remove failed for %s", session_id, exc_info=True)
+    try:
+        from app.mcp.builtin_tools import reap_session_background_shells
+
+        reap_session_background_shells(session_id)
+    except Exception:
+        logger.debug("cleanup: shell reap failed for %s", session_id, exc_info=True)
+
+
+async def _cleanup_linked_worktree(
+    op: Operation,
+    working_dir: str,
+    feature_branch: str,
+    default_branch: str,
+    session_id: Optional[str],
+) -> bool:
+    """Remove a v2/linked branch checkout after merge.
+
+    These directories are git worktrees of the feature branch. Checking out
+    ``default_branch`` inside them fails because that branch is already held
+    by the main checkout — the right cleanup is ``git worktree remove``.
+    """
+    main_dir = _main_dir_for_linked_worktree(working_dir)
+    if not main_dir:
+        logger.warning("Could not resolve main repo for linked worktree %s", working_dir)
+        return False
+
+    await _release_session_cwd(session_id)
+
+    ok = await run_git(git_service.remove_worktree, main_dir, working_dir, True)
+    if not ok:
+        return False
+
+    if feature_branch != default_branch:
+        await run_git(git_service.delete_branch, main_dir, feature_branch, True)
+
+    try:
+        from app.db.checkouts import archive_checkout_by_path
+
+        archive_checkout_by_path(op.project_id, working_dir)
+    except Exception:
+        logger.debug("Could not archive checkout at %s", working_dir, exc_info=True)
+
+    try:
+        from app.api.git_helpers import invalidate_working_dir_cache
+
+        invalidate_working_dir_cache(project_id=op.project_id, session_id=session_id)
+    except Exception:
+        logger.debug("Could not invalidate working-dir cache after cleanup", exc_info=True)
+
+    return True
+
+
 async def _do_cleanup(
     op: Operation,
     working_dir: str,
@@ -346,6 +447,15 @@ async def _do_cleanup(
     try:
         if worktree_id:
             ok = await worktree_manager.cleanup_worktree(worktree_id, keep_branch=False)
+            if ok:
+                op.set_step("cleanup", STEP_DONE)
+                op.result["worktree_deleted"] = True
+            else:
+                op.set_step("cleanup", STEP_WARNING, detail="Worktree cleanup failed")
+        elif _is_linked_worktree(working_dir):
+            ok = await _cleanup_linked_worktree(
+                op, working_dir, feature_branch, default_branch, session_id
+            )
             if ok:
                 op.set_step("cleanup", STEP_DONE)
                 op.result["worktree_deleted"] = True

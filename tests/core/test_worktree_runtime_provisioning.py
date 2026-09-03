@@ -290,6 +290,50 @@ def test_git_worktree_remove_cannot_gut_the_source(tmp_path):
     ).read_text(encoding="utf-8") == "hello"
 
 
+def test_git_worktree_remove_aborts_if_links_cannot_be_severed(tmp_path, monkeypatch):
+    """A locked junction must not be handed to git — that is the gutting path."""
+    import subprocess
+
+    from app.core.git_service import git_service
+
+    main = tmp_path / "main"
+    (main / "frontend").mkdir(parents=True)
+
+    def git(*args):
+        subprocess.run(
+            ["git", *args], cwd=str(main), check=True,
+            capture_output=True, text=True,
+        )
+
+    git("init")
+    git("config", "user.email", "t@t.test")
+    git("config", "user.name", "T")
+    (main / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    (main / "frontend" / "package.json").write_text("{}", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-m", "init")
+    (main / "frontend" / "node_modules" / "pkg").mkdir(parents=True)
+    (main / "frontend" / "node_modules" / "pkg" / "index.js").write_text(
+        "hello", encoding="utf-8"
+    )
+
+    wt = tmp_path / "wt"
+    git("worktree", "add", str(wt), "-b", "feature")
+    summary = cm.provision_node_modules(str(main), str(wt))
+    assert "frontend" in summary["linked"]
+
+    def boom(_path):
+        raise OSError("locked")
+
+    monkeypatch.setattr(cm, "_remove_directory_link", boom)
+
+    assert git_service.remove_worktree(str(main), str(wt), force=True) is False
+    assert wt.exists()
+    assert (
+        main / "frontend" / "node_modules" / "pkg" / "index.js"
+    ).read_text(encoding="utf-8") == "hello"
+
+
 # ─── the guidance the model reads ────────────────────────────────────────────
 
 
