@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { createRawSnippet, tick } from 'svelte';
+import { get } from 'svelte/store';
 import { activeSession } from '$lib/stores/active-session';
 import { appMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
 import ControlsDock from './ControlsDock.svelte';
@@ -156,6 +157,21 @@ describe('ControlsDock split controls', () => {
 		expect(screen.getByRole('radio', { name: /200k.*normal/i }).getAttribute('aria-checked')).toBe(
 			'true'
 		);
+	});
+
+	it('keeps the model picker open after selecting a model so context stays reachable', async () => {
+		renderDock();
+
+		await fireEvent.click(screen.getByRole('button', { name: /^model:/i }));
+		expect(screen.getByRole('dialog', { name: /choose model/i })).toBeTruthy();
+
+		await fireEvent.click(screen.getByRole('option', { name: /opus/i }));
+		expect(get(activeSession).modelOverride).toBe('opus');
+		expect(screen.getByRole('dialog', { name: /choose model/i })).toBeTruthy();
+		expect(screen.getByRole('radiogroup', { name: /context window/i })).toBeTruthy();
+
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(screen.queryByRole('dialog', { name: /choose model/i })).toBeNull();
 	});
 
 	it('drops the tool-access control in the chat lane but keeps attach', () => {

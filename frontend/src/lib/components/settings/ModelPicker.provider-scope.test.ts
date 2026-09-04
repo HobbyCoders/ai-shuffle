@@ -105,6 +105,28 @@ describe('ModelPicker provider scope', () => {
 
 		await fireEvent.click(list.getByRole('option', { name: /GPT-5\.6/ }));
 		expect(onSelect).toHaveBeenCalledWith(encodeProviderModel('openai-row', 'gpt-5.6'));
+		// Selection updates the value but leaves the panel open for further tweaks.
+		expect(getByRole('listbox', { name: 'Model' })).toBeTruthy();
+	});
+
+	it('keeps the panel open after a model selection until Escape', async () => {
+		const onSelect = vi.fn();
+		const { getByRole, queryByRole } = render(ModelPicker, {
+			props: {
+				value: 'sonnet',
+				onSelect
+			}
+		});
+
+		await fireEvent.click(getByRole('button', { name: 'Sonnet' }));
+		const list = within(getByRole('listbox', { name: 'Model' }));
+		await fireEvent.click(list.getByRole('option', { name: /Haiku/ }));
+
+		expect(onSelect).toHaveBeenCalledWith('haiku');
+		expect(getByRole('listbox', { name: 'Model' })).toBeTruthy();
+
+		await fireEvent.keyDown(document, { key: 'Escape' });
+		expect(queryByRole('listbox', { name: 'Model' })).toBeNull();
 	});
 
 	it('keeps native Claude choices separate from configured providers', async () => {

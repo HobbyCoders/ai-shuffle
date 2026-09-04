@@ -451,8 +451,8 @@
 						contextChoice={$activeSession.contextWindowChoice}
 						onContextChoiceSelect={(choice) => activeSession.setContextWindowChoice(choice)}
 						onSelect={(v) => {
+							// Stay open so context-window controls remain reachable.
 							activeSession.setModelOverride(v);
-							closePopover();
 						}}
 						onRequestClose={closePopover}
 					/>

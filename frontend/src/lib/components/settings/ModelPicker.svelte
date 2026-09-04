@@ -117,8 +117,9 @@
 	});
 
 	function selectOption(optionValue: string) {
+		// Keep the panel open so the user can still tweak options like context
+		// window size; outside click / Escape still dismiss via onRequestClose.
 		onSelect(optionValue);
-		open = false;
 	}
 
 	function toggleOpen() {
