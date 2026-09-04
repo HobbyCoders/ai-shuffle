@@ -243,7 +243,7 @@ describe('sessionModeOf', () => {
 
 describe('deriveGitStage', () => {
 	const repo = { hasProject: true };
-	const clean = { isRepo: true, hasChanges: false, ahead: 0, defaultBranch: 'main' };
+	const clean = { isRepo: true, hasChanges: false, ahead: 0, unpushed: null as number | null, defaultBranch: 'main' };
 
 	it('marks a session with no repo behind it', () => {
 		expect(deriveGitStage({ hasProject: false })).toBe('none');
@@ -261,11 +261,23 @@ describe('deriveGitStage', () => {
 
 	it('reads the working tree newest-work-first', () => {
 		expect(deriveGitStage({ ...repo, git: { ...clean, hasChanges: true, ahead: 2 } })).toBe('dirty');
+		// ahead>0 with no remote counterpart (unpushed=null) = local commits only
 		expect(deriveGitStage({ ...repo, git: { ...clean, ahead: 2 } })).toBe('committed');
+		expect(deriveGitStage({ ...repo, git: { ...clean, ahead: 2, unpushed: 1 } })).toBe('committed');
 	});
 
-	it('calls a clean session branch pushed, and trunk plain clean', () => {
-		expect(deriveGitStage({ ...repo, branch: 'feat/x', git: clean })).toBe('pushed');
+	it('calls a branch pushed only when it has commits the remote already has', () => {
+		// Fully pushed feature branch waiting on a PR.
+		expect(
+			deriveGitStage({
+				...repo,
+				branch: 'feat/x',
+				git: { ...clean, ahead: 2, unpushed: 0 }
+			})
+		).toBe('pushed');
+		// Brand-new worktree: clean tree, no unique commits, never pushed.
+		// Must NOT read as "Pushed, no PR yet".
+		expect(deriveGitStage({ ...repo, branch: 'feat/x', git: clean })).toBe('clean');
 		expect(deriveGitStage({ ...repo, branch: 'main', git: clean })).toBe('clean');
 		expect(deriveGitStage({ ...repo, branch: null, git: clean })).toBe('clean');
 	});

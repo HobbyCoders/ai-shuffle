@@ -386,6 +386,7 @@ class GitNativeReader:
             "ahead": 0,
             "behind": 0,
             "differs_from_base": False,
+            "unpushed": None,
             "conflicts": [],
         }
 
@@ -482,6 +483,21 @@ class GitNativeReader:
                         except Exception:
                             pass
                         break
+
+                # Unpushed = commits HEAD has that origin/<branch> does not.
+                # None when the branch was never pushed (no remote counterpart) —
+                # that is NOT the same as unpushed=0 (fully pushed). The sidebar
+                # stage ladder needs the distinction: a brand-new worktree is
+                # ahead=0/unpushed=None, not "pushed, no PR yet".
+                own_remote = _resolve_oid(
+                    repo, f"refs/remotes/origin/{status['current_branch']}"
+                )
+                if own_remote is not None:
+                    try:
+                        unpushed, _ = repo.ahead_behind(local_oid, own_remote)
+                        status["unpushed"] = unpushed
+                    except Exception:
+                        status["unpushed"] = None
 
             status["is_clean"] = (
                 not status["staged"]

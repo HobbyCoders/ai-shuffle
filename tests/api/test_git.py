@@ -200,6 +200,8 @@ def sample_git_status():
         "untracked": [],
         "ahead": 0,
         "behind": 0,
+        "differs_from_base": False,
+        "unpushed": 0,
         "conflicts": []
     }
 
@@ -344,6 +346,7 @@ class TestGetGitStatus:
         assert data["is_git_repo"] is True
         assert data["current_branch"] == "main"
         assert data["is_clean"] is True
+        assert data["unpushed"] == 0
         assert data["repository_id"] == "repo-abc123"
         assert data["default_branch"] == "main"
 

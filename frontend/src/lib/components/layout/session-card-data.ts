@@ -179,8 +179,15 @@ export interface SessionGitFacts {
 	isRepo: boolean;
 	/** Any uncommitted work at all: staged, modified, untracked or conflicted. */
 	hasChanges: boolean;
-	/** Commits on the branch that the remote hasn't got. */
+	/** Commits on the branch ahead of the default branch (base...HEAD count). */
 	ahead: number;
+	/**
+	 * Commits on HEAD missing from origin/<branch>. `null` when the branch was
+	 * never pushed; `0` when it is fully on the remote. This is what separates a
+	 * brand-new worktree (ahead=0, unpushed=null → clean) from a feature branch
+	 * that has been pushed and is waiting on a PR (ahead>0, unpushed=0 → pushed).
+	 */
+	unpushed?: number | null;
 	/** The repo's real default branch, for telling a session branch from trunk. */
 	defaultBranch?: string | null;
 }
@@ -207,6 +214,12 @@ export interface GitStageInput {
  * decides, newest work first — uncommitted, then unpushed commits, then a
  * pushed branch waiting on a PR.
  *
+ * `ahead` counts commits vs the default branch; `unpushed` counts commits vs
+ * origin/<branch> (null when that remote ref does not exist). A brand-new
+ * worktree sits at ahead=0 with unpushed=null — that is clean, not pushed.
+ * "Pushed, no PR yet" requires real commits on the branch (ahead>0) that the
+ * remote already has (unpushed===0).
+ *
  * Without `git` facts (every settled row — we don't spend a request on those)
  * the answer comes from `prState` alone and otherwise falls to the quiet dot,
  * because "no data" must never be drawn as "no changes to push".
@@ -220,9 +233,11 @@ export function deriveGitStage(input: GitStageInput): GitStage {
 	if (input.prState === 'closed') return 'closed';
 	if (!input.git) return 'clean';
 	if (input.git.hasChanges) return 'dirty';
-	if (input.git.ahead > 0) return 'committed';
-	const branch = input.branch?.trim();
-	if (branch && branch !== input.git.defaultBranch) return 'pushed';
+	// Unique commits vs default branch: fully on the remote → waiting on a PR;
+	// otherwise still local (never pushed, or pushed-then-committed-more).
+	if (input.git.ahead > 0) {
+		return input.git.unpushed === 0 ? 'pushed' : 'committed';
+	}
 	return 'clean';
 }
 

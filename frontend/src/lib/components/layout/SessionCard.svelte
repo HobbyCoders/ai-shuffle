@@ -164,6 +164,7 @@
 			isRepo: s.is_git_repo,
 			hasChanges: s.has_changes,
 			ahead: s.ahead,
+			unpushed: s.unpushed,
 			defaultBranch: s.default_branch
 		};
 	});

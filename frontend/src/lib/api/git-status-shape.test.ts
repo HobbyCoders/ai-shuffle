@@ -89,6 +89,14 @@ describe('gitStatusEqual', () => {
 		).toBe(false);
 	});
 
+	it('preserves unpushed null (never pushed) as distinct from 0 (fully pushed)', () => {
+		const never = transformGitStatus({ ...WIRE, unpushed: null });
+		const fully = transformGitStatus({ ...WIRE, unpushed: 0 });
+		expect(never.unpushed).toBeNull();
+		expect(fully.unpushed).toBe(0);
+		expect(gitStatusEqual(never, fully)).toBe(false);
+	});
+
 	it('handles nulls', () => {
 		expect(gitStatusEqual(null, null)).toBe(true);
 		expect(gitStatusEqual(null, transformGitStatus(WIRE))).toBe(false);

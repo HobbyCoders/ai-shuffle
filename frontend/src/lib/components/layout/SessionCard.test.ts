@@ -91,6 +91,7 @@ function gitStatus(over: Record<string, unknown> = {}) {
 		is_git_repo: true,
 		has_changes: false,
 		ahead: 0,
+		unpushed: null as number | null,
 		default_branch: 'main',
 		...over,
 	};
@@ -397,7 +398,8 @@ describe('SessionCard git state', () => {
 
 	it('leads a pushed session branch with the upload glyph', () => {
 		mocks.getSessionGit.mockReturnValue({
-			status: gitStatus(),
+			// ahead>0 (commits vs main) + unpushed=0 (remote has them all)
+			status: gitStatus({ ahead: 2, unpushed: 0 }),
 			diffStats: null,
 			loaded: true,
 		});
@@ -407,6 +409,22 @@ describe('SessionCard git state', () => {
 		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('Pushed, no PR yet');
 		// No uncommitted work, so no diffstat to answer for.
 		expect(container.querySelector('.diff')).toBeNull();
+	});
+
+	it('does not call a brand-new worktree pushed', () => {
+		// Fresh branch off main: clean tree, ahead=0, never on the remote.
+		mocks.getSessionGit.mockReturnValue({
+			status: gitStatus({ ahead: 0, unpushed: null }),
+			diffStats: null,
+			loaded: true,
+		});
+
+		const { container } = renderCard({ worktree_branch: 'feat/x' });
+
+		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('No changes');
+		expect(container.querySelector('.lead')?.getAttribute('aria-label')).not.toBe(
+			'Pushed, no PR yet'
+		);
 	});
 
 	it('lays an active card out as title, status line, then project meta', () => {

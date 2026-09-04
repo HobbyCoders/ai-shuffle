@@ -438,6 +438,7 @@ class GitService(
             "ahead": 0,
             "behind": 0,
             "differs_from_base": False,
+            "unpushed": None,
             "conflicts": []
         }
 
@@ -521,6 +522,29 @@ class GitService(
                                 (status["ahead"], status["behind"], status["differs_from_base"])
                             )
                             break
+
+                # Unpushed vs origin/<branch>. None when that remote ref does not
+                # exist (branch never pushed) — see git_native.get_status.
+                own_remote = f"origin/{status['current_branch']}"
+                check = self._run_git(
+                    working_dir,
+                    ["rev-parse", "--verify", "--quiet", own_remote],
+                    timeout=5,
+                )
+                if check.returncode == 0:
+                    ab = self._run_git(
+                        working_dir,
+                        ["rev-list", "--left-right", "--count",
+                         f"HEAD...{own_remote}"],
+                        timeout=5,
+                    )
+                    if ab.returncode == 0:
+                        parts = ab.stdout.strip().split()
+                        if len(parts) >= 1:
+                            try:
+                                status["unpushed"] = int(parts[0])
+                            except ValueError:
+                                status["unpushed"] = None
 
             # Get file status using porcelain format
             result = self._run_git(working_dir, ["status", "--porcelain=v1"], timeout=10)

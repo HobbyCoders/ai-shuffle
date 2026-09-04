@@ -28,6 +28,7 @@ function status(over: Record<string, unknown> = {}) {
 		ahead: 0,
 		behind: 0,
 		differs_from_base: true,
+		unpushed: null,
 		repository_id: null,
 		default_branch: 'main',
 		github_repo_name: null,
