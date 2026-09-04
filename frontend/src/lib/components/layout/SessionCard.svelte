@@ -187,6 +187,12 @@
 	const stageTone = $derived(GIT_STAGE_TONES[stage]);
 	const stageTip = $derived(GIT_STAGE_TIPS[stage]);
 	const prText = $derived(prStateText(prState, session.pr_number));
+	// Only name the PR while the glyph is still about that PR. After merge,
+	// new uncommitted work restarts the stage so the stale "PR #N merged"
+	// segment does not sit next to a fresh diffstat.
+	const showPr = $derived(
+		Boolean(prText) && (stage === 'pr' || stage === 'merged' || stage === 'closed')
+	);
 	/** Compact rows carry one git word; a PR names its number, the rest use the
 	 *  stage's own label ("uncommitted", "pushed", …). */
 	const stageWord = $derived(
@@ -437,7 +443,7 @@
 					<span class="seg"><span class="proj">{projectLabel}</span></span>
 					<span class="dot" aria-hidden="true"></span>
 					<span class="st {statusTone}">{statusWord}</span>
-					{#if prText}
+					{#if showPr}
 						<span class="dot" aria-hidden="true"></span>
 						<span class="st {stageTone}">{prText}</span>
 					{/if}
