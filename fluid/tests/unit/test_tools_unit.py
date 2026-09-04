@@ -515,7 +515,8 @@ async def test_edit_tolerates_uniform_extra_indent(tmp_path) -> None:
         ctx,
     )
     assert not out.is_error, out.text
-    assert "note:" in out.text
+    # The repair note leads the result — it is corrective pressure, not an aside.
+    assert out.text.startswith("NOTE: old_string did not match")
     assert f.read_text() == "def f():\n\ta = 9\n\tb = 8\n"
 
 
@@ -533,7 +534,7 @@ async def test_edit_tolerates_copied_line_prefix(tmp_path) -> None:
         ctx,
     )
     assert not out.is_error, out.text
-    assert "note:" in out.text
+    assert out.text.startswith("NOTE: old_string did not match")
     assert f.read_text() == "x = 1\ny = 1\nz = 5\nw = 6\n"
 
 

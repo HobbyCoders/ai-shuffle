@@ -19,7 +19,9 @@ from __future__ import annotations
 # Read/Edit/Write — the read-before-write license, stated once.
 READ_BEFORE_EDIT = (
     "A file must have been Read earlier in this session before Edit can "
-    "modify it."
+    "modify it, and old_string must be copied verbatim out of that Read's "
+    "output (without its line-number prefix) — a Read whose text you discard "
+    "unlocks the gate and leaves you nothing to copy."
 )
 
 # Edit/Write — writes confirm themselves; a verification Read is waste.
