@@ -812,12 +812,24 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # The turn task exists but its CLI process has not come up (or has
             # died): there is no stdin to fold the text into.
             raise RuntimeError("no live CLI turn to steer; queue the message instead")
+        text = op.text
+        record: dict[str, Any] = {"id": op.id, "text": op.text}
+        if op.origin != "user":
+            # A harness notice rides the same user frame — the CLI has no other
+            # mid-turn channel — so the marker is the only thing separating it
+            # from the user's own words. Wrap it, and defang the body first:
+            # part of it can be text a sub-agent wrote.
+            from fluid.context.steering import format_system_notice
+            from fluid.tools.hardening import defang_harness_markers
+
+            text = format_system_notice(defang_harness_markers(op.text)).strip()
+            record["origin"] = op.origin
         await self._write_frame({"type": "user", "message": {
-            "role": "user", "content": [{"type": "text", "text": op.text}],
+            "role": "user", "content": [{"type": "text", "text": text}],
         }})
         await self._emit(SteerDelivered(
             session_id=self.session_id, turn_id=self._active_turn_id,
-            steers=[{"id": op.id, "text": op.text}],
+            steers=[record],
         ))
 
     def _persist_cli_session_id(
@@ -1257,7 +1269,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         / totalTokens / maxTokens / rawMaxTokens / percentage / model /
         isAutoCompactEnabled). None when the CLI is not running, errored, or did
         not answer within ``CONTROL_TIMEOUT``. The native leg's ``compaction``
-        stats field is absent here — the CLI compacts its own way.
+        stats field is absent here — the CLI compacts its own way, and reports
+        each boundary as its own ``compact_boundary`` frame, which the mapper
+        turns into a ``ContextCompaction`` event.
         """
         return await self._request_control({"subtype": "get_context_usage"})
 

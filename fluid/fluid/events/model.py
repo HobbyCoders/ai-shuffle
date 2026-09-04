@@ -125,6 +125,15 @@ class BlockStart(Event):
     block_type: str  # "text" | "thinking" | "tool_use"
     tool_name: str | None = None
     tool_use_id: str | None = None
+    # What KIND of block this is within its type, when the provider draws a
+    # distinction the block_type does not. Today only thinking blocks carry
+    # one: "reasoning_summary" is the provider's own summary of its reasoning
+    # (OpenAI Responses ``summary: "auto"``, xAI included), "reasoning" is the
+    # reasoning text itself. A host can label the summary as the provider's
+    # rather than the model's voice. None whenever no distinction was drawn —
+    # which is every provider that has only one reasoning channel, and every
+    # event persisted before this field existed.
+    subtype: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -192,7 +201,9 @@ class SteerDelivered(Event):
     ``steers`` holds one record per delivered steer in submission order:
     ``{"id": <the Steer's id, or None>, "text": <the user's text>}``. A peer's
     ``AgentMessage``, which shares this queue and this receipt, carries an
-    extra ``"from"`` naming the sender; the key's absence marks the user's own.
+    extra ``"from"`` naming the sender; a ``Steer`` submitted with a non-default
+    ``origin`` (a harness notice) carries ``"origin"`` instead. Neither key on a
+    record marks the user's own words.
 
     A host with a durable queue retires an entry the moment its id shows up
     here. An id that never arrives was never seen by the model: the engine
@@ -251,11 +262,20 @@ class ContextCompaction(Event):
     tier: int  # highest rung this batch reached: 1 trim | 2 digest | 3 epoch
     # "trigger" (crossed the size threshold) | "overflow" (provider rejected the
     # prompt) | "image_consumed" (an image the model has already seen left the
-    # context; unlike text, HistoryExpand cannot bring it back)
+    # context; unlike text, HistoryExpand cannot bring it back).
+    # The delegated leg does not run this ladder: the claude CLI compacts its
+    # own context and reports a boundary, which arrives as
+    # "cli_auto_compact" / "cli_manual_compact" with tier 3 (the whole prefix
+    # folded), empty ``trimmed``/``spans``, and the token counts below.
     reason: str
     trimmed: list[list[str]] = field(default_factory=list)  # [node_id, tool_use_id]
     spans: list[list[str]] = field(default_factory=list)  # [start, end, kind]
     reclaimed_chars: int = 0
+    # Prompt size across the boundary, when the compactor reports it in tokens
+    # rather than in decisions (the delegated leg). 0 means "not reported" —
+    # including on every event persisted before these fields existed.
+    before_tokens: int = 0
+    after_tokens: int = 0
 
 
 # ─── Accounting / signals ────────────────────────────────────────────────────

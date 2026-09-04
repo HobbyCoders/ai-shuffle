@@ -539,3 +539,174 @@ def test_request_body_carries_the_output_ceiling() -> None:
     assert build_request_body(request)["max_output_tokens"] == 2048
     request.max_tokens = None
     assert "max_output_tokens" not in build_request_body(request)
+
+
+# ─── reasoning summary vs reasoning text ─────────────────────────────────────
+
+
+def _grok_reasoning_events() -> list[tuple[str, dict]]:
+    """A recorded xAI/grok shape: both reasoning channels on one item_id.
+
+    ``summary: "auto"`` makes the provider stream its own clipped summary while
+    the reasoning draft streams on the second channel. Sharing one block index
+    ran them together into a single "thinking" block that read as a phantom
+    collaborator answering the user.
+    """
+    return [
+        ("response.created", {"response": {"id": "resp_1"}}),
+        ("response.output_item.added", {
+            "item": {"id": "rs_1", "type": "reasoning", "summary": [], "content": []},
+        }),
+        ("response.reasoning_summary_text.delta", {"item_id": "rs_1", "delta": "Check"}),
+        ("response.reasoning_text.delta", {"item_id": "rs_1", "delta": "The scroll "}),
+        ("response.reasoning_summary_text.delta", {"item_id": "rs_1", "delta": "ing scroll..."}),
+        ("response.reasoning_text.delta", {"item_id": "rs_1", "delta": "reset looks fine."}),
+        ("response.output_item.done", {"item": {
+            "id": "rs_1", "type": "reasoning", "status": "completed",
+            "encrypted_content": "BLOB_RS1",
+            "summary": [{"type": "summary_text", "text": "Checking scroll..."}],
+            "content": [],
+        }}),
+        ("response.output_item.added", {"item": {"id": "msg_1", "type": "message"}}),
+        ("response.output_text.delta", {"item_id": "msg_1", "delta": "Nothing to change."}),
+        ("response.output_item.done", {"item": {"id": "msg_1", "type": "message"}}),
+        ("response.completed", {"response": {
+            "id": "resp_1", "status": "completed",
+            "usage": {"input_tokens": 10, "output_tokens": 8},
+        }}),
+    ]
+
+
+def test_reasoning_summary_and_text_get_separate_tagged_blocks() -> None:
+    chunks = _consume_all(_grok_reasoning_events())
+    starts = [c for c in chunks if c.kind == "block_start"]
+    thinking = [s for s in starts if s.payload["block_type"] == "thinking"]
+    assert [s.payload["subtype"] for s in thinking] == ["reasoning_summary", "reasoning"]
+    summary_index, reasoning_index = (s.payload["index"] for s in thinking)
+    assert summary_index != reasoning_index
+    # Arrival order decides which block comes first: grok summarizes first.
+    assert summary_index < reasoning_index
+
+    def text_at(index: int) -> str:
+        return "".join(
+            c.payload["text"] for c in chunks
+            if c.kind == "thinking_delta" and c.payload["index"] == index
+        )
+
+    assert text_at(summary_index) == "Checking scroll..."
+    assert text_at(reasoning_index) == "The scroll reset looks fine."
+
+
+def test_only_one_block_carries_the_encrypted_reasoning_item() -> None:
+    # Two blocks, one round-trip envelope: a second copy would resend the same
+    # encrypted content twice and 400 the whole request.
+    chunks = _consume_all(_grok_reasoning_events())
+    carriers = [
+        c for c in chunks
+        if c.kind == "block_stop"
+        and (c.payload.get("block") or {}).get("type") == "reasoning"
+    ]
+    assert len(carriers) == 1
+    assert carriers[0].payload["block"]["encrypted_content"] == "BLOB_RS1"
+    starts = {
+        s.payload["index"]: s.payload["subtype"]
+        for s in chunks if s.kind == "block_start"
+    }
+    assert starts[carriers[0].payload["index"]] == "reasoning"
+    # Both thinking blocks are still closed exactly once.
+    thinking_indices = {i for i, sub in starts.items() if sub is not None}
+    stops = [c.payload["index"] for c in chunks if c.kind == "block_stop"]
+    assert sorted(i for i in stops if i in thinking_indices) == sorted(thinking_indices)
+    assert len(stops) == len(set(stops))
+
+
+def test_summary_only_reasoning_stays_one_block_and_keeps_the_envelope() -> None:
+    # The ordinary OpenAI shape (the golden stream): only the summary channel
+    # streams, so there is nothing to split and the summary block carries the
+    # encrypted item exactly as before.
+    chunks = _consume_all([
+        ("response.created", {"response": {"id": "resp_1"}}),
+        ("response.output_item.added", {"item": {"id": "rs_1", "type": "reasoning"}}),
+        ("response.reasoning_summary_text.delta", {"item_id": "rs_1", "delta": "Weighing it."}),
+        ("response.output_item.done", {"item": {
+            "id": "rs_1", "type": "reasoning", "encrypted_content": "BLOB_RS1",
+        }}),
+        ("response.completed", {"response": {
+            "id": "resp_1", "status": "completed", "usage": {"input_tokens": 3},
+        }}),
+    ])
+    starts = [c for c in chunks if c.kind == "block_start"]
+    assert len(starts) == 1
+    assert starts[0].payload["block_type"] == "thinking"
+    assert starts[0].payload["subtype"] == "reasoning_summary"
+    stops = [c for c in chunks if c.kind == "block_stop"]
+    assert len(stops) == 1
+    assert stops[0].payload["block"]["encrypted_content"] == "BLOB_RS1"
+
+
+def test_reasoning_item_with_no_visible_text_still_opens_one_block() -> None:
+    # Encrypted content and nothing else: the blob must not be dropped, and the
+    # block is tagged as reasoning rather than as a provider summary.
+    chunks = _consume_all([
+        ("response.created", {"response": {"id": "resp_1"}}),
+        ("response.output_item.added", {"item": {"id": "rs_1", "type": "reasoning"}}),
+        ("response.output_item.done", {"item": {
+            "id": "rs_1", "type": "reasoning", "encrypted_content": "BLOB_RS1",
+        }}),
+        ("response.completed", {"response": {
+            "id": "resp_1", "status": "completed", "usage": {"input_tokens": 3},
+        }}),
+    ])
+    starts = [c for c in chunks if c.kind == "block_start"]
+    assert len(starts) == 1
+    assert starts[0].payload["subtype"] == "reasoning"
+    stops = [c for c in chunks if c.kind == "block_stop"]
+    assert stops[0].payload["block"]["encrypted_content"] == "BLOB_RS1"
+
+
+async def test_engine_keeps_one_reasoning_envelope_for_a_split_thinking_pair() -> None:
+    # End to end: the split reaches the host as two tagged BlockStarts, and the
+    # assembled assistant message still carries exactly one envelope with the
+    # encrypted blob — so the next request resends it once.
+    import asyncio
+
+    from fluid.events import BlockStart, UserTurn
+
+    recorded = _consume_all(_grok_reasoning_events())
+
+    class _Provider:
+        name = "openai_responses"
+        caps = ProviderCaps(stateful_reasoning=True)
+
+        async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+            for chunk in recorded:
+                yield chunk
+
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(
+        provider=_Provider(), store=store, model="grok-4", session_id=sid,
+        max_continuations_per_turn=0,
+    )
+    await loop.submit(UserTurn(content="did you fix it?"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+
+    subtypes = [
+        e.subtype for e in loop.bus.log(sid)
+        if isinstance(e, BlockStart) and e.block_type == "thinking"
+    ]
+    assert subtypes == ["reasoning_summary", "reasoning"]
+
+    nodes = await store.load_path(sid)
+    message = next(
+        n.message for n in reversed(nodes)
+        if n.message is not None and n.message.role == "assistant"
+    )
+    envelopes = [b for b in message.content if isinstance(b, Reasoning)]
+    with_blob = [b for b in envelopes if b.encrypted_content]
+    assert len(with_blob) == 1
+    assert with_blob[0].encrypted_content == "BLOB_RS1"
+    body = build_request_body(ProviderRequest(model="grok-4", messages=[message]))
+    reasoning_items = [i for i in body["input"] if i.get("type") == "reasoning"]
+    assert len(reasoning_items) == 1
+    assert reasoning_items[0]["encrypted_content"] == "BLOB_RS1"

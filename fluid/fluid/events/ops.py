@@ -60,10 +60,26 @@ class Steer(Op):
     message in a durable queue sets one and waits for it to come back on a
     ``SteerDelivered`` event before retiring the queued copy; if the turn ends
     first the id never appears and the host re-sends the text as a normal turn.
+
+    ``origin`` picks the marker the text is delivered in, and with it the
+    standing the model gives it:
+
+    * ``"user"`` (the default, and what every existing caller gets) — the user's
+      own words, in the steering marker that carries their authority.
+    * ``"system"`` — an automated harness notice the host is routing through
+      this channel: a background task finishing, a watcher firing. It arrives in
+      the harness-notice marker (:func:`fluid.context.steering.format_system_notice`)
+      which says plainly that it is not the user and is not asking for anything,
+      so machine-generated text — including a summary some sub-agent wrote —
+      can never borrow the user's authority.
+
+    ``"peer"`` is not set here: a peer's message is an ``AgentMessage``, which
+    carries the sender's name and renders in its own marker.
     """
 
     text: str
     id: str | None = None
+    origin: str = "user"  # "user" | "system"
 
 
 @dataclass(kw_only=True)
