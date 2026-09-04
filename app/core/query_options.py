@@ -355,67 +355,6 @@ def _rescue_pending_checkout(session_row: Dict[str, Any]) -> bool:
         return False
 
 
-def _rebind_to_base_after_deleted_branch(
-    session_row: Optional[Dict[str, Any]],
-    project_v2: Dict[str, Any],
-    branch: Optional[str],
-) -> Optional[str]:
-    """If this session's feature branch was deleted after merge, use the base checkout.
-
-    Merge cleanup removes the worktree and deletes the local branch (GitHub often
-    deletes the remote too). The session stays active — "merge never settles the
-    session" — but ``ensure_checkout`` cannot rematerialize a branch that exists
-    nowhere. Evidence we should drop onto the base rather than refuse:
-
-    * ``sessions.pr_state == 'merged'``, or
-    * this runner's checkout row for the branch is ``archived`` (cleanup's stamp).
-
-    An unpushed branch that only ever lived on another device has neither signal
-    and still raises ``WorktreeUnavailableError``. Never raises: a blip here must
-    degrade to that refusal, not an opaque spawn crash.
-    """
-    if not session_row or not branch:
-        return None
-    try:
-        pr_state = str(session_row.get("pr_state") or "").strip().lower()
-        archived = False
-        if pr_state != "merged":
-            pv2_id = project_v2.get("id") if project_v2 else None
-            if pv2_id:
-                from app.db import checkouts as checkouts_db
-
-                row = checkouts_db.get_checkout_with_legacy_fallback(
-                    pv2_id, settings.effective_instance_id, branch=branch
-                )
-                archived = bool(row and row.get("status") == "archived")
-        if pr_state != "merged" and not archived:
-            return None
-
-        sid = session_row.get("id")
-        if sid:
-            database.set_session_branch(sid, None)
-        # Clear in-memory too so this resolve (and ``_effective_branch``) cannot
-        # resurrect the deleted name from ``worktree_branch``.
-        session_row["branch"] = None
-        session_row["worktree_branch"] = None
-
-        from app.core import project_resolver
-
-        cwd = project_resolver.resolve_cwd(session_row)
-        if cwd:
-            logger.info(
-                "Rebinding session %s off deleted branch %s onto base checkout %s "
-                "(pr_state=%s archived=%s)",
-                sid, branch, cwd, pr_state or None, archived,
-            )
-        return cwd
-    except Exception:  # noqa: BLE001 — degrade to WorktreeUnavailableError
-        logger.warning(
-            "Failed to rebind session off deleted branch %s", branch, exc_info=True
-        )
-        return None
-
-
 async def ensure_pending_checkout(
     session_row: Optional[Dict[str, Any]],
     timeout_s: float = 30.0,
@@ -784,16 +723,10 @@ def build_options_from_profile(
                     # UPDATE the loop uses, so exactly one of us ever runs it),
                     # then retry cwd resolution ONCE.
                     retry_cwd = None
-                    rebound_to_base = False
                     if session_row and _claim_and_run_pending_checkout(
                         project_v2, branch
                     ):
                         retry_cwd = project_resolver.resolve_cwd(session_row)
-                    if retry_cwd is None:
-                        retry_cwd = _rebind_to_base_after_deleted_branch(
-                            session_row, project_v2, branch
-                        )
-                        rebound_to_base = retry_cwd is not None
                     if retry_cwd is None:
                         raise WorktreeUnavailableError(
                             session_id,
@@ -805,18 +738,15 @@ def build_options_from_profile(
                         )
                     working_dir = retry_cwd
                     working_dir_source = "project-v2"
-                    # Merged+cleaned-up sessions stay in local mode on the base
-                    # checkout — do not advertise the deleted branch as a worktree.
-                    if not rebound_to_base:
-                        execution_mode = "worktree"
-                        base_branch = "main"
-                        try:
-                            wt_row = database.get_worktree_by_session(session_id)
-                            if wt_row and wt_row.get("base_branch"):
-                                base_branch = wt_row["base_branch"]
-                        except Exception:  # noqa: BLE001 — best-effort enrichment
-                            pass
-                        worktree_info = {"branch": branch, "base_branch": base_branch}
+                    execution_mode = "worktree"
+                    base_branch = "main"
+                    try:
+                        wt_row = database.get_worktree_by_session(session_id)
+                        if wt_row and wt_row.get("base_branch"):
+                            base_branch = wt_row["base_branch"]
+                    except Exception:  # noqa: BLE001 — best-effort enrichment
+                        pass
+                    worktree_info = {"branch": branch, "base_branch": base_branch}
                 else:
                     raise ValueError(
                         f"This session's project is not checked out on this device "

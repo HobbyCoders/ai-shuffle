@@ -1232,6 +1232,41 @@ def list_sessions_for_branch(project_id: str, branch: str) -> list:
         return [row_to_dict(r) for r in cursor.fetchall()]
 
 
+def latest_pr_number_for_branch(
+    branch: str, project_v2_id: Optional[str] = None
+) -> Optional[int]:
+    """Most recently updated PR number recorded on a session for ``branch``."""
+    if not branch:
+        return None
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        if project_v2_id:
+            cursor.execute(
+                f"SELECT pr_number FROM sessions WHERE pr_number IS NOT NULL "
+                f"AND (branch = {_ph} OR worktree_branch = {_ph}) "
+                f"AND project_v2_id = {_ph} "
+                f"ORDER BY updated_at DESC LIMIT 1",
+                (branch, branch, project_v2_id),
+            )
+        else:
+            cursor.execute(
+                f"SELECT pr_number FROM sessions WHERE pr_number IS NOT NULL "
+                f"AND (branch = {_ph} OR worktree_branch = {_ph}) "
+                f"ORDER BY updated_at DESC LIMIT 1",
+                (branch, branch),
+            )
+        row = cursor.fetchone()
+    if not row:
+        return None
+    d = row_to_dict(row)
+    n = d.get("pr_number")
+    try:
+        return int(n) if n is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def set_session_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
     """Persist (or clear, with ``None``) the durable parked marker.
 

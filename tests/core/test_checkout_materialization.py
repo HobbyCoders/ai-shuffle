@@ -295,6 +295,70 @@ def test_branch_missing_everywhere_returns_none(project, tmp_path, workspace_roo
     ) is None
 
 
+def test_deleted_branch_restored_from_recorded_head_sha(
+    project, base_checkout, workspace_root
+):
+    """After cleanup deletes the local branch, ensure_checkout restores it from
+    the checkout row's head_sha and rematerializes the worktree."""
+    default = _current_branch(base_checkout)
+    _git(base_checkout, "checkout", "-b", "feat/resume")
+    (base_checkout / "resume.txt").write_text("from-tip\n", encoding="utf-8")
+    _git(base_checkout, "add", "-A")
+    _git(base_checkout, "commit", "-m", "resume me")
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(base_checkout),
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    _git(base_checkout, "checkout", default)
+    dest_hint = checkout_manager._branch_checkout_path(str(base_checkout), "feat/resume")
+    checkouts_db.upsert_checkout(
+        project["id"], RUNNER, str(dest_hint),
+        branch="feat/resume", head_sha=sha, status="archived",
+    )
+    _git(base_checkout, "branch", "-D", "feat/resume")
+
+    path = checkout_manager.ensure_checkout(
+        project, branch="feat/resume", runner_id=RUNNER
+    )
+    assert path is not None
+    assert Path(path).is_dir() and (Path(path) / ".git").exists()
+    assert (Path(path) / "resume.txt").read_text(encoding="utf-8") == "from-tip\n"
+
+
+def test_deleted_branch_restored_from_pull_ref(project, tmp_path, workspace_root):
+    """GitHub keeps pull/N/head after deleting the branch; fetch that refspec
+    restores the local branch so the worktree can rematerialize."""
+    remote, seed, base = _make_repo_with_origin(tmp_path)
+    checkouts_db.upsert_checkout(project["id"], RUNNER, str(base))
+
+    _git(seed, "checkout", "-b", "feat/pr-head")
+    (seed / "pr.txt").write_text("pr-tip\n", encoding="utf-8")
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-m", "pr head")
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(seed),
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    _git(seed, "push", "origin", "feat/pr-head")
+    # Simulate GitHub's surviving PR ref after branch delete.
+    _git(remote, "update-ref", "refs/pull/42/head", sha)
+    _git(seed, "push", "origin", ":feat/pr-head")
+
+    from app.db.sessions import latest_pr_number_for_branch
+    from unittest.mock import patch
+
+    with patch(
+        "app.db.sessions.latest_pr_number_for_branch", return_value=42
+    ) as lookup:
+        path = checkout_manager.ensure_checkout(
+            project, branch="feat/pr-head", runner_id=RUNNER
+        )
+
+    assert path is not None
+    assert (Path(path) / "pr.txt").read_text(encoding="utf-8") == "pr-tip\n"
+    lookup.assert_called()
+
+
 def test_create_new_branch_honors_base_and_skips_recovery(
     project, base_checkout, workspace_root, monkeypatch
 ):

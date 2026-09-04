@@ -172,12 +172,112 @@ def resolve_rebound_branch_plan(
         if f"origin/{branch_name}" in remote_names:
             return True, branch_name
 
+    # Merge cleanup deletes the worktree and the local branch; GitHub often
+    # deletes the remote too. Restore the branch from a recorded tip, the PR
+    # head ref, or reflog so the session can rematerialize on the next send.
+    if _try_restore_deleted_branch(git_service_obj, main_dir, branch_name):
+        return False, None
+
     raise WorktreeError(
         f"Branch '{branch_name}' doesn't exist in the local clone or on "
         f"origin — it may only exist on the device that created this "
         f"session. Push it from there (git push -u origin {branch_name}) "
         f"or start a new session."
     )
+
+
+def _object_exists(git_service_obj, main_dir: str, sha: str) -> bool:
+    try:
+        result = git_service_obj._run_git(
+            main_dir, ["cat-file", "-t", "--", sha], timeout=10
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _sha_from_reflog(git_service_obj, main_dir: str, branch_name: str) -> Optional[str]:
+    try:
+        result = git_service_obj._run_git(
+            main_dir,
+            ["reflog", "--all", "--format=%H %gs", "-n", "200"],
+            timeout=10,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0 or not result.stdout:
+        return None
+    needle = branch_name.lower()
+    for line in result.stdout.splitlines():
+        if needle not in line.lower():
+            continue
+        sha = line.split(None, 1)[0].strip()
+        if sha:
+            return sha
+    return None
+
+
+def _try_restore_deleted_branch(
+    git_service_obj, main_dir: str, branch_name: str
+) -> bool:
+    """Recreate ``branch_name`` locally after cleanup deleted it.
+
+    Never fabricates an empty branch off HEAD. Returns True only when the
+    branch now exists locally at a recovered tip.
+    """
+    try:
+        base_row = checkouts_db.get_checkout_by_path(main_dir)
+        project_id = (base_row or {}).get("project_id")
+        runner_id = (base_row or {}).get("runner_id") or settings.effective_instance_id
+
+        pr_number = None
+        try:
+            from app.db.sessions import latest_pr_number_for_branch
+
+            pr_number = latest_pr_number_for_branch(branch_name, project_id)
+        except Exception:
+            logger.debug(
+                "restore: pr lookup failed for branch %s", branch_name, exc_info=True
+            )
+
+        if pr_number:
+            refspec = f"pull/{int(pr_number)}/head:refs/heads/{branch_name}"
+            if git_service_obj.fetch_refspec(main_dir, refspec):
+                logger.info(
+                    "Restored branch %s from origin pull/%s/head",
+                    branch_name, pr_number,
+                )
+                return True
+
+        sha = None
+        if project_id:
+            brow = checkouts_db.get_checkout_with_legacy_fallback(
+                project_id, runner_id, branch=branch_name
+            )
+            if brow and brow.get("head_sha"):
+                sha = str(brow["head_sha"]).strip()
+
+        if sha and _object_exists(git_service_obj, main_dir, sha):
+            if git_service_obj.create_branch(main_dir, branch_name, start_point=sha):
+                logger.info(
+                    "Restored branch %s from recorded tip %s",
+                    branch_name, sha[:12],
+                )
+                return True
+
+        sha = sha or _sha_from_reflog(git_service_obj, main_dir, branch_name)
+        if sha and _object_exists(git_service_obj, main_dir, sha):
+            if git_service_obj.create_branch(main_dir, branch_name, start_point=sha):
+                logger.info(
+                    "Restored branch %s from reflog %s", branch_name, sha[:12]
+                )
+                return True
+        return False
+    except Exception:
+        logger.warning(
+            "Failed to restore deleted branch %s", branch_name, exc_info=True
+        )
+        return False
 
 
 class WorktreeManager:

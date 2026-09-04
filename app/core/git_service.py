@@ -266,6 +266,23 @@ class GitService(
             logger.error(f"Fetch error: {e}")
             return False
 
+    def fetch_refspec(self, working_dir: str, refspec: str, remote: str = "origin") -> bool:
+        """Fetch a single refspec (no prune) — used to restore a deleted PR branch."""
+        try:
+            result = self._run_git(
+                working_dir,
+                ["fetch", remote, refspec],
+                timeout=60,
+            )
+            if result.returncode == 0:
+                logger.debug("Fetched %s from %s", refspec, remote)
+                return True
+            logger.warning("Fetch refspec %s failed: %s", refspec, result.stderr)
+            return False
+        except Exception as e:
+            logger.error("Fetch refspec error: %s", e)
+            return False
+
     # =========================================================================
     # Commit Graph and Status
     # =========================================================================

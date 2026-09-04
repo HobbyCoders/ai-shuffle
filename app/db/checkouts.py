@@ -129,6 +129,40 @@ def get_checkout(
     return _row(row)
 
 
+def get_checkout_by_path(path: str) -> Optional[Dict[str, Any]]:
+    """Return the checkout row whose ``path`` matches, or ``None``."""
+    if not path:
+        return None
+    target = os.path.normcase(os.path.normpath(path))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM checkouts")
+        rows = cursor.fetchall()
+    for row in _rows(rows):
+        raw = row.get("path") or ""
+        if os.path.normcase(os.path.normpath(raw)) == target:
+            return row
+    return None
+
+
+def set_head_sha_for_path(path: str, head_sha: str) -> Optional[Dict[str, Any]]:
+    """Record ``head_sha`` on the checkout at ``path`` without changing status."""
+    if not path or not head_sha:
+        return None
+    row = get_checkout_by_path(path)
+    if not row or not row.get("id"):
+        return None
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE checkouts SET head_sha = %s, updated_at = NOW() "
+            "WHERE id = %s RETURNING *",
+            (head_sha, row["id"]),
+        )
+        updated = cursor.fetchone()
+    return _row(updated)
+
+
 def get_checkout_with_legacy_fallback(
     project_id: str, runner_id: str, branch: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:

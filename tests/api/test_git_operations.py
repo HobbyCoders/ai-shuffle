@@ -441,11 +441,11 @@ class TestExecuteFinish:
         mock_git_service.checkout.assert_not_called()
         mock_worktree_manager.cleanup_worktree.assert_not_called()
 
-    async def test_linked_worktree_cleanup_rebinds_session_off_deleted_branch(
+    async def test_linked_worktree_cleanup_stamps_head_sha(
         self, mock_git_service, mock_github_service, mock_worktree_manager, tmp_path
     ):
-        """After deleting the feature branch, sessions still bound to it cannot
-        rematerialize — rebind them onto the base checkout."""
+        """Cleanup records the worktree tip before deleting the branch so spawn
+        can restore it and rematerialize the checkout."""
         main = tmp_path / "main"
         wt = main / ".fluid" / "worktrees" / "feat-x"
         wt.mkdir(parents=True)
@@ -454,18 +454,18 @@ class TestExecuteFinish:
 
         mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
         mock_git_service.remove_worktree.return_value = True
-        op = _finish_op(session_id="s1")
-        set_branch = MagicMock()
-        list_sessions = MagicMock(return_value=[{"id": "other"}])
+        mock_git_service._run_git.return_value = SimpleNamespace(
+            returncode=0, stdout="abc123def456\n"
+        )
+        op = _finish_op()
+        stamp = MagicMock()
         with patch.multiple(
             gitops,
             git_service=mock_git_service,
             github_service=mock_github_service,
             worktree_manager=mock_worktree_manager,
         ), patch("app.db.checkouts.archive_checkout_by_path", return_value=None), patch(
-            "app.db.database.set_session_branch", set_branch
-        ), patch(
-            "app.db.database.list_sessions_for_branch", list_sessions
+            "app.db.checkouts.set_head_sha_for_path", stamp
         ):
             await _execute_finish(
                 op, working_dir=str(wt), worktree_id=None, repo="o/r",
@@ -476,9 +476,7 @@ class TestExecuteFinish:
 
         assert op.status == "done"
         assert _step_status(op, "cleanup") == "done"
-        assert ("p1", "feat/x") in [c.args for c in list_sessions.call_args_list]
-        set_branch.assert_any_call("s1", None)
-        set_branch.assert_any_call("other", None)
+        stamp.assert_called_once_with(str(wt), "abc123def456")
 
     async def test_linked_worktree_cleanup_failure_is_warning(
         self, mock_git_service, mock_github_service, mock_worktree_manager, tmp_path
