@@ -110,6 +110,32 @@ class TestUpsertProviderUsageSnapshot:
         assert row["credits"] == {"balance_remaining": 20.75}
         assert row["windows"][0]["type"] == "requests"
         assert row["fetched_at"] == 2
+        assert row["raw"]["billing_fetched_at"] == 1
+
+    def test_billing_failure_and_capture_have_independent_freshness(self, mock_db):
+        from app.db.provider_usage_snapshots import record_provider_usage_failure
+
+        db.upsert_provider_usage_snapshot("api", "openai", None, [], {"balance_remaining": 5}, {}, 1)
+        record_provider_usage_failure("api", "openai", "billing_access_denied")
+        db.upsert_provider_usage_snapshot("api", "openai", None, [], None, {}, 2)
+        row = next(r for r in db.get_all_provider_usage_snapshots() if r["provider_id"] == "api")
+        assert row["fetched_at"] == 2
+        assert row["raw"]["billing_fetched_at"] == 1
+        assert row["raw"]["usage_error"] == "billing_access_denied"
+        db.upsert_provider_usage_snapshot("api", "openai", None, [], {"balance_remaining": 4}, {}, 3)
+        row = next(r for r in db.get_all_provider_usage_snapshots() if r["provider_id"] == "api")
+        assert row["raw"]["billing_fetched_at"] == 3
+        assert "usage_error" not in row["raw"]
+
+    def test_capture_then_billing_failure_has_no_successful_billing_timestamp(self, mock_db):
+        from app.db.provider_usage_snapshots import record_provider_usage_failure
+
+        db.upsert_provider_usage_snapshot("api", "openai", None, [], None, {}, 2)
+        record_provider_usage_failure("api", "openai", "private upstream text")
+        row = next(r for r in db.get_all_provider_usage_snapshots() if r["provider_id"] == "api")
+        assert row["fetched_at"] == 2
+        assert row["raw"]["billing_fetched_at"] is None
+        assert row["raw"]["usage_error"] == "unavailable"
 
     def test_none_credits_and_raw_round_trip_as_none(self, mock_db):
         db.upsert_provider_usage_snapshot(

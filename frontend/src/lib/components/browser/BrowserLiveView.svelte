@@ -244,6 +244,120 @@
 		currentBitmap = null;
 	});
 
+	// A native editable is required to summon iOS/Android keyboards. Its value is
+	// only a transient IME buffer; committed text goes directly to the remote page.
+	let keyboardEl: HTMLTextAreaElement | undefined = $state();
+	let keyboardOpen = $state(false);
+	let composing = false;
+	let compositionCommit: string | null = null;
+	let compositionTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function clearBridge() {
+		if (keyboardEl) keyboardEl.value = '';
+		composing = false;
+		compositionCommit = null;
+		clearTimeout(compositionTimer);
+	}
+
+	function openKeyboard() {
+		if (!interactive || inspecting) return;
+		// Must stay in the original user gesture, not a promise/effect/rAF.
+		keyboardEl?.focus({ preventScroll: true });
+	}
+
+	function dismissKeyboard() {
+		keyboardEl?.blur();
+		keyboardOpen = false;
+		clearBridge();
+	}
+
+	$effect(() => {
+		if (!interactive || inspecting) {
+			touch = null;
+			dismissKeyboard();
+		}
+	});
+	onDestroy(() => clearTimeout(compositionTimer));
+
+	function commitText(text: string) {
+		if (!interactive || inspecting || !keyboardOpen) return;
+		// Bound each socket message without separating a UTF-16 surrogate pair.
+		const maxTextUnits = 16384;
+		for (let start = 0; start < text.length;) {
+			let end = Math.min(start + maxTextUnits, text.length);
+			const last = text.charCodeAt(end - 1);
+			const next = text.charCodeAt(end);
+			if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end--;
+			onInput({ type: 'input', kind: 'text', text: text.slice(start, end) });
+			start = end;
+		}
+	}
+
+	function bridgeCompositionEnd(e: CompositionEvent) {
+		if (!composing) return;
+		composing = false;
+		commitText(e.data);
+		if (keyboardEl) keyboardEl.value = '';
+		// Engines differ on whether a final input follows compositionend. Ignore
+		// that trailing commit, but never swallow the next deliberate keystroke.
+		compositionCommit = e.data;
+		clearTimeout(compositionTimer);
+		compositionTimer = setTimeout(() => { compositionCommit = null; }, 0);
+	}
+
+	function bridgeInput(event: Event) {
+		const e = event as InputEvent;
+		e.stopPropagation();
+		if (composing || e.isComposing) return;
+		const text = keyboardEl?.value || e.data || '';
+		if (text !== compositionCommit) commitText(text);
+		compositionCommit = null;
+		if (keyboardEl) keyboardEl.value = '';
+	}
+
+	function bridgeKeyPair(key: string, code: string, keyCode: number) {
+		if (!interactive || inspecting || !keyboardOpen) return;
+		for (const event of ['down', 'up']) {
+			onInput({ type: 'input', kind: 'key', event, key, code, keyCode, text: '', modifiers: 0 });
+		}
+	}
+
+	function bridgeBeforeInput(e: InputEvent) {
+		e.stopPropagation();
+		if (!interactive || inspecting || !keyboardOpen) {
+			e.preventDefault();
+			clearBridge();
+			return;
+		}
+		if (composing || e.isComposing) return;
+		// An empty native buffer still emits beforeinput for virtual Backspace.
+		if (e.inputType.startsWith('delete')) {
+			e.preventDefault();
+			const forward = e.inputType.endsWith('Forward');
+			bridgeKeyPair(forward ? 'Delete' : 'Backspace', forward ? 'Delete' : 'Backspace', forward ? 46 : 8);
+		} else if (e.inputType === 'insertLineBreak' || e.inputType === 'insertParagraph') {
+			e.preventDefault();
+			bridgeKeyPair('Enter', 'Enter', 13);
+		}
+	}
+
+	const bridgeKeys = new Set(['Tab', 'Enter', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown']);
+	function bridgeKey(e: KeyboardEvent, event: 'down' | 'up') {
+		e.stopPropagation();
+		if (!interactive || inspecting) { e.preventDefault(); return; }
+		if (composing || e.isComposing || e.keyCode === 229) return;
+		compositionCommit = null;
+		if (e.key === 'Escape') {
+			e.preventDefault();
+			if (event === 'down') dismissKeyboard();
+		} else if (bridgeKeys.has(e.key)) {
+			// Prevent the native edit (and its beforeinput) when a real key event
+			// already handles it. Printable keys are handled ONLY by input/IME.
+			e.preventDefault();
+			sendKey(event, e);
+		}
+	}
+
 	// ── Input forwarding ───────────────────────────────────────────────────
 
 	function buttonName(btn: number): 'left' | 'middle' | 'right' {
@@ -366,6 +480,7 @@
 		sendMouse('move', e);
 		sendMouse('down', e, { clickCount: 1 });
 		sendMouse('up', e, { clickCount: 1 });
+		if (pagePoint(e)) openKeyboard();
 	}
 
 	// ── Pointer handlers ───────────────────────────────────────────────────
@@ -382,6 +497,7 @@
 	}
 
 	function onPointerMove(e: PointerEvent) {
+		if (e.target !== wrapperEl && e.target !== canvasEl) return;
 		if (!interactive) return;
 		if (e.pointerType === 'touch') {
 			onTouchMove(e);
@@ -399,7 +515,8 @@
 	}
 
 	function onPointerDown(e: PointerEvent) {
-		wrapperEl?.focus();
+		if (e.target !== wrapperEl && e.target !== canvasEl) return;
+		if (e.pointerType !== 'touch') wrapperEl?.focus();
 		if (!interactive) return;
 		e.preventDefault();
 		if (e.pointerType === 'touch') {
@@ -411,6 +528,7 @@
 	}
 
 	function onPointerUp(e: PointerEvent) {
+		if (e.target !== wrapperEl && e.target !== canvasEl) return;
 		if (!interactive) return;
 		if (e.pointerType === 'touch') {
 			onTouchUp(e);
@@ -461,7 +579,7 @@
 	}
 
 	function onKeyDown(e: KeyboardEvent) {
-		if (!interactive || !focused) return;
+		if (e.target !== wrapperEl || !interactive || !focused) return;
 		// Keep the keystroke inside the live view — don't let it trigger app hotkeys.
 		e.preventDefault();
 		e.stopPropagation();
@@ -474,7 +592,7 @@
 	}
 
 	function onKeyUp(e: KeyboardEvent) {
-		if (!interactive || !focused) return;
+		if (e.target !== wrapperEl || !interactive || !focused) return;
 		e.preventDefault();
 		e.stopPropagation();
 		if (inspecting) return;
@@ -490,7 +608,7 @@
 <div
 	bind:this={wrapperEl}
 	class="live-wrapper"
-	class:focused
+	class:focused={focused || keyboardOpen}
 	class:non-interactive={!interactive}
 	class:inspecting
 	tabindex="0"
@@ -511,14 +629,74 @@
 	oncontextmenu={(e) => e.preventDefault()}
 >
 	<canvas bind:this={canvasEl} class="live-canvas"></canvas>
+	<textarea
+		bind:this={keyboardEl}
+		class="keyboard-bridge"
+		aria-label="Type in the remote browser"
+		tabindex="-1"
+		disabled={!interactive || inspecting}
+		autocomplete="off"
+		{...{ autocorrect: 'off' }}
+		autocapitalize="off"
+		spellcheck={false}
+		rows="1"
+		onfocus={() => (keyboardOpen = true)}
+		onblur={() => { keyboardOpen = false; clearBridge(); }}
+		onbeforeinput={bridgeBeforeInput}
+		oninput={bridgeInput}
+		oncompositionstart={() => { composing = true; compositionCommit = null; }}
+		oncompositionend={bridgeCompositionEnd}
+		onkeydown={(e) => bridgeKey(e, 'down')}
+		onkeyup={(e) => bridgeKey(e, 'up')}
+	></textarea>
+	<button
+		type="button"
+		class="keyboard-toggle"
+		disabled={!interactive || inspecting}
+		aria-label={keyboardOpen ? 'Dismiss keyboard' : 'Open keyboard'}
+		aria-pressed={keyboardOpen}
+		onpointerdown={(e) => { e.stopPropagation(); e.preventDefault(); }}
+		onclick={() => { if (keyboardOpen) dismissKeyboard(); else openKeyboard(); }}
+	>{keyboardOpen ? 'Dismiss keyboard' : 'Keyboard'}</button>
+
 	{#if interactive && inspecting}
 		<div class="focus-hint inspect-hint">Click an element to select it</div>
-	{:else if interactive && !focused}
+	{:else if interactive && !focused && !keyboardOpen}
 		<div class="focus-hint">Click to interact</div>
 	{/if}
 </div>
 
 <style>
+	.keyboard-bridge {
+		position: absolute;
+		bottom: 8px;
+		left: 8px;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		border: 0;
+		opacity: 0.01;
+		font-size: 16px; /* Avoid iOS focus zoom; not display:none/offscreen. */
+		pointer-events: none;
+	}
+
+	.keyboard-toggle {
+		position: absolute;
+		top: 8px;
+		right: 8px;
+		min-height: 44px;
+		padding: 8px 12px;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		background: var(--popover);
+		color: var(--foreground);
+		font: inherit;
+		font-size: 12px;
+		cursor: pointer;
+	}
+	.keyboard-toggle:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.keyboard-toggle:disabled { opacity: 0.5; cursor: default; }
+
 	.live-wrapper {
 		position: relative;
 		flex: 1;

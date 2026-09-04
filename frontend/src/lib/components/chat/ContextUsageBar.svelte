@@ -73,6 +73,7 @@
 		resolveBucketKey,
 		selfBucketKey,
 		type UsageBucket,
+		type ProviderUsageBucket,
 		type UsageWindow,
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance } from '$lib/stores/usage-target';
@@ -395,6 +396,17 @@
 	function creditsNum(credits: Record<string, unknown> | null, key: string): number | null {
 		const v = credits?.[key];
 		return typeof v === 'number' && Number.isFinite(v) ? v : null;
+	}
+
+	function providerStatusText(pb: ProviderUsageBucket): string | null {
+		const reason = pb.lastErrorKind === 'billing_access_denied'
+			? 'Billing access required'
+			: pb.lastErrorKind === 'missing_credentials'
+				? 'Sign in to view usage'
+				: pb.lastErrorKind === 'timeout' ? 'Refresh timed out' : 'Usage unavailable';
+		if (pb.status === 'stale') return `Last known usage · ${pb.lastErrorKind ? reason : 'Refresh pending'}`;
+		if (pb.status === 'unavailable' || pb.status === 'never_fetched') return reason;
+		return null;
 	}
 
 	function creditsSummary(
@@ -787,6 +799,7 @@
 				{@const pbWindows = displayWindows(pb.windows)}
 				{@const pbShowsRemaining = providerShowsRemaining(pb)}
 				{@const pbSummary = providerWindowSummary(pbWindows, now, pbShowsRemaining)}
+				{@const pbStatus = providerStatusText(pb)}
 				<div class="popover-section">
 					<button
 						type="button"
@@ -797,6 +810,7 @@
 					>
 						<span class="sec-head-labels">
 							<span class="section-device">{pbDisplay.name}</span>
+							{#if pbStatus}<span class="section-account">{pbStatus}</span>{/if}
 							{#if pbDisplay.subtext}
 								<span class="section-account">{pbDisplay.subtext}</span>
 							{/if}

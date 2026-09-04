@@ -62,6 +62,8 @@ def upsert_provider_usage_snapshot(
 ) -> None:
     """Insert or replace this provider's usage snapshot row."""
     now = datetime.now(timezone.utc).isoformat()
+    if provider_type == "openai" and credits is not None:
+        raw = {**(raw or {}), "billing_fetched_at": fetched_at}
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -75,7 +77,8 @@ def upsert_provider_usage_snapshot(
                 plan_type = EXCLUDED.plan_type,
                 windows = EXCLUDED.windows,
                 credits = COALESCE(EXCLUDED.credits, provider_usage_snapshots.credits),
-                raw = EXCLUDED.raw,
+                raw = CASE WHEN EXCLUDED.provider_type = 'openai' AND EXCLUDED.credits IS NULL
+                    THEN provider_usage_snapshots.raw ELSE EXCLUDED.raw END,
                 fetched_at = EXCLUDED.fetched_at,
                 updated_at = EXCLUDED.updated_at
             """,
@@ -89,6 +92,40 @@ def upsert_provider_usage_snapshot(
                 fetched_at,
                 now,
             ),
+        )
+
+
+def record_provider_usage_failure(provider_id: str, provider_type: str, error_kind: str) -> None:
+    if error_kind not in {"billing_access_denied", "missing_credentials", "timeout", "unavailable"}:
+        error_kind = "unavailable"
+    now = datetime.now(timezone.utc)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT raw, credits, fetched_at FROM provider_usage_snapshots WHERE provider_id = %s",
+            (provider_id,),
+        )
+        rows = rows_to_list(cursor.fetchall())
+        previous = rows[0] if rows else {}
+        previous_raw = _parse_json_dict(previous.get("raw")) or {}
+        billing_fetched_at = previous_raw.get(
+            "billing_fetched_at", previous.get("fetched_at") if previous.get("credits") else None
+        )
+        raw = json.dumps({
+            "usage_error": error_kind,
+            "usage_attempted_at": int(now.timestamp() * 1000),
+            "billing_fetched_at": billing_fetched_at,
+        })
+        cursor.execute(
+            """
+            INSERT INTO provider_usage_snapshots
+                (provider_id, provider_type, windows, raw, updated_at)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT(provider_id) DO UPDATE SET
+                raw = EXCLUDED.raw,
+                updated_at = EXCLUDED.updated_at
+            """,
+            (provider_id, provider_type, "[]", raw, now.isoformat()),
         )
 
 

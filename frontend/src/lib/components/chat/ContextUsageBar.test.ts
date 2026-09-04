@@ -144,6 +144,21 @@ describe('ContextUsageBar — pill', () => {
 	});
 });
 
+describe('ContextUsageBar — provider refresh status', () => {
+	it('keeps stale API balances and explains unavailable billing without inventing zero', async () => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status: 'stale', last_error_kind: 'timeout', credits: { balance_remaining: 12.34 }, fetched_at: 123 },
+			{ provider_id: 'other', provider_type: 'openai', provider_name: 'Other API', status: 'unavailable', last_error_kind: 'billing_access_denied' },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.textContent).toContain('$12.34');
+		expect(container.textContent).toContain('Last known usage · Refresh timed out');
+		expect(container.textContent).toContain('Billing access required');
+		expect(container.textContent).not.toContain('$0.00');
+	});
+});
+
 describe('ContextUsageBar — context breakdown', () => {
 	it('renders the collapse chevron with category rows expanded by default', async () => {
 		const { container } = render(ContextUsageBar);

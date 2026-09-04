@@ -39,6 +39,15 @@ beforeEach(() => {
 	rateLimit.__resetForTests();
 });
 
+it('retains provider freshness metadata and cached credit timestamps independently of Claude', () => {
+	rateLimit.applySnapshot({ windows: [], available: false, provider_refreshing: true, providers: [
+		{ provider_id: 'api', status: 'stale', last_error_kind: 'missing_credentials', fetched_at: 123, credits: { balance_remaining: 42 } },
+	] });
+	expect(rateLimit.current.providerBuckets.api).toMatchObject({ status: 'stale', lastErrorKind: 'missing_credentials', fetchedAt: 123, credits: { balance_remaining: 42 } });
+	rateLimit.applySnapshot({ windows: [], available: false });
+	expect(rateLimit.current.providerBuckets.api.credits).toEqual({ balance_remaining: 42 });
+});
+
 function selfBucket() {
 	return resolveBucket(rateLimit.current, null);
 }

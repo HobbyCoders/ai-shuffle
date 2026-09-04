@@ -6,8 +6,10 @@ their utilization % and reset times) so the frontend can render the usage pill
 + popover on page load, before any live ``usage_snapshot`` WS event arrives.
 """
 
+import asyncio
 import logging
-from typing import List, Optional
+import time
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, field_validator
@@ -116,6 +118,8 @@ class ProviderUsageEntry(BaseModel):
     windows: List[ProviderUsageWindow] = []
     credits: Optional[dict] = None
     fetched_at: Optional[int] = None
+    status: Literal["fresh", "stale", "unavailable", "never_fetched"] = "never_fetched"
+    last_error_kind: Optional[str] = None
 
 
 class UsageSnapshot(BaseModel):
@@ -138,6 +142,7 @@ class UsageSnapshot(BaseModel):
     # Non-Claude provider usage (Codex/ChatGPT, OpenRouter, OpenAI credits,
     # fal.ai credits, SuperGrok, ...). Additive.
     providers: List[ProviderUsageEntry] = []
+    provider_refreshing: bool = False
 
 
 async def _load_provider_usage() -> List[ProviderUsageEntry]:
@@ -167,8 +172,8 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
             # xAI API-key snapshots stay excluded: their only content is
             # per-minute x-ratelimit headroom (~always 0%), and xAI exposes
             # no credits endpoint a secret key may call. OpenAI rows are
-            # included once the credit-grants poller has populated a
-            # displayable balance; their per-minute rate-limit windows are
+            # included once the credit-grants poller has a balance or an
+            # explicit failure status; their per-minute rate-limit windows are
             # stripped so the popover headlines remaining credits instead
             # of a ~0% requests bar. SuperGrok subscription rows
             # (provider_type='grok') are included. Capture itself stays —
@@ -178,9 +183,15 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
             windows = row.get("windows") or []
             if ptype == "xai":
                 continue
+            raw = row.get("raw") or {}
+            error = raw.get("usage_error") if isinstance(raw, dict) else None
+            if error not in {"billing_access_denied", "missing_credentials", "timeout", "unavailable"}:
+                error = None
+            fetched_at = row.get("fetched_at")
             if ptype == "openai":
-                if not _credits_are_displayable(credits):
+                if not _credits_are_displayable(credits) and error is None:
                     continue
+                fetched_at = raw.get("billing_fetched_at", fetched_at if _credits_are_displayable(credits) else None)
                 windows = []
             # ChatGPT/Codex header credits (x-codex-credits-balance, often 0)
             # are extra-credit crumbs on the subscription quota row — not
@@ -200,7 +211,14 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
                     plan_type=row.get("plan_type"),
                     windows=windows,
                     credits=credits,
-                    fetched_at=row.get("fetched_at"),
+                    fetched_at=fetched_at,
+                    status=(
+                        "stale" if fetched_at and (
+                            error or time.time() * 1000 - fetched_at > 300_000
+                        ) else "fresh" if fetched_at else
+                        "unavailable" if error else "never_fetched"
+                    ),
+                    last_error_kind=error,
                 )
             )
         return entries
@@ -209,31 +227,47 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
         return []
 
 
+_claude_refresh_task: Optional[asyncio.Task] = None
+
+
+def _request_claude_refresh() -> None:
+    global _claude_refresh_task
+    if _claude_refresh_task is not None and not _claude_refresh_task.done():
+        return
+
+    async def refresh() -> None:
+        try:
+            await usage_limits_monitor.refresh_and_broadcast()
+        except Exception:
+            logger.debug("Claude usage refresh failed")
+
+    _claude_refresh_task = asyncio.create_task(refresh())
+
+
 @router.get("/limits", response_model=UsageSnapshot)
 async def get_usage_limits(
     refresh: bool = False, _: str = Depends(require_auth)
 ) -> UsageSnapshot:
     """Return the latest Claude usage snapshot for every install in the cluster.
 
-    Serves the cached snapshot; fetches on demand if it is stale or has never
-    been fetched. Pass ``refresh=true`` to force a live fetch + persist + WS
-    broadcast (so other tabs update too) and a best-effort provider-usage poll
-    before assembling the response. Returns ``available: false`` with empty
+    Serves cached snapshots while a coalesced provider poll refreshes stale data.
+    Pass ``refresh=true`` to start a forced provider and Claude refresh without
+    waiting for upstream billing. Read again while ``provider_refreshing`` is
+    true to receive progressive provider results. Returns ``available: false`` with empty
     windows when there is no usable Claude OAuth credential (never errors). The
     legacy top-level fields describe the LOCAL install; ``snapshots`` adds every
     install's per-account data so offloaded sessions render the correct (owning
     account's) reset time. ``providers`` adds every non-Claude provider's usage
     snapshot (best-effort).
     """
-    if refresh:
-        snapshot = await usage_limits_monitor.refresh_and_broadcast()
-        try:
-            from app.core.provider_usage import provider_usage_monitor
+    from app.core.provider_usage import provider_usage_monitor
 
-            await provider_usage_monitor.poll_once()
-        except Exception:
-            logger.debug("provider usage refresh poll failed; continuing", exc_info=True)
-    else:
-        snapshot = await usage_limits_monitor.get_cluster_snapshot()
+    provider_usage_monitor.request_refresh(force=refresh)
+    if refresh:
+        _request_claude_refresh()
+    snapshot = await usage_limits_monitor.get_cluster_snapshot()
+    refreshing = provider_usage_monitor.refreshing
     providers = await _load_provider_usage()
-    return UsageSnapshot(**snapshot, providers=providers)
+    return UsageSnapshot(
+        **snapshot, providers=providers, provider_refreshing=refreshing
+    )

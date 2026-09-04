@@ -100,6 +100,23 @@ class TestTranslateInput:
         )
         assert cmd["params"]["text"] == "\r"
 
+    @pytest.mark.parametrize("text", ["hello", "密碼", "👩🏽‍💻", "e\u0301", "x" * 16_384])
+    def test_committed_text_maps_to_insert_text(self, text):
+        assert browser_stream.translate_input(
+            {"type": "input", "kind": "text", "text": text,
+             "method": "Runtime.evaluate", "params": {"expression": "ignored"}}
+        ) == {"method": "Input.insertText", "params": {"text": text}}
+
+    @pytest.mark.parametrize("text", [None, "", 123, True, [], {}, "x" * 16_385])
+    def test_invalid_committed_text_rejected_without_echo(self, text):
+        with pytest.raises(ValueError, match="text input must contain") as exc:
+            browser_stream.translate_input({"type": "input", "kind": "text", "text": text})
+        assert str(exc.value) == "text input must contain 1 to 16384 characters"
+
+    def test_missing_committed_text_rejected(self):
+        with pytest.raises(ValueError, match="text input must contain"):
+            browser_stream.translate_input({"type": "input", "kind": "text"})
+
     def test_navigate_http_and_https_ok(self):
         for url in ("http://example.com/", "https://example.com/path"):
             cmd = browser_stream.translate_input({"type": "navigate", "url": url})

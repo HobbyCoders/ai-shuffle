@@ -343,6 +343,23 @@ def _token_patches(tokens: Optional[Dict[str, Any]] = _CODEX_TOKENS, access: str
 
 class TestPollGrokProvider:
     @pytest.mark.asyncio
+    async def test_billing_is_saved_before_optional_settings(self, monitor):
+        upsert = MagicMock()
+        async def get(url, headers, timeout):
+            if "/settings" in url:
+                upsert.assert_called_once()
+                assert upsert.call_args.args[3]
+                return {}, 500
+            return {"creditUsagePercent": 34}, 200
+
+        t1, t2, t3 = _token_patches()
+        with t1, t2, t3, patch("app.core.provider_usage._grok_get", new=AsyncMock(side_effect=get)), patch(
+            "app.db.database.upsert_provider_usage_snapshot", upsert
+        ), patch("app.db.database.get_all_provider_usage_snapshots", return_value=[]):
+            await monitor._poll_grok_provider(_GROK_ROW)
+        upsert.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_200_billing_and_settings_upserts_plan_from_settings(self, monitor):
         upsert = MagicMock()
         seen = []
@@ -356,7 +373,9 @@ class TestPollGrokProvider:
         ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
             await monitor._poll_grok_provider(_GROK_ROW)
 
-        upsert.assert_called_once()
+        assert upsert.call_count == 2
+        assert upsert.call_args_list[0].args[2] == "SuperGrok"
+        assert upsert.call_args_list[0].args[6] == upsert.call_args_list[1].args[6]
         args = upsert.call_args[0]
         provider_id, provider_type, plan_type, windows, credits, raw, fetched_at = args
         assert provider_id == "prov-grok-1"

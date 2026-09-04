@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -257,6 +257,25 @@ _CHATGPT_ROW = {
 
 class TestPollOpenAiViaChatgpt:
     @pytest.mark.asyncio
+    async def test_timeout_records_only_safe_reason(self, monitor):
+        with patch.object(monitor, "_request_openai_credit_grants", new=AsyncMock(
+            side_effect=httpx.ReadTimeout("private upstream diagnostic")
+        )), patch.object(monitor, "_record_openai_failure", new=AsyncMock()) as failure:
+            assert not await monitor._fetch_openai_balance("openai-api", {})
+        failure.assert_awaited_once_with("openai-api", "timeout")
+
+    @pytest.mark.asyncio
+    async def test_billing_401_does_not_refresh_codex_login(self, monitor):
+        with patch("app.db.database.get_codex_tokens", return_value={"codex_access_token": "stored"}), patch(
+            "app.core.provider_usage._decrypt_grok_access_token", return_value=_OAUTH
+        ), patch.object(monitor, "_request_openai_credit_grants", new=AsyncMock(return_value=(None, None, 401))), patch.object(
+            monitor, "_record_openai_failure", new=AsyncMock()
+        ) as failure, patch("app.core.codex_token_refresh.refresh_on_401_once", new=AsyncMock()) as refresh:
+            assert not await monitor._poll_openai_chatgpt_row(_CHATGPT_ROW)
+        refresh.assert_not_awaited()
+        failure.assert_awaited_once_with("openai-api", "billing_access_denied")
+
+    @pytest.mark.asyncio
     async def test_200_upserts_synthetic_openai_api_row(self, monitor):
         upsert = MagicMock()
         seen = []
@@ -290,25 +309,15 @@ class TestPollOpenAiViaChatgpt:
         assert seen[0].headers.get("chatgpt-account-id") == "acct-123"
 
     @pytest.mark.asyncio
-    async def test_skips_when_openai_api_key_snapshot_already_has_credits(self, monitor):
-        upsert = MagicMock()
-        get_tokens = MagicMock()
+    @pytest.mark.parametrize("provider_id", ["prov-openai-1", "openai-api"])
+    async def test_old_balance_does_not_suppress_fallback(self, monitor, provider_id):
         with patch(
             "app.db.database.get_all_provider_usage_snapshots",
-            return_value=[
-                {
-                    "provider_id": "prov-openai-1",
-                    "provider_type": "openai",
-                    "credits": {"balance_remaining": 5.0},
-                }
-            ],
-        ), patch("app.db.database.get_codex_tokens", get_tokens), patch(
-            "app.db.database.upsert_provider_usage_snapshot", upsert
-        ):
+            return_value=[{"provider_id": provider_id, "provider_type": "openai",
+                           "credits": {"balance_remaining": 5.0}}],
+        ), patch.object(monitor, "_poll_openai_chatgpt_row", new=AsyncMock(return_value=True)) as poll:
             await monitor._poll_openai_via_chatgpt([_CHATGPT_ROW])
-
-        get_tokens.assert_not_called()
-        upsert.assert_not_called()
+        poll.assert_awaited_once_with(_CHATGPT_ROW)
 
     @pytest.mark.asyncio
     async def test_403_does_not_upsert(self, monitor):

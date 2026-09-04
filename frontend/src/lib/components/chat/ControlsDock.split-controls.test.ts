@@ -5,6 +5,7 @@ import { get } from 'svelte/store';
 import { activeSession } from '$lib/stores/active-session';
 import { appMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
 import ControlsDock from './ControlsDock.svelte';
+import { getUsageLimits } from '$lib/api/client';
 
 vi.hoisted(() => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
@@ -202,6 +203,54 @@ describe('ControlsDock split controls', () => {
 		renderDock({ voiceActions });
 
 		expect(screen.queryByRole('button', { name: /attach file/i })).toBeNull();
+	});
+
+
+	describe('provider refresh polling', () => {
+		beforeEach(() => { vi.useFakeTimers(); vi.mocked(getUsageLimits).mockReset(); });
+		afterEach(() => { vi.useRealTimers(); });
+		const snapshot = (refreshing: boolean) => ({ windows: [], available: false, provider_refreshing: refreshing });
+		async function openUsage() {
+			const view = renderDock();
+			await tick();
+			await fireEvent.click(view.container.querySelector('.usage-indicator')!);
+			await vi.advanceTimersByTimeAsync(0);
+			return view;
+		}
+		it('forces once after mount, reads progressive results and stops at terminal', async () => {
+			vi.mocked(getUsageLimits).mockResolvedValueOnce(snapshot(false)).mockResolvedValueOnce(snapshot(true)).mockResolvedValueOnce(snapshot(true)).mockResolvedValue(snapshot(false));
+			await openUsage();
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(vi.mocked(getUsageLimits).mock.calls.map(([force]) => force)).toEqual([false, true, false, false]);
+		});
+		it('continues polling a still-pending refresh after 70 seconds', async () => {
+			vi.mocked(getUsageLimits).mockResolvedValue(snapshot(true));
+			await openUsage();
+			await vi.advanceTimersByTimeAsync(70_000);
+			const count = vi.mocked(getUsageLimits).mock.calls.length;
+			await vi.advanceTimersByTimeAsync(1_000);
+			expect(getUsageLimits).toHaveBeenCalledTimes(count + 1);
+			expect(getUsageLimits).toHaveBeenLastCalledWith(false);
+		});
+		it.each(['close', 'destroy', 'deadline'])('stops polling on %s', async (stop) => {
+			vi.mocked(getUsageLimits).mockResolvedValue(snapshot(true));
+			const view = await openUsage();
+			if (stop === 'close') await fireEvent.click(view.container.querySelector('.usage-indicator')!);
+			if (stop === 'destroy') view.unmount();
+			if (stop === 'deadline') await vi.advanceTimersByTimeAsync(120_000);
+			const count = vi.mocked(getUsageLimits).mock.calls.length;
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(getUsageLimits).toHaveBeenCalledTimes(count);
+		});
+		it('does not swallow a forced open behind a pending mount request', async () => {
+			let resolve!: (value: ReturnType<typeof snapshot>) => void;
+			vi.mocked(getUsageLimits).mockReturnValueOnce(new Promise((r) => { resolve = r; })).mockResolvedValue(snapshot(false));
+			await openUsage();
+			expect(getUsageLimits).toHaveBeenCalledTimes(1);
+			resolve(snapshot(false));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(vi.mocked(getUsageLimits).mock.calls.map(([force]) => force)).toEqual([false, true]);
+		});
 	});
 
 	it('does not wedge the dock when the lane flips with the access menu open', async () => {

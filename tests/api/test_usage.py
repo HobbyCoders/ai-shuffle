@@ -11,12 +11,21 @@ overridden, matching tests/api/test_health_ready.py.
 import time
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.usage import router
 from app.api.auth import require_auth
 from app.core.config import settings
+
+
+@pytest.fixture(autouse=True)
+def cached_provider_poll():
+    with patch("app.core.provider_usage.provider_usage_monitor") as monitor:
+        monitor.refreshing = False
+        yield monitor
 
 
 def _client(authed=True):
@@ -121,6 +130,7 @@ class TestUsageLimitsEndpoint:
         assert body == {
             "windows": [], "fetched_at": None, "available": False, "generation": None,
             "snapshots": [], "self_instance_id": None, "providers": [],
+            "provider_refreshing": False,
         }
 
     def test_cluster_join_and_unknown_install_excluded(self):
@@ -241,6 +251,96 @@ def _assert_claude_fields_unchanged(body):
 
 
 class TestUsageLimitsProviders:
+    @pytest.mark.asyncio
+    async def test_real_monitor_returns_progressive_cached_results(self):
+        import asyncio
+        from app.api import usage
+        from app.core import provider_usage
+        from app.db import database as db
+        from app.db.async_database import run_sync
+
+        monitor = provider_usage.ProviderUsageMonitor()
+        saved, release = asyncio.Event(), asyncio.Event()
+
+        async def upstream_work():
+            await run_sync(
+                db.upsert_provider_usage_snapshot, "progressive-grok", "grok", "SuperGrok",
+                [{"type": "seven_day", "utilization": 34}], None, {}, int(time.time() * 1000)
+            )
+            saved.set()
+            await release.wait()
+
+        with patch.object(provider_usage, "provider_usage_monitor", monitor), patch.object(
+            monitor, "_poll_providers", new=AsyncMock(side_effect=upstream_work)
+        ) as work, patch.object(usage, "usage_limits_monitor") as claude:
+            claude.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            first = await asyncio.wait_for(usage.get_usage_limits(False, "admin"), 1)
+            assert first.provider_refreshing
+            try:
+                await asyncio.wait_for(saved.wait(), 1)
+                progressive = await asyncio.wait_for(usage.get_usage_limits(False, "admin"), 1)
+                assert progressive.provider_refreshing
+                grok = next(p for p in progressive.providers if p.provider_id == "progressive-grok")
+                assert grok.windows[0].utilization == 34
+                assert grok.status == "fresh"
+            finally:
+                release.set()
+                await monitor._poll_task
+            final = await usage.get_usage_limits(False, "admin")
+            assert not final.provider_refreshing
+            work.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_poll_completion_during_snapshot_read_keeps_followup_enabled(self):
+        from app.api import usage
+        from app.core.provider_usage import provider_usage_monitor
+
+        async def loaded():
+            provider_usage_monitor.refreshing = False
+            return []
+
+        provider_usage_monitor.refreshing = True
+        with patch.object(usage, "usage_limits_monitor") as mon, patch.object(
+            usage, "_load_provider_usage", new=AsyncMock(side_effect=loaded)
+        ):
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            response = await usage.get_usage_limits(False, "admin")
+        assert response.provider_refreshing is True
+
+    @pytest.mark.parametrize("balance", [None, 0.0, 12.5])
+    def test_billing_failure_preserves_balance_and_reports_safe_status(self, balance):
+        from app.db import database as db
+        from app.db.provider_usage_snapshots import record_provider_usage_failure
+
+        fetched = int(time.time() * 1000)
+        if balance is not None:
+            db.upsert_provider_usage_snapshot(
+                "openai-api", "openai", None, [], {"balance_remaining": balance}, {}, fetched
+            )
+        record_provider_usage_failure("openai-api", "openai", "billing_access_denied")
+        db.upsert_provider_usage_snapshot(
+            "openai-api", "openai", None, [], None, {"x-ratelimit-limit-requests": "500"}, fetched + 9999
+        )
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            body = _client().get("/api/v1/usage/limits").json()
+        entry = body["providers"][0]
+        assert entry["status"] == ("stale" if balance is not None else "unavailable")
+        assert entry["last_error_kind"] == "billing_access_denied"
+        assert entry["fetched_at"] == (fetched if balance is not None else None)
+        assert entry["credits"] == ({"balance_remaining": balance} if balance is not None else None)
+        assert "raw" not in entry
+
+    def test_refresh_returns_cached_data_while_provider_work_is_pending(self, cached_provider_poll):
+        cached_provider_poll.refreshing = True
+        with patch("app.api.usage.usage_limits_monitor") as mon, patch("app.api.usage._request_claude_refresh"):
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            response = _client().get("/api/v1/usage/limits?refresh=true")
+        assert response.status_code == 200
+        assert response.json()["provider_refreshing"] is True
+        cached_provider_poll.request_refresh.assert_called_once_with(force=True)
+        cached_provider_poll.poll_once.assert_not_called()
+
     def test_seeded_rows_returned_with_joined_name(self):
         from app.db import database as db
 

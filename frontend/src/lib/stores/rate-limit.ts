@@ -78,7 +78,12 @@ export interface UsageBucket {
  * generation/merge logic applies — the endpoint returns the authoritative
  * current set and we full-replace on each poll.
  */
+export type ProviderUsageStatus = 'fresh' | 'stale' | 'unavailable' | 'never_fetched';
+export type ProviderUsageErrorKind = 'billing_access_denied' | 'missing_credentials' | 'timeout' | 'unavailable';
+
 export interface ProviderUsageBucket {
+	status?: ProviderUsageStatus;
+	lastErrorKind?: ProviderUsageErrorKind | null;
 	providerId: string;
 	providerName: string | null;
 	providerType: string | null;
@@ -157,6 +162,8 @@ export interface SnapshotInstance {
  * Claude `SnapshotWindow` shape (`type` / `utilization` 0–100 / `resets_at`).
  */
 export interface ProviderUsageEntry {
+	status?: ProviderUsageStatus;
+	last_error_kind?: ProviderUsageErrorKind | null;
 	provider_id: string;
 	provider_name?: string | null;
 	provider_type?: string | null;
@@ -167,6 +174,7 @@ export interface ProviderUsageEntry {
 }
 
 export interface UsageSnapshot {
+	provider_refreshing?: boolean;
 	/** Legacy top-level fields — the LOCAL install's data. Always present for
 	 *  backwards compatibility; folded into the self bucket when `snapshots` is
 	 *  absent. */
@@ -573,6 +581,8 @@ export const rateLimit = {
 					if (!p?.provider_id) continue;
 					providerBuckets[p.provider_id] = {
 						providerId: p.provider_id,
+						status: p.status,
+						lastErrorKind: p.last_error_kind ?? null,
 						providerName: p.provider_name ?? null,
 						providerType: p.provider_type ?? null,
 						planType: p.plan_type ?? null,

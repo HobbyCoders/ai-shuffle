@@ -252,6 +252,11 @@ def translate_input(msg: dict, bounds: Optional[Tuple[int, int]] = None) -> Opti
             return _translate_mouse(_MouseInput(**msg), bounds)
         if kind == "key":
             return _translate_key(_KeyInput(**msg))
+        if kind == "text":
+            text = msg.get("text")
+            if not isinstance(text, str) or not 0 < len(text) <= 16_384:
+                raise ValueError("text input must contain 1 to 16384 characters")
+            return {"method": "Input.insertText", "params": {"text": text}}
         raise ValueError(f"invalid input kind: {kind!r}")
     raise ValueError(f"unknown client message type: {mtype!r}")
 

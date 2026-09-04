@@ -31,7 +31,7 @@
 	 * control: the dock neither shows a toggle nor polls status. Halting it for a
 	 * session is the Stop button's job.
 	 */
-	import { tick, type Snippet } from 'svelte';
+	import { onDestroy, tick, type Snippet } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { anyCredential } from '$lib/stores/auth.svelte';
 	import ContextUsageBar from './ContextUsageBar.svelte';
@@ -227,22 +227,51 @@
 		rerouted ? `Running ${actualModelLabel} instead of ${requestedModelLabel}` : undefined
 	);
 
-	// Single owner of usage-limit fetching. A shared in-flight promise dedupes
-	// concurrent triggers (e.g. mount + a rapid target change) into ONE GET.
-	let usageFetchInFlight: Promise<void> | null = null;
-	function refreshUsageLimits(force = false): Promise<void> {
-		if (usageFetchInFlight) return usageFetchInFlight;
-		usageFetchInFlight = getUsageLimits(force)
-			.then((snap) => rateLimit.applySnapshot(snap))
-			.catch(() => {
-				// Non-fatal — reset so a later target change / WS event retries.
-				handledTarget = undefined;
+	// Normal requests dedupe, but opening during a mount request must still force
+	// a refresh. Follow-up requests only read the progressively persisted rows.
+	let usageFetchInFlight: Promise<boolean> | null = null;
+	async function refreshUsageLimits(force = false): Promise<boolean> {
+		if (usageFetchInFlight) {
+			if (!force) return usageFetchInFlight;
+			await usageFetchInFlight;
+		}
+		const request = getUsageLimits(force)
+			.then((snap) => {
+				rateLimit.applySnapshot(snap);
+				return snap.provider_refreshing === true;
 			})
-			.finally(() => {
-				usageFetchInFlight = null;
+			.catch(() => {
+				handledTarget = undefined;
+				return false;
 			});
-		return usageFetchInFlight;
+		usageFetchInFlight = request;
+		try { return await request; }
+		finally { if (usageFetchInFlight === request) usageFetchInFlight = null; }
 	}
+
+	let usagePollGeneration = 0;
+	let usagePollTimer: ReturnType<typeof setTimeout> | undefined;
+	function stopUsagePolling() {
+		usagePollGeneration++;
+		clearTimeout(usagePollTimer);
+	}
+	function onUsageOpenChange(open: boolean) {
+		stopUsagePolling();
+		if (!open) return;
+		const generation = usagePollGeneration;
+		const deadline = Date.now() + 120_000;
+		async function poll(force: boolean) {
+			if (force && usageFetchInFlight) await usageFetchInFlight;
+			if (generation !== usagePollGeneration || Date.now() >= deadline) return;
+			const refreshing = await refreshUsageLimits(force);
+			if (generation !== usagePollGeneration || !refreshing || Date.now() >= deadline) return;
+			usagePollTimer = setTimeout(() => {
+				if (generation === usagePollGeneration && Date.now() < deadline) void poll(false);
+			}, 1_000);
+		}
+		void poll(true);
+	}
+	onDestroy(stopUsagePolling);
 
 	// Populate the ring on load AND keep it right when the viewed/composed session
 	// moves to a DIFFERENT install (e.g. opening an offloaded session), whose usage
@@ -418,7 +447,7 @@
 
 	<!-- Mobile: usage ring on the right. Settings lives in dock-left. -->
 	<div class="mobile-controls">
-		<ContextUsageBar onOpenChange={(o) => { if (o) void refreshUsageLimits(true); }} />
+		<ContextUsageBar onOpenChange={onUsageOpenChange} />
 	</div>
 
 	<!-- Right group (desktop): model · effort · ring -->
@@ -492,7 +521,7 @@
 		</div>
 
 		<!-- Context-usage ring (16px SVG arc + its popover) -->
-		<ContextUsageBar onOpenChange={(o) => { if (o) void refreshUsageLimits(true); }} />
+		<ContextUsageBar onOpenChange={onUsageOpenChange} />
 	</div>
 </div>
 

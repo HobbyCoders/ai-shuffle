@@ -20,6 +20,7 @@ Covers:
     appears in any captured log record.
 """
 
+import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -35,6 +36,85 @@ from app.core.provider_usage import (
 # ---------------------------------------------------------------------------
 # _openrouter_windows_and_credits
 # ---------------------------------------------------------------------------
+
+class TestRefreshScheduling:
+    @pytest.mark.asyncio
+    async def test_shared_task_is_not_cancelled_by_a_waiter(self):
+        monitor = ProviderUsageMonitor()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def poll():
+            entered.set()
+            await release.wait()
+
+        with patch.object(monitor, "_poll_providers", new=AsyncMock(side_effect=poll)) as impl:
+            first = monitor.request_refresh()
+            await asyncio.wait_for(entered.wait(), 1)
+            assert monitor.request_refresh(force=True) is first
+            waiter = asyncio.create_task(monitor.poll_once())
+            await asyncio.sleep(0)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            assert monitor.refreshing
+            release.set()
+            await first
+            assert not monitor.refreshing
+            assert monitor.request_refresh() is None
+            impl.assert_awaited_once()
+            await monitor.poll_once()
+            assert impl.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_failure_finishes_and_is_throttled(self):
+        monitor = ProviderUsageMonitor()
+        with patch.object(monitor, "_poll_providers", new=AsyncMock(side_effect=RuntimeError)):
+            await monitor.poll_once()
+        assert not monitor.refreshing
+        assert monitor.request_refresh() is None
+
+    @pytest.mark.asyncio
+    async def test_provider_jobs_are_concurrent_and_bounded(self):
+        monitor = ProviderUsageMonitor()
+        entered, release = asyncio.Event(), asyncio.Event()
+        active = 0
+        peak = 0
+
+        async def poll(row):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            if active == 4:
+                entered.set()
+            await release.wait()
+            active -= 1
+
+        rows = [{"id": str(i), "provider_type": "grok"} for i in range(8)]
+        with patch("app.db.database.get_enabled_model_providers", return_value=rows), patch.object(
+            monitor, "_poll_grok_provider", new=AsyncMock(side_effect=poll)
+        ), patch.object(monitor, "_poll_fal", new=AsyncMock()):
+            task = monitor.request_refresh()
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+            finally:
+                release.set()
+                await task
+        assert peak == 4
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("success", [True, False])
+    async def test_only_current_api_success_suppresses_oauth(self, success):
+        monitor = ProviderUsageMonitor()
+        rows = [{"id": "api", "provider_type": "openai", "base_url": "https://api.openai.com"},
+                {"id": "sub", "provider_type": "chatgpt"}]
+        with patch("app.db.database.get_enabled_model_providers", return_value=rows), patch.object(
+            monitor, "_poll_openai_provider", new=AsyncMock(return_value=success)
+        ), patch.object(monitor, "_poll_openai_via_chatgpt", new=AsyncMock()) as fallback, patch.object(
+            monitor, "_poll_fal", new=AsyncMock()
+        ):
+            await monitor.poll_once()
+        assert fallback.await_count == (0 if success else 1)
+
 
 class TestOpenrouterWindowsAndCredits:
     def test_non_null_limit_produces_one_credit_limit_window(self):
