@@ -9,6 +9,18 @@ import app.core.task_dispatch as td
 from app.core.provider_agent import WorkerOutcome
 
 
+def test_voice_worker_provider_uses_selected_model_not_realtime_provider():
+    row = {"mode": "voice", "provider_id": "realtime", "model": "prov:worker:gpt-test"}
+    assert td._caller_provider_id(row, None) == "worker"
+    row["model"] = "sonnet"
+    assert td._caller_provider_id(row, None) is None
+
+
+def test_voice_file_worker_prefers_live_model_over_last_launch():
+    row = {"mode": "voice", "model": "sonnet", "launched_model": "opus"}
+    assert td._file_agent_model_id(row, "default", None) == ("sonnet", None)
+
+
 @pytest.fixture()
 def agents(mock_db):
     from app.db import database

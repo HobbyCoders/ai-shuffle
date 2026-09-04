@@ -9,6 +9,8 @@ import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { ExecutionMode } from '../types';
 import { api } from '$lib/api/client';
+import { isCallActiveFor, sendVoiceText } from '$lib/services/voiceCall';
+import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
@@ -232,6 +234,21 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			}
 
 			const _state = getState();
+			if (_state.sessionId && isCallActiveFor(_state.sessionId)) {
+				try {
+					await persistVoiceContext(_state.sessionId, voiceContextFor(_state));
+				} catch {
+					update(s => s.sessionId === _state.sessionId ? { ...s, error: 'Could not save voice execution settings. Your message has been kept.' } : s);
+					return false;
+				}
+				const paths = options?.pendingUploadPaths;
+				if (paths?.length) {
+					prompt += '\n\nAttached file references (ask a worker to inspect these files):\n' + paths.map(path => JSON.stringify(path)).join('\n');
+				}
+				const sent = sendVoiceText(_state.sessionId, prompt);
+				if (!sent) update(s => s.sessionId === _state.sessionId ? { ...s, error: 'Voice call is not ready. Keep your message and try again when connected.' } : s);
+				return sent;
+			}
 
 			// A first send from an unbound compose spends the new-chat compose
 			// state. Invalidate the shared '__new_chat__' ephemeral entry here —

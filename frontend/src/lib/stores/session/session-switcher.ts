@@ -181,7 +181,7 @@ function newChatModeState(
 	ephemeral: { project: string; projectV2Id: string | null } | null | undefined,
 	fallbackProject: string,
 ): NewChatModeSlice {
-	if (mode !== 'code') {
+	if (mode === 'chat') {
 		return {
 			project: '',
 			projectV2Id: null,
@@ -859,7 +859,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// mode) and inheriting 'bypassPermissions' would loosen a lane whose
 			// whole premise is a hard ceiling. null means "no session binding",
 			// so the backend settles it — and pins it for chat besides.
-			permissionModeOverride: mode === 'code' ? getPersistedPermissionMode() : null,
+			permissionModeOverride: mode !== 'chat' ? getPersistedPermissionMode() : null,
 			effortLevelOverride: getPersistedEffort(),
 			fastMode: getPersistedFastMode(),
 			contextWindowChoice: getPersistedContextWindowChoice(),

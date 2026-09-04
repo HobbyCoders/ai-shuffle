@@ -147,13 +147,13 @@
 	const permissionValue = $derived($activeSession.permissionModeOverride ?? 'default');
 	// Chat and voice are projectless, web-only lanes with a fixed tool surface
 	// (decided server-side), so there is no access to grant.
-	const isCodeLane = $derived($activeSession.mode === 'code');
+	const isCodeLane = $derived($activeSession.mode !== 'chat'); // voice shares code controls
 	// Attach survives into the chat lane. Its uploads skip the project endpoint
 	// for a shared workspace directory, and the chat ceiling carries a `Read`
 	// scoped to that directory, so an attached file is genuinely readable there.
 	// Voice is the one lane with no upload path — the call surface has no
 	// composer to attach into.
-	const showAttach = $derived($activeSession.mode !== 'voice');
+	const showAttach = true;
 
 	// Flipping lanes (or opening a chat session) unmounts the permission trigger.
 	// `openPopover` would stay pinned to it, and `handleDocumentClick` bails when

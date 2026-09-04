@@ -58,9 +58,9 @@ describe('ChatView — lane heroes', () => {
 });
 
 describe('ChatView — the composer gate', () => {
-	it('withholds the composer only for an UNBOUND voice surface', () => {
+	it('keeps the composer for an unbound voice surface', () => {
 		expect(codeOnly).toMatch(
-			/const showComposer = \$derived\(!\(surfaceMode === 'voice' && !\$activeSession\.sessionId\)\)/
+			/const showComposer = true/
 		);
 	});
 
@@ -74,7 +74,7 @@ describe('ChatView — the composer gate', () => {
 	});
 
 	it('still hands the composer slot to the call dock during a live call', () => {
-		expect(codeOnly).toMatch(/<VoiceCallPanel sessionId=\{\$activeSession\.sessionId\} \/>/);
+		expect(codeOnly).toMatch(/<VoiceCallPanel sessionId=\{\$activeSession\.sessionId\} compact \/>/);
 	});
 });
 

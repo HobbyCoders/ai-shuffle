@@ -450,6 +450,109 @@ class TestCreateVoiceSession:
         assert row["mode"] == "voice"
         assert row["provider_id"] == "prov-openai"
         assert row["title"] == "Voice session"
+        assert row["is_active"] in (True, 1)
+
+    def test_creation_persists_normal_session_context(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        _enable_voice()
+        _make_provider()
+        _install_mock_transport(monkeypatch, _secret_handler())
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={
+            "model": "gpt-5.6", "effort": "high", "permission_mode": "ask",
+            "context_window": 12345, "fast": True, "execution_mode": "local",
+        })
+        assert resp.status_code == 200, resp.text
+        row = db.get_session(resp.json()["session_id"])
+        assert row["model"] == "gpt-5.6"
+        assert row["effort"] == "high"
+        assert row["permission_mode"] == "ask"
+        assert row["context_window"] == 12345
+        assert row["fast"] in (True, 1)
+
+    def test_v2_existing_branch_is_provisioned_and_voice_bound(
+        self, authenticated_client, mock_db, monkeypatch, tmp_path
+    ):
+        from app.core import checkout_manager, project_resolver
+
+        _enable_voice()
+        _make_provider()
+        _install_mock_transport(monkeypatch, _secret_handler())
+        project_path = tmp_path / "repo"
+        project_path.mkdir()
+        db.create_project("proj-v2", "Repo", None, str(project_path))
+        pv2 = project_resolver.resolve_project_v2({"project_id": "proj-v2"})
+        checkout_path = tmp_path / "checkout"
+        checkout_path.mkdir()
+        prepared = []
+        monkeypatch.setattr(
+            checkout_manager,
+            "ensure_checkout",
+            lambda row, branch, **kwargs: prepared.append((row, branch, kwargs))
+            or str(checkout_path),
+        )
+
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={
+            "project_id": "proj-v2",
+            "project_v2_id": pv2["id"],
+            "execution_mode": "worktree",
+            "worktree_branch": "feature/voice",
+            "base_branch": "main",
+            "model": "gpt-5.6",
+        })
+        assert resp.status_code == 200, resp.text
+        row = db.get_session(resp.json()["session_id"])
+        assert row["mode"] == "voice"
+        assert row["is_active"] in (True, 1)
+        assert row["project_v2_id"] == pv2["id"]
+        assert row["branch"] == "feature/voice"
+        assert row["worktree_id"] is None
+        assert row["model"] == "gpt-5.6"
+        assert prepared[0][1] == "feature/voice"
+        assert prepared[0][2]["create_new_branch"] is False
+
+    def test_v2_auto_branch_and_runner_are_forwarded(
+        self, authenticated_client, mock_db, monkeypatch, tmp_path
+    ):
+        from app.api.sessions_helpers import WorktreeSessionResponse
+        from app.core import project_resolver
+        import app.api.sessions_worktree as worktree_api
+
+        _enable_voice()
+        _make_provider()
+        _install_mock_transport(monkeypatch, _secret_handler())
+        project_path = tmp_path / "repo"
+        project_path.mkdir()
+        db.create_project("proj-auto", "Repo", None, str(project_path))
+        pv2 = project_resolver.resolve_project_v2({"project_id": "proj-auto"})
+        captured = {}
+
+        async def _create(request, body, project, api_user_id, pv2_row, **kwargs):
+            captured.update(body=body, project=project, pv2=pv2_row, kwargs=kwargs)
+            return WorktreeSessionResponse(
+                session_id="voice-auto", branch_name=body.branch_name,
+                base_branch=body.base_branch, status="active",
+            )
+
+        monkeypatch.setattr(worktree_api, "_create_v2_branch_session", _create)
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={
+            "project_id": "proj-auto",
+            "project_v2_id": pv2["id"],
+            "execution_mode": "worktree",
+            "base_branch": "develop",
+            "target_instance_id": "runner-selected",
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["session_id"] == "voice-auto"
+        body = captured["body"]
+        assert body.branch_name.startswith("voice/")
+        assert body.create_new_branch is True
+        assert body.base_branch == "develop"
+        assert body.target_instance_id == "runner-selected"
+        overrides = captured["kwargs"]["session_create_overrides"]
+        assert overrides["mode"] == "voice"
+        assert overrides["is_active"] is True
+        assert overrides["provider_id"] == "prov-openai"
 
     def test_command_mode_creates_a_hidden_session(
         self, authenticated_client, mock_db, monkeypatch
@@ -709,13 +812,13 @@ class TestVoiceCallAttach:
         )
         assert resp.status_code == 200, resp.text
         names = self._tool_names(sidebands[0])
-        # Dispatch tools lead; the app-config surface follows; no file tools.
-        assert names[:6] == [
+        # Dispatch tools lead; the two hardened web tools follow; no code tools.
+        assert names[:8] == [
             "dispatch_agent", "check_agent", "list_agents", "message_agent",
-            "stop_agent", "respond_approval",
+            "stop_agent", "respond_approval", "WebSearch", "WebFetch",
         ]
         assert {"createAutomation", "listHooks", "createProfile", "listConnectors"} <= set(names)
-        assert not any(n in {"Edit", "Write", "Bash", "Read"} for n in names)
+        assert not any(n in {"Edit", "Write", "Bash", "Read", "Grep", "Glob"} for n in names)
         instructions = sidebands[0].sent[0]["session"]["instructions"]
         assert instructions.startswith(voice_bridge.VOICE_INSTRUCTIONS)
         assert voice_bridge.APP_TOOLS_INSTRUCTIONS in instructions
@@ -748,7 +851,10 @@ class TestVoiceCallAttach:
         authenticated_client.post(
             f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
         )
-        assert len(self._tool_names(sidebands[0])) == 6
+        assert self._tool_names(sidebands[0]) == [
+            "dispatch_agent", "check_agent", "list_agents", "message_agent",
+            "stop_agent", "respond_approval", "WebSearch", "WebFetch",
+        ]
         assert voice_bridge.APP_TOOLS_INSTRUCTIONS not in sidebands[0].sent[0]["session"]["instructions"]
         authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
 
@@ -762,8 +868,26 @@ class TestVoiceCallAttach:
         authenticated_client.post(
             f"{VOICE_ROOT}/sessions/voice-api-user/call", json={"call_id": "rtc_2"}
         )
-        assert len(self._tool_names(sidebands[1])) == 6
+        assert self._tool_names(sidebands[1]) == [
+            "dispatch_agent", "check_agent", "list_agents", "message_agent",
+            "stop_agent", "respond_approval", "WebSearch", "WebFetch",
+        ]
         authenticated_client.post(f"{VOICE_ROOT}/sessions/voice-api-user/hangup")
+
+    def test_native_tools_cannot_shadow_server_web_tools(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        _enable_voice()
+        _make_provider()
+        _mk_voice_session()
+        resp = authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={
+                "call_id": "rtc_1",
+                "client_tools": [{"name": "WebFetch", "description": "shadow"}],
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert "collides with a server tool" in resp.json()["detail"]
 
     def test_native_attach_gets_the_mode_appendix_and_no_greeting(
         self, authenticated_client, mock_db, sidebands

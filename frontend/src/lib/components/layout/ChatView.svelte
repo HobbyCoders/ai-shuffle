@@ -1,28 +1,7 @@
 <script lang="ts">
 	/**
-	 * ChatView - Full-panel chat experience
-	 *
-	 * Renders the chat UI directly in the main panel.
-	 * Reads from the activeSession store — no props needed.
-	 *
-	 * Two states:
-	 * - Empty: a per-lane hero + ChatInput centered (the ChatInput's
-	 *   ContextPillBar hosts the Local/Worktree execution-mode toggle above it)
-	 * - Active: MessageArea + ChatInput at bottom
-	 *
-	 * The empty state's hero depends on which LANE the surface belongs to
-	 * (`$activeSession.mode`): code gets the workspace picker, chat gets a
-	 * projectless conversation hero, voice gets a start-a-call hero. Only the hero
-	 * differs — an active transcript looks the same in every lane, because a
-	 * session's messages are a session's messages regardless of how it was
-	 * started. The one exception is the composer, which the brand-new voice lane
-	 * withholds; see `showComposer` below.
-	 *
-	 * Plus one in-place substitution (ruling VM18): while a voice call is up on
-	 * the session being VIEWED, the composer slot hosts the call controls instead
-	 * of the text input. Voice is not a separate surface — the transcript above is
-	 * unchanged, and any terminal call status hands the composer straight back.
-	 */
+	/** Chat surface for code, chat and voice. Lane-specific heroes share one
+	 * persistent editor. A live voice call adds compact controls alongside it. */
 	import { onDestroy, untrack } from 'svelte';
 	import { activeSession, activeWsConnected } from '$lib/stores/active-session';
 	import { notify } from '$lib/stores/notifications';
@@ -83,19 +62,8 @@
 	// lands.
 	const showEmptyHero = $derived(isEmptyState && !voiceCallActive);
 
-	// The ONE sanctioned exception to the always-mounted .input-slot rule (#665).
-	// That rule exists to protect the ChatInput subtree (Tiptap draft, open
-	// popovers, VoiceRecorder, dropdowns) across the empty → active flip WITHIN a
-	// session; a lane switch is a navigation between surfaces, not that flip, so
-	// unmounting here costs nothing the switch wasn't already going to cost.
-	//
-	// On the voice lane's brand-new screen the hero owns the only action — the
-	// user starts a call, they do not type — so a composer there would offer a
-	// text send with no session behind it. Every other case keeps the composer: an
-	// EXISTING voice session still needs it for its resume-call button and typed
-	// follow-ups, and a live call still swaps it for the call dock (VM18) rather
-	// than removing it.
-	const showComposer = $derived(!(surfaceMode === 'voice' && !$activeSession.sessionId));
+	// Keep the editor mounted through call transitions so drafts and file chips survive.
+	const showComposer = true;
 
 	// VM23 (user directive, 2026-08-15): while a call is live, worker permission
 	// requests are the VOICE agent's to relay — it reads them out and answers via
@@ -312,14 +280,9 @@
 	{#if showComposer}
 		<div class="input-slot" class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
 			{#if voiceCallActive && $activeSession.sessionId}
-				<!-- VM18: the call OWNS the composer slot while it is up. The ChatInput is
-				     unmounted here, not hidden — its draft is persisted on destroy (store
-				     + sessionStorage) and re-seeded on remount, which is the same
-				     round-trip a session switch already performs. -->
-				<VoiceCallPanel sessionId={$activeSession.sessionId} />
-			{:else}
-				<ChatInput compact={!showEmptyHero} />
+				<VoiceCallPanel sessionId={$activeSession.sessionId} compact />
 			{/if}
+			<ChatInput compact={!showEmptyHero} />
 		</div>
 	{/if}
 

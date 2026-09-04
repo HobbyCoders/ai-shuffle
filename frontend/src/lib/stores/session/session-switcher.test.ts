@@ -736,7 +736,7 @@ describe('session mode lanes', () => {
 		expect(getState().worktreeIntent).toBe('worktree');
 	});
 
-	it('does not carry a code-lane permission mode into chat or voice', () => {
+	it('does not carry a code-lane permission mode into chat', () => {
 		// The chat and voice composers render no tool-access control, so an
 		// inherited 'plan' would be unchangeable for the life of the session —
 		// and undischargeable, the plan-exit tool not being on the chat ceiling.
@@ -750,7 +750,10 @@ describe('session mode lanes', () => {
 		expect(getState().permissionModeOverride).toBeNull();
 	});
 
-	it('keeps restoring the permission mode for a code compose', () => {
+	it.each(['code', 'voice'] as const)('restores project, worktree and permission for %s compose', (mode) => {
+		appMode.set(mode);
+		localStorage.setItem('aihub_executionMode', 'worktree');
+		localStorage.setItem('aihub_selectedProject', 'proj-A');
 		localStorage.setItem('aihub_lastPermissionMode', 'plan');
 		const { switcher, getState } = makeSwitcher(fullState());
 

@@ -876,6 +876,7 @@ def set_session_run_binding(
     permission_mode: Optional[str] = None,
     context_window: Optional[int] = None,
     fast: Optional[bool] = None,
+    preserve_provider: bool = False,
 ) -> None:
     """Persist the run binding a turn actually used onto its session (v79).
 
@@ -890,7 +891,9 @@ def set_session_run_binding(
     performs (see ``query_options.build_options_from_profile``) so the row never
     disagrees with the leg the turn ran on: a ``prov:<providerId>:<modelId>``
     composite binds that provider, and a plain native-Claude pick the bound
-    provider does not curate clears the binding back to native.
+    provider does not curate clears the binding back to native. Voice context
+    updates pass ``preserve_provider`` because that provider funds Realtime,
+    while the model binding selects a worker.
 
     ``None`` leaves a field alone; only non-empty values are written (a turn
     that sent no override must not erase the binding). ``fast`` is the one
@@ -906,10 +909,11 @@ def set_session_run_binding(
     if clean_model:
         updates.append(f"model = {_ph}")
         values.append(clean_model)
-        rebound_provider, rebind = _provider_for_model_pick(session_id, clean_model)
-        if rebind:
-            updates.append(f"provider_id = {_ph}")
-            values.append(rebound_provider)
+        if not preserve_provider:
+            rebound_provider, rebind = _provider_for_model_pick(session_id, clean_model)
+            if rebind:
+                updates.append(f"provider_id = {_ph}")
+                values.append(rebound_provider)
     clean_effort = (effort or "").strip()
     if clean_effort:
         updates.append(f"effort = {_ph}")

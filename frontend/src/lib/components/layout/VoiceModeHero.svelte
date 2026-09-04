@@ -51,8 +51,7 @@
 	<h1 class="hero-heading">Talk it through</h1>
 
 	<p class="hero-subline">
-		A spoken conversation with the voice agent. It can dispatch work to your agents while you talk,
-		and the transcript lands in this session as you go.
+		Choose your project and tools below. Type a message or start a call — both stay in this conversation.
 	</p>
 
 	<div class="hero-action">

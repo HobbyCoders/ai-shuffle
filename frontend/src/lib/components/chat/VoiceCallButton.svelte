@@ -19,7 +19,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { sessions } from '$lib/stores/app-data.svelte';
 	import { isVoiceEnabled } from '$lib/api/voice';
-	import { startCallForSession } from '$lib/services/voiceCall';
+	import { startCallForSession, voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
 
 	interface Props {
 		disabled?: boolean;
@@ -34,7 +34,7 @@
 		$sessions.find((s) => s.id === $activeSession.sessionId) ?? null
 	);
 	const isVoiceSession = $derived(sessionRow?.mode === 'voice');
-	const show = $derived(voiceEnabled && isVoiceSession);
+	const show = $derived(voiceEnabled && isVoiceSession && !isCallSurfaceActive($voiceCallState, $activeSession.sessionId));
 
 	onMount(async () => {
 		voiceEnabled = await isVoiceEnabled();

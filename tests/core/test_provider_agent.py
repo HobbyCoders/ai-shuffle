@@ -24,6 +24,18 @@ from app.core import provider_agent as pa
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
 
+def test_voice_permission_binding_wins_over_historical_turn(monkeypatch):
+    from app.db import turns
+
+    monkeypatch.setattr(turns, "get_latest_turn", lambda _: {
+        "overrides": {"permission_mode": "bypassPermissions"}
+    })
+    caller = {"id": "voice-owner", "mode": "voice", "permission_mode": "default"}
+    assert pa._caller_permission_mode(caller) == "default"
+    caller["mode"] = "code"
+    assert pa._caller_permission_mode(caller) == "bypassPermissions"
+
+
 def _provider(
     provider_id="prov-openai",
     name="My OpenAI",
@@ -429,6 +441,7 @@ def dispatch_env(monkeypatch, tmp_path):
 
     created = {}
     updates = []
+    branch_updates = []
     terminal_frames = []
     fake_tm = _FakeTurnManager()
     checkout = tmp_path / "repo" / "feat-x"
@@ -457,6 +470,9 @@ def dispatch_env(monkeypatch, tmp_path):
         lambda sid: {
             "id": sid,
             "project_id": "proj-1",
+            "project_v2_id": "pv2-1",
+            "branch": "feat/x-v2",
+            "instance_id": "runner-1",
             "worktree_id": "wt-1",
             "worktree_branch": "feat/x",
             "worktree_path": str(checkout),
@@ -468,6 +484,13 @@ def dispatch_env(monkeypatch, tmp_path):
         return {"id": kwargs.get("session_id")}
 
     monkeypatch.setattr(db, "create_session", _create_session)
+    monkeypatch.setattr(
+        db,
+        "set_session_branch",
+        lambda session_id, branch, project_v2_id=None: branch_updates.append(
+            (session_id, branch, project_v2_id)
+        ),
+    )
     monkeypatch.setattr(
         project_resolver, "resolve_existing_cwd", lambda row: str(checkout)
     )
@@ -484,6 +507,7 @@ def dispatch_env(monkeypatch, tmp_path):
         tm = fake_tm
         create_kwargs = created
         status_updates = updates
+        branch_writes = branch_updates
         wakes = terminal_frames
         cwd = str(checkout)
         report_dir = checkout / ".fluid" / "task-reports"
@@ -535,9 +559,28 @@ class TestDispatchWorker:
         assert created["parent_session_id"] == "parent-1"
         assert created["profile_id"] == "default"
         assert created["project_id"] == "proj-1"
+        assert created["project_v2_id"] == "pv2-1"
+        assert created["target_instance_id"] == "runner-1"
         assert created["worktree_id"] == "wt-1"
+        assert dispatch_env.branch_writes == [
+            (outcome.session_id, "feat/x-v2", "pv2-1")
+        ]
         assert created["session_id"] == outcome.session_id
         assert created["hidden"] is True
+
+    def test_voice_worker_inherits_live_execution_options(self, dispatch_env, monkeypatch):
+        from app.db import database
+
+        original = database.get_session
+        monkeypatch.setattr(database, "get_session", lambda sid: {
+            **original(sid), "mode": "voice", "effort": "high",
+            "context_window": 200000, "fast": False,
+        })
+        _dispatch()
+        overrides = dispatch_env.tm.submitted[0]["overrides"]
+        assert overrides["effort"] == "high"
+        assert overrides["context_window"] == 200000
+        assert overrides["fast"] is False
 
     def test_turn_carries_provider_and_model_overrides(self, dispatch_env):
         _dispatch()

@@ -1559,6 +1559,44 @@ async def record_voice_exchange(
         return None
 
 
+async def record_voice_tool_exchange(
+    session_id: str,
+    call_id: str,
+    name: str,
+    tool_input: Dict[str, Any],
+    result: str,
+    *,
+    is_error: bool = False,
+) -> Optional[str]:
+    """Persist a voice research result using the existing tool-card contract."""
+    try:
+        turn_id = f"voice-tool-{uuid.uuid4()}"
+        rows = [
+            _build_event(contract.TurnStarted, session_id, turn_id=turn_id),
+            _build_event(
+                contract.ToolUse, session_id, turn_id=turn_id,
+                tool_use_id=call_id, name=name, input=tool_input,
+            ),
+            _build_event(
+                contract.ToolResult, session_id, turn_id=turn_id,
+                tool_use_id=call_id, is_error=is_error,
+                content_preview=_truncate(result),
+            ),
+            _build_event(
+                contract.TurnCompleted, session_id, turn_id=turn_id,
+                stop_reason="tool_result",
+            ),
+        ]
+        await _append_unfenced(session_id, rows)
+        return turn_id
+    except Exception:
+        logger.warning(
+            "[TurnRecorder] voice tool persistence failed for %s",
+            session_id, exc_info=True,
+        )
+        return None
+
+
 async def record_task_start_frame(
     session_id: str,
     task_id: Optional[str],

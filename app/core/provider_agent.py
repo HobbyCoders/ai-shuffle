@@ -673,7 +673,8 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
     approval prompts from its workers. Ruling VM22 (user directive,
     2026-08-15): workers inherit the parent's permission level.
 
-    Resolution mirrors what actually governed the caller:
+    Voice uses its live session binding rather than a historical typed turn.
+    For other sessions, resolution mirrors what actually governed the caller:
 
     1. the caller's most recent turn's ``overrides.permission_mode`` — the
        composer's per-session selection, which the FE sends with every query;
@@ -693,7 +694,7 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
 
     mode: Optional[str] = None
     session_id = caller_row.get("id")
-    if session_id:
+    if session_id and caller_row.get("mode") != "voice":
         try:
             from app.db import turns as turns_db
 
@@ -1165,6 +1166,9 @@ async def dispatch_worker(
             parent_row = None
 
         project_id = (parent_row or {}).get("project_id")
+        project_v2_id = (parent_row or {}).get("project_v2_id")
+        branch = (parent_row or {}).get("branch")
+        target_instance_id = (parent_row or {}).get("instance_id")
         worktree_id = (parent_row or {}).get("worktree_id")
         worktree_branch = (parent_row or {}).get("worktree_branch")
         worktree_path = (parent_row or {}).get("worktree_path")
@@ -1180,6 +1184,8 @@ async def dispatch_worker(
                 session_id=worker_session_id,
                 profile_id=profile_id,
                 project_id=project_id,
+                project_v2_id=project_v2_id,
+                target_instance_id=target_instance_id,
                 title=title,
                 parent_session_id=parent_session_id,
                 worktree_id=worktree_id,
@@ -1195,6 +1201,10 @@ async def dispatch_worker(
                 # one-shot backfill.
                 is_worker=True,
             )
+            if branch:
+                database.set_session_branch(
+                    worker_session_id, branch, project_v2_id
+                )
         except Exception as exc:  # noqa: BLE001
             logger.exception("ProviderAgent: worker session creation failed")
             create_error = exc
@@ -1254,6 +1264,11 @@ async def dispatch_worker(
     inherited_mode = _caller_permission_mode(parent_row)
     if inherited_mode:
         overrides["permission_mode"] = inherited_mode
+    if (parent_row or {}).get("mode") == "voice":
+        for key in ("effort", "context_window", "fast"):
+            value = parent_row.get(key)
+            if value is not None:
+                overrides[key] = value
     # A role definition the worker's profile does not carry — today: an agent
     # defined in a ``.claude/agents`` markdown file or a plugin, dispatched on
     # the caller's profile because it has no ``agents`` row of its own (ruling

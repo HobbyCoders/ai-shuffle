@@ -44,10 +44,7 @@
 		fastSupported?: boolean;
 		fastEnabled?: boolean;
 		onToggleFast?: () => void;
-		/** Whether this composer is in the code lane. Chat and voice sessions have
-		 *  no project to set up and a fixed web-only tool surface, so the sheet
-		 *  drops the chat-setup and tool-access sections entirely rather than
-		 *  showing headings above controls that cannot apply. */
+		/** Code and voice share project setup and tool access; chat omits them. */
 		showCodeControls?: boolean;
 		permissionOptions: ControlOption[];
 		permissionValue: string | null;

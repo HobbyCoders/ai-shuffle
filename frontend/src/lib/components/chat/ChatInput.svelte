@@ -19,6 +19,7 @@
 	import { tick, onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
+	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import { anyCredential } from '$lib/stores/auth.svelte';
@@ -67,20 +68,27 @@
 	// compose screen.
 	const composerMode = $derived($activeSession.mode);
 
+	$effect(() => {
+		const state = $activeSession;
+		if (state.mode !== 'voice' || !state.sessionId || state.isRestoringSession) return;
+		const owner = state.sessionId;
+		void persistVoiceContext(owner, voiceContextFor(state)).catch(() => {
+			if (get(activeSession).sessionId === owner) {
+				notify('Could not save voice execution settings. Try again before requesting work.', { severity: 'error' });
+			}
+		});
+	});
+
 	// The invitation has to match the lane. Code mode dispatches work against a
 	// repository; chat and voice are plain conversations with nothing to point
 	// work at, so promising "a task" there would be a lie.
 	const composerPlaceholder = $derived(
-		composerMode === 'code' ? 'Describe a task or ask a question' : 'Ask anything'
+		composerMode !== 'chat' ? 'Describe a task or ask a question' : 'Ask anything'
 	);
 
-	// Attach and drop are live in the code AND chat lanes; only voice has no
-	// composer upload path at all. Chat uploads bypass the project endpoint (it
-	// has no project) and land in a shared workspace directory that the chat
-	// tool ceiling's `Read` is scoped to — see `chat_uploads_dir()` server-side.
-	// This one flag drives all three entry points (button, drag overlay, drop);
-	// splitting them is how you get a picker whose drop counterpart is dead.
-	const attachSupported = $derived(composerMode !== 'voice');
+	// Voice passes local file references to its worker rather than uploading
+	// binary data to the Realtime text channel.
+	const attachSupported = true;
 
 	// Resolve the draft to seed the composer with. The in-memory store draft is
 	// authoritative, but it's wiped by a full page reload (e.g. a PWA update), so
@@ -508,6 +516,8 @@
 		// Snapshot state needed to restore the input on failure. Capturing BEFORE
 		// clearing means a failed interrupt / dropped WS doesn't lose the user's
 		// typed prompt or uploaded attachments — we repopulate the editor.
+		const sendingSessionId = $activeSession.sessionId;
+		const priorDraftJSON = getDraftJSON();
 		const priorInputValue = inputValue;
 		const priorUploadedFiles = uploadedFiles;
 
@@ -522,10 +532,14 @@
 		saveDraftImmediately('');
 
 		const restoreOnFailure = () => {
+			if ($activeSession.sessionId !== sendingSessionId) {
+				writeDraft(sendingSessionId, priorDraftJSON);
+				return;
+			}
 			inputValue = priorInputValue;
 			uploadedFiles = priorUploadedFiles;
-			editorRef?.setContent(finalPrompt);
-			saveDraftImmediately(finalPrompt);
+			editorRef?.setContent(priorDraftJSON);
+			saveDraftImmediately(priorDraftJSON);
 			messageSent = false;
 		};
 
@@ -553,7 +567,7 @@
 				pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : undefined,
 			);
 			if (sent === false) restoreOnFailure();
-			else collapseMobileComposer();
+			else if ($activeSession.sessionId === sendingSessionId) collapseMobileComposer();
 		} catch (err) {
 			console.error('[ChatInput] sendMessage threw', err);
 			restoreOnFailure();
@@ -873,7 +887,7 @@
 			     desktop: chat and voice sessions bind no repository, worktree or
 			     agent, and a row of inapplicable selectors would only invite the
 			     user to configure something that cannot take effect. -->
-			{#if composerMode === 'code'}
+			{#if composerMode !== 'chat'}
 				<div class="context-pill-row"><ContextPillBar /></div>
 			{/if}
 

@@ -178,11 +178,11 @@ describe('ChatInput mobile collapsed surface', () => {
 		expect(chatInput).toContain('armExpandPointerGuard()');
 	});
 
-	it('renders the context chip row only in the code lane', () => {
+	it('renders the context chip row in code and voice lanes', () => {
 		// Chat and voice sessions bind no repository, worktree or agent, so the
 		// whole chip row goes rather than showing selectors that cannot apply.
 		expect(chatInput).toMatch(
-			/\{#if composerMode === 'code'\}\s*<div class="context-pill-row">/
+			/\{#if composerMode !== 'chat'\}\s*<div class="context-pill-row">/
 		);
 	});
 
@@ -209,7 +209,7 @@ describe('ChatInput attachments per lane', () => {
 	it('gates attach, the drag overlay and the drop on the same lane flag', () => {
 		// Three entry points; miss one and the composer offers a picker whose drop
 		// counterpart is dead (or vice versa). Only voice has no upload path.
-		expect(chatInput).toMatch(/const attachSupported = \$derived\(composerMode !== 'voice'\)/);
+		expect(chatInput).toContain('const attachSupported = true;');
 		const gates = chatInput.match(/if \(!attachSupported\) return;/g) ?? [];
 		expect(gates).toHaveLength(2);
 		expect(chatInput).not.toMatch(/if \(composerMode !== 'code'\) return;/);

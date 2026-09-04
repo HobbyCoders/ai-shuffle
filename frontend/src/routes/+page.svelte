@@ -31,6 +31,7 @@
 
 	// Layout components
 	import AppLayout from '$lib/components/layout/AppLayout.svelte';
+	import ActiveVoiceCallBar from '$lib/components/voice/ActiveVoiceCallBar.svelte';
 
 	// Modals
 	import KeyboardShortcutsModal from '$lib/components/KeyboardShortcutsModal.svelte';
@@ -469,6 +470,7 @@
 		<p class="text-muted-foreground">Redirecting to login...</p>
 	</div>
 {:else}
+	<ActiveVoiceCallBar onReturn={handleOpenSession} />
 	<!-- Main Layout: Sidebar + Main Panel -->
 	<AppLayout
 		isAdmin={$isAdmin}

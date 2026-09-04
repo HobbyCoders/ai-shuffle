@@ -8,7 +8,7 @@ included in the main sessions router for backward compatibility.
 import shutil
 import uuid
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Depends, status, Request
 
@@ -27,6 +27,31 @@ logger = logging.getLogger(__name__)
 
 # Sub-router — included by the main sessions router (no prefix needed)
 worktree_router = APIRouter(tags=["Sessions"])
+
+
+_SESSION_CREATE_OVERRIDE_KEYS = {
+    "title",
+    "is_active",
+    "provider_id",
+    "derive_provider_from_profile",
+    "model",
+    "effort",
+    "permission_mode",
+    "context_window",
+    "fast",
+    "mode",
+    "hidden",
+}
+
+
+def _merge_session_create_overrides(
+    base: Dict[str, Any], overrides: Optional[dict]
+) -> Dict[str, Any]:
+    """Apply presentation/run-binding overrides without allowing identity changes."""
+    unknown = set(overrides or {}) - _SESSION_CREATE_OVERRIDE_KEYS
+    if unknown:
+        raise ValueError(f"Unsupported session create overrides: {sorted(unknown)}")
+    return {**base, **(overrides or {})}
 
 
 def _migrate_uploads_to_dir(
@@ -232,6 +257,7 @@ async def _create_remote_branch_session(
     api_user_id: Optional[str],
     pv2: dict,
     target_instance_id: str,
+    session_create_overrides: Optional[dict] = None,
 ) -> WorktreeSessionResponse:
     """Create a branch session that will materialize on ANOTHER install (D4).
 
@@ -286,16 +312,20 @@ async def _create_remote_branch_session(
     # 3. Create the session OWNED BY + PINNED TO the target (D1) and bind it to
     #    the branch, exactly as the local path does.
     def _create() -> None:
-        database.create_session(
-            session_id=session_id,
-            profile_id=profile_id,
-            project_id=body.project_id or None,
-            project_v2_id=pv2["id"],
-            title="",
-            api_user_id=api_user_id,
-            is_active=True,
-            target_instance_id=target_instance_id,
+        create_kwargs = {
+            "session_id": session_id,
+            "profile_id": profile_id,
+            "project_id": body.project_id or None,
+            "project_v2_id": pv2["id"],
+            "title": "",
+            "api_user_id": api_user_id,
+            "is_active": True,
+            "target_instance_id": target_instance_id,
+        }
+        create_kwargs = _merge_session_create_overrides(
+            create_kwargs, session_create_overrides
         )
+        database.create_session(**create_kwargs)
         database.set_session_branch(session_id, branch_name, pv2["id"])
 
     await run_sync(_create)
@@ -370,6 +400,8 @@ async def _create_v2_branch_session(
     project: Optional[dict],
     api_user_id: Optional[str],
     pv2: Optional[dict] = None,
+    *,
+    session_create_overrides: Optional[dict] = None,
 ) -> WorktreeSessionResponse:
     """V2 branch-intake: create a branch session WITHOUT a legacy worktree row.
 
@@ -429,7 +461,12 @@ async def _create_v2_branch_session(
 
     if target_instance_id:
         return await _create_remote_branch_session(
-            body, project, api_user_id, pv2, target_instance_id
+            body,
+            project,
+            api_user_id,
+            pv2,
+            target_instance_id,
+            session_create_overrides,
         )
 
     # 2. Materialize the deterministic (project, branch) checkout. Idempotent with
@@ -468,15 +505,19 @@ async def _create_v2_branch_session(
     profile_id = _resolve_default_profile_id(project, body.profile_id)
 
     def _create() -> None:
-        database.create_session(
-            session_id=session_id,
-            profile_id=profile_id,
-            project_id=body.project_id or None,
-            project_v2_id=pv2["id"],
-            title="",
-            api_user_id=api_user_id,
-            is_active=True,
+        create_kwargs = {
+            "session_id": session_id,
+            "profile_id": profile_id,
+            "project_id": body.project_id or None,
+            "project_v2_id": pv2["id"],
+            "title": "",
+            "api_user_id": api_user_id,
+            "is_active": True,
+        }
+        create_kwargs = _merge_session_create_overrides(
+            create_kwargs, session_create_overrides
         )
+        database.create_session(**create_kwargs)
         database.set_session_branch(session_id, branch_name, pv2["id"])
 
     await run_sync(_create)

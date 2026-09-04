@@ -6,6 +6,10 @@ import { reopenWorktree } from '$lib/api/git';
 import { api } from '$lib/api/client';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
 import { pendingQueue } from './pending-queue';
+const voice = vi.hoisted(() => ({ isCallActiveFor: vi.fn(() => false), sendVoiceText: vi.fn(() => true) }));
+vi.mock('$lib/services/voiceCall', () => voice);
+const context = vi.hoisted(() => ({ persistVoiceContext: vi.fn(async () => {}), voiceContextFor: vi.fn(() => ({})) }));
+vi.mock('$lib/services/voiceExecutionContext', () => context);
 
 // message-sender pulls these from $lib/api/git at module load. Only reopenWorktree
 // is exercised here (the best-effort reopen for cleaned-up worktree sessions); the
@@ -110,6 +114,42 @@ function makeDeps(initial: ActiveSessionState) {
 
 	return { deps, wsConn, getState, internal, autoCreateWorktree, createWorktree };
 }
+
+describe('message-sender voice ownership', () => {
+	it('preserves attachment paths in the owning voice conversation', async () => {
+		voice.isCallActiveFor.mockReturnValueOnce(true);
+		const { deps, wsConn } = makeDeps(baseState({ sessionId: 'owner' }));
+		expect(await createMessageSender(deps).sendMessage('Read @report.pdf', {
+			pendingUploadPaths: ['/workspace/uploads/report.pdf'],
+		})).toBe(true);
+		expect(voice.sendVoiceText).toHaveBeenLastCalledWith('owner', expect.stringContaining('/workspace/uploads/report.pdf'));
+		expect(wsConn.send).not.toHaveBeenCalled();
+	});
+	it('keeps the draft when context persistence fails', async () => {
+		voice.isCallActiveFor.mockReturnValueOnce(true);
+		context.persistVoiceContext.mockRejectedValueOnce(new Error('offline'));
+		const { deps, getState } = makeDeps(baseState({ sessionId: 'owner' }));
+		const priorCalls = voice.sendVoiceText.mock.calls.length;
+		expect(await createMessageSender(deps).sendMessage('Keep this')).toBe(false);
+		expect(voice.sendVoiceText.mock.calls).toHaveLength(priorCalls);
+		expect(getState().error).toContain('Could not save voice execution settings');
+	});
+	it('sends typed text to the call without a competing WS query', async () => {
+		voice.isCallActiveFor.mockReturnValueOnce(true);
+		const { deps, wsConn } = makeDeps(baseState({ sessionId: 'owner', mode: 'voice' }));
+		expect(await createMessageSender(deps).sendMessage('Use this branch')).toBe(true);
+		expect(voice.sendVoiceText).toHaveBeenCalledWith('owner', 'Use this branch');
+		expect(wsConn.send).not.toHaveBeenCalled();
+	});
+	it('returns false while connecting so the composer restores its draft', async () => {
+		voice.isCallActiveFor.mockReturnValueOnce(true);
+		voice.sendVoiceText.mockReturnValueOnce(false);
+		const { deps, wsConn, getState } = makeDeps(baseState({ sessionId: 'owner' }));
+		expect(await createMessageSender(deps).sendMessage('Keep my draft')).toBe(false);
+		expect(getState().error).toContain('Voice call is not ready');
+		expect(wsConn.send).not.toHaveBeenCalled();
+	});
+});
 
 describe('message-sender worktree send backstop', () => {
 	it('suppresses the send to main when worktree creation is still in flight', async () => {

@@ -1,35 +1,6 @@
 <script lang="ts">
-	/**
-	 * VoiceCallPanel — the call surface for a LIVE voice call (VW2, reshaped by
-	 * ruling VM18).
-	 *
-	 * VM18 (user directive, 2026-08-14): voice is NOT a separate UI. This panel
-	 * lives in the CHAT COMPOSER'S SLOT and only while a call is up — it replaces
-	 * the text input in place, and the moment the call ends (hangup, error, cap)
-	 * the normal composer comes straight back. The transcript above is untouched
-	 * throughout: the panel is the LIVE layer, the feed is the durable one (ruling
-	 * VM9 — the backend writes the transcript, not us).
-	 *
-	 * The parent (`ChatView`) owns the gate — it mounts this only when
-	 * `isCallSurfaceActive(state, activeSessionId)`, so there is deliberately no
-	 * "no call running" / "Start call" state here any more. Starting (or
-	 * restarting) a call is the composer's VoiceCallButton (VM19), next to the
-	 * STT mic and send buttons.
-	 *
-	 * VM20 (user directive, 2026-08-15): NO live captions here. Voice mode uses
-	 * the chat UI — the transcript already renders in the conversation feed
-	 * above (backend-written, VM9), so the dock repeating it as captions was
-	 * duplication. The dock is status + the three controls, nothing more.
-	 *
-	 * The interaction contract (§1 of docs/VOICE_MODE_PLAN.md) is binding and
-	 * says EXACTLY three controls while a call is live:
-	 *   1. Stop voice agent — ends the call; the session stays.
-	 *   2. Mute mic.
-	 *   3. Mute agent audio.
-	 * There is no push-to-talk and no per-utterance control: the channel is
-	 * always open once live and turn-taking is server-side VAD. Do not add a
-	 * fourth control here without re-opening that ruling.
-	 */
+	/** Session-scoped call status and controls. Compact mode sits beside the
+	 * persistent text composer; unmounting this view never ends the call. */
 	import { onDestroy } from 'svelte';
 	import { Mic, MicOff, PhoneOff, Volume2, VolumeX } from 'lucide-svelte';
 	import { voiceCallState, hangup, toggleAgent, toggleMic } from '$lib/services/voiceCall';
@@ -37,9 +8,10 @@
 
 	interface Props {
 		sessionId: string;
+		compact?: boolean;
 	}
 
-	let { sessionId }: Props = $props();
+	let { sessionId, compact = false }: Props = $props();
 
 	const call = $derived($voiceCallState);
 
@@ -138,7 +110,7 @@
 <!-- Composer slot (VM18): same outer metrics as .chat-input-wrapper /
      .chat-input-container in ChatInput, so the swap happens in place without the
      chat column shifting. -->
-<div class="voice-dock-wrapper" data-testid="voice-call-dock">
+<div class="voice-dock-wrapper" class:compact data-testid="voice-call-dock">
 	<div class="voice-dock" class:live>
 		{#if mine && call.error}
 			<p class="vp-msg err" role="alert">{call.error}</p>
@@ -219,6 +191,12 @@
 </div>
 
 <style>
+	.compact.voice-dock-wrapper { width: 100%; padding: 0; margin: 0 0 8px; }
+	.compact .voice-dock { padding: 8px 12px; }
+	.compact .orb-wrap, .compact .vp-model { display: none; }
+	.compact .vp-head { gap: 8px; }
+	.compact .vp-title h3 { font-size: 12px; }
+
 	/* Mirrors .chat-input-wrapper / .chat-input-container so the dock occupies the
 	   composer's exact footprint (VM18). */
 	.voice-dock-wrapper {

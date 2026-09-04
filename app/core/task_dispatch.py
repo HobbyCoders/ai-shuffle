@@ -424,6 +424,13 @@ def _caller_provider_id(
     caller_row: Optional[SessionRow], caller_profile_id: Optional[str]
 ) -> Optional[str]:
     """The provider the caller is bound to — session row first, profile after."""
+    if (caller_row or {}).get("mode") == "voice":
+        from app.core.query_options import decode_provider_model
+
+        model = (caller_row or {}).get("model")
+        if model:
+            decoded = decode_provider_model(model)
+            return decoded[0] if decoded else None
     provider_id = (caller_row or {}).get("provider_id")
     if provider_id:
         return str(provider_id)
@@ -513,6 +520,12 @@ def _file_agent_model_id(
     list position is never a model choice.
     """
     launched = str(caller_row.get("launched_model") or "").strip() or None
+    if caller_row.get("mode") == "voice" and caller_row.get("model"):
+        from app.core.query_options import decode_provider_model
+
+        selected = str(caller_row["model"]).strip()
+        decoded = decode_provider_model(selected)
+        launched = decoded[1] if decoded else selected
     if not provider_id:
         return launched, None
 

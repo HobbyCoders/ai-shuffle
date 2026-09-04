@@ -15,7 +15,9 @@ import { layout } from '$lib/stores/layout.svelte';
 import { appMode } from '$lib/stores/sessionMode.svelte';
 import { notify } from '$lib/stores/notifications';
 import { createVoiceSession } from '$lib/api/voice';
-import { startCall } from '$lib/services/voiceCall';
+import { startCall, confirmCallReplacement } from '$lib/services/voiceCall';
+import { contextWindowForChoice } from '$lib/constants/model-context';
+import { getDefaultModel } from '$lib/constants/models';
 
 // Both the composer's call button and the voice lane's hero call this. A second
 // creation while the first is still handshaking would strand an unused session
@@ -29,9 +31,21 @@ export async function startNewVoiceSession(): Promise<boolean> {
 	starting = true;
 	const from = get(activeSession);
 	try {
+		if (!(await confirmCallReplacement(null))) return false;
 		const created = await createVoiceSession({
 			profile_id: from.profile || null,
-			project_id: from.project || null
+			project_id: from.project || null,
+			project_v2_id: from.projectV2Id,
+			worktree_id: from.worktreeId,
+			worktree_branch: from.selectedWorktreeBranch || from.worktreeBranch || null,
+			base_branch: from.worktreeBaseBranch || null,
+			execution_mode: from.worktreeIntent,
+			target_instance_id: from.deviceIntent?.id || null,
+			model: from.modelOverride,
+			permission_mode: from.permissionModeOverride,
+			effort: from.effortLevelOverride,
+			fast: from.fastMode,
+			context_window: contextWindowForChoice(from.modelOverride || getDefaultModel(), from.contextWindowChoice)
 		});
 		// The board row must exist before we switch: ChatView reads `mode`
 		// off the sessions list to decide the surface.
@@ -43,7 +57,7 @@ export async function startNewVoiceSession(): Promise<boolean> {
 		activeSession.switchSession(
 			created.session_id,
 			from.project || null,
-			null,
+			from.worktreeId || from.worktreeBranch ? { worktreeId: from.worktreeId, worktreeBranch: from.selectedWorktreeBranch || from.worktreeBranch, worktreeIntent: from.worktreeIntent, worktreeDeleted: false } : null,
 			'Voice session',
 			from.projectV2Id
 		);

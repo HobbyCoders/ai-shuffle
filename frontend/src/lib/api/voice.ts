@@ -99,6 +99,18 @@ export interface VoiceProvider {
 	name: string;
 }
 
+export interface VoiceExecutionContext {
+	model?: string | null;
+	effort?: string | null;
+	permission_mode?: string | null;
+	context_window?: number | null;
+	fast?: boolean | null;
+}
+
+export function updateVoiceContext(sessionId: string, context: VoiceExecutionContext): Promise<VoiceExecutionContext> {
+	return api.patch(`/voice/sessions/${sessionId}/context`, context);
+}
+
 export interface VoiceSessionCreated {
 	session_id: string;
 	client_secret: string;
@@ -236,11 +248,24 @@ export async function previewVoice(voice: string): Promise<Blob> {
 	return response.blob();
 }
 
-export function createVoiceSession(body: {
+export interface VoiceSessionContext {
 	profile_id?: string | null;
 	project_id?: string | null;
+	project_v2_id?: string | null;
 	provider_id?: string | null;
-}): Promise<VoiceSessionCreated> {
+	worktree_id?: string | null;
+	worktree_branch?: string | null;
+	base_branch?: string | null;
+	execution_mode?: 'local' | 'worktree';
+	target_instance_id?: string | null;
+	model?: string | null;
+	permission_mode?: string | null;
+	effort?: string | null;
+	fast?: boolean;
+	context_window?: number | null;
+}
+
+export function createVoiceSession(body: VoiceSessionContext): Promise<VoiceSessionCreated> {
 	return api.post<VoiceSessionCreated>('/voice/sessions', body);
 }
 

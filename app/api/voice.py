@@ -33,7 +33,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -157,7 +157,21 @@ class VoiceSessionCreateRequest(BaseModel):
     """
     profile_id: Optional[str] = None
     project_id: Optional[str] = None
+    project_v2_id: Optional[str] = None
     provider_id: Optional[str] = None
+    # Voice is a lane, not a reduced session shape.  These are the same durable
+    # bindings a normal code session carries; the bridge uses the owning session
+    # when it dispatches a worker.
+    worktree_id: Optional[str] = None
+    worktree_branch: Optional[str] = None
+    base_branch: Optional[str] = None
+    execution_mode: Optional[str] = None
+    target_instance_id: Optional[str] = None
+    model: Optional[str] = None
+    effort: Optional[str] = None
+    permission_mode: Optional[str] = None
+    context_window: Optional[int] = None
+    fast: Optional[bool] = None
     session_mode: Optional[str] = None
 
 
@@ -624,13 +638,15 @@ async def _require_voice_session(session_id: str) -> Dict[str, Any]:
 
 @router.post("/sessions", response_model=VoiceSessionResponse)
 async def create_voice_session(
+    http_request: Request,
     request: VoiceSessionCreateRequest,
     token: str = Depends(require_auth),
 ):
     """Create a voice session row and mint its realtime client secret.
 
-    Order matters: the upstream mint happens BEFORE the row is written, so a
-    rejected mint leaves no orphaned session on the board.
+    Order matters: project authorization happens before the upstream mint, and
+    the mint happens before the row is written, so neither a denied request nor
+    a rejected mint leaves an orphaned session on the board.
 
     A declared ``session_mode`` of "command" stamps ``hidden=TRUE`` at INSERT —
     the row never exists in a visible state, so the list can't even flash it.
@@ -644,6 +660,42 @@ async def create_voice_session(
             status_code=400,
             detail="session_mode must be 'command' or 'chat'.",
         )
+
+    # Voice uses the same origin authorization as normal branch sessions.
+    # Prefer the legacy id when both forms are supplied by the compose store,
+    # then verify that it resolves to the supplied V2 project.
+    from app.api.auth import get_api_user_from_request
+    from app.api.common import require_origin_access
+
+    execution_mode = (request.execution_mode or "").strip().lower() or None
+    if execution_mode not in (None, "local", "worktree"):
+        raise HTTPException(400, "execution_mode must be 'local' or 'worktree'.")
+    if request.worktree_branch and not request.worktree_id:
+        if execution_mode == "local":
+            raise HTTPException(400, "A branch cannot be used with local execution.")
+        execution_mode = "worktree"
+
+    access = None
+    if request.project_id or request.project_v2_id:
+        access = await run_sync(
+            require_origin_access,
+            request=http_request,
+            project_id=request.project_id or None,
+            project_v2_id=None if request.project_id else request.project_v2_id,
+        )
+        resolved_pv2_id = (access.get("project_v2") or {}).get("id")
+        if request.project_v2_id and resolved_pv2_id != request.project_v2_id:
+            raise HTTPException(
+                400, "project_id and project_v2_id refer to different projects."
+            )
+    else:
+        resolved_pv2_id = None
+
+    from app.core.config import settings
+
+    target_instance_id = (request.target_instance_id or "").strip() or None
+    if target_instance_id == settings.effective_instance_id:
+        target_instance_id = None
 
     voice_settings = await run_sync(get_voice_settings)
     if not voice_settings["voice_mode_enabled"]:
@@ -678,17 +730,105 @@ async def create_voice_session(
             )
         profile_id = profiles[0]["id"]
 
-    session_id = str(uuid.uuid4())
-    await run_sync(
-        database.create_session,
-        session_id=session_id,
-        profile_id=profile_id,
-        project_id=request.project_id,
-        title="Voice session",
-        provider_id=provider_row["id"],
-        mode="voice",
-        hidden=(session_mode == "command"),
-    )
+    session_create_overrides = {
+        "title": "Voice session",
+        "is_active": True,
+        "provider_id": provider_row["id"],
+        "model": request.model,
+        "effort": request.effort,
+        "permission_mode": request.permission_mode,
+        "context_window": request.context_window,
+        "fast": request.fast,
+        "mode": "voice",
+        "hidden": session_mode == "command",
+    }
+
+    # Current branch sessions have no legacy worktree row. Reuse the normal V2
+    # path so existing branches are recovered and Auto creates a real branch;
+    # remote runner picks also go through its eligibility check and durable op.
+    if execution_mode == "worktree" and not request.worktree_id:
+        if not access or not resolved_pv2_id:
+            raise HTTPException(400, "A project is required for worktree execution.")
+        from app.api.sessions_helpers import CreateWorktreeSessionRequest
+        from app.api.sessions_worktree import _create_v2_branch_session
+
+        selected_branch = (request.worktree_branch or "").strip()
+        branch_name = selected_branch or f"voice/{uuid.uuid4().hex[:12]}"
+        branch_request = CreateWorktreeSessionRequest(
+            project_id=request.project_id or None,
+            project_v2_id=None if request.project_id else resolved_pv2_id,
+            branch_name=branch_name,
+            base_branch=(request.base_branch or "main").strip() or "main",
+            profile_id=profile_id,
+            create_new_branch=not bool(selected_branch),
+            target_instance_id=target_instance_id,
+        )
+        created = await _create_v2_branch_session(
+            http_request,
+            branch_request,
+            access.get("legacy"),
+            (get_api_user_from_request(http_request) or {}).get("id"),
+            access.get("project_v2"),
+            session_create_overrides=session_create_overrides,
+        )
+        session_id = created.session_id
+    else:
+        # Legacy worktree rows remain supported, but branch-only identifiers are
+        # never interpreted as legacy ids and never discarded.
+        if request.worktree_id:
+            if not request.project_id:
+                raise HTTPException(400, "project_id is required with worktree_id.")
+            if target_instance_id:
+                raise HTTPException(400, "A legacy worktree cannot be moved to another runner.")
+            worktree = await run_sync(database.get_worktree, request.worktree_id)
+            repository = await run_sync(
+                database.get_git_repository_by_project, request.project_id
+            )
+            if (
+                not worktree
+                or not repository
+                or worktree.get("repository_id") != repository.get("id")
+            ):
+                raise HTTPException(404, "Worktree not found in this project.")
+            worktree_branch = worktree.get("branch") or request.worktree_branch
+            worktree_path = worktree.get("path") or worktree.get("worktree_path")
+        else:
+            worktree_branch = None
+            worktree_path = None
+
+        if target_instance_id:
+            if access and resolved_pv2_id:
+                from app.api.sessions_worktree import _preflight_remote_target
+
+                await _preflight_remote_target(target_instance_id, access["project_v2"])
+            else:
+                install = await run_sync(database.get_install, target_instance_id)
+                if not install:
+                    raise HTTPException(409, "Unknown device — pick another device.")
+                device = install.get("device_name") or target_instance_id
+                if not install.get("approved", True):
+                    raise HTTPException(
+                        409,
+                        f"{device} is waiting for admin approval. Approve and restart it first.",
+                    )
+                if not install.get("online"):
+                    raise HTTPException(
+                        409, f"{device} is offline. Bring it online or pick another device."
+                    )
+
+        session_id = str(uuid.uuid4())
+        await run_sync(
+            database.create_session,
+            session_id=session_id,
+            profile_id=profile_id,
+            project_id=request.project_id,
+            project_v2_id=resolved_pv2_id,
+            worktree_id=request.worktree_id,
+            worktree_branch=worktree_branch,
+            worktree_path=worktree_path,
+            target_instance_id=target_instance_id,
+            **session_create_overrides,
+        )
     logger.info(
         "Voice: created session %s on provider %s (model %s)",
         session_id, provider_row["id"], model,
@@ -831,7 +971,8 @@ async def attach_voice_call(
 
     client_tools = _sanitize_client_tools(
         request.client_tools,
-        reserved_names={t["name"] for t in voice_bridge.VOICE_TOOLS},
+        reserved_names={t["name"] for t in voice_bridge.VOICE_TOOLS}
+        | {t["name"] for t in voice_bridge.VOICE_WEB_TOOLS},
     )
     client_instructions = (request.client_instructions or "").strip() or None
     if client_instructions and len(client_instructions) > MAX_CLIENT_INSTRUCTIONS_CHARS:

@@ -198,11 +198,12 @@ describe('ControlsDock split controls', () => {
 		expect(container.querySelector('.mobile-settings-trigger')).toBeTruthy();
 	});
 
-	it('drops attach in the voice lane, which has no composer upload path', () => {
+	it('keeps attach and tool access in the voice lane', () => {
 		setLane('voice');
 		renderDock({ voiceActions });
 
-		expect(screen.queryByRole('button', { name: /attach file/i })).toBeNull();
+		expect(screen.getByRole('button', { name: /attach file/i })).toBeTruthy();
+		expect(screen.getByRole('button', { name: /^permission mode:/i })).toBeTruthy();
 	});
 
 

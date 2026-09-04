@@ -129,6 +129,28 @@ async def _drain(bridge: vb.VoiceBridge, sock: FakeSideband) -> None:
     await asyncio.wait_for(bridge._reader_task, 5)
 
 
+@pytest.mark.parametrize("event_type", ["conversation.item.created", "conversation.item.added"])
+async def test_typed_user_item_enters_exchange_once(mock_db, fake_sockets, event_type):
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    item = {
+        "id": "typed-user-1", "type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": "Search the web for this"}],
+    }
+    await bridge._handle_event({"type": event_type, "item": item})
+    await bridge._handle_event({"type": "conversation.item.added", "item": item})
+    assert bridge._pending_user == ["Search the web for this"]
+    await bridge._handle_event({
+        "type": "conversation.item.created",
+        "item": {"id": "assistant-1", "role": "assistant", "content": item["content"]},
+    })
+    assert bridge._pending_user == ["Search the web for this"]
+    await bridge._handle_event({"type": "response.done", "response": {}})
+    assert bridge._pending_user == []
+    events = se.get_events(SID)
+    assert "Search the web for this" in json.dumps(events, default=str)
+
+
 def _types(session_id: str = SID):
     return [r["event_type"] for r in se.get_events(session_id)]
 
@@ -628,7 +650,7 @@ async def test_session_update_declares_the_dispatch_tools(mock_db, fake_sockets)
     tools = session["tools"]
     assert [t["name"] for t in tools] == [
         "dispatch_agent", "check_agent", "list_agents", "message_agent",
-        "stop_agent", "respond_approval",
+        "stop_agent", "respond_approval", "WebSearch", "WebFetch",
     ]
     assert {t["type"] for t in tools} == {"function"}
     # Realtime schema is FLAT (no nested "function" object) and every tool
@@ -648,6 +670,8 @@ async def test_session_update_declares_the_dispatch_tools(mock_db, fake_sockets)
     assert by_name["respond_approval"]["parameters"]["required"] == [
         "request_id", "decision",
     ]
+    assert by_name["WebSearch"]["parameters"]["required"] == ["query"]
+    assert by_name["WebFetch"]["parameters"]["required"] == ["url"]
     decision = by_name["respond_approval"]["parameters"]["properties"]["decision"]
     assert decision["enum"] == ["allow", "deny"]
     await bridge.stop()
@@ -1960,7 +1984,8 @@ async def test_app_tools_are_declared_after_the_dispatch_tools(mock_db, fake_soc
     names = [t["name"] for t in session["tools"]]
     assert names == [
         "dispatch_agent", "check_agent", "list_agents", "message_agent",
-        "stop_agent", "respond_approval", "listAutomations",
+        "stop_agent", "respond_approval", "WebSearch", "WebFetch",
+        "listAutomations",
     ]
     declared = next(t for t in session["tools"] if t["name"] == "listAutomations")
     assert declared["type"] == "function"
@@ -2046,6 +2071,71 @@ def test_realtime_tool_from_sdk_handles_both_schema_shapes():
     assert vb.realtime_tool_from_sdk(bare)["parameters"] == {"type": "object", "properties": {}}
     assert vb.realtime_tool_from_sdk(_FakeSdkTool("has space", _h)) is None
     assert vb.realtime_tool_from_sdk(_FakeSdkTool("x" * 65, _h)) is None
+
+
+async def test_web_search_uses_the_hardened_fluid_handler(mock_db, fake_sockets, monkeypatch):
+    from fluid.tools.builtins import web
+    from fluid.tools.registry import ToolOutcome
+
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    seen = []
+
+    async def _search(args, ctx):
+        seen.append((args, ctx.session_id))
+        return ToolOutcome(text="<untrusted WebSearch result>")
+
+    monkeypatch.setattr(web, "search_handler", _search)
+    result = await bridge._tool_web_search({"query": "voice tools", "limit": 2})
+    assert result == {"ok": True, "result": "<untrusted WebSearch result>"}
+    assert seen == [({"query": "voice tools", "limit": 2}, SID)]
+    await bridge.stop()
+
+
+async def test_web_result_is_saved_once_with_sources(mock_db, fake_sockets, monkeypatch):
+    from fluid.tools.builtins import web
+    from fluid.tools.registry import ToolOutcome
+
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+
+    async def _search(args, ctx):
+        return ToolOutcome(text="Source: https://example.com/source")
+
+    monkeypatch.setattr(web, "search_handler", _search)
+    task = bridge._maybe_service_call("web-1", "WebSearch", '{"query": "source"}')
+    assert task is not None
+    await task
+    assert bridge._maybe_service_call("web-1", "WebSearch", '{}') is None
+    events = se.get_events(SID)
+    assert [event["event_type"] for event in events].count("tool.use") == 1
+    assert [event["event_type"] for event in events].count("tool.result") == 1
+    assert "https://example.com/source" in json.dumps(events, default=str)
+    assert "web-1" in json.dumps(events, default=str)
+
+
+async def test_web_fetch_does_not_bypass_voice_approval(mock_db, fake_sockets, monkeypatch):
+    from app.core.permission_handler import permission_handler
+    from claude_agent_sdk.types import PermissionResultDeny
+    from fluid.tools.builtins import web
+
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    fetched = []
+
+    async def _deny(**kwargs):
+        return PermissionResultDeny(message="no")
+
+    async def _fetch(args, ctx):
+        fetched.append(args)
+        raise AssertionError("fetch must not run without approval")
+
+    monkeypatch.setattr(permission_handler, "request_permission", _deny)
+    monkeypatch.setattr(web, "fetch_handler", _fetch)
+    result = await bridge._tool_web_fetch({"url": "https://example.com"})
+    assert result == {"ok": False, "error": "WebFetch was not approved."}
+    assert fetched == []
+    await bridge.stop()
 
 
 # ---------------------------------------------------------------------------

@@ -36,7 +36,7 @@
  */
 
 import { get, writable } from 'svelte/store';
-import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret } from '$lib/api/voice';
+import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, getVoiceCallState } from '$lib/api/voice';
 
 // ============================================================================
 // Public state
@@ -148,6 +148,8 @@ let analyser: AnalyserNode | null = null;
 let levelFrame: number | null = null;
 
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let responseInProgress = false;
+let typedResponsePending = false;
 
 /** Bumped on every start/hangup so a stale async continuation can bail out. */
 let generation = 0;
@@ -302,6 +304,23 @@ function handleRealtimeEvent(raw: string): void {
 	const itemId: string = event?.item_id || event?.response_id || 'pending';
 
 	switch (type) {
+		case 'response.created':
+			responseInProgress = true;
+			break;
+		case 'response.done':
+			responseInProgress = false;
+			scheduleTypedResponse();
+			break;
+		case 'error':
+			// VAD or the sideband may have started a response between our item
+			// and response.create. Keep the typed turn pending until it finishes.
+			if (event.error?.code === 'conversation_already_has_active_response') {
+				responseInProgress = true;
+				typedResponsePending = true;
+			} else {
+				patch({ notice: event.error?.message || 'The voice service could not process an event.' });
+			}
+			break;
 		case 'conversation.item.input_audio_transcription.delta':
 			appendCaption(`u:${itemId}`, 'user', event.delta ?? '', false);
 			break;
@@ -329,9 +348,6 @@ function handleRealtimeEvent(raw: string): void {
 			break;
 		case 'input_audio_buffer.speech_stopped':
 			patch({ userSpeaking: false });
-			break;
-		case 'error':
-			console.warn('[voice] realtime error event:', event.error ?? event);
 			break;
 		default:
 			break;
@@ -383,14 +399,20 @@ async function openConnection(
 	model: string,
 	stream: MediaStream
 ): Promise<Connection> {
+	const epoch = generation;
 	const pc = new RTCPeerConnection();
 
 	// The events channel must exist BEFORE the offer so it is negotiated in the
 	// same exchange (there is no second round trip to add it later).
 	const dc = pc.createDataChannel('oai-events');
-	dc.addEventListener('message', (e) => handleRealtimeEvent(String(e.data)));
+	dc.addEventListener('message', (e) => {
+		// A retired or not-yet-promoted reconnect channel cannot schedule replies
+		// on the current conversation. Both peers briefly share the generation.
+		if (epoch === generation && connection?.dc === dc && pc.connectionState !== 'closed') handleRealtimeEvent(String(e.data));
+	});
 
 	pc.addEventListener('track', (e) => {
+		if (epoch !== generation || pc.connectionState === 'closed') return;
 		const el = ensureAudioElement();
 		el.srcObject = e.streams[0] ?? new MediaStream([e.track]);
 		el.muted = get(voiceCallState).agentMuted;
@@ -477,8 +499,10 @@ function callCapMessage(e: unknown): string | null {
  * so the "start a new call" the message asks for actually works.
  */
 async function endForCap(sessionIdIn: string | null, message: string): Promise<void> {
-	await teardown({ notifyBackend: true, status: 'ended' });
-	patch({ sessionId: sessionIdIn, notice: message });
+	const ending = teardown({ notifyBackend: true, status: 'ended' });
+	const epoch = generation;
+	await ending;
+	if (epoch === generation) patch({ sessionId: sessionIdIn, notice: message });
 }
 
 // ============================================================================
@@ -542,6 +566,11 @@ async function reconnect(): Promise<void> {
 		connection = next;
 		applyMicMuted(get(voiceCallState).micMuted);
 		if (next.callId) await attachVoiceCall(sessionId, next.callId);
+		if (myGeneration !== generation) {
+			closeConnection(previous);
+			closeConnection(next);
+			return;
+		}
 
 		closeConnection(previous);
 		patch({
@@ -615,6 +644,13 @@ export async function startCall(
 	sessionIdIn: string,
 	cred: { client_secret: string; model: string }
 ): Promise<void> {
+	const current = get(voiceCallState);
+	if (isCallSurfaceActive(current, current.sessionId)) {
+		if (current.sessionId === sessionIdIn && sessionId) return;
+		if (current.sessionId !== sessionIdIn) {
+			throw new Error('End the current voice call before starting another.');
+		}
+	}
 	await teardown({ notifyBackend: false, status: 'idle' });
 	const myGeneration = ++generation;
 
@@ -627,8 +663,12 @@ export async function startCall(
 	});
 
 	try {
-		micStream = await acquireMic();
-		if (myGeneration !== generation) return;
+		const acquired = await acquireMic();
+		if (myGeneration !== generation) {
+			acquired.getTracks().forEach(track => track.stop());
+			return;
+		}
+		micStream = acquired;
 
 		const conn = await openConnection(cred.client_secret, cred.model, micStream);
 		if (myGeneration !== generation) {
@@ -642,12 +682,14 @@ export async function startCall(
 
 		startLevelMonitor(micStream);
 		if (conn.callId) await attachVoiceCall(sessionIdIn, conn.callId);
+		if (myGeneration !== generation) return;
 
 		conn.pc.addEventListener('connectionstatechange', () => {
 			if (myGeneration !== generation) return;
 			const s = conn.pc.connectionState;
 			if (s === 'failed') {
-				patch({ status: 'error', error: 'The voice connection dropped.' });
+				void teardown({ notifyBackend: true, status: 'error' });
+				patch({ sessionId: sessionIdIn, status: 'error', error: 'The voice connection dropped.' });
 			}
 		});
 
@@ -682,11 +724,19 @@ function micErrorOrMessage(e: Error): string {
  * non-fatal message rather than an error state the user cannot clear.
  */
 export async function startCallForSession(sessionIdIn: string): Promise<void> {
+	if (isCallActiveFor(sessionIdIn)) return;
+	if (!(await confirmCallReplacement(sessionIdIn))) return;
+	// Another start may have won while confirmation/hangup was pending.
+	const settled = get(voiceCallState);
+	if (isCallSurfaceActive(settled, settled.sessionId)) return;
+	const attempt = ++generation;
 	patch({ sessionId: sessionIdIn, status: 'connecting', error: null, notice: null });
 	let cred: Awaited<ReturnType<typeof mintVoiceSecret>>;
 	try {
 		cred = await mintVoiceSecret(sessionIdIn);
+		if (attempt !== generation) return;
 	} catch (e) {
+		if (attempt !== generation) return;
 		const capped = callCapMessage(e);
 		if (capped) {
 			// Nothing is up yet, so there is nothing to tear down — just say why.
@@ -723,10 +773,12 @@ async function teardown(opts: {
 	status: VoiceCallStatus;
 }): Promise<void> {
 	generation++;
+	responseInProgress = false;
+	typedResponsePending = false;
 	clearReconnectTimer();
 	stopLevelMonitor();
 
-	const endedSession = sessionId;
+	const endedSession = sessionId ?? get(voiceCallState).sessionId;
 	closeConnection(connection);
 	connection = null;
 
@@ -769,6 +821,71 @@ export function isCallSurfaceActive(
 ): boolean {
 	if (!sessionId) return false;
 	return state.sessionId === sessionId && ACTIVE_CALL_STATUSES.includes(state.status);
+}
+
+
+/** Replacing a call is an explicit action, never a side effect of navigation. */
+export async function confirmCallReplacement(nextSessionId: string | null): Promise<boolean> {
+	const current = get(voiceCallState);
+	if (!isCallSurfaceActive(current, current.sessionId) || current.sessionId === nextSessionId) return true;
+	if (typeof window === 'undefined' || !window.confirm('End the current voice call and start another?')) return false;
+	await hangup();
+	return true;
+}
+
+/** Send into the owner's Realtime conversation, never the normal query lane.
+ * Transcript persistence belongs to the sideband input_text item handler. */
+function scheduleTypedResponse(): void {
+	if (!typedResponsePending || responseInProgress) return;
+	if (connection?.dc.readyState !== 'open') {
+		patch({ notice: 'Your text was sent, but the voice connection closed before a reply could start.' });
+		return;
+	}
+	try {
+		connection.dc.send(JSON.stringify({ type: 'response.create' }));
+		responseInProgress = true;
+		typedResponsePending = false;
+	} catch {
+		// The conversation item was already accepted by the local transport.
+		// Returning false here would restore the draft and invite duplicate sends.
+		patch({ notice: 'Your text was sent, but a voice reply could not start. Try speaking when the connection is ready.' });
+	}
+}
+
+export function sendVoiceText(owner: string, text: string): boolean {
+	const state = get(voiceCallState);
+	if (state.sessionId !== owner || state.status !== 'live' || !text.trim() || connection?.dc.readyState !== 'open') return false;
+	try {
+		connection.dc.send(JSON.stringify({
+			type: 'conversation.item.create',
+			item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] }
+		}));
+	} catch {
+		return false;
+	}
+	// Mark in flight synchronously, before response.created, so rapid sends
+	// cannot create competing responses. A later item gets the next turn.
+	typedResponsePending = true;
+	scheduleTypedResponse();
+	return true;
+}
+
+/** Visibility return only reconciles a live owner. It never mints or restarts. */
+export async function reconcileVoiceCall(): Promise<void> {
+	const state = get(voiceCallState);
+	if (!state.sessionId || !['live', 'reconnecting'].includes(state.status)) return;
+	const owner = state.sessionId;
+	const epoch = generation;
+	try {
+		const remote = await getVoiceCallState(owner);
+		if (epoch !== generation || get(voiceCallState).sessionId !== owner) return;
+		if (remote && !remote.active) {
+			await teardown({ notifyBackend: false, status: 'ended' });
+			patch({ sessionId: owner, notice: 'This voice call has ended.' });
+		}
+	} catch (error) {
+		console.warn('[voice] could not reconcile call state:', error);
+	}
 }
 
 /** Is a call live (or coming up) for this session? Snapshot read of the store. */
