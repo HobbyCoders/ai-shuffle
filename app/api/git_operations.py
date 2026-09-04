@@ -407,6 +407,56 @@ async def _cleanup_linked_worktree(
     return True
 
 
+def _rebind_sessions_off_deleted_branch(
+    project_id: str,
+    feature_branch: str,
+    default_branch: str,
+    session_id: Optional[str],
+) -> None:
+    """Drop sessions off a feature branch that merge cleanup just deleted.
+
+    Cleanup removes the worktree and force-deletes the local branch; GitHub
+    typically deletes the remote too. Sessions left bound to that name cannot
+    rematerialize on the next send (WorktreeUnavailableError). Rebind them
+    onto the project's base checkout (``sessions.branch = NULL``). Never
+    raises — the merge already landed; a rebind blip must not flip cleanup
+    to a warning.
+    """
+    if not feature_branch or feature_branch == default_branch:
+        return
+    try:
+        from app.db import database
+    except Exception:
+        return
+    ids: list[str] = []
+    seen = set()
+    if session_id:
+        ids.append(session_id)
+        seen.add(session_id)
+    try:
+        for row in database.list_sessions_for_branch(project_id, feature_branch):
+            sid = row.get("id") if isinstance(row, dict) else None
+            if sid and sid not in seen:
+                ids.append(sid)
+                seen.add(sid)
+    except Exception:
+        logger.debug(
+            "rebind: list_sessions_for_branch failed for %s %s",
+            project_id, feature_branch, exc_info=True,
+        )
+    for sid in ids:
+        try:
+            database.set_session_branch(sid, None)
+            logger.info(
+                "Rebinding session %s off deleted branch %s onto the base checkout",
+                sid, feature_branch,
+            )
+        except Exception:
+            logger.debug(
+                "rebind: set_session_branch failed for %s", sid, exc_info=True
+            )
+
+
 async def _do_cleanup(
     op: Operation,
     working_dir: str,
@@ -474,6 +524,12 @@ async def _do_cleanup(
     except Exception as e:  # noqa: BLE001
         logger.exception("Cleanup step failed for op %s", op.id)
         op.set_step("cleanup", STEP_WARNING, detail=str(e))
+        return
+
+    if any(s["id"] == "cleanup" and s["status"] == STEP_DONE for s in op.steps):
+        _rebind_sessions_off_deleted_branch(
+            op.project_id, feature_branch, default_branch, session_id
+        )
 
 
 def _fail_running_step(op: Operation, error: str) -> None:
