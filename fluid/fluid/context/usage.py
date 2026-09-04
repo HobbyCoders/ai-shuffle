@@ -108,7 +108,7 @@ without a legend lookup, and distinct enough to stay readable side by side:
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -201,7 +201,11 @@ def _server_name(tool_name: str) -> str:
     return parts[1] if len(parts) >= 3 else ""
 
 
-def tool_section_rows(sections: Sequence[PromptSection]) -> tuple[list[dict[str, Any]], int]:
+def tool_section_rows(
+    sections: Sequence[PromptSection],
+    *,
+    mounted: Collection[str] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
     """Per-tool rows + unattributed-token count for host ``tools`` sections.
 
     One section per tool, ``tool_name`` naming the registry entry: the row shape
@@ -210,6 +214,12 @@ def tool_section_rows(sections: Sequence[PromptSection]) -> tuple[list[dict[str,
     without a usable ``tool_name`` are NOT rows — their tokens are returned as
     the second element for the caller to fold into "System prompt", keeping the
     invariant that every token of the prompt lands in exactly one row.
+
+    ``mounted`` (see :func:`build_context_usage`) names the tools this leg
+    actually serves. A section for a tool that is NOT mounted is prose about a
+    tool the model cannot call: its tokens are real and stay in the total, but
+    they fold into the unattributed bucket rather than being billed as that
+    tool's cost, so the breakdown never lists a tool the session does not have.
     """
     rows: list[dict[str, Any]] = []
     unattributed = 0
@@ -217,7 +227,7 @@ def tool_section_rows(sections: Sequence[PromptSection]) -> tuple[list[dict[str,
         if s.kind != TOOLS_SECTION_KIND:
             continue
         name = getattr(s, "tool_name", None)
-        if not name:
+        if not name or (mounted is not None and name not in mounted):
             unattributed += estimate_tokens_of_text(s.text)
             continue
         tokens = estimate_tokens_of_text(s.text)
@@ -279,6 +289,7 @@ def build_context_usage(
     context_window: int | None = None,
     compaction: dict[str, int] | None = None,
     measured_prompt_tokens: int | None = None,
+    mounted_tools: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the breakdown dict (see the module docstring for the rules).
 
@@ -299,8 +310,27 @@ def build_context_usage(
     the other rows keep their own estimates and Messages carries the remainder,
     floored at 0. Free space and ``percentage`` then follow from the real total.
     The response says which it was in ``measured``.
+
+    ``mounted_tools`` names the tools this leg actually serves — the
+    capability-filtered surface, not the registry. Hosts that assemble
+    ``tools_api`` or per-tool prompt sections from registered specs bill tools
+    the session cannot call: an audited leg was charged 546 tokens for
+    SendMessage and 245 for ListAgents on a host that never wired agent
+    messaging, and the same names were advertised in the prompt, so models
+    imported them and two workers briefed to coordinate through them could
+    not. Given the set, an unmounted tool gets no row: its schema tokens leave
+    the total (that schema is not sent) and its prompt-section tokens fall
+    back to "System prompt" (that text IS sent, and every token must still
+    land somewhere). ``None`` bills everything, as before.
     """
-    section_rows, unattributed = tool_section_rows(sections)
+    section_rows, unattributed = tool_section_rows(sections, mounted=mounted_tools)
+    mounted = (
+        None if mounted_tools is None else frozenset(mounted_tools)
+    )
+
+    def _billable(name: str) -> bool:
+        return mounted is None or name in mounted
+
     system_tools_rows = [r for r in section_rows if "serverName" not in r]
     mcp_section_rows = [r for r in section_rows if "serverName" in r]
     system_tokens = sum(
@@ -322,7 +352,7 @@ def build_context_usage(
     system_tools = [
         {"name": t.get("name", ""), "tokens": tool_schema_tokens(t)}
         for t in tools_api
-        if not _is_mcp(t.get("name", ""))
+        if not _is_mcp(t.get("name", "")) and _billable(t.get("name", ""))
     ] + system_tools_rows
     mcp_tools = [
         {
@@ -332,12 +362,12 @@ def build_context_usage(
             "isLoaded": True,
         }
         for t in tools_api
-        if _is_mcp(t.get("name", ""))
+        if _is_mcp(t.get("name", "")) and _billable(t.get("name", ""))
     ] + mcp_section_rows
     deferred_builtin = [
         {"name": t.get("name", ""), "tokens": tool_schema_tokens(t)}
         for t in deferred_tools_api
-        if not _is_mcp(t.get("name", ""))
+        if not _is_mcp(t.get("name", "")) and _billable(t.get("name", ""))
     ]
     deferred_mcp = [
         {
@@ -347,7 +377,7 @@ def build_context_usage(
             "isLoaded": False,
         }
         for t in deferred_tools_api
-        if _is_mcp(t.get("name", ""))
+        if _is_mcp(t.get("name", "")) and _billable(t.get("name", ""))
     ]
 
     agent_entries = agent_usage(agents)
