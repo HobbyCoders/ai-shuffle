@@ -18,6 +18,7 @@
 		CapabilityBadge,
 	} from '$lib/types/ai-tool-registry';
 	import { ALL_TTS_MODELS, type TTSVoice, type CatalogModel } from '$lib/types/ai-models';
+	import { invalidateSttCapability } from '$lib/services/sttStream';
 	import ModelPickerGrid from './ModelPickerGrid.svelte';
 	import DynamicModelParams from './DynamicModelParams.svelte';
 
@@ -125,6 +126,12 @@
 				});
 			} catch {
 				// Non-critical
+			}
+
+			// The live-transcription probe caches whether the current STT model can
+			// stream; a model swap invalidates that answer immediately.
+			if (tool.modelSettingKey === 'stt_model') {
+				invalidateSttCapability();
 			}
 
 			onchange(tool.modelSettingKey, modelId);

@@ -100,6 +100,12 @@ function isInputElement(target: EventTarget | null): boolean {
 function handleKeyDown(e: KeyboardEvent): void {
 	if (!shortcutsEnabled) return;
 
+	// Auto-repeat is never what a shortcut wants: every registered shortcut here
+	// is a one-shot action or a toggle. Holding the voice-input hotkey used to
+	// fire ~30 toggles a second, so the recording was cancelled the instant it
+	// started — which read as "the recorder randomly drops what I say".
+	if (e.repeat) return;
+
 	const eventKey = getShortcutKey(e);
 
 	// Find matching shortcut

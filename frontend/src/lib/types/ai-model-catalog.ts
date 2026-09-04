@@ -1173,7 +1173,7 @@ export const OPENAI_STT_MODELS: STTModel[] = [
 		provider: 'openai',
 		description: 'OpenAI GPT-4o speech-to-text — high-accuracy transcription',
 		capabilities: {
-			realtime: false,
+			realtime: true,
 			diarization: false,
 			translation: false,
 			timestamps: false,
@@ -1191,7 +1191,7 @@ export const OPENAI_STT_MODELS: STTModel[] = [
 		provider: 'openai',
 		description: 'OpenAI GPT-4o mini speech-to-text — fast, affordable transcription',
 		capabilities: {
-			realtime: false,
+			realtime: true,
 			diarization: false,
 			translation: false,
 			timestamps: false,

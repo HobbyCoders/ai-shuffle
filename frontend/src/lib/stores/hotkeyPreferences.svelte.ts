@@ -34,6 +34,10 @@ interface HotkeyPreferences {
 	// Global STT hotkey
 	globalSttEnabled: boolean;
 	globalSttHotkey: HotkeyConfig;
+	/** Short tones when voice capture goes live, stops, or fails. On by default:
+	 *  the go-cue is the whole point — it is what lets you start talking without
+	 *  watching the screen. */
+	voiceSoundCues: boolean;
 }
 
 /**
@@ -48,7 +52,8 @@ const DEFAULT_HOTKEY: HotkeyConfig = {
 
 const DEFAULT_PREFERENCES: HotkeyPreferences = {
 	globalSttEnabled: false, // Disabled by default - user must opt-in for privacy
-	globalSttHotkey: DEFAULT_HOTKEY
+	globalSttHotkey: DEFAULT_HOTKEY,
+	voiceSoundCues: true
 };
 
 // ============================================
@@ -271,6 +276,7 @@ async function syncFromServer(): Promise<void> {
 		// Check if server differs from local
 		const isDifferent =
 			merged.globalSttEnabled !== localState.globalSttEnabled ||
+			merged.voiceSoundCues !== localState.voiceSoundCues ||
 			merged.globalSttHotkey.key !== localState.globalSttHotkey.key ||
 			merged.globalSttHotkey.cmdOrCtrl !== localState.globalSttHotkey.cmdOrCtrl ||
 			merged.globalSttHotkey.shift !== localState.globalSttHotkey.shift ||
@@ -294,6 +300,7 @@ async function syncFromServer(): Promise<void> {
 	if (!serverState) {
 		const hasNonDefaults =
 			localState.globalSttEnabled !== DEFAULT_PREFERENCES.globalSttEnabled ||
+			localState.voiceSoundCues !== DEFAULT_PREFERENCES.voiceSoundCues ||
 			localState.globalSttHotkey.key !== DEFAULT_HOTKEY.key ||
 			localState.globalSttHotkey.cmdOrCtrl !== DEFAULT_HOTKEY.cmdOrCtrl ||
 			localState.globalSttHotkey.shift !== DEFAULT_HOTKEY.shift ||
@@ -333,4 +340,5 @@ export const hotkeyPreferences = {
 	// Convenience setters
 	setGlobalSttEnabled: (value: boolean) => updatePreference('globalSttEnabled', value),
 	setGlobalSttHotkey: (value: HotkeyConfig) => updatePreference('globalSttHotkey', value),
+	setVoiceSoundCues: (value: boolean) => updatePreference('voiceSoundCues', value),
 };

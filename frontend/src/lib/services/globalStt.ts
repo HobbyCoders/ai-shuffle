@@ -1,12 +1,15 @@
 /**
  * Global STT Service
  *
- * Provides global Speech-to-Text functionality triggered by a configurable hotkey.
- * When triggered:
- * 1. Records audio from the microphone
- * 2. Transcribes via the backend API
- * 3. Copies result to clipboard
- * 4. If an input field is focused, also pastes the text
+ * Voice input on a configurable hotkey. Two paths, chosen per press:
+ *
+ * - **Live** (OpenAI STT models): audio streams to the backend proxy and text
+ *   comes back while the user is still talking. See `sttStream`.
+ * - **Batch** (fal models, or when live is unavailable): record the whole clip,
+ *   re-encode to WAV, upload it, wait for one answer.
+ *
+ * Either way the finished text lands on the clipboard and, if something is
+ * focused, at the caret.
  */
 
 import { writable, get } from 'svelte/store';
@@ -14,10 +17,19 @@ import { browser } from '$app/environment';
 import { registerShortcut, type ShortcutRegistration } from './keyboard';
 import { hotkeyPreferences, type HotkeyConfig } from '$lib/stores/hotkeyPreferences.svelte';
 import { convertToWav } from '$lib/utils/audioConvert';
+import { playEarcon, primeEarcons, setEarconsEnabled } from '$lib/utils/earcon';
+import {
+	fetchSttCapability,
+	startSttStream,
+	SttUnsupportedError,
+	type SttStreamSession
+} from './sttStream';
 
 // ============================================================================
 // Types
 // ============================================================================
+
+export type GlobalSttMode = 'idle' | 'live' | 'batch';
 
 export interface GlobalSttState {
 	isRecording: boolean;
@@ -26,10 +38,35 @@ export interface GlobalSttState {
 	audioLevel: number;
 	error: string | null;
 	lastTranscription: string | null;
+	/** Which path this press took. */
+	mode: GlobalSttMode;
+	/** Live only: the segment being spoken right now, still growing. */
+	partial: string;
+	/** Live only: segments the model has settled on, in order. */
+	segments: string[];
+	/** Live only: server VAD currently hears speech. */
+	speechActive: boolean;
+	/** Live only: the model doing the transcribing, for the overlay caption. */
+	modelName: string | null;
+	/** Live only: false for whisper-1, which returns whole segments with no
+	 *  mid-utterance deltas — the overlay explains the wait instead of
+	 *  pretending nothing is happening. */
+	partialsSupported: boolean;
+	/** How much audio is being transcribed, in ms. Set once at stop, so the
+	 *  overlay can say "transcribing 1:47 of audio" instead of leaving a long
+	 *  wait unexplained. Null when nothing is in flight. */
+	recordingMs: number | null;
+}
+
+/** Meter data, kept out of the main store so a 60 fps waveform never
+ *  re-renders the transcript. */
+export interface GlobalSttAudio {
+	level: number;
+	bands: number[];
 }
 
 // ============================================================================
-// State Store
+// State Stores
 // ============================================================================
 
 const initialState: GlobalSttState = {
@@ -38,10 +75,26 @@ const initialState: GlobalSttState = {
 	isPreparing: false,
 	audioLevel: 0,
 	error: null,
-	lastTranscription: null
+	lastTranscription: null,
+	mode: 'idle',
+	partial: '',
+	segments: [],
+	speechActive: false,
+	modelName: null,
+	partialsSupported: true,
+	recordingMs: null
 };
 
 export const globalSttState = writable<GlobalSttState>(initialState);
+
+const BAND_COUNT = 28;
+const emptyBands = () => new Array(BAND_COUNT).fill(0);
+
+export const globalSttAudio = writable<GlobalSttAudio>({ level: 0, bands: emptyBands() });
+
+/** Batch upload progress, 0-1, or null when nothing is uploading. Its own store
+ *  so progress ticks never re-render the transcript. */
+export const globalSttUpload = writable<number | null>(null);
 
 // ============================================================================
 // Private State
@@ -53,7 +106,10 @@ let mediaStream: MediaStream | null = null;
 let audioChunks: Blob[] = [];
 let recordingStartTime: number = 0;
 
-// Audio level monitoring
+// Live session handle (null while on the batch path)
+let streamSession: SttStreamSession | null = null;
+
+// Audio level monitoring (batch path only — the live path meters in sttStream)
 let audioContext: AudioContext | null = null;
 let analyserNode: AnalyserNode | null = null;
 let audioLevelAnimationId: number | null = null;
@@ -63,8 +119,28 @@ const MIN_RECORDING_DURATION = 500; // 500ms minimum
 // Mutex to prevent race conditions during toggle
 let isToggling = false;
 
+// Bumped on every start and on every cancel. Async continuations snapshot it and
+// bail if it has moved on: resetting the store alone would not stop an in-flight
+// stop handler from inserting the text the user just discarded.
+let runId = 0;
+const isCurrentRun = (id: number) => id === runId;
+
+// The batch upload in flight, so cancel can abort it instead of paying for a
+// transcription nobody will read.
+let uploadRequest: XMLHttpRequest | null = null;
+
+// Where finished text goes. Null means the default: clipboard, plus the caret
+// if something is focused. The composer's microphone button sets a sink so its
+// text lands in the editor even though focus is on the button.
+let outputSink: ((text: string) => void) | null = null;
+
 // Track current MIME type for proper file extension
 let currentMimeType: string = 'audio/webm';
+
+// Whether the configured STT model accepts the browser's own recording
+// container. Defaults to false so an unknown or unreachable model still gets the
+// safe (converted) upload.
+let sttAcceptsCompressed = false;
 
 // ============================================================================
 // Audio Helpers
@@ -106,6 +182,8 @@ async function initAudioMonitoring(stream: MediaStream): Promise<() => void> {
 	source.connect(analyserNode);
 
 	const dataArray = new Uint8Array(analyserNode.frequencyBinCount);
+	const bands = emptyBands();
+	const perBand = Math.floor(dataArray.length / BAND_COUNT) || 1;
 
 	function updateLevel() {
 		if (!analyserNode) return;
@@ -120,14 +198,23 @@ async function initAudioMonitoring(stream: MediaStream): Promise<() => void> {
 		}
 		const rms = Math.sqrt(sum / dataArray.length);
 
-		// Update state with smoothed level
+		// Same band shape the live path publishes, so one waveform component
+		// drives both modes.
+		for (let band = 0; band < BAND_COUNT; band++) {
+			let total = 0;
+			for (let i = 0; i < perBand; i++) {
+				total += dataArray[band * perBand + i] ?? 0;
+			}
+			bands[band] = total / perBand / 255;
+		}
+
 		globalSttState.update((s) => ({
 			...s,
 			audioLevel: s.audioLevel * 0.7 + rms * 0.3
 		}));
+		globalSttAudio.set({ level: rms, bands: [...bands] });
 
-		// Don't start the loop here — return a starter function so the
-		// caller controls when visualization begins (after UI state is set).
+		audioLevelAnimationId = requestAnimationFrame(updateLevel);
 	}
 
 	// Return function to start the visualization loop (call exactly once)
@@ -152,6 +239,170 @@ function stopAudioMonitoring(): void {
 	analyserNode = null;
 
 	globalSttState.update((s) => ({ ...s, audioLevel: 0 }));
+	globalSttAudio.set({ level: 0, bands: emptyBands() });
+}
+
+// ============================================================================
+// Live Recording (streaming)
+// ============================================================================
+
+/**
+ * Try the live path. Returns false when this setup can only do batch, so the
+ * caller falls through without the user seeing a failure.
+ */
+async function startLiveRecording(): Promise<boolean> {
+	let capability;
+	try {
+		capability = await fetchSttCapability();
+	} catch (error) {
+		console.warn('[GlobalSTT] Capability probe failed, using batch path:', error);
+		sttAcceptsCompressed = false;
+		return false;
+	}
+
+	// Recorded before the early return: the batch path below reads it, and an
+	// unsupported model is exactly the case that falls through to batch.
+	sttAcceptsCompressed = capability.accepts_compressed === true;
+
+	if (!capability.supported) return false;
+
+	globalSttState.update((s) => ({
+		...s,
+		mode: 'live',
+		partial: '',
+		segments: [],
+		speechActive: false,
+		modelName: capability.model_name,
+		partialsSupported: capability.partials
+	}));
+
+	try {
+		streamSession = await startSttStream({
+			// Note there is no onReady handler: the socket being open says nothing
+			// about the microphone. Flipping to "listening" there told the user to
+			// start talking a few hundred milliseconds before anything could hear
+			// them, which is exactly the clipped-first-words complaint.
+			onCapture: () => {
+				globalSttState.update((s) => ({
+					...s,
+					isPreparing: false,
+					isRecording: true
+				}));
+				playEarcon('ready');
+			},
+			onClosed: () => {
+				// The socket died on its own. Guard on streamSession rather than
+				// isRecording: stopLiveRecording nulls it synchronously, so the
+				// normal stop path cannot recurse through here.
+				if (streamSession) void stopLiveRecording('dropped');
+			},
+			onDelta: (text) => {
+				globalSttState.update((s) => ({ ...s, partial: text }));
+			},
+			onFinal: (text) => {
+				globalSttState.update((s) => ({
+					...s,
+					partial: '',
+					segments: [...s.segments, text]
+				}));
+			},
+			onSpeech: (active) => {
+				globalSttState.update((s) => ({ ...s, speechActive: active }));
+			},
+			onAudio: (level, bands) => {
+				globalSttAudio.set({ level, bands: Array.from(bands) });
+			},
+			onError: (message, fatal) => {
+				if (fatal) {
+					globalSttState.update((s) => ({ ...s, error: message }));
+				} else {
+					console.warn('[GlobalSTT] Live transcription warning:', message);
+				}
+			}
+		});
+		return true;
+	} catch (error) {
+		streamSession = null;
+
+		if (error instanceof SttUnsupportedError) {
+			// The backend says this model can't stream — batch handles it.
+			globalSttState.update((s) => ({ ...s, mode: 'idle' }));
+			return false;
+		}
+
+		// A real failure (microphone denied, socket refused). Surfacing it beats
+		// silently retrying on the batch path, which would fail the same way and
+		// prompt for the microphone a second time.
+		const err = error as { message?: string };
+		globalSttState.update((s) => ({
+			...s,
+			mode: 'idle',
+			isPreparing: false,
+			isRecording: false,
+			error: err.message || 'Live transcription failed to start'
+		}));
+		return true;
+	}
+}
+
+async function stopLiveRecording(reason: 'user' | 'dropped' = 'user'): Promise<void> {
+	const session = streamSession;
+	streamSession = null;
+	if (!session) {
+		globalSttState.update((s) => ({ ...s, isRecording: false, mode: 'idle' }));
+		return;
+	}
+
+	playEarcon('stop');
+
+	// Drain: the tail segment is still transcribing upstream.
+	globalSttState.update((s) => ({
+		...s,
+		isRecording: false,
+		isTranscribing: true,
+		speechActive: false,
+		// Never clobber a message the backend already sent (a length or byte cap
+		// explains the drop far better than a generic disconnect notice would).
+		error: reason === 'dropped' ? s.error ?? 'Live transcription disconnected.' : s.error
+	}));
+	globalSttAudio.set({ level: 0, bands: emptyBands() });
+
+	const myRun = runId;
+
+	try {
+		const text = (await session.stop()).trim();
+		if (!isCurrentRun(myRun)) return;
+		if (text) {
+			await outputText(text, myRun);
+			globalSttState.update((s) => ({ ...s, lastTranscription: text }));
+		} else if (reason === 'user') {
+			// On a drop the disconnect message is the useful one; "no speech"
+			// would blame the user for the network.
+			globalSttState.update((s) => ({ ...s, error: 'No speech detected' }));
+			playEarcon('error');
+		}
+	} catch (error) {
+		if (!isCurrentRun(myRun)) return;
+		const err = error as { message?: string };
+		globalSttState.update((s) => ({
+			...s,
+			error: err.message || 'Live transcription failed'
+		}));
+		playEarcon('error');
+	} finally {
+		if (isCurrentRun(myRun)) {
+			outputSink = null;
+			globalSttState.update((s) => ({
+				...s,
+				isTranscribing: false,
+				mode: 'idle',
+				partial: '',
+				segments: [],
+				speechActive: false,
+				recordingMs: null
+			}));
+		}
+	}
 }
 
 // ============================================================================
@@ -167,12 +418,27 @@ async function startRecording(): Promise<void> {
 	}
 
 	audioChunks = [];
+	const myRun = ++runId;
 
 	globalSttState.update((s) => ({
 		...s,
 		isPreparing: true,
-		error: null
+		error: null,
+		partial: '',
+		segments: [],
+		lastTranscription: null,
+		recordingMs: null
 	}));
+	globalSttUpload.set(null);
+	recordingStartTime = Date.now();
+
+	// Live first; batch is the fallback for models that can't stream.
+	if (await startLiveRecording()) {
+		return;
+	}
+	if (!isCurrentRun(myRun)) return;
+
+	globalSttState.update((s) => ({ ...s, mode: 'batch' }));
 
 	try {
 		// Get microphone access - check for secure context (HTTPS or localhost)
@@ -206,6 +472,10 @@ async function startRecording(): Promise<void> {
 		mediaRecorder = recorder;
 		recordingStartTime = Date.now();
 
+		// Capture is live from this line, so the cue belongs here rather than
+		// after the meter setup below, which is another await away.
+		playEarcon('ready');
+
 		// Initialize audio monitoring
 		const startVisualization = await initAudioMonitoring(mediaStream);
 
@@ -234,17 +504,25 @@ async function startRecording(): Promise<void> {
 		globalSttState.update((s) => ({
 			...s,
 			isPreparing: false,
+			mode: 'idle',
 			error: errorMessage
 		}));
 	}
 }
 
 async function stopRecording(): Promise<void> {
+	if (get(globalSttState).mode === 'live') {
+		await stopLiveRecording();
+		return;
+	}
+
+	playEarcon('stop');
+
 	// Stop audio monitoring first
 	stopAudioMonitoring();
 
 	if (!mediaRecorder || mediaRecorder.state === 'inactive') {
-		globalSttState.update((s) => ({ ...s, isRecording: false }));
+		globalSttState.update((s) => ({ ...s, isRecording: false, mode: 'idle' }));
 		return;
 	}
 
@@ -258,7 +536,8 @@ async function stopRecording(): Promise<void> {
 		globalSttState.update((s) => ({
 			...s,
 			isRecording: false,
-			error: 'Recording too short. Please hold the hotkey longer.'
+			mode: 'idle',
+			error: 'That was too short to transcribe — press the hotkey again to stop.'
 		}));
 		recorder.stop();
 		stream?.getTracks().forEach((track) => track.stop());
@@ -267,19 +546,24 @@ async function stopRecording(): Promise<void> {
 		return;
 	}
 
-	globalSttState.update((s) => ({ ...s, isRecording: false }));
+	const myRun = runId;
+	globalSttState.update((s) => ({
+		...s,
+		isRecording: false,
+		recordingMs: recordingDuration
+	}));
 
 	try {
-		// Use Promise-based approach to ensure all data is collected
+		// Wait for the recorder to flush before assembling the blob.
+		//
+		// Collection stays on the `ondataavailable` property handler installed in
+		// startRecording — it already receives every chunk, including the ones
+		// requestData() and stop() emit. A second listener here appended those
+		// final chunks TWICE, so the blob ended with duplicated WebM clusters:
+		// depending on the decoder that garbled the last words or made
+		// decodeAudioData throw, which silently uploaded the malformed original.
 		const audioBlob = await new Promise<Blob>((resolve, reject) => {
-			const handleDataAvailable = (event: BlobEvent) => {
-				if (event.data.size > 0) {
-					audioChunks.push(event.data);
-				}
-			};
-
 			const handleStop = () => {
-				recorder.removeEventListener('dataavailable', handleDataAvailable);
 				recorder.removeEventListener('stop', handleStop);
 				stream?.getTracks().forEach((track) => track.stop());
 
@@ -291,9 +575,10 @@ async function stopRecording(): Promise<void> {
 				resolve(new Blob(audioChunks, { type: mimeType }));
 			};
 
-			recorder.addEventListener('dataavailable', handleDataAvailable);
 			recorder.addEventListener('stop', handleStop);
 
+			// Deterministically flush the tail first: Safari has been unreliable
+			// about dispatching the last dataavailable before the stop event.
 			recorder.requestData();
 			recorder.stop();
 		});
@@ -301,11 +586,13 @@ async function stopRecording(): Promise<void> {
 		mediaRecorder = null;
 		mediaStream = null;
 
-		await transcribeAndOutput(audioBlob);
+		if (!isCurrentRun(myRun)) return;
+		await transcribeAndOutput(audioBlob, myRun);
 	} catch (error: unknown) {
 		const err = error as { message?: string };
 		globalSttState.update((s) => ({
 			...s,
+			mode: 'idle',
 			error: err.message || 'Failed to process recording'
 		}));
 		mediaRecorder = null;
@@ -314,6 +601,11 @@ async function stopRecording(): Promise<void> {
 }
 
 async function toggleRecording(): Promise<void> {
+	// Must be the first statement and must stay synchronous: this call runs
+	// inside the click/keydown, which is the only moment iOS lets an
+	// AudioContext start. By the time a cue is due we are several awaits away.
+	primeEarcons();
+
 	// Prevent rapid toggles causing race conditions
 	if (isToggling) return;
 	isToggling = true;
@@ -335,7 +627,66 @@ async function toggleRecording(): Promise<void> {
 // Transcription & Output
 // ============================================================================
 
-async function transcribeAndOutput(audioBlob: Blob): Promise<void> {
+interface TranscribeResponse {
+	ok: boolean;
+	text?: string;
+	detail?: string;
+}
+
+/**
+ * Upload one recording for transcription.
+ *
+ * XMLHttpRequest rather than fetch purely for `upload.onprogress`: the upload is
+ * the leg that actually hurts on a phone, and it is the only part of the wait we
+ * can report honestly. Once the bytes are up, progress goes indeterminate rather
+ * than inventing a number for the model's own inference time.
+ */
+function post(blob: Blob, name: string): Promise<TranscribeResponse> {
+	return new Promise((resolve, reject) => {
+		const formData = new FormData();
+		formData.append('file', blob, name);
+
+		const xhr = new XMLHttpRequest();
+		uploadRequest = xhr;
+		xhr.open('POST', '/api/v1/settings/transcribe');
+		xhr.withCredentials = true;
+
+		globalSttUpload.set(0);
+		xhr.upload.onprogress = (event) => {
+			if (event.lengthComputable) {
+				globalSttUpload.set(event.loaded / event.total);
+			}
+		};
+		xhr.upload.onload = () => globalSttUpload.set(1);
+
+		xhr.onload = () => {
+			uploadRequest = null;
+			let body: { text?: string; detail?: string } = {};
+			try {
+				body = JSON.parse(xhr.responseText);
+			} catch {
+				/* a non-JSON body is reported through `detail` below */
+			}
+			resolve({
+				ok: xhr.status >= 200 && xhr.status < 300,
+				text: body.text,
+				detail: body.detail || (xhr.status ? `Transcription failed (${xhr.status})` : undefined)
+			});
+		};
+		xhr.onerror = () => {
+			uploadRequest = null;
+			reject(new Error('Network error while uploading the recording.'));
+		};
+		xhr.onabort = () => {
+			uploadRequest = null;
+			reject(new Error('Upload cancelled'));
+		};
+
+		xhr.send(formData);
+	});
+}
+
+async function transcribeAndOutput(audioBlob: Blob, myRun: number): Promise<void> {
 	globalSttState.update((s) => ({
 		...s,
 		isTranscribing: true,
@@ -343,37 +694,52 @@ async function transcribeAndOutput(audioBlob: Blob): Promise<void> {
 	}));
 
 	try {
-		// MediaRecorder produces WebM/Opus (or MP4), which some fal STT models
-		// (e.g. ElevenLabs Scribe) reject. Re-encode to WAV, which every model
-		// accepts. Fall back to the original blob if conversion isn't possible.
+		// MediaRecorder produces WebM/Opus (or MP4). Some STT models (notably
+		// ElevenLabs Scribe) reject those, which is why this used to re-encode to
+		// 16 kHz WAV every time — but WAV is uncompressed, so a 3-minute dictation
+		// went from a few hundred KB of Opus to ~5.8 MB, and that whole inflation
+		// crossed a phone's uplink before transcription could even start. Models
+		// known to accept the native container now upload it as-is.
 		let uploadBlob = audioBlob;
 		let filename = `recording.${getFileExtension(audioBlob.type || currentMimeType)}`;
-		try {
-			uploadBlob = await convertToWav(audioBlob);
-			filename = 'recording.wav';
-		} catch (conversionError) {
-			console.warn('[GlobalSTT] WAV conversion failed, uploading original recording:', conversionError);
+		let converted = false;
+
+		if (!sttAcceptsCompressed) {
+			try {
+				uploadBlob = await convertToWav(audioBlob);
+				filename = 'recording.wav';
+				converted = true;
+			} catch (conversionError) {
+				console.warn('[GlobalSTT] WAV conversion failed, uploading original recording:', conversionError);
+			}
 		}
 
-		const formData = new FormData();
-		formData.append('file', uploadBlob, filename);
+		let response = await post(uploadBlob, filename);
+		if (!isCurrentRun(myRun)) return;
 
-		const response = await fetch('/api/v1/settings/transcribe', {
-			method: 'POST',
-			credentials: 'include',
-			body: formData
-		});
+		// Safety net for the allowlist above: if a model is flagged as accepting
+		// compressed audio but actually rejects it, convert and retry exactly
+		// once. A mis-declared model then costs one slow request rather than
+		// breaking voice input outright.
+		if (!response.ok && !converted) {
+			try {
+				const wav = await convertToWav(audioBlob);
+				console.warn('[GlobalSTT] Native upload rejected, retrying as WAV');
+				response = await post(wav, 'recording.wav');
+				if (!isCurrentRun(myRun)) return;
+			} catch (conversionError) {
+				console.warn('[GlobalSTT] WAV retry unavailable:', conversionError);
+			}
+		}
 
 		if (!response.ok) {
-			const error = await response.json().catch(() => ({ detail: 'Transcription failed' }));
-			throw new Error(error.detail || 'Transcription failed');
+			throw new Error(response.detail || 'Transcription failed');
 		}
 
-		const result = await response.json();
-		const text = result.text?.trim();
+		const text = (response.text || '').trim();
 
 		if (text) {
-			await outputText(text);
+			await outputText(text, myRun);
 			globalSttState.update((s) => ({
 				...s,
 				lastTranscription: text
@@ -383,23 +749,41 @@ async function transcribeAndOutput(audioBlob: Blob): Promise<void> {
 				...s,
 				error: 'No speech detected'
 			}));
+			playEarcon('error');
 		}
 	} catch (error: unknown) {
+		// A cancelled run aborts its own upload, so this fires by design there.
+		// Reporting it would stamp an error onto state that has already moved on.
+		if (!isCurrentRun(myRun)) return;
 		console.error('[GlobalSTT] Transcription failed:', error);
 		const err = error as { message?: string };
 		globalSttState.update((s) => ({
 			...s,
 			error: err.message || 'Transcription failed'
 		}));
+		playEarcon('error');
 	} finally {
-		globalSttState.update((s) => ({
-			...s,
-			isTranscribing: false
-		}));
+		if (isCurrentRun(myRun)) {
+			outputSink = null;
+			globalSttUpload.set(null);
+			globalSttState.update((s) => ({
+				...s,
+				isTranscribing: false,
+				mode: 'idle',
+				recordingMs: null
+			}));
+		}
 	}
 }
 
-async function outputText(text: string): Promise<void> {
+async function outputText(text: string, myRun?: number): Promise<void> {
+	if (myRun !== undefined && !isCurrentRun(myRun)) return;
+
+	if (outputSink) {
+		outputSink(text);
+		return;
+	}
+
 	// Always copy to clipboard first
 	try {
 		await navigator.clipboard.writeText(text);
@@ -486,8 +870,14 @@ export function initGlobalStt(): () => void {
 		return () => {};
 	}
 
+	// Warm the capability probe so the first press does not pay for it. Failure
+	// is expected and ignorable here — this can run before auth has settled.
+	void fetchSttCapability().catch(() => {});
+
 	// Subscribe to preference changes
 	const unsubscribe = hotkeyPreferences.subscribe((prefs) => {
+		setEarconsEnabled(prefs.voiceSoundCues !== false);
+
 		if (prefs.globalSttEnabled) {
 			registerGlobalSttShortcut(prefs.globalSttHotkey);
 		} else {
@@ -509,6 +899,9 @@ export function initGlobalStt(): () => void {
 function cleanup(): void {
 	stopAudioMonitoring();
 
+	streamSession?.abort();
+	streamSession = null;
+
 	if (mediaRecorder && mediaRecorder.state !== 'inactive') {
 		mediaRecorder.stop();
 	}
@@ -521,7 +914,11 @@ function cleanup(): void {
 	mediaStream = null;
 	audioChunks = [];
 
+	outputSink = null;
+	runId++;
 	globalSttState.set(initialState);
+	globalSttAudio.set({ level: 0, bands: emptyBands() });
+	globalSttUpload.set(null);
 }
 
 /**
@@ -532,8 +929,66 @@ export function clearError(): void {
 }
 
 /**
+ * Abandon whatever voice input is in flight and keep none of it.
+ *
+ * Bumping the run id is the load-bearing part. Resetting the store would not be
+ * enough: `stopRecording` and `stopLiveRecording` hold local references to the
+ * recorder and session, and their continuations would still insert the text the
+ * user just discarded. Every such continuation checks the id after each await.
+ *
+ * This is also the only way out of a stuck `isPreparing` — a pending
+ * `startSttStream` cannot be aborted from outside, so instead it is left to
+ * resolve into a stale run that immediately tears its own session down.
+ */
+export function cancelVoiceInput(): void {
+	if (!browser) return;
+
+	runId++;
+	outputSink = null;
+
+	uploadRequest?.abort();
+	uploadRequest = null;
+
+	streamSession?.abort();
+	streamSession = null;
+
+	stopAudioMonitoring();
+
+	if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+		try {
+			mediaRecorder.stop();
+		} catch {
+			/* already stopping */
+		}
+	}
+	mediaStream?.getTracks().forEach((track) => track.stop());
+	mediaRecorder = null;
+	mediaStream = null;
+	audioChunks = [];
+
+	playEarcon('stop');
+	globalSttUpload.set(null);
+	globalSttState.set({ ...initialState });
+}
+
+/**
  * Manually trigger recording toggle (for UI buttons)
  */
 export function triggerToggle(): void {
+	toggleRecording();
+}
+
+/**
+ * Toggle voice input on behalf of a UI button, delivering the finished text to
+ * `sink` instead of the clipboard/caret.
+ *
+ * Both entry points share one capture stack and one overlay: the composer's
+ * microphone is a trigger, not a second recorder, so live transcription behaves
+ * identically however it was started.
+ */
+export function toggleVoiceInput(sink: (text: string) => void): void {
+	if (!get(globalSttState).isRecording) {
+		outputSink = sink;
+	}
 	toggleRecording();
 }
