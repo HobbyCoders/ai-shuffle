@@ -560,11 +560,13 @@ class EstimatingProvider(ScriptedProvider):
         return 0.5
 
 
-async def _run_two_call_turn(provider: ScriptedProvider) -> TurnComplete:
+async def _run_two_call_turn(
+    provider: ScriptedProvider, model: str = "claude-sonnet-5"
+) -> TurnComplete:
     registry = ToolRegistry()
     registry.register_inproc(_weather_server())
     loop = NativeLoop(
-        provider=provider, store=MemoryStore(), model="claude-sonnet-5",
+        provider=provider, store=MemoryStore(), model=model,
         registry=registry, permissions=PermissionEngine("never_ask"),
     )
     await loop.submit(UserTurn(content="weather in Paris?"))
@@ -595,12 +597,27 @@ async def test_turn_cost_falls_back_to_provider_estimate() -> None:
 
 
 async def test_turn_cost_is_none_without_cost_or_estimator() -> None:
+    """Nothing can price this call: the provider reports no cost, exposes no
+    estimator, and the model id is in no pricing table. The cost stays absent
+    rather than becoming a guess."""
     provider = ScriptedProvider([
         _tool("t1", "mcp__wx__get_weather", '{"city": "Paris"}'),
         _text("It is sunny in Paris."),
     ])
-    done = await _run_two_call_turn(provider)
+    done = await _run_two_call_turn(provider, model="mystery-model-1")
     assert done.cost_usd is None
+
+
+async def test_turn_cost_falls_back_to_the_cross_provider_table() -> None:
+    """A provider with no estimator still prices a model fluid knows — the
+    Grok/GLM gap that recorded whole sessions as free."""
+    provider = ScriptedProvider([
+        _tool("t1", "mcp__wx__get_weather", '{"city": "Paris"}'),
+        _text("It is sunny in Paris."),
+    ])
+    done = await _run_two_call_turn(provider, model="claude-sonnet-5")
+    # 10 input + 5 output tokens per call at Sonnet 5's $2/$10 per MTok.
+    assert done.cost_usd == pytest.approx(2 * (10 * 2.0 + 5 * 10.0) / 1_000_000)
 
 
 # ─── partial cost on turn-ending Interrupted / ErrorEvent ────────────────────
@@ -677,7 +694,9 @@ async def test_provider_error_turn_reports_accumulated_cost() -> None:
         _error("upstream exploded", {"input_tokens": 7}),
     ])
     loop = NativeLoop(
-        provider=provider, store=MemoryStore(), model="claude-sonnet-5",
+        # An unpriced model id, so the only cost in play is the one the
+        # provider reported — this test is about accumulation, not pricing.
+        provider=provider, store=MemoryStore(), model="mystery-model-1",
         registry=registry, permissions=PermissionEngine("never_ask"),
     )
     await loop.submit(UserTurn(content="weather in Paris?"))

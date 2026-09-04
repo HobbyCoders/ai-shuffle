@@ -63,7 +63,9 @@ class ProviderClient(Protocol):
     # a provider MAY expose ``estimate_cost(model, usage) -> float | None``. The
     # engine discovers it via ``getattr`` and calls it once per model call, only
     # when that call's usage dict carries no provider-reported ``"cost_usd"``.
-    # Return ``None`` for models with no known price (never guess).
+    # Return ``None`` for models with no known price (never guess) — the engine
+    # then falls through to ``fluid.providers.pricing``, which consults the
+    # host's pricing resolver and fluid's own cross-provider table.
     name: str
     caps: ProviderCaps
 

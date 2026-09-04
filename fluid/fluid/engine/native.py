@@ -139,6 +139,8 @@ from fluid.permissions.engine import (
     plan_mode_tools,
 )
 from fluid.providers.base import ProviderClient, ProviderRequest
+from fluid.providers.pricing import PricingResolver
+from fluid.providers.pricing import estimate_cost as estimate_cost_from_table
 from fluid.providers.windows import context_window_for
 from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
 from fluid.tools.builtins._util import resolve as resolve_tool_path
@@ -3470,16 +3472,33 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     def _fold_call_usage(self, totals: dict[str, Any], usage: dict[str, Any]) -> None:
         """Fold one model call's usage into the turn totals, filling in an
-        estimated cost when the provider reported none."""
+        estimated cost when the provider reported none.
+
+        Three tiers, first answer wins: the provider's own ``estimate_cost``
+        (Anthropic and the OpenAI dialect ship sourced tables; OpenRouter
+        prices from injected rates), then the cross-provider table in
+        ``fluid.providers.pricing`` — which also consults the host's pricing
+        resolver, and which is what stops a Grok or GLM session from
+        recording no spend at all. A model nobody can price leaves ``cost_usd``
+        absent, so the field stays "unknown" rather than becoming a wrong
+        number; every call here is guarded, and a missing price never raises.
+        """
         if "cost_usd" not in usage:
-            # No provider-reported cost — fall back to the provider's
-            # optional pricing-table estimate for this call.
+            cost: float | None = None
             est = getattr(self.provider, "estimate_cost", None)
             if est is not None:
-                cost = est(self.model, usage)
-                if cost is not None:
-                    usage["cost_usd"] = cost
-                    usage["cost_estimated"] = True
+                try:
+                    cost = est(self.model, usage)
+                except Exception:  # noqa: BLE001 — accounting is never fatal
+                    log.debug("provider cost estimate failed", exc_info=True)
+                    cost = None
+            if cost is None:
+                cost = estimate_cost_from_table(
+                    self.model, usage, resolver=self._pricing_resolver
+                )
+            if cost is not None:
+                usage["cost_usd"] = cost
+                usage["cost_estimated"] = True
         self._accumulate_usage(totals, usage)
 
     @staticmethod
