@@ -19,6 +19,7 @@ from fluid.context.cache_probe import (
     checkpoint_positions,
     diagnose_cache_miss,
     fingerprint_prefix,
+    message_count,
 )
 from fluid.context.compaction import (
     CompactionConfig,
@@ -460,3 +461,202 @@ async def test_probe_can_be_turned_off_on_the_engine() -> None:
     )
     assert "prefix_hashes" not in usage.raw
     assert "cache_miss" not in usage.raw
+
+
+# ─── Blind spot (b): the shared-count checkpoint ─────────────────────────────
+
+
+def test_extra_checkpoint_covers_the_whole_shared_prefix() -> None:
+    """Powers of two alone stop at m32 on a 63-message history, leaving 33..63
+    uncompared. Snapshotting the previous request's count closes the gap."""
+    assert checkpoint_positions(63) == [1, 2, 4, 8, 16, 32, 63]
+    assert checkpoint_positions(70, [63]) == [1, 2, 4, 8, 16, 32, 63, 64, 70]
+    # Ascending whatever order the extras arrive in — dict order IS prefix
+    # order for the bisection.
+    assert checkpoint_positions(70, [63, 3]) == [1, 2, 3, 4, 8, 16, 32, 63, 64, 70]
+    # Out-of-range extras are ignored rather than inventing a checkpoint.
+    assert checkpoint_positions(8, [0, -1, 99]) == [1, 2, 4, 8]
+
+
+def test_message_count_reads_the_largest_checkpoint() -> None:
+    assert message_count(None) == 0
+    assert message_count({"system": "a", "tools": "b"}) == 0
+    assert message_count({"m1": "a", "m2": "b", "m63": "c"}) == 63
+
+
+def test_extra_checkpoint_localizes_a_mutation_past_the_last_power_of_two() -> None:
+    """The audited case: message 40 of 63 was rewritten and the diagnosis said
+    the prefix was unchanged, because nothing between m32 and m63 was hashed."""
+    previous = fingerprint_prefix(system="s", tools=[], messages=_messages(63))
+    grown = _messages(70)
+    grown[40] = Message(role="assistant", content=[Text("rewritten")])
+
+    blind = diagnose_cache_miss(
+        previous=previous,
+        current=fingerprint_prefix(system="s", tools=[], messages=grown),
+        input_tokens=90_000,
+        cache_read_tokens=0,
+    )
+    assert blind["reason"] == "prefix_grew_only"
+    assert blind["stable_through"] == "m32"
+    # …and it says so rather than pretending m32 proved anything about 33..63.
+    assert blind["verified_messages"] == 32
+    assert blind["shared_messages"] == 63
+    assert "never compared" in blind["note"]
+
+    seeing = diagnose_cache_miss(
+        previous=previous,
+        current=fingerprint_prefix(
+            system="s", tools=[], messages=grown, extra_checkpoints=(63,)
+        ),
+        input_tokens=90_000,
+        cache_read_tokens=0,
+    )
+    assert seeing["reason"] == "prefix_changed"
+    assert seeing["changed"] == "m63"
+    assert seeing["message_range"] == [32, 63]
+
+
+def test_full_coverage_note_says_the_prefix_really_was_whole() -> None:
+    previous = fingerprint_prefix(system="s", tools=[], messages=_messages(63))
+    current = fingerprint_prefix(
+        system="s", tools=[], messages=_messages(70), extra_checkpoints=(63,)
+    )
+    out = diagnose_cache_miss(
+        previous=previous, current=current,
+        input_tokens=90_000, cache_read_tokens=0,
+    )
+    assert out["reason"] == "prefix_grew_only"
+    assert out["verified_messages"] == out["shared_messages"] == 63
+    assert "all 63 messages" in out["note"]
+    assert "expiry" in out["note"]
+    assert "never compared" not in out["note"]
+
+
+# ─── Blind spot (c): a rewrite fluid itself performed ────────────────────────
+
+
+def test_a_compaction_since_the_last_request_is_named_not_the_provider() -> None:
+    previous = _fp()
+    current = dict(previous)
+    current["m8"] = "f" * 16  # history grew; the shared prefix matched
+    out = diagnose_cache_miss(
+        previous=previous, current=current,
+        input_tokens=60_000, cache_read_tokens=0,
+        history_rewrites=[{"tier": 1, "reason": "image_consumed", "trimmed": 1}],
+    )
+    assert out["reason"] == "history_rewritten"
+    assert out["history_rewritten"][0]["reason"] == "image_consumed"
+    assert "tier-1 image_consumed" in out["note"]
+    assert "expiry" not in out["note"]
+
+
+def test_a_rewrite_is_recorded_even_when_a_segment_did_change() -> None:
+    out = diagnose_cache_miss(
+        previous=_fp(), current=_fp(m4="z" * 16),
+        input_tokens=60_000, cache_read_tokens=0,
+        history_rewrites=[{"tier": 2, "reason": "trigger"}],
+    )
+    assert out["reason"] == "prefix_changed"
+    assert out["changed"] == "m4"
+    assert out["history_rewritten"] == [{"tier": 2, "reason": "trigger"}]
+    assert "tier-2 trigger" in out["note"]
+
+
+def test_describe_promotions_is_the_signal_shape() -> None:
+    from fluid.context.compaction import Promotion, describe_promotions
+
+    records = describe_promotions([
+        Promotion(
+            tier=1, reason="image_consumed",
+            trimmed=(("n1", "c1"),), reclaimed_chars=531_000,
+        )
+    ])
+    assert records == [{
+        "tier": 1, "reason": "image_consumed", "trimmed": 1,
+        "spans": 0, "reclaimed_chars": 531_000,
+    }]
+
+
+async def test_engine_blames_its_own_image_trim_not_the_provider() -> None:
+    """End to end: a consume-once image trim rewrites an already-sent message,
+    the next call misses, and the Usage event names the trim."""
+    from fluid.context.compaction import CompactionConfig
+    from fluid.messages import Image
+
+    provider = _ScriptedProvider([
+        {"input_tokens": 50_000, "cache_read_input_tokens": 0},
+        {"input_tokens": 60_000, "cache_read_input_tokens": 0},
+    ])
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="m", system="sys",
+        compaction=CompactionConfig(
+            enabled=False, trim=TrimConfig(enabled=True, trigger_tokens=10**9)
+        ),
+    )
+    await loop.submit(UserTurn(content=[Image(data="A" * 4_000, media_type="image/png")]))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+    await loop.submit(UserTurn(content="and now?"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+
+    usages = [e for e in loop.bus.log(loop.session_id) if isinstance(e, Usage)]
+    second = usages[1].raw["cache_miss"]
+    # The image sits in message 1, so a checkpoint does catch the rewrite here
+    # — and the record says who rewrote it, which is the part the transcript
+    # was missing.
+    assert second["reason"] == "prefix_changed"
+    assert second["history_rewritten"][0]["reason"] == "image_consumed"
+    assert "tier-1 image_consumed" in second["note"]
+    # The rung belongs to the request it preceded, not to the one after.
+    assert "history_rewritten" not in usages[0].raw.get("cache_miss", {})
+
+
+# ─── Blind spot (a): the fingerprint survives a rebuilt engine ───────────────
+
+
+async def test_fingerprint_is_recovered_from_the_persisted_usage_events() -> None:
+    """The app rebuilds the engine per run, so every turn's first call used to
+    report ``no_previous_request``. The fingerprint rides the Usage event, so a
+    fresh engine on the same session reads the real previous request back."""
+    store = MemoryStore()
+    first = NativeLoop(
+        provider=_ScriptedProvider(
+            [{"input_tokens": 50_000, "cache_read_input_tokens": 0}]
+        ),
+        store=store, model="m", system="sys",
+    )
+    await first.submit(UserTurn(content="turn one"))
+    await asyncio.wait_for(first.wait_turn(), timeout=5)
+    sid = first.session_id
+
+    # A brand-new engine on the same session — and a changed system prompt,
+    # exactly the observed miss (system hash moved, every mK identical).
+    second = NativeLoop(
+        provider=_ScriptedProvider(
+            [{"input_tokens": 60_000, "cache_read_input_tokens": 0}]
+        ),
+        store=store, model="m", system="a different system prompt",
+        session_id=sid,
+    )
+    await second.submit(UserTurn(content="turn two"))
+    await asyncio.wait_for(second.wait_turn(), timeout=5)
+
+    miss = [
+        e for e in second.bus.log(sid) if isinstance(e, Usage)
+    ][-1].raw["cache_miss"]
+    assert miss["reason"] == "prefix_changed"
+    assert miss["changed"] == "system"
+
+
+async def test_the_very_first_call_of_a_session_still_says_so() -> None:
+    """Nothing to recover means nothing to diagnose — the honest answer."""
+    loop = NativeLoop(
+        provider=_ScriptedProvider(
+            [{"input_tokens": 50_000, "cache_read_input_tokens": 0}]
+        ),
+        store=MemoryStore(), model="m", system="sys",
+    )
+    await loop.submit(UserTurn(content="hello"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+    usage = next(e for e in loop.bus.log(loop.session_id) if isinstance(e, Usage))
+    assert usage.raw["cache_miss"]["reason"] == "no_previous_request"

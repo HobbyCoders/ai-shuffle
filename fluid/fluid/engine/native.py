@@ -53,8 +53,14 @@ from fluid.context.cache_probe import (
     CacheProbeConfig,
     diagnose_cache_miss,
     fingerprint_prefix,
+    message_count,
 )
-from fluid.context.compaction import CompactionConfig, Compactor, Promotion
+from fluid.context.compaction import (
+    CompactionConfig,
+    Compactor,
+    Promotion,
+    describe_promotions,
+)
 from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
 from fluid.context.trim import (
@@ -605,6 +611,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         trim: TrimConfig | None = None,
         compaction: CompactionConfig | None = None,
         cache_probe: CacheProbeConfig | None = None,
+        pricing: PricingResolver | None = None,
         mcp_servers: dict[str, dict[str, Any]] | None = None,
         agents: Sequence[dict[str, Any]] | None = None,
         allowed_tools: Sequence[str] | None = None,
@@ -806,6 +813,20 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._cache_probe = cache_probe or CacheProbeConfig()
         self._prefix_fingerprint: dict[str, str] | None = None
         self._prev_prefix_fingerprint: dict[str, str] | None = None
+        # Sessions whose previous-request fingerprint was already looked for in
+        # the persisted Usage events. The app rebuilds the engine per run, so
+        # without this every turn's first call reported "no_previous_request"
+        # and the one diagnosis that mattered — what moved across the turn
+        # boundary — was never made.
+        self._prefix_rehydrated: set[str] = set()
+        # Compaction/trim rungs applied since the last request was sent, as
+        # ``describe_promotions`` records. Consumed by the next cache-miss
+        # diagnosis, which reports a rewrite instead of blaming the provider.
+        self._history_rewrites: list[dict[str, Any]] = []
+        # Host pricing hook: ``resolver(model) -> ModelPrice | mapping | None``,
+        # consulted before fluid's own table so an app with its own model
+        # catalog prices its own models. See fluid.providers.pricing.
+        self._pricing_resolver = pricing
         # MCP servers from config, connected lazily on the first turn (the
         # constructor is sync; connecting needs the event loop).
         self._mcp_servers = dict(mcp_servers or {})
@@ -1485,6 +1506,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         await self._rehydrate_deferred_announced(sid, meta.head_node_id)
         await self._rehydrate_read_files(sid, meta.head_node_id)
         await self._rehydrate_compaction(sid)
+        await self._rehydrate_prefix_fingerprint(sid)
 
         if isinstance(op, Resume):
             # Nothing is appended: the head user node IS the prompt, so the
@@ -1740,6 +1762,46 @@ class NativeLoop(BackgroundLifecycleMixin):
             if isinstance(e, ContextCompaction)
         )
 
+    async def _rehydrate_prefix_fingerprint(self, sid: str) -> None:
+        """Recover the previous request's prefix fingerprint from the events.
+
+        ``_prev_prefix_fingerprint`` is process memory; the session outlives
+        the process, and a host that rebuilds the engine per run or per turn
+        starts every turn with none. Every model call already persisted its
+        fingerprint on the Usage event, so the newest one IS the previous
+        request — read it back and the first call of a turn gets a real
+        diagnosis instead of ``no_previous_request``.
+
+        Looked for once per session per engine, and never overwrites a
+        fingerprint this engine recorded itself. A store that cannot replay
+        contributes nothing.
+        """
+        if not self._cache_probe.enabled or sid in self._prefix_rehydrated:
+            return
+        self._prefix_rehydrated.add(sid)
+        if self._prev_prefix_fingerprint is not None:
+            return
+        try:
+            events = await self.store.events_since(sid, 0)
+        except Exception:  # noqa: BLE001 — instrumentation is never fatal
+            return
+        for event in reversed(events):
+            if not isinstance(event, Usage):
+                continue
+            hashes = event.raw.get("prefix_hashes")
+            if not isinstance(hashes, dict) or not hashes:
+                continue
+            # Dict order is prefix order and JSON round-trips preserve it, so
+            # the rehydrated fingerprint bisects exactly like a live one.
+            recovered = {
+                key: value
+                for key, value in hashes.items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+            if recovered:
+                self._prev_prefix_fingerprint = recovered
+            return
+
     async def _emit_compaction(
         self, sid: str, turn_id: str, promo: Promotion
     ) -> None:
@@ -1933,6 +1995,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # keeps them — a switch back could decrypt them again).
                 history = strip_opaque_reasoning(history)
             if promotions:
+                self._history_rewrites.extend(describe_promotions(promotions))
                 await self._emit_pre_compact(sid, turn_id, promotions)
             for promo in promotions:
                 await self._emit_compaction(sid, turn_id, promo)
@@ -2081,6 +2144,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                     )
                     if escalations:
                         overflow_retries += 1
+                        self._history_rewrites.extend(
+                            describe_promotions(escalations)
+                        )
                         await self._emit_pre_compact(sid, turn_id, escalations)
                         for promo in escalations:
                             await self._emit_compaction(sid, turn_id, promo)
@@ -2485,6 +2551,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                 system=request.system,
                 tools=request.tools,
                 messages=request.messages,
+                # Snapshot the end of the previous request's history too, so
+                # the two fingerprints share a checkpoint at the end of their
+                # common prefix. Powers of two alone leave everything between
+                # the last one and the shared count uncompared — with 63
+                # messages that is 33..63, a third of the history.
+                extra_checkpoints=(message_count(self._prev_prefix_fingerprint),),
             )
         except Exception:  # noqa: BLE001 — instrumentation is never fatal
             log.debug("prefix fingerprint failed", exc_info=True)
@@ -2497,6 +2569,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         into the "previous" slot, so the next call diffs against this one.
         """
         fingerprint = self._prefix_fingerprint
+        rewrites = self._history_rewrites
+        # Consumed either way: these rungs belong to the request just sent, and
+        # must not be blamed for the miss after next.
+        self._history_rewrites = []
         if fingerprint is None:
             return {}
         self._prefix_fingerprint = None
@@ -2510,6 +2586,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     usage.get("cache_read_input_tokens", 0) or 0
                 ),
                 config=self._cache_probe,
+                history_rewrites=rewrites,
             )
         except Exception:  # noqa: BLE001 — instrumentation is never fatal
             log.debug("cache-miss diagnosis failed", exc_info=True)

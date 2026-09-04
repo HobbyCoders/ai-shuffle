@@ -173,6 +173,30 @@ class Promotion:
     reclaimed_chars: int = 0
 
 
+def describe_promotions(
+    promotions: Iterable[Promotion],
+) -> list[dict[str, Any]]:
+    """Compact records of the rungs just applied — the "history was rewritten
+    since the previous request" signal.
+
+    A rung rewrites messages the provider already cached (a consume-once image
+    trim replaces a block in a message that was sent verbatim last call), so
+    the next request misses. Handing these to the cache probe lets a miss say
+    "we rewrote history" instead of pointing at provider routing. Descriptive
+    only: nothing here changes what gets rendered.
+    """
+    return [
+        {
+            "tier": promo.tier,
+            "reason": promo.reason,
+            "trimmed": len(promo.trimmed),
+            "spans": len(promo.spans),
+            "reclaimed_chars": promo.reclaimed_chars,
+        }
+        for promo in promotions
+    ]
+
+
 def _chars_of(
     nodes: list[SessionNode], pairs: list[tuple[str, str]]
 ) -> int:

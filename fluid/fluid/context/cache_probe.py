@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -40,6 +40,7 @@ __all__ = [
     "fingerprint_prefix",
     "diagnose_cache_miss",
     "checkpoint_positions",
+    "message_count",
 ]
 
 _DIGEST_BYTES = 8  # 16 hex chars — collision-irrelevant for a diff signal
@@ -72,21 +73,52 @@ def _hash_text(text: str) -> str:
     return h.hexdigest()
 
 
-def checkpoint_positions(count: int) -> list[int]:
+def checkpoint_positions(
+    count: int, extra: Sequence[int] = ()
+) -> list[int]:
     """Message counts to snapshot: 1, 2, 4, 8 … plus ``count`` itself.
 
     Absolute (not relative to ``count``) so the same key means the same prefix
     on every call, which is the whole point — a fraction-based checkpoint would
-    cover different messages each turn and always look "changed"."""
+    cover different messages each turn and always look "changed".
+
+    ``extra`` adds further absolute positions — the caller passes the PREVIOUS
+    request's message count, so the two fingerprints share a checkpoint at the
+    end of their common prefix. Without it, 63 messages snapshot at m1…m32 and
+    m63, the next call at m1…m64 and m70, and messages 33-63 are never
+    compared: the diagnosis reports "stable through m32" and calls a mutation
+    at message 40 an unchanged prefix.
+    """
     if count <= 0:
         return []
-    positions: list[int] = []
+    positions: set[int] = set()
     k = 1
     while k < count:
-        positions.append(k)
+        positions.add(k)
         k *= 2
-    positions.append(count)
-    return positions
+    positions.add(count)
+    for value in extra:
+        if 0 < value <= count:
+            positions.add(int(value))
+    return sorted(positions)
+
+
+def message_count(fingerprint: Mapping[str, str] | None) -> int:
+    """The number of messages a fingerprint covers — its largest ``mK``.
+
+    Lets the engine ask the previous fingerprint how long the previous
+    request was without keeping a parallel counter (and so it survives being
+    rehydrated from a persisted ``Usage`` event).
+    """
+    best = 0
+    for key in fingerprint or ():
+        if not key.startswith("m"):
+            continue
+        try:
+            best = max(best, int(key[1:]))
+        except ValueError:  # pragma: no cover — defensive
+            continue
+    return best
 
 
 def _feed_block(h: Any, block: Any) -> None:
@@ -126,12 +158,15 @@ def fingerprint_prefix(
     system: str | None,
     tools: Sequence[dict[str, Any]] | None,
     messages: Sequence[Message],
+    extra_checkpoints: Sequence[int] = (),
 ) -> dict[str, str]:
     """Short stable hashes of the request prefix, in prefix order.
 
     Keys: ``system``, ``tools``, then ``m1``/``m2``/``m4``… ``m<len>`` — each
     ``mK`` covering the first K messages cumulatively. Dict order IS prefix
-    order, which is what :func:`diagnose_cache_miss` walks.
+    order, which is what :func:`diagnose_cache_miss` walks, so the message
+    keys are always emitted in ascending order however ``extra_checkpoints``
+    interleaves with the powers of two.
     """
     out: dict[str, str] = {
         SYSTEM_SEGMENT: _hash_text(system or ""),
@@ -142,7 +177,7 @@ def fingerprint_prefix(
         tools_text = "<unserializable>"
     out[TOOLS_SEGMENT] = _hash_text(tools_text)
 
-    wanted = set(checkpoint_positions(len(messages)))
+    wanted = set(checkpoint_positions(len(messages), extra_checkpoints))
     if not wanted:
         return out
     running = _hasher()
@@ -178,6 +213,18 @@ def _segment_span(
     return lo, hi
 
 
+def _rewrite_phrase(rewrites: Sequence[Mapping[str, Any]]) -> str:
+    """Human phrase naming the rungs applied, for the diagnosis note."""
+    parts = []
+    for rewrite in rewrites:
+        tier = rewrite.get("tier")
+        reason = rewrite.get("reason") or "trigger"
+        parts.append(f"tier-{tier} {reason}" if tier else str(reason))
+    joined = ", ".join(parts)
+    subject = "compactions were" if len(parts) > 1 else "a compaction was"
+    return f"{subject} applied ({joined})"
+
+
 def diagnose_cache_miss(
     *,
     previous: dict[str, str] | None,
@@ -185,6 +232,7 @@ def diagnose_cache_miss(
     input_tokens: int,
     cache_read_tokens: int,
     config: CacheProbeConfig | None = None,
+    history_rewrites: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Name the first prefix segment that changed, when a call missed cache.
 
@@ -192,6 +240,12 @@ def diagnose_cache_miss(
     (big fresh prompt, ~no cache read) — accounting noise stays out of the
     event log. ``changed`` is the earliest differing segment; everything after
     it is a consequence, not evidence.
+
+    ``history_rewrites`` are the compaction/trim rungs applied between the
+    previous request and this one (see
+    :func:`fluid.context.compaction.describe_promotions`). A rung rewrites a
+    message the provider already cached, so a miss right after one is fluid's
+    own doing — naming it beats sending the reader after provider routing.
     """
     config = config or CacheProbeConfig()
     if not config.enabled:
@@ -200,12 +254,16 @@ def diagnose_cache_miss(
         return None
     if cache_read_tokens > config.max_cache_read_tokens:
         return None
+    rewrites = [dict(r) for r in history_rewrites or ()]
     if previous is None:
-        return {
+        first: dict[str, Any] = {
             "reason": "no_previous_request",
             "input_tokens": input_tokens,
             "cache_read_tokens": cache_read_tokens,
         }
+        if rewrites:
+            first["history_rewritten"] = rewrites
+        return first
 
     shared = [k for k in current if k in previous]
     changed: str | None = None
@@ -216,26 +274,74 @@ def diagnose_cache_miss(
             break
         stable_through = key
 
+    # How much of the common message prefix the checkpoints actually compared.
+    # ``shared_messages`` is min(len_prev, len_cur); ``verified_messages`` is
+    # the largest checkpoint proven identical. They match whenever the two
+    # fingerprints share a checkpoint at the end of the common prefix — which
+    # is what passing the previous request's message count arranges. When they
+    # do not, the gap is stated rather than papered over.
+    shared_messages = min(message_count(previous), message_count(current))
+    verified_messages = 0
+    if stable_through and stable_through.startswith("m"):
+        try:
+            verified_messages = int(stable_through[1:])
+        except ValueError:  # pragma: no cover — defensive
+            verified_messages = 0
+    full_coverage = shared_messages > 0 and verified_messages >= shared_messages
+
     if changed is None:
         # Prefix is byte-identical as far as both fingerprints reach. Either
         # history only grew (append-only, cache SHOULD have hit) or the miss is
         # provider-side: expiry, a different upstream replica, no breakpoint.
-        grew = len(current) > len(shared)
-        return {
+        grew = message_count(current) > shared_messages
+        out = {
             "reason": "prefix_grew_only" if grew else "prefix_unchanged",
             "stable_through": stable_through,
+            "shared_messages": shared_messages,
+            "verified_messages": verified_messages,
             "input_tokens": input_tokens,
             "cache_read_tokens": cache_read_tokens,
-            "note": (
-                "no prefix segment changed — suspect cache expiry, provider "
-                "routing, or a missing cache breakpoint"
-            ),
         }
+        if full_coverage:
+            note = (
+                f"every shared checkpoint matched and they cover the whole "
+                f"shared prefix (all {shared_messages} messages) — suspect "
+                f"cache expiry, provider routing, or a missing cache breakpoint"
+            )
+        else:
+            note = (
+                f"every shared checkpoint matched, but they only reach "
+                f"message {verified_messages} of {shared_messages}: messages "
+                f"{verified_messages + 1}..{shared_messages} were never "
+                f"compared, so a rewrite in there looks exactly like this. "
+                f"Failing that, suspect cache expiry, provider routing, or a "
+                f"missing cache breakpoint"
+            )
+        if rewrites:
+            # A trim/digest rewrote already-sent history between the two
+            # requests. That is a local cause with a name; do not hand the
+            # reader "suspect the provider" for something fluid did.
+            out["reason"] = "history_rewritten"
+            note = (
+                f"{_rewrite_phrase(rewrites)} between the two requests, so "
+                f"already-sent history was rewritten"
+            )
+            if not full_coverage:
+                note += (
+                    f" (the checkpoints verified only message "
+                    f"{verified_messages} of {shared_messages}, so the "
+                    f"rewrite may sit past the last shared checkpoint)"
+                )
+            out["history_rewritten"] = rewrites
+        out["note"] = note
+        return out
 
-    out: dict[str, Any] = {
+    out = {
         "reason": "prefix_changed",
         "changed": changed,
         "stable_through": stable_through,
+        "shared_messages": shared_messages,
+        "verified_messages": verified_messages,
         "input_tokens": input_tokens,
         "cache_read_tokens": cache_read_tokens,
     }
@@ -248,4 +354,7 @@ def diagnose_cache_miss(
         )
     else:
         out["note"] = f"the {changed} section of the prompt changed"
+    if rewrites:
+        out["history_rewritten"] = rewrites
+        out["note"] += f"; {_rewrite_phrase(rewrites)} since the last request"
     return out
