@@ -405,7 +405,13 @@ class GitHubService:
     # Pull Requests
     # =========================================================================
 
-    def list_pulls(self, repo: str, state: str = 'open', limit: int = 30) -> List[PullRequest]:
+    def list_pulls(
+        self,
+        repo: str,
+        state: str = 'open',
+        limit: int = 30,
+        head: Optional[str] = None,
+    ) -> List[PullRequest]:
         """
         List pull requests for a repository.
 
@@ -413,6 +419,7 @@ class GitHubService:
             repo: Repository in "owner/repo" format
             state: PR state filter - 'open', 'closed', 'merged', 'all'
             limit: Maximum number of PRs to return
+            head: Optional head-branch filter (``gh pr list --head``)
 
         Returns:
             List of PullRequest objects. An empty list means "this repository
@@ -424,13 +431,16 @@ class GitHubService:
                 negative answer flips the UI between Merge-PR and Create-PR).
         """
         try:
-            result = self._run_gh([
+            cmd = [
                 'pr', 'list',
                 '--repo', repo,
                 '--state', state,
                 '--limit', str(limit),
-                '--json', 'number,title,body,state,headRefName,baseRefName,author,url,createdAt,updatedAt,mergeable'
-            ])
+                '--json', 'number,title,body,state,headRefName,baseRefName,author,url,createdAt,updatedAt,mergeable',
+            ]
+            if head:
+                cmd.extend(['--head', head])
+            result = self._run_gh(cmd)
         except Exception as e:
             raise GitHubCliError(f"gh pr list failed: {e}") from e
 

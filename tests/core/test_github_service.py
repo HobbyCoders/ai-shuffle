@@ -593,6 +593,22 @@ class TestListPulls:
             limit_idx = call_args.index('--limit')
             assert call_args[limit_idx + 1] == '10'
 
+    def test_list_with_head_filter(self, service, mock_completed_process):
+        """Should pass head-branch filter to gh CLI."""
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value = mock_completed_process(
+                returncode=0,
+                stdout="[]"
+            )
+
+            service.list_pulls("owner/repo", state="all", head="feat/x")
+
+            call_args = mock_run.call_args[0][0]
+            assert '--head' in call_args
+            head_idx = call_args.index('--head')
+            assert call_args[head_idx + 1] == 'feat/x'
+            assert call_args[call_args.index('--state') + 1] == 'all'
+
     def test_empty_list(self, service, mock_completed_process):
         """Should return empty list when no PRs."""
         with patch('subprocess.run') as mock_run:

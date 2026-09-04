@@ -8,7 +8,7 @@ row patch so every device's list updates without a refetch.
 Never raises: a persistence or GitHub blip must not break the git flow or
 turn teardown. Merge never settles the session. A merged (or closed) PR is
 not terminal for the session either: turn-end reconcile will adopt a newer
-open PR on the same checkout.
+PR on the same checkout, whether that PR is still open or already merged.
 """
 
 from __future__ import annotations
@@ -140,22 +140,26 @@ def _github_state(pr: Any) -> Optional[str]:
     return _normalize_pr_state(getattr(pr, "state", None))
 
 
-def _find_open_pull(github_service: Any, repo: str, branch: str) -> Any:
-    for item in github_service.list_pulls(repo, state="open", limit=100):
-        if getattr(item, "head_branch", None) == branch:
-            return item
-    return None
+def _find_pull_for_branch(github_service: Any, repo: str, branch: str) -> Any:
+    """Open PR on this branch, else the highest-numbered PR (merged/closed)."""
+    pulls = github_service.list_pulls(repo, state="all", limit=100, head=branch)
+    matching = [
+        item for item in pulls if getattr(item, "head_branch", None) == branch
+    ]
+    if not matching:
+        return None
+    open_ones = [p for p in matching if _github_state(p) == "open"]
+    pool = open_ones or matching
+    return max(pool, key=lambda p: p.number)
 
 
 async def reconcile_session_pr(session_id: str) -> None:
     """Best-effort: if this session's branch has a GitHub PR, persist it.
 
-    - ``merged`` / ``closed`` describe that pull request, not the session.
-      Keep looking for a newer open PR on the current branch so a session
-      that continues after merge (or close) can pick up the next one.
-    - Has ``pr_number`` and not yet terminal: refresh that PR (catches
-      agent/gh merges).
-    - Otherwise: look up an open PR whose head is the session branch.
+    Prefers an open PR on the session branch; otherwise the latest PR for
+    that branch (so a second PR that is already merged replaces the previous
+    merged number). No branch: refresh the stored ``pr_number``. Unchanged
+    number+state is a no-op.
 
     A failed GitHub lookup never clears persisted state. Never raises.
     """
@@ -171,13 +175,9 @@ async def reconcile_session_pr(session_id: str) -> None:
         branch = session.get("worktree_branch") or session.get("branch")
         pr_number = session.get("pr_number")
         current_state = (session.get("pr_state") or "").lower()
-        terminal = current_state in ("merged", "closed")
         if not project_id:
             return
-        if terminal:
-            if not branch:
-                return
-        elif not branch and not pr_number:
+        if not branch and not pr_number:
             return
 
         try:
@@ -203,11 +203,10 @@ async def reconcile_session_pr(session_id: str) -> None:
 
         pr = None
         try:
-            if terminal or not pr_number:
-                if branch:
-                    pr = await asyncio.to_thread(
-                        _find_open_pull, github_service, repo, branch
-                    )
+            if branch:
+                pr = await asyncio.to_thread(
+                    _find_pull_for_branch, github_service, repo, branch
+                )
             else:
                 pr = await asyncio.to_thread(github_service.get_pull, repo, int(pr_number))
         except GitHubCliError:
@@ -221,7 +220,7 @@ async def reconcile_session_pr(session_id: str) -> None:
             return
 
         state = _github_state(pr) or "open"
-        if terminal and state != "open":
+        if pr.number == pr_number and state == current_state:
             return
         await persist_pr_state(
             session_id=session_id,

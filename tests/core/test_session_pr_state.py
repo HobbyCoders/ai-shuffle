@@ -141,6 +141,96 @@ async def test_reconcile_merged_without_new_pr_keeps_state(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_reconcile_same_merged_pr_does_not_rewrite(mock_db):
+    sid = _mk(project_id='p1', worktree_branch='feat/x')
+    database.update_session_pr_state(
+        sid, pr_number=4, pr_url='https://github.com/o/r/pull/4', pr_state='merged'
+    )
+    same = SimpleNamespace(
+        number=4, url='https://github.com/o/r/pull/4', state='MERGED', head_branch='feat/x'
+    )
+
+    with patch(
+        'app.api.git_helpers.get_working_dir_async', new=AsyncMock(return_value='/wd')
+    ), patch('app.core.github_service.github_service') as gh, patch(
+        'app.core.sync_engine.sync_engine'
+    ) as sync:
+        gh.get_repo_from_remote.return_value = 'o/r'
+        gh.list_pulls.return_value = [same]
+        sync.broadcast_session_updated = AsyncMock()
+        sync.broadcast_user_session_updated = AsyncMock()
+        await reconcile_session_pr(sid)
+        sync.broadcast_user_session_updated.assert_not_awaited()
+
+    row = database.get_session(sid)
+    assert row['pr_number'] == 4
+    assert row['pr_state'] == 'merged'
+
+
+@pytest.mark.asyncio
+async def test_reconcile_merged_adopts_newer_merged_pr(mock_db):
+    sid = _mk(project_id='p1', worktree_branch='feat/x')
+    database.update_session_pr_state(
+        sid, pr_number=4, pr_url='https://github.com/o/r/pull/4', pr_state='merged'
+    )
+    old_pr = SimpleNamespace(
+        number=4, url='https://github.com/o/r/pull/4', state='MERGED', head_branch='feat/x'
+    )
+    new_pr = SimpleNamespace(
+        number=12, url='https://github.com/o/r/pull/12', state='MERGED', head_branch='feat/x'
+    )
+
+    with patch(
+        'app.api.git_helpers.get_working_dir_async', new=AsyncMock(return_value='/wd')
+    ), patch('app.core.github_service.github_service') as gh, patch(
+        'app.core.sync_engine.sync_engine'
+    ) as sync:
+        gh.get_repo_from_remote.return_value = 'o/r'
+        gh.list_pulls.return_value = [old_pr, new_pr]
+        sync.broadcast_session_updated = AsyncMock()
+        sync.broadcast_user_session_updated = AsyncMock()
+        await reconcile_session_pr(sid)
+        gh.get_pull.assert_not_called()
+        gh.list_pulls.assert_called()
+        assert gh.list_pulls.call_args.kwargs.get('state') == 'all'
+        assert gh.list_pulls.call_args.kwargs.get('head') == 'feat/x'
+
+    row = database.get_session(sid)
+    assert row['pr_number'] == 12
+    assert row['pr_state'] == 'merged'
+    assert row['pr_url'] == 'https://github.com/o/r/pull/12'
+
+
+@pytest.mark.asyncio
+async def test_reconcile_prefers_open_pr_over_older_merged(mock_db):
+    sid = _mk(project_id='p1', worktree_branch='feat/x')
+    database.update_session_pr_state(
+        sid, pr_number=4, pr_url='https://github.com/o/r/pull/4', pr_state='merged'
+    )
+    old_pr = SimpleNamespace(
+        number=4, url='https://github.com/o/r/pull/4', state='MERGED', head_branch='feat/x'
+    )
+    new_pr = SimpleNamespace(
+        number=12, url='https://github.com/o/r/pull/12', state='OPEN', head_branch='feat/x'
+    )
+
+    with patch(
+        'app.api.git_helpers.get_working_dir_async', new=AsyncMock(return_value='/wd')
+    ), patch('app.core.github_service.github_service') as gh, patch(
+        'app.core.sync_engine.sync_engine'
+    ) as sync:
+        gh.get_repo_from_remote.return_value = 'o/r'
+        gh.list_pulls.return_value = [old_pr, new_pr]
+        sync.broadcast_session_updated = AsyncMock()
+        sync.broadcast_user_session_updated = AsyncMock()
+        await reconcile_session_pr(sid)
+
+    row = database.get_session(sid)
+    assert row['pr_number'] == 12
+    assert row['pr_state'] == 'open'
+
+
+@pytest.mark.asyncio
 async def test_reconcile_failed_lookup_does_not_clear(mock_db):
     from app.core.github_service import GitHubCliError
 
@@ -153,7 +243,7 @@ async def test_reconcile_failed_lookup_does_not_clear(mock_db):
         'app.api.git_helpers.get_working_dir_async', new=AsyncMock(return_value='/wd')
     ), patch('app.core.github_service.github_service') as gh:
         gh.get_repo_from_remote.return_value = 'o/r'
-        gh.get_pull.side_effect = GitHubCliError('offline')
+        gh.list_pulls.side_effect = GitHubCliError('offline')
         await reconcile_session_pr(sid)
 
     row = database.get_session(sid)
