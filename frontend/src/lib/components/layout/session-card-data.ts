@@ -327,7 +327,7 @@ export function sessionDeviceId(s: Session): string {
 	return s.is_remote && s.instance_id ? s.instance_id : '__local__';
 }
 
-/** Human label for the device segment on line 3. */
+/** Human label for the device icon (title + aria-label; no longer shown as text). */
 export function deviceLabel(s: Session): string {
 	if (!s.is_remote) return 'This device';
 	return s.device_name || 'Unknown device';

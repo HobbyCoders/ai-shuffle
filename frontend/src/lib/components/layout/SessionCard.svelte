@@ -11,12 +11,12 @@
 	 *
 	 * Active card (three lines):
 	 *   L1  glyph · title · elapsed
-	 *   L2  status word · PR state · diffstat
-	 *   L3  project · device · branch
+	 *   L2  project · status word · PR state · diffstat
+	 *   L3  device icon · branch
 	 *
 	 * Settled row (compact, two lines):
 	 *   L1  glyph · title · age
-	 *   L2  device · git-state word · branch
+	 *   L2  device icon · git-state word · branch
 	 *
 	 * Hover/swipe exposes a single action: Settle (active) or Move to Active
 	 * (settled). Rename, Fork, and Delete live on the header session-title menu.
@@ -434,6 +434,8 @@
 
 			{#if !compact}
 				<span class="l2">
+					<span class="seg"><span class="proj">{projectLabel}</span></span>
+					<span class="dot" aria-hidden="true"></span>
 					<span class="st {statusTone}">{statusWord}</span>
 					{#if prText}
 						<span class="dot" aria-hidden="true"></span>
@@ -447,17 +449,12 @@
 			{/if}
 
 			<span class="l3">
-				{#if !compact}
-					<span class="seg"><span class="proj">{projectLabel}</span></span>
-					<span class="dot" aria-hidden="true"></span>
-				{/if}
-				<span class="seg">
+				<span class="seg device-seg" title={device} aria-label={device}>
 					{#if session.is_remote}
 						<Cloud size={12} strokeWidth={1.9} />
 					{:else}
 						<Monitor size={12} strokeWidth={1.9} />
 					{/if}
-					<span class="dev">{device}</span>
 				</span>
 				{#if compact && stageWord}
 					<span class="dot" aria-hidden="true"></span>
@@ -558,7 +555,7 @@
 	.scard:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
 	/* Compact two-line row for settled/archived sessions: title + age, then a
-	   muted meta line (device · git state · branch). Still denser than the
+	   muted meta line (device icon · git state · branch). Still denser than the
 	   three-line active cards. Hover reveals the quick action centered at the
 	   row's right edge; the mobile swipe strip is untouched. */
 	.scard.compact { padding: 6px calc(8px + var(--ram-reveal) * 30px) 7px 8px; }
@@ -725,14 +722,18 @@
 	.seg.branch-seg {
 		flex: 0 1 auto;
 	}
-	.proj,
-	.dev {
+	.proj {
 		display: block;
 		min-width: 0;
 		max-width: 96px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		color: var(--sidebar-muted);
+		font-weight: 400;
+	}
+	.device-seg {
+		flex: none;
 	}
 	.branch {
 		min-width: 0;

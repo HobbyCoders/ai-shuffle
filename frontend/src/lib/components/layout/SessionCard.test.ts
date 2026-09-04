@@ -199,12 +199,16 @@ describe('SessionCard actions', () => {
 
 		expect(container.querySelector('.scard.compact')).toBeTruthy();
 		expect(container.querySelector('.title')?.textContent).toContain('Sidebar work');
-		// A settled row drops the status line; its meta reads device · git · branch
+		// A settled row drops the status line; its meta reads device icon · git · branch
 		// (the project is the group it already sits under).
 		expect(container.querySelector('.l2')).toBeNull();
 		const meta = container.querySelector('.l3');
 		expect(meta).toBeTruthy();
-		expect(meta?.textContent).toContain('This device');
+		// Device shows as leading icon only — label stays on title/aria for hover + a11y.
+		const deviceSeg = meta?.querySelector('.device-seg');
+		expect(meta?.firstElementChild).toBe(deviceSeg);
+		expect(deviceSeg?.getAttribute('aria-label')).toBe('This device');
+		expect(meta?.textContent).not.toContain('This device');
 		expect(meta?.textContent).toContain('fix/thing');
 		expect(meta?.textContent).not.toContain('Project A');
 		expect(screen.getByTitle('Move to Active')).toBeTruthy();
@@ -427,18 +431,26 @@ describe('SessionCard git state', () => {
 		);
 	});
 
-	it('lays an active card out as title, status line, then project meta', () => {
+	it('lays an active card out as title, status line with project, then device meta', () => {
 		const { container } = renderCard(
 			{ is_active: true, worktree_branch: 'feat/x' },
 			{ status: 'working', projectLabel: 'Project A' }
 		);
 
 		expect(container.querySelector('.title')?.textContent).toContain('Sidebar work');
-		expect(container.querySelector('.l2 .st')?.textContent).toBe('Working');
-		expect(container.querySelector('.l2 .st')?.classList.contains('accent')).toBe(true);
+		const statusLine = container.querySelector('.l2');
+		// Project leads the middle row; runtime status follows.
+		expect(statusLine?.querySelector('.proj')?.textContent).toBe('Project A');
+		expect(statusLine?.firstElementChild?.querySelector('.proj')).toBeTruthy();
+		expect(statusLine?.querySelector('.st')?.textContent).toBe('Working');
+		expect(statusLine?.querySelector('.st')?.classList.contains('accent')).toBe(true);
 		const meta = container.querySelector('.l3');
-		expect(meta?.textContent).toContain('Project A');
-		expect(meta?.textContent).toContain('This device');
+		const deviceSeg = meta?.querySelector('.device-seg');
+		// Device icon leads the bottom meta line (same position as settled rows).
+		expect(meta?.firstElementChild).toBe(deviceSeg);
+		expect(deviceSeg?.getAttribute('aria-label')).toBe('This device');
+		expect(meta?.textContent).not.toContain('This device');
+		expect(meta?.textContent).not.toContain('Project A');
 		expect(meta?.textContent).toContain('feat/x');
 	});
 
