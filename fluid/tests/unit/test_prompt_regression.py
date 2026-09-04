@@ -268,8 +268,16 @@ def test_code_mode_addendum_explains_deferred_tools() -> None:
     )
 
     assert "[deferred]" in CODE_MODE_ADDENDUM
-    assert 'read_tool_docs("<name>")' in CODE_MODE_ADDENDUM
-    assert "never withholds a capability" in CODE_MODE_ADDENDUM
+    assert "`read_tool_docs` tool" in CODE_MODE_ADDENDUM
+    assert "rather than withholding a capability" in CODE_MODE_ADDENDUM
+    # "It imports and calls exactly like any other tool" read as a promise
+    # about read_tool_docs — the nearest name — and seven of nine audited
+    # code-mode sessions opened a batched cell with
+    # `from tools.read_tool_docs import read_tool_docs`, losing the whole
+    # cell. The subject of that sentence is now named, and the catalog tools
+    # are said outright to be unimportable.
+    assert "never importable from `tools`" in CODE_MODE_ADDENDUM
+    assert "The deferred tool itself" in CODE_MODE_ADDENDUM
     # Gated like the rest: the text is surface-independent, so it survives even
     # the empty builtin surface (it names only code-mode tools).
     assert "[deferred]" in compose_code_mode_addendum(frozenset())
@@ -535,3 +543,44 @@ def test_code_mode_addendum_matches_golden_snapshot() -> None:
     from fluid.cli.prompt import CODE_MODE_ADDENDUM
 
     _check_golden("code_mode_addendum.txt", CODE_MODE_ADDENDUM + "\n")
+
+
+def test_mounted_builtin_tools_reads_a_tool_context_extras_mapping() -> None:
+    """One derivation of "what this leg mounts", so the prompt block and the
+    context breakdown cannot disagree. They did: a host that never injected
+    ``agent_message`` still advertised SendMessage and ListAgents in the
+    prompt and billed 546 + 245 tokens for them, while the engine withheld
+    both from every surface the model could call."""
+    from fluid.cli.prompt import BUILTIN_TOOL_NAMES, mounted_builtin_tools
+
+    extras = {"monitor_spawn": object(), "plan_mode_control": object()}
+    mounted = mounted_builtin_tools(BUILTIN_TOOL_NAMES, extras)
+    assert "SendMessage" not in mounted and "ListAgents" not in mounted
+    assert {"Monitor", "Plan", "StopPlanning"} <= mounted
+    # Capability-free builtins are always mounted.
+    assert {"Read", "Grep", "Glob"} <= mounted
+    # Bare keys work too, and no extras at all leaves only the free ones.
+    assert mounted == mounted_builtin_tools(BUILTIN_TOOL_NAMES, set(extras))
+    assert not mounted_builtin_tools(BUILTIN_TOOL_NAMES, None) & {"Monitor", "Task"}
+
+
+def test_the_peer_message_block_follows_the_mounted_surface(tmp_path) -> None:
+    """gpt-6-astra imported SendMessage in 3 of 3 sessions on a host that had
+    no agent messaging, because the prompt described how peer messages arrive.
+    The block rides on the tool being mounted, not on the tool existing."""
+    from fluid.cli.config import resolved_prompt
+    from fluid.cli.prompt import BUILTIN_TOOL_NAMES, mounted_builtin_tools
+
+    config = HarnessConfig.from_dict(
+        deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path)})
+    )
+    wired = frozenset(
+        mounted_builtin_tools(BUILTIN_TOOL_NAMES, ())  # nothing injected
+    )
+    assert "SendMessage" not in wired
+    without = resolved_prompt(config, wired=frozenset()).text
+    assert "SendMessage" not in without and "ListAgents" not in without
+    with_messaging = resolved_prompt(
+        config, wired=frozenset({"agent_message", "agent_roster"})
+    ).text
+    assert "SendMessage" in with_messaging

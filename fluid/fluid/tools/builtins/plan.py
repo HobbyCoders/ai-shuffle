@@ -33,10 +33,19 @@ from fluid.tools.registry import InputRequired, ToolCtx, ToolOutcome, ToolSpec
 
 @dataclass(frozen=True)
 class PlanModeControl:
-    """Engine-injected plan-mode switch (``ctx.extra["plan_mode_control"]``)."""
+    """Engine-injected plan-mode switch (``ctx.extra["plan_mode_control"]``).
+
+    ``auto_approve`` says the approval gate is a no-op on this host: the plan
+    is accepted by policy (bypass permissions, an unattended runner) without
+    anyone reading it. Fluid cannot detect that — only the host knows — and
+    left unset the tools keep promising a human decision that will not happen.
+    Set it and the entry result says the gate is automatic instead, so a model
+    does not go on to tell the user their plan was approved.
+    """
 
     is_active: Callable[[], bool]
     set_active: Callable[[bool], None]
+    auto_approve: bool = False
 
 
 # What the mode takes away, in the words every plan-mode message uses: the
@@ -51,6 +60,24 @@ ENTER_RESULT = (
     "present a concrete plan with StopPlanning for the user's approval. Do "
     "not describe edits as if you were making them."
 )
+
+# Same mode, honest about the gate: on a host that approves by policy nobody
+# reads the plan, so promising "the user's approval" produces a model that
+# later reports back "the plan is approved" as if a person had said so.
+ENTER_RESULT_AUTO = (
+    f"Plan mode is on. {LEAVES[0].upper()}{LEAVES[1:]} have left your surface. "
+    "Explore the codebase with the read tools, weigh the approaches, then "
+    "present a concrete plan with StopPlanning. Note that this host approves "
+    "automatically — StopPlanning restores your tools by policy, no one "
+    "reviews the plan, so do not report it back as user-approved. Write the "
+    "plan for the user to read afterwards. Do not describe edits as if you "
+    "were making them."
+)
+
+
+def enter_result(*, auto_approve: bool = False) -> str:
+    """The Plan entry text, honest about whether a human will decide."""
+    return ENTER_RESULT_AUTO if auto_approve else ENTER_RESULT
 
 APPROVED_RESULT = (
     "Plan approved — plan mode is now OFF. Your write tools are back on the "
@@ -118,11 +145,39 @@ STOP_SPEC = ToolSpec(
     requires_extra=("plan_mode_control",),
 )
 
+# The host ended plan mode before the answer came back, and nothing in the
+# payload says a person answered. The old text opened "Plan approved" and
+# models relayed that to users verbatim — on hosts that auto-approve under
+# bypass permissions, nobody had read the plan at all. State the mechanism, not
+# a verdict: the tools are back either way, which is the actionable part.
 ALREADY_OFF_RESULT = (
-    "Plan approved — plan mode is OFF (the host had already ended it). Your "
-    f"write tools are on the surface ({LEAVES}). Execute the approved plan "
-    "now; steps it already covers need no further permission."
+    "Plan mode is OFF — the host ended it by policy, not through an approval "
+    "you can attribute to the user. No user review of this plan was recorded, "
+    "so do not report the plan as approved. Your write tools are on the "
+    f"surface ({LEAVES}): proceed with the plan, and raise anything in it a "
+    "user would want to weigh in on before you do the irreversible part."
 )
+
+# The host ended plan mode itself AND is telling us a real answer came back
+# from a person (see :data:`USER_ANSWERED_KEY`) — approval is attributable.
+ALREADY_OFF_APPROVED_RESULT = (
+    "Plan approved by the user — plan mode is OFF (the host had already ended "
+    f"it). Your write tools are on the surface ({LEAVES}). Execute the "
+    "approved plan now; steps it already covers need no further permission."
+)
+
+#: Optional key in the ``__input_responses__`` payload. A host that can tell a
+#: human answer from a policy auto-approval sets it truthy on the human one;
+#: absent, fluid assumes the honest thing — that nobody approved anything —
+#: rather than crediting a user with a decision the host made.
+USER_ANSWERED_KEY = "__user_answered__"
+
+
+def _user_answered(answers: Any) -> bool:
+    """Whether the host says a person actually answered the approval prompt."""
+    if not isinstance(answers, dict):
+        return False
+    return bool(answers.get(USER_ANSWERED_KEY))
 
 # Answers treated as approval on the MRTR second leg. "1" is the first
 # option's index (Approve is listed first); anything else is feedback.
@@ -194,7 +249,9 @@ async def plan_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             is_error=True,
         )
     control.set_active(True)
-    return ToolOutcome(text=ENTER_RESULT)
+    return ToolOutcome(
+        text=enter_result(auto_approve=bool(getattr(control, "auto_approve", False)))
+    )
 
 
 async def stop_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
@@ -273,7 +330,18 @@ async def stop_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         # outright: an approval that reads as empty (or merely implied) cost
         # audited sessions whole turns of the model re-checking whether it was
         # allowed to write yet.
-        return ToolOutcome(text=ALREADY_OFF_RESULT if already_off else APPROVED_RESULT)
+        if not already_off:
+            return ToolOutcome(text=APPROVED_RESULT)
+        # Plan mode was already off when the answer arrived, so the answer did
+        # not end it — the host did. Whether a person was behind it is the
+        # host's to say (USER_ANSWERED_KEY); unsaid means unattributable.
+        return ToolOutcome(
+            text=(
+                ALREADY_OFF_APPROVED_RESULT
+                if _user_answered(answers)
+                else ALREADY_OFF_RESULT
+            )
+        )
     feedback = raw or "(no feedback given)"
     if not control.is_active():
         # Rejected, but the host has already ended plan mode out from under the

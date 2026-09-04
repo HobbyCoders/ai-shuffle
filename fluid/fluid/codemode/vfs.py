@@ -54,6 +54,85 @@ DEFAULT_ALLOWLIST = frozenset({
 })
 
 
+
+# ─── names that will never be under ``tools`` ────────────────────────────────
+
+# The catalog tools. They are TOP-LEVEL tool calls, siblings of run_python, so
+# nothing under ``tools`` will ever answer to them. Reaching for one from
+# inside a cell was the most expensive small mistake in the audited code-mode
+# sessions: seven of nine wrote ``from tools.read_tool_docs import
+# read_tool_docs`` at the top of a batched cell and lost the whole cell to a
+# bare ModuleNotFoundError with nothing in it to correct from.
+# ``save_skill``/``delete_skill`` are deliberately absent: those ARE projected
+# into the kernel, so ``from tools import save_skill`` is the right spelling.
+TOP_LEVEL_TOOL_NAMES = frozenset({
+    "list_tools", "search_tools", "read_tool_docs",
+})
+
+# Builtins the prompt names but a given host may not mount, because the
+# capability behind them was never wired onto the tool context. Naming the
+# capability turns "no module named tools.SendMessage" — which reads as a typo
+# worth retrying — into a fact: it is absent, and no spelling will find it.
+CAPABILITY_TOOL_REASONS: dict[str, str] = {
+    "HistoryExpand": "no history recall capability",
+    "HistorySearch": "no history recall capability",
+    "ListAgents": "no agent roster capability",
+    "Monitor": "no monitor spawner",
+    "Plan": "no plan-mode control",
+    "Recall": "no recall store",
+    "Remember": "no continual journal",
+    "SendMessage": "no agent messaging capability",
+    "SessionSearch": "no session search capability",
+    "SessionView": "no session view capability",
+    "StopPlanning": "no plan-mode control",
+    "Task": "no task dispatch capability",
+    "ToolSearch": "no tool registry capability",
+}
+
+# Builtins plan mode withholds. A name in both tables can be missing for either
+# reason, and the kernel cannot tell which — so the message says both rather
+# than asserting the wrong one.
+PLAN_MODE_WITHHELD = frozenset({
+    "Bash", "Edit", "Monitor", "SendMessage", "Task", "WebFetch", "Write",
+})
+
+
+def missing_leaf_message(pkg: str, name: str) -> str:
+    """Why ``pkg.name`` does not resolve, and what to reach for instead.
+
+    Shared by attribute access (``tools.read_tool_docs``) and the import path
+    (``from tools.read_tool_docs import read_tool_docs``) so both spellings of
+    the same mistake get the same correction.
+    """
+    kind = "tool" if pkg == "tools" else "skill"
+    head = f"{pkg} has no {kind} {name!r}"
+    if pkg != "tools":
+        return f"{head} — `dir({pkg})` lists what is mounted here."
+    if name in TOP_LEVEL_TOOL_NAMES:
+        return (
+            f"{head} — {name} is a top-level tool call, not an in-kernel "
+            "function, and it cannot be reached from inside a cell by any "
+            "import. Call it as its own tool, outside run_python. From in "
+            "here use `dir(tools)` for the names mounted and "
+            "`tools.<name>.__doc__` for one tool's documentation."
+        )
+    reason = CAPABILITY_TOOL_REASONS.get(name)
+    if reason is not None:
+        if name in PLAN_MODE_WITHHELD:
+            reason = f"{reason}, or plan mode has withheld it"
+        return (
+            f"{head} — {name} is not available on this host ({reason}), so no "
+            "import spelling will reach it. `dir(tools)` lists what is "
+            "mounted here."
+        )
+    if name in PLAN_MODE_WITHHELD:
+        return (
+            f"{head} — {name} is off the surface while plan mode is on. "
+            "`dir(tools)` lists what is mounted here."
+        )
+    return f"{head} — `dir({pkg})` lists what is mounted here."
+
+
 class ToolError(RuntimeError):
     """Raised inside the kernel when a host tool call returns an error result."""
 
@@ -225,25 +304,7 @@ class _VfsPackage(types.ModuleType):
         return importlib.import_module(f"{self.__name__}.{name}")
 
     def _missing_message(self, name: str) -> str:
-        """Say what the kernel *does* mount, not just what it does not.
-
-        ``tools.list_tools()`` / ``tools.search_tools()`` were a real
-        twelve-call dead end: those are top-level tool calls, so nothing under
-        ``tools`` will ever answer to them, and the reachable catalog inside a
-        cell is ``dir(tools)``.
-        """
-        kind = "tool" if self.__name__ == "tools" else "skill"
-        head = f"{self.__name__} has no {kind} {name!r}"
-        if self.__name__ == "tools" and name in (
-            "list_tools", "search_tools", "read_tool_docs",
-        ):
-            return (
-                f"{head} — {name} is a top-level tool call, not an in-kernel "
-                "function; it cannot be reached from inside a cell. Use "
-                "`dir(tools)` for the names mounted here and "
-                "`tools.<name>.__doc__` for one tool's documentation."
-            )
-        return f"{head} — `dir({self.__name__})` lists what is mounted here."
+        return missing_leaf_message(self.__name__, name)
 
     def __dir__(self) -> list[str]:
         return sorted(set(super().__dir__()) | set(self._leaves()))
@@ -340,8 +401,19 @@ class VfsFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         if fullname in ("tools", "skills"):
             return importlib.util.spec_from_loader(fullname, self, is_package=True)
         if fullname.startswith("tools."):
-            if fullname.split(".", 1)[1] in self._sources:
+            leaf = fullname.split(".", 1)[1]
+            if leaf in self._sources:
                 return importlib.util.spec_from_loader(fullname, self)
+            # A plain ImportError, deliberately NOT ModuleNotFoundError:
+            # ``from tools import read_tool_docs`` swallows a
+            # ModuleNotFoundError raised for the submodule and then reports its
+            # own generic "cannot import name", which is what left seven
+            # audited cells with nothing to correct from. A plain ImportError
+            # propagates, so the correction reaches the model whichever
+            # spelling it used.
+            if leaf in TOP_LEVEL_TOOL_NAMES or leaf in CAPABILITY_TOOL_REASONS:
+                raise ImportError(missing_leaf_message("tools", leaf))
+            return None
         if fullname.startswith("skills."):
             if fullname.split(".", 1)[1] in self._skills:
                 return importlib.util.spec_from_loader(fullname, self)

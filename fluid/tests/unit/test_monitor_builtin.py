@@ -6,6 +6,7 @@ import pytest
 
 from fluid.tools.builtins import register_builtins
 from fluid.tools.builtins.monitor import (
+    BUDGET_EXTRA_KEY,
     SPEC,
     describe,
     handler,
@@ -306,3 +307,132 @@ async def test_spawn_crosses_parent_cancellation_boundary():
     await asyncio.sleep(0)
     assert not cancelled.is_set()
     assert not tracked
+
+
+# ─── the host's budget: one number, three places it has to agree ─────────────
+#
+# The host appends "It carries a 1200s time budget: if it is still running
+# then, it is stopped and you are woken with a timeout" to the receipt. Fluid's
+# warning then said the command "will hold the park until the session ends and
+# you will never be woken". Both sentences arrived in one receipt in six
+# audited sessions; models believed the alarming half and burned TaskStop +
+# relaunch cycles on a task that was working, one of them leaving a ghost task
+# behind.
+
+
+def test_warning_without_a_budget_keeps_the_never_woken_wording():
+    warning = spawn_warning("while true; do sleep 30; done")
+    assert warning is not None
+    assert "no time budget" in warning
+    assert "holds the park until the session ends" in warning
+
+
+def test_warning_with_a_budget_promises_the_wake_the_host_promises():
+    warning = spawn_warning("while true; do sleep 30; done", budget_seconds=1200)
+    assert warning is not None
+    assert "1200s budget" in warning
+    assert "woken with a timeout" in warning
+    # The half models acted on, gone.
+    assert "never be woken" not in warning
+    assert "until the session ends" not in warning
+    # And it says outright not to do the thing they did.
+    assert "Do not stop and relaunch it" in warning
+
+
+def test_budget_reaches_the_warning_through_the_tool_context():
+    async def spawn(input, ctx):
+        return BackgroundTaskReceipt(task_id="mon-budget")
+
+    out = asyncio.run(
+        handler(
+            {"command": "tail -f build.log"},
+            ToolCtx(extra={"monitor_spawn": spawn, BUDGET_EXTRA_KEY: 900}),
+        )
+    )
+    assert "900s budget" in out.text
+    assert "never be woken" not in out.text
+
+
+@pytest.mark.parametrize("value", [None, 0, -5, "", "abc", {}])
+def test_a_missing_or_junk_budget_falls_back_to_the_budget_less_wording(value):
+    warning = spawn_warning("tail -f build.log", budget_seconds=value)
+    assert warning is not None and "no time budget" in warning
+    assert "is stopped at the host's" not in warning
+
+
+def test_description_names_the_budget_when_the_host_declares_one():
+    # A session that only read "cap the total wait" wrote a 3600s watcher
+    # against a 1200s budget and lost the twenty minutes it ran.
+    surface = frozenset({"Bash", "Monitor"})
+    assert "1200" in describe(surface, budget_seconds=1200)
+    assert "1200" not in describe(surface)
+    assert "seconds" in describe(surface, budget_seconds=1200)
+
+
+def test_description_warns_about_the_other_exit_code_destroyers():
+    text = describe(frozenset({"Bash", "Monitor"}))
+    assert "|| true" in text
+    assert "; next-command" in text
+    assert "last and unmasked" in text
+
+
+def test_description_says_to_let_ci_register_before_watching():
+    # Both audited `gh pr checks --watch` launches died seconds after a push
+    # with "no checks reported", and the instant clean exit read as success.
+    text = describe(frozenset({"Bash", "Monitor"}))
+    assert "no checks reported" in text
+    assert "gh pr checks <PR> --watch --fail-fast" in text
+    assert "never as success" in text
+
+
+# ─── iteration caps the detector used to miss ────────────────────────────────
+
+
+@pytest.mark.parametrize("command", [
+    # Count-and-break, the mirror image of the `-lt` shape already handled.
+    'i=0; while true; do [ $i -ge 60 ] && break; i=$((i+1)); sleep 10; done',
+    'n=0; while true; do n=$((n+1)); if [ $n -gt 30 ]; then break; fi; sleep 5; done',
+    # Arithmetic spelling of the same cap.
+    'i=0; while true; do ((i++)); ((i>=60)) && break; sleep 10; done',
+    # A bare bail-out inside the body is a bound too.
+    'while true; do gh pr checks 12 && break; sleep 20; done',
+    'until false; do make -q && exit 0; sleep 15; done',
+])
+def test_lint_recognises_a_capped_loop(command):
+    assert unbounded_reason(command) is None
+    assert spawn_warning(command) is None
+
+
+def test_a_break_does_not_excuse_a_follow():
+    # `break` bounds a LOOP body; it says nothing about `tail -f`, which has no
+    # body to break out of.
+    command = "tail -f build.log; break"
+    assert unbounded_reason(command) == "`tail -f`"
+
+
+def test_a_dead_break_arm_earns_no_credit():
+    # The audited park: `*""*` collapses to `**` and matches every status, so
+    # the arm holding the break never runs. A break the glob has killed must
+    # not read as a bound.
+    command = (
+        'while true; do s=$(gh pr view 12 --json state -q .state); '
+        'case $s in *pending*|*""*) sleep 30;; *) break;; esac; done'
+    )
+    assert unbounded_reason(command) is not None
+
+
+def test_refinement_carries_the_budget_into_the_registered_description():
+    from fluid.tools.builtins import refine_builtin_descriptions
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    refine_builtin_descriptions(registry, monitor_budget_seconds=1200)
+    spec = registry.get("Monitor")
+    assert spec is not None and "1200 seconds" in spec.description
+    # Other builtins are untouched by it.
+    assert "1200 seconds" not in registry.get("Bash").description
+
+    plain = ToolRegistry()
+    register_builtins(plain)
+    refine_builtin_descriptions(plain)
+    assert "1200" not in plain.get("Monitor").description

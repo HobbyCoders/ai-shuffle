@@ -95,6 +95,7 @@ def refine_builtin_descriptions(
     *,
     allowed: Iterable[str] | None = None,
     disallowed: Iterable[str] | None = (),
+    monitor_budget_seconds: int | None = None,
 ) -> None:
     """Specialize registered builtin descriptions to this session.
 
@@ -102,6 +103,11 @@ def refine_builtin_descriptions(
     tool restriction is known: cross-tool clauses collapse to the permitted
     surface. Idempotent — amending with the full surface reproduces the
     module-constant text.
+
+    ``monitor_budget_seconds`` is the wall-clock budget the host enforces on a
+    monitored command. Only the host knows it, and Monitor's prose about
+    bounding a command is guesswork without it — pass the same number the host
+    puts on ``ctx.extra["monitor_budget_seconds"]``.
     """
     builtin_names = {
         s.name
@@ -110,8 +116,13 @@ def refine_builtin_descriptions(
     }
     surface = effective_surface(builtin_names, allowed, disallowed)
     for name, describe in _DESCRIBERS.items():
-        if name in builtin_names:
-            registry.amend_spec(name, description=describe(surface))
+        if name not in builtin_names:
+            continue
+        if name == "Monitor":
+            text = describe(surface, budget_seconds=monitor_budget_seconds)
+        else:
+            text = describe(surface)
+        registry.amend_spec(name, description=text)
 
 
 __all__ = [

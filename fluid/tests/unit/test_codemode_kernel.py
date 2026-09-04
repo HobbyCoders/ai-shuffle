@@ -688,3 +688,23 @@ async def test_tracebacks_do_not_name_host_directories() -> None:
         assert os.path.expanduser("~") not in r.error
     finally:
         await k.stop()
+
+
+async def test_importing_read_tool_docs_from_a_cell_corrects_the_model() -> None:
+    # Seven of nine audited grok sessions opened a batched cell with this
+    # import and lost the whole cell to a bare ModuleNotFoundError. The
+    # attribute path had the right correction all along; the import path
+    # reached the finder instead and got nothing.
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        await k.set_vfs(dict(_ECHO_STUB))
+        r = await k.exec(
+            "from tools.read_tool_docs import read_tool_docs",
+            timeout=10, on_host_call=_echo_host,
+        )
+        assert r.error is not None
+        assert "top-level tool call" in r.error
+        assert "dir(tools)" in r.error
+    finally:
+        await k.stop()

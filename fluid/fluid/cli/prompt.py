@@ -44,10 +44,11 @@ supplying a replacement.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover
     from fluid.config.model import HarnessConfig
@@ -108,6 +109,34 @@ TOOL_CAPABILITIES: dict[str, tuple[str, ...]] = {
 NATIVE_WIRED_CAPABILITIES: frozenset[str] = frozenset(
     {"history_recall", "plan_mode_control", "tool_registry"}
 )
+
+
+def mounted_builtin_tools(
+    tools: Iterable[str],
+    extra: Mapping[str, Any] | Iterable[str] | None,
+) -> frozenset[str]:
+    """The builtins in ``tools`` this leg actually mounts, given ``extra``.
+
+    ``extra`` is the tool context's extras — the mapping a host injects its
+    capabilities into (``ctx.extra``), or just the keys. Every builtin whose
+    :data:`TOOL_CAPABILITIES` entry names a key that is not there is dropped,
+    exactly as the request schemas drop it.
+
+    One derivation, two consumers, because they disagreed: a host that never
+    injected ``agent_message`` still had SendMessage and ListAgents in the
+    prompt and in the context breakdown while the engine withheld them from
+    every surface the model could call. Models imported them, the imports
+    failed, and two workers briefed to coordinate through them could not. Pass
+    the result as ``mounted_tools`` to
+    :func:`fluid.context.usage.build_context_usage`, and give the same extras
+    to prompt composition as ``wired`` (``frozenset(ctx.extra)``), so the
+    prose, the schemas and the accounting name one surface.
+    """
+    present = frozenset(extra or ())
+    return frozenset(
+        name for name in tools
+        if all(key in present for key in TOOL_CAPABILITIES.get(name, ()))
+    )
 
 # Code-mode tool names prose may reference (the addendum's surface).
 CODE_MODE_TOOL_NAMES: tuple[str, ...] = (
@@ -912,10 +941,14 @@ filesystem; `open()`, `os`, `subprocess` and the network are disabled.\
 {shell}{search}
 
 A catalog entry marked `[deferred]` carries only its one-line summary here — \
-its signature and parameter docs are not in this prompt. Run \
-`read_tool_docs("<name>")` once before the first call instead of guessing \
-parameter names. It imports and calls exactly like any other tool: deferral \
-saves prompt space, it never withholds a capability, and a tool listed as \
+its signature and parameter docs are not in this prompt. Call the \
+`read_tool_docs` tool on that name once before the first use, instead of \
+guessing parameter names. `read_tool_docs`, `list_tools` and `search_tools` \
+are top-level tools of their own, alongside run_python — never Python written \
+inside a cell, and never importable from `tools`; every spelling of \
+`from tools import read_tool_docs` fails. The deferred tool itself is a \
+normal one: it imports from `tools` and calls like any other, deferral saves \
+prompt space rather than withholding a capability, and a tool listed as \
 deferred is never "unavailable".
 
 A cell that does not parse costs a whole turn, so watch the two mistakes that \

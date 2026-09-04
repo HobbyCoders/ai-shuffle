@@ -1118,3 +1118,66 @@ async def test_native_rebuild_without_usage_events_stays_an_estimate(tmp_path) -
     finally:
         await loop.aclose()
     assert usage["measured"] is False
+
+
+# ─── billing only what this leg actually mounts ──────────────────────────────
+
+
+def test_unmounted_tools_are_not_billed_as_tools() -> None:
+    """A host that never wired agent messaging was still charged 546 tokens for
+    SendMessage and 245 for ListAgents, and advertised both in the prompt, on a
+    leg where the engine withheld them from every surface the model could
+    call. ``mounted_tools`` is the capability-filtered surface; a name outside
+    it gets no row."""
+    read = {"name": "Read", "description": "r", "input_schema": {}}
+    send = {"name": "SendMessage", "description": "s" * 400, "input_schema": {}}
+    usage = build_context_usage(
+        tools_api=[read, send], model="m", mounted_tools={"Read"}
+    )
+    assert usage["systemTools"] == [
+        {"name": "Read", "tokens": tool_schema_tokens(read)},
+    ]
+    # The schema is not sent, so its tokens leave the total too.
+    assert _by_name(usage)[SYSTEM_TOOLS]["tokens"] == tool_schema_tokens(read)
+
+
+def test_unmounted_mcp_and_deferred_tools_drop_out_as_well() -> None:
+    slack = {"name": "mcp__slack__send", "description": "s", "input_schema": {}}
+    hidden = {"name": "ListAgents", "description": "l", "input_schema": {}}
+    usage = build_context_usage(
+        tools_api=[slack],
+        deferred_tools_api=[hidden],
+        model="m",
+        mounted_tools={"Read"},
+    )
+    assert usage["mcpTools"] == []
+    assert usage["deferredBuiltinTools"] == []
+
+
+def test_an_unmounted_tools_section_falls_back_to_system_prompt() -> None:
+    """Its text IS in the prompt, so the tokens must still land somewhere —
+    just not billed as a tool the session cannot call."""
+    send_text = "## SendMessage\n" + "s" * 400
+    sections = (
+        PromptSection(kind="base", text="base"),
+        PromptSection(kind="tools", text="## Read\nr", tool_name="Read"),
+        PromptSection(kind="tools", text=send_text, tool_name="SendMessage"),
+    )
+    everything = build_context_usage(sections=sections, model="m")
+    filtered = build_context_usage(
+        sections=sections, model="m", mounted_tools={"Read"}
+    )
+    assert [r["name"] for r in filtered["systemTools"]] == ["Read"]
+    # Nothing lost: the same total, redistributed into "System prompt".
+    assert filtered["totalTokens"] == everything["totalTokens"]
+    assert (
+        _by_name(filtered)[SYSTEM_PROMPT]["tokens"]
+        > _by_name(everything)[SYSTEM_PROMPT]["tokens"]
+    )
+
+
+def test_no_mounted_set_bills_everything_as_before() -> None:
+    read = {"name": "Read", "description": "r", "input_schema": {}}
+    send = {"name": "SendMessage", "description": "s", "input_schema": {}}
+    usage = build_context_usage(tools_api=[read, send], model="m")
+    assert [r["name"] for r in usage["systemTools"]] == ["Read", "SendMessage"]
