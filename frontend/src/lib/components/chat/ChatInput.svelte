@@ -240,9 +240,16 @@
 	// Island ref
 	let islandRef = $state<HTMLDivElement | null>(null);
 	let mobileComposerExpanded = $state(false);
+	function isMobileComposerViewport(): boolean {
+		return typeof window !== 'undefined' && isPanelFullscreenWidth(window.innerWidth);
+	}
+	// `compact` means "not the empty-hero layout" and is true on desktop as soon
+	// as a session has messages. Collapse / toolbar-inert is mobile-viewport only.
+	let mobileViewport = $state(isMobileComposerViewport());
 	const mobileCollapsed = $derived(
 		shouldCollapseMobileComposer({
 			compact,
+			mobileViewport,
 			hasDraft: inputValue.trim().length > 0,
 			expanded: mobileComposerExpanded,
 			composerFocused,
@@ -255,13 +262,10 @@
 	const toolbarPointerBlocked = $derived(
 		shouldBlockMobileComposerToolbarPointer({
 			collapsed: mobileCollapsed,
-			expandPointerActive
+			expandPointerActive,
+			mobileViewport
 		})
 	);
-
-	function isMobileComposerViewport(): boolean {
-		return typeof window !== 'undefined' && isPanelFullscreenWidth(window.innerWidth);
-	}
 
 	let mobileReconcileRaf: number | null = null;
 	let mobileComposerDestroyed = false;
@@ -339,6 +343,13 @@
 		if (isMobileComposerViewport()) mobileComposerExpanded = true;
 	}
 
+	function syncMobileViewport() {
+		const next = isMobileComposerViewport();
+		if (next === mobileViewport) return;
+		mobileViewport = next;
+		if (!next) clearExpandPointerGuard();
+	}
+
 	function handleComposerPointerDown() {
 		if (!isMobileComposerViewport()) return;
 		armExpandPointerGuard();
@@ -366,6 +377,7 @@
 	});
 
 	onMount(() => {
+		syncMobileViewport();
 		document.addEventListener('pointerdown', handleDocumentPointerDown);
 		return () => {
 			document.removeEventListener('pointerdown', handleDocumentPointerDown);
@@ -800,6 +812,7 @@
 	}
 </script>
 
+<svelte:window onresize={syncMobileViewport} />
 <div
 	class="chat-input-wrapper"
 	class:mobile-collapsed={mobileCollapsed}

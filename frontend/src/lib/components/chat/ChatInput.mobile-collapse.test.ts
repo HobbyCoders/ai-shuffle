@@ -28,6 +28,7 @@ function ruleBody(selector: string): string {
 
 const idleCompactComposer: MobileComposerCollapseState = {
 	compact: true,
+	mobileViewport: true,
 	hasDraft: false,
 	expanded: false,
 	composerFocused: false,
@@ -50,6 +51,11 @@ describe('mobile composer collapse predicate', () => {
 	it('collapses only an idle compact composer', () => {
 		expect(shouldCollapseMobileComposer(idleCompactComposer)).toBe(true);
 		expect(shouldCollapseMobileComposer({ ...idleCompactComposer, compact: false })).toBe(false);
+	});
+
+	it('never collapses on a desktop viewport, even when the chat is compact', () => {
+		// `compact` is true for any active (non-hero) chat, including desktop.
+		expect(shouldCollapseMobileComposer({ ...idleCompactComposer, mobileViewport: false })).toBe(false);
 	});
 
 	it('never collapses while draft text remains', () => {
@@ -102,21 +108,32 @@ describe('mobile composer toolbar pointer guard', () => {
 	it('blocks hits while the composer is collapsed', () => {
 		expect(shouldBlockMobileComposerToolbarPointer({
 			collapsed: true,
-			expandPointerActive: false
+			expandPointerActive: false,
+			mobileViewport: true
 		})).toBe(true);
 	});
 
 	it('blocks hits for the expanding pointer even after the dock is shown', () => {
 		expect(shouldBlockMobileComposerToolbarPointer({
 			collapsed: false,
-			expandPointerActive: true
+			expandPointerActive: true,
+			mobileViewport: true
 		})).toBe(true);
 	});
 
 	it('allows hits once expanded and the expanding pointer has settled', () => {
 		expect(shouldBlockMobileComposerToolbarPointer({
 			collapsed: false,
-			expandPointerActive: false
+			expandPointerActive: false,
+			mobileViewport: true
+		})).toBe(false);
+	});
+
+	it('never blocks toolbar hits outside the mobile composer viewport', () => {
+		expect(shouldBlockMobileComposerToolbarPointer({
+			collapsed: true,
+			expandPointerActive: true,
+			mobileViewport: false
 		})).toBe(false);
 	});
 });
@@ -140,6 +157,12 @@ describe('ChatInput mobile collapsed surface', () => {
 		expect(chatInput).toMatch(/\.send-cluster\s*\{[^}]*align-self:\s*center;/);
 		expect(mobileStyles).not.toMatch(/\.send-cluster\s*\{[^}]*display:\s*none;/);
 		expect(mobileStyles).not.toContain('.controls-right');
+	});
+
+	it('gates collapse and toolbar-inert on the mobile viewport, not compact-alone', () => {
+		expect(chatInput).toMatch(/shouldCollapseMobileComposer\(\{[\s\S]*?mobileViewport/);
+		expect(chatInput).toMatch(/shouldBlockMobileComposerToolbarPointer\(\{[\s\S]*?mobileViewport/);
+		expect(chatInput).toContain('<svelte:window onresize={syncMobileViewport} />');
 	});
 
 	it('keeps the dock inert for the tap that expands the collapsed composer', () => {

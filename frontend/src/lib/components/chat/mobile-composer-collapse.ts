@@ -1,5 +1,7 @@
 export interface MobileComposerCollapseState {
 	compact: boolean;
+	/** ≤1080px composer shell. `compact` is also true on desktop once a chat has messages. */
+	mobileViewport: boolean;
 	hasDraft: boolean;
 	expanded: boolean;
 	composerFocused: boolean;
@@ -10,6 +12,7 @@ export interface MobileComposerCollapseState {
 
 export function shouldCollapseMobileComposer(state: MobileComposerCollapseState): boolean {
 	return (
+		state.mobileViewport &&
 		state.compact &&
 		!state.hasDraft &&
 		!state.expanded &&
@@ -60,15 +63,19 @@ export interface MobileComposerToolbarPointerState {
 	collapsed: boolean;
 	/** True from the expanding pointerdown until after the following click. */
 	expandPointerActive: boolean;
+	/** Collapse/inert is a mobile-shell concern; desktop must keep the dock clickable. */
+	mobileViewport: boolean;
 }
 
 /**
  * The collapsed dock is `display:none`, but expanding on pointerdown reflows
  * the toolbar under the still-down finger. Block hits while collapsed and
- * until that pointer's click has been delivered.
+ * until that pointer's click has been delivered. Never block outside the
+ * mobile composer viewport — `compact` is true on desktop for any active chat.
  */
 export function shouldBlockMobileComposerToolbarPointer(
 	state: MobileComposerToolbarPointerState
 ): boolean {
+	if (!state.mobileViewport) return false;
 	return state.collapsed || state.expandPointerActive;
 }
