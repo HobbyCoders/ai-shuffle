@@ -713,6 +713,19 @@
 		editorRef?.focus();
 	}
 
+	// Live dictation writes straight into the editor as it is spoken. The editor
+	// owns a span for it and replaces that span on every update, so a transcript
+	// that revises a word mid-sentence corrects in place instead of stuttering.
+	function handleLiveText(text: string) {
+		editorRef?.streamText(text);
+		inputValue = editorRef?.getText() ?? '';
+	}
+
+	function handleLiveCommit() {
+		editorRef?.commitDictation();
+		inputValue = editorRef?.getText() ?? '';
+	}
+
 	// Drag and drop file upload (inline since DragDropOverlay uses alert() for errors)
 	let isDragging = $state(false);
 
@@ -964,6 +977,8 @@
 						<!-- Voice Input (delegated to VoiceRecorder component) -->
 						<VoiceRecorder
 							onTranscription={handleTranscription}
+							onLiveText={handleLiveText}
+							onLiveCommit={handleLiveCommit}
 							disabled={!$anyCredential || isUploading}
 							bind:isRecording
 							bind:isTranscribing

@@ -134,6 +134,11 @@ export async function toggleModelProvider(id: string): Promise<ModelProvider> {
 export interface FetchModelsResult {
 	source: 'preset' | 'upstream';
 	models: ProviderModelEntry[];
+	/** Media endpoints the server held back: this picker is for chat models, and
+	 *  audio/voice/image/video ones are configured elsewhere. Reported so the UI
+	 *  can name their destination instead of looking like a failed fetch.
+	 *  Absent on older payloads. */
+	hidden?: (ProviderModelEntry & { media_kind?: string })[];
 }
 
 export async function fetchProviderModels(id: string): Promise<FetchModelsResult> {

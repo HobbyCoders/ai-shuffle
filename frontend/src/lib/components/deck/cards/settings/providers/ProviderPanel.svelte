@@ -227,12 +227,35 @@
 	let modelsSaving = $state(false);
 	let filter = $state('');
 
+	// Media endpoints the server kept out of this list. Held so a search for one
+	// can explain where it lives rather than reporting no matches.
+	let hiddenMedia = $state<{ id: string; label?: string; media_kind?: string }[]>([]);
+
 	let checkedCount = $derived(results.filter((r) => r.checked).length);
 	let filteredResults = $derived.by(() => {
 		const q = filter.trim().toLowerCase();
 		if (!q) return results;
 		return results.filter((r) => r.id.toLowerCase().includes(q) || r.label.toLowerCase().includes(q));
 	});
+
+	let hiddenMatch = $derived.by(() => {
+		const q = filter.trim().toLowerCase();
+		if (!q) return null;
+		return hiddenMedia.find((m) => m.id.toLowerCase().includes(q)) ?? null;
+	});
+
+	function hiddenLabel(kind: string | undefined): string {
+		if (kind === 'voice') return 'voice';
+		if (kind === 'image') return 'image';
+		if (kind === 'video') return 'video';
+		return 'speech';
+	}
+
+	function hiddenDestination(kind: string | undefined): string {
+		// Realtime voice has its own allowlisted setting; everything else is a
+		// media model configured in the AI tools panel.
+		return kind === 'voice' ? 'Settings › Voice' : 'Settings › AI tools';
+	}
 
 	const nativeModelList = $derived(getModels());
 
@@ -279,6 +302,7 @@
 			}));
 
 			results = [...extras, ...catalogRows];
+			hiddenMedia = res.hidden ?? [];
 		} catch (e) {
 			modelsError = getErrorMessage(e, 'Could not fetch models');
 			// Keep the stored curation visible and checked so a failed fetch can't
@@ -472,7 +496,16 @@
 					</label>
 				{/each}
 				{#if filteredResults.length === 0}
-					<p class="pp-muted pp-mempty">No models match “{filter}”.</p>
+					{#if hiddenMatch}
+						<!-- "No matches" would be a lie here: the key really does offer
+						     this model, it is just configured somewhere else. -->
+						<p class="pp-muted pp-mempty">
+							<strong>{hiddenMatch.id}</strong> is a {hiddenLabel(hiddenMatch.media_kind)} model —
+							pick it under {hiddenDestination(hiddenMatch.media_kind)}.
+						</p>
+					{:else}
+						<p class="pp-muted pp-mempty">No models match “{filter}”.</p>
+					{/if}
 				{/if}
 			</div>
 		{/if}

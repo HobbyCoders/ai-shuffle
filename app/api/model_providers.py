@@ -35,6 +35,7 @@ from app.core import (
     encryption,
     grok_rate_limit_resets,
     model_catalog_presets,
+    model_modality,
     model_registry,
     xai_oauth,
 )
@@ -129,9 +130,16 @@ class FetchModelsResponse(BaseModel):
     so older clients still parse the field. The UI check-selects from
     ``models`` and PATCHes the curated subset via the normal update route —
     this endpoint never persists anything.
+
+    ``models`` carries TEXT-generation models only. Audio, voice, image and
+    video endpoints are split into ``hidden`` (each entry keeps its shape, plus
+    a ``media_kind``) so the UI can say where they live instead of leaving the
+    user hunting for a model their key genuinely offers. Defaulted, so an older
+    client that ignores it still parses.
     """
     source: str
     models: List[Dict[str, Any]]
+    hidden: List[Dict[str, Any]] = []
 
 
 class CodexDeviceStartResponse(BaseModel):
@@ -705,7 +713,7 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
         base_url=base_url,
         api_dialect=body.api_dialect,
         auth_token=encrypted_token,
-        models=body.models,
+        models=model_modality.split_media_models(body.models)[0],
         default_model=body.default_model,
         small_fast_model=body.small_fast_model,
         extra_env=body.extra_env,
@@ -752,7 +760,10 @@ async def update_provider(
     if body.api_dialect is not None:
         updates["api_dialect"] = body.api_dialect
     if body.models is not None:
-        updates["models_json"] = body.models
+        # Sanitize on write, not just on display: four provider flows persist the
+        # whole fetched roster with no user picking, so an unfiltered write is
+        # how media ids got into models_json in the first place.
+        updates["models_json"], _ = model_modality.split_media_models(body.models)
     if body.default_model is not None:
         updates["default_model"] = body.default_model
     if body.small_fast_model is not None:
@@ -884,7 +895,16 @@ async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Could not fetch models from the provider upstream: {e}",
         )
-    return FetchModelsResponse(source="upstream", models=models)
+    # One filter covers all three branches above, and it sits here rather than in
+    # _parse_models_response for the same reason the codex exclusion does: that
+    # helper is a wire-shape parser with its own unit tests, and curation is a
+    # separate concern.
+    models, media = model_modality.split_media_models(models)
+    hidden = [
+        {**entry, "media_kind": model_modality.media_kind(entry.get("id"))}
+        for entry in media
+    ]
+    return FetchModelsResponse(source="upstream", models=models, hidden=hidden)
 
 
 # ============================================================================

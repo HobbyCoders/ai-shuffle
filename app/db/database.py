@@ -13,7 +13,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 import psycopg2
 
@@ -2133,6 +2133,21 @@ def _run_column_migrations(cursor):
         if backfilled is not None:
             migrations_applied.append(f"sessions.is_worker_backfill({backfilled} rows)")
 
+    # Scrub media endpoints out of every provider's curated chat roster.
+    #
+    # Filtering the fetch route alone would not help an existing install: the
+    # provider panel deliberately re-surfaces stored ids that the catalog no
+    # longer offers (so a save cannot silently drop them), so a hidden model
+    # would come back as the FIRST row, checked — the opposite of the intent.
+    # And model_registry keeps serving models_json to the chat model picker
+    # regardless. So the data itself has to be corrected, once.
+    if table_exists(cursor, "model_providers"):
+        scrubbed = _backfill_provider_media_models(cursor)
+        if scrubbed:
+            migrations_applied.append(
+                f"model_providers.media_scrub({scrubbed[0]} ids, {scrubbed[1]} rows)"
+            )
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
@@ -2210,6 +2225,79 @@ def _backfill_sessions_is_worker(cursor) -> Optional[int]:
         updated = 0
     _set_marker(cursor, IS_WORKER_BACKFILL_MARKER, "1")
     return updated
+
+
+def _backfill_provider_media_models(cursor) -> Optional[Tuple[int, int]]:
+    """Drop media endpoints from every provider's curated model roster.
+
+    Returns ``(ids_removed, rows_touched)``, or ``None`` when nothing changed.
+    Idempotent: a second run finds nothing to remove and writes nothing.
+
+    Also clears ``default_model`` / ``small_fast_model`` when they point at a
+    removed id. Leaving them dangling would be worse than the original problem —
+    ``provider_agent.default_model_for_provider`` returns ``None`` once the
+    default is no longer among the curated ids, so the row would silently
+    resolve to a different model than it claims.
+
+    Best-effort: startup must never fail on a cosmetic scrub.
+    """
+    from app.core import model_modality
+
+    try:
+        cursor.execute(
+            "SELECT id, models_json, default_model, small_fast_model FROM model_providers"
+        )
+        rows = cursor.fetchall()
+    except Exception:  # noqa: BLE001 — table shape varies across old installs
+        logger.warning("provider media scrub skipped", exc_info=True)
+        return None
+
+    removed_ids = 0
+    touched_rows = 0
+
+    for row in rows:
+        try:
+            raw = row["models_json"]
+            if isinstance(raw, str):
+                models = json.loads(raw) if raw.strip() else []
+            else:
+                models = raw or []
+            if not isinstance(models, list) or not models:
+                continue
+
+            text, media = model_modality.split_media_models(models)
+            if not media:
+                continue
+
+            media_ids = {
+                (m.get("id") if isinstance(m, dict) else m) for m in media
+            }
+            updates = ["models_json = %s"]
+            params: list = [json.dumps(text)]
+
+            for column in ("default_model", "small_fast_model"):
+                if row[column] and row[column] in media_ids:
+                    updates.append(f"{column} = NULL")
+
+            params.append(row["id"])
+            cursor.execute(
+                f"UPDATE model_providers SET {', '.join(updates)} WHERE id = %s",
+                tuple(params),
+            )
+            removed_ids += len(media)
+            touched_rows += 1
+        except Exception:  # noqa: BLE001 — one bad row must not stop the rest
+            logger.warning(
+                "provider media scrub skipped for one row", exc_info=True
+            )
+
+    if not touched_rows:
+        return None
+    logger.info(
+        "Removed %d media model ids from %d provider rows",
+        removed_ids, touched_rows,
+    )
+    return removed_ids, touched_rows
 
 
 def migrations_fingerprint() -> str:

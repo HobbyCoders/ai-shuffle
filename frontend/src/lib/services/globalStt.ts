@@ -31,6 +31,19 @@ import {
 
 export type GlobalSttMode = 'idle' | 'live' | 'batch';
 
+/**
+ * Where dictation goes while it is still being spoken.
+ *
+ * The composer registers one of these so live text lands in the editor as the
+ * user talks, instead of arriving in a lump after they stop. `onText` gets the
+ * FULL dictation so far every time — the consumer replaces its span rather than
+ * appending, which is what lets the model revise a word mid-sentence.
+ */
+export interface VoiceInputSink {
+	onText: (text: string) => void;
+	onCommit: () => void;
+}
+
 export interface GlobalSttState {
 	isRecording: boolean;
 	isTranscribing: boolean;
@@ -52,10 +65,6 @@ export interface GlobalSttState {
 	 *  mid-utterance deltas — the overlay explains the wait instead of
 	 *  pretending nothing is happening. */
 	partialsSupported: boolean;
-	/** How much audio is being transcribed, in ms. Set once at stop, so the
-	 *  overlay can say "transcribing 1:47 of audio" instead of leaving a long
-	 *  wait unexplained. Null when nothing is in flight. */
-	recordingMs: number | null;
 }
 
 /** Meter data, kept out of the main store so a 60 fps waveform never
@@ -81,8 +90,7 @@ const initialState: GlobalSttState = {
 	segments: [],
 	speechActive: false,
 	modelName: null,
-	partialsSupported: true,
-	recordingMs: null
+	partialsSupported: true
 };
 
 export const globalSttState = writable<GlobalSttState>(initialState);
@@ -92,8 +100,9 @@ const emptyBands = () => new Array(BAND_COUNT).fill(0);
 
 export const globalSttAudio = writable<GlobalSttAudio>({ level: 0, bands: emptyBands() });
 
-/** Batch upload progress, 0-1, or null when nothing is uploading. Its own store
- *  so progress ticks never re-render the transcript. */
+/** Batch upload progress, 0-1, or null when nothing is uploading. Rendered as a
+ *  fill inside the microphone button — the upload is the leg that actually takes
+ *  time on a phone, and it is the only part of the wait we can report honestly. */
 export const globalSttUpload = writable<number | null>(null);
 
 // ============================================================================
@@ -116,6 +125,26 @@ let audioLevelAnimationId: number | null = null;
 
 const MIN_RECORDING_DURATION = 500; // 500ms minimum
 
+// Stop on our own once the speaker has clearly finished. Without this the only
+// way out is the cancel affordance, which throws the transcript away — so the
+// natural gesture (stop talking) had no natural outcome.
+//
+// Two values because the two paths start counting at different moments. The live
+// path is told by the server's VAD, which itself waits out
+// TURN_DETECTION.silence_duration_ms (700ms) first; the batch path detects
+// silence itself and starts counting immediately. Both land at roughly 2.5s of
+// quiet before the recording ends.
+const SILENCE_AUTO_STOP_LIVE_MS = 1800;
+const SILENCE_AUTO_STOP_BATCH_MS = 2500;
+
+// A session where nothing is ever said should not hold the microphone open
+// indefinitely either.
+const NO_SPEECH_AUTO_STOP_MS = 12000;
+
+// Batch path only: RMS below this counts as silence. The live path uses the
+// server's own VAD instead, which is far better than a threshold.
+const SILENCE_RMS_THRESHOLD = 0.02;
+
 // Mutex to prevent race conditions during toggle
 let isToggling = false;
 
@@ -133,6 +162,50 @@ let uploadRequest: XMLHttpRequest | null = null;
 // if something is focused. The composer's microphone button sets a sink so its
 // text lands in the editor even though focus is on the button.
 let outputSink: ((text: string) => void) | null = null;
+
+// Where in-progress dictation goes. Set alongside outputSink by a caller that
+// can render text as it arrives; when it is present the final text has already
+// been written, so outputSink is not called again.
+let liveSink: VoiceInputSink | null = null;
+
+// Auto-stop timers.
+let silenceTimer: ReturnType<typeof setTimeout> | null = null;
+let noSpeechTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearAutoStop(): void {
+	if (silenceTimer !== null) {
+		clearTimeout(silenceTimer);
+		silenceTimer = null;
+	}
+	if (noSpeechTimer !== null) {
+		clearTimeout(noSpeechTimer);
+		noSpeechTimer = null;
+	}
+}
+
+/** Stop because the speaker has finished, not because they asked. */
+function autoStop(): void {
+	clearAutoStop();
+	if (!get(globalSttState).isRecording) return;
+	void stopRecording();
+}
+
+/** Arm (or re-arm) the end-of-speech countdown. */
+function armSilenceStop(delayMs: number): void {
+	if (silenceTimer !== null) clearTimeout(silenceTimer);
+	silenceTimer = setTimeout(autoStop, delayMs);
+}
+
+function cancelSilenceStop(): void {
+	if (silenceTimer !== null) {
+		clearTimeout(silenceTimer);
+		silenceTimer = null;
+	}
+	if (noSpeechTimer !== null) {
+		clearTimeout(noSpeechTimer);
+		noSpeechTimer = null;
+	}
+}
 
 // Track current MIME type for proper file extension
 let currentMimeType: string = 'audio/webm';
@@ -172,7 +245,13 @@ function getFileExtension(mimeType: string): string {
 // Audio Level Monitoring
 // ============================================================================
 
+// Whether this batch recording has heard anything yet. The silence countdown
+// only starts after real speech, so a slow starter is not cut off before they
+// have said a word.
+let heardSpeech = false;
+
 async function initAudioMonitoring(stream: MediaStream): Promise<() => void> {
+	heardSpeech = false;
 	audioContext = new AudioContext();
 	analyserNode = audioContext.createAnalyser();
 	analyserNode.fftSize = 256;
@@ -214,6 +293,16 @@ async function initAudioMonitoring(stream: MediaStream): Promise<() => void> {
 		}));
 		globalSttAudio.set({ level: rms, bands: [...bands] });
 
+		// The batch path has no server VAD, so end-of-speech is inferred from
+		// loudness. Crude next to real VAD, but it gives this path the same
+		// "stop talking and it finishes" behaviour.
+		if (rms >= SILENCE_RMS_THRESHOLD) {
+			heardSpeech = true;
+			cancelSilenceStop();
+		} else if (heardSpeech && silenceTimer === null) {
+			armSilenceStop(SILENCE_AUTO_STOP_BATCH_MS);
+		}
+
 		audioLevelAnimationId = requestAnimationFrame(updateLevel);
 	}
 
@@ -245,6 +334,24 @@ function stopAudioMonitoring(): void {
 // ============================================================================
 // Live Recording (streaming)
 // ============================================================================
+
+/** Everything transcribed so far, settled segments plus the in-flight one. */
+function dictationText(state: GlobalSttState): string {
+	return [...state.segments, state.partial].join(' ').replace(/\s+/g, ' ').trim();
+}
+
+/** Mirror the running dictation into whatever surface registered for it. */
+function pushLiveText(state: GlobalSttState): void {
+	if (!liveSink) return;
+	try {
+		liveSink.onText(dictationText(state));
+	} catch (error) {
+		// A consumer that throws (unmounted editor, detached node) must not take
+		// the recording down with it.
+		console.warn('[GlobalSTT] Live sink failed:', error);
+		liveSink = null;
+	}
+}
 
 /**
  * Try the live path. Returns false when this setup can only do batch, so the
@@ -289,6 +396,8 @@ async function startLiveRecording(): Promise<boolean> {
 					isRecording: true
 				}));
 				playEarcon('ready');
+				// Nothing said at all still ends the session eventually.
+				noSpeechTimer = setTimeout(autoStop, NO_SPEECH_AUTO_STOP_MS);
 			},
 			onClosed: () => {
 				// The socket died on its own. Guard on streamSession rather than
@@ -297,17 +406,28 @@ async function startLiveRecording(): Promise<boolean> {
 				if (streamSession) void stopLiveRecording('dropped');
 			},
 			onDelta: (text) => {
-				globalSttState.update((s) => ({ ...s, partial: text }));
+				globalSttState.update((s) => {
+					const next = { ...s, partial: text };
+					pushLiveText(next);
+					return next;
+				});
 			},
 			onFinal: (text) => {
-				globalSttState.update((s) => ({
-					...s,
-					partial: '',
-					segments: [...s.segments, text]
-				}));
+				globalSttState.update((s) => {
+					const next = { ...s, partial: '', segments: [...s.segments, text] };
+					pushLiveText(next);
+					return next;
+				});
 			},
 			onSpeech: (active) => {
 				globalSttState.update((s) => ({ ...s, speechActive: active }));
+				// Server VAD is the authority on "are they still talking" — far
+				// better than an RMS threshold, so the live path defers to it.
+				if (active) {
+					cancelSilenceStop();
+				} else {
+					armSilenceStop(SILENCE_AUTO_STOP_LIVE_MS);
+				}
 			},
 			onAudio: (level, bands) => {
 				globalSttAudio.set({ level, bands: Array.from(bands) });
@@ -353,6 +473,7 @@ async function stopLiveRecording(reason: 'user' | 'dropped' = 'user'): Promise<v
 		return;
 	}
 
+	clearAutoStop();
 	playEarcon('stop');
 
 	// Drain: the tail segment is still transcribing upstream.
@@ -372,7 +493,14 @@ async function stopLiveRecording(reason: 'user' | 'dropped' = 'user'): Promise<v
 	try {
 		const text = (await session.stop()).trim();
 		if (!isCurrentRun(myRun)) return;
-		if (text) {
+		if (text && liveSink) {
+			// The sink has been rendering this all along; the last update just
+			// settles it. Routing it through outputText as well would insert the
+			// whole transcript a second time.
+			liveSink.onText(text);
+			liveSink.onCommit();
+			globalSttState.update((s) => ({ ...s, lastTranscription: text }));
+		} else if (text) {
 			await outputText(text, myRun);
 			globalSttState.update((s) => ({ ...s, lastTranscription: text }));
 		} else if (reason === 'user') {
@@ -391,6 +519,8 @@ async function stopLiveRecording(reason: 'user' | 'dropped' = 'user'): Promise<v
 		playEarcon('error');
 	} finally {
 		if (isCurrentRun(myRun)) {
+			liveSink?.onCommit();
+			liveSink = null;
 			outputSink = null;
 			globalSttState.update((s) => ({
 				...s,
@@ -398,8 +528,7 @@ async function stopLiveRecording(reason: 'user' | 'dropped' = 'user'): Promise<v
 				mode: 'idle',
 				partial: '',
 				segments: [],
-				speechActive: false,
-				recordingMs: null
+				speechActive: false
 			}));
 		}
 	}
@@ -426,8 +555,7 @@ async function startRecording(): Promise<void> {
 		error: null,
 		partial: '',
 		segments: [],
-		lastTranscription: null,
-		recordingMs: null
+		lastTranscription: null
 	}));
 	globalSttUpload.set(null);
 	recordingStartTime = Date.now();
@@ -475,6 +603,7 @@ async function startRecording(): Promise<void> {
 		// Capture is live from this line, so the cue belongs here rather than
 		// after the meter setup below, which is another await away.
 		playEarcon('ready');
+		noSpeechTimer = setTimeout(autoStop, NO_SPEECH_AUTO_STOP_MS);
 
 		// Initialize audio monitoring
 		const startVisualization = await initAudioMonitoring(mediaStream);
@@ -516,6 +645,7 @@ async function stopRecording(): Promise<void> {
 		return;
 	}
 
+	clearAutoStop();
 	playEarcon('stop');
 
 	// Stop audio monitoring first
@@ -547,11 +677,7 @@ async function stopRecording(): Promise<void> {
 	}
 
 	const myRun = runId;
-	globalSttState.update((s) => ({
-		...s,
-		isRecording: false,
-		recordingMs: recordingDuration
-	}));
+	globalSttState.update((s) => ({ ...s, isRecording: false }));
 
 	try {
 		// Wait for the recorder to flush before assembling the blob.
@@ -764,13 +890,14 @@ async function transcribeAndOutput(audioBlob: Blob, myRun: number): Promise<void
 		playEarcon('error');
 	} finally {
 		if (isCurrentRun(myRun)) {
+			liveSink?.onCommit();
+			liveSink = null;
 			outputSink = null;
 			globalSttUpload.set(null);
 			globalSttState.update((s) => ({
 				...s,
 				isTranscribing: false,
-				mode: 'idle',
-				recordingMs: null
+				mode: 'idle'
 			}));
 		}
 	}
@@ -915,6 +1042,8 @@ function cleanup(): void {
 	audioChunks = [];
 
 	outputSink = null;
+	liveSink = null;
+	clearAutoStop();
 	runId++;
 	globalSttState.set(initialState);
 	globalSttAudio.set({ level: 0, bands: emptyBands() });
@@ -944,6 +1073,9 @@ export function cancelVoiceInput(): void {
 	if (!browser) return;
 
 	runId++;
+	clearAutoStop();
+	liveSink?.onCommit();
+	liveSink = null;
 	outputSink = null;
 
 	uploadRequest?.abort();
@@ -986,9 +1118,13 @@ export function triggerToggle(): void {
  * microphone is a trigger, not a second recorder, so live transcription behaves
  * identically however it was started.
  */
-export function toggleVoiceInput(sink: (text: string) => void): void {
+export function toggleVoiceInput(
+	sink: (text: string) => void,
+	live?: VoiceInputSink
+): void {
 	if (!get(globalSttState).isRecording) {
 		outputSink = sink;
+		liveSink = live ?? null;
 	}
 	toggleRecording();
 }
