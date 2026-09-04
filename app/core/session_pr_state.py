@@ -6,7 +6,9 @@ and turn-end reconciliation write these fields and broadcast a user-wide
 row patch so every device's list updates without a refetch.
 
 Never raises: a persistence or GitHub blip must not break the git flow or
-turn teardown. Merge never settles the session.
+turn teardown. Merge never settles the session. A merged (or closed) PR is
+not terminal for the session either: turn-end reconcile will adopt a newer
+open PR on the same checkout.
 """
 
 from __future__ import annotations
@@ -138,11 +140,21 @@ def _github_state(pr: Any) -> Optional[str]:
     return _normalize_pr_state(getattr(pr, "state", None))
 
 
+def _find_open_pull(github_service: Any, repo: str, branch: str) -> Any:
+    for item in github_service.list_pulls(repo, state="open", limit=100):
+        if getattr(item, "head_branch", None) == branch:
+            return item
+    return None
+
+
 async def reconcile_session_pr(session_id: str) -> None:
     """Best-effort: if this session's branch has a GitHub PR, persist it.
 
-    - Already ``merged``: skip (terminal).
-    - Has ``pr_number``: refresh that PR (catches agent/gh merges).
+    - ``merged`` / ``closed`` describe that pull request, not the session.
+      Keep looking for a newer open PR on the current branch so a session
+      that continues after merge (or close) can pick up the next one.
+    - Has ``pr_number`` and not yet terminal: refresh that PR (catches
+      agent/gh merges).
     - Otherwise: look up an open PR whose head is the session branch.
 
     A failed GitHub lookup never clears persisted state. Never raises.
@@ -154,15 +166,18 @@ async def reconcile_session_pr(session_id: str) -> None:
         session = await asyncio.to_thread(database.get_session, session_id)
         if not session:
             return
-        if (session.get("pr_state") or "").lower() == "merged":
-            return
 
         project_id = session.get("project_id")
         branch = session.get("worktree_branch") or session.get("branch")
         pr_number = session.get("pr_number")
+        current_state = (session.get("pr_state") or "").lower()
+        terminal = current_state in ("merged", "closed")
         if not project_id:
             return
-        if not branch and not pr_number:
+        if terminal:
+            if not branch:
+                return
+        elif not branch and not pr_number:
             return
 
         try:
@@ -188,17 +203,13 @@ async def reconcile_session_pr(session_id: str) -> None:
 
         pr = None
         try:
-            if pr_number:
+            if terminal or not pr_number:
+                if branch:
+                    pr = await asyncio.to_thread(
+                        _find_open_pull, github_service, repo, branch
+                    )
+            else:
                 pr = await asyncio.to_thread(github_service.get_pull, repo, int(pr_number))
-            elif branch:
-                def _find():
-                    pulls = github_service.list_pulls(repo, state="open", limit=100)
-                    for item in pulls:
-                        if item.head_branch == branch:
-                            return item
-                    return None
-
-                pr = await asyncio.to_thread(_find)
         except GitHubCliError:
             logger.debug("PR reconcile: gh lookup failed for %s", session_id, exc_info=True)
             return
@@ -210,6 +221,8 @@ async def reconcile_session_pr(session_id: str) -> None:
             return
 
         state = _github_state(pr) or "open"
+        if terminal and state != "open":
+            return
         await persist_pr_state(
             session_id=session_id,
             project_id=project_id,

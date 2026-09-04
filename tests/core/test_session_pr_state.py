@@ -92,14 +92,52 @@ async def test_reconcile_persists_open_pr_for_branch(mock_db):
 
 
 @pytest.mark.asyncio
-async def test_reconcile_skips_already_merged(mock_db):
+async def test_reconcile_merged_adopts_new_open_pr(mock_db):
     sid = _mk(project_id='p1', worktree_branch='feat/x')
-    database.update_session_pr_state(sid, pr_number=4, pr_state='merged')
+    database.update_session_pr_state(
+        sid, pr_number=4, pr_url='https://github.com/o/r/pull/4', pr_state='merged'
+    )
+    new_pr = SimpleNamespace(
+        number=12, url='https://github.com/o/r/pull/12', state='OPEN', head_branch='feat/x'
+    )
 
-    with patch('app.core.github_service.github_service') as gh:
+    with patch(
+        'app.api.git_helpers.get_working_dir_async', new=AsyncMock(return_value='/wd')
+    ), patch('app.core.github_service.github_service') as gh, patch(
+        'app.core.sync_engine.sync_engine'
+    ) as sync:
+        gh.get_repo_from_remote.return_value = 'o/r'
+        gh.list_pulls.return_value = [new_pr]
+        sync.broadcast_session_updated = AsyncMock()
+        sync.broadcast_user_session_updated = AsyncMock()
         await reconcile_session_pr(sid)
         gh.get_pull.assert_not_called()
-        gh.list_pulls.assert_not_called()
+
+    row = database.get_session(sid)
+    assert row['pr_number'] == 12
+    assert row['pr_state'] == 'open'
+    assert row['pr_url'] == 'https://github.com/o/r/pull/12'
+
+
+@pytest.mark.asyncio
+async def test_reconcile_merged_without_new_pr_keeps_state(mock_db):
+    sid = _mk(project_id='p1', worktree_branch='feat/x')
+    database.update_session_pr_state(
+        sid, pr_number=4, pr_url='https://github.com/o/r/pull/4', pr_state='merged'
+    )
+
+    with patch(
+        'app.api.git_helpers.get_working_dir_async', new=AsyncMock(return_value='/wd')
+    ), patch('app.core.github_service.github_service') as gh:
+        gh.get_repo_from_remote.return_value = 'o/r'
+        gh.list_pulls.return_value = []
+        await reconcile_session_pr(sid)
+        gh.get_pull.assert_not_called()
+
+    row = database.get_session(sid)
+    assert row['pr_number'] == 4
+    assert row['pr_state'] == 'merged'
+    assert row['pr_url'] == 'https://github.com/o/r/pull/4'
 
 
 @pytest.mark.asyncio

@@ -208,11 +208,17 @@ export interface GitStageInput {
 /**
  * Resolve one stage from the session row plus (optionally) its working tree.
  *
- * Precedence puts the PR lifecycle first: once a branch has a pull request,
- * that is the thing the user is tracking, and stray edits on top of it still
- * show up as the diff counts next to the PR segment. Below that the tree
- * decides, newest work first — uncommitted, then unpushed commits, then a
- * pushed branch waiting on a PR.
+ * An open pull request owns the glyph: stray edits on top of it still show
+ * up as the diff counts next to the PR segment. Merged and closed do not —
+ * they describe the last PR, and new work on the same session restarts the
+ * git lifecycle (dirty → committed → pushed → a new PR) so a session that
+ * keeps going after merge is not frozen on "PR Merged".
+ *
+ * Below that the tree decides, newest work first — uncommitted, then
+ * unpushed commits, then a pushed branch waiting on a PR. A fully-pushed
+ * feature branch that was just merged still reports ahead>0 / unpushed=0
+ * (those commits are the ones that landed); that stays `merged`, not
+ * `pushed`.
  *
  * `ahead` counts commits vs the default branch; `unpushed` counts commits vs
  * origin/<branch> (null when that remote ref does not exist). A brand-new
@@ -227,17 +233,23 @@ export interface GitStageInput {
 export function deriveGitStage(input: GitStageInput): GitStage {
 	if (input.mode === 'chat' || input.mode === 'voice') return 'none';
 	if (!input.hasProject) return 'none';
-	if (input.prState === 'merged') return 'merged';
 	if (input.prState === 'open') return 'pr';
 	if (input.git && !input.git.isRepo) return 'none';
-	if (input.prState === 'closed') return 'closed';
-	if (!input.git) return 'clean';
+	if (!input.git) {
+		if (input.prState === 'merged') return 'merged';
+		if (input.prState === 'closed') return 'closed';
+		return 'clean';
+	}
 	if (input.git.hasChanges) return 'dirty';
 	// Unique commits vs default branch: fully on the remote → waiting on a PR;
 	// otherwise still local (never pushed, or pushed-then-committed-more).
-	if (input.git.ahead > 0) {
-		return input.git.unpushed === 0 ? 'pushed' : 'committed';
-	}
+	// After merge those remote commits are the ones that landed, so unpushed===0
+	// must not promote a merged row to "pushed". New local commits (unpushed
+	// null or >0) do restart the lifecycle.
+	if (input.git.ahead > 0 && input.git.unpushed !== 0) return 'committed';
+	if (input.prState === 'merged') return 'merged';
+	if (input.prState === 'closed') return 'closed';
+	if (input.git.ahead > 0) return 'pushed';
 	return 'clean';
 }
 

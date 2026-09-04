@@ -400,6 +400,26 @@ describe('SessionCard git state', () => {
 		expect(container.querySelector('.diff')?.textContent).toBe('+124 −38');
 	});
 
+	it('restarts the glyph after a merged PR once the tree is dirty again', () => {
+		mocks.getSessionGit.mockReturnValue({
+			status: gitStatus({ has_changes: true }),
+			diffStats: { additions: 12, deletions: 3, files_changed: 2 },
+			loaded: true,
+		});
+
+		const { container } = renderCard({
+			worktree_branch: 'feat/x',
+			pr_state: 'merged',
+			pr_number: 1071,
+		});
+
+		const lead = container.querySelector('.lead');
+		expect(lead?.getAttribute('aria-label')).toBe('Uncommitted changes');
+		expect(lead?.classList.contains('amber')).toBe(true);
+		expect(container.querySelector('.l2')?.textContent).not.toContain('PR #1071 merged');
+		expect(container.querySelector('.diff')?.textContent).toBe('+12 −3');
+	});
+
 	it('leads a pushed session branch with the upload glyph', () => {
 		mocks.getSessionGit.mockReturnValue({
 			// ahead>0 (commits vs main) + unpushed=0 (remote has them all)

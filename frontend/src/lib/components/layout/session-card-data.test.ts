@@ -252,11 +252,24 @@ describe('deriveGitStage', () => {
 		expect(deriveGitStage({ ...repo, git: { ...clean, isRepo: false } })).toBe('none');
 	});
 
-	it('lets the PR lifecycle own the glyph', () => {
+	it('lets an open PR own the glyph over a dirty tree', () => {
 		const dirty = { ...clean, hasChanges: true };
 		expect(deriveGitStage({ ...repo, prState: 'open', git: dirty })).toBe('pr');
-		expect(deriveGitStage({ ...repo, prState: 'merged', git: dirty })).toBe('merged');
-		expect(deriveGitStage({ ...repo, prState: 'closed', git: dirty })).toBe('closed');
+	});
+
+	it('lets new work after merge or close restart the git lifecycle', () => {
+		const dirty = { ...clean, hasChanges: true };
+		expect(deriveGitStage({ ...repo, prState: 'merged', git: dirty })).toBe('dirty');
+		expect(deriveGitStage({ ...repo, prState: 'closed', git: dirty })).toBe('dirty');
+		expect(
+			deriveGitStage({ ...repo, prState: 'merged', git: { ...clean, ahead: 2, unpushed: 1 } })
+		).toBe('committed');
+		// The merged commits themselves still sit ahead of main and fully on the remote.
+		expect(
+			deriveGitStage({ ...repo, prState: 'merged', git: { ...clean, ahead: 2, unpushed: 0 } })
+		).toBe('merged');
+		expect(deriveGitStage({ ...repo, prState: 'merged', git: clean })).toBe('merged');
+		expect(deriveGitStage({ ...repo, prState: 'closed', git: clean })).toBe('closed');
 	});
 
 	it('reads the working tree newest-work-first', () => {
