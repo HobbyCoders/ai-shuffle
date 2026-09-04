@@ -321,6 +321,11 @@ class HarnessAdapter(ProviderAdapter):
         # receive_events replay cursor: fluid's EventBus replays from ``since_seq``,
         # so we advance this per delivered event to avoid re-yielding prior turns.
         self._event_cursor: int = 0
+        # The bus the continual synthesizer announces on, and the session id to
+        # fall back to before the engine has minted one (see
+        # ``_announce_continual``). Both None/"" when continual is off.
+        self._continual_bus: Optional[Any] = None
+        self._continual_fallback_sid: str = ""
         # Highest seq that already existed when the CURRENT turn was submitted.
         # A terminal event at or below it belongs to an earlier turn, so it can
         # never settle this one (see ``receive_events``).
@@ -595,17 +600,15 @@ class HarnessAdapter(ProviderAdapter):
                         # it: the synthesizer's ContinualUpdate announcements
                         # must publish to the SAME bus the engine streams from.
                         from fluid.events.bus import EventBus
-                        from fluid.events.model import ContinualUpdate
 
                         engine_bus = EventBus()
-                        _bus, _sid = engine_bus, fluid_session_id or ""
+                        self._continual_bus = engine_bus
+                        self._continual_fallback_sid = fluid_session_id or ""
 
                         async def _announce(changes: list) -> None:
                             # Learning that lands invisibly might as well not
                             # have happened — announce what the pass changed.
-                            await _bus.publish(ContinualUpdate(
-                                session_id=_sid, changes=tuple(changes),
-                            ))
+                            await self._announce_continual(list(changes))
 
                         # Session provider; fluid_continual_model pins synthesis
                         # to one model so skill quality doesn't drift with the
@@ -1225,6 +1228,36 @@ class HarnessAdapter(ProviderAdapter):
                 if isinstance(translated, ResultMessage):
                     return
 
+    async def _announce_continual(self, changes: list) -> None:
+        """Publish a ``ContinualUpdate`` for a synthesis pass — and persist it.
+
+        This used to call ``bus.publish`` directly. The bus assigns the seq and
+        bumps its counter, but only the engines' ``_emit`` writes to the store,
+        so every announcement burned a seq that never reached
+        ``fluid_session_events`` — a permanent hole in the durable log, one per
+        changing pass. (There are zero ``ContinualUpdate`` rows in production to
+        show for hundreds of sessions run with continual on.) Holes are no
+        longer fatal — :meth:`_anchor_replay_cursor` reads past them — but a
+        durable log that silently disagrees with the bus is worth not creating.
+
+        Routing through the engine's ``_emit`` keeps ONE writer for the whole
+        stream. The direct publish stays as the fallback for an engine that has
+        not been built yet (a pass can fire before ``connect`` finishes wiring
+        it) — visible, unpersisted, same as before, rather than lost entirely.
+        """
+        from fluid.events.model import ContinualUpdate
+
+        session_id = self._sdk_session_id or self._continual_fallback_sid
+        event = ContinualUpdate(session_id=session_id, changes=tuple(changes))
+
+        emit = getattr(self._engine, "_emit", None)
+        if callable(emit) and session_id:
+            await emit(event)
+            return
+        bus = self._continual_bus
+        if bus is not None:
+            await bus.publish(event)
+
     def _is_live(self, event: Any) -> bool:
         """True when ``event`` was published after the current turn started.
 
@@ -1276,11 +1309,14 @@ class HarnessAdapter(ProviderAdapter):
         reaches the model.
 
         The cursor is the store's HIGHEST seq — not the length of the log, and
-        not the end of its contiguous prefix. A durable log with a hole in it
-        (an event published to the bus but never persisted) is still entirely
-        history; anchoring at the hole makes every later turn replay everything
-        after it, and because the hole never heals the session can never catch
-        up again. That is exactly what stranded a live session on 2026-09-03.
+        not the end of its contiguous prefix. A holed log is still entirely
+        history, and holes are ROUTINE: ``prune_fluid_delta_events`` deletes
+        reconstructible deltas for long-idle sessions without renumbering, so
+        most resumed sessions are non-contiguous from seq 3 onwards. Anchoring
+        at the first hole makes every later turn replay everything after it, and
+        since the hole never heals the session never catches up — which is what
+        stranded a live session on 2026-09-03 and what stranded every session
+        resumed after a retention pass.
 
         Event NUMBERING is fluid's own job: ``_ensure_session`` already seeds
         the bus from the store's maximum (``NativeLoop._seed_bus_seq``) before
@@ -1311,15 +1347,18 @@ class HarnessAdapter(ProviderAdapter):
             if stored:
                 stored_head = max(int(getattr(e, "seq", 0) or 0) for e in stored)
                 if stored_head != len(stored):
-                    # Not fatal any more, but it does mean an event was
-                    # published and never persisted — worth seeing, because the
-                    # gap is permanent and the durable log is now lossy.
-                    logger.warning(
-                        "[HarnessAdapter] durable event log for %s is missing %d "
-                        "event(s) (%d rows, head %d) — an event was published but "
-                        "never stored; anchoring the replay cursor at the head",
-                        session_id, stored_head - len(stored), len(stored),
-                        stored_head,
+                    # Not a fault signal: ``prune_fluid_delta_events`` deletes
+                    # reconstructible streaming deltas for long-idle sessions
+                    # (app/db/fluid_events.py) and does not renumber, so a
+                    # resumed session is non-contiguous BY DESIGN — typically
+                    # from seq 3 on. A lost publish looks identical from here.
+                    # Either way the head is the anchor; this line only says
+                    # the log is sparser than its numbering.
+                    logger.info(
+                        "[HarnessAdapter] durable event log for %s is sparse "
+                        "(%d rows, head %d — delta retention and lost publishes "
+                        "both do this); anchoring the replay cursor at the head",
+                        session_id, len(stored), stored_head,
                     )
                 head = max(head, stored_head)
 

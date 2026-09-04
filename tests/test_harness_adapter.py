@@ -3491,14 +3491,16 @@ async def test_holed_store_anchors_at_head_not_prefix(monkeypatch, tmp_path, cap
     sid = "ses_holed"
     store = await _seeded_store(sid, [1, 2, 5])
 
-    with caplog.at_level(logging.WARNING, logger="app.core.provider.harness_adapter"):
+    with caplog.at_level(logging.INFO, logger="app.core.provider.harness_adapter"):
         adapter = await _connect_native(
             monkeypatch, store, tmp_path, resume_session_id=sid
         )
     try:
         assert adapter._event_cursor == 5
+        # Reported, not blamed: retention pruning holes a log exactly like a
+        # lost publish does, and neither changes where the turn starts reading.
         assert any(
-            "missing 2 event(s)" in r.getMessage() and sid in r.getMessage()
+            "is sparse (3 rows, head 5" in r.getMessage() and sid in r.getMessage()
             for r in caplog.records
         )
 
@@ -3540,8 +3542,12 @@ async def test_replayed_terminal_never_settles_the_turn(monkeypatch, tmp_path, c
     adapter = await _connect_native(monkeypatch, store, tmp_path, resume_session_id=sid)
     try:
         assert adapter._event_cursor == 2
+        # Rewind BEFORE submitting: this is the real shape of the bug — the
+        # anchor failed, so the turn opens behind the head. The floor then has
+        # to come from the bus, which is the half a post-submit rewind would
+        # never exercise.
+        adapter._event_cursor = 0
         await adapter.send_query("hi")
-        adapter._event_cursor = 0  # simulate an anchor that rewound
 
         with caplog.at_level(
             logging.WARNING, logger="app.core.provider.harness_adapter"
@@ -3566,6 +3572,69 @@ async def test_replayed_terminal_never_settles_the_turn(monkeypatch, tmp_path, c
         assert delta_texts == ["old-1", "fresh reply"]
     finally:
         await adapter.disconnect()
+
+
+# ─── 9b. Continual announcements must be persisted, not just published ───────
+#
+# The synthesizer's ContinualUpdate used to go straight to bus.publish(), which
+# assigns a seq and bumps the counter but never writes the store — one permanent
+# hole in fluid_session_events per changing pass (production held zero
+# ContinualUpdate rows across hundreds of continual-enabled sessions). Routing
+# through the engine's _emit keeps one writer for the whole stream.
+
+
+class _RecordingEmitEngine:
+    """Engine stub exposing the ``_emit`` seam (publish + durable append)."""
+
+    def __init__(self) -> None:
+        self.emitted: list = []
+
+    async def _emit(self, event):
+        self.emitted.append(event)
+        return event
+
+
+class _RecordingBus:
+    def __init__(self) -> None:
+        self.published: list = []
+
+    async def publish(self, event):
+        self.published.append(event)
+        return event
+
+
+@pytest.mark.asyncio
+async def test_continual_announcement_goes_through_emit():
+    """A pass with an engine behind it emits — so the event is also stored."""
+    adapter = HarnessAdapter()
+    engine = _RecordingEmitEngine()
+    bus = _RecordingBus()
+    adapter._engine = engine
+    adapter._continual_bus = bus
+    adapter._sdk_session_id = "ses_continual"
+
+    await adapter._announce_continual(["skills/foo.md"])
+
+    assert len(engine.emitted) == 1
+    event = engine.emitted[0]
+    assert type(event).__name__ == "ContinualUpdate"
+    assert event.session_id == "ses_continual"
+    assert event.changes == ("skills/foo.md",)
+    assert bus.published == []  # not double-published
+
+
+@pytest.mark.asyncio
+async def test_continual_announcement_falls_back_to_the_bus():
+    """A pass that fires before the engine exists is still announced."""
+    adapter = HarnessAdapter()
+    bus = _RecordingBus()
+    adapter._continual_bus = bus
+    adapter._continual_fallback_sid = "ses_early"
+
+    await adapter._announce_continual(["memory/bar.md"])
+
+    assert len(bus.published) == 1
+    assert bus.published[0].session_id == "ses_early"
 
 
 # ─── W0a: native-leg MCP normalization + turn/output caps ────────────────────
