@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from fluid.tools.builtins.plan import (
+    APPROVED_RESULT,
     PLAN_SPEC,
     STOP_SPEC,
+    USER_ANSWERED_KEY,
     PlanModeControl,
     plan_handler,
     stop_handler,
@@ -108,3 +110,74 @@ async def test_stop_rejection_keeps_planning_with_feedback() -> None:
     assert state["active"] is True
     assert "use redis instead" in outcome.text
     assert "NOT approve" in outcome.text
+
+
+# ─── honesty about who approved ──────────────────────────────────────────────
+#
+# Under bypass permissions the host ends plan mode itself and hands the answer
+# back already approved. Nobody read the plan — and models relayed "the plan is
+# approved" to users as though somebody had.
+
+
+def _auto_ctx(active: bool = False) -> tuple[ToolCtx, dict]:
+    state = {"active": active}
+    ctx = ToolCtx()
+    ctx.extra["plan_mode_control"] = PlanModeControl(
+        is_active=lambda: state["active"],
+        set_active=lambda value: state.__setitem__("active", value),
+        auto_approve=True,
+    )
+    return ctx, state
+
+
+async def test_entry_text_promises_a_human_only_when_there_is_one() -> None:
+    ctx, _ = _ctx()
+    human = await plan_handler({}, ctx)
+    assert "for the user's approval" in human.text
+
+    auto_ctx, auto_state = _auto_ctx()
+    auto = await plan_handler({}, auto_ctx)
+    assert auto_state["active"] is True
+    assert "for the user's approval" not in auto.text
+    assert "approves automatically" in auto.text
+    assert "do not report it back as user-approved" in auto.text
+
+
+async def test_already_off_exit_does_not_claim_a_user_approved() -> None:
+    ctx, _ = _ctx(active=False)
+    outcome = await stop_handler(
+        {"plan": "p", "__input_responses__": {"approve": "1"}}, ctx
+    )
+    assert not outcome.is_error
+    assert not outcome.text.startswith("Plan approved")
+    assert "ended it by policy" in outcome.text
+    assert "No user review of this plan was recorded" in outcome.text
+    # The actionable half survives: the tools are back.
+    assert "write tools are on the surface" in outcome.text
+
+
+async def test_a_host_that_saw_a_real_answer_gets_the_approved_wording() -> None:
+    ctx, _ = _ctx(active=False)
+    outcome = await stop_handler(
+        {
+            "plan": "p",
+            "__input_responses__": {
+                "approve": "1",
+                USER_ANSWERED_KEY: True,
+            },
+        },
+        ctx,
+    )
+    assert outcome.text.startswith("Plan approved by the user")
+    assert "No user review" not in outcome.text
+
+
+async def test_a_live_exit_is_unaffected_by_the_marker() -> None:
+    # Plan mode was still on, so the answer itself ended it — attribution is
+    # not in doubt and the marker changes nothing.
+    ctx, state = _ctx(active=True)
+    outcome = await stop_handler(
+        {"plan": "p", "__input_responses__": {"approve": "go ahead"}}, ctx
+    )
+    assert state["active"] is False
+    assert outcome.text == APPROVED_RESULT
