@@ -66,6 +66,9 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "- If old_string differs only by a uniform indentation offset or a "
         "copied line-number prefix, Edit corrects it and tells you; any "
         "other mismatch fails with a diagnostic.\n"
+        "- In code mode, a triple-quoted old_string must start at column 0: "
+        "the cell's own indentation becomes part of the string, and so does "
+        "the newline before the closing quotes.\n"
         "- Edits to a .py file that currently parses are syntax-checked "
         "before anything is written: a result that would not parse is "
         "rejected, the file is left untouched, and the error names the "
@@ -106,9 +109,15 @@ SPEC = ToolSpec(
 # rendered line back into old_string.
 _LINE_PREFIX = re.compile(r"^\d+\t")
 
+# Lands as the result's FIRST line, not a trailing aside. A twelve-repair
+# session shows the aside being skimmed past: the same indented triple-quoted
+# old_string kept coming back, and three of those attempts failed outright.
 _FALLBACK_NOTE = (
-    " — note: matched after correcting leading whitespace/line-number prefix; "
-    "copy text exactly from Read next time"
+    "NOTE: old_string did not match the file as written — it matched only "
+    "after correcting a uniform indentation offset / a copied line-number "
+    "prefix. Copy old_string verbatim from the Read output next time; a "
+    "triple-quoted old_string must start at column 0, because the cell's own "
+    "indentation becomes part of the string."
 )
 
 
@@ -121,6 +130,16 @@ def _strip_line_prefixes(text: str) -> str | None:
     if not any(_LINE_PREFIX.match(line) for line in lines):
         return None
     return "\n".join(_LINE_PREFIX.sub("", line) for line in lines)
+
+
+def _ends_blank(lines: list[str]) -> bool:
+    """Whether ``lines`` carries the empty element a trailing newline leaves."""
+    return len(lines) > 1 and lines[-1] == ""
+
+
+def _strip_trailing_blank(lines: list[str]) -> list[str]:
+    """Drop that phantom element — it corresponds to no line in the file."""
+    return lines[:-1] if _ends_blank(lines) else lines
 
 
 def _indent(line: str) -> str:
@@ -377,9 +396,8 @@ def _syntax_message(
 
 
 def _result(path: Path, n: int, note: str) -> ToolOutcome:
-    return ToolOutcome(
-        text=f"edited {path} ({n} replacement{'s' if n != 1 else ''}){note}"
-    )
+    line = f"edited {path} ({n} replacement{'s' if n != 1 else ''})"
+    return ToolOutcome(text=f"{note}\n{line}" if note else line)
 
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
@@ -388,8 +406,12 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         return ToolOutcome(
             text=(
                 f"must Read {path} before editing it — call "
-                f'Read(file_path="{path}") first. In code mode both calls fit '
-                "in one cell, so this costs no extra turn."
+                f'Read(file_path="{path}") first and copy old_string out of '
+                "what it returns, byte-for-byte and without the line-number "
+                "prefix. In code mode the Read and the Edit fit in one cell, "
+                "so this costs no extra turn. A Read whose text you discard "
+                "(`_ = Read(..., limit=5)`) unlocks the gate and nothing else "
+                "— the match is still byte-for-byte against the file."
             ),
             is_error=True,
         )
@@ -456,6 +478,14 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # 3. Uniform leading-whitespace drift.
     file_lines = content.split("\n")
     old_lines = old.split("\n")
+    new_lines = new.split("\n")
+    # A triple-quoted old_string ends at a newline, so ``split`` leaves a
+    # phantom "" element that matches no real file line — which used to fail
+    # _find_runs' body check and kill this recovery even when a uniform
+    # indentation drift was the only thing wrong. Dropped from both sides
+    # together, so the replacement keeps the same trailing newline it had.
+    if _ends_blank(old_lines) and _ends_blank(new_lines):
+        old_lines, new_lines = old_lines[:-1], new_lines[:-1]
     runs = _find_runs(file_lines, old_lines)
     if runs:
         if len(runs) > 1 and not replace_all:
@@ -464,7 +494,6 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 is_error=True,
             )
         chosen = runs if replace_all else runs[:1]
-        new_lines = new.split("\n")
         span = len(old_lines)
         for start, prefix, old_has_extra in reversed(chosen):
             file_lines[start:start + span] = _apply_prefix(new_lines, prefix, old_has_extra)
@@ -476,5 +505,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         return _result(path, len(chosen), _FALLBACK_NOTE)
 
     # 4. No match — say why.
-    diag_lines = (stripped_old if stripped_old is not None else old).split("\n")
+    # The phantom trailing element goes here too: reported as content it read
+    # as `your old_string has ""` and sent the model hunting for a difference
+    # that was really just indentation.
+    diag_lines = _strip_trailing_blank(
+        (stripped_old if stripped_old is not None else old).split("\n")
+    )
     return ToolOutcome(text=_diagnose(file_lines, diag_lines), is_error=True)

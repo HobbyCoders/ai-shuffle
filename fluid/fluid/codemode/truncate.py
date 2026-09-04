@@ -42,7 +42,58 @@ def to_result_ref(
     return ref_cls(text) if exceeds(text, limit) else text
 
 
-def repeat_read_pointer(key: int, size: int) -> str:
+class ReadPointer(str):
+    """A pointer to a payload the kernel already holds — not the payload.
+
+    A repeat read returns guidance ("it is in ``_refs[7]``") rather than the
+    bytes. As a plain ``str`` that guidance is indistinguishable from content
+    to code: a transcript shows ``card = Read(...)`` followed by
+    ``card.splitlines()``, which quietly iterated the *notice* and produced a
+    report about nothing.
+
+    Subclassing ``str`` keeps everything that made the pointer useful —
+    ``print(pointer)`` shows the guidance, f-strings and ``==`` behave, and the
+    kernel's ``repr``-based value display still carries the text — while the
+    two operations that consume it *as content* raise instead of lying. That is
+    the least surprising of the options: refusing every operation would hide
+    the guidance the model needs to read, and a silent str keeps the bug.
+    """
+
+    #: Registry id of the payload this points at, and the payload's size.
+    key: int | None = None
+    size: int = 0
+
+    def __new__(cls, text: str, key: int | None = None, size: int = 0):
+        obj = super().__new__(cls, text)
+        obj.key = key
+        obj.size = size
+        return obj
+
+    def __repr__(self) -> str:
+        # The guidance rides inside the repr: a bare tool call in the last
+        # expression of a cell reaches the model through repr(), and the
+        # pointer is useless if that is where the text disappears.
+        return f"<ReadPointer #{self.key}: {str.__str__(self)}>"
+
+    def _not_content(self, op: str):
+        raise TypeError(
+            f"{op} on this value would read the pointer text, not the file — "
+            f"the content is in the kernel as _refs[{self.key}] "
+            f"({self.size:,} bytes). Bind it first: text = _refs[{self.key}]; "
+            f"then {op} on text."
+        )
+
+    def __iter__(self):
+        self._not_content("iteration")
+
+    def splitlines(self, *args, **kwargs):  # noqa: D102 - see _not_content
+        self._not_content(".splitlines()")
+
+    def split(self, *args, **kwargs):  # noqa: D102 - see _not_content
+        self._not_content(".split()")
+
+
+def repeat_read_pointer(key: int, size: int) -> ReadPointer:
     """The result a repeat read of an unchanged file gets instead of the bytes.
 
     The passive "unchanged since your earlier read" note asked the model to
@@ -50,17 +101,24 @@ def repeat_read_pointer(key: int, size: int) -> str:
     price. This removes the choice: the payload is already alive in the kernel
     under a registry id, so the second read returns the id and the size and
     nothing else. Slicing ``_refs[key]`` costs no host round-trip at all.
+
+    Like :func:`windowed_read_pointer` it leads with the expression to type,
+    because a pointer that only *describes* the situation gets read as prose
+    and answered with another read.
     """
-    return (
-        f"unchanged since your earlier read — full content is already in the "
-        f"kernel: _refs[{key}] ({size:,} bytes). Slice it instead of "
-        f"re-reading (e.g. text = _refs[{key}]; text[:2000])."
+    return ReadPointer(
+        f"unchanged since your earlier read — this value is a pointer, not the "
+        f"file. Print only the slice you need: text = _refs[{key}]; "
+        f"print(text[:2000]). _refs[{key}] holds all {size:,} bytes; slice it "
+        f"instead of re-reading.",
+        key=key,
+        size=size,
     )
 
 
 def windowed_read_pointer(
     key: int, size: int, start: int, stop: int | None, *, offset: int = 0
-) -> str:
+) -> ReadPointer:
     """The result a re-read of an unchanged file at a *new* window gets.
 
     Keying the pointer on the exact ``(path, offset, limit)`` window left the
@@ -84,10 +142,12 @@ def windowed_read_pointer(
         if not offset
         else "an earlier read covering these lines is already in the kernel"
     )
-    return (
+    return ReadPointer(
         f"unchanged since your earlier read — {holds}: _refs[{key}] "
         f"({size:,} bytes). Lines {start + 1}-{last} are "
-        f"_refs[{key}].splitlines(){span} — slice it instead of re-reading."
+        f"_refs[{key}].splitlines(){span} — slice it instead of re-reading.",
+        key=key,
+        size=size,
     )
 
 
@@ -96,11 +156,40 @@ def windowed_read_pointer(
 DEFAULT_STDOUT_CAP = 16384  # chars of cell stdout that reach the model
 _DROP_MARKER = "…[-{n} chars]"
 _NAMED_DROPS = 2  # how many of the heaviest drops the notice names
-_NAMED_REFS = 3  # how many kernel handles the notice names
+# How many kernel handles the notice names. It used to be 3, which was the
+# second half of a two-part loss: a cell that batched three whole-file Reads had
+# only its largest result behind a ref at all, and the notice then named that
+# one as if it were the cell's whole output. Refs are now created for every
+# result of a truncated cell (see ``SPILL_MIN``), so the list has to be able to
+# name them all; the ceiling only exists so a cell with fifty calls cannot turn
+# the notice into a page.
+_NAMED_REFS = 12
+# A result the cell did not print in full is worth a handle only if recovering
+# it saves a round-trip. Below this, re-running the tool is cheaper than
+# reading a line about it.
+SPILL_MIN = 512  # bytes
 
 
 def _drop_marker(dropped: int) -> str:
     return _DROP_MARKER.format(n=dropped)
+
+
+def _handle_list(refs) -> tuple[str, str]:
+    """``(named handles, "and N more" tail)`` for a cell's refs.
+
+    Accepts ``(key, size)`` or ``(key, size, tool_name)``; the tool name is
+    included when known, because "this cell's full tool output" was a lie in
+    every cell that made more than one call.
+    """
+    seen = list(dict.fromkeys(tuple(entry) for entry in refs))
+    named = seen[:_NAMED_REFS]
+    parts = []
+    for entry in named:
+        key, size = entry[0], entry[1]
+        tool = f" {entry[2]}" if len(entry) > 2 and entry[2] else ""
+        parts.append(f"_refs[{key}]{tool} ({size:,} bytes)")
+    rest = len(seen) - len(named)
+    return ", ".join(parts), (f" (and {rest} more in _refs)" if rest else "")
 
 
 def _recovery_clause(refs: "list[tuple[int, int]] | tuple" ) -> str:
@@ -111,17 +200,33 @@ def _recovery_clause(refs: "list[tuple[int, int]] | tuple" ) -> str:
     payload came from tool calls whose full results are alive in the kernel,
     the recovery is free and it should be spelled out.
     """
-    named = list(dict.fromkeys(refs))[:_NAMED_REFS]
-    if not named:
+    handles, more = _handle_list(refs)
+    if not handles:
         return (
             " Nothing in this cell is held as a ResultRef, so print less per "
             "cell — slice or summarize — rather than re-running the tools."
         )
-    handles = ", ".join(f"_refs[{key}] ({size:,} bytes)" for key, size in named)
-    more = " (and others in _refs)" if len(refs) > len(named) else ""
     return (
-        f" This cell's full tool output is held in the kernel: {handles}{more} "
-        "— slice it instead of re-running the tools or re-printing."
+        f" Each tool result this cell produced is held whole in the kernel: "
+        f"{handles}{more} — slice it instead of re-running the tools or "
+        "re-printing."
+    )
+
+
+def refs_footer(refs) -> str:
+    """One line naming the refs a cell's host calls produced, or ``""``.
+
+    Refs used to be announced only when stdout was truncated, so a cell that
+    stayed under the cap left its handles undiscoverable: a transcript shows a
+    44k-token call spent guessing which ``_refs`` slot held a Read. Every cell
+    that created refs now says so, in one line, whether or not anything was cut.
+    """
+    handles, more = _handle_list(refs)
+    if not handles:
+        return ""
+    return (
+        f"[refs created this cell: {handles}{more} — the full results are in "
+        "the kernel; slice them instead of re-running the tools.]"
     )
 
 
