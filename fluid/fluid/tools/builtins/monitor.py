@@ -19,6 +19,14 @@ The spawner receives ``(input, ctx)`` and must return a ``BackgroundTaskReceipt`
               task is still registered, surfaced and stoppable, but it is kept
               out of park accounting: see ``BackgroundTaskReceipt.serves``.
 
+A host that enforces a wall-clock budget on monitored commands declares it as
+``ctx.extra["monitor_budget_seconds"]`` (see :data:`BUDGET_EXTRA_KEY`) and
+passes the same number to :func:`describe` when it refines the builtin
+descriptions. Fluid then names that number instead of guessing: the description
+says what to bound the command below, and the spawn warning says the command
+will be stopped at the budget and woken with a timeout rather than claiming no
+wake is coming — which is what the host's own receipt says too.
+
 Returning the receipt is the atomic detach boundary: the monitored process must
 outlive the originating HTTP request, WebSocket turn, and this tool coroutine.
 When the command reaches a terminal state the host submits
@@ -51,9 +59,40 @@ from fluid.tools.registry import (
 )
 
 
-def describe(tools: frozenset[str] | None = None) -> str:
-    """Monitor's description, specialized to the session's tool surface."""
+#: The ctx key a host uses to declare the wall-clock budget it enforces on a
+#: monitored command (seconds). The host that stops the process at N seconds is
+#: the only one that knows N, and every piece of Monitor prose that talks about
+#: bounds is wrong without it — the description told models to bound the command
+#: without saying below what, and the spawn warning claimed a command "will
+#: never wake you" while the host's own receipt said it would be woken at the
+#: budget. Absent or non-positive, the prose falls back to the budget-less
+#: wording.
+BUDGET_EXTRA_KEY = "monitor_budget_seconds"
+
+
+def budget_seconds_of(value: Any) -> int | None:
+    """Coerce a host-declared budget to a positive whole number of seconds."""
+    try:
+        seconds = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def describe(
+    tools: frozenset[str] | None = None,
+    *,
+    budget_seconds: int | None = None,
+) -> str:
+    """Monitor's description, specialized to the session's tool surface.
+
+    ``budget_seconds`` is the host's enforced wall-clock budget (see
+    :data:`BUDGET_EXTRA_KEY`). Given it, the description names the number: a
+    session that only heard "cap the total wait" wrote a 3600s watcher against
+    a 1200s budget and lost the twenty minutes it ran before the host killed it.
+    """
     has = (lambda name: tools is None or name in tools)
+    budget = budget_seconds_of(budget_seconds)
     shell_note = (
         " The command runs in the same shell environment as Bash."
         if has("Bash")
@@ -62,8 +101,19 @@ def describe(tools: frozenset[str] | None = None) -> str:
     pipe_note = (
         " Never pipe a build or test command through `tail`/`head` to shorten "
         "it: the cap already handles size, and the pipe replaces the real exit "
-        "code with the pipe's."
+        "code with the pipe's. A trailing `|| true` and a `; next-command` "
+        "chain lose it the same way — whatever runs last owns the exit code, "
+        "so a failed build reports success. Keep the command whose result you "
+        "want last and unmasked."
         if has("Bash")
+        else ""
+    )
+    budget_note = (
+        f" The host stops a Monitor command after {budget} seconds and wakes "
+        "you with a timeout, so bound your command below that: a watch written "
+        f"for longer than {budget}s spends the whole budget and comes back "
+        "with nothing to show for it."
+        if budget
         else ""
     )
     wait_here = (
@@ -108,7 +158,15 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "is `gh pr checks <PR> --watch --fail-fast`, which blocks until the "
         "checks settle and exits non-zero on failure, so no loop of your own "
         "is needed — otherwise a watch whose condition and overall time "
-        "budget both end it.\n"
+        f"budget both end it.{budget_note}\n"
+        "\n"
+        "**Give CI a moment to register.** A `--watch` started seconds after a "
+        "push exits at once with \"no checks reported\" — the workflow has not "
+        "been created yet — and that instant exit reads as a clean result. "
+        "Start the watch after a short delay instead (`sleep 20 && gh pr "
+        "checks <PR> --watch --fail-fast`, all inside the one Monitor "
+        "command), and treat an immediate exit with no checks as \"not started "
+        "yet\", never as success.\n"
         "\n"
         "**`serves: true` for a process that is MEANT to stay up** — a dev "
         "server, a tunnel, a queue worker you need running while you work on "
@@ -220,19 +278,23 @@ def serving_text(task_id: str) -> str:
 
 # Shapes with no natural end. Matching one is not proof of a bug — a bound may
 # be supplied elsewhere in the command, which _TIME_BOUND_PATTERNS covers.
-_UNBOUNDED_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\bwhile\s+(?:true|:)(?:\s|;|$)"), "a `while true` loop"),
-    (re.compile(r"\bwhile\s+\[\s*1\s*\]"), "a `while [ 1 ]` loop"),
-    (re.compile(r"\buntil\s"), "an `until` loop"),
-    (re.compile(r"\bfor\s*\(\(\s*;\s*;\s*\)\)"), "a `for((;;))` loop"),
-    (re.compile(r"\btail\s+(?:-[A-Za-z]*f\b|--follow)"), "`tail -f`"),
+#
+# The third element says whether the shape is a LOOP: a loop can also be bounded
+# from inside its body (a counter that breaks, a bail-out `exit`), which a
+# `tail -f` cannot.
+_UNBOUNDED_PATTERNS: tuple[tuple[re.Pattern[str], str, bool], ...] = (
+    (re.compile(r"\bwhile\s+(?:true|:)(?:\s|;|$)"), "a `while true` loop", True),
+    (re.compile(r"\bwhile\s+\[\s*1\s*\]"), "a `while [ 1 ]` loop", True),
+    (re.compile(r"\buntil\s"), "an `until` loop", True),
+    (re.compile(r"\bfor\s*\(\(\s*;\s*;\s*\)\)"), "a `for((;;))` loop", True),
+    (re.compile(r"\btail\s+(?:-[A-Za-z]*f\b|--follow)"), "`tail -f`", False),
     (re.compile(r"\binotifywait\b[^;|]*\s(?:-[A-Za-z]*m\b|--monitor)"),
-     "`inotifywait -m`"),
-    (re.compile(r"(?:^|[|;&]\s*)watch\s"), "the `watch` utility"),
+     "`inotifywait -m`", False),
+    (re.compile(r"(?:^|[|;&]\s*)watch\s"), "the `watch` utility", False),
     (re.compile(
         r"\b(?:journalctl|docker\s+logs|docker\s+compose\s+logs|kubectl\s+logs)"
         r"\b[^;|]*(?:\s-[A-Za-z]*f\b|--follow)"
-    ), "a log follow"),
+    ), "a log follow", False),
 )
 
 # Evidence that the command DOES carry a time budget or an iteration cap, so a
@@ -245,7 +307,23 @@ _TIME_BOUND_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\$SECONDS\b|\bSECONDS="),
     re.compile(r"\bin\s+\$\(\s*seq\b"),                # for i in $(seq 1 60)
     re.compile(r"\bfor\s*\(\([^;]*;[^;]*[<>][^;]*;"),  # for ((i=0; i<60; i++))
-    re.compile(r"-(?:lt|le)\s"),                       # while [ $i -lt 60 ]
+    # A count-and-continue test (`while [ $i -lt 60 ]`) and its mirror image,
+    # the count-and-BREAK test (`[ $i -ge 60 ] && break`). Only the first half
+    # was recognised, so every capped loop written the second way — the more
+    # common shape inside a `while true` — was reported as unbounded.
+    re.compile(r"-(?:lt|le|ge|gt)\s"),
+    # The arithmetic spellings of the same cap: ((i>=60)), (( n < 60 )),
+    # ((i++ >= 60)).
+    re.compile(r"\(\([^)]*[<>]=?[^)]*\)\)"),
+)
+
+# A loop that ends from inside its own body. Consulted only for loop-shaped
+# reasons, and only when the body can be trusted — a match-all glob makes the
+# arm holding the `break` dead code, which is exactly the audited park.
+_LOOP_EXIT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:^|[\s;&|(])break(?:\s|;|$|\))"),
+    re.compile(r"(?:^|[\s;&|(])exit\b"),
+    re.compile(r"(?:^|[\s;&|(])return\b"),
 )
 
 # ``*""*`` / ``*''*`` in a glob: quote removal collapses it to ``**``, which
@@ -274,18 +352,40 @@ def unbounded_reason(command: str) -> str | None:
     """The shape that makes ``command`` unbounded, or None if it will end.
 
     A command carrying its own bound (``timeout``, deadline arithmetic, an
-    iteration cap) is never reported, however loop-shaped it looks.
+    iteration cap, or a loop body that breaks out) is never reported, however
+    loop-shaped it looks.
     """
     if _matches_any(command, _TIME_BOUND_PATTERNS):
         return None
-    for pattern, reason in _UNBOUNDED_PATTERNS:
-        if pattern.search(command):
-            return reason
+    breaks_out = not _MATCH_ALL_GLOB.search(command) and _matches_any(
+        command, _LOOP_EXIT_PATTERNS
+    )
+    for pattern, reason, is_loop in _UNBOUNDED_PATTERNS:
+        if not pattern.search(command):
+            continue
+        if is_loop and breaks_out:
+            return None
+        return reason
     return None
 
 
-def spawn_warning(command: str, *, serves: bool = False) -> str | None:
-    """A pointed warning to staple onto the receipt, or None when clean."""
+def spawn_warning(
+    command: str,
+    *,
+    serves: bool = False,
+    budget_seconds: int | None = None,
+) -> str | None:
+    """A pointed warning to staple onto the receipt, or None when clean.
+
+    ``budget_seconds`` is the host's enforced wall-clock budget (see
+    :data:`BUDGET_EXTRA_KEY`). Hosts that enforce one append their own "you
+    will be woken with a timeout" line to the receipt, and this warning used to
+    contradict it flatly — one receipt promised a wake and the next paragraph
+    said there would never be one. Models believed the alarming half and spent
+    turns stopping and relaunching a task that was working. Given the budget,
+    the warning says what actually happens instead.
+    """
+    budget = budget_seconds_of(budget_seconds)
     parts: list[str] = []
     if _MATCH_ALL_GLOB.search(command):
         parts.append(
@@ -306,13 +406,27 @@ def spawn_warning(command: str, *, serves: bool = False) -> str | None:
             )
         else:
             reason = unbounded_reason(command)
-            if reason is not None:
+            if reason is not None and budget:
+                parts.append(
+                    f"Warning — this command has no time budget of its own: "
+                    f"{reason} with no `timeout`, deadline, or iteration cap. "
+                    f"It is stopped at the host's {budget}s budget and you are "
+                    "woken with a timeout then — so the task does finish, but "
+                    f"it costs the full {budget}s and tells you nothing about "
+                    "the job. Do not stop and relaunch it over this warning. "
+                    "For a real signal next time, give the command its own "
+                    f"bound well under {budget}s (`timeout ...`, or a deadline "
+                    "you break on) or use the job's own blocking wait (`gh pr "
+                    "checks <PR> --watch --fail-fast` for GitHub CI). If the "
+                    "process is MEANT to stay up, re-run with `serves: true`."
+                )
+            elif reason is not None:
                 parts.append(
                     f"Warning — this command has no time budget: {reason} with "
-                    "no `timeout`, deadline, or iteration cap. It will hold "
-                    "the park until the session ends and you will never be "
-                    "woken. Add a bound (wrap it in `timeout 900 ...`, or "
-                    "compute a deadline and break on it), use the job's own "
+                    "no `timeout`, deadline, or iteration cap. Unless the host "
+                    "enforces a budget of its own, it holds the park until the "
+                    "session ends. Add a bound (wrap it in `timeout 900 ...`, "
+                    "or compute a deadline and break on it), use the job's own "
                     "blocking wait instead (`gh pr checks <PR> --watch "
                     "--fail-fast` for GitHub CI), or — if the process is MEANT "
                     "to stay up — re-run with `serves: true`."
@@ -398,7 +512,11 @@ async def _spawn_detached(spawn: Any, input: dict[str, Any], ctx: ToolCtx) -> To
             await notified
     return _with_warning(
         outcome,
-        spawn_warning(str(input.get("command") or ""), serves=receipt.serves),
+        spawn_warning(
+            str(input.get("command") or ""),
+            serves=receipt.serves,
+            budget_seconds=budget_seconds_of((ctx.extra or {}).get(BUDGET_EXTRA_KEY)),
+        ),
     )
 
 
