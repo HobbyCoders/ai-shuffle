@@ -412,7 +412,8 @@
 				githubAvailable: $githubFeaturesAvailable,
 				worktreeDeleted: !!activeTab.worktreeDeleted,
 				isRemote: activeIsRemote,
-				isMobile
+				isMobile,
+				sessionMode: activeTab.mode
 			})
 	);
 
@@ -889,7 +890,8 @@
 		githubAvailable: $githubFeaturesAvailable,
 		worktreeDeleted: !!activeTab.worktreeDeleted,
 		isRemote: activeIsRemote,
-		isMobile
+		isMobile,
+		sessionMode: activeTab.mode
 	})}
 		<div class="git-actions-host">
 			<GitHeaderActions

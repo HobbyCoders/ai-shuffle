@@ -63,12 +63,24 @@ describe('shouldShowHeaderGitActions', () => {
 	});
 
 	it('hides all git actions on mobile chat mode header', () => {
-		expect(shouldShowHeaderGitActions(base({ isMobile: true }))).toBe(false);
+		expect(shouldShowHeaderGitActions(base({ isMobile: true, sessionMode: 'chat' }))).toBe(false);
 	});
 
-	it('keeps git actions on desktop when isMobile is false/omitted', () => {
-		expect(shouldShowHeaderGitActions(base({ isMobile: false }))).toBe(true);
-		expect(shouldShowHeaderGitActions(base())).toBe(true);
+	it('keeps git actions on mobile code mode', () => {
+		expect(shouldShowHeaderGitActions(base({ isMobile: true, sessionMode: 'code' }))).toBe(true);
+	});
+
+	it('keeps git actions on mobile voice mode', () => {
+		expect(shouldShowHeaderGitActions(base({ isMobile: true, sessionMode: 'voice' }))).toBe(true);
+	});
+
+	it('does not hide on mobile when sessionMode is omitted (fail open for code/voice)', () => {
+		expect(shouldShowHeaderGitActions(base({ isMobile: true }))).toBe(true);
+	});
+
+	it('keeps git actions on desktop chat mode', () => {
+		expect(shouldShowHeaderGitActions(base({ isMobile: false, sessionMode: 'chat' }))).toBe(true);
+		expect(shouldShowHeaderGitActions(base({ sessionMode: 'chat' }))).toBe(true);
 	});
 });
 
@@ -100,9 +112,18 @@ describe('shouldShowGithubGitActions', () => {
 		).toBe(false);
 	});
 
-	it('still respects the local gate (mobile hides everything)', () => {
+	it('still respects the local gate (mobile chat hides everything)', () => {
 		expect(
-			shouldShowGithubGitActions(base({ isMobile: true, githubAvailable: true }))
+			shouldShowGithubGitActions(base({ isMobile: true, sessionMode: 'chat', githubAvailable: true }))
 		).toBe(false);
+	});
+
+	it('does not hide GitHub actions on mobile code or voice', () => {
+		expect(
+			shouldShowGithubGitActions(base({ isMobile: true, sessionMode: 'code', githubAvailable: true }))
+		).toBe(true);
+		expect(
+			shouldShowGithubGitActions(base({ isMobile: true, sessionMode: 'voice', githubAvailable: true }))
+		).toBe(true);
 	});
 });

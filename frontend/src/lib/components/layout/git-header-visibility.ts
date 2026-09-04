@@ -60,35 +60,40 @@ export interface HeaderGitActionsInput {
 	/** The session is owned by (placed on) another install. */
 	isRemote: boolean;
 	/**
-	 * Mobile chat layout (≤1080px panel-fullscreen breakpoint).
-	 * Git header actions are desktop-only — the mobile header is too tight for
-	 * the Commit/Push/PR/Ship rail, so hide the whole cluster there.
+	 * Mobile layout (≤1080px panel-fullscreen breakpoint). Combined with
+	 * `sessionMode === 'chat'` to hide the git rail on the mobile chat header
+	 * only — code and voice keep their controls.
 	 */
 	isMobile?: boolean;
+	/**
+	 * Session lane ('code' | 'chat' | 'voice'). The mobile hide applies to
+	 * chat only; omitted/other values must not blank the rail.
+	 */
+	sessionMode?: string;
 }
 
 /**
  * Resolve whether the header's LOCAL git action buttons should render.
  *
- * Shown for a chat view with a project on a non-deleted, NON-remote, NON-mobile
- * session. Remote-placed sessions never show local git actions — their repo
- * lives on the owning install, so the local status is meaningless (and would
- * surface a bogus "Init Repo"). Mobile chat mode hides the whole rail — the
- * header has no room for Commit/Push/PR/Ship.
+ * Shown for a chat view with a project on a non-deleted, NON-remote session.
+ * Remote-placed sessions never show local git actions — their repo lives on the
+ * owning install, so the local status is meaningless (and would surface a bogus
+ * "Init Repo"). Mobile *chat* mode hides the whole rail (header is too tight);
+ * code and voice on mobile are unchanged.
  *
  * Deliberately independent of GitHub auth: a `gh` blip must never blank the
  * local git UI (G10c).
  */
 export function shouldShowHeaderGitActions(input: HeaderGitActionsInput): boolean {
-	const { viewType, hasProject, worktreeDeleted, isRemote, isMobile } = input;
+	const { viewType, hasProject, worktreeDeleted, isRemote, isMobile, sessionMode } = input;
 
 	if (viewType !== 'chat') return false;
 	if (!hasProject) return false;
 	if (worktreeDeleted) return false;
 	// Remote-placed session: repo is on the owning install, never local.
 	if (isRemote) return false;
-	// Mobile chat header: hide the entire git action cluster.
-	if (isMobile) return false;
+	// Mobile chat-mode header only — do not blank code or voice.
+	if (isMobile && sessionMode === 'chat') return false;
 
 	return true;
 }
