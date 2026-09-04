@@ -15,6 +15,10 @@ Frame vocabulary handled (see ``claude_agent_sdk`` message_parser + query.py):
     TurnStarted is emitted by the loop at turn start (native parity: a
     persistent process only emits ``init`` once, so binding TurnStarted to it
     would miss turns 2+).
+  * ``{"type":"system","subtype":"compact_boundary","compact_metadata":
+    {"trigger":"auto"|"manual","pre_tokens":N,"post_tokens":N?}}`` — the CLI
+    compacted its own context; mapped to ContextCompaction so a host sees the
+    same boundary the native leg reports (see ``_on_compact_boundary``).
   * ``{"type":"assistant","message":{"content":[...],"usage":{...},...}}`` — each
     content block becomes BlockStart + a whole-block delta + BlockStop (+ ToolUse
     for ``tool_use``); ``usage`` becomes a per-model-call Usage event. The full
@@ -69,6 +73,7 @@ from typing import Any
 from fluid.events.model import (
     BlockStart,
     BlockStop,
+    ContextCompaction,
     DelegatedSurface,
     Event,
     PermissionRequest,
@@ -155,6 +160,14 @@ def parse_control_response(frame: dict[str, Any]) -> ControlReply | None:
         request_id=request_id, ok=True,
         payload=payload if isinstance(payload, dict) else None,
     )
+
+
+def _int_or_zero(value: Any) -> int:
+    """A reported token count, or 0 when the CLI omitted it (or sent junk)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def usage_fields(usage: dict[str, Any]) -> dict[str, Any]:
@@ -326,7 +339,10 @@ class StreamJsonMapper:
     # ─── per-frame handlers ──────────────────────────────────────────────
 
     def _on_system(self, frame: dict[str, Any]) -> Mapped:
-        if frame.get("subtype") != "init":
+        subtype = frame.get("subtype")
+        if subtype == "compact_boundary":
+            return self._on_compact_boundary(frame)
+        if subtype != "init":
             return Mapped()
         self.cli_session_id = frame.get("session_id") or self.cli_session_id
         tools = frame.get("tools")
@@ -342,6 +358,38 @@ class StreamJsonMapper:
         return Mapped(events=[DelegatedSurface(
             session_id=self.session_id, turn_id=self.turn_id,
             tools=self.cli_tools, mcp_servers=self.cli_mcp_servers,
+        )])
+
+    def _on_compact_boundary(self, frame: dict[str, Any]) -> Mapped:
+        """The CLI compacted its own context — report it the way the native leg does.
+
+        Without this the delegated leg emitted nothing at all when the prompt
+        collapsed mid-turn (166k → 35k tokens behind a 74-second stall in one
+        audited session), so a host asking for the latest compaction boundary
+        concluded a Claude-lane session had never compacted and the model
+        re-ran work whose results had just left the context.
+
+        The CLI owns the compaction, so the event carries what it reports and
+        nothing invented: its trigger as the reason, its own before/after token
+        counts, and no digest text — ``trimmed`` and ``spans`` are the native
+        ladder's decisions and stay empty. Tier 3 is the honest rung: a CLI
+        compaction folds the whole prefix into a summary.
+        """
+        meta = frame.get("compact_metadata")
+        if not isinstance(meta, dict):
+            # A boundary with no metadata still says the context changed.
+            meta = {}
+        trigger = meta.get("trigger")
+        reason = (
+            f"cli_{trigger}_compact"
+            if trigger in ("auto", "manual")
+            else "cli_compact"
+        )
+        return Mapped(events=[ContextCompaction(
+            session_id=self.session_id, turn_id=self.turn_id,
+            tier=3, reason=reason,
+            before_tokens=_int_or_zero(meta.get("pre_tokens")),
+            after_tokens=_int_or_zero(meta.get("post_tokens")),
         )])
 
     def _on_assistant(self, frame: dict[str, Any]) -> Mapped:

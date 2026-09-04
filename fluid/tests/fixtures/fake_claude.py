@@ -128,6 +128,20 @@ def turn_simple(sid: str) -> None:
     emit(result_frame(sid))
 
 
+def turn_compacting(sid: str) -> None:
+    """A turn the CLI compacts its own context in the middle of."""
+    emit(assistant_frame(sid, [{"type": "text", "text": "Reading everything."}], "end_turn"))
+    emit({
+        "type": "system", "subtype": "compact_boundary", "session_id": sid,
+        "uuid": "uuid-compact-1",
+        "compact_metadata": {
+            "trigger": "auto", "pre_tokens": 166397, "post_tokens": 34856,
+        },
+    })
+    emit(assistant_frame(sid, [{"type": "text", "text": "Carrying on."}], "end_turn"))
+    emit(result_frame(sid))
+
+
 def turn_tool(sid: str) -> None:
     tid = "toolu_fake_1"
     tool_name = "mcp__fluid_bundled__get_weather"
@@ -331,6 +345,8 @@ def main() -> int:
         elif scenario == "o":
             emit(assistant_frame(session_id, [{"type": "text", "text": "Still going."}], "end_turn"))
             emit(result_frame(session_id, "error_max_turns"))
+        elif scenario == "p":
+            turn_compacting(session_id)
         elif scenario == "j":
             turn_inline_context(session_id)
         elif scenario == "b":

@@ -26,6 +26,7 @@ from fluid.engine.delegated_proto import StreamJsonMapper, stop_reason_from_subt
 from fluid.events import (
     BlockStart,
     BlockStop,
+    ContextCompaction,
     DelegatedSurface,
     ErrorEvent,
     PermissionRequest,
@@ -1611,3 +1612,156 @@ def test_delegated_engine_is_built_with_the_journal_and_recall_wiring(tmp_path) 
     ))
     engine = build_engine(with_provider, MemoryStore(), provider_name="claude")
     assert engine._journal._synthesizer is not None
+
+
+# ─── CLI-side compaction (compact_boundary frames) ───────────────────────────
+
+
+def _compacting_frames() -> list[dict]:
+    """A recorded turn the CLI compacts in the middle of.
+
+    Prompt size collapses across the boundary — 166k to 35k tokens, the shape
+    of the audited Opus session — and the CLI says so in its own frame rather
+    than in the usage numbers.
+    """
+    return [
+        {"type": "system", "subtype": "init", "session_id": "cli-1",
+         "tools": ["Read"], "mcp_servers": []},
+        {"type": "assistant", "message": {
+            "id": "msg_1", "content": [{"type": "text", "text": "Reading everything."}],
+            "usage": {"input_tokens": 166397, "output_tokens": 12},
+        }},
+        {"type": "system", "subtype": "compact_boundary", "session_id": "cli-1",
+         "uuid": "uuid-1", "compact_metadata": {
+             "trigger": "auto", "pre_tokens": 166397, "post_tokens": 34856,
+         }},
+        {"type": "assistant", "message": {
+            "id": "msg_2", "content": [{"type": "text", "text": "Carrying on."}],
+            "usage": {"input_tokens": 34856, "output_tokens": 9},
+        }},
+        {"type": "result", "subtype": "success", "num_turns": 2,
+         "usage": {"input_tokens": 34856, "output_tokens": 9}},
+    ]
+
+
+def test_compact_boundary_frame_becomes_a_context_compaction() -> None:
+    mapper = _mapper()
+    events = []
+    for frame in _compacting_frames():
+        events.extend(mapper.feed(frame).events)
+
+    compactions = [e for e in events if isinstance(e, ContextCompaction)]
+    assert len(compactions) == 1
+    event = compactions[0]
+    assert event.reason == "cli_auto_compact"
+    assert event.before_tokens == 166397
+    assert event.after_tokens == 34856
+    assert event.tier == 3
+    # The CLI owns the decisions; fluid invents none of them.
+    assert event.trimmed == [] and event.spans == []
+    assert event.session_id == "s1" and event.turn_id == "t1"
+
+
+def test_manual_compaction_is_named_as_such() -> None:
+    mapper = _mapper()
+    mapped = mapper.feed({
+        "type": "system", "subtype": "compact_boundary",
+        "compact_metadata": {"trigger": "manual", "pre_tokens": 90_000},
+    })
+    event = mapped.events[0]
+    assert isinstance(event, ContextCompaction)
+    assert event.reason == "cli_manual_compact"
+    assert event.before_tokens == 90_000
+    # post_tokens is optional on the wire; an unreported count stays 0.
+    assert event.after_tokens == 0
+
+
+def test_compact_boundary_without_metadata_is_still_reported() -> None:
+    """A boundary is a boundary even when the CLI sends no numbers with it."""
+    mapper = _mapper()
+    mapped = mapper.feed({"type": "system", "subtype": "compact_boundary"})
+    event = mapped.events[0]
+    assert isinstance(event, ContextCompaction)
+    assert event.reason == "cli_compact"
+    assert event.before_tokens == 0 and event.after_tokens == 0
+
+
+def test_compaction_event_round_trips_through_the_codec() -> None:
+    event = ContextCompaction(
+        session_id="s1", turn_id="t1", tier=3, reason="cli_auto_compact",
+        before_tokens=166397, after_tokens=34856,
+    )
+    assert event_from_dict(event_to_dict(event)) == event
+    revived = event_from_dict(json.loads(json.dumps(event_to_dict(event))))
+    assert revived == event
+
+
+async def test_the_cli_lane_reports_its_compaction_to_the_host() -> None:
+    """End to end: the boundary reaches the bus and the store, so a host asking
+    for the latest compaction no longer reads a Claude-lane session as one that
+    never compacted."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop("p", store=store, session_id=sid)
+    try:
+        await loop.submit(UserTurn(content="read the repo"))
+        await loop.wait_turn()
+
+        events = loop.bus.log(sid)
+        compactions = [e for e in events if isinstance(e, ContextCompaction)]
+        assert len(compactions) == 1
+        assert compactions[0].reason == "cli_auto_compact"
+        assert compactions[0].before_tokens == 166397
+        assert compactions[0].after_tokens == 34856
+        assert compactions[0].turn_id == next(
+            e.turn_id for e in events if isinstance(e, TurnStarted)
+        )
+        # It lands between the two model messages, not after the turn.
+        order = [type(e).__name__ for e in events]
+        assert order.index("ContextCompaction") < order.index("TurnComplete")
+        assert any(isinstance(e, ContextCompaction) for e in await store.events_since(sid, 0))
+        assert not any(isinstance(e, ErrorEvent) for e in events)
+    finally:
+        await loop.aclose()
+
+
+# ─── Harness notices do not borrow the user's marker ─────────────────────────
+
+
+async def test_a_system_origin_steer_reaches_the_cli_in_the_notice_marker() -> None:
+    from fluid.context.steering import NOTICE_OPEN, STEER_OPEN
+
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop("b", store=store, session_id=sid)
+    frames = _spy_on_frames(loop)
+
+    async def responder() -> None:
+        async for e in loop.bus.subscribe(sid):
+            if isinstance(e, PermissionRequest):
+                await loop.submit(Steer(
+                    text="<task-notification>build finished</task-notification>",
+                    id="n1", origin="system",
+                ))
+                await loop.submit(
+                    RespondPermission(request_id=e.request_id, decision="allow")
+                )
+                return
+
+    watcher = asyncio.create_task(responder())
+    try:
+        await loop.submit(UserTurn(content="weather in Paris?"))
+        await loop.wait_turn()
+        await asyncio.wait_for(watcher, timeout=10)
+
+        injected = _user_frames(frames)[1]["message"]["content"][0]["text"]
+        assert NOTICE_OPEN in injected
+        assert STEER_OPEN not in injected  # emphatically not the user's marker
+        assert "build finished" in injected
+
+        receipt = next(
+            e for e in loop.bus.log(sid) if isinstance(e, SteerDelivered)
+        )
+        assert receipt.steers[0]["origin"] == "system"
+    finally:
+        await loop.aclose()

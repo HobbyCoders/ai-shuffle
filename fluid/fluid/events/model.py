@@ -262,11 +262,20 @@ class ContextCompaction(Event):
     tier: int  # highest rung this batch reached: 1 trim | 2 digest | 3 epoch
     # "trigger" (crossed the size threshold) | "overflow" (provider rejected the
     # prompt) | "image_consumed" (an image the model has already seen left the
-    # context; unlike text, HistoryExpand cannot bring it back)
+    # context; unlike text, HistoryExpand cannot bring it back).
+    # The delegated leg does not run this ladder: the claude CLI compacts its
+    # own context and reports a boundary, which arrives as
+    # "cli_auto_compact" / "cli_manual_compact" with tier 3 (the whole prefix
+    # folded), empty ``trimmed``/``spans``, and the token counts below.
     reason: str
     trimmed: list[list[str]] = field(default_factory=list)  # [node_id, tool_use_id]
     spans: list[list[str]] = field(default_factory=list)  # [start, end, kind]
     reclaimed_chars: int = 0
+    # Prompt size across the boundary, when the compactor reports it in tokens
+    # rather than in decisions (the delegated leg). 0 means "not reported" —
+    # including on every event persisted before these fields existed.
+    before_tokens: int = 0
+    after_tokens: int = 0
 
 
 # ─── Accounting / signals ────────────────────────────────────────────────────

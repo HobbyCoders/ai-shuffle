@@ -1269,7 +1269,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         / totalTokens / maxTokens / rawMaxTokens / percentage / model /
         isAutoCompactEnabled). None when the CLI is not running, errored, or did
         not answer within ``CONTROL_TIMEOUT``. The native leg's ``compaction``
-        stats field is absent here — the CLI compacts its own way.
+        stats field is absent here — the CLI compacts its own way, and reports
+        each boundary as its own ``compact_boundary`` frame, which the mapper
+        turns into a ``ContextCompaction`` event.
         """
         return await self._request_control({"subtype": "get_context_usage"})
 
