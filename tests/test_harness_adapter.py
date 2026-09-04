@@ -3355,15 +3355,18 @@ async def test_disconnect_closes_capture_http_client():
     assert adapter._connected is False
 
 
-# ─── 9. Bus seq seeding on resume (durable-event-loss regression) ────────────
+# ─── 9. Replay-cursor anchoring on resume ────────────────────────────────────
 #
-# fluid's EventBus numbers events off its IN-MEMORY log (seq = len(log) + 1). A
-# freshly built engine over a resumed session starts with an empty log, so it
-# re-uses seq 1..N — and the durable append is idempotent per (session_id, seq),
-# so those events are silently dropped. Headless one-shot turns (ScheduleWakeup
-# wakes, automations) build a new adapter per turn and hit this EVERY turn, so
-# whole wake turns never reached fluid_session_events (and the live feed).
-# connect() now seeds the bus log from the store, restoring seq continuity.
+# Two failure modes, one anchor. fluid's EventBus replays from ``since_seq`` and
+# numbers new events after its seeded head, so a resumed session whose adapter
+# starts at cursor 0 (a) re-emits the persisted history into the new turn and
+# settles it on an OLD TurnComplete — the user gets the previous answer back in
+# a fraction of a second and their prompt never reaches the model — and (b) used
+# to re-issue seqs the store already held, which the idempotent append dropped.
+# connect() anchors the cursor at the durable HEAD, which covers both. A hole in
+# the durable log (an event published but never persisted) must not move that
+# anchor backwards: the hole never heals, so a session that rewinds to it can
+# never catch up again.
 
 _SEED_CHUNKS = [
     StreamChunk("message_start", {"usage": {"input_tokens": 5}}),
@@ -3414,20 +3417,17 @@ async def _connect_native(monkeypatch, store, tmp_path, **option_kwargs) -> Harn
 
 
 @pytest.mark.asyncio
-async def test_resume_seeds_bus_log_and_continues_seq(monkeypatch, tmp_path):
-    """A resumed session's new events must persist — i.e. continue at N+1."""
+async def test_resume_anchors_cursor_at_durable_head(monkeypatch, tmp_path):
+    """A resumed session opens past its history and its new events persist."""
     sid = "ses_seed"
     store = await _seeded_store(sid, [1, 2, 3])
 
     adapter = await _connect_native(monkeypatch, store, tmp_path, resume_session_id=sid)
     try:
-        # The bus log is primed with the durable history, and the replay cursor
-        # sits past it so receive_events() will not re-yield old turns.
+        # The replay cursor sits at the durable head, so receive_events() will
+        # not re-yield old turns, and numbering continues after the stored tail.
         assert adapter._event_cursor == 3
-        assert [e.seq for e in adapter._engine.bus.log(sid)] == [1, 2, 3]
-        assert [e.text for e in adapter._engine.bus.log(sid)] == [
-            "old-1", "old-2", "old-3",
-        ]
+        assert adapter._engine.bus.last_seq(sid) == 3
 
         await adapter.send_query("hi")
         got = await asyncio.wait_for(_collect(adapter), timeout=5)
@@ -3459,7 +3459,7 @@ async def test_resume_seeds_bus_log_and_continues_seq(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_fresh_session_starts_at_seq_one(monkeypatch, tmp_path):
-    """Nothing stored → nothing to seed; numbering starts at 1 as before."""
+    """Nothing stored → nothing to anchor; numbering starts at 1 as before."""
     store = MemoryStore()
     adapter = await _connect_native(monkeypatch, store, tmp_path)
     try:
@@ -3478,10 +3478,14 @@ async def test_fresh_session_starts_at_seq_one(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_non_contiguous_store_seeds_prefix_only(monkeypatch, tmp_path, caplog):
-    """A holed durable log (the fingerprint of prior drops) seeds only its
-    contiguous prefix — the bus indexes its log positionally, so seeding past a
-    hole would mis-number everything after it."""
+async def test_holed_store_anchors_at_head_not_prefix(monkeypatch, tmp_path, caplog):
+    """A hole in the durable log must not rewind the replay cursor.
+
+    Regression: the cursor used to stop at the end of the contiguous PREFIX, so
+    every turn after a hole replayed the events past it — ending on an old
+    TurnComplete, which settled the turn with the previous answer in ~0.2s. The
+    hole is permanent, so the session never recovered.
+    """
     import logging
 
     sid = "ses_holed"
@@ -3492,12 +3496,74 @@ async def test_non_contiguous_store_seeds_prefix_only(monkeypatch, tmp_path, cap
             monkeypatch, store, tmp_path, resume_session_id=sid
         )
     try:
-        assert [e.seq for e in adapter._engine.bus.log(sid)] == [1, 2]
-        assert adapter._event_cursor == 2
+        assert adapter._event_cursor == 5
         assert any(
-            "non-contiguous durable event log" in r.getMessage() and sid in r.getMessage()
+            "missing 2 event(s)" in r.getMessage() and sid in r.getMessage()
             for r in caplog.records
         )
+
+        await adapter.send_query("hi")
+        got = await asyncio.wait_for(_collect(adapter), timeout=5)
+
+        delta_texts = [
+            e.event["delta"]["text"]
+            for e in got
+            if isinstance(e, StreamEvent) and e.event.get("delta", {}).get("type")
+            == "text_delta"
+        ]
+        assert delta_texts == ["fresh reply"]
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_replayed_terminal_never_settles_the_turn(monkeypatch, tmp_path, caplog):
+    """Second line of defense: a stale cursor must not end the turn early.
+
+    The cursor is forced back behind a stored TurnComplete — the exact state a
+    bad anchor produces. The turn floor taken at submit time says that terminal
+    predates this turn, so it is dropped and the real reply still arrives.
+    """
+    import logging
+
+    sid = "ses_stale_cursor"
+    store = MemoryStore()
+    await store.create_session(sid)
+    await store.append_event(sid, _old_event(sid, 1))
+    await store.append_event(
+        sid,
+        lm.TurnComplete(
+            session_id=sid, stop_reason="end_turn", num_model_calls=1, seq=2
+        ),
+    )
+
+    adapter = await _connect_native(monkeypatch, store, tmp_path, resume_session_id=sid)
+    try:
+        assert adapter._event_cursor == 2
+        await adapter.send_query("hi")
+        adapter._event_cursor = 0  # simulate an anchor that rewound
+
+        with caplog.at_level(
+            logging.WARNING, logger="app.core.provider.harness_adapter"
+        ):
+            got = await asyncio.wait_for(_collect(adapter), timeout=5)
+
+        # The replayed terminal was dropped, not yielded...
+        assert any(
+            "ignoring replayed terminal" in r.getMessage() for r in caplog.records
+        )
+        # ...and the turn ran for real, ending on ITS terminal.
+        assert sum(isinstance(e, ResultMessage) for e in got) == 1
+        delta_texts = [
+            e.event["delta"]["text"]
+            for e in got
+            if isinstance(e, StreamEvent) and e.event.get("delta", {}).get("type")
+            == "text_delta"
+        ]
+        # The replayed non-terminal still rides along — this guard only refuses
+        # to END a turn on old history, it is not a general replay filter (that
+        # is the cursor's job). What matters is that the real reply arrives.
+        assert delta_texts == ["old-1", "fresh reply"]
     finally:
         await adapter.disconnect()
 

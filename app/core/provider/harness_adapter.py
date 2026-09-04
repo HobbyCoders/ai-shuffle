@@ -321,6 +321,10 @@ class HarnessAdapter(ProviderAdapter):
         # receive_events replay cursor: fluid's EventBus replays from ``since_seq``,
         # so we advance this per delivered event to avoid re-yielding prior turns.
         self._event_cursor: int = 0
+        # Highest seq that already existed when the CURRENT turn was submitted.
+        # A terminal event at or below it belongs to an earlier turn, so it can
+        # never settle this one (see ``receive_events``).
+        self._turn_floor: int = 0
         # app tool_use_id -> fluid permission request_id (respond_to_permission map)
         self._perm_requests: Dict[str, str] = {}
         # last pending fluid QuestionRequest id (AskUser / StopPlanning).
@@ -858,7 +862,7 @@ class HarnessAdapter(ProviderAdapter):
                         "[HarnessAdapter] could not stamp session_id onto ToolCtx",
                         exc_info=True,
                     )
-            await self._seed_event_log(meta.session_id)
+            await self._anchor_replay_cursor(meta.session_id)
 
         self._connected = True
 
@@ -1093,6 +1097,7 @@ class HarnessAdapter(ProviderAdapter):
     async def send_query(self, prompt: str) -> None:
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
+        self._mark_turn_floor()
         # fluid annotates ``UserTurn.content`` as a list, but its own callers and
         # tests pass the prompt string straight through (the loops normalize it),
         # so the cast bridges the vendor annotation without touching the value.
@@ -1101,7 +1106,27 @@ class HarnessAdapter(ProviderAdapter):
     async def send_resume(self) -> None:
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
+        self._mark_turn_floor()
         await self._engine.submit(Resume())
+
+    def _mark_turn_floor(self) -> None:
+        """Record the event head as it stands just before a turn is submitted.
+
+        Everything at or below it happened BEFORE this turn asked for anything,
+        so no event down there can be this turn's terminal — however the replay
+        cursor got there. Cheap second line of defense behind
+        :meth:`_anchor_replay_cursor`: if the cursor is ever wrong again, the turn
+        still runs for real instead of settling on a replayed answer.
+        """
+        floor = self._event_cursor
+        bus = getattr(self._engine, "bus", None)
+        sid = self._sdk_session_id
+        if bus is not None and sid:
+            try:
+                floor = max(floor, int(bus.last_seq(sid)))
+            except Exception:  # noqa: BLE001 — engines/test fakes without a bus
+                pass
+        self._turn_floor = floor
 
     async def steer(self, text: str, *, id: Optional[str] = None) -> None:
         """Hand ``text`` to the RUNNING turn as a fluid ``Steer``.
@@ -1183,9 +1208,32 @@ class HarnessAdapter(ProviderAdapter):
                     self._perm_bridge_tasks.add(task)
                     task.add_done_callback(self._perm_bridge_tasks.discard)
                     continue
+                if isinstance(translated, ResultMessage) and not self._is_live(event):
+                    # A terminal from before this turn was submitted: history
+                    # being replayed, not this turn ending. Dropping it (rather
+                    # than yielding) keeps the caller from settling the turn on
+                    # a previous answer.
+                    logger.warning(
+                        "[HarnessAdapter] ignoring replayed terminal event "
+                        "seq=%s for %s (turn floor %s) — the durable replay "
+                        "cursor is behind the head",
+                        getattr(event, "seq", None), self._sdk_session_id,
+                        self._turn_floor,
+                    )
+                    continue
                 yield translated
                 if isinstance(translated, ResultMessage):
                     return
+
+    def _is_live(self, event: Any) -> bool:
+        """True when ``event`` was published after the current turn started.
+
+        Unsequenced events (seq < 0 — never through the bus) count as live:
+        they carry no position to judge, and refusing them would drop real
+        terminals on engines/test fakes that do not sequence.
+        """
+        seq = int(getattr(event, "seq", -1) or -1)
+        return seq < 0 or seq > self._turn_floor
 
     async def _resolve_cli_session_id(
         self, fluid_session_id: Optional[str], options: SessionOptions
@@ -1214,67 +1262,74 @@ class HarnessAdapter(ProviderAdapter):
             return None
         return getattr(meta, "cli_session_id", None) if meta is not None else None
 
-    async def _seed_event_log(self, session_id: str) -> None:
-        """Seed the engine's in-memory event log from the durable store.
+    async def _anchor_replay_cursor(self, session_id: str) -> None:
+        """Anchor this adapter's replay cursor at the durable head.
 
-        WHY this exists: fluid's EventBus numbers events ``seq = len(log) + 1``
-        off its *in-memory* log. A freshly built engine over a RESUMED session
-        starts with an empty log, so its first new event is numbered 1 — even
-        though the store already holds seq 1..N for that session. The durable
-        append is idempotent per ``(session_id, seq)`` (PgFluidStore's
-        ``ON CONFLICT DO NOTHING``), so those re-used numbers collide with the
-        existing rows and the first N events of every post-resume turn are
-        silently DROPPED from ``fluid_session_events``.
+        fluid's ``EventBus`` replays from ``since_seq``, and
+        :meth:`receive_events` opens every turn at ``_event_cursor``. A freshly
+        built adapter over a RESUMED session starts that cursor at 0, so
+        without this the next turn re-emits the persisted history as if it were
+        live: old thinking, old tool calls, and finally an old ``TurnComplete``,
+        which the translator turns into a ``ResultMessage`` — the iterator's
+        terminal. The turn "completes" in a fraction of a second, the user gets
+        the PREVIOUS answer replayed verbatim, and their actual prompt never
+        reaches the model.
 
-        Headless one-shot turns (ScheduleWakeup wakes, automations) build a
-        fresh adapter per turn, so they hit this on EVERY turn and the wake's
-        events never reach the durable log at all. Pooled sessions hit it once,
-        on the first resume after a process restart.
+        The cursor is the store's HIGHEST seq — not the length of the log, and
+        not the end of its contiguous prefix. A durable log with a hole in it
+        (an event published to the bus but never persisted) is still entirely
+        history; anchoring at the hole makes every later turn replay everything
+        after it, and because the hole never heals the session can never catch
+        up again. That is exactly what stranded a live session on 2026-09-03.
 
-        Seeding the bus log with the stored events restores the invariant the
-        bus assumes (log length == highest seq), so new events continue at N+1
-        and persist. Advancing ``_event_cursor`` past the seeded tail keeps
-        ``receive_events()`` from replaying that history into the new turn.
+        Event NUMBERING is fluid's own job: ``_ensure_session`` already seeds
+        the bus from the store's maximum (``NativeLoop._seed_bus_seq``) before
+        this runs, so new events continue after the stored tail and the durable
+        append never collides. Re-asserting the same floor here is a harmless
+        no-op the bus ignores when it is already past it.
         """
-        if self._store is None:
-            return
-        try:
-            stored = await self._store.events_since(session_id, 0)
-        except Exception:
-            # Seeding is best effort — it must never fail a connect.
-            logger.exception(
-                "[HarnessAdapter] could not load durable events for %s; new "
-                "events may collide with stored seqs and be dropped",
-                session_id,
-            )
-            return
-        if not stored:
-            return
         bus = getattr(self._engine, "bus", None)
-        if bus is None:
-            return  # engines/test fakes without an EventBus
-        log = bus.log(session_id)
-        if log:
-            return  # this bus already carries the session's history
-        if stored[-1].seq != len(stored):
-            # A hole in the durable log can only come from prior drops under
-            # this very bug. The bus indexes its log positionally, so only a
-            # contiguous prefix may be seeded.
-            logger.warning(
-                "[HarnessAdapter] non-contiguous durable event log for %s "
-                "(%d events, last seq %s) — seeding the contiguous prefix only",
-                session_id, len(stored), stored[-1].seq,
-            )
-            prefix = []
-            for index, event in enumerate(stored):
-                if getattr(event, "seq", -1) != index + 1:
-                    break
-                prefix.append(event)
-            stored = prefix
-            if not stored:
-                return
-        log.extend(stored)
-        self._event_cursor = max(self._event_cursor, stored[-1].seq)
+        head = 0
+        if bus is not None:
+            try:
+                head = int(bus.last_seq(session_id))
+            except Exception:  # noqa: BLE001 — engines/test fakes without a bus
+                head = 0
+
+        if self._store is not None:
+            try:
+                stored = await self._store.events_since(session_id, 0)
+            except Exception:
+                # Best effort — it must never fail a connect. The bus head (or
+                # 0 for a fresh session) still bounds the replay.
+                logger.exception(
+                    "[HarnessAdapter] could not load durable events for %s; "
+                    "falling back to the bus head for the replay cursor",
+                    session_id,
+                )
+                stored = []
+            if stored:
+                stored_head = max(int(getattr(e, "seq", 0) or 0) for e in stored)
+                if stored_head != len(stored):
+                    # Not fatal any more, but it does mean an event was
+                    # published and never persisted — worth seeing, because the
+                    # gap is permanent and the durable log is now lossy.
+                    logger.warning(
+                        "[HarnessAdapter] durable event log for %s is missing %d "
+                        "event(s) (%d rows, head %d) — an event was published but "
+                        "never stored; anchoring the replay cursor at the head",
+                        session_id, stored_head - len(stored), len(stored),
+                        stored_head,
+                    )
+                head = max(head, stored_head)
+
+        if head <= 0:
+            return
+        if bus is not None:
+            seed = getattr(bus, "seed", None)
+            if callable(seed):
+                seed(session_id, head)  # never moves numbering backwards
+        self._event_cursor = max(self._event_cursor, head)
 
     async def _bridge_permission(self, ev: PermissionRequestEvent) -> None:
         """Route one fluid permission request through the app's can_use_tool
