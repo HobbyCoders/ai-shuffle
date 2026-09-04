@@ -324,6 +324,18 @@ _ITEM_BLOCK_TYPE = {
     "function_call": "tool_use",
 }
 
+# A reasoning item streams on two independent channels that share one item_id:
+# ``reasoning_summary_text`` (the provider's own summary of its reasoning, asked
+# for by ``summary: "auto"``) and ``reasoning_text`` (the reasoning draft
+# itself). They are different kinds of text and xAI/grok sends both, so they get
+# their own block indices — keyed here — and their own ``subtype`` on block_start
+# so a host can label the summary as the provider's rather than the model's.
+_SUMMARY_SUFFIX = "\x00summary"
+
+
+def _summary_key(item_id: str) -> str:
+    return f"{item_id}{_SUMMARY_SUFFIX}"
+
 
 class ResponsesStreamNormalizer:
     """Stateful normalizer: feed parsed Responses SSE events, get StreamChunks.
@@ -366,19 +378,22 @@ class ResponsesStreamNormalizer:
         return [StreamChunk("usage", payload), StreamChunk("message_stop", {})]
 
     def _open(
-        self, item_id: str, block_type: str, **kw: Any
+        self, key: str, block_type: str, **kw: Any
     ) -> list[StreamChunk]:
-        if item_id in self._index_of:
+        """Open the block ``key`` names, once. ``key`` is the item_id for every
+        channel except a reasoning summary, which gets its own (:func:`_summary_key`)."""
+        if key in self._index_of:
             return []
         index = self._next_index
         self._next_index += 1
-        self._index_of[item_id] = index
+        self._index_of[key] = index
         return [
             StreamChunk(
                 "block_start",
                 {
                     "index": index,
                     "block_type": block_type,
+                    "subtype": kw.get("subtype"),
                     "tool_name": kw.get("tool_name"),
                     "tool_use_id": kw.get("tool_use_id"),
                     "block": kw.get("block", {}),
@@ -414,8 +429,13 @@ class ResponsesStreamNormalizer:
                     tool_use_id=item.get("call_id"),
                     block=item,
                 )
-            elif itype in ("message", "reasoning"):
+            elif itype == "message":
                 out += self._open(item.get("id", ""), _ITEM_BLOCK_TYPE[itype], block=item)
+            # A reasoning item is NOT opened here: which of its two text
+            # channels arrives first decides the block order, and a summary
+            # that never streams must not leave an empty block behind. The
+            # first delta opens it; ``output_item.done`` opens it if neither
+            # channel produced one (encrypted content with no visible text).
             return out
 
         if name in ("response.output_text.delta", "response.refusal.delta"):
@@ -436,12 +456,22 @@ class ResponsesStreamNormalizer:
             "response.reasoning_summary_text.delta",
             "response.reasoning_text.delta",
         ):
+            # Two channels, two blocks. Concatenating them (which one shared
+            # index did) produced a single "thinking" block on xAI/grok that ran
+            # a clipped auto-summary straight into a second-person draft answer,
+            # so the host rendered what read as a phantom collaborator.
+            summary = name == "response.reasoning_summary_text.delta"
             item_id = data.get("item_id", "")
-            out += self._open(item_id, "thinking")
+            key = _summary_key(item_id) if summary else item_id
+            out += self._open(
+                key,
+                "thinking",
+                subtype="reasoning_summary" if summary else "reasoning",
+            )
             out.append(
                 StreamChunk(
                     "thinking_delta",
-                    {"index": self._index_of[item_id], "text": data.get("delta", "")},
+                    {"index": self._index_of[key], "text": data.get("delta", "")},
                 )
             )
             return out
@@ -470,14 +500,37 @@ class ResponsesStreamNormalizer:
             if itype == "function_call":
                 self._has_function_call = True
             block_type = _ITEM_BLOCK_TYPE.get(itype, "text")
+            item_id = item.get("id", "")
+            key = item_id
+            subtype: str | None = None
+            if itype == "reasoning":
+                # The done item is the encrypted round-trip envelope and only
+                # ONE block may carry it. It rides the reasoning-text block when
+                # that channel streamed; otherwise the summary block, which is
+                # what a summary-only item (the ordinary OpenAI shape) has. Both
+                # absent: open the carrier now so the blob is not lost.
+                summary_key = _summary_key(item_id)
+                summary_index = self._index_of.get(summary_key)
+                if item_id not in self._index_of and summary_index is not None:
+                    key = summary_key
+                    subtype = "reasoning_summary"
+                else:
+                    subtype = "reasoning"
+                    if summary_index is not None and summary_index not in self._stopped:
+                        # Close the sibling summary block first, without the
+                        # done item: a second envelope would resend the same
+                        # encrypted content twice.
+                        self._stopped.add(summary_index)
+                        out.append(StreamChunk("block_stop", {"index": summary_index}))
             out += self._open(
-                item.get("id", ""),
+                key,
                 block_type,
+                subtype=subtype,
                 tool_name=item.get("name"),
                 tool_use_id=item.get("call_id"),
                 block=item,
             )
-            index = self._index_of.get(item.get("id", ""))
+            index = self._index_of.get(key)
             if index is not None and index not in self._stopped:
                 self._stopped.add(index)
                 out.append(StreamChunk("block_stop", {"index": index, "block": item}))

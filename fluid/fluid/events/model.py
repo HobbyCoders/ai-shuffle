@@ -125,6 +125,15 @@ class BlockStart(Event):
     block_type: str  # "text" | "thinking" | "tool_use"
     tool_name: str | None = None
     tool_use_id: str | None = None
+    # What KIND of block this is within its type, when the provider draws a
+    # distinction the block_type does not. Today only thinking blocks carry
+    # one: "reasoning_summary" is the provider's own summary of its reasoning
+    # (OpenAI Responses ``summary: "auto"``, xAI included), "reasoning" is the
+    # reasoning text itself. A host can label the summary as the provider's
+    # rather than the model's voice. None whenever no distinction was drawn —
+    # which is every provider that has only one reasoning channel, and every
+    # event persisted before this field existed.
+    subtype: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

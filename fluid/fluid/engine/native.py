@@ -2580,6 +2580,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     BlockStart(
                         session_id=sid, turn_id=turn_id, index=index,
                         block_type=payload["block_type"],
+                        subtype=payload.get("subtype"),
                         tool_name=payload.get("tool_name"),
                         tool_use_id=payload.get("tool_use_id"),
                     )
