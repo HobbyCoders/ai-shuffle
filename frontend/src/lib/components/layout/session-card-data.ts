@@ -1,10 +1,10 @@
 /**
  * Pure helpers for the sidebar session cards (Studio Noir shell).
  *
- * Every value here is derived from data the sessions store already carries
- * (`$sessions` rows plus the streaming / pending-permission maps). Nothing in
- * this module fetches anything: segments the store cannot supply — a per
- * session diffstat, the provider's display name — are simply not modelled.
+ * Every value here is derived from data the caller already holds: `$sessions`
+ * rows plus the streaming / pending-permission maps, and — for the git stage —
+ * a working-tree snapshot the card's own store fetched. Nothing in this module
+ * fetches anything itself; it only shapes what it is handed.
  */
 import type { Session } from '$lib/api/client';
 import { normalizeSessionMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
@@ -31,6 +31,43 @@ export const STATUS_LABELS: Record<SessionCardStatus, string> = {
 	done: 'Done',
 	idle: 'Idle'
 };
+
+/**
+ * The runtime word a card shows on its second line, and the tone that colors
+ * it. This is the SESSION's state — what the agent is doing — kept separate
+ * from the branch's git stage, which now owns the leading glyph and its own
+ * segment. `pr` / `pr_merged` are PR facts rather than runtime facts, so they
+ * read as plain "Done" here and let the PR segment say the rest.
+ */
+export type StatusTone = 'accent' | 'amber' | 'muted';
+
+export const RUNTIME_STATUS_WORDS: Record<SessionCardStatus, string> = {
+	working: 'Working',
+	needs_permission: 'Needs permission',
+	has_question: 'Has question',
+	await: 'Awaiting input',
+	pr: 'Done',
+	pr_merged: 'Done',
+	done: 'Done',
+	idle: 'Idle'
+};
+
+export const RUNTIME_STATUS_TONES: Record<SessionCardStatus, StatusTone> = {
+	working: 'accent',
+	needs_permission: 'amber',
+	has_question: 'amber',
+	await: 'amber',
+	pr: 'muted',
+	pr_merged: 'muted',
+	done: 'muted',
+	idle: 'muted'
+};
+
+/** Statuses that park the row on a prompt — they get the amber warning glyph
+ *  ahead of the title, where `working` gets the pulsing live dot. */
+export function isAttentionStatus(status: SessionCardStatus): boolean {
+	return status === 'needs_permission' || status === 'has_question' || status === 'await';
+}
 
 /** The states that get a live-ticking timer — in-flight, including a session
  *  parked on a permission/question prompt (its turn hasn't finished). */
@@ -72,6 +109,149 @@ export function deriveStatus(input: {
 	if (input.prState === 'merged') return 'pr_merged';
 	if (input.isActive) return 'done';
 	return 'idle';
+}
+
+// ============================================================================
+// Git stage — the leading glyph
+// ============================================================================
+
+/**
+ * Where the session's branch sits on the road from edit to merge. One value
+ * per row, drawn as the glyph in the card's left column.
+ *
+ * `clean` is the "repo, nothing to say" fallback (a bare dot) and `none` marks
+ * a row with no repo at all — a chat or voice session, a session whose project
+ * is gone, or a folder that turned out not to be a git checkout.
+ */
+export type GitStage =
+	| 'pr'
+	| 'merged'
+	| 'closed'
+	| 'dirty'
+	| 'committed'
+	| 'pushed'
+	| 'clean'
+	| 'none';
+
+/** Words for the git segment. Empty means the stage speaks through its glyph
+ *  alone — a bare dot needs no caption. */
+export const GIT_STAGE_LABELS: Record<GitStage, string> = {
+	pr: 'PR open',
+	merged: 'merged',
+	closed: 'PR closed',
+	dirty: 'uncommitted',
+	committed: 'committed',
+	pushed: 'pushed',
+	clean: '',
+	none: ''
+};
+
+export const GIT_STAGE_TONES: Record<GitStage, 'green' | 'purple' | 'amber' | 'muted'> = {
+	pr: 'green',
+	merged: 'purple',
+	closed: 'muted',
+	dirty: 'amber',
+	committed: 'muted',
+	pushed: 'muted',
+	clean: 'muted',
+	none: 'muted'
+};
+
+/** Tooltip on the glyph, so a colored icon is never the only explanation. */
+export const GIT_STAGE_TIPS: Record<GitStage, string> = {
+	pr: 'Pull request open',
+	merged: 'Pull request merged',
+	closed: 'Pull request closed without merge',
+	dirty: 'Uncommitted changes',
+	committed: 'Committed, not pushed',
+	pushed: 'Pushed, no PR yet',
+	clean: 'No changes',
+	none: 'Chat session'
+};
+
+/**
+ * The working-tree facts the stage needs, flattened out of `GitStatus` so this
+ * module stays free of the git API's shape (and so tests can hand it a
+ * literal). Absent entirely for rows we never fetch — settled ones.
+ */
+export interface SessionGitFacts {
+	/** False once we positively know the folder is not a checkout. */
+	isRepo: boolean;
+	/** Any uncommitted work at all: staged, modified, untracked or conflicted. */
+	hasChanges: boolean;
+	/** Commits on the branch that the remote hasn't got. */
+	ahead: number;
+	/** The repo's real default branch, for telling a session branch from trunk. */
+	defaultBranch?: string | null;
+}
+
+export interface GitStageInput {
+	/** Which lane the row is in — chat and voice sessions never own a branch. */
+	mode?: SessionMode;
+	/** Whether the session is attached to a project at all. */
+	hasProject: boolean;
+	/** Persisted PR lifecycle from the session row. */
+	prState?: 'open' | 'merged' | 'closed' | null;
+	/** Worktree branch, else the v2 branch field. */
+	branch?: string | null;
+	/** Live working tree, when the card fetched one. */
+	git?: SessionGitFacts | null;
+}
+
+/**
+ * Resolve one stage from the session row plus (optionally) its working tree.
+ *
+ * Precedence puts the PR lifecycle first: once a branch has a pull request,
+ * that is the thing the user is tracking, and stray edits on top of it still
+ * show up as the diff counts next to the PR segment. Below that the tree
+ * decides, newest work first — uncommitted, then unpushed commits, then a
+ * pushed branch waiting on a PR.
+ *
+ * Without `git` facts (every settled row — we don't spend a request on those)
+ * the answer comes from `prState` alone and otherwise falls to the quiet dot,
+ * because "no data" must never be drawn as "no changes to push".
+ */
+export function deriveGitStage(input: GitStageInput): GitStage {
+	if (input.mode === 'chat' || input.mode === 'voice') return 'none';
+	if (!input.hasProject) return 'none';
+	if (input.prState === 'merged') return 'merged';
+	if (input.prState === 'open') return 'pr';
+	if (input.git && !input.git.isRepo) return 'none';
+	if (input.prState === 'closed') return 'closed';
+	if (!input.git) return 'clean';
+	if (input.git.hasChanges) return 'dirty';
+	if (input.git.ahead > 0) return 'committed';
+	const branch = input.branch?.trim();
+	if (branch && branch !== input.git.defaultBranch) return 'pushed';
+	return 'clean';
+}
+
+/**
+ * The PR segment's text: "PR #123 open" / "PR #123 merged" / "PR closed".
+ * Null when the row has no pull request to talk about.
+ */
+export function prStateText(
+	prState: 'open' | 'merged' | 'closed' | null | undefined,
+	prNumber?: number | null
+): string | null {
+	if (!prState) return null;
+	const ref = prNumber ? `PR #${prNumber}` : 'PR';
+	if (prState === 'open') return `${ref} open`;
+	if (prState === 'merged') return `${ref} merged`;
+	return `${ref} closed`;
+}
+
+/** Diff counts for the second line, e.g. `{ plus: '+124', minus: '−38' }`.
+ *  Null when there is nothing changed to count. Uses a real minus sign so the
+ *  two columns line up in the mono face. */
+export function diffCounts(
+	stats: { additions: number; deletions: number } | null | undefined
+): { plus: string; minus: string } | null {
+	if (!stats) return null;
+	const additions = Math.max(0, stats.additions || 0);
+	const deletions = Math.max(0, stats.deletions || 0);
+	if (additions === 0 && deletions === 0) return null;
+	return { plus: `+${additions}`, minus: `−${deletions}` };
 }
 
 /**

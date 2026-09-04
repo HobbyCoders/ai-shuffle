@@ -29,6 +29,15 @@ const mocks = vi.hoisted(() => {
 		newChat: vi.fn(),
 		setTitle: vi.fn(),
 		toastPush: vi.fn(),
+		gitCurrent: {
+			sessionId: null as string | null,
+			projectId: null as string | null,
+			worktreeId: null as string | null,
+			status: null as Record<string, unknown> | null,
+			diffStats: null as Record<string, unknown> | null,
+		},
+		watch: vi.fn(() => () => {}),
+		getSessionGit: vi.fn(() => null as Record<string, unknown> | null),
 	};
 });
 
@@ -56,7 +65,36 @@ vi.mock('$lib/stores/toast', () => ({
 	toast: { push: mocks.toastPush },
 }));
 
+// The card reads the real git store only for the session open in the main
+// panel, and leases a poll from the sidebar's own store for every other active
+// card. Both are stubbed so a row renders without touching the network.
+vi.mock('$lib/stores/git.svelte', () => ({
+	git: {
+		get current() {
+			return mocks.gitCurrent;
+		},
+	},
+}));
+
+vi.mock('$lib/stores/session-git-state.svelte', () => ({
+	sessionGitState: {
+		watch: mocks.watch,
+		get: mocks.getSessionGit,
+	},
+}));
+
 import SessionCard from './SessionCard.svelte';
+
+/** A canonical `GitStatus`, trimmed to what the card actually reads. */
+function gitStatus(over: Record<string, unknown> = {}) {
+	return {
+		is_git_repo: true,
+		has_changes: false,
+		ahead: 0,
+		default_branch: 'main',
+		...over,
+	};
+}
 
 function session(overrides: Record<string, unknown> = {}) {
 	return {
@@ -114,6 +152,13 @@ beforeEach(() => {
 		})),
 	});
 	mocks.activeSession.set({ sessionId: null });
+	mocks.gitCurrent.sessionId = null;
+	mocks.gitCurrent.projectId = null;
+	mocks.gitCurrent.worktreeId = null;
+	mocks.gitCurrent.status = null;
+	mocks.gitCurrent.diffStats = null;
+	mocks.watch.mockReturnValue(() => {});
+	mocks.getSessionGit.mockReturnValue(null);
 	mocks.setSessionActive.mockResolvedValue(undefined);
 	mocks.deleteSession.mockResolvedValue(undefined);
 	mocks.renameSession.mockResolvedValue(undefined);
@@ -146,15 +191,21 @@ describe('SessionCard actions', () => {
 	});
 
 	it('renders a settled row as two compact lines, keeping its action', () => {
-		const { container } = renderCard({ is_active: false }, { compact: true });
+		const { container } = renderCard(
+			{ is_active: false, worktree_branch: 'fix/thing' },
+			{ compact: true }
+		);
 
 		expect(container.querySelector('.scard.compact')).toBeTruthy();
-		expect(container.querySelector('.ctitle')?.textContent).toContain('Sidebar work');
-		// The meta line keeps project · device · branch on its own row.
+		expect(container.querySelector('.title')?.textContent).toContain('Sidebar work');
+		// A settled row drops the status line; its meta reads device · git · branch
+		// (the project is the group it already sits under).
+		expect(container.querySelector('.l2')).toBeNull();
 		const meta = container.querySelector('.l3');
 		expect(meta).toBeTruthy();
-		expect(meta?.textContent).toContain('Project A');
 		expect(meta?.textContent).toContain('This device');
+		expect(meta?.textContent).toContain('fix/thing');
+		expect(meta?.textContent).not.toContain('Project A');
 		expect(screen.getByTitle('Move to Active')).toBeTruthy();
 	});
 
@@ -300,5 +351,111 @@ describe('SessionCard actions', () => {
 
 		expect(frame.classList.contains('actions-open')).toBe(false);
 		expect(onOpen).not.toHaveBeenCalled();
+	});
+});
+
+describe('SessionCard git state', () => {
+	it('leads a merged session with the purple merge glyph', () => {
+		const { container } = renderCard({ pr_state: 'merged', pr_number: 1071 });
+
+		const lead = container.querySelector('.lead');
+		expect(lead?.getAttribute('aria-label')).toBe('Pull request merged');
+		expect(lead?.classList.contains('purple')).toBe(true);
+		expect(container.querySelector('.l2')?.textContent).toContain('PR #1071 merged');
+	});
+
+	it('leads an open PR with the green pull-request glyph', () => {
+		const { container } = renderCard({ pr_state: 'open', pr_number: 42 }, { status: 'pr' });
+
+		const lead = container.querySelector('.lead');
+		expect(lead?.getAttribute('aria-label')).toBe('Pull request open');
+		expect(lead?.classList.contains('green')).toBe(true);
+		expect(container.querySelector('.l2')?.textContent).toContain('PR #42 open');
+	});
+
+	it('leads a chat session with the chat glyph and no branch talk', () => {
+		const { container } = renderCard({ project_id: null });
+
+		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('Chat session');
+		expect(container.querySelector('.l2')?.textContent).not.toContain('PR');
+	});
+
+	it('shows the amber diff glyph and the diffstat for an uncommitted tree', () => {
+		mocks.getSessionGit.mockReturnValue({
+			status: gitStatus({ has_changes: true }),
+			diffStats: { additions: 124, deletions: 38, files_changed: 4 },
+			loaded: true,
+		});
+
+		const { container } = renderCard({ worktree_branch: 'feat/x' });
+
+		const lead = container.querySelector('.lead');
+		expect(lead?.getAttribute('aria-label')).toBe('Uncommitted changes');
+		expect(lead?.classList.contains('amber')).toBe(true);
+		expect(container.querySelector('.diff')?.textContent).toBe('+124 −38');
+	});
+
+	it('leads a pushed session branch with the upload glyph', () => {
+		mocks.getSessionGit.mockReturnValue({
+			status: gitStatus(),
+			diffStats: null,
+			loaded: true,
+		});
+
+		const { container } = renderCard({ worktree_branch: 'feat/x' });
+
+		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('Pushed, no PR yet');
+		// No uncommitted work, so no diffstat to answer for.
+		expect(container.querySelector('.diff')).toBeNull();
+	});
+
+	it('lays an active card out as title, status line, then project meta', () => {
+		const { container } = renderCard(
+			{ is_active: true, worktree_branch: 'feat/x' },
+			{ status: 'working', projectLabel: 'Project A' }
+		);
+
+		expect(container.querySelector('.title')?.textContent).toContain('Sidebar work');
+		expect(container.querySelector('.l2 .st')?.textContent).toBe('Working');
+		expect(container.querySelector('.l2 .st')?.classList.contains('accent')).toBe(true);
+		const meta = container.querySelector('.l3');
+		expect(meta?.textContent).toContain('Project A');
+		expect(meta?.textContent).toContain('This device');
+		expect(meta?.textContent).toContain('feat/x');
+	});
+
+	it('marks a working row with the live pip and a parked row with the warning', () => {
+		const working = renderCard({ is_active: true }, { status: 'working' });
+		expect(working.container.querySelector('.title .pip')).toBeTruthy();
+		cleanup();
+
+		const parked = renderCard({ is_active: true }, { status: 'needs_permission' });
+		expect(parked.container.querySelector('.title .pip')).toBeNull();
+		expect(parked.container.querySelector('.title .warn')).toBeTruthy();
+		expect(parked.container.querySelector('.l2 .st')?.textContent).toBe('Needs permission');
+	});
+
+	it('leases one poll per active card', () => {
+		renderCard({ project_id: 'project-a', worktree_id: 'wt-1' });
+
+		expect(mocks.watch).toHaveBeenCalledWith('session-a', 'project-a', 'wt-1');
+	});
+
+	it('never spends a request on a settled row', () => {
+		renderCard({ is_active: false }, { compact: true });
+
+		expect(mocks.watch).not.toHaveBeenCalled();
+	});
+
+	it('reuses the main panel git store for the session that is open', () => {
+		mocks.gitCurrent.sessionId = 'session-a';
+		mocks.gitCurrent.status = gitStatus({ has_changes: true });
+		mocks.gitCurrent.diffStats = { additions: 7, deletions: 1, files_changed: 1 };
+
+		const { container } = renderCard({ worktree_branch: 'feat/x' }, { active: true });
+
+		expect(mocks.watch).not.toHaveBeenCalled();
+		expect(container.querySelector('.diff')?.textContent).toBe('+7 −1');
+		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('Uncommitted changes');
 	});
 });

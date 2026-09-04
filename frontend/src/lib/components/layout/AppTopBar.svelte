@@ -3,10 +3,14 @@
 	 * AppTopBar - compact mobile app bar + navigation drawer.
 	 *
 	 * Rendered only at ≤1080px (phones AND unfolded foldables); AppLayout owns
-	 * that width decision. The bar carries ☰ menu + current-page title +
-	 * notifications, and every navigation destination lives in the
-	 * slide-in drawer, which hosts the same Sidebar component the desktop shell
-	 * shows beside the main panel.
+	 * that width decision. The bar carries ☰ menu + current-page title, and
+	 * every navigation destination lives in the slide-in drawer, which hosts the
+	 * same Sidebar component the desktop shell shows beside the main panel.
+	 *
+	 * The notification bell moved into that sidebar's header, so on this bar it
+	 * is represented by a dot on the ☰ while the drawer is closed. Unread state
+	 * therefore stays visible without a second bell, and opening the drawer puts
+	 * the real bell one row away.
 	 *
 	 * On desktop the sidebar itself replaces this bar's old tab row, and the main
 	 * panel's StudioTopBar carries the breadcrumbs and actions.
@@ -15,7 +19,7 @@
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
+	import { unreadCount } from '$lib/stores/notifications';
 	import Sidebar from './Sidebar.svelte';
 	import SessionTitleMenu from './SessionTitleMenu.svelte';
 	import { chatHeaderTitle } from './chat-empty-state';
@@ -92,8 +96,16 @@
 <svelte:window onkeydown={handleWindowKeydown} />
 
 <header class="topbar topbar-mobile">
-	<button class="tb-hamburger" onclick={() => (drawerOpen = true)} aria-label="Open menu" aria-expanded={drawerOpen}>
+	<button
+		class="tb-hamburger"
+		onclick={() => (drawerOpen = true)}
+		aria-label={$unreadCount > 0 ? `Open menu (${$unreadCount} unread notifications)` : 'Open menu'}
+		aria-expanded={drawerOpen}
+	>
 		<Menu size={20} strokeWidth={1.8} />
+		{#if !drawerOpen && $unreadCount > 0}
+			<span class="tb-unread" aria-hidden="true"></span>
+		{/if}
 	</button>
 
 	{#if boundChatId}
@@ -102,7 +114,9 @@
 		<span class="tb-context-title">{mobileTitle}</span>
 	{/if}
 
-	<NotificationCenter />
+	<!-- Balances the ☰ so the title stays optically centered now that the bell
+	     it used to sit beside lives in the sidebar. -->
+	<span class="tb-spacer" aria-hidden="true"></span>
 </header>
 
 <!-- Slide-in navigation drawer: hosts the full sidebar -->
@@ -148,6 +162,7 @@
 	}
 
 	.tb-hamburger {
+		position: relative;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
@@ -163,6 +178,22 @@
 		-webkit-tap-highlight-color: transparent;
 	}
 	.tb-hamburger:hover { color: var(--foreground); background: var(--accent); }
+
+	/* A dot, not a count: the exact number is one tap away on the bell inside the
+	   drawer, and a badge on a navigation control reads as a nav badge. */
+	.tb-unread {
+		position: absolute;
+		top: 7px;
+		right: 7px;
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: var(--destructive);
+		box-shadow: 0 0 0 2px var(--background);
+		pointer-events: none;
+	}
+
+	.tb-spacer { width: 40px; flex-shrink: 0; }
 
 	/* Title fills the space between the ☰ (left) and the notification bell
 	   (right), so it sits visually centered, and ellipsizes for long chat names. */

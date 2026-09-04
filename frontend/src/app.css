@@ -312,6 +312,11 @@
 		--status-info-border: oklch(0.72 0.115 250 / 0.28);
 		--status-pending-bg: oklch(0.575 0.008 240 / 0.14);
 		--status-pending-border: oklch(0.575 0.008 240 / 0.28);
+		/* Merged: the one state git owns that no semantic token covered.
+		   Purple, same hue as --feature-agents, so a merged PR reads apart
+		   from success green at a glance. */
+		--status-merged: oklch(0.74 0.145 300);
+		--status-merged-fg: oklch(0.18 0.045 300);
 
 		/* Chip/badge colors - derived from theme primary */
 		--chip-primary-bg: color-mix(in srgb, var(--primary) 15%, transparent);
@@ -542,6 +547,9 @@
 		--status-info-border: oklch(0.55 0.16 255 / 0.25);
 		--status-pending-bg: oklch(0.565 0.008 250 / 0.12);
 		--status-pending-border: oklch(0.565 0.008 250 / 0.25);
+		/* Merged — light theme; darkened the same way the other purples are. */
+		--status-merged: oklch(0.52 0.17 300);
+		--status-merged-fg: oklch(0.99 0 0);
 
 		/* Chip/badge colors - derived from theme primary */
 		--chip-primary-bg: color-mix(in srgb, var(--primary) 12%, transparent);

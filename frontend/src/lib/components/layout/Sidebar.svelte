@@ -2,11 +2,28 @@
 	/**
 	 * Sidebar - Studio Noir session navigator.
 	 *
-	 * A 256px black plane: brand header + new session, the Code / Chat / Voice
-	 * lane switcher, ghost rows (search and the project / device filters), a
-	 * scrollable list of three-line session cards grouped Active / Settled, the
-	 * archived shelf, and a collapsible Workspace section of labeled nav rows
-	 * that switches the MainPanel deck views.
+	 * A 256px black plane in three bands:
+	 *
+	 * 1. A STICKY TOP BLOCK — brand + search + notifications + the host's header
+	 *    action on one row, and "New session" directly beneath it as the first
+	 *    row of the nav. It is deliberately not styled as a header with a border:
+	 *    at rest it shares the 1px row rhythm of the Workspace rows that follow,
+	 *    and only when the scroll region has actually moved does a hairline and a
+	 *    soft shadow fade in under it, so the separator means "there is content
+	 *    above" instead of decorating an empty state.
+	 * 2. A SCROLL REGION — the customizable Workspace nav (see WorkspaceNav /
+	 *    sidebar-prefs), the project + device scope filters on a hairline rule,
+	 *    then the session ledger: three-line cards grouped Active / Settled with
+	 *    an archived shelf.
+	 * 3. A MODE DOCK — the Code / Chat / Voice lane switcher on a raised plate at
+	 *    the bottom edge, where it stays reachable on a phone and stops competing
+	 *    with the brand row for the top of the panel.
+	 *
+	 * POPOVER ANCHORING. The scope menus and the Workspace "More" flyout are
+	 * opened from rows INSIDE the scroll region, so an absolutely-positioned
+	 * popover would be clipped by it. Both are `position: fixed` with coordinates
+	 * measured from their button at open time, and both close on scroll rather
+	 * than tracking it — the snapshot is only ever as old as one gesture.
 	 *
 	 * MODE LANES. The panel shows one lane at a time and the lane is a hard
 	 * partition: a code session is never listed while Chat is selected, and vice
@@ -42,6 +59,7 @@
 		ChevronRight,
 		Check,
 		SquarePen,
+		X,
 		Files,
 		StickyNote,
 		Hammer,
@@ -66,8 +84,13 @@
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { preloadPanelForView } from '$lib/components/deck/lazy/panels';
 	import { appMode, sessionMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
+	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
+	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 	import SessionCard from './SessionCard.svelte';
 	import SessionModeSwitcher from './SessionModeSwitcher.svelte';
+	import WorkspaceNav from './sidebar/WorkspaceNav.svelte';
+	import WorkspaceCustomize from './sidebar/WorkspaceCustomize.svelte';
+	import type { WorkspaceNavItem } from './sidebar/workspace-items';
 	import {
 		branchLabel,
 		deriveStatus,
@@ -304,6 +327,20 @@
 	let projectMenuRef = $state<HTMLDivElement | null>(null);
 	let deviceMenuRef = $state<HTMLDivElement | null>(null);
 
+	interface MenuPos { top: number; left: number; width: number }
+	let projectMenuPos = $state<MenuPos>({ top: 0, left: 0, width: 200 });
+	let deviceMenuPos = $state<MenuPos>({ top: 0, left: 0, width: 200 });
+
+	/** Snapshot a fixed-position anchor under `btn`, kept inside the panel. */
+	function anchorBelow(btn: HTMLElement): MenuPos {
+		const r = btn.getBoundingClientRect();
+		const panel = btn.closest('aside')?.getBoundingClientRect();
+		if (!panel) return { top: r.bottom + 4, left: r.left, width: Math.max(180, r.width) };
+		const width = Math.min(280, Math.max(180, panel.width - 16));
+		const left = Math.min(Math.max(panel.left + 8, r.left), Math.max(panel.left + 8, panel.right - 8 - width));
+		return { top: r.bottom + 4, left, width };
+	}
+
 	interface FilterOption { id: string; label: string }
 
 	const projectOptions = $derived.by((): FilterOption[] => {
@@ -426,43 +463,77 @@
 	const BUILD_MEMBERS: ViewType[] = ['build', 'profile', 'mcp', 'plugins', 'hooks'];
 	const currentType = $derived($activeView?.type ?? null);
 
-	const WORKSPACE_OPEN_KEY = 'ai-shuffle.sidebar.workspaceOpen';
-	function readWorkspaceOpen(): boolean {
-		try {
-			return localStorage.getItem(WORKSPACE_OPEN_KEY) !== '0';
-		} catch {
-			return true;
-		}
-	}
-	let workspaceOpen = $state(readWorkspaceOpen());
-	function toggleWorkspace() {
-		workspaceOpen = !workspaceOpen;
-		try {
-			localStorage.setItem(WORKSPACE_OPEN_KEY, workspaceOpen ? '1' : '0');
-		} catch {
-			/* private mode: collapse state just won't persist */
-		}
-	}
-
-	const railItems = $derived([
-		{ label: 'Files', icon: Files, type: 'file-browser' as ViewType, on: currentType === 'file-browser' },
-		{ label: 'Notes', icon: StickyNote, type: 'notes' as ViewType, on: currentType === 'notes' },
-		{ label: 'Build', icon: Hammer, type: 'build' as ViewType, on: currentType ? BUILD_MEMBERS.includes(currentType) : false },
+	// Admin gating stays HERE, above the preference layer: WorkspaceNav and the
+	// Customize dialog only ever see the destinations this role may open, so a
+	// stored order can never surface Settings to a non-admin — and an admin's
+	// order survives their role lapsing, because nothing rewrote it.
+	const railItems = $derived<WorkspaceNavItem[]>([
+		{ id: 'file-browser', label: 'Files', icon: Files, on: currentType === 'file-browser' },
+		{ id: 'notes', label: 'Notes', icon: StickyNote, on: currentType === 'notes' },
+		{ id: 'build', label: 'Build', icon: Hammer, on: currentType ? BUILD_MEMBERS.includes(currentType) : false },
 		...(isAdmin
-			? [{ label: 'Automations', icon: CalendarClock, type: 'automations' as ViewType, on: currentType === 'automations' }]
+			? [{ id: 'automations' as const, label: 'Automations', icon: CalendarClock, on: currentType === 'automations' }]
 			: []),
-		{ label: 'Projects', icon: FolderKanban, type: 'project' as ViewType, on: currentType === 'project' },
-		{ label: 'Stats', icon: BarChart3, type: 'stats' as ViewType, on: currentType === 'stats' },
-		{ label: 'Docs', icon: BookOpen, type: 'docs' as ViewType, on: currentType === 'docs' },
+		{ id: 'project', label: 'Projects', icon: FolderKanban, on: currentType === 'project' },
+		{ id: 'stats', label: 'Stats', icon: BarChart3, on: currentType === 'stats' },
+		{ id: 'docs', label: 'Docs', icon: BookOpen, on: currentType === 'docs' },
 		...(isAdmin
-			? [{ label: 'Settings', icon: Settings, type: 'settings' as ViewType, on: currentType === 'settings' }]
+			? [{ id: 'settings' as const, label: 'Settings', icon: Settings, on: currentType === 'settings' }]
 			: [])
 	]);
+
+	let workspaceRef = $state<HTMLDivElement | null>(null);
+	let flyoutOpen = $state(false);
+	let customizeOpen = $state(false);
+
+	function openCustomize() {
+		flyoutOpen = false;
+		customizeOpen = true;
+	}
+
+	// --- sticky block / scroll state ---------------------------------------
+	// The separator under the sticky block is a scroll signal, not decoration:
+	// it only appears once the list has actually moved under it.
+	let scrollRef = $state<HTMLDivElement | null>(null);
+	let scrolled = $state(false);
+	let viewportWidth = $state(0);
+	/** Panel is fullscreen-width (≤1080px) — the drawer, or a foldable's inner
+	 *  screen. Drives where the More flyout is drawn. */
+	const fullscreen = $derived(viewportWidth > 0 && isPanelFullscreenWidth(viewportWidth));
+
+	function handleScroll() {
+		scrolled = (scrollRef?.scrollTop ?? 0) > 2;
+		// Fixed popovers hold a snapshot of their anchor (see the header note).
+		if (projectMenuOpen || deviceMenuOpen || flyoutOpen) closeMenus();
+	}
 
 	// --- menu plumbing -----------------------------------------------------
 	function closeMenus() {
 		projectMenuOpen = false;
 		deviceMenuOpen = false;
+		flyoutOpen = false;
+	}
+
+	function toggleProjectMenu(e: MouseEvent) {
+		const next = !projectMenuOpen;
+		closeMenus();
+		if (!next) return;
+		projectMenuPos = anchorBelow(e.currentTarget as HTMLElement);
+		projectMenuOpen = true;
+	}
+
+	function toggleDeviceMenu(e: MouseEvent) {
+		const next = !deviceMenuOpen;
+		closeMenus();
+		if (!next) return;
+		deviceMenuPos = anchorBelow(e.currentTarget as HTMLElement);
+		deviceMenuOpen = true;
+	}
+
+	/** Both scopes at once — the row's single clear affordance. */
+	function clearFilters() {
+		projectFilter = null;
+		deviceFilter = null;
 	}
 
 	// --- delegated card menus ------------------------------------------------
@@ -481,6 +552,9 @@
 		const t = e.target as Node;
 		if (projectMenuOpen && projectMenuRef && !projectMenuRef.contains(t)) projectMenuOpen = false;
 		if (deviceMenuOpen && deviceMenuRef && !deviceMenuRef.contains(t)) deviceMenuOpen = false;
+		// The flyout is a child of `workspaceRef`, so one containment test covers
+		// both the More row and the menu it opened.
+		if (flyoutOpen && workspaceRef && !workspaceRef.contains(t)) flyoutOpen = false;
 		if (openActionsCardId) {
 			const el = t instanceof Element ? t : (t as Node)?.parentElement ?? null;
 			const frame = el?.closest?.('[data-session-card]') ?? null;
@@ -492,6 +566,7 @@
 		if (e.key === 'Escape') {
 			closeMenus();
 			closeCardActions();
+			customizeOpen = false;
 		}
 	}
 
@@ -527,130 +602,136 @@
 	}
 </script>
 
-<svelte:window onclick={handleWindowClick} onkeydown={handleWindowKeydown} />
+<svelte:window onclick={handleWindowClick} onkeydown={handleWindowKeydown} bind:innerWidth={viewportWidth} />
 
 <aside class="sidebar grain" aria-label="Sessions">
-	<header class="sb-head">
-		<div class="brand">
-			<span class="brandmark" aria-hidden="true">
-				<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round">
-					<path d="M16 3h5v5" /><path d="M4 20 21 3" /><path d="M21 16v5h-5" /><path d="m15 15 6 6" /><path d="M4 4l5 5" />
-				</svg>
-			</span>
-			<span class="wordmark">AI Shuffle</span>
-		</div>
-		<button class="iconbtn" onclick={onNewSession} title="New session (Cmd/Ctrl+N)" aria-label="New session">
-			<SquarePen size={16} strokeWidth={1.85} />
-		</button>
-		{#if headerAction}
-			{@render headerAction()}
-		{/if}
-	</header>
-
-	<div class="sb-rows">
-		<SessionModeSwitcher value={$sessionMode} onSelect={selectMode} />
-
-		{#if onOpenSpotlight}
-			<button class="ghostrow" onclick={onOpenSpotlight}>
-				<Search size={16} strokeWidth={1.85} />
-				<span class="label">Search</span>
-				<kbd class="kbd">⌘K</kbd>
-			</button>
-		{/if}
-
-		<!-- Chat and voice sessions carry no project, so outside the code lane this
-		     menu would only ever offer "Ungrouped". -->
-		{#if $sessionMode === 'code'}
-			<div class="rowmenu" bind:this={projectMenuRef}>
-				<button
-					class="ghostrow"
-					class:active={!!projectFilter}
-					aria-haspopup="menu"
-					aria-expanded={projectMenuOpen}
-					onclick={() => { const next = !projectMenuOpen; closeMenus(); projectMenuOpen = next; }}
-				>
-					<FolderClosed size={16} strokeWidth={1.85} />
-					<span class="label">{projectFilterLabel}</span>
-					<ChevronDown class="chev" size={14} strokeWidth={2} />
+	<!-- Sticky top block: the brand row and New session travel together and never
+	     scroll, so the panel's two constant actions are always in the same place. -->
+	<div class="sb-top" class:scrolled>
+		<header class="sb-head">
+			<div class="brand">
+				<span class="brandmark" aria-hidden="true">
+					<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round">
+						<path d="M16 3h5v5" /><path d="M4 20 21 3" /><path d="M21 16v5h-5" /><path d="m15 15 6 6" /><path d="M4 4l5 5" />
+					</svg>
+				</span>
+				<span class="wordmark">AI Shuffle</span>
+			</div>
+			{#if onOpenSpotlight}
+				<button class="iconbtn" onclick={onOpenSpotlight} title="Search (Cmd/Ctrl+K)" aria-label="Search">
+					<Search size={16} strokeWidth={1.85} />
 				</button>
-				{#if projectMenuOpen}
-					<div class="menu" role="menu">
-						<button class="menu-item" class:active={!projectFilter} role="menuitem" onclick={() => pickProject(null)}>
-							<span class="menu-label">All projects</span>
-							{#if !projectFilter}<Check size={14} strokeWidth={2} />{/if}
+			{/if}
+			<!-- The bell's only home: it used to sit in both top bars, which meant
+			     two copies on mobile and none while the drawer was open. -->
+			<NotificationCenter />
+			{#if headerAction}
+				{@render headerAction()}
+			{/if}
+		</header>
+
+		<!-- New session is the first row of the nav, not a header icon: it reads as
+		     a destination like the Workspace rows that continue below it. -->
+		<button
+			class="ghostrow newrow"
+			onclick={onNewSession}
+			title="New session (Cmd/Ctrl+N)"
+		>
+			<SquarePen size={16} strokeWidth={1.85} />
+			<span class="label">New session</span>
+			<kbd class="kbd shortcut">⌘N</kbd>
+		</button>
+	</div>
+
+	<div class="sb-scroll" bind:this={scrollRef} onscroll={handleScroll}>
+		<div class="workspace" bind:this={workspaceRef}>
+			<WorkspaceNav
+				items={railItems}
+				bind:open={flyoutOpen}
+				{fullscreen}
+				onPick={pickFeature}
+				onPreload={preloadPanelForView}
+				onCustomize={openCustomize}
+			/>
+		</div>
+
+		<!-- Scope filters: two ghost buttons on one rule, heading the ledger. -->
+		<div class="scope" role="group" aria-label="Scope">
+			<!-- Chat and voice sessions carry no project, so outside the code lane this
+			     menu would only ever offer "Ungrouped". -->
+			{#if $sessionMode === 'code'}
+				<div class="rowmenu" bind:this={projectMenuRef}>
+					<button
+						class="fbtn"
+						class:set={!!projectFilter}
+						aria-haspopup="menu"
+						aria-expanded={projectMenuOpen}
+						onclick={toggleProjectMenu}
+					>
+						<FolderClosed size={14} strokeWidth={1.85} />
+						<span class="val">{projectFilterLabel}</span>
+						<ChevronDown class="chev" size={12} strokeWidth={2} />
+					</button>
+					{#if projectMenuOpen}
+						<div
+							class="menu"
+							role="menu"
+							style="top:{projectMenuPos.top}px; left:{projectMenuPos.left}px; width:{projectMenuPos.width}px;"
+						>
+							<button class="menu-item" class:active={!projectFilter} role="menuitem" onclick={() => pickProject(null)}>
+								<span class="menu-label">All projects</span>
+								{#if !projectFilter}<Check size={14} strokeWidth={2} />{/if}
+							</button>
+							{#each projectOptions as opt (opt.id)}
+								<button class="menu-item" class:active={projectFilter === opt.id} role="menuitem" onclick={() => pickProject(opt.id)}>
+									<span class="menu-label">{opt.label}</span>
+									{#if projectFilter === opt.id}<Check size={14} strokeWidth={2} />{/if}
+								</button>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			{/if}
+
+			<div class="rowmenu" bind:this={deviceMenuRef}>
+				<button
+					class="fbtn"
+					class:set={!!deviceFilter}
+					aria-haspopup="menu"
+					aria-expanded={deviceMenuOpen}
+					onclick={toggleDeviceMenu}
+				>
+					<MonitorSmartphone size={14} strokeWidth={1.85} />
+					<span class="val">{deviceFilterLabel}</span>
+					<ChevronDown class="chev" size={12} strokeWidth={2} />
+				</button>
+				{#if deviceMenuOpen}
+					<div
+						class="menu"
+						role="menu"
+						style="top:{deviceMenuPos.top}px; left:{deviceMenuPos.left}px; width:{deviceMenuPos.width}px;"
+					>
+						<button class="menu-item" class:active={!deviceFilter} role="menuitem" onclick={() => pickDevice(null)}>
+							<span class="menu-label">All devices</span>
+							{#if !deviceFilter}<Check size={14} strokeWidth={2} />{/if}
 						</button>
-						{#each projectOptions as opt (opt.id)}
-							<button class="menu-item" class:active={projectFilter === opt.id} role="menuitem" onclick={() => pickProject(opt.id)}>
+						{#each deviceOptions as opt (opt.id)}
+							<button class="menu-item" class:active={deviceFilter === opt.id} role="menuitem" onclick={() => pickDevice(opt.id)}>
 								<span class="menu-label">{opt.label}</span>
-								{#if projectFilter === opt.id}<Check size={14} strokeWidth={2} />{/if}
+								{#if deviceFilter === opt.id}<Check size={14} strokeWidth={2} />{/if}
 							</button>
 						{/each}
 					</div>
 				{/if}
 			</div>
-		{/if}
 
-		<div class="rowmenu" bind:this={deviceMenuRef}>
-			<button
-				class="ghostrow"
-				class:active={!!deviceFilter}
-				aria-haspopup="menu"
-				aria-expanded={deviceMenuOpen}
-				onclick={() => { const next = !deviceMenuOpen; closeMenus(); deviceMenuOpen = next; }}
-			>
-				<MonitorSmartphone size={16} strokeWidth={1.85} />
-				<span class="label">{deviceFilterLabel}</span>
-				<ChevronDown class="chev" size={14} strokeWidth={2} />
-			</button>
-			{#if deviceMenuOpen}
-				<div class="menu" role="menu">
-					<button class="menu-item" class:active={!deviceFilter} role="menuitem" onclick={() => pickDevice(null)}>
-						<span class="menu-label">All devices</span>
-						{#if !deviceFilter}<Check size={14} strokeWidth={2} />{/if}
-					</button>
-					{#each deviceOptions as opt (opt.id)}
-						<button class="menu-item" class:active={deviceFilter === opt.id} role="menuitem" onclick={() => pickDevice(opt.id)}>
-							<span class="menu-label">{opt.label}</span>
-							{#if deviceFilter === opt.id}<Check size={14} strokeWidth={2} />{/if}
-						</button>
-					{/each}
-				</div>
+			{#if projectFilter || deviceFilter}
+				<button class="scope-clear" onclick={clearFilters} title="Clear filters" aria-label="Clear filters">
+					<X size={13} strokeWidth={2} />
+				</button>
 			{/if}
 		</div>
-	</div>
-	<div class="sb-scroll">
-		<div class="workspace">
-			<button class="grouplabel ws-head" onclick={toggleWorkspace} aria-expanded={workspaceOpen}>
-				Workspace
-				<span class="rule" aria-hidden="true"></span>
-				<span class="group-chev" class:is-collapsed={!workspaceOpen}>
-					<ChevronDown size={13} strokeWidth={2} />
-				</span>
-			</button>
-			{#if workspaceOpen}
-				{#each railItems as item (item.label)}
-					<!--
-						Intent prefetch: `pointerenter` fires once per genuine entry into the
-						row (not per render, not per scroll tick, and — unlike `pointermove`
-						or `pointerover` — not repeatedly while the pointer sits inside), and
-						`focus` gives keyboard and screen-reader users the identical warm-up.
-						`preloadPanelForView` dedupes against the resolved/in-flight chunk, so
-						re-entering a row costs nothing beyond the call itself.
-					-->
-					<button
-						class="ghostrow wsrow"
-						class:active={item.on}
-						onclick={() => pickFeature(item.type)}
-						onpointerenter={() => preloadPanelForView(item.type)}
-						onfocus={() => preloadPanelForView(item.type)}
-					>
-						<item.icon size={16} strokeWidth={1.85} />
-						<span class="label">{item.label}</span>
-					</button>
-				{/each}
-			{/if}
-		</div>
-		<div class="divider" role="separator"></div>
+
 		{#if activeRows.length > 0}
 			<button class="grouplabel" onclick={() => toggleGroup('active')} aria-expanded={!collapsedGroups.active}>
 				Active <span class="count">{activeRows.length}</span>
@@ -766,6 +847,15 @@
 		{/if}
 	</div>
 
+	<!-- Mode dock: the lane switcher on a raised plate at the panel's bottom edge,
+	     where a thumb reaches it and it no longer competes with the brand row. -->
+	<footer class="sb-dock">
+		<SessionModeSwitcher value={$sessionMode} onSelect={selectMode} />
+	</footer>
+
+	{#if customizeOpen}
+		<WorkspaceCustomize items={railItems} onClose={() => (customizeOpen = false)} />
+	{/if}
 </aside>
 
 <style>
@@ -780,13 +870,40 @@
 		color: var(--sidebar-foreground);
 	}
 
+	/* Sticky top block --------------------------------------------------------
+	   Header row + New session, above the scroll region. The separator is drawn
+	   on ::after so it can cross-fade in without ever changing the block's
+	   height: a border appearing on scroll would shift every row below it. */
+	.sb-top {
+		position: relative;
+		flex: none;
+		z-index: 5;
+		padding: 0 6px;
+		background: var(--sidebar);
+	}
+	.sb-top::after {
+		content: '';
+		position: absolute;
+		left: 0;
+		right: 0;
+		top: 100%;
+		height: 20px;
+		pointer-events: none;
+		background:
+			linear-gradient(var(--sidebar-border), var(--sidebar-border)) top / 100% 1px no-repeat,
+			linear-gradient(color-mix(in oklch, var(--background) 70%, transparent), transparent);
+		opacity: 0;
+		transition: opacity 0.22s ease;
+	}
+	.sb-top.scrolled::after { opacity: 1; }
+
 	/* Header */
 	.sb-head {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		height: 52px;
-		padding: 0 8px 0 12px;
+		gap: 2px;
+		height: 48px;
+		padding: 0 0 0 4px;
 		flex: none;
 	}
 	.brand {
@@ -831,8 +948,20 @@
 	}
 	.iconbtn:hover { background: var(--sidebar-accent); color: var(--foreground); }
 
+	/* The bell is shared with the top bars, where it is right-anchored under a
+	   wide header. Inside a 220–400px panel that anchor puts most of the panel
+	   off the left edge, so pin it to the viewport under the header instead —
+	   which also takes it out of reach of any overflow container. */
+	.sb-head :global(.notif-panel) {
+		position: fixed;
+		top: 52px;
+		left: 8px;
+		right: auto;
+		width: min(340px, calc(100vw - 16px));
+		max-height: min(440px, calc(100vh - 140px));
+	}
+
 	/* Ghost rows */
-	.sb-rows { padding: 2px 8px 6px; flex: none; }
 	.rowmenu { position: relative; }
 	.ghostrow {
 		width: 100%;
@@ -851,12 +980,6 @@
 	.ghostrow:hover { background: var(--sidebar-accent); color: var(--foreground); }
 	.ghostrow:hover :global(svg) { color: var(--foreground); }
 	.ghostrow :global(svg) { color: var(--subtle-foreground); transition: color 0.13s ease; flex: none; }
-	/* An applied filter marks its row so the active scope is legible at a glance
-	   (mirrors t3-code's filled filter glyph). Uses the stronger accent-active
-	   tier so it reads a notch above a plain hover, and holds it on hover. */
-	.ghostrow.active,
-	.ghostrow.active:hover { background: var(--sidebar-accent-active); color: var(--foreground); }
-	.ghostrow.active :global(svg) { color: var(--primary); }
 	.ghostrow .label {
 		font-size: 13px;
 		margin-right: auto;
@@ -876,20 +999,87 @@
 		border: 1px solid var(--sidebar-border);
 	}
 
-	/* Filter menus */
+	/* New session: the first row of the nav, lifted by the accent glyph alone so
+	   it keeps the exact row rhythm of the Workspace rows below it. */
+	.newrow { color: var(--sidebar-foreground); margin-bottom: 1px; }
+	.newrow :global(svg) { color: var(--primary); }
+	.newrow:hover { background: color-mix(in oklch, var(--primary) 16%, transparent); }
+	.newrow:hover :global(svg) { color: var(--primary); }
+	.sb-top.scrolled .newrow { margin-bottom: 6px; }
+
+	/* Scope filters: two ghost buttons side by side on a top rule, with one
+	   clear that resets both — a per-filter clear would double the controls in
+	   a row that is already two menus wide at 220px. */
+	.scope {
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		margin: 8px 2px 0;
+		padding-top: 8px;
+		border-top: 1px solid var(--sidebar-border);
+	}
+	.fbtn {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+		height: 28px;
+		padding: 0 7px;
+		border: none;
+		background: transparent;
+		border-radius: 7px;
+		color: var(--sidebar-muted);
+		font-size: 12px;
+		cursor: pointer;
+		transition: background-color 0.13s ease, color 0.13s ease;
+	}
+	.fbtn:hover { background: var(--sidebar-accent); color: var(--foreground); }
+	.fbtn[aria-expanded='true'] { background: var(--sidebar-accent-active); color: var(--foreground); }
+	.fbtn :global(svg) { flex: none; color: var(--subtle-foreground); transition: color 0.13s ease; }
+	.fbtn .val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	/* An applied filter marks its button so the active scope is legible at a
+	   glance: the label goes bright and the glyph takes the accent. */
+	.fbtn.set { color: var(--foreground); background: var(--sidebar-accent); }
+	.fbtn.set .val { font-weight: 500; }
+	.fbtn.set :global(svg:not(.chev)) { color: var(--primary); }
+	.scope-clear {
+		margin-left: auto;
+		flex: none;
+		width: 26px;
+		height: 26px;
+		display: grid;
+		place-items: center;
+		border: none;
+		background: transparent;
+		border-radius: 6px;
+		color: var(--subtle-foreground);
+		cursor: pointer;
+		transition: background-color 0.13s ease, color 0.13s ease;
+	}
+	.scope-clear:hover { background: var(--sidebar-accent); color: var(--foreground); }
+	.rowmenu { min-width: 0; }
+
+	/* Filter menus. Fixed, not absolute: the buttons live inside the scroll
+	   region (see the POPOVER ANCHORING note at the top), and the coordinates
+	   come from the button's rect at open time. */
 	.menu {
-		position: absolute;
-		top: calc(100% + 4px);
-		left: 0;
-		right: 0;
+		position: fixed;
 		max-height: 320px;
 		overflow-y: auto;
 		padding: 4px;
-		background: var(--popover);
+		background: color-mix(in oklch, var(--popover) 90%, transparent);
+		backdrop-filter: blur(16px) saturate(1.2);
+		-webkit-backdrop-filter: blur(16px) saturate(1.2);
 		border: 1px solid var(--border);
-		border-radius: 10px;
-		box-shadow: var(--shadow-l);
-		z-index: 60;
+		border-radius: 12px;
+		box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.08), var(--shadow-l);
+		transform-origin: 20px 0;
+		animation: pop-in 200ms cubic-bezier(0.16, 1, 0.3, 1);
+		z-index: 120;
+	}
+	@keyframes pop-in {
+		from { opacity: 0; transform: scale(0.94) translateY(-4px); }
+		to { opacity: 1; transform: none; }
 	}
 	.menu-item {
 		display: flex;
@@ -921,7 +1111,9 @@
 		flex: 1 1 auto;
 		min-height: 0;
 		overflow-y: auto;
-		padding: 4px 6px 8px;
+		/* No top padding: New session is the row above, and the list has to
+		   continue on the same 1px rhythm rather than after a gap. */
+		padding: 0 6px 8px;
 		scrollbar-width: thin;
 		scrollbar-color: var(--border-strong) transparent;
 	}
@@ -1003,26 +1195,44 @@
 
 	/* Workspace nav — labeled rows reusing the ghost-row language, so the
 	   sidebar reads as one list of named destinations on desktop and touch
-	   alike (no hover-only tooltips). Lives INSIDE the session scroll area so
-	   an expanded Workspace scrolls with the sessions instead of squeezing
-	   the scrollable list down to a sliver at the panel's bottom edge. */
-	.ws-head { padding-top: 6px; padding-bottom: 4px; }
-	.wsrow { height: 30px; }
-	.wsrow.active,
-	.wsrow.active:hover { background: var(--sidebar-accent-active); color: var(--foreground); }
-	.wsrow.active :global(svg) { color: var(--primary); }
+	   alike (no hover-only tooltips). Lives INSIDE the session scroll area so a
+	   long workspace list scrolls with the sessions instead of squeezing the
+	   scrollable list down to a sliver at the panel's bottom edge. The rows
+	   themselves are styled by WorkspaceNav. */
+	.workspace { padding-top: 0; }
+
+	/* Mode dock — a raised plate at the bottom edge: top hairline, a slight
+	   gradient and an upward shadow, so the lane switcher reads as the floor of
+	   the panel rather than one more row in the ledger. */
+	.sb-dock {
+		flex: none;
+		padding: 8px 6px calc(8px + env(safe-area-inset-bottom, 0px));
+		background: linear-gradient(
+			180deg,
+			color-mix(in oklch, var(--sidebar-accent) 60%, var(--sidebar)),
+			var(--sidebar)
+		);
+		border-top: 1px solid var(--sidebar-border);
+		box-shadow: 0 -12px 24px -12px oklch(0 0 0 / 0.8), inset 0 1px 0 oklch(1 0 0 / 0.04);
+	}
 
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 
-	/* The same workspace rows serve the desktop sidebar and the mobile drawer;
-	   on handheld widths enlarge the controls to clear the 44px touch minimum. */
+	/* The same rows serve the desktop sidebar and the mobile drawer; on handheld
+	   widths enlarge the controls to clear the 44px touch minimum, and the ⌘N
+	   hint goes away because there is no keyboard to press it on. */
 	@media (hover: none), (max-width: 1080px) {
 		.iconbtn { width: 40px; height: 40px; }
 		.ghostrow { height: 44px; }
-		.wsrow { height: 40px; }
+		.shortcut { display: none; }
+		/* The drawer is fullscreen, so the brand row sits under the status bar /
+		   notch unless it clears the inset itself. */
+		.sb-top { padding-top: env(safe-area-inset-top, 0px); }
+		.sb-head { height: 56px; }
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.iconbtn, .ghostrow, .shelf, .ws-head, .group-chev { transition: none; }
+		.iconbtn, .ghostrow, .shelf, .fbtn, .scope-clear, .group-chev, .sb-top::after { transition: none; }
+		.menu { animation: none; }
 	}
 </style>

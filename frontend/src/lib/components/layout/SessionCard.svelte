@@ -1,44 +1,65 @@
 <script lang="ts">
 	/**
-	 * SessionCard - three-line session row for the Studio Noir sidebar.
+	 * SessionCard — the ledger row for the Studio Noir sidebar.
 	 *
-	 * L1: project · status · timer (row actions sit at the top-right)
-	 * L2: session title
-	 * L3: device · branch
+	 * Every row leads with ONE glyph in a fixed left column: where the branch
+	 * sits between edit and merge (see `deriveGitStage`). The session's own
+	 * runtime state moved off that slot and onto the title — a pulsing dot while
+	 * it works, an amber warning when it is parked on a prompt — so the two
+	 * questions ("what is the agent doing" / "what happened to the code") stop
+	 * competing for the same pixel.
 	 *
-	 * The mockup's third line also carries a +add/−del diffstat and a provider
-	 * glyph; neither is derivable from the sessions store without new API work,
-	 * so those two segments are omitted rather than faked.
+	 * Active card (three lines):
+	 *   L1  glyph · title · elapsed
+	 *   L2  status word · PR state · diffstat
+	 *   L3  project · device · branch
+	 *
+	 * Settled row (compact, two lines):
+	 *   L1  glyph · title · age
+	 *   L2  device · git-state word · branch
 	 *
 	 * Hover/swipe exposes a single action: Settle (active) or Move to Active
 	 * (settled). Rename, Fork, and Delete live on the header session-title menu.
 	 */
 	import { onMount } from 'svelte';
 	import {
-		Loader2,
-		AlertCircle,
-		CircleHelp,
-		GitPullRequest,
-		GitMerge,
-		ShieldQuestionMark,
+		ArrowUpFromLine,
 		Check,
-		Monitor,
 		Cloud,
-		GitBranch,
+		Diff,
+		GitCommitHorizontal,
+		GitMerge,
+		GitPullRequest,
+		GitPullRequestClosed,
+		MessageSquare,
+		Monitor,
+		TriangleAlert,
 		Undo2
 	} from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
 	import { appData } from '$lib/stores/app-data.svelte';
+	import { git } from '$lib/stores/git.svelte';
+	import { sessionGitState } from '$lib/stores/session-git-state.svelte';
 	import { toast } from '$lib/stores/toast';
 	import {
-		STATUS_LABELS,
+		GIT_STAGE_LABELS,
+		GIT_STAGE_TONES,
+		GIT_STAGE_TIPS,
+		RUNTIME_STATUS_TONES,
+		RUNTIME_STATUS_WORDS,
+		deriveGitStage,
+		diffCounts,
+		isAttentionStatus,
 		isLiveStatus,
 		formatElapsed,
 		formatAge,
 		deviceLabel,
 		branchLabel,
+		prStateText,
+		sessionModeOf,
 		sessionTimestamp,
-		type SessionCardStatus
+		type SessionCardStatus,
+		type SessionGitFacts
 	} from './session-card-data';
 
 	interface Props {
@@ -88,10 +109,93 @@
 	const title = $derived(session.title?.trim() || 'Untitled');
 	const device = $derived(deviceLabel(session));
 	const branch = $derived(branchLabel(session));
-	const statusLabel = $derived(STATUS_LABELS[status]);
+	const statusWord = $derived(RUNTIME_STATUS_WORDS[status]);
+	const statusTone = $derived(RUNTIME_STATUS_TONES[status]);
+	const attention = $derived(isAttentionStatus(status));
 	// In-flight (working) rows that aren't the open session recede so the list
 	// triages at a glance; prompt-parked / PR / done rows stay prominent.
 	const receded = $derived(status === 'working' && !active);
+
+	// ── Git state ───────────────────────────────────────────────────────
+	// The session open in the main panel already has its checkout loaded by the
+	// real git store; reading that costs nothing and stays in step with the
+	// header. Every OTHER active card leases a slow poll from the sidebar's own
+	// store. Settled rows lease nothing at all — they read `pr_state`.
+	const openGit = $derived.by(() => {
+		if (compact) return null;
+		const current = git.current;
+		if (!current) return null;
+		if (current.sessionId && current.sessionId === session.id) return current;
+		if (
+			active &&
+			current.projectId &&
+			current.projectId === session.project_id &&
+			(current.worktreeId ?? null) === (session.worktree_id ?? null)
+		) {
+			return current;
+		}
+		return null;
+	});
+
+	// A boolean, not `openGit` itself: the git store hands back a fresh object on
+	// every one of its own updates, and depending on that object would tear the
+	// lease down and re-fetch each time it blinked.
+	const usesOpenGit = $derived(openGit !== null);
+
+	$effect(() => {
+		if (compact || usesOpenGit) return;
+		return sessionGitState.watch(session.id, session.project_id ?? null, session.worktree_id ?? null);
+	});
+
+	const gitStatus = $derived.by(() => {
+		if (compact) return null;
+		if (openGit) return openGit.status;
+		return sessionGitState.get(session.id)?.status ?? null;
+	});
+	const gitDiffStats = $derived.by(() => {
+		if (compact) return null;
+		if (openGit) return openGit.diffStats;
+		return sessionGitState.get(session.id)?.diffStats ?? null;
+	});
+	const gitFacts = $derived.by<SessionGitFacts | null>(() => {
+		const s = gitStatus;
+		if (!s) return null;
+		return {
+			isRepo: s.is_git_repo,
+			hasChanges: s.has_changes,
+			ahead: s.ahead,
+			defaultBranch: s.default_branch
+		};
+	});
+
+	// The sidebar can call a row `pr` from an open pull request it matched by
+	// head branch, before the lifecycle is persisted on the row — trust that
+	// rather than drawing a session with a live PR as a bare dot.
+	const prState = $derived(
+		session.pr_state ?? (status === 'pr' ? 'open' : status === 'pr_merged' ? 'merged' : null)
+	);
+	const stage = $derived(
+		deriveGitStage({
+			mode: sessionModeOf(session),
+			hasProject: Boolean(session.project_id),
+			prState,
+			branch,
+			git: gitFacts
+		})
+	);
+	const stageTone = $derived(GIT_STAGE_TONES[stage]);
+	const stageTip = $derived(GIT_STAGE_TIPS[stage]);
+	const prText = $derived(prStateText(prState, session.pr_number));
+	/** Compact rows carry one git word; a PR names its number, the rest use the
+	 *  stage's own label ("uncommitted", "pushed", …). */
+	const stageWord = $derived(
+		(stage === 'pr' || stage === 'merged' || stage === 'closed') && prText
+			? prText
+			: GIT_STAGE_LABELS[stage]
+	);
+	// Diff counts belong to uncommitted work only — a merged branch's totals
+	// would read as "still to review".
+	const diff = $derived(gitStatus?.has_changes ? diffCounts(gitDiffStats) : null);
 
 	let cardRef = $state<HTMLElement | null>(null);
 	// Reveal state is parent-owned when `openActionsId` is supplied (the sidebar
@@ -295,67 +399,57 @@
 		title={title}
 		style:transform={dragOffset === null ? undefined : `translateX(${dragOffset}px)`}
 	>
-		{#if compact}
-			<span class="l1 cline">
-				<span class="ctitle">{title}</span>
-				{#if status === 'pr' || status === 'pr_merged'}
-					<span class="status {status}" title={status === 'pr_merged' ? 'Merged pull request' : 'Open pull request for this branch'}>
-						{#if status === 'pr_merged'}
-							<GitMerge size={11} strokeWidth={2.2} />
-						{:else}
-							<GitPullRequest size={11} strokeWidth={2.2} />
-						{/if}
-						{statusLabel}
-					</span>
-				{/if}
-				<span class="timer" class:live>{timer}</span>
-			</span>
-			<span class="l3">
-				<span class="seg">
-					<span class="cproj">{projectLabel}</span>
-				</span>
-				<span class="seg">
-					{#if session.is_remote}
-						<Cloud size={12} strokeWidth={1.9} />
-					{:else}
-						<Monitor size={12} strokeWidth={1.9} />
-					{/if}
-					<span class="dev">{device}</span>
-				</span>
-				{#if branch}
-					<span class="seg branch-seg">
-						<GitBranch size={12} strokeWidth={1.9} />
-						<span class="branch">{branch}</span>
-					</span>
-				{/if}
-			</span>
-		{:else}
+		<span class="lead {stageTone}" role="img" title={stageTip} aria-label={stageTip}>
+			{#if stage === 'pr'}
+				<GitPullRequest size={14} strokeWidth={2} />
+			{:else if stage === 'merged'}
+				<GitMerge size={14} strokeWidth={2} />
+			{:else if stage === 'closed'}
+				<GitPullRequestClosed size={14} strokeWidth={2} />
+			{:else if stage === 'dirty'}
+				<Diff size={14} strokeWidth={2} />
+			{:else if stage === 'committed'}
+				<GitCommitHorizontal size={14} strokeWidth={2} />
+			{:else if stage === 'pushed'}
+				<ArrowUpFromLine size={14} strokeWidth={2} />
+			{:else if stage === 'none'}
+				<MessageSquare size={14} strokeWidth={2} />
+			{:else}
+				<span class="stage-dot"></span>
+			{/if}
+		</span>
+
+		<span class="body">
 			<span class="l1">
-				<span class="proj">{projectLabel}</span>
-				<span class="dot proj-sep" aria-hidden="true"></span>
-				<span class="status {status}">
+				<span class="title">
 					{#if status === 'working'}
-						<Loader2 size={11} strokeWidth={2.6} class="spin" />
-					{:else if status === 'needs_permission'}
-						<ShieldQuestionMark size={11} strokeWidth={2.2} />
-					{:else if status === 'has_question' || status === 'await'}
-						<CircleHelp size={11} strokeWidth={2.2} />
-					{:else if status === 'pr'}
-						<GitPullRequest size={11} strokeWidth={2.2} />
-					{:else if status === 'pr_merged'}
-						<GitMerge size={11} strokeWidth={2.2} />
-					{:else if status === 'done'}
-						<Check size={11} strokeWidth={2.6} />
-					{/if}
-					{statusLabel}
+						<span class="pip" aria-label="Working"></span>
+					{:else if attention}
+						<TriangleAlert size={12} strokeWidth={2.2} class="warn" />
+					{/if}{title}
 				</span>
-				<span class="dot" aria-hidden="true"></span>
 				<span class="timer" class:live>{timer}</span>
 			</span>
 
-			<span class="l2">{title}</span>
+			{#if !compact}
+				<span class="l2">
+					<span class="st {statusTone}">{statusWord}</span>
+					{#if prText}
+						<span class="dot" aria-hidden="true"></span>
+						<span class="st {stageTone}">{prText}</span>
+					{/if}
+					{#if diff}
+						<span class="dot" aria-hidden="true"></span>
+						<span class="diff"><span class="p">{diff.plus}</span> <span class="m">{diff.minus}</span></span>
+					{/if}
+				</span>
+			{/if}
 
 			<span class="l3">
+				{#if !compact}
+					<span class="seg"><span class="proj">{projectLabel}</span></span>
+					<span class="dot" aria-hidden="true"></span>
+				{/if}
 				<span class="seg">
 					{#if session.is_remote}
 						<Cloud size={12} strokeWidth={1.9} />
@@ -364,14 +458,16 @@
 					{/if}
 					<span class="dev">{device}</span>
 				</span>
+				{#if compact && stageWord}
+					<span class="dot" aria-hidden="true"></span>
+					<span class="st {stageTone}">{stageWord}</span>
+				{/if}
 				{#if branch}
-					<span class="seg branch-seg">
-						<GitBranch size={12} strokeWidth={1.9} />
-						<span class="branch">{branch}</span>
-					</span>
+					<span class="dot" aria-hidden="true"></span>
+					<span class="seg branch-seg"><span class="branch">{branch}</span></span>
 				{/if}
 			</span>
-		{/if}
+		</span>
 	</div>
 
 	<span
@@ -420,8 +516,13 @@
 	.scard-frame.actions-open {
 		--ram-reveal: 1;
 	}
+	/* Fixed 16px lead column so every glyph lines up down the list, however
+	   narrow the sidebar gets (it resizes to 220px). */
 	.scard {
-		display: block;
+		display: grid;
+		grid-template-columns: 16px minmax(0, 1fr);
+		column-gap: 6px;
+		align-items: start;
 		width: 100%;
 		text-align: left;
 		/* When the hover action reveals, grow the right padding so lines
@@ -456,20 +557,45 @@
 	.scard:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
 	/* Compact two-line row for settled/archived sessions: title + age, then a
-	   muted meta line (project · device · branch). Still denser than the
+	   muted meta line (device · git state · branch). Still denser than the
 	   three-line active cards. Hover reveals the quick action centered at the
 	   row's right edge; the mobile swipe strip is untouched. */
 	.scard.compact { padding: 6px calc(8px + var(--ram-reveal) * 30px) 7px 8px; }
-	.l1.cline { display: flex; align-items: center; gap: 8px; }
-	.cproj {
-		color: var(--sidebar-muted);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		max-width: 96px;
-	}
 	.scard.compact .l3 { margin-top: 3px; font-size: 10.5px; }
-	.ctitle {
+	.scard.compact.active::before { top: 6px; bottom: 6px; }
+
+	/* ── Leading git glyph ───────────────────────────────────────────── */
+	.lead {
+		display: grid;
+		place-items: center;
+		height: 17px;
+		color: var(--subtle-foreground);
+	}
+	.scard.compact .lead { height: 16px; }
+	.lead :global(svg) { flex: none; }
+	.lead.green { color: var(--success); }
+	.lead.purple { color: var(--status-merged); }
+	.lead.amber { color: var(--warning); }
+	.lead.muted { color: var(--subtle-foreground); }
+	/* "Repo, nothing to report" is a dot rather than an icon — it should read
+	   as an absence, not as one more thing to decode. */
+	.stage-dot {
+		width: 5px;
+		height: 5px;
+		border-radius: 50%;
+		background: currentColor;
+		opacity: 0.75;
+	}
+
+	.body { min-width: 0; }
+
+	.l1 {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		min-width: 0;
+	}
+	.title {
 		flex: 1 1 auto;
 		min-width: 0;
 		overflow: hidden;
@@ -480,63 +606,40 @@
 		letter-spacing: -0.008em;
 		color: var(--sidebar-foreground);
 	}
-	.scard.compact .timer { flex: none; }
-	.scard.compact.active::before { top: 6px; bottom: 6px; }
-
-	.l1 {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		min-width: 0;
-		overflow: hidden;
-	}
-	.proj {
-		font-size: 12px;
-		color: var(--sidebar-muted);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		max-width: 96px;
-	}
-	.dot {
-		width: 2px;
-		height: 2px;
+	.scard:not(.compact) .title { font-size: 13.5px; font-weight: 600; }
+	/* Runtime state rides IN the title, so it truncates with it and never
+	   steals a column from the branch line. */
+	.pip {
+		display: inline-block;
+		width: 6px;
+		height: 6px;
 		border-radius: 50%;
-		background: var(--subtle-foreground);
-		flex: none;
+		background: var(--primary);
+		margin-right: 6px;
+		vertical-align: 1px;
+		box-shadow: 0 0 6px -1px var(--glow);
+		animation: card-ping 1.8s ease-in-out infinite;
 	}
-	.status {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		font-size: 12px;
-		white-space: nowrap;
-		flex: none;
-	}
-	.status.working { color: var(--primary); }
-	.status.needs_permission { color: var(--warning); }
-	.status.has_question,
-	.status.await { color: var(--amber); }
-	.status.pr,
-	.status.pr_merged { color: var(--success); }
-	.status.done { color: var(--muted-foreground); }
-	.status.idle { color: var(--subtle-foreground); }
-	.status :global(svg) { flex: none; }
-	.status.working :global(svg) {
-		filter: drop-shadow(0 0 4px var(--glow));
-	}
-	/* The pulse is for static glyphs only; scoping it off .spin lets the
-	   lower-specificity spin rule below own the loader's animation. */
-	.status.working :global(svg:not(.spin)) {
+	.title :global(.warn) {
+		display: inline-block;
+		color: var(--warning);
+		margin-right: 5px;
+		vertical-align: -2px;
 		animation: card-pulse 2.4s ease-in-out infinite;
 	}
-	.status.needs_permission :global(svg),
-	.status.has_question :global(svg),
-	.status.await :global(svg) { animation: card-pulse 2.4s ease-in-out infinite; }
-	.status :global(.spin) { animation: card-spin 1.4s linear infinite; }
 
-	@keyframes card-spin {
-		to { transform: rotate(360deg); }
+	.dot {
+		width: 3px;
+		height: 3px;
+		border-radius: 50%;
+		background: var(--subtle-foreground);
+		opacity: 0.6;
+		flex: none;
+	}
+
+	@keyframes card-ping {
+		0%, 100% { opacity: 1; transform: scale(1); }
+		50% { opacity: 0.55; transform: scale(0.82); }
 	}
 	@keyframes card-pulse {
 		0%, 100% { opacity: 0.75; }
@@ -547,36 +650,53 @@
 		flex: none;
 		font-family: var(--font-mono);
 		font-variant-numeric: tabular-nums;
-		font-size: 11.5px;
+		font-size: 11px;
 		color: var(--sidebar-muted);
 		white-space: nowrap;
 		transition: opacity 120ms ease;
 	}
 	.timer.live { color: var(--primary); }
 
-	/* Receded rows dim their project + title + meta but keep the colored status
+	/* Receded rows dim the title + meta line but keep the status line, glyph
 	   and timer lit; hover (desktop) restores the whole row. */
-	.scard.receded .proj,
-	.scard.receded .l2,
+	.scard.receded .title,
 	.scard.receded .l3 { opacity: 0.62; transition: opacity 0.13s ease; }
-	.scard-frame:hover .scard.receded .proj,
-	.scard-frame:hover .scard.receded .l2,
+	.scard-frame:hover .scard.receded .title,
 	.scard-frame:hover .scard.receded .l3,
-	.scard-frame:has(:focus-visible) .scard.receded .proj,
-	.scard-frame:has(:focus-visible) .scard.receded .l2,
+	.scard-frame:has(:focus-visible) .scard.receded .title,
 	.scard-frame:has(:focus-visible) .scard.receded .l3 { opacity: 1; }
 
+	/* Line 2 (active cards): what the agent is doing · what the PR is doing ·
+	   how much has changed. */
 	.l2 {
-		display: block;
-		margin-top: 3px;
-		font-size: 13.5px;
-		font-weight: 500;
-		letter-spacing: -0.008em;
-		color: var(--sidebar-foreground);
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		margin-top: 4px;
+		min-width: 0;
+		font-size: 11.5px;
 		white-space: nowrap;
+		overflow: hidden;
+	}
+	.st {
+		flex: none;
+		font-weight: 500;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	.st.accent { color: var(--primary); }
+	.st.amber { color: var(--warning); }
+	.st.green { color: var(--success); }
+	.st.purple { color: var(--status-merged); }
+	.st.muted { color: var(--muted-foreground); }
+	.diff {
+		flex: none;
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		font-variant-numeric: tabular-nums;
+	}
+	.diff .p { color: var(--success); }
+	.diff .m { color: var(--destructive); }
 
 	.l3 {
 		margin-top: 4px;
@@ -590,6 +710,7 @@
 		overflow: hidden;
 	}
 	.l3 :global(svg) { color: var(--subtle-foreground); flex: none; }
+	.l3 .st { font-size: 10.5px; font-weight: 400; }
 	.seg {
 		display: inline-flex;
 		align-items: center;
@@ -603,6 +724,7 @@
 	.seg.branch-seg {
 		flex: 0 1 auto;
 	}
+	.proj,
 	.dev {
 		display: block;
 		min-width: 0;
@@ -714,8 +836,8 @@
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.status :global(svg),
-		.status :global(.spin) { animation: none; }
+		.pip,
+		.title :global(.warn) { animation: none; }
 		.scard { transition: none; }
 	}
 </style>
