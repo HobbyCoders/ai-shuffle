@@ -18,7 +18,7 @@ import {
 /** A live, authenticated local chat session — git actions should show. */
 function base(overrides: Partial<HeaderGitActionsInput> = {}): HeaderGitActionsInput {
 	return {
-		viewType: 'chat',
+		viewType: 'session',
 		hasProject: true,
 		githubAuthenticated: true,
 		worktreeDeleted: false,
@@ -42,7 +42,7 @@ describe('shouldShowHeaderGitActions', () => {
 		expect(shouldShowHeaderGitActions(base({ isRemote: true }))).toBe(false);
 	});
 
-	it('hides when not a chat view', () => {
+	it('hides when not a session view', () => {
 		expect(shouldShowHeaderGitActions(base({ viewType: 'board' }))).toBe(false);
 		expect(shouldShowHeaderGitActions(base({ viewType: undefined }))).toBe(false);
 	});

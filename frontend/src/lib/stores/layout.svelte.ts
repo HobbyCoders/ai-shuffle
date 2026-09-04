@@ -13,7 +13,7 @@ import { createSubscribers } from './store-utils';
 // ============================================
 
 export type ViewType =
-	| 'chat'
+	| 'session'
 	| 'board'
 	| 'build'
 	| 'settings'
@@ -30,7 +30,7 @@ export type ViewType =
 
 interface ActiveView {
 	type: ViewType;
-	/** Session ID for chat views, null for new chat */
+	/** Session ID for the conversation panel, null for a new session */
 	sessionId?: string | null;
 	/**
 	 * Deep-link target within a feature page (e.g. an agent id to open in its
@@ -67,7 +67,10 @@ function loadPersistedState(): Partial<LayoutState> | null {
 	try {
 		const raw = localStorage.getItem(STORAGE_KEY);
 		if (!raw) return null;
-		return JSON.parse(raw);
+		const parsed = JSON.parse(raw);
+		// Pre-rename ViewType 'chat' meant this conversation panel, not SessionMode.
+		if (parsed?.activeView?.type === 'chat') parsed.activeView.type = 'session';
+		return parsed;
 	} catch {
 		return null;
 	}
@@ -159,7 +162,7 @@ export const layout = {
 	openChat(sessionId: string | null) {
 		_update((s) => ({
 			...s,
-			activeView: { type: 'chat', sessionId }
+			activeView: { type: 'session', sessionId }
 		}));
 	},
 
@@ -169,12 +172,12 @@ export const layout = {
 	openBoard() {
 		_update((s) => ({
 			...s,
-			activeView: { type: 'chat', sessionId: null }
+			activeView: { type: 'session', sessionId: null }
 		}));
 	},
 
 	/** Navigate to a feature page, optionally deep-linking to an item id. */
-	openFeaturePage(type: Exclude<ViewType, 'chat'>, itemId?: string | null) {
+	openFeaturePage(type: Exclude<ViewType, 'session'>, itemId?: string | null) {
 		_update((s) => ({
 			...s,
 			activeView: { type, sessionId: null, itemId: itemId ?? null }

@@ -35,7 +35,7 @@
  * Svelte template.
  */
 export interface HeaderGitActionsInput {
-	/** The active view type ('chat' when a session is open). */
+	/** The active view type ('session' when the conversation panel is open). */
 	viewType: string | undefined;
 	/** The session has an associated project. */
 	hasProject: boolean;
@@ -71,7 +71,7 @@ export interface HeaderGitActionsInput {
 /**
  * Resolve whether the header's LOCAL git action buttons should render.
  *
- * Shown for a chat view with a project on a non-deleted, NON-remote session.
+ * Shown for a session view with a project on a non-deleted, NON-remote session.
  * Remote-placed sessions never show local git actions — their repo lives on the
  * owning install, so the local status is meaningless (and would surface a bogus
  * "Init Repo"). Chat-lane sessions have no repo, so the rail is hidden for
@@ -84,14 +84,14 @@ export interface HeaderGitActionsInput {
 export function shouldShowHeaderGitActions(input: HeaderGitActionsInput): boolean {
 	const { viewType, hasProject, worktreeDeleted, isRemote, sessionMode } = input;
 
-	if (viewType !== 'chat') return false;
+	if (viewType !== 'session') return false;
 	if (!hasProject) return false;
 	if (worktreeDeleted) return false;
 	// Remote-placed session: repo is on the owning install, never local.
 	if (isRemote) return false;
 	// Chat lane has no repository. Do NOT also require isMobile: that blanked
 	// Finish/Commit/Push on mobile *code* sessions (the conversation view is
-	// still viewType 'chat' on every lane).
+	// still viewType 'session' on every lane).
 	if (sessionMode === 'chat') return false;
 
 	return true;

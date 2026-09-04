@@ -60,7 +60,7 @@
 	// is dropped on mobile, so the name lives here, centered). Mirrors MainPanel's
 	// headerTitle derivation.
 	const boundChatId = $derived(
-		currentType === 'chat' ? ($activeSession.sessionId ?? null) : null
+		currentType === 'session' ? ($activeSession.sessionId ?? null) : null
 	);
 	const chatTitle = $derived.by(() => {
 		const s = $activeSession;
@@ -71,7 +71,7 @@
 		});
 	});
 	const mobileTitle = $derived.by(() => {
-		if (currentType === 'chat') return chatTitle;
+		if (currentType === 'session') return chatTitle;
 		if (currentType === 'board') return 'Sessions';
 		if (buildActive) return 'Build';
 		return (currentType && TITLES[currentType]) || 'AI Shuffle';

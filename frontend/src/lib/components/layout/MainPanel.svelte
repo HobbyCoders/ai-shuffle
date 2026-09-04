@@ -211,9 +211,9 @@
 	let createBranchEverOpened = $state(false);
 	let initRepoEverOpened = $state(false);
 
-	// Get the active session state (if in chat view)
+	// Get the active session state (if the conversation panel is open)
 	const activeTab = $derived(
-		$activeView?.type === 'chat' ? $activeSession : null
+		$activeView?.type === 'session' ? $activeSession : null
 	);
 
 	// Header title. For a chat, a session BOUND to an id always shows its own
@@ -223,7 +223,7 @@
 	// chat-empty-state.ts). Only a genuinely unbound, empty chat shows "New Chat".
 	const headerTitle = $derived.by(() => {
 		if (!$activeView) return '';
-		if ($activeView.type === 'chat') {
+		if ($activeView.type === 'session') {
 			return chatHeaderTitle({
 				sessionId: activeTab?.sessionId ?? null,
 				title: activeTab?.title,
@@ -242,12 +242,12 @@
 	// just the section name everywhere else. The project crumb returns to the
 	// sessions board.
 	const crumbProject = $derived(
-		$activeView?.type === 'chat' ? (headerProjectName || 'Sessions') : null
+		$activeView?.type === 'session' ? (headerProjectName || 'Sessions') : null
 	);
 	const crumbTitle = $derived.by(() => {
 		const type = $activeView?.type;
 		if (!type) return 'Sessions';
-		if (type === 'chat') return headerTitle;
+		if (type === 'session') return headerTitle;
 		if (type === 'board') return 'Sessions';
 		if (isBuildView) return 'Build';
 		return viewTitles[type] || '';
@@ -854,7 +854,7 @@
 	existing GitHeaderActions instance with its existing handlers.
 -->
 {#snippet downloadAction()}
-	{#if $activeView?.type === 'chat' && activeTab?.sessionId && activeTab.messages.length > 0}
+	{#if $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}
 		<button
 			class="download-jsonl-btn"
 			onclick={handleDownloadJsonl}
@@ -868,7 +868,7 @@
 {/snippet}
 
 {#snippet headerActions()}
-	{#if $activeView?.type === 'chat' && activeTab?.sessionId}
+	{#if $activeView?.type === 'session' && activeTab?.sessionId}
 		<button
 			class="browser-toggle-btn"
 			class:active={$browserPanelOpen}
@@ -936,12 +936,12 @@
 	{/if}
 
 	{#if $activeView}
-		<!-- Mobile keeps the PageHeader for chat views and non-embedded pages -->
-		{#if isMobile && ($activeView.type === 'chat' || !embeddedViews.has($activeView.type))}
+		<!-- Mobile keeps the PageHeader for session views and non-embedded pages -->
+		{#if isMobile && ($activeView.type === 'session' || !embeddedViews.has($activeView.type))}
 			<PageHeader
 				title={headerTitle}
 				{isMobile}
-				hideGlobalStt={$activeView?.type === 'chat'}
+				hideGlobalStt={$activeView?.type === 'session'}
 			>
 				{#snippet leftActions()}
 					{@render downloadAction()}

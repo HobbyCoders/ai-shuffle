@@ -65,4 +65,29 @@ describe('layout store — one-shot deep-link itemId', () => {
 		layout.openFeaturePage('mcp');
 		expect(layout.getState().activeView?.itemId ?? null).toBeNull();
 	});
+
+	it("migrates persisted ViewType 'chat' to 'session' on load", async () => {
+		localStorage.setItem(
+			STORAGE_KEY,
+			JSON.stringify({
+				sidebarCollapsed: false,
+				activeView: { type: 'chat', sessionId: 'sess-1' },
+				sidebarWidth: 390
+			})
+		);
+		const { layout } = await import('./layout.svelte');
+		expect(layout.getState().activeView).toMatchObject({
+			type: 'session',
+			sessionId: 'sess-1'
+		});
+	});
+
+	it("openChat writes ViewType 'session'", async () => {
+		const { layout } = await import('./layout.svelte');
+		layout.openChat('sess-2');
+		expect(layout.getState().activeView).toMatchObject({
+			type: 'session',
+			sessionId: 'sess-2'
+		});
+	});
 });

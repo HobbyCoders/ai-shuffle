@@ -151,7 +151,7 @@
 	function handleNotificationOpenSession(sessionId: string | null | undefined) {
 		if (!sessionId) return;
 		const alreadyOpen =
-			$activeView?.type === 'chat' &&
+			$activeView?.type === 'session' &&
 			$activeView.sessionId === sessionId &&
 			$activeSession?.sessionId === sessionId;
 		if (alreadyOpen) return;
@@ -162,7 +162,7 @@
 	 * Open a feature page (settings, files, plugins, etc.)
 	 */
 	function handleOpenFeature(type: ViewType, itemId?: string | null) {
-		if (type === 'chat') {
+		if (type === 'session') {
 			handleNewSession();
 			return;
 		}
@@ -170,10 +170,10 @@
 		if ($sidebarOverlay && !$sidebarCollapsed) {
 			layout.setSidebarCollapsed(true);
 			requestAnimationFrame(() => {
-				layout.openFeaturePage(type as Exclude<ViewType, 'chat'>, itemId);
+				layout.openFeaturePage(type as Exclude<ViewType, 'session'>, itemId);
 			});
 		} else {
-			layout.openFeaturePage(type as Exclude<ViewType, 'chat'>, itemId);
+			layout.openFeaturePage(type as Exclude<ViewType, 'session'>, itemId);
 		}
 	}
 
@@ -248,7 +248,7 @@
 		// the layout immediately persists null, but the backend may still have the
 		// old session. In that case, the layout's explicit "new chat" intent wins.
 		const restoredSessionId = $activeSession?.sessionId ?? null;
-		const currentViewSessionId = $activeView?.type === 'chat' ? ($activeView.sessionId ?? null) : null;
+		const currentViewSessionId = $activeView?.type === 'session' ? ($activeView.sessionId ?? null) : null;
 
 		// Pull the sidepanel over to the restored session's lane, so a reload never
 		// leaves the open session missing from the list beside it (the alignment
@@ -265,12 +265,12 @@
 			} else {
 				handleNewSession();
 			}
-		} else if ($activeView.type === 'chat' && currentViewSessionId === null && restoredSessionId) {
+		} else if ($activeView.type === 'session' && currentViewSessionId === null && restoredSessionId) {
 			// Layout says "new chat" but backend has a session — the user explicitly
 			// clicked New Chat (layout persists synchronously) but the async backend
 			// persist may not have completed. Respect the layout's explicit intent.
 			activeSession.newChat();
-		} else if ($activeView.type === 'chat' && currentViewSessionId !== restoredSessionId) {
+		} else if ($activeView.type === 'session' && currentViewSessionId !== restoredSessionId) {
 			// Layout view and active session disagree — backend is authoritative
 			followRestoredLane();
 			layout.openChat(restoredSessionId);
