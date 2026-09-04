@@ -33,6 +33,8 @@ describe('ControlsDock mobile control order', () => {
 				onAttachClick: vi.fn()
 			}
 		});
+		const dock = container.querySelector('.controls-dock');
+		expect(dock instanceof HTMLElement && !dock.inert).toBe(true);
 		const left = container.querySelector('.dock-left');
 		const mobile = container.querySelector('.mobile-controls');
 		const settings = left?.querySelector('.mobile-settings-trigger');
@@ -56,5 +58,18 @@ describe('ControlsDock mobile control order', () => {
 			.toBeTruthy();
 		expect(attach.compareDocumentPosition(contextUsage) & Node.DOCUMENT_POSITION_FOLLOWING)
 			.toBeTruthy();
+	});
+
+	it('marks the dock inert when ChatInput is guarding the expand tap', () => {
+		const { container } = render(ControlsDock, {
+			props: {
+				isUploading: false,
+				onAttachClick: vi.fn(),
+				inertToolbar: true
+			}
+		});
+		const dock = container.querySelector('.controls-dock');
+		expect(dock).toBeInstanceOf(HTMLElement);
+		expect(dock instanceof HTMLElement && dock.inert).toBe(true);
 	});
 });

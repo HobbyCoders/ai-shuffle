@@ -63,9 +63,11 @@
 		voiceActions?: Snippet;
 		/** Lets ChatInput keep its compact mobile surface expanded while the sheet is open. */
 		onSheetOpenChange?: (open: boolean) => void;
+		/** Collapsed / expanding-tap: dock stays in the tree but cannot receive the expand click. */
+		inertToolbar?: boolean;
 	}
 
-	let { isUploading, onAttachClick, voiceActions, onSheetOpenChange }: Props = $props();
+	let { isUploading, onAttachClick, voiceActions, onSheetOpenChange, inertToolbar = false }: Props = $props();
 
 	// ── Desktop popovers ──────────────────────────────────────────────
 	// Three anchored popovers, one open at a time: the permission menu, the
@@ -310,6 +312,7 @@
 <div
 	class="controls-dock"
 	bind:this={dockRef}
+	inert={inertToolbar}
 	style:--dock-pop-max={popoverRoom != null ? `${popoverRoom}px` : undefined}
 >
 	<!-- Left group: permission · voice · attach -->

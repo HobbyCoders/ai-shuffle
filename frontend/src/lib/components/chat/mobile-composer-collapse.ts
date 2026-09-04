@@ -55,3 +55,20 @@ export function reconcileMobileComposerExpanded(
 	}
 	return false;
 }
+
+export interface MobileComposerToolbarPointerState {
+	collapsed: boolean;
+	/** True from the expanding pointerdown until after the following click. */
+	expandPointerActive: boolean;
+}
+
+/**
+ * The collapsed dock is `display:none`, but expanding on pointerdown reflows
+ * the toolbar under the still-down finger. Block hits while collapsed and
+ * until that pointer's click has been delivered.
+ */
+export function shouldBlockMobileComposerToolbarPointer(
+	state: MobileComposerToolbarPointerState
+): boolean {
+	return state.collapsed || state.expandPointerActive;
+}

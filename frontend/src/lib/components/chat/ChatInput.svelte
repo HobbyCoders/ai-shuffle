@@ -29,6 +29,7 @@
 	import { attachmentBlockReason } from './attach-disable';
 	import {
 		reconcileMobileComposerExpanded,
+		shouldBlockMobileComposerToolbarPointer,
 		shouldCollapseMobileComposer
 	} from './mobile-composer-collapse';
 	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
@@ -250,6 +251,13 @@
 			fileAutocompleteOpen: showFileAutocomplete
 		})
 	);
+	let expandPointerActive = $state(false);
+	const toolbarPointerBlocked = $derived(
+		shouldBlockMobileComposerToolbarPointer({
+			collapsed: mobileCollapsed,
+			expandPointerActive
+		})
+	);
 
 	function isMobileComposerViewport(): boolean {
 		return typeof window !== 'undefined' && isPanelFullscreenWidth(window.innerWidth);
@@ -257,6 +265,8 @@
 
 	let mobileReconcileRaf: number | null = null;
 	let mobileComposerDestroyed = false;
+	let expandPointerCleanup: (() => void) | null = null;
+	let expandPointerTimeout: ReturnType<typeof setTimeout> | null = null;
 
 	function isComposerOwnedNode(target: EventTarget | Node | null): boolean {
 		if (!(target instanceof Node)) return false;
@@ -294,13 +304,51 @@
 		});
 	}
 
+	function clearExpandPointerGuard() {
+		expandPointerCleanup?.();
+		expandPointerCleanup = null;
+		if (expandPointerTimeout !== null) {
+			clearTimeout(expandPointerTimeout);
+			expandPointerTimeout = null;
+		}
+		expandPointerActive = false;
+	}
+
+	function armExpandPointerGuard() {
+		if (!mobileCollapsed || expandPointerActive) return;
+		expandPointerActive = true;
+		const onFinish = () => {
+			expandPointerCleanup = null;
+			window.removeEventListener('pointerup', onFinish, true);
+			window.removeEventListener('pointercancel', onFinish, true);
+			// pointerup is followed by click in the same turn; release after it.
+			expandPointerTimeout = setTimeout(() => {
+				expandPointerTimeout = null;
+				expandPointerActive = false;
+			}, 0);
+		};
+		window.addEventListener('pointerup', onFinish, true);
+		window.addEventListener('pointercancel', onFinish, true);
+		expandPointerCleanup = () => {
+			window.removeEventListener('pointerup', onFinish, true);
+			window.removeEventListener('pointercancel', onFinish, true);
+		};
+	}
+
 	function keepMobileComposerExpanded() {
 		if (isMobileComposerViewport()) mobileComposerExpanded = true;
+	}
+
+	function handleComposerPointerDown() {
+		if (!isMobileComposerViewport()) return;
+		armExpandPointerGuard();
+		mobileComposerExpanded = true;
 	}
 
 	function handleDocumentPointerDown(event: PointerEvent) {
 		if (!compact || !isMobileComposerViewport()) return;
 		if (isComposerOwnedNode(event.target)) {
+			armExpandPointerGuard();
 			mobileComposerExpanded = true;
 			return;
 		}
@@ -314,6 +362,7 @@
 	onDestroy(() => {
 		mobileComposerDestroyed = true;
 		if (mobileReconcileRaf !== null) cancelAnimationFrame(mobileReconcileRaf);
+		clearExpandPointerGuard();
 	});
 
 	onMount(() => {
@@ -741,6 +790,7 @@
 <div
 	class="chat-input-wrapper"
 	class:mobile-collapsed={mobileCollapsed}
+	class:mobile-toolbar-blocked={toolbarPointerBlocked}
 	onfocusout={scheduleMobileComposerReconciliation}
 	role="region"
 	aria-label="Chat input with file drop"
@@ -784,7 +834,7 @@
 
 		<form
 			onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}
-			onpointerdown={keepMobileComposerExpanded}
+			onpointerdown={handleComposerPointerDown}
 		>
 			<!-- Context chips: agent · runner · repository · branch · worktree.
 			     A loose row floating ABOVE the box with a visible gap, in both the
@@ -902,6 +952,7 @@
 				     component's recording state and render inside the form. -->
 				<ControlsDock
 					{isUploading}
+					inertToolbar={toolbarPointerBlocked}
 					onAttachClick={triggerFileUpload}
 					onSheetOpenChange={(open) => {
 						mobileControlsOpen = open;
@@ -1157,6 +1208,13 @@
 		   single remaining line. */
 		.mobile-collapsed :global(.controls-dock) {
 			display: none;
+			pointer-events: none;
+		}
+
+		/* Expanding on pointerdown reflows this row under the still-down finger.
+		   Keep it un-hittable until that pointer's click has been delivered. */
+		.mobile-toolbar-blocked :global(.controls-dock) {
+			pointer-events: none;
 		}
 
 		.mobile-collapsed .input-area {

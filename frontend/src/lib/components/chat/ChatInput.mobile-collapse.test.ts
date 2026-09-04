@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
 	reconcileMobileComposerExpanded,
+	shouldBlockMobileComposerToolbarPointer,
 	shouldCollapseMobileComposer,
 	type MobileComposerCollapseState,
 	type MobileComposerReconcileState
@@ -97,6 +98,29 @@ describe('mobile composer deferred ownership reconciliation', () => {
 	});
 });
 
+describe('mobile composer toolbar pointer guard', () => {
+	it('blocks hits while the composer is collapsed', () => {
+		expect(shouldBlockMobileComposerToolbarPointer({
+			collapsed: true,
+			expandPointerActive: false
+		})).toBe(true);
+	});
+
+	it('blocks hits for the expanding pointer even after the dock is shown', () => {
+		expect(shouldBlockMobileComposerToolbarPointer({
+			collapsed: false,
+			expandPointerActive: true
+		})).toBe(true);
+	});
+
+	it('allows hits once expanded and the expanding pointer has settled', () => {
+		expect(shouldBlockMobileComposerToolbarPointer({
+			collapsed: false,
+			expandPointerActive: false
+		})).toBe(false);
+	});
+});
+
 describe('ChatInput mobile collapsed surface', () => {
 	it('uses compact squared corners instead of the full-width pill radius', () => {
 		expect(mobileStyles).toMatch(
@@ -111,10 +135,24 @@ describe('ChatInput mobile collapsed surface', () => {
 		// The send / stop cluster lives in the input area (right of the editor
 		// row), not in the controls row, so the whole row can go when idle.
 		expect(ruleBody('.mobile-collapsed :global(.controls-dock)')).toMatch(/display:\s*none;/);
+		expect(ruleBody('.mobile-collapsed :global(.controls-dock)')).toMatch(/pointer-events:\s*none;/);
 		expect(chatInput).toContain('class="send-cluster"');
 		expect(chatInput).toMatch(/\.send-cluster\s*\{[^}]*align-self:\s*center;/);
 		expect(mobileStyles).not.toMatch(/\.send-cluster\s*\{[^}]*display:\s*none;/);
 		expect(mobileStyles).not.toContain('.controls-right');
+	});
+
+	it('keeps the dock inert for the tap that expands the collapsed composer', () => {
+		// Expanding on pointerdown reflows the toolbar under the finger. The
+		// wrapper class and inert flag cover that click; display:none alone
+		// does not, because it lifts before click is dispatched.
+		expect(ruleBody('.mobile-toolbar-blocked :global(.controls-dock)')).toMatch(
+			/pointer-events:\s*none;/
+		);
+		expect(chatInput).toContain('class:mobile-toolbar-blocked={toolbarPointerBlocked}');
+		expect(chatInput).toContain('inertToolbar={toolbarPointerBlocked}');
+		expect(chatInput).toContain('onpointerdown={handleComposerPointerDown}');
+		expect(chatInput).toContain('armExpandPointerGuard()');
 	});
 
 	it('renders the context chip row only in the code lane', () => {
