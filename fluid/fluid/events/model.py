@@ -201,7 +201,9 @@ class SteerDelivered(Event):
     ``steers`` holds one record per delivered steer in submission order:
     ``{"id": <the Steer's id, or None>, "text": <the user's text>}``. A peer's
     ``AgentMessage``, which shares this queue and this receipt, carries an
-    extra ``"from"`` naming the sender; the key's absence marks the user's own.
+    extra ``"from"`` naming the sender; a ``Steer`` submitted with a non-default
+    ``origin`` (a harness notice) carries ``"origin"`` instead. Neither key on a
+    record marks the user's own words.
 
     A host with a durable queue retires an entry the moment its id shows up
     here. An id that never arrives was never seen by the model: the engine

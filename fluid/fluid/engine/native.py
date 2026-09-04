@@ -249,20 +249,55 @@ def _hook_reminder(label: str, text: str) -> str:
     return hook_reminder(label, text)
 
 
-def _steer_parts(pending: Steer | AgentMessage | str) -> tuple[str | None, str, str | None]:
-    """Split a queued interjection into ``(id, text, sender)``.
+def _steer_parts(
+    pending: Steer | AgentMessage | str,
+) -> tuple[str | None, str, str | None, str]:
+    """Split a queued interjection into ``(id, text, sender, origin)``.
 
     The queue normally holds Steer ops, but a bare string is accepted so
     callers that pushed text straight onto ``_pending_steers`` keep working;
     such a steer simply has no correlation id. ``sender`` is None for the
-    user's own steers and the peer's name for an AgentMessage — which is what
-    picks the marker the text is rendered in (fluid.context.peer).
+    user's own steers and the peer's name for an AgentMessage. ``origin``
+    ("user" | "system" | "peer") is what picks the marker the text is rendered
+    in — the user's steering marker, the harness-notice marker, or the peer
+    marker (fluid.context.steering, fluid.context.peer).
     """
     if isinstance(pending, str):
-        return (None, pending, None)
+        return (None, pending, None, "user")
     if isinstance(pending, AgentMessage):
-        return (pending.id, pending.text, pending.sender)
-    return (pending.id, pending.text, None)
+        return (pending.id, pending.text, pending.sender, "peer")
+    return (pending.id, pending.text, None, pending.origin)
+
+
+def _render_interjection(text: str, sender: str | None, origin: str) -> str:
+    """Wrap one queued interjection in the marker its origin earns.
+
+    The marker IS the authority statement, so this is the one place that
+    decides it. A harness-generated notice must never reach the model in the
+    user's marker: the base prompt tells the model that text there carries the
+    user's own authority, and a <task-notification> whose summary a sub-agent
+    wrote plainly does not.
+    """
+    from fluid.context.peer import format_peer_message
+    from fluid.context.steering import format_steer, format_system_notice
+
+    if origin == "system":
+        return format_system_notice(text)
+    if sender is not None:
+        return format_peer_message(sender, text)
+    return format_steer(text)
+
+
+def _steer_receipt(
+    steer_id: str | None, text: str, sender: str | None, origin: str
+) -> dict[str, Any]:
+    """One entry of a ``SteerDelivered`` record."""
+    entry: dict[str, Any] = {"id": steer_id, "text": text}
+    if sender is not None:
+        entry["from"] = sender  # a peer's message; ``from`` already says so
+    elif origin != "user":
+        entry["origin"] = origin  # a harness notice, not the user's own words
+    return entry
 
 
 @dataclass
@@ -1142,6 +1177,16 @@ class NativeLoop(BackgroundLifecycleMixin):
             # the one role-alternation-safe slot. Delivery is receipted with a
             # SteerDelivered event; if the turn ends first the steer is dropped
             # with a warning (the user can just send a message then).
+            #
+            # origin="system" is the same channel carrying a harness notice
+            # instead: it renders in the harness-notice marker, and its body is
+            # defanged on the way in because part of it can be text a sub-agent
+            # wrote — which must not be able to close the notice and open the
+            # user's marker.
+            if op.origin != "user":
+                from fluid.tools.hardening import defang_harness_markers
+
+                op = replace(op, text=defang_harness_markers(op.text))
             if self._turn_task is not None and not self._turn_task.done():
                 self._pending_steers.append(op)
             else:
@@ -3332,17 +3377,13 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._journal.record_tool(
                 name, input or {}, outcome.text, outcome.is_error
             )
-        delivered: list[tuple[str | None, str, str | None]] = []
+        delivered: list[tuple[str | None, str, str | None, str]] = []
         if self._pending_steers:
-            from fluid.context.peer import format_peer_message
-            from fluid.context.steering import format_steer
-
             delivered = [_steer_parts(pending) for pending in self._pending_steers]
             self._pending_steers.clear()
             steers = "".join(
-                format_steer(text) if sender is None
-                else format_peer_message(sender, text)
-                for _, text, sender in delivered
+                _render_interjection(text, sender, origin)
+                for _, text, sender, origin in delivered
             )
             # The steer is new information appended to the payload, so the
             # tool's content_id no longer describes this text. Dropping it
@@ -3361,14 +3402,13 @@ class NativeLoop(BackgroundLifecycleMixin):
             # its durable copy of every id listed here.
             await self._emit(SteerDelivered(
                 session_id=sid, turn_id=turn_id,
-                # ``from`` appears only on a peer's message: the record for a
-                # user steer keeps the shape hosts already parse, and its
-                # absence is what says "this one was the user".
+                # ``from`` appears only on a peer's message, ``origin`` only on
+                # a harness notice; the record for a user steer keeps the shape
+                # hosts already parse, and the absence of both is what says
+                # "this one was the user".
                 steers=[
-                    {"id": steer_id, "text": text}
-                    if sender is None
-                    else {"id": steer_id, "text": text, "from": sender}
-                    for steer_id, text, sender in delivered
+                    _steer_receipt(steer_id, text, sender, origin)
+                    for steer_id, text, sender, origin in delivered
                 ],
             ))
         return outcome
