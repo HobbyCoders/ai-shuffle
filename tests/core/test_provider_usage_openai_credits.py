@@ -91,6 +91,10 @@ class TestNormalizeOpenAiCreditGrants:
     def test_unusable_payload_returns_none(self, payload):
         assert normalize_openai_credit_grants(payload) is None
 
+    def test_unwraps_data_wrapper(self):
+        credits = normalize_openai_credit_grants({"data": dict(_GRANTS)})
+        assert credits["balance_remaining"] == pytest.approx(20.75)
+
 
 class TestOpenAiPlatformRow:
     def test_official_host_is_true(self):
@@ -98,6 +102,8 @@ class TestOpenAiPlatformRow:
         assert _is_openai_platform_row(
             {"provider_type": "openai", "base_url": "https://api.openai.com/v1/"}
         ) is True
+        assert _is_openai_platform_row({"provider_type": "openai", "base_url": ""}) is True
+        assert _is_openai_platform_row({"provider_type": "openai"}) is True
 
     def test_custom_host_is_false(self):
         assert _is_openai_platform_row(
@@ -145,7 +151,10 @@ def _grants_handler(status=200, body=None, seen=None):
             seen.append(request)
         assert request.url.host == OPENAI_CREDIT_GRANTS_HOST
         assert request.url.scheme == "https"
-        assert request.url.path == "/v1/dashboard/billing/credit_grants"
+        assert request.url.path in (
+            "/v1/dashboard/billing/credit_grants",
+            "/dashboard/billing/credit_grants",
+        )
         assert request.headers.get("authorization") == f"Bearer {_KEY}"
         return httpx.Response(status, json=body if body is not None else _GRANTS)
 

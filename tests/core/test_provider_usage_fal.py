@@ -18,13 +18,17 @@ import pytest
 from app.core.provider_usage import (
     FAL_BILLING_HOST,
     FAL_BILLING_URL,
+    FAL_USER_BALANCE_HOST,
+    FAL_USER_BALANCE_URL,
     FAL_USAGE_PROVIDER_ID,
     FAL_USAGE_PROVIDER_NAME,
     FAL_USAGE_PROVIDER_TYPE,
     ProviderUsageMonitor,
     _fal_auth_header,
     _fal_billing_url_is_pinned,
+    _fal_user_balance_url_is_pinned,
     normalize_fal_billing,
+    normalize_fal_user_balance,
 )
 
 
@@ -66,6 +70,25 @@ class TestNormalizeFalBilling:
         assert normalize_fal_billing(payload) is None
 
 
+class TestNormalizeFalUserBalance:
+    def test_bare_number(self):
+        assert normalize_fal_user_balance(18.11) == {"balance_remaining": 18.11}
+
+    def test_quoted_number_string(self):
+        assert normalize_fal_user_balance('"18.11"')["balance_remaining"] == pytest.approx(18.11)
+
+    def test_dict_balance(self):
+        assert normalize_fal_user_balance({"balance": 9.5, "currency": "USD"}) == {
+            "balance_remaining": 9.5,
+            "currency": "USD",
+        }
+
+    def test_unusable_returns_none(self):
+        assert normalize_fal_user_balance(None) is None
+        assert normalize_fal_user_balance(True) is None
+        assert normalize_fal_user_balance("nope") is None
+
+
 class TestFalAuthAndPin:
     def test_auth_header_prefixes_key(self):
         assert _fal_auth_header("abc") == "Key abc"
@@ -77,6 +100,10 @@ class TestFalAuthAndPin:
         assert _fal_billing_url_is_pinned("http://api.fal.ai/v1/account/billing") is False
         assert _fal_billing_url_is_pinned(
             "https://evil.example/v1/account/billing?expand=credits"
+        ) is False
+        assert _fal_user_balance_url_is_pinned(FAL_USER_BALANCE_URL) is True
+        assert _fal_user_balance_url_is_pinned(
+            "https://evil.example/billing/user_balance"
         ) is False
 
 
@@ -100,16 +127,33 @@ def _mock_transport_client(handler, recorded=None):
     return _factory
 
 
-def _billing_handler(status=200, body=None, seen=None):
+def _fal_handler(
+    billing_status=200,
+    billing_body=None,
+    balance_status=200,
+    balance_body=18.11,
+    seen=None,
+):
     def _handler(request: httpx.Request) -> httpx.Response:
         if seen is not None:
             seen.append(request)
-        assert request.url.host == FAL_BILLING_HOST
         assert request.url.scheme == "https"
-        assert request.url.path == "/v1/account/billing"
-        assert request.url.params.get("expand") == "credits"
         assert request.headers.get("authorization") == f"Key {_KEY}"
-        return httpx.Response(status, json=body if body is not None else _BILLING)
+        if request.url.host == FAL_BILLING_HOST:
+            assert request.url.path == "/v1/account/billing"
+            assert request.url.params.get("expand") == "credits"
+            return httpx.Response(
+                billing_status,
+                json=billing_body if billing_body is not None else _BILLING,
+            )
+        if request.url.host == FAL_USER_BALANCE_HOST:
+            assert request.url.path == "/billing/user_balance"
+            if isinstance(balance_body, (dict, list)):
+                return httpx.Response(balance_status, json=balance_body)
+            if isinstance(balance_body, (int, float)) and not isinstance(balance_body, bool):
+                return httpx.Response(balance_status, json=balance_body)
+            return httpx.Response(balance_status, text=str(balance_body))
+        return httpx.Response(404, json={})
 
     return _handler
 
@@ -124,7 +168,7 @@ class TestPollFal:
             "app.api.settings_crypto.get_decrypted_api_key", return_value=_KEY
         ), patch(
             "app.core.provider_usage.httpx.AsyncClient",
-            side_effect=_mock_transport_client(_billing_handler(seen=seen), recorded),
+            side_effect=_mock_transport_client(_fal_handler(seen=seen), recorded),
         ), patch("app.db.database.upsert_provider_usage_snapshot", upsert), patch(
             "app.db.database.delete_provider_usage_snapshot", MagicMock()
         ) as delete:
@@ -142,11 +186,9 @@ class TestPollFal:
         assert plan_type is None
         assert windows == []
         assert credits == {"balance_remaining": 24.5, "currency": "USD"}
-        assert raw == {
-            "username": "my-team",
-            "current_balance": 24.5,
-            "currency": "USD",
-        }
+        assert raw["username"] == "my-team"
+        assert raw["current_balance"] == 24.5
+        assert raw["source"] == "account/billing"
         assert isinstance(fetched_at, int)
         assert recorded and recorded[0].get("follow_redirects") is False
         assert len(seen) == 1
@@ -166,13 +208,42 @@ class TestPollFal:
         upsert.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_403_does_not_raise_or_upsert(self, monitor):
+    async def test_admin_403_falls_back_to_user_balance(self, monitor):
+        upsert = MagicMock()
+        seen = []
+        with patch(
+            "app.api.settings_crypto.get_decrypted_api_key", return_value=_KEY
+        ), patch(
+            "app.core.provider_usage.httpx.AsyncClient",
+            side_effect=_mock_transport_client(
+                _fal_handler(
+                    billing_status=403,
+                    billing_body={},
+                    balance_status=200,
+                    balance_body=18.11,
+                    seen=seen,
+                )
+            ),
+        ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
+            await monitor._poll_fal()
+
+        upsert.assert_called_once()
+        _id, _type, _plan, windows, credits, raw, _fetched = upsert.call_args[0]
+        assert windows == []
+        assert credits["balance_remaining"] == pytest.approx(18.11)
+        assert raw["source"] == "user_balance"
+        assert [r.url.host for r in seen] == [FAL_BILLING_HOST, FAL_USER_BALANCE_HOST]
+
+    @pytest.mark.asyncio
+    async def test_both_endpoints_fail_does_not_upsert(self, monitor):
         upsert = MagicMock()
         with patch(
             "app.api.settings_crypto.get_decrypted_api_key", return_value=_KEY
         ), patch(
             "app.core.provider_usage.httpx.AsyncClient",
-            side_effect=_mock_transport_client(_billing_handler(status=403, body={})),
+            side_effect=_mock_transport_client(
+                _fal_handler(billing_status=403, billing_body={}, balance_status=403)
+            ),
         ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
             await monitor._poll_fal()
         upsert.assert_not_called()
@@ -184,7 +255,9 @@ class TestPollFal:
             "app.api.settings_crypto.get_decrypted_api_key", return_value=_KEY
         ), patch(
             "app.core.provider_usage.httpx.AsyncClient",
-            side_effect=_mock_transport_client(_billing_handler(status=500, body={})),
+            side_effect=_mock_transport_client(
+                _fal_handler(billing_status=500, billing_body={}, balance_status=500)
+            ),
         ), patch("app.db.database.upsert_provider_usage_snapshot", MagicMock()):
             await monitor._poll_fal()
 

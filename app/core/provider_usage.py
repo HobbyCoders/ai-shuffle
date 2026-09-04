@@ -51,9 +51,11 @@ and is NEVER logged.
 
 **fal.ai credits poller.** The same monitor reads the install's
 ``fal_api_key`` (not a model-provider row) and polls the official Platform
-API (``GET https://api.fal.ai/v1/account/billing?expand=credits``). The
-snapshot is stored under the synthetic id ``fal-ai``. Missing key deletes
-that row so the popover does not keep a stale balance.
+API (``GET https://api.fal.ai/v1/account/billing?expand=credits``). Ordinary
+keys 403 there (admin-only); we then fall back to
+``GET https://rest.alpha.fal.ai/billing/user_balance``. The snapshot is
+stored under the synthetic id ``fal-ai``. Missing key deletes that row so
+the popover does not keep a stale balance.
 
 Security (S4 hard invariant): the allowlists below are the ONLY thing that
 ever reaches ``raw`` (and, transitively, the DB and any future API response).
@@ -73,7 +75,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -857,16 +859,55 @@ async def _maybe_refresh_grok_on_401(
         return False
 
 
+def _https_host_is(url: str, host: str) -> bool:
+    """True when ``url`` is https on the given host (no port tricks)."""
+    parsed = urlsplit(url)
+    return parsed.scheme == "https" and (parsed.hostname or "").lower() == host
+
+
+async def _pinned_get(
+    url: str,
+    headers: Mapping[str, str],
+    host: str,
+    timeout: float,
+) -> httpx.Response:
+    """GET ``url`` without following off-host redirects.
+
+    Same-host 3xx hops (trailing slash, etc.) are followed so a 301 cannot
+    look like a billing failure; any Location that leaves ``host`` stops the
+    chain and the 3xx is returned as-is.
+    """
+    if not _https_host_is(url, host):
+        raise ValueError("refusing non-pinned host")
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        resp = await client.get(url, headers=dict(headers))
+        hops = 0
+        while resp.status_code in (301, 302, 303, 307, 308) and hops < 3:
+            loc = resp.headers.get("location")
+            if not loc:
+                break
+            next_url = urljoin(str(resp.url), loc)
+            if not _https_host_is(next_url, host):
+                break
+            url = next_url
+            resp = await client.get(url, headers=dict(headers))
+            hops += 1
+        return resp
+
+
 # ---------------------------------------------------------------------------
 # OpenAI platform credit-grants poller
 # ---------------------------------------------------------------------------
 
 # Dashboard billing endpoint the platform console uses. Undocumented; 403s for
 # project keys without billing access. Host is pinned so the Bearer token never
-# leaves api.openai.com (and never follows redirects).
+# leaves api.openai.com. Same-host redirects are followed via ``_pinned_get``.
 OPENAI_CREDIT_GRANTS_HOST = "api.openai.com"
 OPENAI_CREDIT_GRANTS_URL = (
     "https://api.openai.com/v1/dashboard/billing/credit_grants"
+)
+OPENAI_CREDIT_GRANTS_URL_LEGACY = (
+    "https://api.openai.com/dashboard/billing/credit_grants"
 )
 
 # credits keys that may leave this module. Never tokens.
@@ -887,17 +928,20 @@ _OPENAI_CREDITS_RAW_FIELDS: Tuple[str, ...] = (
 
 def _openai_credit_grants_url_is_pinned(url: str) -> bool:
     """HTTPS + host pin — the Bearer token must never leave api.openai.com."""
-    parsed = urlsplit(url)
-    return parsed.scheme == "https" and parsed.hostname == OPENAI_CREDIT_GRANTS_HOST
+    return _https_host_is(url, OPENAI_CREDIT_GRANTS_HOST)
 
 
 def _is_openai_platform_row(row: Optional[Dict[str, Any]]) -> bool:
-    """True for official OpenAI API-key rows (not custom OpenAI-compatible hosts)."""
+    """True for official OpenAI API-key rows (not custom OpenAI-compatible hosts).
+
+    An empty ``base_url`` is treated as official: the request still goes only
+    to the pinned ``api.openai.com`` credit-grants URL.
+    """
     r = row or {}
     if r.get("provider_type") != "openai":
         return False
     host = (urlsplit(r.get("base_url") or "").hostname or "").lower()
-    return host == OPENAI_CREDIT_GRANTS_HOST
+    return host in ("", OPENAI_CREDIT_GRANTS_HOST)
 
 
 def normalize_openai_credit_grants(payload: Any) -> Optional[Dict[str, Any]]:
@@ -907,13 +951,20 @@ def normalize_openai_credit_grants(payload: Any) -> Optional[Dict[str, Any]]:
     platform home page shows). It is copied to ``balance_remaining`` so the
     existing OpenRouter-style headline (``$X.XX left``) applies unchanged.
     Pure and defensive: a non-dict payload or a missing available figure
-    returns ``None`` rather than raising.
+    returns ``None`` rather than raising. A top-level ``data`` wrapper is
+    unwrapped (some dashboard responses nest the totals).
     """
     if not isinstance(payload, dict):
         return None
+    if isinstance(payload.get("data"), dict) and "total_available" not in payload:
+        payload = payload["data"]
     total_granted = _as_float(payload.get("total_granted"))
     total_used = _as_float(payload.get("total_used"))
-    total_available = _as_float(payload.get("total_available"))
+    total_available = _as_float(
+        payload.get("total_available")
+        if payload.get("total_available") is not None
+        else payload.get("available")
+    )
     if total_available is None and total_granted is not None and total_used is not None:
         total_available = total_granted - total_used
     if total_available is None:
@@ -935,23 +986,29 @@ def normalize_openai_credit_grants(payload: Any) -> Optional[Dict[str, Any]]:
 # fal.ai account billing poller
 # ---------------------------------------------------------------------------
 
-# Official Platform API. Host is pinned; requests never follow redirects so the
-# Key credential cannot hop hosts. Synthetic snapshot id is not a model-provider
-# UUID — fal is an integration key, not a chat gateway row.
+# Official Platform API requires an *admin* key (ordinary FAL_KEY → 403).
+# Ordinary keys work on rest.alpha.fal.ai/billing/user_balance (raw number).
+# Both hosts are pinned; the Key credential never hops off them.
 FAL_BILLING_HOST = "api.fal.ai"
 FAL_BILLING_URL = "https://api.fal.ai/v1/account/billing?expand=credits"
+FAL_USER_BALANCE_HOST = "rest.alpha.fal.ai"
+FAL_USER_BALANCE_URL = "https://rest.alpha.fal.ai/billing/user_balance"
 FAL_USAGE_PROVIDER_ID = "fal-ai"
 FAL_USAGE_PROVIDER_TYPE = "fal"
 FAL_USAGE_PROVIDER_NAME = "fal.ai"
 
 _FAL_CREDITS_FIELDS: Tuple[str, ...] = ("balance_remaining", "currency")
-_FAL_RAW_FIELDS: Tuple[str, ...] = ("username", "current_balance", "currency")
+_FAL_RAW_FIELDS: Tuple[str, ...] = ("username", "current_balance", "currency", "source")
 
 
 def _fal_billing_url_is_pinned(url: str) -> bool:
     """HTTPS + host pin — the Key credential must never leave api.fal.ai."""
-    parsed = urlsplit(url)
-    return parsed.scheme == "https" and parsed.hostname == FAL_BILLING_HOST
+    return _https_host_is(url, FAL_BILLING_HOST)
+
+
+def _fal_user_balance_url_is_pinned(url: str) -> bool:
+    """HTTPS + host pin for the ordinary-key balance endpoint."""
+    return _https_host_is(url, FAL_USER_BALANCE_HOST)
 
 
 def _fal_auth_header(api_key: str) -> str:
@@ -960,6 +1017,36 @@ def _fal_auth_header(api_key: str) -> str:
     if text.lower().startswith("key "):
         return text
     return f"Key {text}"
+
+
+def normalize_fal_user_balance(payload: Any) -> Optional[Dict[str, Any]]:
+    """Map rest.alpha ``/billing/user_balance`` to a credits blob.
+
+    The endpoint often returns a bare number (or a quoted number). Dict
+    wrappers with ``balance`` / ``user_balance`` / ``current_balance`` are
+    also accepted. Pure and defensive.
+    """
+    if isinstance(payload, bool):
+        return None
+    if isinstance(payload, (int, float)):
+        return {"balance_remaining": float(payload)}
+    if isinstance(payload, str):
+        n = _as_float(payload.strip().strip('"').strip("'"))
+        return {"balance_remaining": n} if n is not None else None
+    if not isinstance(payload, dict):
+        return None
+    for key in ("balance", "user_balance", "current_balance"):
+        n = _as_float(payload.get(key))
+        if n is not None:
+            credits: Dict[str, Any] = {"balance_remaining": n}
+            currency = payload.get("currency")
+            if isinstance(currency, str) and currency.strip():
+                credits["currency"] = currency.strip()
+            return {k: v for k, v in credits.items() if k in _FAL_CREDITS_FIELDS}
+    nested = payload.get("credits")
+    if isinstance(nested, dict):
+        return normalize_fal_billing(payload)
+    return None
 
 
 def normalize_fal_billing(payload: Any) -> Optional[Dict[str, Any]]:
@@ -971,6 +1058,8 @@ def normalize_fal_billing(payload: Any) -> Optional[Dict[str, Any]]:
     """
     if not isinstance(payload, dict):
         return None
+    if isinstance(payload.get("data"), dict) and "credits" not in payload:
+        payload = payload["data"]
     credits_obj = payload.get("credits")
     if not isinstance(credits_obj, dict):
         credits_obj = payload if "current_balance" in payload else None
@@ -1219,56 +1308,60 @@ class ProviderUsageMonitor:
             key = _decrypt_provider_auth_token(row)
             if not key:
                 return
-            if not _openai_credit_grants_url_is_pinned(OPENAI_CREDIT_GRANTS_URL):
-                return
 
             headers = {
                 "Authorization": f"Bearer {key}",
                 "Accept": "application/json",
             }
-            async with httpx.AsyncClient(
-                timeout=_REQUEST_TIMEOUT_SECONDS, follow_redirects=False
-            ) as client:
-                resp = await client.get(OPENAI_CREDIT_GRANTS_URL, headers=headers)
+            body: Optional[Any] = None
+            last_status: Optional[int] = None
+            for url in (OPENAI_CREDIT_GRANTS_URL, OPENAI_CREDIT_GRANTS_URL_LEGACY):
+                if not _openai_credit_grants_url_is_pinned(url):
+                    continue
+                resp = await _pinned_get(
+                    url, headers, OPENAI_CREDIT_GRANTS_HOST, _REQUEST_TIMEOUT_SECONDS
+                )
+                last_status = resp.status_code
+                if resp.status_code != 200:
+                    continue
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = None
+                credits = normalize_openai_credit_grants(body)
+                if credits:
+                    raw_body = body if isinstance(body, dict) else {}
+                    if isinstance(raw_body.get("data"), dict):
+                        raw_body = raw_body["data"]
+                    raw = {
+                        k: raw_body.get(k)
+                        for k in _OPENAI_CREDITS_RAW_FIELDS
+                        if k in raw_body
+                    }
+                    await run_sync(
+                        db.upsert_provider_usage_snapshot,
+                        provider_id,
+                        "openai",
+                        None,
+                        [],
+                        credits,
+                        raw,
+                        int(time.time() * 1000),
+                    )
+                    return
 
-            if resp.status_code in (401, 403):
-                # Project / service-account keys cannot read billing. Expected.
+            if last_status in (401, 403):
                 logger.debug(
                     "OpenAI credit_grants for provider %s returned HTTP %s",
                     provider_id,
-                    resp.status_code,
+                    last_status,
                 )
-                return
-            if resp.status_code != 200:
+            elif last_status is not None:
                 logger.warning(
                     "OpenAI credit_grants for provider %s failed: HTTP %s",
                     provider_id,
-                    resp.status_code,
+                    last_status,
                 )
-                return
-
-            try:
-                body = resp.json()
-            except Exception:
-                body = None
-            credits = normalize_openai_credit_grants(body)
-            if not credits:
-                return
-            raw = {
-                k: body.get(k)
-                for k in _OPENAI_CREDITS_RAW_FIELDS
-                if isinstance(body, dict) and k in body
-            }
-            await run_sync(
-                db.upsert_provider_usage_snapshot,
-                provider_id,
-                "openai",
-                None,
-                [],
-                credits,
-                raw,
-                int(time.time() * 1000),
-            )
         except Exception as e:
             # Never include the Bearer key here.
             logger.warning(
@@ -1281,6 +1374,9 @@ class ProviderUsageMonitor:
         Fal is an integration key (``fal_api_key``), not a model-provider row.
         A missing key deletes any previous ``fal-ai`` snapshot so the popover
         cannot keep a stale balance after the user removes the key.
+
+        Ordinary keys 403 on the documented admin billing endpoint; we then
+        fall back to ``rest.alpha.fal.ai/billing/user_balance``.
         """
         from app.db import database as db
 
@@ -1291,33 +1387,59 @@ class ProviderUsageMonitor:
             if not key:
                 await run_sync(db.delete_provider_usage_snapshot, FAL_USAGE_PROVIDER_ID)
                 return
-            if not _fal_billing_url_is_pinned(FAL_BILLING_URL):
-                return
 
             headers = {
                 "Authorization": _fal_auth_header(key),
                 "Accept": "application/json",
             }
-            async with httpx.AsyncClient(
-                timeout=_REQUEST_TIMEOUT_SECONDS, follow_redirects=False
-            ) as client:
-                resp = await client.get(FAL_BILLING_URL, headers=headers)
+            credits: Optional[Dict[str, Any]] = None
+            raw: Dict[str, Any] = {}
 
-            if resp.status_code in (401, 403):
-                logger.debug("fal.ai billing returned HTTP %s", resp.status_code)
-                return
-            if resp.status_code != 200:
-                logger.warning("fal.ai billing fetch failed: HTTP %s", resp.status_code)
-                return
+            if _fal_billing_url_is_pinned(FAL_BILLING_URL):
+                try:
+                    resp = await _pinned_get(
+                        FAL_BILLING_URL,
+                        headers,
+                        FAL_BILLING_HOST,
+                        _REQUEST_TIMEOUT_SECONDS,
+                    )
+                    if resp.status_code == 200:
+                        try:
+                            body = resp.json()
+                        except Exception:
+                            body = None
+                        credits = normalize_fal_billing(body)
+                        if credits:
+                            raw = _allowlisted_fal_raw(
+                                body if isinstance(body, dict) else {}
+                            )
+                            raw["source"] = "account/billing"
+                except Exception as e:
+                    logger.debug("fal.ai admin billing fetch failed: %s", e)
 
-            try:
-                body = resp.json()
-            except Exception:
-                body = None
-            credits = normalize_fal_billing(body)
+            if credits is None and _fal_user_balance_url_is_pinned(FAL_USER_BALANCE_URL):
+                resp = await _pinned_get(
+                    FAL_USER_BALANCE_URL,
+                    headers,
+                    FAL_USER_BALANCE_HOST,
+                    _REQUEST_TIMEOUT_SECONDS,
+                )
+                if resp.status_code != 200:
+                    logger.debug(
+                        "fal.ai user_balance returned HTTP %s", resp.status_code
+                    )
+                    return
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = (resp.text or "").strip()
+                credits = normalize_fal_user_balance(body)
+                if credits:
+                    raw = {"source": "user_balance"}
+                    raw["current_balance"] = credits["balance_remaining"]
+
             if not credits:
                 return
-            raw = _allowlisted_fal_raw(body if isinstance(body, dict) else {})
             await run_sync(
                 db.upsert_provider_usage_snapshot,
                 FAL_USAGE_PROVIDER_ID,
