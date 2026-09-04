@@ -158,6 +158,8 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
         from app.core.provider_usage import (
             FAL_USAGE_PROVIDER_ID,
             FAL_USAGE_PROVIDER_NAME,
+            OPENAI_API_USAGE_PROVIDER_ID,
+            OPENAI_API_USAGE_PROVIDER_NAME,
         )
 
         entries: List[ProviderUsageEntry] = []
@@ -183,6 +185,8 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
             name = names.get(row["provider_id"])
             if not name and row["provider_id"] == FAL_USAGE_PROVIDER_ID:
                 name = FAL_USAGE_PROVIDER_NAME
+            if not name and row["provider_id"] == OPENAI_API_USAGE_PROVIDER_ID:
+                name = OPENAI_API_USAGE_PROVIDER_NAME
             entries.append(
                 ProviderUsageEntry(
                     provider_id=row["provider_id"],

@@ -145,7 +145,9 @@ def _mock_transport_client(handler, recorded=None):
     return _factory
 
 
-def _grants_handler(status=200, body=None, seen=None):
+def _grants_handler(status=200, body=None, seen=None, bearer=None):
+    expected = f"Bearer {bearer if bearer is not None else _KEY}"
+
     def _handler(request: httpx.Request) -> httpx.Response:
         if seen is not None:
             seen.append(request)
@@ -155,7 +157,7 @@ def _grants_handler(status=200, body=None, seen=None):
             "/v1/dashboard/billing/credit_grants",
             "/dashboard/billing/credit_grants",
         )
-        assert request.headers.get("authorization") == f"Bearer {_KEY}"
+        assert request.headers.get("authorization") == expected
         return httpx.Response(status, json=body if body is not None else _GRANTS)
 
     return _handler
@@ -243,3 +245,101 @@ class TestPollOpenAiProvider:
         assert _KEY not in caplog.text
         for record in caplog.records:
             assert _TOKEN_KEY_RE.search(record.getMessage()) is None or _KEY not in record.getMessage()
+
+
+_OAUTH = "chatgpt-oauth-must-never-log"
+_CHATGPT_ROW = {
+    "id": "prov-chatgpt-1",
+    "provider_type": "chatgpt",
+    "auth_mode": "chatgpt",
+}
+
+
+class TestPollOpenAiViaChatgpt:
+    @pytest.mark.asyncio
+    async def test_200_upserts_synthetic_openai_api_row(self, monitor):
+        upsert = MagicMock()
+        seen = []
+        tokens = {
+            "codex_access_token": "enc:chatgpt-access",
+            "codex_account_id": "acct-123",
+        }
+        with patch(
+            "app.db.database.get_all_provider_usage_snapshots", return_value=[]
+        ), patch("app.db.database.get_codex_tokens", return_value=tokens), patch(
+            "app.core.provider_usage._decrypt_grok_access_token", return_value=_OAUTH
+        ), patch(
+            "app.core.provider_usage.httpx.AsyncClient",
+            side_effect=_mock_transport_client(
+                _grants_handler(seen=seen, bearer=_OAUTH)
+            ),
+        ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
+            await monitor._poll_openai_via_chatgpt([_CHATGPT_ROW])
+
+        upsert.assert_called_once()
+        provider_id, provider_type, plan_type, windows, credits, raw, fetched_at = (
+            upsert.call_args[0]
+        )
+        assert provider_id == "openai-api"
+        assert provider_type == "openai"
+        assert plan_type is None
+        assert windows == []
+        assert credits["balance_remaining"] == pytest.approx(20.75)
+        assert isinstance(fetched_at, int)
+        assert seen and seen[0].headers.get("authorization") == f"Bearer {_OAUTH}"
+        assert seen[0].headers.get("chatgpt-account-id") == "acct-123"
+
+    @pytest.mark.asyncio
+    async def test_skips_when_openai_api_key_snapshot_already_has_credits(self, monitor):
+        upsert = MagicMock()
+        get_tokens = MagicMock()
+        with patch(
+            "app.db.database.get_all_provider_usage_snapshots",
+            return_value=[
+                {
+                    "provider_id": "prov-openai-1",
+                    "provider_type": "openai",
+                    "credits": {"balance_remaining": 5.0},
+                }
+            ],
+        ), patch("app.db.database.get_codex_tokens", get_tokens), patch(
+            "app.db.database.upsert_provider_usage_snapshot", upsert
+        ):
+            await monitor._poll_openai_via_chatgpt([_CHATGPT_ROW])
+
+        get_tokens.assert_not_called()
+        upsert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_403_does_not_upsert(self, monitor):
+        upsert = MagicMock()
+        tokens = {"codex_access_token": "enc:chatgpt-access"}
+        with patch(
+            "app.db.database.get_all_provider_usage_snapshots", return_value=[]
+        ), patch("app.db.database.get_codex_tokens", return_value=tokens), patch(
+            "app.core.provider_usage._decrypt_grok_access_token", return_value=_OAUTH
+        ), patch(
+            "app.core.provider_usage.httpx.AsyncClient",
+            side_effect=_mock_transport_client(
+                _grants_handler(status=403, body={}, bearer=_OAUTH)
+            ),
+        ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
+            await monitor._poll_openai_via_chatgpt([_CHATGPT_ROW])
+        upsert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_oauth_token_never_appears_in_logs(self, monitor, caplog):
+        caplog.set_level(logging.DEBUG)
+        tokens = {"codex_access_token": "enc:chatgpt-access"}
+        with patch(
+            "app.db.database.get_all_provider_usage_snapshots", return_value=[]
+        ), patch("app.db.database.get_codex_tokens", return_value=tokens), patch(
+            "app.core.provider_usage._decrypt_grok_access_token", return_value=_OAUTH
+        ), patch(
+            "app.core.provider_usage.httpx.AsyncClient",
+            side_effect=_mock_transport_client(
+                _grants_handler(status=500, body={}, bearer=_OAUTH)
+            ),
+        ), patch("app.db.database.upsert_provider_usage_snapshot", MagicMock()):
+            await monitor._poll_openai_via_chatgpt([_CHATGPT_ROW])
+        assert _OAUTH not in caplog.text

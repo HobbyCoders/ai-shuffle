@@ -49,6 +49,14 @@ a 403 is logged at debug and skipped. Custom OpenAI-compatible gateways are
 never sent to that host. The decrypted key is used only as a Bearer header
 and is NEVER logged.
 
+When no API-key snapshot has a balance, ChatGPT/Codex OAuth rows are tried
+against the same credit-grants URL (Bearer access token + optional
+``ChatGPT-Account-Id``). A hit is stored under the synthetic id
+``openai-api`` so the popover can show **OpenAI · API** ``$X.XX left``
+alongside the ChatGPT subscription quota row. Dashboard billing historically
+403s for secret keys but accepts session-like tokens; the Codex access token
+is the closest credential this install has to a platform.openai.com session.
+
 **fal.ai credits poller.** The same monitor reads the install's
 ``fal_api_key`` (not a model-provider row) and polls the official Platform
 API (``GET https://api.fal.ai/v1/account/billing?expand=credits``). Ordinary
@@ -944,6 +952,28 @@ def _is_openai_platform_row(row: Optional[Dict[str, Any]]) -> bool:
     return host in ("", OPENAI_CREDIT_GRANTS_HOST)
 
 
+# Synthetic snapshot for prepaid API credits fetched via ChatGPT OAuth when
+# there is no (successful) openai API-key provider poll.
+OPENAI_API_USAGE_PROVIDER_ID = "openai-api"
+OPENAI_API_USAGE_PROVIDER_TYPE = "openai"
+OPENAI_API_USAGE_PROVIDER_NAME = "OpenAI"
+
+
+def _is_chatgpt_subscription_row(row: Optional[Dict[str, Any]]) -> bool:
+    """True for ChatGPT/Codex OAuth rows. OpenAI API-key rows are ``openai``."""
+    r = row or {}
+    if r.get("provider_type") == "openai":
+        return False
+    return r.get("provider_type") == "chatgpt" or r.get("auth_mode") == "chatgpt"
+
+
+def _openai_credits_blob_is_displayable(credits: Any) -> bool:
+    if not isinstance(credits, dict):
+        return False
+    value = credits.get("balance_remaining")
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def normalize_openai_credit_grants(payload: Any) -> Optional[Dict[str, Any]]:
     """Map ``credit_grants`` JSON to the credits blob the usage popover renders.
 
@@ -1114,6 +1144,7 @@ class ProviderUsageMonitor:
             logger.debug("Provider usage poll: provider read skipped: %s", e)
             rows = []
 
+        chatgpt_rows: List[Dict[str, Any]] = []
         for row in rows or []:
             r = row or {}
             if r.get("provider_type") == "openrouter":
@@ -1122,7 +1153,10 @@ class ProviderUsageMonitor:
                 await self._poll_grok_provider(r)
             elif _is_openai_platform_row(r):
                 await self._poll_openai_provider(r)
+            elif _is_chatgpt_subscription_row(r):
+                chatgpt_rows.append(r)
 
+        await self._poll_openai_via_chatgpt(chatgpt_rows)
         await self._poll_fal()
 
     async def _poll_provider(self, row: Dict[str, Any]) -> None:
@@ -1297,6 +1331,40 @@ class ProviderUsageMonitor:
                 "Grok usage poll for provider %s failed: %s", provider_id, e
             )
 
+    async def _request_openai_credit_grants(
+        self, headers: Mapping[str, str]
+    ) -> Tuple[
+        Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[int]
+    ]:
+        """GET credit_grants (v1 then legacy). Returns (credits, raw, last_status)."""
+        last_status: Optional[int] = None
+        for url in (OPENAI_CREDIT_GRANTS_URL, OPENAI_CREDIT_GRANTS_URL_LEGACY):
+            if not _openai_credit_grants_url_is_pinned(url):
+                continue
+            resp = await _pinned_get(
+                url, headers, OPENAI_CREDIT_GRANTS_HOST, _REQUEST_TIMEOUT_SECONDS
+            )
+            last_status = resp.status_code
+            if resp.status_code != 200:
+                continue
+            try:
+                body = resp.json()
+            except Exception:
+                body = None
+            credits = normalize_openai_credit_grants(body)
+            if not credits:
+                continue
+            raw_body = body if isinstance(body, dict) else {}
+            if isinstance(raw_body.get("data"), dict):
+                raw_body = raw_body["data"]
+            raw = {
+                k: raw_body.get(k)
+                for k in _OPENAI_CREDITS_RAW_FIELDS
+                if k in raw_body
+            }
+            return credits, raw, last_status
+        return None, None, last_status
+
     async def _poll_openai_provider(self, row: Dict[str, Any]) -> None:
         """Fetch OpenAI credit-grants and upsert a credits-only snapshot. Never raises."""
         from app.db import database as db
@@ -1313,42 +1381,19 @@ class ProviderUsageMonitor:
                 "Authorization": f"Bearer {key}",
                 "Accept": "application/json",
             }
-            body: Optional[Any] = None
-            last_status: Optional[int] = None
-            for url in (OPENAI_CREDIT_GRANTS_URL, OPENAI_CREDIT_GRANTS_URL_LEGACY):
-                if not _openai_credit_grants_url_is_pinned(url):
-                    continue
-                resp = await _pinned_get(
-                    url, headers, OPENAI_CREDIT_GRANTS_HOST, _REQUEST_TIMEOUT_SECONDS
+            credits, raw, last_status = await self._request_openai_credit_grants(headers)
+            if credits:
+                await run_sync(
+                    db.upsert_provider_usage_snapshot,
+                    provider_id,
+                    "openai",
+                    None,
+                    [],
+                    credits,
+                    raw,
+                    int(time.time() * 1000),
                 )
-                last_status = resp.status_code
-                if resp.status_code != 200:
-                    continue
-                try:
-                    body = resp.json()
-                except Exception:
-                    body = None
-                credits = normalize_openai_credit_grants(body)
-                if credits:
-                    raw_body = body if isinstance(body, dict) else {}
-                    if isinstance(raw_body.get("data"), dict):
-                        raw_body = raw_body["data"]
-                    raw = {
-                        k: raw_body.get(k)
-                        for k in _OPENAI_CREDITS_RAW_FIELDS
-                        if k in raw_body
-                    }
-                    await run_sync(
-                        db.upsert_provider_usage_snapshot,
-                        provider_id,
-                        "openai",
-                        None,
-                        [],
-                        credits,
-                        raw,
-                        int(time.time() * 1000),
-                    )
-                    return
+                return
 
             if last_status in (401, 403):
                 logger.debug(
@@ -1367,6 +1412,125 @@ class ProviderUsageMonitor:
             logger.warning(
                 "OpenAI credits poll for provider %s failed: %s", provider_id, e
             )
+
+    async def _poll_openai_via_chatgpt(self, rows: List[Dict[str, Any]]) -> None:
+        """Fetch prepaid API credits using ChatGPT/Codex OAuth. Never raises.
+
+        Skipped when an openai API-key snapshot already has a displayable
+        balance. Success is stored under the synthetic ``openai-api`` id so
+        the popover can show OpenAI · API separately from ChatGPT quota.
+        """
+        from app.db import database as db
+
+        try:
+            snaps = await run_sync(db.get_all_provider_usage_snapshots)
+            for snap in snaps or []:
+                if snap.get("provider_type") == "openai" and _openai_credits_blob_is_displayable(
+                    snap.get("credits")
+                ):
+                    return
+        except Exception:
+            logger.debug("openai-via-chatgpt snapshot read skipped", exc_info=True)
+
+        for row in rows:
+            if await self._poll_openai_chatgpt_row(row):
+                return
+
+    async def _maybe_refresh_chatgpt_on_401(
+        self, provider_id: str, stale_access: str
+    ) -> bool:
+        try:
+            from app.core import codex_token_refresh
+        except ImportError:
+            return False
+        try:
+            return bool(
+                await codex_token_refresh.refresh_on_401_once(
+                    provider_id, stale_access_token=stale_access
+                )
+            )
+        except Exception as e:
+            logger.warning(
+                "ChatGPT token refresh after credit_grants 401 for provider %s failed: %s",
+                provider_id,
+                e,
+            )
+            return False
+
+    async def _poll_openai_chatgpt_row(self, row: Dict[str, Any]) -> bool:
+        """Return True when the synthetic openai-api snapshot was upserted."""
+        from app.db import database as db
+        from app.core.codex_rate_limit_resets import CODEX_USER_AGENT
+
+        provider_id = row.get("id")
+        try:
+            if not provider_id or row.get("needs_reauth"):
+                return False
+            stored = await run_sync(db.get_codex_tokens, provider_id)
+            if not stored or stored.get("needs_reauth"):
+                return False
+            access = _decrypt_grok_access_token(stored.get("codex_access_token"))
+            if not access:
+                return False
+
+            headers = {
+                "Authorization": f"Bearer {access}",
+                "Accept": "application/json",
+                "User-Agent": CODEX_USER_AGENT,
+            }
+            account_id = stored.get("codex_account_id")
+            if isinstance(account_id, str) and account_id.strip():
+                headers["ChatGPT-Account-Id"] = account_id.strip()
+
+            credits, raw, last_status = await self._request_openai_credit_grants(headers)
+            if last_status == 401:
+                refreshed = await self._maybe_refresh_chatgpt_on_401(provider_id, access)
+                if refreshed:
+                    stored = await run_sync(db.get_codex_tokens, provider_id)
+                    access = _decrypt_grok_access_token(
+                        (stored or {}).get("codex_access_token")
+                    )
+                    if access:
+                        headers["Authorization"] = f"Bearer {access}"
+                        credits, raw, last_status = await self._request_openai_credit_grants(
+                            headers
+                        )
+
+            if not credits:
+                if last_status in (401, 403):
+                    logger.debug(
+                        "OpenAI credit_grants via ChatGPT oauth for provider %s "
+                        "returned HTTP %s",
+                        provider_id,
+                        last_status,
+                    )
+                elif last_status is not None:
+                    logger.warning(
+                        "OpenAI credit_grants via ChatGPT oauth for provider %s "
+                        "failed: HTTP %s",
+                        provider_id,
+                        last_status,
+                    )
+                return False
+
+            await run_sync(
+                db.upsert_provider_usage_snapshot,
+                OPENAI_API_USAGE_PROVIDER_ID,
+                OPENAI_API_USAGE_PROVIDER_TYPE,
+                None,
+                [],
+                credits,
+                raw,
+                int(time.time() * 1000),
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                "OpenAI credits poll via ChatGPT oauth for provider %s failed: %s",
+                provider_id,
+                e,
+            )
+            return False
 
     async def _poll_fal(self) -> None:
         """Fetch fal.ai account credits and upsert the synthetic snapshot. Never raises.

@@ -423,6 +423,30 @@ class TestUsageLimitsProviders:
         assert entry["provider_type"] == "fal"
         assert entry["credits"]["balance_remaining"] == 24.5
 
+    def test_openai_api_synthetic_snapshot_surfaces_with_brand_name(self):
+        """ChatGPT-oauth credit_grants lands under synthetic id openai-api."""
+        from app.db import database as db
+
+        db.upsert_provider_usage_snapshot(
+            provider_id="openai-api", provider_type="openai", plan_type=None,
+            windows=[], credits={"balance_remaining": 12.5, "total_usage": 2.0},
+            raw=None, fetched_at=10,
+        )
+
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            resp = _client().get("/api/v1/usage/limits")
+
+        assert resp.status_code == 200
+        providers = resp.json()["providers"]
+        assert len(providers) == 1
+        entry = providers[0]
+        assert entry["provider_id"] == "openai-api"
+        assert entry["provider_name"] == "OpenAI"
+        assert entry["provider_type"] == "openai"
+        assert entry["windows"] == []
+        assert entry["credits"]["balance_remaining"] == 12.5
+
     def test_provider_load_exception_yields_empty_providers_with_200(self):
         """A DB hiccup inside _load_provider_usage degrades to providers: [] and
         must NOT turn the endpoint into an error or drop Claude fields."""
