@@ -74,7 +74,7 @@ def upsert_provider_usage_snapshot(
                 provider_type = EXCLUDED.provider_type,
                 plan_type = EXCLUDED.plan_type,
                 windows = EXCLUDED.windows,
-                credits = EXCLUDED.credits,
+                credits = COALESCE(EXCLUDED.credits, provider_usage_snapshots.credits),
                 raw = EXCLUDED.raw,
                 fetched_at = EXCLUDED.fetched_at,
                 updated_at = EXCLUDED.updated_at

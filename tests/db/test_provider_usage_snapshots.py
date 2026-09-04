@@ -82,6 +82,35 @@ class TestUpsertProviderUsageSnapshot:
         assert isinstance(row["raw"], dict)
         assert row["raw"] == raw
 
+    def test_null_credits_on_conflict_preserves_existing(self, mock_db):
+        """OpenAI header capture writes credits=None; that must not wipe a
+        credit-grants balance the poller already stored."""
+        db.upsert_provider_usage_snapshot(
+            provider_id="prov-openai",
+            provider_type="openai",
+            plan_type=None,
+            windows=[],
+            credits={"balance_remaining": 20.75},
+            raw={"total_available": 20.75},
+            fetched_at=1,
+        )
+        db.upsert_provider_usage_snapshot(
+            provider_id="prov-openai",
+            provider_type="openai",
+            plan_type=None,
+            windows=[{"type": "requests", "utilization": 1.0, "resets_at": None}],
+            credits=None,
+            raw={"x-ratelimit-limit-requests": "60"},
+            fetched_at=2,
+        )
+        row = next(
+            r for r in db.get_all_provider_usage_snapshots()
+            if r["provider_id"] == "prov-openai"
+        )
+        assert row["credits"] == {"balance_remaining": 20.75}
+        assert row["windows"][0]["type"] == "requests"
+        assert row["fetched_at"] == 2
+
     def test_none_credits_and_raw_round_trip_as_none(self, mock_db):
         db.upsert_provider_usage_snapshot(
             provider_id="prov-C",

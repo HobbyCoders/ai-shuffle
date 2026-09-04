@@ -268,6 +268,16 @@ describe('getProviderDisplay / getClaudeDisplay — brand + auth-kind subtext', 
 		).toEqual({ name: 'OpenAI', subtext: 'API' });
 	});
 
+	it('shows a fal.ai integration row as fal.ai + API', () => {
+		expect(
+			getProviderDisplay({ name: 'fal.ai', provider_type: 'fal', auth_kind: 'api' })
+		).toEqual({ name: 'fal.ai', subtext: 'API' });
+		expect(getProviderDisplay({ provider_type: 'fal' })).toEqual({
+			name: 'fal.ai',
+			subtext: 'API'
+		});
+	});
+
 	it('keeps other API-key rows on their own name + API', () => {
 		expect(
 			getProviderDisplay({ name: 'OpenRouter', provider_type: 'openrouter', auth_kind: 'api' })

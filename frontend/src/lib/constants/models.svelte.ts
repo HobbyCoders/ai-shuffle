@@ -316,7 +316,8 @@ const PROVIDER_BRANDS: Readonly<Record<string, string>> = {
 	chatgpt: 'OpenAI',
 	openai: 'OpenAI',
 	grok: 'Grok',
-	xai: 'Grok'
+	xai: 'Grok',
+	fal: 'fal.ai'
 };
 
 /** A provider's two-part display label. */

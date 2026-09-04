@@ -32,6 +32,9 @@
 				return 'grok';
 			case 'openrouter':
 				return 'openrouter';
+			case 'fal':
+			case 'fal-ai':
+				return 'custom';
 			default:
 				return 'custom';
 		}

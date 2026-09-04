@@ -466,8 +466,11 @@ class TestPollOnceSkipsXai:
         ]
         with patch("app.db.database.get_enabled_model_providers", return_value=rows), \
              patch.object(monitor, "_poll_provider", new=AsyncMock()) as poll_or, \
-             patch.object(monitor, "_poll_grok_provider", new=AsyncMock()) as poll_grok:
+             patch.object(monitor, "_poll_grok_provider", new=AsyncMock()) as poll_grok, \
+             patch.object(monitor, "_poll_openai_provider", new=AsyncMock()) as poll_openai, \
+             patch.object(monitor, "_poll_fal", new=AsyncMock()):
             await monitor.poll_once()
 
         poll_or.assert_not_called()
+        poll_openai.assert_not_called()
         poll_grok.assert_called_once_with(rows[1])

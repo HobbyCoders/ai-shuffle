@@ -20,6 +20,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/usage", tags=["Usage"])
 
 
+def _credits_are_displayable(credits: object) -> bool:
+    """True when a provider credits blob has a figure the popover can render."""
+    if not isinstance(credits, dict):
+        return False
+    if credits.get("unlimited") is True:
+        return True
+    for key in (
+        "balance_remaining",
+        "limit_remaining",
+        "usage",
+        "balance",
+        "total_available",
+    ):
+        value = credits.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return True
+    return False
+
+
 def _coerce_epoch_resets_at(v: object) -> object:
     """Accept int/float epoch-seconds ``resets_at`` and emit them as str.
 
@@ -116,7 +135,8 @@ class UsageSnapshot(BaseModel):
     # Per-install cluster view (per-account usage). Absent from very old clients.
     snapshots: List[InstallUsageSnapshot] = []
     self_instance_id: Optional[str] = None
-    # Non-Claude provider usage (Codex/ChatGPT, OpenRouter, ...). Additive.
+    # Non-Claude provider usage (Codex/ChatGPT, OpenRouter, OpenAI credits,
+    # fal.ai credits, SuperGrok, ...). Additive.
     providers: List[ProviderUsageEntry] = []
 
 
@@ -135,26 +155,42 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
         providers = await run_sync(db.get_all_model_providers)
         names = {p["id"]: p.get("name") for p in providers}
 
+        from app.core.provider_usage import (
+            FAL_USAGE_PROVIDER_ID,
+            FAL_USAGE_PROVIDER_NAME,
+        )
+
         entries: List[ProviderUsageEntry] = []
         for row in rows:
-            # OpenAI / xAI API-key snapshots are excluded from the response:
-            # their only content is per-minute x-ratelimit headroom (~always
-            # 0%), and neither exposes a credits/usage endpoint a secret key
-            # may call (dashboard billing = session-key-only 403; org cost
-            # reports = separate admin key, and still no balance). Verified
-            # live 2026-08-16 (OpenAI); capture itself stays — it doubles as
-            # the 429 breaker seam. SuperGrok subscription rows
-            # (provider_type='grok') are included.
-            if row.get("provider_type") in ("openai", "xai"):
+            # xAI API-key snapshots stay excluded: their only content is
+            # per-minute x-ratelimit headroom (~always 0%), and xAI exposes
+            # no credits endpoint a secret key may call. OpenAI rows are
+            # included once the credit-grants poller has populated a
+            # displayable balance; their per-minute rate-limit windows are
+            # stripped so the popover headlines remaining credits instead
+            # of a ~0% requests bar. SuperGrok subscription rows
+            # (provider_type='grok') are included. Capture itself stays —
+            # it doubles as the 429 breaker seam.
+            ptype = row.get("provider_type")
+            credits = row.get("credits")
+            windows = row.get("windows") or []
+            if ptype == "xai":
                 continue
+            if ptype == "openai":
+                if not _credits_are_displayable(credits):
+                    continue
+                windows = []
+            name = names.get(row["provider_id"])
+            if not name and row["provider_id"] == FAL_USAGE_PROVIDER_ID:
+                name = FAL_USAGE_PROVIDER_NAME
             entries.append(
                 ProviderUsageEntry(
                     provider_id=row["provider_id"],
-                    provider_name=names.get(row["provider_id"]),
-                    provider_type=row.get("provider_type"),
+                    provider_name=name,
+                    provider_type=ptype,
                     plan_type=row.get("plan_type"),
-                    windows=row.get("windows") or [],
-                    credits=row.get("credits"),
+                    windows=windows,
+                    credits=credits,
                     fetched_at=row.get("fetched_at"),
                 )
             )

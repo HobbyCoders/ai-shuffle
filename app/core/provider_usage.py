@@ -40,12 +40,28 @@ access token from ``codex_access_token``, never the row's API-key
 short-timeout fetch whose failure must not drop an already-fetched billing
 snapshot. xAI API-key rows (``provider_type='xai'``) are never polled.
 
+**OpenAI platform credits poller.** Enabled ``provider_type='openai'`` rows
+whose ``base_url`` host is ``api.openai.com`` are polled against the dashboard
+credit-grants endpoint the platform console uses
+(``GET https://api.openai.com/v1/dashboard/billing/credit_grants``). This is
+undocumented and 403s for project/service-account keys without billing access;
+a 403 is logged at debug and skipped. Custom OpenAI-compatible gateways are
+never sent to that host. The decrypted key is used only as a Bearer header
+and is NEVER logged.
+
+**fal.ai credits poller.** The same monitor reads the install's
+``fal_api_key`` (not a model-provider row) and polls the official Platform
+API (``GET https://api.fal.ai/v1/account/billing?expand=credits``). The
+snapshot is stored under the synthetic id ``fal-ai``. Missing key deletes
+that row so the popover does not keep a stale balance.
+
 Security (S4 hard invariant): the allowlists below are the ONLY thing that
 ever reaches ``raw`` (and, transitively, the DB and any future API response).
 They never include ``Authorization``, ``chatgpt-account-id``, any cookie, or
-any other credential. The decrypted OpenRouter key is used only as a Bearer
-header value and is NEVER logged, printed, or stored (not even truncated).
-Failures are logged at WARNING without ever including header or key values.
+any other credential. The decrypted OpenRouter / OpenAI / fal keys are used
+only as Authorization header values and are NEVER logged, printed, or stored
+(not even truncated). Failures are logged at WARNING without ever including
+header or key values.
 """
 
 from __future__ import annotations
@@ -841,8 +857,151 @@ async def _maybe_refresh_grok_on_401(
         return False
 
 
+# ---------------------------------------------------------------------------
+# OpenAI platform credit-grants poller
+# ---------------------------------------------------------------------------
+
+# Dashboard billing endpoint the platform console uses. Undocumented; 403s for
+# project keys without billing access. Host is pinned so the Bearer token never
+# leaves api.openai.com (and never follows redirects).
+OPENAI_CREDIT_GRANTS_HOST = "api.openai.com"
+OPENAI_CREDIT_GRANTS_URL = (
+    "https://api.openai.com/v1/dashboard/billing/credit_grants"
+)
+
+# credits keys that may leave this module. Never tokens.
+_OPENAI_CREDITS_FIELDS: Tuple[str, ...] = (
+    "balance_remaining",
+    "total_available",
+    "total_granted",
+    "total_credits",
+    "total_used",
+    "total_usage",
+)
+_OPENAI_CREDITS_RAW_FIELDS: Tuple[str, ...] = (
+    "total_granted",
+    "total_used",
+    "total_available",
+)
+
+
+def _openai_credit_grants_url_is_pinned(url: str) -> bool:
+    """HTTPS + host pin — the Bearer token must never leave api.openai.com."""
+    parsed = urlsplit(url)
+    return parsed.scheme == "https" and parsed.hostname == OPENAI_CREDIT_GRANTS_HOST
+
+
+def _is_openai_platform_row(row: Optional[Dict[str, Any]]) -> bool:
+    """True for official OpenAI API-key rows (not custom OpenAI-compatible hosts)."""
+    r = row or {}
+    if r.get("provider_type") != "openai":
+        return False
+    host = (urlsplit(r.get("base_url") or "").hostname or "").lower()
+    return host == OPENAI_CREDIT_GRANTS_HOST
+
+
+def normalize_openai_credit_grants(payload: Any) -> Optional[Dict[str, Any]]:
+    """Map ``credit_grants`` JSON to the credits blob the usage popover renders.
+
+    ``total_available`` is the remaining prepaid/grant balance (the figure the
+    platform home page shows). It is copied to ``balance_remaining`` so the
+    existing OpenRouter-style headline (``$X.XX left``) applies unchanged.
+    Pure and defensive: a non-dict payload or a missing available figure
+    returns ``None`` rather than raising.
+    """
+    if not isinstance(payload, dict):
+        return None
+    total_granted = _as_float(payload.get("total_granted"))
+    total_used = _as_float(payload.get("total_used"))
+    total_available = _as_float(payload.get("total_available"))
+    if total_available is None and total_granted is not None and total_used is not None:
+        total_available = total_granted - total_used
+    if total_available is None:
+        return None
+    credits: Dict[str, Any] = {
+        "balance_remaining": total_available,
+        "total_available": total_available,
+    }
+    if total_granted is not None:
+        credits["total_granted"] = total_granted
+        credits["total_credits"] = total_granted
+    if total_used is not None:
+        credits["total_used"] = total_used
+        credits["total_usage"] = total_used
+    return {k: v for k, v in credits.items() if k in _OPENAI_CREDITS_FIELDS}
+
+
+# ---------------------------------------------------------------------------
+# fal.ai account billing poller
+# ---------------------------------------------------------------------------
+
+# Official Platform API. Host is pinned; requests never follow redirects so the
+# Key credential cannot hop hosts. Synthetic snapshot id is not a model-provider
+# UUID — fal is an integration key, not a chat gateway row.
+FAL_BILLING_HOST = "api.fal.ai"
+FAL_BILLING_URL = "https://api.fal.ai/v1/account/billing?expand=credits"
+FAL_USAGE_PROVIDER_ID = "fal-ai"
+FAL_USAGE_PROVIDER_TYPE = "fal"
+FAL_USAGE_PROVIDER_NAME = "fal.ai"
+
+_FAL_CREDITS_FIELDS: Tuple[str, ...] = ("balance_remaining", "currency")
+_FAL_RAW_FIELDS: Tuple[str, ...] = ("username", "current_balance", "currency")
+
+
+def _fal_billing_url_is_pinned(url: str) -> bool:
+    """HTTPS + host pin — the Key credential must never leave api.fal.ai."""
+    parsed = urlsplit(url)
+    return parsed.scheme == "https" and parsed.hostname == FAL_BILLING_HOST
+
+
+def _fal_auth_header(api_key: str) -> str:
+    """Build fal's ``Authorization: Key …`` header. Never log the return value."""
+    text = (api_key or "").strip()
+    if text.lower().startswith("key "):
+        return text
+    return f"Key {text}"
+
+
+def normalize_fal_billing(payload: Any) -> Optional[Dict[str, Any]]:
+    """Map fal ``/v1/account/billing?expand=credits`` JSON to a credits blob.
+
+    ``credits.current_balance`` becomes ``balance_remaining`` so the popover
+    headlines ``$X.XX left``. Pure and defensive: a missing/non-numeric
+    balance returns ``None``.
+    """
+    if not isinstance(payload, dict):
+        return None
+    credits_obj = payload.get("credits")
+    if not isinstance(credits_obj, dict):
+        credits_obj = payload if "current_balance" in payload else None
+    if not isinstance(credits_obj, dict):
+        return None
+    balance = _as_float(credits_obj.get("current_balance"))
+    if balance is None:
+        return None
+    credits: Dict[str, Any] = {"balance_remaining": balance}
+    currency = credits_obj.get("currency")
+    if isinstance(currency, str) and currency.strip():
+        credits["currency"] = currency.strip()
+    return {k: v for k, v in credits.items() if k in _FAL_CREDITS_FIELDS}
+
+
+def _allowlisted_fal_raw(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Copy only billing fields we actually read. Never credentials."""
+    raw: Dict[str, Any] = {}
+    username = payload.get("username")
+    if isinstance(username, str) and username:
+        raw["username"] = username
+    credits_obj = payload.get("credits") if isinstance(payload.get("credits"), dict) else {}
+    if "current_balance" in credits_obj:
+        raw["current_balance"] = credits_obj.get("current_balance")
+    if "currency" in credits_obj:
+        raw["currency"] = credits_obj.get("currency")
+    return {k: v for k, v in raw.items() if k in _FAL_RAW_FIELDS}
+
+
 class ProviderUsageMonitor:
-    """Polls OpenRouter ``/api/v1/key`` and SuperGrok billing endpoints.
+    """Polls OpenRouter, SuperGrok, OpenAI credit-grants, and fal.ai billing.
 
     Best-effort, module-singleton, lifecycle mirrors
     ``app.core.usage_limits.UsageLimitsMonitor``: ``poll_once`` never raises,
@@ -851,7 +1010,7 @@ class ProviderUsageMonitor:
     """
 
     async def poll_once(self) -> None:
-        """Poll enabled OpenRouter and Grok-subscription rows. Never raises."""
+        """Poll enabled OpenRouter, Grok, OpenAI-platform, and fal rows. Never raises."""
         from app.db import database as db
 
         try:
@@ -864,7 +1023,7 @@ class ProviderUsageMonitor:
             )
         except Exception as e:
             logger.debug("Provider usage poll: provider read skipped: %s", e)
-            return
+            rows = []
 
         for row in rows or []:
             r = row or {}
@@ -872,6 +1031,10 @@ class ProviderUsageMonitor:
                 await self._poll_provider(r)
             elif _is_grok_subscription_row(r):
                 await self._poll_grok_provider(r)
+            elif _is_openai_platform_row(r):
+                await self._poll_openai_provider(r)
+
+        await self._poll_fal()
 
     async def _poll_provider(self, row: Dict[str, Any]) -> None:
         from app.db import database as db
@@ -1044,6 +1207,130 @@ class ProviderUsageMonitor:
             logger.warning(
                 "Grok usage poll for provider %s failed: %s", provider_id, e
             )
+
+    async def _poll_openai_provider(self, row: Dict[str, Any]) -> None:
+        """Fetch OpenAI credit-grants and upsert a credits-only snapshot. Never raises."""
+        from app.db import database as db
+
+        provider_id = row.get("id")
+        try:
+            if not provider_id:
+                return
+            key = _decrypt_provider_auth_token(row)
+            if not key:
+                return
+            if not _openai_credit_grants_url_is_pinned(OPENAI_CREDIT_GRANTS_URL):
+                return
+
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "Accept": "application/json",
+            }
+            async with httpx.AsyncClient(
+                timeout=_REQUEST_TIMEOUT_SECONDS, follow_redirects=False
+            ) as client:
+                resp = await client.get(OPENAI_CREDIT_GRANTS_URL, headers=headers)
+
+            if resp.status_code in (401, 403):
+                # Project / service-account keys cannot read billing. Expected.
+                logger.debug(
+                    "OpenAI credit_grants for provider %s returned HTTP %s",
+                    provider_id,
+                    resp.status_code,
+                )
+                return
+            if resp.status_code != 200:
+                logger.warning(
+                    "OpenAI credit_grants for provider %s failed: HTTP %s",
+                    provider_id,
+                    resp.status_code,
+                )
+                return
+
+            try:
+                body = resp.json()
+            except Exception:
+                body = None
+            credits = normalize_openai_credit_grants(body)
+            if not credits:
+                return
+            raw = {
+                k: body.get(k)
+                for k in _OPENAI_CREDITS_RAW_FIELDS
+                if isinstance(body, dict) and k in body
+            }
+            await run_sync(
+                db.upsert_provider_usage_snapshot,
+                provider_id,
+                "openai",
+                None,
+                [],
+                credits,
+                raw,
+                int(time.time() * 1000),
+            )
+        except Exception as e:
+            # Never include the Bearer key here.
+            logger.warning(
+                "OpenAI credits poll for provider %s failed: %s", provider_id, e
+            )
+
+    async def _poll_fal(self) -> None:
+        """Fetch fal.ai account credits and upsert the synthetic snapshot. Never raises.
+
+        Fal is an integration key (``fal_api_key``), not a model-provider row.
+        A missing key deletes any previous ``fal-ai`` snapshot so the popover
+        cannot keep a stale balance after the user removes the key.
+        """
+        from app.db import database as db
+
+        try:
+            from app.api.settings_crypto import get_decrypted_api_key
+
+            key = await run_sync(get_decrypted_api_key, "fal_api_key")
+            if not key:
+                await run_sync(db.delete_provider_usage_snapshot, FAL_USAGE_PROVIDER_ID)
+                return
+            if not _fal_billing_url_is_pinned(FAL_BILLING_URL):
+                return
+
+            headers = {
+                "Authorization": _fal_auth_header(key),
+                "Accept": "application/json",
+            }
+            async with httpx.AsyncClient(
+                timeout=_REQUEST_TIMEOUT_SECONDS, follow_redirects=False
+            ) as client:
+                resp = await client.get(FAL_BILLING_URL, headers=headers)
+
+            if resp.status_code in (401, 403):
+                logger.debug("fal.ai billing returned HTTP %s", resp.status_code)
+                return
+            if resp.status_code != 200:
+                logger.warning("fal.ai billing fetch failed: HTTP %s", resp.status_code)
+                return
+
+            try:
+                body = resp.json()
+            except Exception:
+                body = None
+            credits = normalize_fal_billing(body)
+            if not credits:
+                return
+            raw = _allowlisted_fal_raw(body if isinstance(body, dict) else {})
+            await run_sync(
+                db.upsert_provider_usage_snapshot,
+                FAL_USAGE_PROVIDER_ID,
+                FAL_USAGE_PROVIDER_TYPE,
+                None,
+                [],
+                credits,
+                raw,
+                int(time.time() * 1000),
+            )
+        except Exception as e:
+            # Never include the Key credential here.
+            logger.warning("fal.ai credits poll failed: %s", e)
 
 
 provider_usage_monitor = ProviderUsageMonitor()

@@ -337,10 +337,9 @@ class TestUsageLimitsProviders:
         assert "should-not-leak" not in resp.text
 
     def test_openai_and_xai_snapshots_excluded_from_response(self):
-        """OpenAI / xAI API-key snapshots never surface: their windows are
-        per-minute rate-limit headroom (~always 0%), and neither has a
-        key-accessible credits/usage endpoint to show instead. SuperGrok
-        subscription snapshots (provider_type='grok') are included."""
+        """xAI API-key snapshots never surface (per-minute headroom only).
+        OpenAI snapshots without a displayable credits blob stay hidden too;
+        SuperGrok subscription snapshots (provider_type='grok') are included."""
         from app.db import database as db
 
         db.upsert_provider_usage_snapshot(
@@ -373,6 +372,56 @@ class TestUsageLimitsProviders:
         grok = next(p for p in providers if p["provider_id"] == "prov-grok")
         assert grok["provider_type"] == "grok"
         assert grok["plan_type"] == "SuperGrok"
+
+    def test_openai_credits_surface_without_rate_limit_windows(self):
+        """Once credit_grants has populated a balance, OpenAI is included and
+        the per-minute requests/tokens windows are stripped so the popover
+        headlines remaining credits."""
+        from app.db import database as db
+
+        db.upsert_provider_usage_snapshot(
+            provider_id="prov-openai", provider_type="openai", plan_type=None,
+            windows=[{"type": "requests", "utilization": 0.2, "resets_at": None}],
+            credits={"balance_remaining": 20.75, "total_usage": 4.25},
+            raw=None, fetched_at=8,
+        )
+
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            resp = _client().get("/api/v1/usage/limits")
+
+        assert resp.status_code == 200
+        providers = resp.json()["providers"]
+        assert len(providers) == 1
+        entry = providers[0]
+        assert entry["provider_id"] == "prov-openai"
+        assert entry["provider_type"] == "openai"
+        assert entry["windows"] == []
+        assert entry["credits"]["balance_remaining"] == 20.75
+
+    def test_fal_credits_surface_with_brand_name(self):
+        """fal.ai is an integration key, not a model-provider row; the API
+        still names it so the popover can render without a registry join."""
+        from app.db import database as db
+
+        db.upsert_provider_usage_snapshot(
+            provider_id="fal-ai", provider_type="fal", plan_type=None,
+            windows=[], credits={"balance_remaining": 24.5, "currency": "USD"},
+            raw=None, fetched_at=9,
+        )
+
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            resp = _client().get("/api/v1/usage/limits")
+
+        assert resp.status_code == 200
+        providers = resp.json()["providers"]
+        assert len(providers) == 1
+        entry = providers[0]
+        assert entry["provider_id"] == "fal-ai"
+        assert entry["provider_name"] == "fal.ai"
+        assert entry["provider_type"] == "fal"
+        assert entry["credits"]["balance_remaining"] == 24.5
 
     def test_provider_load_exception_yields_empty_providers_with_200(self):
         """A DB hiccup inside _load_provider_usage degrades to providers: [] and

@@ -16,6 +16,8 @@ describe('ProviderGlyph', () => {
 		['grok', 'grok'],
 		['xai', 'grok'],
 		['openrouter', 'openrouter'],
+		['fal', 'custom'],
+		['fal-ai', 'custom'],
 		['custom', 'custom']
 	] satisfies [string, ProviderGlyphKind][])('maps %s to the %s company mark', (type, mark) => {
 		expect(providerGlyphKind(type)).toBe(mark);
