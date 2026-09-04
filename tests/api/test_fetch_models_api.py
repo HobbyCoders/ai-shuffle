@@ -492,3 +492,107 @@ class TestHelperParsing:
         assert mp_api._models_catalog_url("https://api.x.ai/v1/") == (
             "https://api.x.ai/v1/models"
         )
+
+
+class TestMediaModelFiltering:
+    """The provider list is a TEXT-generation picker.
+
+    Audio, voice, image and video endpoints are configured elsewhere (AI tools,
+    and Settings > Voice), so they are split out of ``models`` and reported in
+    ``hidden`` instead of being offered as chat models.
+    """
+
+    def test_media_models_are_split_out_on_the_generic_path(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        _unlock(mock_db)
+        _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
+
+        def _handler(request):
+            return httpx.Response(200, json={"data": [
+                {"id": "gpt-5.6-sol"},
+                {"id": "gpt-realtime-2.1"},
+                {"id": "whisper-1"},
+                {"id": "tts-1-hd"},
+                {"id": "dall-e-3"},
+                # Chat model that merely speaks — must survive.
+                {"id": "gpt-4o-audio-preview"},
+            ]})
+
+        _install_mock_transport(monkeypatch, _handler)
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        assert [m["id"] for m in body["models"]] == [
+            "gpt-5.6-sol",
+            "gpt-4o-audio-preview",
+        ]
+        assert [m["id"] for m in body["hidden"]] == [
+            "gpt-realtime-2.1",
+            "whisper-1",
+            "tts-1-hd",
+            "dall-e-3",
+        ]
+
+    def test_hidden_entries_carry_their_destination_kind(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        """The UI switches on this to say where the model actually lives."""
+        _unlock(mock_db)
+        _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
+
+        def _handler(request):
+            return httpx.Response(200, json={"data": [
+                {"id": "gpt-realtime-2.1"},
+                {"id": "whisper-1"},
+                {"id": "sora-2"},
+            ]})
+
+        _install_mock_transport(monkeypatch, _handler)
+        body = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models").json()
+
+        kinds = {m["id"]: m["media_kind"] for m in body["hidden"]}
+        assert kinds == {
+            "gpt-realtime-2.1": "voice",
+            "whisper-1": "audio",
+            "sora-2": "video",
+        }
+
+    def test_an_all_text_roster_reports_nothing_hidden(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        _unlock(mock_db)
+        _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
+
+        def _handler(request):
+            return httpx.Response(200, json={"data": [
+                {"id": "gpt-5.6-sol"},
+                {"id": "anthropic/claude-fable-5.1"},
+            ]})
+
+        _install_mock_transport(monkeypatch, _handler)
+        body = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models").json()
+
+        assert len(body["models"]) == 2
+        assert body["hidden"] == []
+
+    def test_unknown_ids_are_never_hidden(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        """A custom gateway serves ids this rule has never seen; hiding them
+        would empty its picker."""
+        _unlock(mock_db)
+        _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
+
+        def _handler(request):
+            return httpx.Response(200, json={"data": [
+                {"id": "acme-llm-7b"},
+                {"id": "some-future-model-9"},
+            ]})
+
+        _install_mock_transport(monkeypatch, _handler)
+        body = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models").json()
+
+        assert len(body["models"]) == 2
+        assert body["hidden"] == []
