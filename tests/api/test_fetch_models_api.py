@@ -118,6 +118,59 @@ class TestLiveCatalogs:
         assert captured["originator"] == "codex_cli_rs"
         assert captured["ua"] == "codex_cli_rs/1.0.0"
 
+    def test_chatgpt_catalog_uses_slug_and_hides_visibility_hide(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        """Live Codex entries identify models with ``slug``, not ``id``.
+
+        Refresh used to skip every row (no ``id`` / ``model``), so new slugs
+        like gpt-6-astra never appeared on the ChatGPT sub picker even though
+        the same account's OpenAI API catalog listed them.
+        """
+        _unlock(mock_db)
+        _make_provider(
+            provider_type="chatgpt",
+            base_url="https://chatgpt.com/backend-api/codex",
+        )
+        _attach_subscription(auth_mode="chatgpt", account_id="acct-1")
+
+        def _handler(request):
+            return httpx.Response(200, json={"models": [
+                {
+                    "slug": "gpt-6-astra",
+                    "display_name": "GPT-6-Astra",
+                    "context_window": 272000,
+                    "visibility": ["codex"],
+                },
+                {
+                    "slug": "gpt-5.6-sol",
+                    "display_name": "GPT-5.6-Sol",
+                    "visibility": ["codex"],
+                },
+                {
+                    "slug": "gpt-reserve",
+                    "display_name": "GPT-Reserve",
+                    "visibility": "hide",
+                },
+                {
+                    "slug": "codex-auto-review",
+                    "display_name": "Codex Auto Review",
+                    "visibility": "hide",
+                },
+            ]})
+
+        _install_mock_transport(monkeypatch, _handler)
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["models"] == [
+            {
+                "id": "gpt-6-astra",
+                "label": "GPT-6-Astra",
+                "context_window": 272000,
+            },
+            {"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol"},
+        ]
+
     def test_chatgpt_without_tokens_returns_409(
         self, authenticated_client, mock_db, monkeypatch
     ):
@@ -481,6 +534,33 @@ class TestHelperParsing:
             {"id": "gpt-5.6-sol", "label": "gpt-5.6-sol"},
             {"id": "gpt-5.7", "label": "GPT-5.7"},
         ]
+
+    def test_parse_codex_slug_display_name_and_context_window(self):
+        """The real Codex catalog has no ``id`` / ``name`` / ``context_length``."""
+        out = mp_api._parse_models_response({"models": [
+            {
+                "slug": "gpt-6-astra",
+                "display_name": "GPT-6-Astra",
+                "context_window": 272000,
+            },
+            {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol"},
+        ]})
+        assert out == [
+            {
+                "id": "gpt-6-astra",
+                "label": "GPT-6-Astra",
+                "context_window": 272000,
+            },
+            {"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol"},
+        ]
+
+    def test_codex_visible_payload_drops_hide(self):
+        payload = {"models": [
+            {"slug": "gpt-6-astra", "visibility": ["codex"]},
+            {"slug": "gpt-reserve", "visibility": "hide"},
+        ]}
+        out = mp_api._codex_visible_payload(payload)
+        assert [e["slug"] for e in out["models"]] == ["gpt-6-astra"]
 
     def test_models_catalog_url_avoids_double_v1(self):
         assert mp_api._models_catalog_url("https://api.openai.com/v1") == (

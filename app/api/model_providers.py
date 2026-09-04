@@ -360,13 +360,15 @@ def _upstream_context_length(entry: Dict[str, Any]) -> Optional[int]:
     OpenRouter (and the gateways that copy its shape) publish it as
     ``context_length`` at the top level and/or under ``top_provider``; the
     latter is the more specific value (the actual serving provider's window) so
-    it wins. Returns ``None`` when absent or unusable — never a guessed default.
+    it wins. Codex publishes ``context_window`` instead. Returns ``None`` when
+    absent or unusable — never a guessed default.
     """
     candidates = []
     top_provider = entry.get("top_provider")
     if isinstance(top_provider, dict):
         candidates.append(top_provider.get("context_length"))
     candidates.append(entry.get("context_length"))
+    candidates.append(entry.get("context_window"))
     for value in candidates:
         if value is None or isinstance(value, bool):
             continue
@@ -387,13 +389,15 @@ def _parse_models_response(
     """Normalize an upstream ``/models`` body into ``[{id, label}]``.
 
     Handles OpenAI-style ``{"data": [{"id": ...}]}``, Codex-style
-    ``{"models": [{"id": ...}]}``, and a bare list of entries. Each entry may
-    be an object (``id`` required; ``label``/``name`` optional, falling back
-    to ``id``) or a bare string id. Entries without a usable id are skipped.
+    ``{"models": [{"slug": ...}]}`` (also ``id`` / ``model``), and a bare list
+    of entries. Each entry may be an object (``id`` / ``model`` / ``slug``
+    required; ``label`` / ``name`` / ``display_name`` optional, falling back to
+    the id) or a bare string id. Entries without a usable id are skipped.
     The list is capped at ``_FETCH_MODELS_CAP``.
 
     An upstream-advertised per-model window (``context_length`` /
-    ``top_provider.context_length``) is CARRIED THROUGH as ``context_window``.
+    ``top_provider.context_length`` / Codex ``context_window``) is CARRIED
+    THROUGH as ``context_window``.
     It used to be dropped here, which forced every model on the row to share the
     row's single ``context_window`` column — wrong the moment one model on the
     row has a different window.
@@ -417,10 +421,15 @@ def _parse_models_response(
             model_id = entry
             label = entry
         elif isinstance(entry, dict):
-            model_id = entry.get("id") or entry.get("model")
+            model_id = entry.get("id") or entry.get("model") or entry.get("slug")
             if not isinstance(model_id, str) or not model_id:
                 continue
-            label = entry.get("label") or entry.get("name") or model_id
+            label = (
+                entry.get("label")
+                or entry.get("name")
+                or entry.get("display_name")
+                or model_id
+            )
             if not isinstance(label, str) or not label:
                 label = model_id
             context_window = _upstream_context_length(entry)
@@ -613,8 +622,31 @@ async def _fetch_codex_models(
         payload = resp.json()
     except Exception as e:  # noqa: BLE001 — malformed upstream body
         raise UpstreamModelsError("invalid_json") from e
-    models = _parse_models_response(payload, provider_type="chatgpt")
+    models = _parse_models_response(
+        _codex_visible_payload(payload), provider_type="chatgpt"
+    )
     return [m for m in models if m.get("id") not in _CODEX_EXCLUDED_MODEL_IDS]
+
+
+def _codex_visible_payload(payload: Any) -> Any:
+    """Drop Codex rows marked ``visibility: "hide"`` (gpt-reserve, auto-review).
+
+    The live catalog identifies models with ``slug``, not ``id``. Hidden
+    special-purpose rows still arrive in the same list; stripping them here
+    keeps them out of the ChatGPT sub picker the same way ``codex-auto-review``
+    is excluded by id after parse.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    raw = payload.get("models")
+    if not isinstance(raw, list):
+        return payload
+    visible = [
+        entry
+        for entry in raw
+        if not (isinstance(entry, dict) and entry.get("visibility") == "hide")
+    ]
+    return {**payload, "models": visible}
 
 
 async def _fetch_upstream_with_grok_retry(
