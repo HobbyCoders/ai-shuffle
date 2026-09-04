@@ -397,7 +397,10 @@
 		return typeof v === 'number' && Number.isFinite(v) ? v : null;
 	}
 
-	function creditsSummary(credits: Record<string, unknown> | null): string | null {
+	function creditsSummary(
+		credits: Record<string, unknown> | null,
+		providerType: string | null = null
+	): string | null {
 		if (!credits || typeof credits !== 'object') return null;
 		// An account credit BALANCE (OpenRouter's /credits ledger) is the headline
 		// figure and outranks the key-scoped usage/limit fields below it.
@@ -408,6 +411,10 @@
 				? `$${remaining.toFixed(2)} left · $${spent.toFixed(2)} used`
 				: `$${remaining.toFixed(2)} left`;
 		}
+		// ChatGPT/Codex extra-credit headers (balance / unlimited) belong on
+		// the subscription quota row and are usually $0 — prepaid API $ is
+		// the separate OpenAI · API row (balance_remaining).
+		if ((providerType || '').toLowerCase() === 'chatgpt') return null;
 		if (credits.unlimited === true) return 'Credits: unlimited';
 		const used = typeof credits.usage === 'number' ? credits.usage : null;
 		const left = typeof credits.limit_remaining === 'number' ? credits.limit_remaining : null;
@@ -425,10 +432,14 @@
 	// the provider has no rate-limit windows to draw a pct from. Same field
 	// semantics as creditsSummary: the account balance first, then usage,
 	// key-limit remaining, and a plain balance.
-	function creditsShort(credits: Record<string, unknown> | null): string | null {
+	function creditsShort(
+		credits: Record<string, unknown> | null,
+		providerType: string | null = null
+	): string | null {
 		if (!credits || typeof credits !== 'object') return null;
 		const remaining = creditsNum(credits, 'balance_remaining');
 		if (remaining != null) return `$${remaining.toFixed(2)} left`;
+		if ((providerType || '').toLowerCase() === 'chatgpt') return null;
 		const used = typeof credits.usage === 'number' ? credits.usage : null;
 		if (used != null) return `$${used.toFixed(2)} used`;
 		const left = typeof credits.limit_remaining === 'number' ? credits.limit_remaining : null;
@@ -494,13 +505,22 @@
 		});
 	}
 
-	// Alphabetical by resolved display name. Raw bucket order follows
-	// record-insertion, which re-shuffles on every usage fold-in — rows must
-	// hold still under the user's eye instead.
+	// Subscriptions (ChatGPT / SuperGrok) first, A–Z, then API accounts
+	// (OpenAI API, OpenRouter, fal.ai, …) A–Z. Brand-only alpha parked
+	// OpenAI · API next to OpenAI · prolite, which read as one section.
+	function isSubscriptionProvider(pb: { providerType: string | null }): boolean {
+		const t = (pb.providerType || '').toLowerCase();
+		return t === 'chatgpt' || t === 'grok';
+	}
+
 	function sortedProviderBuckets() {
 		return Object.values($rateLimit.providerBuckets ?? {})
-			.map((pb) => ({ pb, name: providerDisplayFor(pb).name }))
-			.sort((a, b) => a.name.localeCompare(b.name))
+			.map((pb) => ({
+				pb,
+				name: providerDisplayFor(pb).name,
+				group: isSubscriptionProvider(pb) ? 0 : 1
+			}))
+			.sort((a, b) => a.group - b.group || a.name.localeCompare(b.name))
 			.map((entry) => entry.pb);
 	}
 
@@ -782,7 +802,7 @@
 							{/if}
 						</span>
 						{#if !pbOpen}
-							{@const pbCreditsShort = creditsShort(pb.credits)}
+							{@const pbCreditsShort = creditsShort(pb.credits, pb.providerType)}
 							<!-- An account credit balance is the headline the user cares
 							     about, so it outranks the window pct (which an OpenRouter
 							     key-spend limit would otherwise produce). -->
@@ -834,7 +854,7 @@
 							</div>
 						</div>
 					{/each}
-					{@const credits = creditsSummary(pb.credits)}
+					{@const credits = creditsSummary(pb.credits, pb.providerType)}
 					{#if credits}
 						<div class="row-reset">{credits}</div>
 					{/if}

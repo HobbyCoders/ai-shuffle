@@ -274,7 +274,8 @@ class TestUsageLimitsProviders:
         assert entry["provider_name"] == "My ChatGPT"
         assert entry["provider_type"] == "chatgpt"
         assert entry["plan_type"] == "plus"
-        assert entry["credits"] == {"has_credits": True, "balance": 5.0}
+        # Codex extra-credit headers stay off the ChatGPT quota row.
+        assert entry["credits"] is None
         assert entry["fetched_at"] == 1783739400000
         # Window int-epoch resets_at coerced to decimal string; None preserved.
         assert entry["windows"][0]["type"] == "five_hour"

@@ -1012,6 +1012,86 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		expect(container.querySelectorAll('.popover-section').length).toBe(3);
 	});
 
+	it('sorts subscription rows A–Z above API rows A–Z', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'or-1',
+					provider_name: 'OpenRouter',
+					provider_type: 'openrouter',
+					windows: [],
+					credits: { balance_remaining: 20.52 }
+				},
+				{
+					provider_id: 'fal-ai',
+					provider_name: 'fal.ai',
+					provider_type: 'fal',
+					windows: [],
+					credits: { balance_remaining: 22.91 }
+				},
+				{
+					provider_id: 'p-chatgpt',
+					provider_name: 'ChatGPT',
+					provider_type: 'chatgpt',
+					plan_type: 'prolite',
+					windows: [{ type: 'five_hour', utilization: 0, resets_at: future() }],
+					credits: { balance: 0 }
+				},
+				{
+					provider_id: 'p-grok',
+					provider_name: 'Grok',
+					provider_type: 'grok',
+					plan_type: 'SuperGrok',
+					windows: [{ type: 'seven_day', utilization: 4, resets_at: future() }],
+					credits: null
+				},
+				{
+					provider_id: 'openai-api',
+					provider_name: 'OpenAI',
+					provider_type: 'openai',
+					windows: [],
+					credits: { balance_remaining: 12.5 }
+				}
+			]
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		const labels = Array.from(container.querySelectorAll('.section-device')).map(
+			(e) => e.textContent
+		);
+		const accounts = Array.from(container.querySelectorAll('.section-account')).map(
+			(e) => e.textContent
+		);
+		// Claude (native) stays first; then subs A–Z (Grok, OpenAI prolite);
+		// then APIs A–Z (fal.ai, OpenAI API, OpenRouter).
+		expect(labels).toEqual(['Claude', 'Grok', 'OpenAI', 'fal.ai', 'OpenAI', 'OpenRouter']);
+		expect(accounts).toEqual(['SuperGrok', 'prolite', 'API', 'API', 'API']);
+	});
+
+	it('does not show Codex extra-credit $0 on the ChatGPT subscription row', async () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'p-chatgpt',
+					provider_name: 'ChatGPT',
+					provider_type: 'chatgpt',
+					plan_type: 'prolite',
+					windows: [{ type: 'five_hour', utilization: 0, resets_at: future() }],
+					credits: { has_credits: true, balance: 0 }
+				}
+			]
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.textContent).not.toContain('$0.00');
+		expect(container.textContent).not.toContain('Credits: $');
+	});
+
 	it('renders a muted credits line and NO bar for a null-limit provider (OpenRouter-style)', async () => {
 		rateLimit.applySnapshot({
 			available: true,

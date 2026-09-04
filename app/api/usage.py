@@ -182,6 +182,11 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
                 if not _credits_are_displayable(credits):
                     continue
                 windows = []
+            # ChatGPT/Codex header credits (x-codex-credits-balance, often 0)
+            # are extra-credit crumbs on the subscription quota row — not
+            # prepaid API balance. That figure lives on the openai-api row.
+            if ptype == "chatgpt":
+                credits = None
             name = names.get(row["provider_id"])
             if not name and row["provider_id"] == FAL_USAGE_PROVIDER_ID:
                 name = FAL_USAGE_PROVIDER_NAME
