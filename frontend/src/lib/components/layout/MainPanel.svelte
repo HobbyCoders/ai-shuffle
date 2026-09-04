@@ -52,6 +52,7 @@
 	import StudioTopBar from './StudioTopBar.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import { shouldShowHeaderGitActions } from './git-header-visibility';
+	import { sessionMode } from '$lib/stores/sessionMode.svelte';
 	import { chatHeaderTitle } from './chat-empty-state';
 	import { warmHighlighter } from '$lib/utils/shiki';
 	import {
@@ -413,7 +414,8 @@
 				worktreeDeleted: !!activeTab.worktreeDeleted,
 				isRemote: activeIsRemote,
 				isMobile,
-				sessionMode: activeTab.mode
+				sessionMode: activeTab.mode,
+				appLane: $sessionMode
 			})
 	);
 
@@ -891,7 +893,8 @@
 		worktreeDeleted: !!activeTab.worktreeDeleted,
 		isRemote: activeIsRemote,
 		isMobile,
-		sessionMode: activeTab.mode
+		sessionMode: activeTab.mode,
+		appLane: $sessionMode
 	})}
 		<div class="git-actions-host">
 			<GitHeaderActions

@@ -74,6 +74,15 @@ describe('shouldShowHeaderGitActions', () => {
 		expect(shouldShowHeaderGitActions(base({ isMobile: true, sessionMode: 'voice' }))).toBe(true);
 	});
 
+	it('keeps git actions on mobile when the sidepanel lane is code even if session mode says chat', () => {
+		expect(shouldShowHeaderGitActions(base({ isMobile: true, sessionMode: 'chat', appLane: 'code' }))).toBe(true);
+	});
+
+	it('keeps Finish-capable git actions on desktop regardless of session mode', () => {
+		expect(shouldShowHeaderGitActions(base({ isMobile: false, sessionMode: 'code' }))).toBe(true);
+		expect(shouldShowHeaderGitActions(base({ isMobile: false, sessionMode: 'chat' }))).toBe(true);
+	});
+
 	it('does not hide on mobile when sessionMode is omitted (fail open for code/voice)', () => {
 		expect(shouldShowHeaderGitActions(base({ isMobile: true }))).toBe(true);
 	});

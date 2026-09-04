@@ -548,7 +548,7 @@
 	<!-- Commit / Create PR / Finish split button — primary action decided by
 	     computePrimaryAction (unit-tested pure helper) -->
 	{#if primaryAction === 'commit'}
-		<div class="split-btn-group">
+		<div class="split-btn-group git-primary">
 			<button
 				class="git-btn split-main"
 				class:stale={snapshotPending}
@@ -587,7 +587,7 @@
 			{/if}
 		</div>
 	{:else if primaryAction === 'finish'}
-		<div class="split-btn-group">
+		<div class="split-btn-group git-primary">
 			<button
 				class="git-btn split-main"
 				class:stale={snapshotPending}
@@ -639,7 +639,7 @@
 			{/if}
 		</div>
 	{:else if primaryAction === 'create-pr'}
-		<div class="split-btn-group">
+		<div class="split-btn-group git-primary">
 			<button
 				class="git-btn split-main"
 				class:stale={snapshotPending}
@@ -679,7 +679,7 @@
 		</div>
 	{:else}
 		<button
-			class="git-btn"
+			class="git-btn git-primary"
 			disabled={true}
 			title="No changes to commit"
 		>
@@ -1130,6 +1130,13 @@
 		.split-btn-group,
 		.diff-stats {
 			flex-shrink: 0;
+		}
+
+		/* Pin Commit/Finish/Create PR at the start of the rail so Finish is
+		   visible when a PR is open — Pull/Push used to sit first and push
+		   the primary action off-screen on a phone-width header. */
+		.git-primary {
+			order: -1;
 		}
 
 		.git-btn {
