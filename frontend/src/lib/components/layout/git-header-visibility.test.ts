@@ -61,6 +61,15 @@ describe('shouldShowHeaderGitActions', () => {
 	it('hides when the worktree directory is gone', () => {
 		expect(shouldShowHeaderGitActions(base({ worktreeDeleted: true }))).toBe(false);
 	});
+
+	it('hides all git actions on mobile chat mode header', () => {
+		expect(shouldShowHeaderGitActions(base({ isMobile: true }))).toBe(false);
+	});
+
+	it('keeps git actions on desktop when isMobile is false/omitted', () => {
+		expect(shouldShowHeaderGitActions(base({ isMobile: false }))).toBe(true);
+		expect(shouldShowHeaderGitActions(base())).toBe(true);
+	});
 });
 
 describe('shouldShowGithubGitActions', () => {
@@ -88,6 +97,12 @@ describe('shouldShowGithubGitActions', () => {
 	it('still respects the local gate (remote session hides everything)', () => {
 		expect(
 			shouldShowGithubGitActions(base({ isRemote: true, githubAvailable: true }))
+		).toBe(false);
+	});
+
+	it('still respects the local gate (mobile hides everything)', () => {
+		expect(
+			shouldShowGithubGitActions(base({ isMobile: true, githubAvailable: true }))
 		).toBe(false);
 	});
 });

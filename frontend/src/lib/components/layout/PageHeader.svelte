@@ -11,9 +11,9 @@
 	 *   it centers itself and shrinks/ellipsizes so it can never overlap the side
 	 *   clusters on narrow screens.
 	 * - Mobile: a single row. The chat name moves to the global app bar
-	 *   (AppTopBar), so the title is hidden here; the row carries download pinned
-	 *   at the start with the git actions in a horizontal scroll rail filling the
-	 *   rest. Both <div class="hdr-row*"> wrappers use `display:contents` so all
+	 *   (AppTopBar), so the title is hidden here; the row carries non-git actions
+	 *   (download, browser toggle). Git header actions are suppressed on mobile.
+	 *   Both <div class="hdr-row*"> wrappers use `display:contents` so all
 	 *   items share one flex row on every width.
 	 *
 	 * The project/worktree context badge that used to render here now lives in the
@@ -33,7 +33,7 @@
 		profile?: Snippet;
 		/** Left-cluster meta actions (e.g. download chat history). */
 		leftActions?: Snippet;
-		/** Right cluster / bottom rail: git actions, diff stats, etc. */
+		/** Right cluster: header actions (git on desktop; non-git on mobile). */
 		actions?: Snippet;
 	}
 
@@ -73,7 +73,7 @@
 		</div>
 	</div>
 
-	<!-- Row 2: profile + git actions (scroll rail on mobile; flattened on desktop) -->
+	<!-- Row 2: profile + header actions (scroll rail on mobile; flattened on desktop) -->
 	<div class="hdr-row2">
 		{#if profile}
 			<div class="hdr-profile">
@@ -220,8 +220,8 @@
 	/* ===================================================================
 	   Mobile: a single row. The chat name now lives in the global app bar
 	   (AppTopBar), so the title is hidden here and the row carries the
-	   original actions — download pinned at the start, with
-	   the git actions in a horizontal touch-scroll rail filling the rest.
+	   remaining header actions (download, browser toggle). Git actions are
+	   intentionally omitted on mobile via shouldShowHeaderGitActions.
 	   =================================================================== */
 	/* Mobile breakpoint: 1080px covers phones AND unfolded foldables (Z Fold 6/7
 	   inner ~1028–1040px). Kept in sync with AppLayout's isMobile width cutoff. */
@@ -232,7 +232,6 @@
 			min-height: 44px;
 			padding: 0 8px;
 			gap: 8px;
-			/* Only the git rail (.hdr-right) scrolls. */
 			overflow: visible;
 		}
 
@@ -260,7 +259,7 @@
 			margin: 0;
 		}
 
-		/* Git actions: horizontal touch-scroll rail filling the remaining width.
+		/* Header actions: horizontal touch-scroll rail filling the remaining width.
 		   Editable-prompt popovers inside it switch to position:fixed on mobile,
 		   so this overflow doesn't clip them. */
 		.hdr-right {
@@ -270,7 +269,7 @@
 			flex-wrap: nowrap;
 			/* Reset the desktop `flex-end`: with flex-end + overflow-x the content
 			   overflows past the START (left) edge, which is unreachable by scroll —
-			   so the git actions slide under the pinned meta-actions cluster
+			   so actions would slide under the pinned meta-actions cluster
 			   instead of scrolling. flex-start sends the overflow to the END so the
 			   rail scrolls left→right and never overlaps the meta cluster. */
 			justify-content: flex-start;

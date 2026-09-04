@@ -411,7 +411,8 @@
 				githubAuthenticated: $githubAuthenticated,
 				githubAvailable: $githubFeaturesAvailable,
 				worktreeDeleted: !!activeTab.worktreeDeleted,
-				isRemote: activeIsRemote
+				isRemote: activeIsRemote,
+				isMobile
 			})
 	);
 
@@ -887,7 +888,8 @@
 		githubAuthenticated: $githubAuthenticated,
 		githubAvailable: $githubFeaturesAvailable,
 		worktreeDeleted: !!activeTab.worktreeDeleted,
-		isRemote: activeIsRemote
+		isRemote: activeIsRemote,
+		isMobile
 	})}
 		<div class="git-actions-host">
 			<GitHeaderActions
