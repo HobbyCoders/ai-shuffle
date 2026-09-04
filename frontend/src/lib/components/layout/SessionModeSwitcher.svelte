@@ -9,9 +9,13 @@
 	 * same panel — with roving-tabindex arrow keys, so a keyboard user tabs
 	 * into the group once and cycles lanes with the arrows.
 	 *
-	 * Styling stays on the sidebar's flat, hairline-bordered language: a single
-	 * inset trough with a filled pill for the selected lane, sized so all three
-	 * labels survive the panel's 220px minimum. Below ~250px of switcher width
+	 * It rides in the sidebar's bottom dock, so it is styled as a segmented
+	 * control: an inset trough with ONE raised thumb that slides between the
+	 * three equal columns. The thumb is a sibling element rather than a
+	 * background on the selected button, which is the only way the change of
+	 * lane reads as a movement instead of two independent fades — and it is a
+	 * transform, so the slide never touches layout. Sized so all three labels
+	 * survive the panel's 220px minimum; below ~250px of switcher width
 	 * the labels drop and the icons carry the meaning — which is why each radio
 	 * carries an explicit `aria-label`: `display: none` takes the visible label
 	 * out of the accessibility tree too, so without it the narrow sidebar would
@@ -34,6 +38,10 @@
 	];
 
 	let buttons = $state<(HTMLButtonElement | null)[]>([]);
+
+	/** Which column the thumb sits over. Clamped so an unknown value parks it
+	 *  on the first lane instead of sliding the thumb out of the trough. */
+	const index = $derived(Math.max(0, OPTIONS.findIndex((o) => o.mode === value)));
 
 	/** Arrow keys move the selection AND the focus, which is what a radiogroup
 	 *  promises — Home/End jump to the ends. */
@@ -63,7 +71,8 @@
 	}
 </script>
 
-<div class="modes" role="radiogroup" aria-label="Session mode">
+<div class="modes" role="radiogroup" aria-label="Session mode" style="--mode-index:{index}">
+	<span class="thumb" aria-hidden="true"></span>
 	{#each OPTIONS as opt, i (opt.mode)}
 		<button
 			bind:this={buttons[i]}
@@ -85,17 +94,37 @@
 
 <style>
 	.modes {
-		display: flex;
-		gap: 2px;
-		margin: 0 0 4px;
-		padding: 2px;
+		position: relative;
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		margin: 0;
+		padding: 3px;
 		border: 1px solid var(--sidebar-border);
 		border-radius: 9px;
-		background: var(--sidebar-accent);
+		background: oklch(0 0 0 / 0.5);
+		box-shadow: inset 0 1px 2px oklch(0 0 0 / 0.6);
 		container-type: inline-size;
 	}
+	.thumb {
+		position: absolute;
+		top: 3px;
+		bottom: 3px;
+		left: 3px;
+		width: calc((100% - 6px) / 3);
+		border-radius: 7px;
+		background: linear-gradient(
+			180deg,
+			color-mix(in oklch, var(--sidebar-accent-active) 100%, var(--foreground) 6%),
+			var(--sidebar-accent)
+		);
+		box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.1), 0 2px 6px oklch(0 0 0 / 0.5);
+		transform: translateX(calc(var(--mode-index, 0) * 100%));
+		transition: transform 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+		pointer-events: none;
+	}
 	.mode {
-		flex: 1 1 0;
+		position: relative;
+		z-index: 1;
 		min-width: 0;
 		display: flex;
 		align-items: center;
@@ -121,11 +150,8 @@
 		white-space: nowrap;
 	}
 	.mode:hover { color: var(--foreground); }
-	.mode.on {
-		background: var(--sidebar-accent-active);
-		color: var(--foreground);
-		box-shadow: inset 0 0 0 1px var(--sidebar-border);
-	}
+	/* The thumb carries the selection; the button only brightens. */
+	.mode.on { color: var(--foreground); }
 	.mode.on :global(svg) { color: var(--primary); }
 
 	/* The sidebar is user-resizable down to 220px; at that width three labels
@@ -138,10 +164,10 @@
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 
 	@media (hover: none), (max-width: 1080px) {
-		.mode { height: 36px; }
+		.mode { height: 40px; }
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.mode { transition: none; }
+		.mode, .thumb { transition: none; }
 	}
 </style>

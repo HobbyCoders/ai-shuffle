@@ -122,6 +122,9 @@ import { sessionTimestamp } from './session-card-data';
 // Not mocked: the lane partition IS what the mode tests assert, so they drive
 // the real store. It is a module singleton, hence the reset in beforeEach.
 import { appMode } from '$lib/stores/sessionMode.svelte';
+// Also unmocked: the workspace nav's shown/hidden split IS what those tests
+// assert. Module-level state, hence the reset in beforeEach.
+import { sidebarWorkspace } from '$lib/stores/sidebar-prefs.svelte';
 import Sidebar from './Sidebar.svelte';
 
 function session(
@@ -171,9 +174,31 @@ const sidebarProps = {
 	onOpenFeature: vi.fn(),
 };
 
+// ── Card queries ────────────────────────────────────────────────────────────
+// A card's INNARDS belong to SessionCard, so the sidebar's tests address cards
+// by the `data-session-card` frame the sidebar itself relies on (see the
+// delegated-menus block) and by the words a status is supposed to carry — never
+// by SessionCard's internal class names, which are free to change without
+// breaking anything the sidebar promises.
+
+/** Every rendered card id, in DOM order. */
+function cardIds(scope: ParentNode = document): string[] {
+	return Array.from(scope.querySelectorAll('[data-session-card]')).map(
+		(node) => node.getAttribute('data-session-card') ?? ''
+	);
+}
+
+/** The card frame carrying `title`. */
+function cardFrame(title: string): HTMLElement {
+	const frame = screen.getByText(title).closest('[data-session-card]');
+	if (!frame) throw new Error(`no card frame for ${title}`);
+	return frame as HTMLElement;
+}
+
 beforeEach(() => {
 	localStorage.clear();
 	appMode.set('code');
+	sidebarWorkspace.reset();
 	vi.mocked(sessionTimestamp).mockClear();
 	mocks.sessionsHasMore.set(false);
 	mocks.sessionsLoadingMore.set(false);
@@ -215,8 +240,7 @@ describe('Sidebar session groups', () => {
 			},
 		});
 
-		// `.ws-head` is the Workspace nav header, not a session group.
-		const labels = Array.from(document.querySelectorAll('.grouplabel:not(.ws-head)')).map((node) =>
+		const labels = Array.from(document.querySelectorAll('.grouplabel')).map((node) =>
 			node.textContent?.replace(/\s+/g, ' ').trim()
 		);
 		expect(labels).toEqual(['Active 1', 'Settled 1']);
@@ -313,8 +337,7 @@ describe('Sidebar session groups', () => {
 
 		render(Sidebar, { props: sidebarProps });
 
-		const card = screen.getByText('Active chat').closest('.scard');
-		expect(card?.querySelector('.status')?.textContent).toContain('Needs Permission');
+		expect(cardFrame('Active chat').textContent).toContain('Needs permission');
 	});
 
 	it('shows Has Question while a user question is pending', async () => {
@@ -322,8 +345,7 @@ describe('Sidebar session groups', () => {
 
 		render(Sidebar, { props: sidebarProps });
 
-		const card = screen.getByText('Active chat').closest('.scard');
-		expect(card?.querySelector('.status')?.textContent).toContain('Has Question');
+		expect(cardFrame('Active chat').textContent).toContain('Has question');
 	});
 
 	it('shows PR Opened from persisted session state without polling GitHub', async () => {
@@ -338,8 +360,7 @@ describe('Sidebar session groups', () => {
 
 		render(Sidebar, { props: sidebarProps });
 
-		const card = screen.getByText('PR chat').closest('.scard');
-		expect(card?.querySelector('.status')?.textContent).toContain('PR Opened');
+		expect(cardFrame('PR chat').textContent).toContain('PR #7 open');
 		expect(mocks.getPullRequests).not.toHaveBeenCalled();
 	});
 
@@ -355,8 +376,7 @@ describe('Sidebar session groups', () => {
 
 		render(Sidebar, { props: sidebarProps });
 
-		const card = screen.getByText('PR chat').closest('.scard');
-		expect(card?.querySelector('.status')?.textContent).toContain('PR Merged');
+		expect(cardFrame('PR chat').textContent).toContain('PR #7 merged');
 		expect(mocks.getPullRequests).not.toHaveBeenCalled();
 	});
 
@@ -374,8 +394,7 @@ describe('Sidebar session groups', () => {
 
 		// The fetch is async — wait for the badge to appear.
 		await vi.waitFor(() => {
-			const card = screen.getByText('PR chat').closest('.scard');
-			expect(card?.querySelector('.status')?.textContent).toContain('PR Opened');
+			expect(cardFrame('PR chat').textContent).toContain('PR open');
 		});
 		expect(mocks.getPullRequests).toHaveBeenCalledWith(
 			'visible-project',
@@ -394,19 +413,18 @@ describe('Sidebar session groups', () => {
 
 		render(Sidebar, { props: sidebarProps });
 
-		const card = screen.getByText('Active chat').closest('.scard');
-		expect(card?.querySelector('.status')?.textContent).toContain('Working');
+		expect(cardFrame('Active chat').textContent).toContain('Working');
 	});
 
 	it('marks the project ghost row active once a project filter is applied', async () => {
 		render(Sidebar, { props: sidebarProps });
 
-		expect(document.querySelector('.ghostrow.active')).toBeNull();
+		expect(document.querySelector('.fbtn.set')).toBeNull();
 
 		await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
 		await fireEvent.click(screen.getByRole('menuitem', { name: /Visible Project/ }));
 
-		const active = document.querySelector('.ghostrow.active');
+		const active = document.querySelector('.fbtn.set');
 		expect(active).toBeTruthy();
 		expect(active?.textContent).toContain('Visible Project');
 	});
@@ -446,14 +464,13 @@ describe('Sidebar ordering (must never change silently)', () => {
 
 		render(Sidebar, { props: sidebarProps });
 
-		const titles = Array.from(document.querySelectorAll('.ctitle')).map((n) => n.textContent);
-		expect(titles).toEqual([
-			'Newest chat',
-			'Naive timestamp chat',
-			'Created only chat',
-			'Middle chat',
-			'Oldest chat',
-			'Undated chat',
+		expect(cardIds()).toEqual([
+			'newest',
+			'naive',
+			'created-only',
+			'middle',
+			'oldest',
+			'undated',
 		]);
 	});
 
@@ -472,10 +489,9 @@ describe('Sidebar ordering (must never change silently)', () => {
 
 		render(Sidebar, { props: sidebarProps });
 
-		const activeTitles = Array.from(document.querySelectorAll('.l2')).map((n) => n.textContent);
-		expect(activeTitles).toEqual(['Active newer', 'Active older']);
-		const settledTitles = Array.from(document.querySelectorAll('.ctitle')).map((n) => n.textContent);
-		expect(settledTitles).toEqual(['Settled one']);
+		const groups = document.querySelectorAll('.cards');
+		expect(cardIds(groups[0])).toEqual(['a-new', 'a-old']);
+		expect(cardIds(groups[1])).toEqual(['s-one']);
 	});
 });
 
@@ -510,8 +526,7 @@ describe('Sidebar streaming folds (R2)', () => {
 
 		render(Sidebar, { props: sidebarProps });
 
-		const card = screen.getByText('Settled chat').closest('.scard');
-		expect(card?.querySelector('.status')?.textContent ?? card?.textContent).toBeTruthy();
+		expect(cardFrame('Settled chat').textContent).toBeTruthy();
 		expect(document.body.textContent).toContain('Settled chat');
 	});
 });
@@ -571,8 +586,7 @@ describe('Sidebar open-PR refresh (R8)', () => {
 		render(Sidebar, { props: sidebarProps });
 
 		await vi.waitFor(() => {
-			const card = screen.getByText('PR chat').closest('.scard');
-			expect(card?.querySelector('.status')?.textContent).toContain('PR Opened');
+			expect(cardFrame('PR chat').textContent).toContain('PR open');
 		});
 
 		// A transient failure (auth blip, rate limit) must not blank the badge.
@@ -583,8 +597,7 @@ describe('Sidebar open-PR refresh (R8)', () => {
 		]);
 		await new Promise((r) => setTimeout(r, 2200));
 
-		const card = screen.getByText('PR chat').closest('.scard');
-		expect(card?.querySelector('.status')?.textContent).toContain('PR Opened');
+		expect(cardFrame('PR chat').textContent).toContain('PR open');
 	});
 });
 
@@ -610,19 +623,27 @@ describe('Sidebar delegated card menus (R15)', () => {
 		return frame;
 	}
 
-	it('attaches ONE window click listener regardless of how many cards render', () => {
-		mocks.sessions.set(
-			Array.from({ length: 12 }, (_, i) =>
-				session(`s${i}`, `Chat ${i}`, 'visible-project', false)
-			)
-		);
-		const addSpy = vi.spyOn(window, 'addEventListener');
+	it('does not attach a window click listener per rendered card', () => {
+		function countClickListeners(cards: number): number {
+			mocks.sessions.set(
+				Array.from({ length: cards }, (_, i) =>
+					session(`s${i}`, `Chat ${i}`, 'visible-project', false)
+				)
+			);
+			const addSpy = vi.spyOn(window, 'addEventListener');
+			const view = render(Sidebar, { props: sidebarProps });
+			const count = addSpy.mock.calls.filter(([type]) => type === 'click').length;
+			addSpy.mockRestore();
+			view.unmount();
+			return count;
+		}
 
-		render(Sidebar, { props: sidebarProps });
-
-		const clickListeners = addSpy.mock.calls.filter(([type]) => type === 'click').length;
-		expect(clickListeners).toBe(1);
-		addSpy.mockRestore();
+		// Every SessionCard used to attach its own pair, so a single click
+		// anywhere ran one handler per rendered card (60+). The sidebar owns the
+		// open-card id instead. The absolute count is not the point — it also
+		// covers the header's notification bell — so assert the invariant that
+		// actually matters: it is flat in the number of cards.
+		expect(countClickListeners(12)).toBe(countClickListeners(1));
 	});
 
 	it('closes the open card actions on an outside click', async () => {
@@ -678,16 +699,39 @@ describe('Sidebar load-more shelf (W1)', () => {
 	});
 });
 
-describe('Sidebar workspace nav prefetch', () => {
-	/** The Workspace rows, keyed by their visible label. */
-	function wsrow(label: string): HTMLElement {
-		const row = Array.from(document.querySelectorAll('.wsrow')).find(
-			(node) => node.querySelector('.label')?.textContent?.trim() === label
-		);
-		if (!row) throw new Error(`no workspace row labelled ${label}`);
-		return row as HTMLElement;
-	}
+// ── Workspace nav helpers (shared by the two blocks below) ──────────────────
 
+/** The inline Workspace rows, keyed by their visible label. */
+function wsrow(label: string): HTMLElement {
+	const row = Array.from(document.querySelectorAll('.wsrow')).find(
+		(node) => node.querySelector('.label')?.textContent?.trim() === label
+	);
+	if (!row) throw new Error(`no workspace row labelled ${label}`);
+	return row as HTMLElement;
+}
+
+/** Labels of the inline rows, in order, excluding the More row itself. */
+function wsLabels(): string[] {
+	return Array.from(document.querySelectorAll('.wsrow:not(.morerow) .label')).map(
+		(node) => node.textContent?.trim() ?? ''
+	);
+}
+
+/** Open the More flyout and return its menu items. */
+async function openMore(): Promise<HTMLElement[]> {
+	await fireEvent.click(screen.getByRole('button', { name: /More/ }));
+	return screen.getAllByRole('menuitem') as HTMLElement[];
+}
+
+function flyoutItem(label: string): HTMLElement {
+	const item = screen
+		.getAllByRole('menuitem')
+		.find((node) => node.textContent?.trim() === label);
+	if (!item) throw new Error(`no flyout item labelled ${label}`);
+	return item as HTMLElement;
+}
+
+describe('Sidebar workspace nav prefetch', () => {
 	it('does not prefetch anything just by rendering', () => {
 		render(Sidebar, { props: sidebarProps });
 
@@ -698,21 +742,21 @@ describe('Sidebar workspace nav prefetch', () => {
 	it('prefetches the panel chunk when the pointer enters a row', async () => {
 		render(Sidebar, { props: sidebarProps });
 
-		await fireEvent.pointerEnter(wsrow('Notes'));
+		await fireEvent.pointerEnter(wsrow('Projects'));
 		await Promise.resolve();
 
-		expect(panelSpies.preloadCalls).toEqual(['notes']);
-		expect(panelSpies.chunkFetches).toEqual(['notes']);
+		expect(panelSpies.preloadCalls).toEqual(['project']);
+		expect(panelSpies.chunkFetches).toEqual(['project']);
 	});
 
 	it('prefetches on focus, so keyboard navigation warms the same chunk', async () => {
 		render(Sidebar, { props: sidebarProps });
 
-		await fireEvent.focus(wsrow('Stats'));
+		await fireEvent.focus(wsrow('Build'));
 		await Promise.resolve();
 
-		expect(panelSpies.preloadCalls).toEqual(['stats']);
-		expect(panelSpies.chunkFetches).toEqual(['stats']);
+		expect(panelSpies.preloadCalls).toEqual(['build']);
+		expect(panelSpies.chunkFetches).toEqual(['build']);
 	});
 
 	it('maps every Build sub-view row onto the Build panel chunk', async () => {
@@ -722,6 +766,17 @@ describe('Sidebar workspace nav prefetch', () => {
 		await Promise.resolve();
 
 		expect(panelSpies.chunkFetches).toEqual(['build']);
+	});
+
+	it('prefetches from a flyout item too — a folded row is no less likely', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		await openMore();
+		await fireEvent.pointerEnter(flyoutItem('Notes'));
+		await Promise.resolve();
+
+		expect(panelSpies.preloadCalls).toEqual(['notes']);
+		expect(panelSpies.chunkFetches).toEqual(['notes']);
 	});
 
 	it('does not re-fetch a chunk on repeated hover or on a later focus', async () => {
@@ -744,11 +799,173 @@ describe('Sidebar workspace nav prefetch', () => {
 		const onOpenFeature = vi.fn();
 		render(Sidebar, { props: { ...sidebarProps, onOpenFeature } });
 
-		const row = wsrow('Docs');
+		const row = wsrow('Files');
 		await fireEvent.pointerEnter(row);
 		await fireEvent.click(row);
 
+		expect(onOpenFeature).toHaveBeenCalledWith('file-browser');
+	});
+});
+
+describe('Sidebar workspace nav customization', () => {
+	it('shows the default three rows inline and folds the rest into More', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		expect(wsLabels()).toEqual(['Files', 'Build', 'Projects']);
+
+		const items = await openMore();
+		expect(items.map((n) => n.textContent?.trim())).toEqual([
+			'Notes',
+			'Stats',
+			'Docs',
+			'Customize',
+		]);
+	});
+
+	it('never offers an admin-only destination to a non-admin, inline or folded', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		const items = await openMore();
+		const labels = [...wsLabels(), ...items.map((n) => n.textContent?.trim())];
+		expect(labels).not.toContain('Automations');
+		expect(labels).not.toContain('Settings');
+	});
+
+	it('lists the admin destinations for an admin', async () => {
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true } });
+
+		const items = await openMore();
+		const labels = items.map((n) => n.textContent?.trim());
+		expect(labels).toContain('Automations');
+		expect(labels).toContain('Settings');
+	});
+
+	it('opens a folded destination from the flyout and closes it behind itself', async () => {
+		const onOpenFeature = vi.fn();
+		render(Sidebar, { props: { ...sidebarProps, onOpenFeature } });
+
+		await openMore();
+		await fireEvent.click(flyoutItem('Docs'));
+
 		expect(onOpenFeature).toHaveBeenCalledWith('docs');
+		expect(screen.queryByRole('menuitem', { name: 'Docs' })).toBeNull();
+	});
+
+	it('promotes a hidden destination to an inline row from Customize', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		await openMore();
+		await fireEvent.click(flyoutItem('Customize'));
+
+		const dialog = screen.getByRole('dialog', { name: /Customize workspace/ });
+		expect(dialog).toBeTruthy();
+		// "New session" is listed but pinned — it is not a Workspace destination.
+		expect(dialog.textContent).toContain('Always first');
+
+		await fireEvent.click(screen.getByRole('checkbox', { name: 'Show Notes' }));
+		expect(wsLabels()).toEqual(['Files', 'Notes', 'Build', 'Projects']);
+
+		// And it survives the dialog, because the store wrote it.
+		await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+		expect(screen.queryByRole('dialog', { name: /Customize workspace/ })).toBeNull();
+		expect(wsLabels()).toEqual(['Files', 'Notes', 'Build', 'Projects']);
+	});
+
+	it('reorders a row from the keyboard, so the feature is not pointer-only', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		await openMore();
+		await fireEvent.click(flyoutItem('Customize'));
+
+		await fireEvent.keyDown(screen.getByRole('button', { name: 'Reorder Projects' }), {
+			key: 'ArrowUp',
+		});
+		await fireEvent.keyDown(screen.getByRole('button', { name: 'Reorder Projects' }), {
+			key: 'ArrowUp',
+		});
+
+		expect(wsLabels()).toEqual(['Files', 'Projects', 'Build']);
+	});
+});
+
+describe('Sidebar header and sticky block', () => {
+	it('puts New session first, as a row rather than a header icon', () => {
+		render(Sidebar, { props: sidebarProps });
+
+		const newRow = screen.getByRole('button', { name: /New session/ });
+		expect(newRow.classList.contains('newrow')).toBe(true);
+		// It sits in the sticky block, above the scroll region's workspace rows.
+		expect(newRow.closest('.sb-top')).toBeTruthy();
+		expect(newRow.compareDocumentPosition(wsrow('Files')) & Node.DOCUMENT_POSITION_FOLLOWING)
+			.toBeTruthy();
+	});
+
+	it('opens the spotlight from the header search button and drops the ghost row', async () => {
+		const onOpenSpotlight = vi.fn();
+		render(Sidebar, { props: { ...sidebarProps, onOpenSpotlight } });
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+		expect(onOpenSpotlight).toHaveBeenCalledTimes(1);
+		// The old full-width "Search" ghost row is gone.
+		expect(document.querySelector('.ghostrow .label')?.textContent).not.toBe('Search');
+	});
+
+	it('omits the search button when the host threads no spotlight', () => {
+		render(Sidebar, { props: sidebarProps });
+
+		expect(screen.queryByRole('button', { name: 'Search' })).toBeNull();
+	});
+
+	it('hosts the notification bell — its only home now', () => {
+		render(Sidebar, { props: sidebarProps });
+
+		expect(screen.getByRole('button', { name: /Notifications/ })).toBeTruthy();
+	});
+
+	it('fades the separator in only once the list has actually scrolled', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		const top = document.querySelector('.sb-top') as HTMLElement;
+		const scroll = document.querySelector('.sb-scroll') as HTMLElement;
+		expect(top.classList.contains('scrolled')).toBe(false);
+
+		Object.defineProperty(scroll, 'scrollTop', { value: 40, configurable: true });
+		await fireEvent.scroll(scroll);
+		expect(top.classList.contains('scrolled')).toBe(true);
+	});
+
+	it('closes an open scope menu on scroll, since its anchor is a snapshot', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		await fireEvent.click(screen.getByRole('button', { name: /All devices/ }));
+		expect(screen.queryByRole('menuitem', { name: /This device/ })).toBeTruthy();
+
+		await fireEvent.scroll(document.querySelector('.sb-scroll') as HTMLElement);
+		expect(screen.queryByRole('menuitem', { name: /This device/ })).toBeNull();
+	});
+
+	it('clears both scopes from the single clear button on the row', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		expect(document.querySelector('.scope-clear')).toBeNull();
+
+		await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
+		await fireEvent.click(screen.getByRole('menuitem', { name: /Visible Project/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /All devices/ }));
+		await fireEvent.click(screen.getByRole('menuitem', { name: /This device/ }));
+		expect(document.querySelectorAll('.fbtn.set').length).toBe(2);
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+		expect(document.querySelectorAll('.fbtn.set').length).toBe(0);
+		expect(document.querySelector('.scope-clear')).toBeNull();
+	});
+
+	it('docks the lane switcher at the panel foot', () => {
+		render(Sidebar, { props: sidebarProps });
+
+		const dock = document.querySelector('.sb-dock');
+		expect(dock?.querySelector('[role="radiogroup"]')).toBeTruthy();
 	});
 });
 
@@ -765,8 +982,8 @@ describe('Sidebar mode lanes', () => {
 	}
 
 	function visibleTitles(): string[] {
-		return Array.from(document.querySelectorAll('.ctitle, .l2')).map(
-			(n) => n.textContent?.trim() ?? ''
+		return Array.from(document.querySelectorAll('[data-session-card]')).map(
+			(n) => n.querySelector('.title')?.textContent?.trim() ?? ''
 		);
 	}
 
@@ -830,7 +1047,7 @@ describe('Sidebar mode lanes', () => {
 
 		await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
 		await fireEvent.click(screen.getByRole('menuitem', { name: /Visible Project/ }));
-		expect(document.querySelector('.ghostrow.active')?.textContent).toContain('Visible Project');
+		expect(document.querySelector('.fbtn.set')?.textContent).toContain('Visible Project');
 
 		await fireEvent.click(screen.getByRole('radio', { name: /Chat/ }));
 		await tick();

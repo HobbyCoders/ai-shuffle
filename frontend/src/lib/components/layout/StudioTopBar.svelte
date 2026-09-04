@@ -3,9 +3,13 @@
 	 * StudioTopBar - desktop top bar for the main panel (Studio Noir shell).
 	 *
 	 * Sidebar toggle + breadcrumbs (`project › session title`) on the left; the
-	 * caller's action snippet (git actions, chat utilities), notifications and
-	 * the account badge on the right. It replaces the old AppTopBar tab row:
-	 * page navigation now lives in the sidebar's footer rail.
+	 * caller's action snippet (git actions, chat utilities) and the account
+	 * badge on the right. It replaces the old AppTopBar tab row: page navigation
+	 * now lives in the sidebar's workspace nav.
+	 *
+	 * The notification bell used to sit here too. It now lives only in the
+	 * sidebar header, so there is exactly one bell on screen at any width
+	 * instead of one per header that happens to be mounted.
 	 *
 	 * The bar renders inside MainPanel so the git action buttons it hosts are the
 	 * existing GitHeaderActions instance with its existing handlers — nothing
@@ -14,7 +18,6 @@
 	import type { Snippet } from 'svelte';
 	import { PanelLeft, ChevronRight } from 'lucide-svelte';
 	import { username } from '$lib/stores/auth.svelte';
-	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 	import SessionTitleMenu from './SessionTitleMenu.svelte';
 
 	interface Props {
@@ -84,7 +87,6 @@
 		{#if actions}
 			{@render actions()}
 		{/if}
-		<NotificationCenter />
 		<div class="tb-sep" aria-hidden="true"></div>
 		<span class="tb-avatar" title={$username || 'Account'}>{initials}</span>
 	</div>

@@ -1,15 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import type { Session } from '$lib/api/client';
 import {
+	deriveGitStage,
 	deriveStatus,
+	diffCounts,
+	isAttentionStatus,
 	isLiveStatus,
 	isRemovedDeviceSession,
 	isRemovedProjectSession,
 	isVisibleSidebarSession,
 	liveProjectKeys,
+	prStateText,
 	sessionModeOf,
 	sessionTimestamp,
+	GIT_STAGE_LABELS,
+	GIT_STAGE_TONES,
+	GIT_STAGE_TIPS,
+	RUNTIME_STATUS_TONES,
+	RUNTIME_STATUS_WORDS,
 	STATUS_LABELS,
+	type GitStage,
 } from './session-card-data';
 
 function session(over: Partial<Session> = {}): Session {
@@ -228,5 +238,105 @@ describe('sessionModeOf', () => {
 		// some lane instead of disappearing from all three lists.
 		expect(sessionModeOf(session({ mode: 'telepathy' }))).toBe('code');
 		expect(sessionModeOf(session({ mode: '' }))).toBe('code');
+	});
+});
+
+describe('deriveGitStage', () => {
+	const repo = { hasProject: true };
+	const clean = { isRepo: true, hasChanges: false, ahead: 0, defaultBranch: 'main' };
+
+	it('marks a session with no repo behind it', () => {
+		expect(deriveGitStage({ hasProject: false })).toBe('none');
+		expect(deriveGitStage({ ...repo, mode: 'chat' })).toBe('none');
+		expect(deriveGitStage({ ...repo, mode: 'voice' })).toBe('none');
+		expect(deriveGitStage({ ...repo, git: { ...clean, isRepo: false } })).toBe('none');
+	});
+
+	it('lets the PR lifecycle own the glyph', () => {
+		const dirty = { ...clean, hasChanges: true };
+		expect(deriveGitStage({ ...repo, prState: 'open', git: dirty })).toBe('pr');
+		expect(deriveGitStage({ ...repo, prState: 'merged', git: dirty })).toBe('merged');
+		expect(deriveGitStage({ ...repo, prState: 'closed', git: dirty })).toBe('closed');
+	});
+
+	it('reads the working tree newest-work-first', () => {
+		expect(deriveGitStage({ ...repo, git: { ...clean, hasChanges: true, ahead: 2 } })).toBe('dirty');
+		expect(deriveGitStage({ ...repo, git: { ...clean, ahead: 2 } })).toBe('committed');
+	});
+
+	it('calls a clean session branch pushed, and trunk plain clean', () => {
+		expect(deriveGitStage({ ...repo, branch: 'feat/x', git: clean })).toBe('pushed');
+		expect(deriveGitStage({ ...repo, branch: 'main', git: clean })).toBe('clean');
+		expect(deriveGitStage({ ...repo, branch: null, git: clean })).toBe('clean');
+	});
+
+	it('never guesses a tree state it was not given', () => {
+		// Settled rows cost no request, so "no git facts" must read as the quiet
+		// dot rather than as "pushed and waiting on a PR".
+		expect(deriveGitStage({ ...repo, branch: 'feat/x' })).toBe('clean');
+		expect(deriveGitStage({ ...repo, branch: 'feat/x', prState: 'merged' })).toBe('merged');
+	});
+
+	it('gives every stage a label, tone and tip', () => {
+		const stages: GitStage[] = ['pr', 'merged', 'closed', 'dirty', 'committed', 'pushed', 'clean', 'none'];
+		for (const stage of stages) {
+			expect(GIT_STAGE_LABELS[stage]).toBeDefined();
+			expect(GIT_STAGE_TONES[stage]).toBeTruthy();
+			expect(GIT_STAGE_TIPS[stage]).toBeTruthy();
+		}
+		expect(GIT_STAGE_TONES.merged).toBe('purple');
+		expect(GIT_STAGE_TONES.pr).toBe('green');
+		expect(GIT_STAGE_TONES.dirty).toBe('amber');
+	});
+});
+
+describe('prStateText', () => {
+	it('names the number when there is one', () => {
+		expect(prStateText('open', 123)).toBe('PR #123 open');
+		expect(prStateText('merged', 123)).toBe('PR #123 merged');
+		expect(prStateText('closed', 123)).toBe('PR #123 closed');
+	});
+
+	it('falls back to a bare PR when the number is missing', () => {
+		expect(prStateText('open', null)).toBe('PR open');
+		expect(prStateText('closed')).toBe('PR closed');
+	});
+
+	it('says nothing when there is no pull request', () => {
+		expect(prStateText(null, 12)).toBeNull();
+		expect(prStateText(undefined)).toBeNull();
+	});
+});
+
+describe('diffCounts', () => {
+	it('formats a diffstat with a real minus sign', () => {
+		expect(diffCounts({ additions: 124, deletions: 38 })).toEqual({ plus: '+124', minus: '−38' });
+	});
+
+	it('drops an empty or missing diffstat', () => {
+		expect(diffCounts({ additions: 0, deletions: 0 })).toBeNull();
+		expect(diffCounts(null)).toBeNull();
+		expect(diffCounts(undefined)).toBeNull();
+	});
+});
+
+describe('runtime status words', () => {
+	it('keeps the agent state and the PR state on separate segments', () => {
+		// `pr` / `pr_merged` describe the branch, not the turn — the PR segment
+		// says the rest, so the runtime word stays plain.
+		expect(RUNTIME_STATUS_WORDS.pr).toBe('Done');
+		expect(RUNTIME_STATUS_WORDS.pr_merged).toBe('Done');
+		expect(RUNTIME_STATUS_WORDS.working).toBe('Working');
+		expect(RUNTIME_STATUS_TONES.working).toBe('accent');
+		expect(RUNTIME_STATUS_TONES.needs_permission).toBe('amber');
+		expect(RUNTIME_STATUS_TONES.done).toBe('muted');
+	});
+
+	it('flags exactly the prompt-parked statuses for the warning glyph', () => {
+		expect(isAttentionStatus('needs_permission')).toBe(true);
+		expect(isAttentionStatus('has_question')).toBe(true);
+		expect(isAttentionStatus('await')).toBe(true);
+		expect(isAttentionStatus('working')).toBe(false);
+		expect(isAttentionStatus('done')).toBe(false);
 	});
 });
