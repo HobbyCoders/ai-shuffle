@@ -654,8 +654,8 @@ def _unattempted_note(code: str, exc: BaseException) -> str:
             )
         if maybe:
             lead = " Possibly not attempted" if note else (
-                "possibly not attempted — the cell stopped at the error and "
-                "these later calls did not run"
+                "possibly not attempted — the cell stopped at the error, and "
+                "these call sites come after it"
             )
             note += (
                 f"{lead} (inside a branch, loop or function, so they may not "
