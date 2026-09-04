@@ -71,10 +71,19 @@ _REFS = vfs.RefRegistry()
 # checkpointed: a restarted kernel has no refs to point at, so it starts empty
 # and every read is a real read again.
 _READ_REFS = {}
-# ``(registry id, size)`` for every ref this cell created or was pointed at, in
-# call order. The stdout-cap notice names these so truncated output is
-# recovered with a slice instead of a re-run (see ``truncate.fair_share_stdout``).
+# One entry per host result this cell produced, in call order:
+# ``[registry id | None, size, tool leaf, held text | None]``. A result big
+# enough to ride behind a ref has its id already; a smaller one is carried here
+# as text and only becomes a ref if the cell turns out to have overrun its
+# stdout budget (see ``_cell_refs``) — the case where a sub-threshold result
+# was cut with no way back. The stdout-cap notice and the per-cell footer name
+# these so a lost print is recovered with a slice instead of a re-run.
 _CELL_REFS = []
+_CELL_SPILL_MAX = vfs.REF_REGISTRY_MAX  # unprinted results held per cell
+# Leaf names of the host calls that COMPLETED in this cell, in order. A cell
+# that dies mid-way reports what never got attempted, and that report has to
+# know whether anything already landed on disk.
+_CELL_DONE = []
 
 
 # ─── framing ─────────────────────────────────────────────────────────────────
@@ -112,7 +121,27 @@ def _send(obj: dict) -> None:
 # ─── host-call RPC (blocks the cell until the host answers) ──────────────────
 
 
+def _leaf(tool_name: str) -> str:
+    """``mcp__server__Edit`` → ``Edit`` — the name the cell actually wrote."""
+    return str(tool_name).split("__")[-1]
+
+
+_MUTATING_RISKS = ("write", "destructive")
+
+
+def _mutating(leaf: str) -> bool:
+    """Whether a projected tool can change the filesystem.
+
+    The stub's docstring carries ``[risk: …]`` (see ``projection.stub_source``),
+    so the kernel can tell an Edit from a Grep without the host's spec.
+    """
+    return any(f"[risk: {r}]" in (_SOURCES.get(leaf) or "") for r in _MUTATING_RISKS)
+
+
 def _host_call(tool_name: str, kwargs: dict):
+    # Deliberately one frame, not a wrapper around an inner function: a tool
+    # error's traceback reaches the model with every frame below the cell in
+    # it, and an extra kernel frame is an extra line of noise on every failure.
     _send({"kind": "host_call", "name": tool_name, "kwargs": kwargs})
     reply = _read_frame()
     if reply is None:
@@ -124,6 +153,10 @@ def _host_call(tool_name: str, kwargs: dict):
     result = reply.get("result")
     if result is None:
         result = ""
+    # The call returned, so it counts as completed: the "never attempted"
+    # report picks up its numbering from here.
+    leaf = _leaf(tool_name)
+    _CELL_DONE.append(leaf)
     content_id = reply.get("content_id")
     window = reply.get("window_of")
     held = _live_entry(content_id)
@@ -136,7 +169,7 @@ def _host_call(tool_name: str, kwargs: dict):
         # only PART of this identity cannot answer for the whole thing, so it
         # is not a hit here.
         ref = held[0]
-        _CELL_REFS.append((ref.key, len(ref)))
+        _record_ref(ref.key, len(ref), leaf)
         return truncate.repeat_read_pointer(ref.key, len(ref))
     if isinstance(window, dict):
         # A *narrower* claim: this result is a slice of a payload the host has
@@ -151,17 +184,23 @@ def _host_call(tool_name: str, kwargs: dict):
             ref, covered = whole
             base = _slice_base(covered, start, stop)
             if base is not None:
-                _CELL_REFS.append((ref.key, len(ref)))
+                _record_ref(ref.key, len(ref), leaf)
                 return truncate.windowed_read_pointer(
                     ref.key, len(ref), start, stop, offset=base
                 )
     wrapped = truncate.to_result_ref(result, vfs.ResultRef, limit=_REF_THRESHOLD)
-    if isinstance(wrapped, vfs.ResultRef):
+    if not isinstance(wrapped, vfs.ResultRef):
+        # Under the ref threshold, so it is delivered whole — but a cell that
+        # blows its stdout budget can still lose it, and until this was held it
+        # was lost with no way back (three whole-file Reads in one cell, one
+        # ref). Held as text; promoted to a real ref only if the cell overruns.
+        _hold_unwrapped(leaf, result)
+    else:
         # Every ref gets an id in ``_refs`` before the cell sees it, so a
         # handle the cell forgets to bind is still recoverable from the id its
         # repr printed (``_refs[7]``) instead of costing a re-run of the tool.
         _REFS.register(wrapped)
-        _CELL_REFS.append((wrapped.key, len(wrapped)))
+        _record_ref(wrapped.key, len(wrapped), leaf)
         if content_id:
             _remember_ref(content_id, wrapped, None)
         if isinstance(window, dict) and window.get("content_id"):
@@ -173,6 +212,39 @@ def _host_call(tool_name: str, kwargs: dict):
                 (window.get("start") or 0, window.get("stop")),
             )
     return wrapped
+
+
+def _record_ref(key, size, leaf) -> None:
+    """Note that this cell produced (or was pointed at) ref ``key``."""
+    _CELL_REFS.append([key, size, leaf, None])
+
+
+def _hold_unwrapped(leaf, text) -> None:
+    """Keep a sub-threshold result in reach in case the cell overruns stdout."""
+    if not isinstance(text, str) or len(text) < truncate.SPILL_MIN:
+        return
+    if sum(1 for e in _CELL_REFS if e[0] is None) >= _CELL_SPILL_MAX:
+        return  # the registry holds no more than this anyway
+    _CELL_REFS.append([None, len(text), leaf, text])
+
+
+def _cell_refs(spill: bool):
+    """This cell's ``(id, size, tool)`` handles, promoting held text if asked.
+
+    ``spill`` is "the cell printed more than its budget": every result of such
+    a cell becomes recoverable, because the one that got cut is exactly the one
+    the model cannot see well enough to know it needs.
+    """
+    out = []
+    for entry in _CELL_REFS:
+        if entry[0] is None:
+            if not spill:
+                continue
+            ref = vfs.ResultRef(entry[3])
+            _REFS.register(ref)
+            entry[0], entry[3] = ref.key, None
+        out.append((entry[0], entry[1], entry[2]))
+    return out
 
 
 def _live_entry(content_id):
@@ -447,6 +519,163 @@ class _SegmentedStdout(io.TextIOBase):
         return "".join(self._done) + "".join(self._open)
 
 
+# ─── the calls the error cancelled ───────────────────────────────────────────
+#
+# A host call that raises aborts the whole cell, so everything queued after it
+# is dropped without a word: audited sessions lost Note/Ledger bookkeeping,
+# commits and Monitor launches this way and re-issued them a turn later — once,
+# twelve model calls later. The host names the calls that *completed*; this
+# names the ones that never got their turn, read statically off the cell source.
+
+# Statements whose body may not run at all, so a call inside one is only
+# "possibly" pending — a helper the cell defines but never reaches is the
+# obvious false positive.
+_CONDITIONAL = tuple(
+    node for node in (
+        ast.If, ast.For, ast.While, ast.Try, ast.FunctionDef, ast.AsyncFunctionDef,
+        ast.ClassDef, ast.AsyncFor, ast.Lambda, ast.IfExp, ast.ListComp,
+        ast.DictComp, ast.SetComp, ast.GeneratorExp,
+        getattr(ast, "Match", None), getattr(ast, "TryStar", None),
+    ) if node is not None
+)
+
+# The kwarg that says what a call would have acted on, most identifying first
+# (the host's manifest labels completed calls the same way).
+_LABEL_KEYS = (
+    "file_path", "path", "notebook_path", "target_file", "command",
+    "pattern", "url", "query", "name", "description", "prompt",
+)
+_LABEL_CAP = 60
+_UNATTEMPTED_MAX = 20
+
+
+def _cell_lineno(exc: BaseException):
+    """Line of the model's own code that was executing when it blew up."""
+    tb = exc.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename == "<cell>":
+            return tb.tb_lineno
+        tb = tb.tb_next
+    return None
+
+
+def _call_label(node) -> str:
+    """A short, recognisable label for what a queued call would have done."""
+    literals = {
+        kw.arg: kw.value.value
+        for kw in node.keywords
+        if kw.arg and isinstance(kw.value, ast.Constant)
+        and isinstance(kw.value.value, str)
+    }
+    text = next((literals[key] for key in _LABEL_KEYS if key in literals), "")
+    if not text:
+        first = node.args[0] if node.args else None
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            text = first.value
+    text = " ".join(text.split())
+    if len(text) > _LABEL_CAP:
+        text = text[:_LABEL_CAP] + "…"
+    return text
+
+
+def _called_tool(node, known) -> str:
+    """The projected tool a ``Call`` node invokes — ``Edit``, ``tools.Edit``."""
+    func = node.func
+    if isinstance(func, ast.Name):
+        name = func.id
+    elif isinstance(func, ast.Attribute):
+        name = func.attr
+    else:
+        return ""
+    return name if name in known else ""
+
+
+def _tool_calls_after(code: str, lineno: int, known=None) -> list:
+    """``[(line, name, label, conditional)]`` for tool calls past ``lineno``.
+
+    Best-effort and deliberately static: the cell is dead, so there is nothing
+    left to ask. A call reached only through a branch, a loop or a function
+    body is flagged ``conditional`` — it may never have been due to run.
+    """
+    known = _SOURCES if known is None else known
+    try:
+        tree = ast.parse(code, "<cell>", "exec")
+    except SyntaxError:
+        return []
+    found: list = []
+
+    def walk(node, conditional: bool) -> None:
+        for child in ast.iter_child_nodes(node):
+            nested = conditional or isinstance(child, _CONDITIONAL)
+            if isinstance(child, ast.Call):
+                name = _called_tool(child, known)
+                if name and getattr(child, "lineno", 0) > lineno:
+                    found.append(
+                        (child.lineno, name, _call_label(child), nested)
+                    )
+            walk(child, nested)
+
+    walk(tree, False)
+    found.sort(key=lambda item: item[0])
+    return found
+
+
+def _unattempted_note(code: str, exc: BaseException) -> str:
+    """Name the host calls the aborted cell never got to, or ``""``."""
+    try:
+        lineno = _cell_lineno(exc)
+        if lineno is None:
+            return ""
+        sites = _tool_calls_after(code, lineno)
+        if not sites:
+            return ""
+        # The host numbers completed calls 1..N and the failing one last, so
+        # picking up from there keeps one sequence across both lines.
+        failed = isinstance(exc, (vfs.ToolError, vfs.HostCallDenied))
+        index = len(_CELL_DONE) + (2 if failed else 1)
+        shown = sites[:_UNATTEMPTED_MAX]
+        # Numbered in the order they are listed, not in source order: a loop
+        # makes source order a fiction anyway, and a list that counts 5, 6, 4
+        # reads as a mistake.
+        ordered = [s for s in shown if not s[3]] + [s for s in shown if s[3]]
+        sure: list = []
+        maybe: list = []
+        for _line, name, label, conditional in ordered:
+            (maybe if conditional else sure).append(
+                f"{index}. {name}({label})" if label else f"{index}. {name}()"
+            )
+            index += 1
+        rest = len(sites) - len(shown)
+        note = ""
+        if sure:
+            note = (
+                "never attempted — the cell stopped at the error, so these "
+                f"queued calls did not run: {', '.join(sure)}."
+            )
+        if maybe:
+            lead = " Possibly not attempted" if note else (
+                "possibly not attempted — the cell stopped at the error and "
+                "these later calls did not run"
+            )
+            note += (
+                f"{lead} (inside a branch, loop or function, so they may not "
+                f"have been due to run): {', '.join(maybe)}."
+            )
+        if rest > 0:
+            note += f" (… and {rest} more call sites after those.)"
+        note += " Re-issue whichever you still need"
+        if any(_mutating(name) for name in _CELL_DONE):
+            note += (
+                " — but the Edits/Writes that DID complete are already on "
+                "disk; do not re-issue those."
+            )
+        else:
+            note += "."
+        return note
+    except Exception:  # pragma: no cover - a diagnostic must never mask the bug
+        return ""
+
+
 def _run_cell(code: str):
     buf = _SegmentedStdout()
     value_repr = ""
@@ -454,6 +683,7 @@ def _run_cell(code: str):
     saved = sys.stdout
     sys.stdout = buf
     _CELL_REFS.clear()
+    _CELL_DONE.clear()
     try:
         tree = ast.parse(code, "<cell>", "exec")
         if tree.body and isinstance(tree.body[-1], ast.Expr):
@@ -474,6 +704,9 @@ def _run_cell(code: str):
         hint = _error_hint(exc)
         if hint:
             err = err.rstrip("\n") + "\n" + hint + "\n"
+        queued = _unattempted_note(code, exc)
+        if queued:
+            err = err.rstrip("\n") + "\n" + queued + "\n"
     except (SystemExit, KeyboardInterrupt) as exc:
         # A cell that calls sys.exit() or raises KeyboardInterrupt ends the
         # cell, not the kernel: letting it out would kill the child and the
@@ -486,9 +719,18 @@ def _run_cell(code: str):
     # The registry is the runner's, not the cell's: rebinding ``_refs`` in a
     # cell shadows the view, never the recording.
     _NS["_refs"] = _REFS
-    out = truncate.fair_share_stdout(
-        buf.segments(), _STDOUT_CAP, refs=list(_CELL_REFS)
-    )
+    segments = buf.segments()
+    truncated = bool(segments) and sum(len(s) for s in segments) > _STDOUT_CAP
+    refs = _cell_refs(truncated)
+    out = truncate.fair_share_stdout(segments, _STDOUT_CAP, refs=refs)
+    if not truncated:
+        # A truncated cell's notice already names the handles; an untruncated
+        # one said nothing at all, which is how a model ends up guessing which
+        # ``_refs`` slot holds its Read.
+        footer = truncate.refs_footer(refs)
+        if footer:
+            out = out.rstrip("\n")
+            out = f"{out}\n{footer}" if out else footer
     return out, value_repr, err
 
 
