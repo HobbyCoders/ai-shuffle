@@ -60,22 +60,12 @@ export interface HeaderGitActionsInput {
 	/** The session is owned by (placed on) another install. */
 	isRemote: boolean;
 	/**
-	 * Mobile layout (≤1080px panel-fullscreen breakpoint). Combined with
-	 * `sessionMode === 'chat'` to hide the git rail on the mobile chat header
-	 * only — code and voice keep their controls.
-	 */
-	isMobile?: boolean;
-	/**
-	 * Session's own lane ('code' | 'chat' | 'voice'). The mobile hide applies
-	 * to chat only; omitted/other values must not blank the rail.
+	 * Session's own lane ('code' | 'chat' | 'voice').
+	 * Chat-lane sessions have no repository; hide the git rail for them.
+	 * Code and voice keep it on every width — including mobile, where Finish
+	 * must remain reachable when a PR is open. Omitted values fail open.
 	 */
 	sessionMode?: string;
-	/**
-	 * Sidepanel lane (`appMode` / `$sessionMode`). Fail-open for code/voice:
-	 * if the user is in the code (or voice) lane, never blank the rail even
-	 * when the open session's stored mode still says chat.
-	 */
-	appLane?: string;
 }
 
 /**
@@ -84,26 +74,25 @@ export interface HeaderGitActionsInput {
  * Shown for a chat view with a project on a non-deleted, NON-remote session.
  * Remote-placed sessions never show local git actions — their repo lives on the
  * owning install, so the local status is meaningless (and would surface a bogus
- * "Init Repo"). Mobile *chat* mode hides the whole rail (header is too tight);
- * code and voice on mobile are unchanged — including Finish when a PR is open.
- * Desktop is never gated on width.
+ * "Init Repo"). Chat-lane sessions have no repo, so the rail is hidden for
+ * them. Code (and voice) keep Commit/Push/Finish on desktop AND mobile —
+ * never gate on viewport width.
  *
  * Deliberately independent of GitHub auth: a `gh` blip must never blank the
  * local git UI (G10c).
  */
 export function shouldShowHeaderGitActions(input: HeaderGitActionsInput): boolean {
-	const { viewType, hasProject, worktreeDeleted, isRemote, isMobile, sessionMode, appLane } = input;
+	const { viewType, hasProject, worktreeDeleted, isRemote, sessionMode } = input;
 
 	if (viewType !== 'chat') return false;
 	if (!hasProject) return false;
 	if (worktreeDeleted) return false;
 	// Remote-placed session: repo is on the owning install, never local.
 	if (isRemote) return false;
-	// Mobile chat-mode header only. Code/voice — session OR sidepanel lane —
-	// keep the rail (Finish/Commit/PR). Desktop is unaffected (`isMobile` false).
-	if (isMobile && sessionMode === 'chat' && appLane !== 'code' && appLane !== 'voice') {
-		return false;
-	}
+	// Chat lane has no repository. Do NOT also require isMobile: that blanked
+	// Finish/Commit/Push on mobile *code* sessions (the conversation view is
+	// still viewType 'chat' on every lane).
+	if (sessionMode === 'chat') return false;
 
 	return true;
 }

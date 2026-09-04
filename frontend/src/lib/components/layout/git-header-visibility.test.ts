@@ -62,34 +62,20 @@ describe('shouldShowHeaderGitActions', () => {
 		expect(shouldShowHeaderGitActions(base({ worktreeDeleted: true }))).toBe(false);
 	});
 
-	it('hides all git actions on mobile chat mode header', () => {
-		expect(shouldShowHeaderGitActions(base({ isMobile: true, sessionMode: 'chat' }))).toBe(false);
+	it('hides git actions for a chat-lane session (no repository)', () => {
+		expect(shouldShowHeaderGitActions(base({ sessionMode: 'chat' }))).toBe(false);
 	});
 
-	it('keeps git actions on mobile code mode', () => {
-		expect(shouldShowHeaderGitActions(base({ isMobile: true, sessionMode: 'code' }))).toBe(true);
+	it('keeps git actions for a code-lane session, including mobile-width', () => {
+		expect(shouldShowHeaderGitActions(base({ sessionMode: 'code' }))).toBe(true);
 	});
 
-	it('keeps git actions on mobile voice mode', () => {
-		expect(shouldShowHeaderGitActions(base({ isMobile: true, sessionMode: 'voice' }))).toBe(true);
+	it('keeps git actions for a voice-lane session', () => {
+		expect(shouldShowHeaderGitActions(base({ sessionMode: 'voice' }))).toBe(true);
 	});
 
-	it('keeps git actions on mobile when the sidepanel lane is code even if session mode says chat', () => {
-		expect(shouldShowHeaderGitActions(base({ isMobile: true, sessionMode: 'chat', appLane: 'code' }))).toBe(true);
-	});
-
-	it('keeps Finish-capable git actions on desktop regardless of session mode', () => {
-		expect(shouldShowHeaderGitActions(base({ isMobile: false, sessionMode: 'code' }))).toBe(true);
-		expect(shouldShowHeaderGitActions(base({ isMobile: false, sessionMode: 'chat' }))).toBe(true);
-	});
-
-	it('does not hide on mobile when sessionMode is omitted (fail open for code/voice)', () => {
-		expect(shouldShowHeaderGitActions(base({ isMobile: true }))).toBe(true);
-	});
-
-	it('keeps git actions on desktop chat mode', () => {
-		expect(shouldShowHeaderGitActions(base({ isMobile: false, sessionMode: 'chat' }))).toBe(true);
-		expect(shouldShowHeaderGitActions(base({ sessionMode: 'chat' }))).toBe(true);
+	it('does not hide when sessionMode is omitted (fail open for code)', () => {
+		expect(shouldShowHeaderGitActions(base())).toBe(true);
 	});
 });
 
@@ -121,18 +107,18 @@ describe('shouldShowGithubGitActions', () => {
 		).toBe(false);
 	});
 
-	it('still respects the local gate (mobile chat hides everything)', () => {
+	it('still respects the local gate (chat lane hides everything)', () => {
 		expect(
-			shouldShowGithubGitActions(base({ isMobile: true, sessionMode: 'chat', githubAvailable: true }))
+			shouldShowGithubGitActions(base({ sessionMode: 'chat', githubAvailable: true }))
 		).toBe(false);
 	});
 
-	it('does not hide GitHub actions on mobile code or voice', () => {
+	it('does not hide GitHub actions (Finish) on code or voice', () => {
 		expect(
-			shouldShowGithubGitActions(base({ isMobile: true, sessionMode: 'code', githubAvailable: true }))
+			shouldShowGithubGitActions(base({ sessionMode: 'code', githubAvailable: true }))
 		).toBe(true);
 		expect(
-			shouldShowGithubGitActions(base({ isMobile: true, sessionMode: 'voice', githubAvailable: true }))
+			shouldShowGithubGitActions(base({ sessionMode: 'voice', githubAvailable: true }))
 		).toBe(true);
 	});
 });
