@@ -24,11 +24,13 @@ import { syncFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 	import BannerHost from '$lib/components/BannerHost.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { installGlobalErrorHandlers } from '$lib/services/error-reporter';
+	import { bindVisualViewport } from '$lib/utils/visual-viewport';
 
 	let { children }: { children: Snippet } = $props();
 
 	let initialized = $state(false);
 	let teardownErrorHandlers: (() => void) | null = null;
+	let teardownVisualViewport: (() => void) | null = null;
 
 	// When a new build activates while THIS tab is visible, the PWA store defers
 	// the reload (so it can't wipe an in-progress composer draft) and flips
@@ -94,6 +96,10 @@ import { syncFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 	}
 
 	onMount(async () => {
+		// Size the app shell to the visible viewport so the composer stays
+		// above the virtual keyboard (100dvh does not shrink with it).
+		teardownVisualViewport = bindVisualViewport();
+
 		// Initialize theme on mount (applies from localStorage immediately to prevent flash)
 		theme.init();
 
@@ -157,11 +163,13 @@ import { syncFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 		document.removeEventListener('visibilitychange', handleAuthVisibility);
 		teardownErrorHandlers?.();
 		teardownErrorHandlers = null;
+		teardownVisualViewport?.();
+		teardownVisualViewport = null;
 	});
 </script>
 
 <svelte:head>
-	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
 	<meta name="theme-color" content="#0f0f0f" />
 	<meta name="mobile-web-app-capable" content="yes" />
 	<meta name="apple-mobile-web-app-capable" content="yes" />

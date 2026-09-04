@@ -173,6 +173,8 @@
 		width: 100%;
 		height: 100vh;
 		height: 100dvh;
+		/* visualViewport.height — tracks the virtual keyboard, unlike dvh */
+		height: var(--app-viewport-height, 100dvh);
 		background: var(--background);
 		overflow: hidden;
 	}
