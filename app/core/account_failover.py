@@ -80,7 +80,7 @@ async def _notify(
             severity=severity,
             message=message,
             category="account_failover",
-            surface="toast",
+            surface="notification",
             session_id=session_id,
             persist=True,
         )

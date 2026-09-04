@@ -1151,7 +1151,7 @@ def _run_column_migrations(cursor):
                 id TEXT PRIMARY KEY,
                 user_id TEXT,
                 severity TEXT NOT NULL DEFAULT 'info',
-                surface TEXT NOT NULL DEFAULT 'toast',
+                surface TEXT NOT NULL DEFAULT 'notification',
                 category TEXT,
                 source TEXT NOT NULL DEFAULT 'server',
                 title TEXT,
@@ -1165,6 +1165,11 @@ def _run_column_migrations(cursor):
             )
         """)
         migrations_applied.append("notifications")
+    # Preserve existing rows, but ensure omitted surface values on upgraded
+    # installations cannot recreate the retired ``toast`` wire value.
+    cursor.execute(
+        "ALTER TABLE notifications ALTER COLUMN surface SET DEFAULT 'notification'"
+    )
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, read)")
 

@@ -20,7 +20,6 @@ import { syncFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 	import { onDestroy } from 'svelte';
 	import type { Snippet } from 'svelte';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
-	import ToastViewport from '$lib/components/ToastViewport.svelte';
 	import BannerHost from '$lib/components/BannerHost.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { installGlobalErrorHandlers } from '$lib/services/error-reporter';
@@ -34,13 +33,13 @@ import { syncFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 
 	// When a new build activates while THIS tab is visible, the PWA store defers
 	// the reload (so it can't wipe an in-progress composer draft) and flips
-	// `updateReady`. Surface that as a non-blocking, sticky toast whose action
+	// `updateReady`. Surface that as a non-blocking, sticky banner whose action
 	// applies the update on demand. Fires once per pending update.
-	let updateToastShown = false;
+	let updateBannerShown = false;
 	$effect(() => {
-		if (pwa.current.updateReady && !updateToastShown) {
-			updateToastShown = true;
-			notify.info('A new version is ready — click to refresh', {
+		if (pwa.current.updateReady && !updateBannerShown) {
+			updateBannerShown = true;
+			notify.banner('A new version is ready — click to refresh', {
 				duration_ms: 0,
 				action: { label: 'Refresh', onClick: () => pwa.applyUpdate() }
 			});
@@ -201,7 +200,6 @@ import { syncFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 {:else}
 	<!-- PWA Components -->
 	<InstallPrompt />
-	<ToastViewport />
 	<BannerHost />
 
 	{@render children?.()}

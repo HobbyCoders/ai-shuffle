@@ -1,8 +1,8 @@
 """
 Notification database operations — the user-facing notification history (the bell).
 
-The persisted backing store for the unified notification system. Every banner /
-toast that should survive a reload or reach the NotificationCenter lands here:
+The persisted backing store for the unified notification system. Every bell
+notification (and any explicitly persisted banner) lands here:
 
 - **Server-originated** notifications written by
   ``app/services/notification_service.py`` (the ``emit_notification`` funnel).
@@ -31,6 +31,16 @@ from app.db.base import get_db, row_to_dict, rows_to_list, logger
 # Bound a single fetch — the NotificationCenter only ever shows recent history.
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 200
+
+
+def normalize_surface(surface: Optional[str]) -> str:
+    """Return the two-surface wire value without rewriting historical rows.
+
+    Existing ``toast`` / ``inline`` rows remain intact in storage and are exposed
+    as persistent bell notifications. Unknown historical values degrade the same
+    way rather than leaking unsupported surface values to clients.
+    """
+    return "banner" if surface == "banner" else "notification"
 
 
 def _serialize(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -67,7 +77,7 @@ def _serialize(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         "id": row["id"],
         "user_id": row.get("user_id"),
         "severity": row.get("severity") or "info",
-        "surface": row.get("surface") or "toast",
+        "surface": normalize_surface(row.get("surface")),
         "category": row.get("category"),
         "source": row.get("source") or "server",
         "title": row.get("title"),
@@ -87,7 +97,7 @@ def create_notification(
     *,
     severity: str = "info",
     message: str,
-    surface: str = "toast",
+    surface: str = "notification",
     category: Optional[str] = None,
     source: str = "server",
     title: Optional[str] = None,
@@ -105,6 +115,7 @@ def create_notification(
     Idempotent on id collision: an existing row is returned untouched.
     """
     nid = notification_id or str(uuid.uuid4())
+    surface = normalize_surface(surface)
     created_at = datetime.now(timezone.utc).isoformat()
     payload_json = json.dumps(action_payload) if action_payload is not None else None
 

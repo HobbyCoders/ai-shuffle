@@ -40,7 +40,7 @@
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { git } from '$lib/stores/git.svelte';
 	import { sessionGitState } from '$lib/stores/session-git-state.svelte';
-	import { toast } from '$lib/stores/toast';
+	import { notify } from '$lib/stores/notifications';
 	import {
 		GIT_STAGE_LABELS,
 		GIT_STAGE_TONES,
@@ -245,7 +245,7 @@
 			// at a settled chat — hand the shell a fresh composer instead.
 			if (settling && active) onSettled?.();
 		} catch {
-			toast.push('Failed to update session', { tone: 'error' });
+			notify('Failed to update session', { severity: 'error' });
 		}
 	}
 

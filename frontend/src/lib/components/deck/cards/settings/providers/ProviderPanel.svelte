@@ -33,7 +33,7 @@
 		type ProviderModelEntry
 	} from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
-	import { toast } from '$lib/stores/toast';
+	import { notify } from '$lib/stores/notifications';
 	import { getModels } from '$lib/constants/models.svelte';
 	import BankedResetsPanel from './BankedResetsPanel.svelte';
 
@@ -342,7 +342,7 @@
 			await providers.refreshProviders();
 		} catch (e) {
 			results = previous;
-			toast.push(getErrorMessage(e, 'Could not save models'), { tone: 'error' });
+			notify(getErrorMessage(e, 'Could not save models'), { severity: 'error' });
 		} finally {
 			modelsSaving = false;
 		}

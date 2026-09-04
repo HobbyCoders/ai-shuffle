@@ -13,7 +13,7 @@
 	import { forkSession } from '$lib/api/client';
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { toast } from '$lib/stores/toast';
+	import { notify } from '$lib/stores/notifications';
 	import { openHeaderDropdown, toggleDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 
 	interface Props {
@@ -103,7 +103,7 @@
 			await appData.renameSession(sessionId, next);
 			activeSession.setTitle(sessionId, next);
 		} catch {
-			toast.push('Failed to rename session', { tone: 'error' });
+			notify('Failed to rename session', { severity: 'error' });
 		}
 	}
 
@@ -124,10 +124,10 @@
 		try {
 			const result = await forkSession(sessionId);
 			await appData.loadSessions();
-			toast.push('Session forked', { tone: 'success' });
+			notify('Session forked', { severity: 'success' });
 			window.dispatchEvent(new CustomEvent('open-session', { detail: { sessionId: result.session_id } }));
 		} catch {
-			toast.push('Failed to fork session', { tone: 'error' });
+			notify('Failed to fork session', { severity: 'error' });
 		}
 	}
 
@@ -144,7 +144,7 @@
 			await appData.deleteSession(id);
 			if (activeSession.current.sessionId === id) activeSession.newChat();
 		} catch {
-			toast.push('Failed to delete session', { tone: 'error' });
+			notify('Failed to delete session', { severity: 'error' });
 		}
 	}
 

@@ -61,8 +61,8 @@ vi.mock('$lib/api/client', () => ({
 	forkSession: mocks.forkSession,
 }));
 
-vi.mock('$lib/stores/toast', () => ({
-	toast: { push: mocks.toastPush },
+vi.mock('$lib/stores/notifications', () => ({
+	notify: mocks.toastPush,
 }));
 
 // The card reads the real git store only for the session open in the main

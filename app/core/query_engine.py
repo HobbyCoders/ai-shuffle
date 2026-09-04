@@ -1237,7 +1237,7 @@ async def _emit_api_error_notification(
 
     Single source of truth for API-level errors (Anthropic 429 / 5xx): persists
     to the bell and broadcasts the user-scoped ``notification`` event so every
-    device the user has open renders one consistent toast. The interactive
+    device the user has open renders one consistent notification. The interactive
     "Fix with AI" button is rebuilt client-side (keyed on ``category`` —
     closures can't cross the wire), so we only ship a serializable action
     descriptor here. Never raises — must not break the streaming path.
@@ -1255,7 +1255,7 @@ async def _emit_api_error_notification(
             # which surfaces the "rate-limited — wait or sign into a different
             # account" state on every 429 turn through its ``attempt_failover``
             # seam (native auto-switch was retired — OC-1/OC-4). Suppressing the
-            # duplicate generic toast here keeps exactly one notification per
+            # duplicate generic notification here keeps exactly one notification per
             # 429 turn: every 429 that reaches this funnel is on a path that
             # also runs ``attempt_failover`` (the streaming SSE wrapper,
             # ``turn_scheduler``, or ``execute_query_with_failover``).
@@ -1278,7 +1278,7 @@ async def _emit_api_error_notification(
             severity=severity,
             message=message,
             category="api_error",
-            surface="toast",
+            surface="notification",
             session_id=session_id,
             persist=True,
             action=action,
@@ -1858,7 +1858,7 @@ async def stream_query(
                     yield {"type": "api_error", "status": api_err, "session_id": session_id}
                     # Funnel through the unified notification system (persist + the
                     # bell + all the user's devices). The frontend `api_error`
-                    # handler no longer toasts — the `notification` event does.
+                    # handler no longer emits separately — the `notification` event does.
                     await _emit_api_error_notification(api_user_id, session_id, api_err)
                 # Extract token counts from usage dict
                 if message.usage:
@@ -4171,7 +4171,7 @@ async def _stream_to_websocket_impl(
                     yield {"type": "api_error", "status": api_err, "session_id": session_id}
                     # Funnel through the unified notification system (persist + the
                     # bell + all the user's devices). The frontend `api_error`
-                    # handler no longer toasts — the `notification` event does.
+                    # handler no longer emits separately — the `notification` event does.
                     await _emit_api_error_notification(api_user_id, session_id, api_err)
                 # Extract token counts from usage dict
                 if message.usage:

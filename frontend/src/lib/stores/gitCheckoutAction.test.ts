@@ -22,10 +22,8 @@ vi.mock('$lib/stores/git.svelte', () => ({
 	},
 }));
 
-vi.mock('$lib/stores/toast', () => ({
-	toast: {
-		push: mocks.toastPush,
-	},
+vi.mock('$lib/stores/notifications', () => ({
+	notify: mocks.toastPush,
 }));
 
 // Use the real isApiError type guard (shape-based), so we just feed it the
@@ -63,7 +61,7 @@ describe('checkoutBranchWithToast', () => {
 		expect(mocks.toastPush).toHaveBeenCalledTimes(1);
 		const [message, opts] = mocks.toastPush.mock.calls[0];
 		expect(message).toContain('Failed to checkout');
-		expect(opts.tone).toBe('error');
+		expect(opts.severity).toBe('error');
 		expect(opts.action).toBeUndefined();
 	});
 
@@ -77,7 +75,7 @@ describe('checkoutBranchWithToast', () => {
 		expect(mocks.toastPush).toHaveBeenCalledTimes(1);
 		const [message, opts] = mocks.toastPush.mock.calls[0];
 		expect(message).toContain('uncommitted changes');
-		expect(opts.tone).toBe('error');
+		expect(opts.severity).toBe('error');
 		expect(opts.action).toBeDefined();
 		expect(opts.action.label).toBe('Stash & switch');
 	});
@@ -104,7 +102,7 @@ describe('checkoutBranchWithToast', () => {
 		expect(afterSwitch).toHaveBeenCalledTimes(1);
 		const [message, opts] = mocks.toastPush.mock.calls[0];
 		expect(message).toBe('Stashed changes and switched to feature');
-		expect(opts.tone).toBe('success');
+		expect(opts.severity).toBe('success');
 	});
 
 	it('does not offer stash again if the stash retry itself fails', async () => {
@@ -121,7 +119,7 @@ describe('checkoutBranchWithToast', () => {
 
 		// The retry (autoStash=true) failure must NOT carry another stash action.
 		const opts = mocks.toastPush.mock.calls[0][1];
-		expect(opts.tone).toBe('error');
+		expect(opts.severity).toBe('error');
 		expect(opts.action).toBeUndefined();
 	});
 });

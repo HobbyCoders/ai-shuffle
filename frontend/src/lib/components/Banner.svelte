@@ -9,7 +9,7 @@
 	 *     <Banner severity="error" message={error} dismissible onDismiss={() => (error = null)} />
 	 *   {/if}
 	 *
-	 * For transient toasts and the bell, use `notify.*` from
+	 * For the bell, use `notify.*` from
 	 * `$lib/stores/notifications` instead — this component is for in-flow messages.
 	 */
 	import { AlertTriangle, AlertOctagon, Info, CheckCircle2, X } from 'lucide-svelte';
@@ -80,7 +80,12 @@
 		display: flex;
 		align-items: flex-start;
 		gap: 9px;
-		border: 1px solid transparent;
+		border: 1px solid var(--border);
+		background: var(--card);
+		color: var(--card-foreground, var(--foreground));
+		box-shadow: 0 2px 8px rgb(0 0 0 / 0.06);
+		box-sizing: border-box;
+		flex-wrap: wrap;
 		border-radius: calc(var(--radius, 0.75rem) * 0.66);
 		font-size: 0.8125rem;
 		line-height: 1.4;
@@ -99,27 +104,20 @@
 
 	/* ── Severity palettes (shared --status-* design tokens) ── */
 	.sev-error {
-		background: var(--status-error-bg);
-		border-color: var(--status-error-border);
-		color: var(--destructive);
+		--banner-accent: var(--destructive);
 	}
 	.sev-warning {
-		background: var(--status-warning-bg);
-		border-color: var(--status-warning-border);
-		color: var(--warning, #d97706);
+		--banner-accent: var(--warning, #d97706);
 	}
 	.sev-success {
-		background: var(--status-success-bg);
-		border-color: var(--status-success-border);
-		color: var(--success, #059669);
+		--banner-accent: var(--success, #059669);
 	}
 	.sev-info {
-		background: var(--status-info-bg);
-		border-color: var(--status-info-border);
-		color: var(--foreground);
+		--banner-accent: var(--foreground);
 	}
 
 	.banner-icon {
+		color: var(--banner-accent);
 		flex-shrink: 0;
 		display: inline-flex;
 		align-items: center;
@@ -128,7 +126,7 @@
 	}
 
 	.banner-body {
-		flex: 1;
+		flex: 1 1 160px;
 		min-width: 0;
 		word-break: break-word;
 	}
@@ -150,9 +148,11 @@
 		padding: 4px 12px;
 		font-size: 0.75rem;
 		font-weight: 600;
-		background: currentColor;
-		color: var(--card, var(--background));
-		border: 0;
+		background: var(--secondary);
+		color: var(--secondary-foreground, var(--foreground));
+		border: 1px solid var(--border);
+		max-width: 100%;
+		white-space: normal;
 		border-radius: 6px;
 		cursor: pointer;
 		transition: opacity 0.15s ease;
@@ -196,5 +196,8 @@
 		.banner-action {
 			min-height: 40px;
 		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.banner-action, .banner-close { transition: none; }
 	}
 </style>

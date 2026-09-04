@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Banner from '$lib/components/Banner.svelte';
 	/**
 	 * DirectoryBrowser - Tree browser for picking directories
 	 *
@@ -95,7 +96,7 @@
 			<span>Loading...</span>
 		</div>
 	{:else if error}
-		<div class="error">{error}</div>
+		<Banner message={error} />
 	{:else}
 		<div class="tree">
 			{#each roots as node (node.entry.path)}
@@ -153,7 +154,7 @@
 		overflow-x: hidden;
 	}
 
-	.loading, .error {
+	.loading {
 		display: flex;
 		align-items: center;
 		gap: 8px;
@@ -162,9 +163,6 @@
 		color: var(--muted-foreground);
 	}
 
-	.error {
-		color: var(--destructive);
-	}
 
 	.tree {
 		padding: 4px 0;

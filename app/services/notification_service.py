@@ -2,7 +2,7 @@
 Notification emit funnel — the single server-side entry point for user-facing
 notifications.
 
-Every server-originated banner / toast goes through ``emit_notification``:
+Every server-originated notification / banner goes through ``emit_notification``:
 
 1. **Persist** the notification to the ``notifications`` table (history / the
    bell), so a message the user missed isn't lost and survives a reload.
@@ -31,10 +31,15 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Severities that persist to history (the bell) by default. Mirrors the
-# frontend store's `_defaultPersist` so client- and server-originated
-# notifications behave identically.
-_PERSIST_BY_DEFAULT = {"error", "warning"}
+# ``notification`` is the persistent bell surface. ``banner`` is an explicit
+# live surface and is not added to bell history unless the caller opts in.
+# Persistence is surface-based, not severity-based; every bell severity persists.
+_PERSIST_BY_DEFAULT = {"notification"}
+
+
+def _normalize_surface(surface: Optional[str]) -> str:
+    """Collapse legacy wire values into the two supported surfaces."""
+    return "banner" if surface == "banner" else "notification"
 
 # Severities that warrant a mobile push by default (high signal only).
 _PUSH_BY_DEFAULT = {"error"}
@@ -68,7 +73,7 @@ async def emit_notification(
     message: str,
     title: Optional[str] = None,
     category: Optional[str] = None,
-    surface: str = "toast",
+    surface: str = "notification",
     session_id: Optional[str] = None,
     persist: Optional[bool] = None,
     action: Optional[Dict[str, Any]] = None,
@@ -84,9 +89,12 @@ async def emit_notification(
         title: Optional heading.
         category: Stable tag (e.g. ``api_error``, ``session_complete``) the
             frontend keys interactive actions on (e.g. "Fix with AI").
-        surface: ``toast`` (transient) | ``banner`` (sticky) | ``inline``.
+        surface: ``notification`` (persistent bell item) or ``banner``
+            (explicit live banner). Legacy ``toast`` / ``inline`` values normalize
+            to ``notification``.
         session_id: Originating session, if any.
-        persist: Override the severity-based history default.
+        persist: Override the surface-based history default. Banners are live-only
+            unless this is explicitly true.
         action: Optional ``{"kind": str, "payload": dict}`` action descriptor,
             stored so the frontend can rebuild the button on hydration.
         push: Override the severity-based mobile-push default.
@@ -94,7 +102,8 @@ async def emit_notification(
     Returns the persisted notification (wire shape) or ``None`` on failure.
     Never raises — emitting a notification must not break its caller.
     """
-    should_persist = persist if persist is not None else (severity in _PERSIST_BY_DEFAULT)
+    surface = _normalize_surface(surface)
+    should_persist = persist if persist is not None else (surface in _PERSIST_BY_DEFAULT)
     action_kind = action.get("kind") if action else None
     action_payload = action.get("payload") if action else None
 

@@ -18,7 +18,7 @@
 	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
 	import DiffViewer from './DiffViewer.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import { toast } from '$lib/stores/toast';
+	import { notify } from '$lib/stores/notifications';
 
 	interface Props {
 		projectId: string;
@@ -161,7 +161,7 @@
 			await git.refreshChangedFiles();
 			advanceReviewFile();
 		} catch {
-			toast.push('Failed to update file', { tone: 'error' });
+			notify('Failed to update file', { severity: 'error' });
 		} finally {
 			reviewActionInFlight = false;
 		}
@@ -178,7 +178,7 @@
 			await git.refreshChangedFiles();
 			advanceReviewFile();
 		} catch {
-			toast.push('Failed to discard changes', { tone: 'error' });
+			notify('Failed to discard changes', { severity: 'error' });
 		} finally {
 			reviewActionInFlight = false;
 		}
@@ -204,7 +204,7 @@
 		try {
 			await git.stageFiles([file.file]);
 		} catch {
-			toast.push('Failed to stage file', { tone: 'error' });
+			notify('Failed to stage file', { severity: 'error' });
 		} finally {
 			clearInFlight(file.file);
 		}
@@ -215,7 +215,7 @@
 		try {
 			await git.unstageFiles([file.file]);
 		} catch {
-			toast.push('Failed to unstage file', { tone: 'error' });
+			notify('Failed to unstage file', { severity: 'error' });
 		} finally {
 			clearInFlight(file.file);
 		}
@@ -226,7 +226,7 @@
 		try {
 			await git.discardChanges([file.file], { [file.file]: file.category });
 		} catch {
-			toast.push('Failed to discard changes', { tone: 'error' });
+			notify('Failed to discard changes', { severity: 'error' });
 		} finally {
 			clearInFlight(file.file);
 		}
@@ -238,7 +238,7 @@
 		try {
 			await git.stageFiles(paths);
 		} catch {
-			toast.push('Failed to stage files', { tone: 'error' });
+			notify('Failed to stage files', { severity: 'error' });
 		} finally {
 			for (const p of paths) clearInFlight(p);
 		}
@@ -250,7 +250,7 @@
 		try {
 			await git.unstageFiles(paths);
 		} catch {
-			toast.push('Failed to unstage files', { tone: 'error' });
+			notify('Failed to unstage files', { severity: 'error' });
 		} finally {
 			for (const p of paths) clearInFlight(p);
 		}
@@ -265,7 +265,7 @@
 				Object.fromEntries(files.map(f => [f.file, f.category]))
 			);
 		} catch {
-			toast.push('Failed to discard changes', { tone: 'error' });
+			notify('Failed to discard changes', { severity: 'error' });
 		} finally {
 			for (const p of paths) clearInFlight(p);
 		}

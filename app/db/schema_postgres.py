@@ -1663,8 +1663,8 @@ def create_postgres_schema(cursor) -> None:
     # ------------------------------------------------------------------
     # 49. Notifications — unified user-facing notification history (the bell).
     #
-    # The single source of truth for every persisted banner / toast in the
-    # app. Distinct from ``error_log`` (debug/observability): this is the
+    # The single source of truth for every bell notification and explicitly
+    # persisted banner. Distinct from ``error_log`` (debug/observability): this is the
     # user-facing history surfaced by the NotificationCenter, with read /
     # dismissed state per row. Server-originated notifications are written by
     # app/services/notification_service.py; client-originated ones are POSTed
@@ -1675,7 +1675,7 @@ def create_postgres_schema(cursor) -> None:
             id TEXT PRIMARY KEY,
             user_id TEXT,
             severity TEXT NOT NULL DEFAULT 'info',
-            surface TEXT NOT NULL DEFAULT 'toast',
+            surface TEXT NOT NULL DEFAULT 'notification',
             category TEXT,
             source TEXT NOT NULL DEFAULT 'server',
             title TEXT,

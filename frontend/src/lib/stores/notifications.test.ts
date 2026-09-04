@@ -1,135 +1,96 @@
-/**
- * Tests for the unified notification store — the backward-compatible `toast`
- * alias mapping and the severity-based persist defaults that decide what lands
- * in the bell (history) vs. what stays live-only.
- *
- * Network (`$lib/api/client`) and auth are mocked so the store stays pure: with
- * auth reported unauthenticated, the store's remote-persist guards short-circuit
- * and no POST fires.
- */
-
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-
-vi.mock('$lib/api/client', () => ({
-	api: {
-		get: vi.fn(() => Promise.resolve({})),
-		post: vi.fn(() => Promise.resolve({})),
-		delete: vi.fn(() => Promise.resolve({})),
-	},
-}));
-
-// Unauthenticated → `_persistRemote` / `_remote` early-return, so no network.
-vi.mock('./auth.svelte', () => ({
-	auth: { current: { status: { authenticated: false } } },
-}));
-
-import { notify, toast, notifications, notificationHistory, unreadCount } from './notifications';
-
-/** Wipe both slices between tests so counts/ids don't leak across cases. */
-function resetStore() {
-	for (const n of [...notifications.current.live, ...notifications.current.history]) {
-		notify.dismiss(n.id);
-	}
-}
-
-describe('notifications store', () => {
-	beforeEach(() => {
-		resetStore();
-		vi.clearAllMocks();
-	});
-
-	describe('toast alias (legacy facade)', () => {
-		it('maps tone → severity, defaults to a transient (non-persisted) toast', () => {
-			toast.push('Saved', { tone: 'success' });
-
-			const { live, history } = notifications.current;
-			expect(live).toHaveLength(1);
-			expect(live[0].severity).toBe('success');
-			expect(live[0].surface).toBe('toast');
-			expect(live[0].persist).toBe(false);
-			// Legacy toasts are ephemeral — they never reach the bell.
-			expect(history).toHaveLength(0);
-		});
-
-		it('returns a numeric id that dismiss() accepts', () => {
-			const id = toast.push('Hello');
-			expect(typeof id).toBe('number');
-			expect(notifications.current.live).toHaveLength(1);
-
-			toast.dismiss(id);
-			expect(notifications.current.live).toHaveLength(0);
-		});
-
-		it('defaults an untoned toast to info severity', () => {
-			toast.push('Heads up');
-			expect(notifications.current.live[0].severity).toBe('info');
-		});
-	});
-
-	describe('persist defaults by severity', () => {
-		it('persists errors and warnings to history (the bell)', () => {
-			notify.error('Boom');
-			notify.warning('Careful');
-
-			expect(notificationHistory.current).toHaveLength(2);
-			expect(notificationHistory.current.every((n) => n.persist)).toBe(true);
-		});
-
-		it('keeps success and info live-only (not in history)', () => {
-			notify.success('Nice');
-			notify.info('FYI');
-
-			expect(notifications.current.live).toHaveLength(2);
-			expect(notificationHistory.current).toHaveLength(0);
-		});
-
-		it('honors an explicit persist override against the severity default', () => {
-			notify.success('Important success', { persist: true });
-			notify.error('Transient error', { persist: false });
-
-			const titles = notificationHistory.current.map((n) => n.message);
-			expect(titles).toContain('Important success');
-			expect(titles).not.toContain('Transient error');
-		});
-	});
-
-	describe('ingest (server-originated)', () => {
-		it('adds a server notification to history as read-state false, source server', () => {
-			notify.ingest({
-				id: 'srv-1',
-				severity: 'error',
-				category: 'api_error',
-				message: 'API error: HTTP 500',
-			});
-
-			const row = notificationHistory.current.find((n) => n.id === 'srv-1');
-			expect(row).toBeTruthy();
-			expect(row?.source).toBe('server');
-			expect(row?.persist).toBe(true);
-			expect(get(unreadCount)).toBe(1);
-		});
-
-		it('dedupes by id so a re-ingested event does not double-count', () => {
-			notify.ingest({ id: 'srv-dup', severity: 'warning', message: 'Rate limited' });
-			notify.ingest({ id: 'srv-dup', severity: 'warning', message: 'Rate limited' });
-
-			expect(notificationHistory.current.filter((n) => n.id === 'srv-dup')).toHaveLength(1);
-		});
-	});
-
-	describe('unread badge', () => {
-		it('counts unread history items and clears on markAllRead', () => {
-			notify.error('one');
-			notify.error('two');
-			expect(get(unreadCount)).toBe(2);
-
-			notify.markAllRead();
-			expect(get(unreadCount)).toBe(0);
-		});
-	});
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('$lib/api/client', () => ({ api: { get: vi.fn(), post: vi.fn(() => Promise.resolve({})), delete: vi.fn(() => Promise.resolve({})) } }));
+vi.mock('./auth.svelte', () => ({ auth: { current: { status: { authenticated: true } } } }));
+import { api } from '$lib/api/client';
+import { notify, notifications, notificationHistory, unreadCount } from './notifications';
+beforeEach(() => {
+ for (const n of notifications.current.live) notify.dismissLive(n.id);
+ notify.clearAll();
+ vi.clearAllMocks();
 });
-
-/** Tiny helper mirroring svelte/store `get` for the project's createDerived stores. */
-function get<T>(store: { current: T }): T {
-	return store.current;
-}
+describe('two notification surfaces', () => {
+ it.each(['error', 'warning', 'info', 'success'] as const)('%s goes only to the bell and persists', (severity) => {
+  const id = notify[severity]('Message');
+  expect(notifications.current.live).toEqual([]);
+  expect(notificationHistory.current).toMatchObject([{ id, severity, surface: 'notification', persist: true }]);
+  expect(api.post).toHaveBeenCalledWith('/notifications', expect.objectContaining({id, severity, surface: 'notification'}));
+ });
+ it('keeps banners out of the bell and sticky until dismissed', () => {
+  const id = notify.banner('Update ready', {severity: 'info'});
+  expect(notificationHistory.current).toEqual([]);
+  expect(notifications.current.live).toMatchObject([{id, surface: 'banner', duration_ms: 0}]);
+  expect(api.post).not.toHaveBeenCalled();
+  notify.dismissLive(id);
+  expect(notifications.current.live).toEqual([]);
+ });
+ it('keeps explicitly persisted banners in bell history without reposting server events', async () => {
+  notify.ingest({id:'live-only', severity:'warning', surface:'banner', message:'Connecting', persist:false});
+  expect(notificationHistory.current).toEqual([]);
+  notify.ingest({id:'saved', severity:'error', surface:'banner', message:'Reconnect account', persist:true});
+  expect(notificationHistory.current).toMatchObject([{id:'saved'}]);
+  expect(api.post).not.toHaveBeenCalled();
+  notify.clearAll();
+  vi.mocked(api.get).mockResolvedValue({notifications:[{id:'saved',severity:'error',surface:'banner',message:'Reconnect account'}]});
+  await notify.loadHistory();
+  expect(notificationHistory.current).toMatchObject([{id:'saved',surface:'notification'}]);
+ });
+ it('persists client banners only when explicitly requested', () => {
+  const id = notify.banner('Keep this', {persist:true});
+  expect(notificationHistory.current).toMatchObject([{id}]);
+  expect(api.post).toHaveBeenCalledWith('/notifications', expect.objectContaining({id,surface:'banner'}));
+ });
+ it('allows local-only bell items without silently discarding them', () => {
+  notify.info('Local', {persist: false});
+  expect(notificationHistory.current).toHaveLength(1);
+  expect(api.post).not.toHaveBeenCalled();
+ });
+ it.each(['toast','inline',undefined] as const)('normalizes legacy %s events, without reposting or duplicating', (surface) => {
+  const row = {id: 'server-row', severity: 'info' as const, surface, message: 'Done'};
+  notify.ingest(row);
+  notify.markRead(row.id);
+  vi.clearAllMocks();
+  notify.ingest(row);
+  expect(notificationHistory.current).toMatchObject([{id: row.id, surface:'notification', read:true}]);
+  expect(notificationHistory.current).toHaveLength(1);
+  expect(notifications.current.live).toEqual([]);
+  expect(api.post).not.toHaveBeenCalled();
+ });
+ it('preserves actions and session navigation metadata through server echoes and history loading', async () => {
+  const onClick = vi.fn();
+  const id = notify.success('Done', {session_id:'session-1', action:{label:'Open', onClick}});
+  notify.ingest({id, severity:'success', message:'Done'});
+  vi.mocked(api.get).mockResolvedValue({notifications:[{id, severity:'success',surface:'toast',message:'Done'}]});
+  await notify.loadHistory();
+  expect(notificationHistory.current).toHaveLength(1);
+  expect(notificationHistory.current[0].session_id).toBe('session-1');
+  notificationHistory.current[0].action?.onClick();
+  expect(onClick).toHaveBeenCalledOnce();
+ });
+ it('hydrates legacy rows once, excludes dismissed rows, and never shows history live', async () => {
+  vi.mocked(api.get).mockResolvedValue({notifications:[
+   {id:'old',severity:'info',surface:'inline',message:'Old'},
+   {id:'old',severity:'info',surface:'toast',message:'Old'},
+   {id:'gone',severity:'error',message:'Gone',dismissed:true}
+  ]});
+  await notify.loadHistory();
+  expect(notificationHistory.current).toMatchObject([{id:'old',surface:'notification'}]);
+  expect(notificationHistory.current).toHaveLength(1);
+  expect(notifications.current.live).toEqual([]);
+ });
+ it('marks read, dismisses and clears locally and remotely', () => {
+  const first = notify.info('First');
+  notify.success('Second');
+  expect(unreadCount.current).toBe(2);
+  notify.markRead(first);
+  expect(unreadCount.current).toBe(1);
+  notify.markAllRead();
+  expect(unreadCount.current).toBe(0);
+  notify.dismiss(first);
+  expect(notificationHistory.current).toHaveLength(1);
+  notify.clearAll();
+  expect(notificationHistory.current).toEqual([]);
+  expect(api.post).toHaveBeenCalledWith(`/notifications/${first}/read`);
+  expect(api.post).toHaveBeenCalledWith(`/notifications/${first}/dismiss`);
+  expect(api.delete).toHaveBeenCalledWith('/notifications');
+ });
+});

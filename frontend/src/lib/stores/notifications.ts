@@ -1,30 +1,12 @@
-/**
- * Unified notification store — the single source of truth for every user-facing
- * banner / toast / notification in the app.
- *
- * One store, one call API (`notify.*`), three live surfaces (toast | banner |
- * inline) and one persisted history (the bell / NotificationCenter).
- *
- * - Client code calls `notify.error/warning/info/success(...)` or `notify.banner(...)`.
- * - Server-originated notifications arrive over the `notification` WS event and
- *   are fed in via `notify.ingest(...)` (already persisted server-side).
- * - Notifications with `persist: true` go to history (the bell) and, when
- *   client-originated, are POSTed to `/api/v1/notifications` so they survive
- *   reloads and sync across devices.
- *
- * Plain `.ts` (no runes) — same constraint as the legacy `toast.ts` it replaces.
- * See KNOWN_ISSUES.md Root Cause 10.
- */
-
 import { createStore } from './store-utils';
 import { api } from '$lib/api/client';
 import { auth } from './auth.svelte';
 
 export type NotificationSeverity = 'error' | 'warning' | 'info' | 'success';
-export type NotificationSurface = 'toast' | 'banner' | 'inline';
+export type NotificationSurface = 'notification' | 'banner';
 type NotificationSource = 'client' | 'server';
 
-/** Optional action button rendered inside a toast / banner / center row. */
+/** Optional action button rendered inside a banner / center row. */
 export interface NotificationAction {
 	label: string;
 	onClick: () => void;
@@ -39,12 +21,12 @@ export interface AppNotification {
 	title?: string;
 	message: string;
 	action?: NotificationAction;
-	/** Whether this notification belongs in the persisted history / bell. */
+	/** Whether this item is saved remotely; notifications always appear in the bell. */
 	persist: boolean;
 	read: boolean;
 	dismissed: boolean;
 	created_at: number;
-	/** Toast auto-dismiss in ms. 0 / undefined for surface !== 'toast' = sticky. */
+	/** Banner auto-dismiss in ms. 0 / undefined for banners = sticky. */
 	duration_ms?: number;
 	session_id?: string;
 }
@@ -53,7 +35,7 @@ export interface AppNotification {
 interface ServerNotificationRow {
 	id: string;
 	severity: NotificationSeverity;
-	surface?: NotificationSurface;
+	surface?: NotificationSurface | 'toast' | 'inline';
 	category?: string | null;
 	source?: NotificationSource;
 	title?: string | null;
@@ -66,7 +48,7 @@ interface ServerNotificationRow {
 }
 
 interface NotificationState {
-	/** Currently rendered, auto-dismissing surfaces (toasts + page banners). */
+	/** Currently rendered, auto-dismissing surfaces (page banners). */
 	live: AppNotification[];
 	/** Persisted history, newest first — drives the NotificationCenter. */
 	history: AppNotification[];
@@ -75,28 +57,20 @@ interface NotificationState {
 /** Options accepted by the public `notify.*` API. */
 interface NotifyOptions {
 	severity?: NotificationSeverity;
-	surface?: NotificationSurface;
 	category?: string;
 	title?: string;
 	action?: NotificationAction;
-	/** Override the severity-based persist default. */
+	/** Override the default remote persistence. */
 	persist?: boolean;
-	/** Toast auto-dismiss in ms. Pass 0 for a sticky toast. */
+	/** Banner auto-dismiss in ms. Pass 0 for a sticky banner. */
 	duration_ms?: number;
 	session_id?: string;
 }
 
 const HISTORY_CAP = 200;
-const DEFAULT_TOAST_MS = 5000;
 
 const _store = createStore<NotificationState>({ live: [], history: [] });
 const _timers = new Map<string, ReturnType<typeof setTimeout>>();
-let _seq = 0;
-
-/** Errors / warnings persist to the bell by default; success / info are live-only. */
-function _defaultPersist(severity: NotificationSeverity): boolean {
-	return severity === 'error' || severity === 'warning';
-}
 
 function _scheduleAutoDismiss(id: string, ms: number) {
 	const t = setTimeout(() => dismissLive(id), ms);
@@ -132,18 +106,19 @@ function _persistRemote(n: AppNotification): void {
 	}
 }
 
-/** Remove a live (toast / page banner) notification. Leaves history untouched. */
+/** Remove a live (page banner) notification. Leaves history untouched. */
 function dismissLive(id: string): void {
 	_clearTimer(id);
 	_store.update((s) => ({ ...s, live: s.live.filter((n) => n.id !== id) }));
 }
 
 /**
- * Core entry point. Builds a notification, renders it live (toast/banner) and,
+ * Core entry point. Builds a notification, renders it as a banner or bell item and,
  * when persisted, records it in history (+ POSTs client-originated ones).
  */
 function _emit(
 	opts: NotifyOptions & {
+		surface?: NotificationSurface;
 		message: string;
 		source?: NotificationSource;
 		id?: string;
@@ -153,12 +128,12 @@ function _emit(
 	}
 ): string {
 	const severity = opts.severity ?? 'info';
-	const surface = opts.surface ?? 'toast';
+	const surface = opts.surface === 'banner' ? 'banner' : 'notification';
 	const source = opts.source ?? 'client';
-	const persist = opts.persist ?? _defaultPersist(severity);
-	const id = opts.id ?? `c${++_seq}`;
-	const duration_ms =
-		surface === 'toast' ? (opts.duration_ms ?? DEFAULT_TOAST_MS) : (opts.duration_ms ?? 0);
+	const persist = opts.persist ?? (surface === 'notification');
+	const id = opts.id ?? `c-${Array.from(globalThis.crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16).padStart(8, '0')).join('')}`;
+	if (opts.source === 'server' && [..._store.current.history, ..._store.current.live].some((n) => n.id === id)) return id;
+	const duration_ms = opts.duration_ms ?? 0;
 
 	const n: AppNotification = {
 		id,
@@ -178,16 +153,16 @@ function _emit(
 	};
 
 	_store.update((s) => {
-		const live = surface === 'inline' ? s.live : [...s.live, n];
+		const live = surface === 'banner' ? [...s.live.filter((b) => b.id !== id), n] : s.live;
 		let history = s.history;
-		if (persist) {
+		if (surface === 'notification' || persist) {
 			// Dedupe by id (e.g. an ingested server event we already hold).
 			history = [n, ...history.filter((h) => h.id !== id)].slice(0, HISTORY_CAP);
 		}
 		return { live, history };
 	});
 
-	if (surface === 'toast' && duration_ms > 0) {
+	if (surface === 'banner' && duration_ms > 0) {
 		_scheduleAutoDismiss(id, duration_ms);
 	}
 	if (persist && source === 'client') {
@@ -201,7 +176,7 @@ function _emit(
  *
  * ```ts
  * notify.error('Failed to save profile');
- * notify.success('Saved', { duration_ms: 3000 });
+ * notify.success('Saved');
  * notify.banner('Connection lost — reconnecting…', { severity: 'warning' });
  * ```
  */
@@ -229,29 +204,35 @@ export const notify = Object.assign(
 			payload: {
 				id: string;
 				severity: NotificationSeverity;
-				surface?: NotificationSurface;
+				surface?: NotificationSurface | 'toast' | 'inline';
 				category?: string;
 				title?: string;
 				message: string;
 				duration_ms?: number;
 				session_id?: string;
 				read?: boolean;
+				persist?: boolean;
 				created_at?: number;
 			},
 			action?: NotificationAction
 		): string =>
 			_emit({
 				...payload,
+				surface: payload.surface === 'banner' ? 'banner' : 'notification',
 				source: 'server',
-				persist: true,
+				persist: payload.persist ?? payload.surface !== 'banner',
 				action,
 			}),
 
-		/** Seed history from the backend on load. Replaces the history slice. */
+		/** Merge backend history with items received while the request was in flight. */
 		hydrate: (items: AppNotification[]) => {
 			_store.update((s) => ({
 				...s,
-				history: [...items]
+				history: [...new Map(
+					[...items, ...s.history]
+						.filter((n) => !n.dismissed)
+						.map((n) => [n.id, { ...n, surface: 'notification' as const }])
+				).values()]
 					.sort((a, b) => b.created_at - a.created_at)
 					.slice(0, HISTORY_CAP),
 			}));
@@ -273,7 +254,7 @@ export const notify = Object.assign(
 				const items: AppNotification[] = rows.map((r) => ({
 					id: r.id,
 					severity: r.severity,
-					surface: r.surface ?? 'toast',
+					surface: r.surface === 'banner' ? 'banner' : 'notification',
 					category: r.category ?? undefined,
 					source: 'server',
 					title: r.title ?? undefined,
@@ -325,7 +306,7 @@ export const notify = Object.assign(
 			_remote(() => api.delete('/notifications'));
 		},
 
-		/** Dismiss a live toast / banner without touching history. */
+		/** Dismiss a live banner without touching history. */
 		dismissLive,
 	}
 );
@@ -351,8 +332,6 @@ export const notifications = {
 	subscribe: _store.subscribe,
 };
 
-/** Live toasts only — consumed by ToastViewport. */
-export const liveToasts = _store.createDerived((s) => s.live.filter((n) => n.surface === 'toast'));
 
 /** Live page banners only — consumed by the global banner host. */
 export const liveBanners = _store.createDerived((s) => s.live.filter((n) => n.surface === 'banner'));
@@ -362,48 +341,3 @@ export const notificationHistory = _store.createDerived((s) => s.history);
 
 /** Unread count for the bell badge. */
 export const unreadCount = _store.createDerived((s) => s.history.filter((n) => !n.read).length);
-
-// ─── Backward-compatible `toast` alias ─────────────────────────────────────────
-
-type ToastTone = NotificationSeverity;
-
-interface ToastAction {
-	label: string;
-	onClick: () => void;
-}
-
-/**
- * Legacy toast facade kept so the existing `toast.push(...)` call sites keep
- * working unchanged. Delegates into the unified store. `push` returns a numeric
- * id (legacy contract) and `dismiss` accepts it.
- */
-export const toast = {
-	push(
-		message: string,
-		opts: { tone?: ToastTone; duration_ms?: number; action?: ToastAction } = {}
-	): number {
-		const n = ++_seq;
-		_emit({
-			id: `c${n}`,
-			message,
-			severity: opts.tone ?? 'info',
-			surface: 'toast',
-			duration_ms: opts.duration_ms,
-			action: opts.action,
-			// Legacy toasts were ephemeral; preserve that (no bell history).
-			persist: false,
-		});
-		return n;
-	},
-	dismiss(id: number): void {
-		dismissLive(`c${id}`);
-	},
-	dismissAll(): void {
-		_store.update((s) => {
-			for (const n of s.live) {
-				if (n.surface === 'toast') _clearTimer(n.id);
-			}
-			return { ...s, live: s.live.filter((n) => n.surface !== 'toast') };
-		});
-	},
-};

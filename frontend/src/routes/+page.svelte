@@ -39,7 +39,6 @@
 	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import { initGlobalStt } from '$lib/services/globalStt';
-	import { requestPermissionIfNeeded } from '$lib/services/notifications';
 
 	// ============================================
 	// State: Modals
@@ -142,11 +141,9 @@
 	}
 
 	/**
-	 * Open a session in response to a notification click. Both the OS push
-	 * notification (relayed by the service worker via postMessage) and the in-app
-	 * browser notification (notifySessionComplete, via a window event) funnel
-	 * here. Skip the switch when the session is already the one on screen so the
-	 * click doesn't trigger a needless reload/flash.
+	 * Open a session in response to the in-app notification bell's
+	 * `open-session` event. Skip the switch when the session is already on screen so
+	 * the click doesn't trigger a needless reload/flash.
 	 */
 	function handleNotificationOpenSession(sessionId: string | null | undefined) {
 		if (!sessionId) return;
@@ -185,7 +182,6 @@
 	let visibilityChangeHandler: (() => void) | null = null;
 	let focusHandler: (() => void) | null = null;
 	let cleanupGlobalStt: (() => void) | null = null;
-	let swMessageHandler: ((event: MessageEvent) => void) | null = null;
 	let openSessionEventHandler: ((event: Event) => void) | null = null;
 
 	// Cross-install freshness: active-state changes (and other mutations) land in
@@ -294,20 +290,10 @@
 			history.replaceState(history.state, '', url.pathname + url.search + url.hash);
 		}
 
-		// Notification clicks open the relevant session without a reload. The
-		// service worker relays an OS push click via postMessage; the in-app
-		// "Session Complete" notification dispatches an 'open-session' window event.
-		swMessageHandler = (event: MessageEvent) => {
-			if (event.data?.type === 'OPEN_SESSION') {
-				handleNotificationOpenSession(event.data.sessionId as string | undefined);
-			}
-		};
+		// The in-app notification bell opens the relevant session without a reload.
 		openSessionEventHandler = (event: Event) => {
 			handleNotificationOpenSession((event as CustomEvent).detail?.sessionId);
 		};
-		if ('serviceWorker' in navigator) {
-			navigator.serviceWorker.addEventListener('message', swMessageHandler);
-		}
 		window.addEventListener('open-session', openSessionEventHandler);
 
 		// Sync from server when window regains focus / the tab becomes visible.
@@ -398,10 +384,6 @@
 			})
 		];
 
-		// Request notification permission if not yet determined (works on both desktop and mobile)
-		// Fire-and-forget: non-critical, errors handled internally
-		void requestPermissionIfNeeded();
-
 		// Initialize global STT
 		cleanupGlobalStt = initGlobalStt();
 	});
@@ -413,9 +395,6 @@
 			}
 			if (focusHandler) {
 				window.removeEventListener('focus', focusHandler);
-			}
-			if (swMessageHandler && 'serviceWorker' in navigator) {
-				navigator.serviceWorker.removeEventListener('message', swMessageHandler);
 			}
 			if (openSessionEventHandler) {
 				window.removeEventListener('open-session', openSessionEventHandler);

@@ -2,7 +2,7 @@
 	/**
 	 * Banner host — renders the global `liveBanners` slice (notifications emitted
 	 * with `surface: 'banner'` via `notify.banner(...)`) as page-level, sticky
-	 * messages. Mounted once at the app shell level alongside ToastViewport.
+	 * messages. Mounted once at the app shell level above the page content.
 	 *
 	 * Page banners are sticky (no auto-dismiss) — they stay until the user closes
 	 * them or `notify.dismissLive(id)` removes them. Styling/markup is the shared
@@ -27,7 +27,7 @@
 </script>
 
 {#if banners.length > 0}
-	<div class="banner-host" role="region" aria-label="Alerts" aria-live="polite">
+	<div class="banner-host" role="region" aria-label="Alerts">
 		{#each banners as b (b.id)}
 			<Banner
 				severity={b.severity}
@@ -45,7 +45,9 @@
 <style>
 	.banner-host {
 		position: fixed;
-		top: 12px;
+		top: max(12px, env(safe-area-inset-top));
+		max-height: calc(100dvh - 24px);
+		overflow-y: auto;
 		left: 50%;
 		transform: translateX(-50%);
 		display: flex;

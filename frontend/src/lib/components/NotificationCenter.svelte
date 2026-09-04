@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * NotificationCenter — the bell + history panel for the unified notification
-	 * system. Lives in the AppTopBar right cluster (always visible, independent of
+	 * system. Lives in the Sidebar header (one bell, independent of
 	 * the chat view) and reads the persisted `history` slice of the notification
 	 * store.
 	 *
@@ -69,7 +69,7 @@
 	function onItemClick(n: AppNotification) {
 		if (!n.read) notify.markRead(n.id);
 		// Session-scoped notifications (e.g. "Session finished") deep-link to their
-		// session — reuse the same 'open-session' funnel as the toast / OS push.
+		// session through the shared 'open-session' navigation event.
 		if (n.session_id) {
 			window.dispatchEvent(new CustomEvent('open-session', { detail: { sessionId: n.session_id } }));
 			closeDropdown('notifications');

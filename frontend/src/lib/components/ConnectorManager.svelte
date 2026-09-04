@@ -37,7 +37,7 @@
 	import { getApiUsers } from '$lib/api/apiUsers';
 	import { listInstalls } from '$lib/api/installs';
 	import { formatDateTime } from '$lib/utils/dateFormatting';
-	import { toast } from '$lib/stores/toast';
+	import { notify } from '$lib/stores/notifications';
 
 	// State
 	let connectors: Connector[] = $state([]);
@@ -426,7 +426,7 @@
 			deletingId = null;
 			await loadData();
 		} catch (e: any) {
-			toast.push(e.detail || 'Failed to delete connector', { tone: 'error' });
+			notify(e.detail || 'Failed to delete connector', { severity: 'error' });
 			deletingId = null;
 		}
 	}
@@ -441,15 +441,15 @@
 		try {
 			const result = await testConnector(id);
 			if (result.success) {
-				toast.push(
+				notify(
 					`Connection successful${result.response_time_ms ? ` (${result.response_time_ms}ms)` : ''}`,
-					{ tone: 'success' }
+					{ severity: 'success' }
 				);
 			} else {
-				toast.push(result.error || result.message || 'Test failed', { tone: 'error' });
+				notify(result.error || result.message || 'Test failed', { severity: 'error' });
 			}
 		} catch (e: any) {
-			toast.push(e.detail || 'Failed to test connector', { tone: 'error' });
+			notify(e.detail || 'Failed to test connector', { severity: 'error' });
 		} finally {
 			testingId = null;
 		}
@@ -464,7 +464,7 @@
 			}
 			await loadData();
 		} catch (e: any) {
-			toast.push(e.detail || 'Failed to update connector', { tone: 'error' });
+			notify(e.detail || 'Failed to update connector', { severity: 'error' });
 		}
 	}
 

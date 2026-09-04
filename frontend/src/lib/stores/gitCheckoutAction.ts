@@ -14,7 +14,7 @@
 
 import { git } from '$lib/stores/git.svelte';
 import { isApiError } from '$lib/api/client';
-import { toast } from '$lib/stores/toast';
+import { notify } from '$lib/stores/notifications';
 
 /**
  * Run a user-initiated branch checkout and surface any failure to the user.
@@ -39,7 +39,7 @@ async function runCheckout(
 		await git.checkout(ref, autoStash);
 		await afterSwitch?.();
 		if (autoStash) {
-			toast.push(`Stashed changes and switched to ${ref}`, { tone: 'success' });
+			notify(`Stashed changes and switched to ${ref}`, { severity: 'success' });
 		}
 	} catch (e) {
 		console.error('Failed to checkout branch:', e);
@@ -53,8 +53,8 @@ async function runCheckout(
 			: `Failed to switch to ${ref}`;
 
 		if (isUncommittedConflict) {
-			toast.push(detail, {
-				tone: 'error',
+			notify(detail, {
+				severity: 'error',
 				action: {
 					label: 'Stash & switch',
 					onClick: () => {
@@ -63,7 +63,7 @@ async function runCheckout(
 				},
 			});
 		} else {
-			toast.push(detail, { tone: 'error' });
+			notify(detail, { severity: 'error' });
 		}
 	}
 }

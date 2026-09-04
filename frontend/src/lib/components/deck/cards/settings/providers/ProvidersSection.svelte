@@ -33,7 +33,7 @@
 		saveTextGenerationSettings
 	} from '$lib/api/text-generation';
 	import { getDefaultModel } from '$lib/constants/models';
-	import { toast } from '$lib/stores/toast';
+	import { notify } from '$lib/stores/notifications';
 
 	interface Props {
 		// ----- GitHub (forwarded to MediaToolsSection) -----
@@ -104,9 +104,9 @@
 			// binding the server refused (e.g. a model the provider dropped).
 			textGenModel = previous.model;
 			textGenEffort = previous.effort;
-			toast.push(
+			notify(
 				e instanceof Error ? e.message : 'Could not save the text generation model',
-				{ tone: 'error' }
+				{ severity: 'error' }
 			);
 		} finally {
 			textGenSaving = false;

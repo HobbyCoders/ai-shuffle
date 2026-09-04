@@ -48,12 +48,14 @@ const QUESTION_NOTES: Note[] = [
 
 const STORAGE_KEY = 'ai-shuffle-notification-sound';
 const DEFAULT_VOLUME = 0.4;
+const COMPLETE_THROTTLE_MS = 5000;
 
 class NotificationSound {
 	private ctx: AudioContext | null = null;
 	private enabled = true;
 	private volume = DEFAULT_VOLUME;
 	private unlocked = false;
+	private lastCompletePlayedAt: number | null = null;
 	private removeGestureListeners: (() => void) | null = null;
 
 	constructor() {
@@ -151,15 +153,31 @@ class NotificationSound {
 		const ctx = this.ensureContext();
 		if (!ctx) return;
 
+		// Completion events can arrive through more than one path. Drop duplicates
+		// inside the cooldown rather than queueing them; question sounds remain
+		// independent. Check only after audio is enabled and available so skipped
+		// attempts do not consume the cooldown.
+		const now = Date.now();
+		if (
+			kind === 'complete' &&
+			this.lastCompletePlayedAt !== null &&
+			now - this.lastCompletePlayedAt < COMPLETE_THROTTLE_MS
+		) return;
+
 		// Best-effort resume: the context may have been suspended (autoplay policy,
 		// or the OS pausing audio while the tab was backgrounded). If it was ever
 		// unlocked this resolves immediately; otherwise the sound is simply skipped.
 		if (ctx.state === 'suspended') {
-			ctx.resume().catch(() => {});
+			ctx.resume().then(() => {
+				if (ctx.state === 'running') this.play(kind);
+			}).catch(() => {});
+			return;
 		}
+		if (ctx.state !== 'running') return;
 
 		const notes = kind === 'complete' ? COMPLETE_NOTES : QUESTION_NOTES;
 		this.playSequence(ctx, notes);
+		if (kind === 'complete') this.lastCompletePlayedAt = now;
 	}
 
 	playComplete(): void {

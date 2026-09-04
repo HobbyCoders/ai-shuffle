@@ -1,8 +1,4 @@
-/**
- * Tests for notifications.ts — verifies the audible chime plays for "session
- * complete" and "Claude has a question / needs permission" REGARDLESS of whether
- * the window is focused (the visual OS popup is still suppressed when focused).
- */
+/** Tests for the in-app notification sound hooks. */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -18,37 +14,38 @@ vi.mock('./notificationSound', () => ({
 
 import { notifyWaitingForResponse, notifySessionComplete } from './notifications';
 
+let notificationConstructor: ReturnType<typeof vi.fn>;
+let requestPermission: ReturnType<typeof vi.fn>;
+
 beforeEach(() => {
 	sound.play.mockReset();
 	sound.playComplete.mockReset();
 	sound.playQuestion.mockReset();
+	notificationConstructor = vi.fn();
+	requestPermission = vi.fn();
+	Object.defineProperty(window, 'Notification', {
+		configurable: true,
+		value: Object.assign(notificationConstructor, {
+			permission: 'granted',
+			requestPermission,
+		}),
+	});
 });
 
 describe('notifyWaitingForResponse', () => {
-	it('plays the question chime even when the window is focused', () => {
-		vi.spyOn(document, 'hasFocus').mockReturnValue(true);
-		const result = notifyWaitingForResponse('question', { questionCount: 1 });
-		expect(sound.play).toHaveBeenCalledWith('question');
-		// Focused → no redundant OS popup (in-app modal is already visible).
-		expect(result).toBeNull();
-	});
-
-	it('plays the permission chime when focused', () => {
-		vi.spyOn(document, 'hasFocus').mockReturnValue(true);
-		notifyWaitingForResponse('permission', { toolName: 'Bash' });
-		expect(sound.play).toHaveBeenCalledWith('permission');
-	});
-
-	it('plays the chime when the window is NOT focused', () => {
-		vi.spyOn(document, 'hasFocus').mockReturnValue(false);
-		notifyWaitingForResponse('question', { questionCount: 2 });
-		expect(sound.play).toHaveBeenCalledWith('question');
+	it.each(['question', 'permission'] as const)('plays the %s chime without using browser notifications', (type) => {
+		expect(notifyWaitingForResponse(type)).toBeNull();
+		expect(sound.play).toHaveBeenCalledWith(type);
+		expect(notificationConstructor).not.toHaveBeenCalled();
+		expect(requestPermission).not.toHaveBeenCalled();
 	});
 });
 
 describe('notifySessionComplete', () => {
-	it('plays the complete chime', () => {
-		notifySessionComplete({ sessionId: 's1', sessionTitle: 'Test session' });
-		expect(sound.playComplete).toHaveBeenCalled();
+	it('plays the complete chime without using browser notifications', () => {
+		expect(notifySessionComplete({ sessionId: 's1', sessionTitle: 'Test session' })).toBeNull();
+		expect(sound.playComplete).toHaveBeenCalledOnce();
+		expect(notificationConstructor).not.toHaveBeenCalled();
+		expect(requestPermission).not.toHaveBeenCalled();
 	});
 });

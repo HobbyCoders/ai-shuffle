@@ -41,7 +41,7 @@
 	import { computeOperationSideEffects } from '$lib/stores/derived/git-action-options';
 	import { isApiError } from '$lib/api/client';
 	import { exportSession } from '$lib/api/sessions';
-	import { toast } from '$lib/stores/toast';
+	import { notify } from '$lib/stores/notifications';
 	import { Download, PanelRight } from 'lucide-svelte';
 	import { browserPanel, browserPanelOpen } from '$lib/stores/browser-panel.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
@@ -643,9 +643,9 @@
 			gitOperations.succeed();
 			if (prInfo) {
 				const url = prInfo.url;
-				toast.push(`Opened pull request #${prInfo.number}`, { tone: 'success', action: { label: 'View PR', onClick: () => openPRUrl(url) } });
+				notify(`Opened pull request #${prInfo.number}`, { severity: 'success', action: { label: 'View PR', onClick: () => openPRUrl(url) } });
 			} else {
-				toast.push('Committed changes', { tone: 'success' });
+				notify('Committed changes', { severity: 'success' });
 			}
 		} catch (e) {
 			gitOperations.failCurrent(errText(e));
@@ -660,14 +660,14 @@
 		try {
 			await git.pushCommits(undefined, true, force);
 			gitOperations.succeed();
-			toast.push('Pushed to remote', { tone: 'success' });
+			notify('Pushed to remote', { severity: 'success' });
 		} catch (e) {
 			gitOperations.clear();
 			const detail = errText(e);
 			if (!force && isNonFastForward(detail)) {
-				toast.push(detail, { tone: 'error', action: { label: 'Pull first', onClick: () => handlePull() } });
+				notify(detail, { severity: 'error', action: { label: 'Pull first', onClick: () => handlePull() } });
 			} else {
-				toast.push(detail, { tone: 'error' });
+				notify(detail, { severity: 'error' });
 			}
 		}
 	}
@@ -685,9 +685,9 @@
 			gitOperations.clear();
 			if (res.has_conflicts) {
 				const files = res.conflicts.length ? res.conflicts.join(', ') : 'some files';
-				toast.push(`Pull hit conflicts in ${files}. Resolve them, then commit to finish the merge.`, { tone: 'error' });
+				notify(`Pull hit conflicts in ${files}. Resolve them, then commit to finish the merge.`, { severity: 'error' });
 			} else {
-				toast.push(res.message || 'Pulled latest changes', { tone: 'success' });
+				notify(res.message || 'Pulled latest changes', { severity: 'success' });
 			}
 		} catch (e) {
 			gitOperations.clear();
@@ -696,9 +696,9 @@
 			const dirty = !autoStash && isApiError(e) && e.status === 409;
 			const detail = errText(e);
 			if (dirty) {
-				toast.push(detail, { tone: 'error', action: { label: 'Stash & pull', onClick: () => handlePull({ strategy, autoStash: true }) } });
+				notify(detail, { severity: 'error', action: { label: 'Stash & pull', onClick: () => handlePull({ strategy, autoStash: true }) } });
 			} else {
-				toast.push(detail, { tone: 'error' });
+				notify(detail, { severity: 'error' });
 			}
 		}
 	}
@@ -723,7 +723,7 @@
 			git.refreshPrState(true).catch(() => {});
 			gitOperations.succeed();
 			const url = prInfo.url;
-			toast.push(`Opened pull request #${prInfo.number}`, { tone: 'success', action: { label: 'View PR', onClick: () => openPRUrl(url) } });
+			notify(`Opened pull request #${prInfo.number}`, { severity: 'success', action: { label: 'View PR', onClick: () => openPRUrl(url) } });
 		} catch (e) {
 			gitOperations.failCurrent(errText(e));
 		}
@@ -825,9 +825,9 @@
 		}
 		if (effects.toast.prUrl) {
 			const url = effects.toast.prUrl;
-			toast.push(effects.toast.label, { tone: 'success', action: { label: 'View PR', onClick: () => openPRUrl(url) } });
+			notify(effects.toast.label, { severity: 'success', action: { label: 'View PR', onClick: () => openPRUrl(url) } });
 		} else {
-			toast.push('Operation complete', { tone: 'success' });
+			notify('Operation complete', { severity: 'success' });
 		}
 	}
 
@@ -841,7 +841,7 @@
 			await exportSession(sessionId, 'jsonl');
 		} catch (err) {
 			const detail = (err as { detail?: string })?.detail;
-			toast.push(detail || 'Failed to download chat history', { tone: 'error' });
+			notify(detail || 'Failed to download chat history', { severity: 'error' });
 		} finally {
 			downloadingJsonl = false;
 		}

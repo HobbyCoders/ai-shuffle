@@ -18,7 +18,7 @@ server emit funnel and this REST path write/read the same rows.
 """
 
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -39,11 +39,14 @@ class NotificationCreate(BaseModel):
     """A client-originated notification to persist (mirrors the store's POST)."""
     id: Optional[str] = None
     severity: str = Field(default="info")
-    surface: str = Field(default="toast")
+    surface: Literal["notification", "banner", "toast", "inline"] = Field(
+        default="notification"
+    )
     category: Optional[str] = None
     title: Optional[str] = None
     message: str = ""
     session_id: Optional[str] = None
+    action: Optional[Dict[str, Any]] = None
 
 
 # =============================================================================
@@ -102,6 +105,8 @@ async def create_notification(
         source="client",
         title=body.title,
         session_id=body.session_id,
+        action_kind=body.action.get("kind") if body.action else None,
+        action_payload=body.action.get("payload") if body.action else None,
         notification_id=body.id,
     )
     return created

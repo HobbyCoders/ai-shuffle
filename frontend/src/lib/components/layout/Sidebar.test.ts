@@ -73,8 +73,9 @@ vi.mock('$lib/api/client', () => ({
 	forkSession: vi.fn(),
 }));
 
-vi.mock('$lib/stores/toast', () => ({
-	toast: { push: vi.fn() },
+vi.mock('$lib/stores/notifications', async (importOriginal) => ({
+	...await importOriginal<typeof import('$lib/stores/notifications')>(),
+	notify: Object.assign(vi.fn(), { markAllRead: vi.fn() }),
 }));
 
 vi.mock('$lib/api/github', () => ({

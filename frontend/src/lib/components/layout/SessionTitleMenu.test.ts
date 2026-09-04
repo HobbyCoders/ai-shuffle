@@ -50,8 +50,8 @@ vi.mock('$lib/api/client', () => ({
 	forkSession: mocks.forkSession,
 }));
 
-vi.mock('$lib/stores/toast', () => ({
-	toast: { push: mocks.toastPush },
+vi.mock('$lib/stores/notifications', () => ({
+	notify: mocks.toastPush,
 }));
 
 import SessionTitleMenu from './SessionTitleMenu.svelte';
@@ -138,7 +138,7 @@ describe('SessionTitleMenu', () => {
 		expect(mocks.forkSession).toHaveBeenCalledWith('session-a');
 		await vi.waitFor(() => expect(opened).toEqual(['forked-session']));
 		expect(mocks.loadSessions).toHaveBeenCalledOnce();
-		expect(mocks.toastPush).toHaveBeenCalledWith('Session forked', { tone: 'success' });
+		expect(mocks.toastPush).toHaveBeenCalledWith('Session forked', { severity: 'success' });
 		window.removeEventListener('open-session', onOpen);
 	});
 

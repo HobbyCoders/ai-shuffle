@@ -11,7 +11,7 @@ vi.mock('$lib/api/computerUse', () => ({
 	getComputerUseStatus: (...args: unknown[]) => getStatus(...args),
 	setComputerUseEnabled: (...args: unknown[]) => setEnabled(...args)
 }));
-vi.mock('$lib/stores/toast', () => ({ toast: { push: vi.fn() } }));
+vi.mock('$lib/stores/notifications', () => ({ notify: vi.fn() }));
 
 import { computerUse, POLL_AVAILABLE_MS, POLL_UNAVAILABLE_MS } from './computerUse.svelte';
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Banner from '$lib/components/Banner.svelte';
 	/**
 	 * AddProjectModal - Shared "Add Project" modal with directory browser
 	 *
@@ -111,9 +112,7 @@
 			</div>
 
 			{#if addError}
-				<div class="create-modal-error">
-					{addError}
-				</div>
+				<Banner message={addError} />
 			{/if}
 
 			<div class="create-modal-field">
@@ -254,14 +253,6 @@
 		color: var(--foreground);
 	}
 
-	.create-modal-error {
-		padding: 8px 12px;
-		background: color-mix(in oklch, var(--destructive) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
-		border-radius: 8px;
-		color: var(--destructive);
-		font-size: 0.8125rem;
-	}
 
 	.create-modal-field {
 		display: flex;

@@ -18,7 +18,7 @@
  * backend was already struggling, every call slow.
  */
 import { getComputerUseStatus, setComputerUseEnabled } from '$lib/api/computerUse';
-import { toast } from '$lib/stores/toast';
+import { notify } from '$lib/stores/notifications';
 
 export const POLL_AVAILABLE_MS = 2_000;
 export const POLL_UNAVAILABLE_MS = 60_000;
@@ -68,8 +68,8 @@ class ComputerUseStore {
 			// Toast on the rising edge of control activity, so the user is told
 			// the moment the agent starts driving a screen (and which one).
 			if (s.active && !this.#wasActive) {
-				toast.push(`AI Shuffle is controlling ${s.display_label ?? 'your screen'}`, {
-					tone: 'info',
+				notify(`AI Shuffle is controlling ${s.display_label ?? 'your screen'}`, {
+					severity: 'info',
 					duration_ms: 4000
 				});
 			}

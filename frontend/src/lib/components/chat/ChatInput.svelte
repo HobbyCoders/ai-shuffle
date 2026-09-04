@@ -24,7 +24,7 @@
 	import { anyCredential } from '$lib/stores/auth.svelte';
 
 	import { api, type FileUploadResponse } from '$lib/api/client';
-	import { toast } from '$lib/stores/toast';
+	import { notify } from '$lib/stores/notifications';
 	import { evaluateSubmitGuards } from './submit-guards';
 	import { attachmentBlockReason } from './attach-disable';
 	import {
@@ -463,7 +463,7 @@
 			mode: composerMode
 		});
 		if (block) {
-			if (block.notice) toast.push(block.notice.message, { tone: block.notice.tone });
+			if (block.notice) notify(block.notice.message, { severity: block.notice.tone });
 			return;
 		}
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Banner from '$lib/components/Banner.svelte';
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { Link2, ShieldCheck, Smartphone } from 'lucide-svelte';
@@ -117,7 +118,7 @@
 			{#if linkSupplied}
 				<div class="notice"><Smartphone size={18} /><span>Pairing link received. Confirm the device name, then connect.</span></div>
 			{/if}
-			{#if error}<p class="error" role="alert">{error}</p>{/if}
+			{#if error}<Banner message={error} />{/if}
 
 			<button onclick={connect} disabled={connecting || !code.trim() || !deviceName.trim()}>
 				{connecting ? 'Connecting…' : 'Connect device'}
@@ -145,7 +146,6 @@
 	.notice { display: flex; gap: 10px; align-items: flex-start; margin-top: 18px; padding: 11px 12px; border-radius: 10px; font-size: 12.5px; line-height: 1.4; color: var(--muted-foreground); background: var(--muted); }
 	.notice :global(svg) { flex: 0 0 auto; margin-top: 1px; color: var(--primary); }
 	.notice.warning :global(svg) { color: var(--warning, #d97706); }
-	.error { margin: 14px 0 0; font-size: 12.5px; color: var(--destructive); }
 	.foot { margin: 22px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--muted-foreground); }
 	@media (max-width: 520px) { .pair-shell { padding: 0; place-items: stretch; } .pair-card { width: auto; min-height: 100vh; box-sizing: border-box; border: 0; border-radius: 0; padding: 42px 24px; } }
 </style>

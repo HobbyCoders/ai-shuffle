@@ -9,7 +9,7 @@
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
-	import { toast } from '$lib/stores/toast';
+	import { notify } from '$lib/stores/notifications';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
 	import { Users, Wrench, Bot, Settings, FileText, SlidersHorizontal } from 'lucide-svelte';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data.svelte';
@@ -160,8 +160,8 @@
 		try {
 			toolSurface = await fetchToolSurface(true);
 		} catch (e: any) {
-			toast.push('Failed to refresh tools: ' + (e?.detail || e?.message || 'Unknown error'), {
-				tone: 'error'
+			notify('Failed to refresh tools: ' + (e?.detail || e?.message || 'Unknown error'), {
+				severity: 'error'
 			});
 		} finally {
 			toolsRefreshing = false;
@@ -560,7 +560,7 @@
 					try {
 						await writeProfile();
 					} catch (e: any) {
-						toast.push('Failed to save agent: ' + (e.detail || e.message || 'Unknown error'), { tone: 'error' });
+						notify('Failed to save agent: ' + (e.detail || e.message || 'Unknown error'), { severity: 'error' });
 					}
 				}
 			} finally {
@@ -604,7 +604,7 @@
 		try {
 			await tabsStore.restoreProfile(profileId);
 		} catch (e: any) {
-			toast.push('Failed to restore defaults: ' + (e.detail || e.message || 'Unknown error'), { tone: 'error' });
+			notify('Failed to restore defaults: ' + (e.detail || e.message || 'Unknown error'), { severity: 'error' });
 		}
 	}
 
@@ -613,7 +613,7 @@
 		try {
 			await exportAgent(profileId);
 		} catch (e: any) {
-			toast.push('Export failed: ' + (e.detail || 'Unknown error'), { tone: 'error' });
+			notify('Export failed: ' + (e.detail || 'Unknown error'), { severity: 'error' });
 		}
 	}
 
@@ -632,9 +632,9 @@
 			const parsed = parseAgentExportFile(content);
 			const profile = await importAgent(parsed);
 			await tabsStore.loadProfiles();
-			toast.push(`Successfully imported agent: ${profile.name}`, { tone: 'success' });
+			notify(`Successfully imported agent: ${profile.name}`, { severity: 'success' });
 		} catch (err: any) {
-			toast.push('Import failed: ' + (err.detail || err.message || 'Invalid file format'), { tone: 'error' });
+			notify('Import failed: ' + (err.detail || err.message || 'Invalid file format'), { severity: 'error' });
 		} finally {
 			input.value = '';
 			profileImporting = false;
