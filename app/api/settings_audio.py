@@ -186,7 +186,8 @@ STT_MODELS = {
         "name": "Whisper (Large v3)",
         "description": "Speech transcription and translation, 99+ languages, speaker diarization",
         "price_display": "~$0.005/min",
-        "supports_diarization": True
+        "supports_diarization": True,
+        "accepts_compressed": True
     },
     "fal-ai/elevenlabs/speech-to-text": {
         "name": "ElevenLabs Scribe v1",
@@ -212,21 +213,24 @@ STT_MODELS = {
         "description": "OpenAI GPT-4o speech-to-text — high-accuracy transcription",
         "price_display": "~$0.006/min",
         "provider": "openai",
-        "supports_diarization": False
+        "supports_diarization": False,
+        "accepts_compressed": True
     },
     "openai/gpt-4o-mini-transcribe": {
         "name": "GPT-4o mini Transcribe",
         "description": "OpenAI GPT-4o mini speech-to-text — fast, affordable transcription",
         "price_display": "~$0.003/min",
         "provider": "openai",
-        "supports_diarization": False
+        "supports_diarization": False,
+        "accepts_compressed": True
     },
     "openai/whisper-1": {
         "name": "OpenAI Whisper",
         "description": "OpenAI Whisper — 99+ language transcription and translation",
         "price_display": "~$0.006/min",
         "provider": "openai",
-        "supports_diarization": False
+        "supports_diarization": False,
+        "accepts_compressed": True
     },
 }
 
@@ -1005,9 +1009,14 @@ async def transcribe_audio(
                         transcribed_text = " ".join(c.get("text", "") for c in chunks).strip()
 
             if not transcribed_text:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Transcription returned empty result."
+                # Silence is a normal outcome, not a server fault. Answering 200
+                # with empty text lets the client say "no speech detected"; the
+                # 500 this used to raise made that branch unreachable and showed
+                # the user a failure instead. The log keeps the diagnostic, since
+                # an unexpected upstream response shape also lands here.
+                logger.warning(
+                    "Transcription returned empty text (model %s, %d bytes)",
+                    stt_model, len(audio_data),
                 )
 
             return TranscriptionResponse(

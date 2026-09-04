@@ -38,7 +38,7 @@
 	import TagManager from '$lib/components/TagManager.svelte';
 	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
-	import GlobalSttIndicator from '$lib/components/GlobalSttIndicator.svelte';
+	import LiveTranscriptionOverlay from '$lib/components/voice/LiveTranscriptionOverlay.svelte';
 	import { initGlobalStt } from '$lib/services/globalStt';
 	import { requestPermissionIfNeeded } from '$lib/services/notifications';
 
@@ -546,5 +546,5 @@
 	{/if}
 
 	<!-- Global STT Indicator -->
-	<GlobalSttIndicator />
+	<LiveTranscriptionOverlay />
 {/if}

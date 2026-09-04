@@ -40,6 +40,7 @@ from app.api.settings_audio import (  # noqa: F401
     _build_tts_payload,
     _extract_audio_url,
 )
+from app.api.stt_realtime import stt_stream_router  # noqa: F401
 from app.api.settings_media import (  # noqa: F401
     media_router,
     ModelUpdateRequest,
@@ -65,6 +66,7 @@ router = APIRouter(prefix="/api/v1/settings", tags=["Settings"])
 
 # Include sub-routers (they share the same prefix via this parent router)
 router.include_router(audio_router)
+router.include_router(stt_stream_router)
 router.include_router(media_router)
 router.include_router(credentials_router)
 

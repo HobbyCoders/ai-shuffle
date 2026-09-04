@@ -1,11 +1,21 @@
 <script lang="ts">
 	/**
-	 * VoiceRecorder - Handles microphone access, MediaRecorder, audio level
-	 * visualization, and transcription. Extracted from ChatInput.
+	 * VoiceRecorder — the composer's microphone button.
+	 *
+	 * A trigger, not a recorder. Capture, live streaming, transcription and the
+	 * on-screen transcript all live in the shared voice-input stack
+	 * (`globalStt` + `LiveTranscriptionOverlay`), which the hotkey uses too. This
+	 * component contributes the button and its meter, and names where the
+	 * finished text should land — the editor, rather than the clipboard.
+	 *
+	 * Delegating is what gives the composer live transcription: it previously ran
+	 * its own MediaRecorder and could only upload a finished clip.
 	 */
-	import { tick, onDestroy } from 'svelte';
-	import { convertToWav } from '$lib/utils/audioConvert';
-	import Banner from '$lib/components/Banner.svelte';
+	import {
+		globalSttState,
+		globalSttAudio,
+		toggleVoiceInput
+	} from '$lib/services/globalStt';
 
 	interface Props {
 		onTranscription: (text: string) => void;
@@ -21,318 +31,33 @@
 		isTranscribing = $bindable(false)
 	}: Props = $props();
 
-	let isPreparing = $state(false);
-	let mediaRecorder = $state<MediaRecorder | null>(null);
-	let recordingError = $state('');
-	let recordingStartTime = $state<number>(0);
-	let audioLevel = $state(0);
-	let analyserNode = $state<AnalyserNode | null>(null);
-	let audioContext = $state<AudioContext | null>(null);
-	let animationFrameId = $state<number | null>(null);
-
-	// Use a non-reactive array for audio chunks to avoid Svelte 5 reactivity issues
-	// with rapid MediaRecorder ondataavailable events
-	let audioChunksRef: Blob[] = [];
-
-	// Recording is always available for admins (they control the API keys)
-	const canRecord = $derived(true);
-
-	// Minimum recording duration in milliseconds to avoid empty/too-short recordings
-	const MIN_RECORDING_DURATION = 500;
-
-	// Audio level monitoring for visualization
-	// Returns a promise that resolves when the audio system is ready to capture
-	// The returned function starts the visualization loop (call after isRecording = true)
-	async function initAudioMonitoring(stream: MediaStream): Promise<(() => void) | null> {
-		try {
-			audioContext = new AudioContext();
-
-			// If AudioContext is suspended (common on some browsers), resume it
-			if (audioContext.state === 'suspended') {
-				await audioContext.resume();
-			}
-
-			const source = audioContext.createMediaStreamSource(stream);
-			analyserNode = audioContext.createAnalyser();
-			analyserNode.fftSize = 256;
-			analyserNode.smoothingTimeConstant = 0.5;
-			source.connect(analyserNode);
-
-			const dataArray = new Uint8Array(analyserNode.frequencyBinCount);
-
-			// Wait for AudioContext to be in 'running' state
-			// This is the proper API signal that the audio system is ready
-			if (audioContext.state !== 'running') {
-				const ctx = audioContext; // Capture reference for closure
-				await new Promise<void>((resolve) => {
-					const handleStateChange = () => {
-						if (ctx.state === 'running') {
-							ctx.removeEventListener('statechange', handleStateChange);
-							resolve();
-						}
-					};
-					ctx.addEventListener('statechange', handleStateChange);
-
-					// Safety timeout - resolve after 1s even if state never changes
-					setTimeout(() => {
-						ctx.removeEventListener('statechange', handleStateChange);
-						resolve();
-					}, 1000);
-				});
-			}
-
-			// Return a function to start the visualization loop
-			// This should be called AFTER isRecording is set to true
-			return function startVisualization() {
-				function updateLevel() {
-					if (!analyserNode || !isRecording) {
-						audioLevel = 0;
-						return;
-					}
-					analyserNode.getByteFrequencyData(dataArray);
-					// Calculate average level
-					const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-					// Normalize to 0-1 range with some amplification for better visual feedback
-					audioLevel = Math.min(1, average / 128);
-					animationFrameId = requestAnimationFrame(updateLevel);
-				}
-				updateLevel();
-			};
-		} catch (e) {
-			console.warn('Audio level monitoring not available:', e);
-			return null;
-		}
-	}
-
-	function stopAudioLevelMonitoring() {
-		if (animationFrameId) {
-			cancelAnimationFrame(animationFrameId);
-			animationFrameId = null;
-		}
-		if (audioContext) {
-			audioContext.close().catch(() => {});
-			audioContext = null;
-		}
-		analyserNode = null;
-		audioLevel = 0;
-	}
-
-	async function startRecording() {
-		recordingError = '';
-		audioChunksRef = [];
-		isPreparing = true;
-
-		try {
-			if (!navigator.mediaDevices) {
-				throw new Error(
-					'Microphone requires a secure context (HTTPS or localhost). In Chrome, you can allow this origin at chrome://flags/#unsafely-treat-insecure-origin-as-secure'
-				);
-			}
-			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-			// Determine best supported mime type
-			const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-				? 'audio/webm;codecs=opus'
-				: MediaRecorder.isTypeSupported('audio/webm')
-					? 'audio/webm'
-					: 'audio/mp4';
-
-			const recorder = new MediaRecorder(stream, { mimeType });
-
-			// Collect audio chunks - use non-reactive array to avoid issues
-			recorder.ondataavailable = (event) => {
-				if (event.data.size > 0) {
-					audioChunksRef.push(event.data);
-				}
-			};
-
-			// Start recording with timeslice for chunked data collection
-			recorder.start(1000);
-			mediaRecorder = recorder;
-			recordingStartTime = Date.now();
-
-			// Initialize audio monitoring and wait for the audio system to be ready
-			const startVisualization = await initAudioMonitoring(stream);
-
-			// Only now show the recording UI - system is ready to capture speech
-			isPreparing = false;
-			isRecording = true;
-
-			// Start the visualization loop now that isRecording is true
-			if (startVisualization) {
-				startVisualization();
-			}
-		} catch (error: unknown) {
-			isPreparing = false;
-			console.error('Failed to start recording:', error);
-			const err = error as { name?: string; message?: string };
-			if (err.name === 'NotAllowedError') {
-				recordingError = 'Microphone access denied. Please allow microphone access in your browser settings.';
-			} else if (err.name === 'NotFoundError') {
-				recordingError = 'No microphone found. Please connect a microphone and try again.';
-			} else {
-				recordingError = `Failed to start recording: ${err.message || 'Unknown error'}`;
-			}
-		}
-	}
-
-	async function stopRecording() {
-		// Stop audio level monitoring first
-		stopAudioLevelMonitoring();
-
-		if (!mediaRecorder || mediaRecorder.state === 'inactive') {
-			isRecording = false;
-			return;
-		}
-
-		const recorder = mediaRecorder;
-		const stream = recorder.stream;
-		const mimeType = recorder.mimeType;
-
-		// Check minimum recording duration
-		const recordingDuration = Date.now() - recordingStartTime;
-		if (recordingDuration < MIN_RECORDING_DURATION) {
-			recordingError = 'Recording too short. Please hold the button longer.';
-			recorder.stop();
-			stream.getTracks().forEach(track => track.stop());
-			isRecording = false;
-			return;
-		}
-
-		isRecording = false;
-
-		// Use a Promise-based approach to ensure all data is collected before processing
-		try {
-			const audioBlob = await new Promise<Blob>((resolve, reject) => {
-				const handleDataAvailable = (event: BlobEvent) => {
-					if (event.data.size > 0) {
-						audioChunksRef.push(event.data);
-					}
-				};
-
-				const handleStop = () => {
-					recorder.removeEventListener('dataavailable', handleDataAvailable);
-					recorder.removeEventListener('stop', handleStop);
-					stream.getTracks().forEach(track => track.stop());
-
-					if (audioChunksRef.length === 0) {
-						reject(new Error('No audio recorded'));
-						return;
-					}
-
-					resolve(new Blob(audioChunksRef, { type: mimeType }));
-				};
-
-				recorder.addEventListener('dataavailable', handleDataAvailable);
-				recorder.addEventListener('stop', handleStop);
-
-				recorder.requestData();
-				recorder.stop();
-			});
-
-			await transcribeAudio(audioBlob);
-		} catch (error: unknown) {
-			const err = error as { message?: string };
-			recordingError = err.message || 'Failed to process recording';
-		}
-	}
-
-	async function transcribeAudio(audioBlob: Blob) {
-		isTranscribing = true;
-		recordingError = '';
-
-		try {
-			// MediaRecorder produces WebM/Opus (or MP4), which some fal STT models
-			// (e.g. ElevenLabs Scribe) reject. Re-encode to WAV, which every model
-			// accepts. Fall back to the original blob if conversion isn't possible.
-			let uploadBlob = audioBlob;
-			let filename = 'recording.webm';
-			try {
-				uploadBlob = await convertToWav(audioBlob);
-				filename = 'recording.wav';
-			} catch (conversionError) {
-				console.warn('WAV conversion failed, uploading original recording:', conversionError);
-			}
-
-			const formData = new FormData();
-			formData.append('file', uploadBlob, filename);
-
-			const response = await fetch('/api/v1/settings/transcribe', {
-				method: 'POST',
-				credentials: 'include',
-				body: formData
-			});
-
-			if (!response.ok) {
-				const error = await response.json().catch(() => ({ detail: 'Transcription failed' }));
-				throw new Error(error.detail || 'Transcription failed');
-			}
-
-			const result = await response.json();
-			const transcribedText = result.text?.trim();
-
-			if (transcribedText) {
-				onTranscription(transcribedText);
-			}
-		} catch (error: unknown) {
-			console.error('Transcription failed:', error);
-			const err = error as { message?: string };
-			recordingError = err.message || 'Failed to transcribe audio';
-		} finally {
-			isTranscribing = false;
-		}
-	}
-
-	async function toggleRecording() {
-		if (isRecording) {
-			await stopRecording();
-		} else {
-			await startRecording();
-		}
-	}
-
-	// Cleanup all media resources on component unmount
-	onDestroy(() => {
-		// Cancel animation frame
-		if (animationFrameId) {
-			cancelAnimationFrame(animationFrameId);
-			animationFrameId = null;
-		}
-		// Stop MediaRecorder
-		if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-			try {
-				mediaRecorder.stop();
-				// Stop all tracks on the stream
-				mediaRecorder.stream.getTracks().forEach(track => track.stop());
-			} catch {
-				// Ignore errors during cleanup
-			}
-		}
-		// Close AudioContext
-		if (audioContext) {
-			audioContext.close().catch(() => {});
-			audioContext = null;
-		}
-		analyserNode = null;
+	// Mirror the shared state onto the bindable props ChatInput already reads.
+	$effect(() => {
+		isRecording = $globalSttState.isRecording;
 	});
-</script>
+	$effect(() => {
+		isTranscribing = $globalSttState.isTranscribing;
+	});
 
-<!-- Recording Error Message -->
-{#if recordingError}
-	<Banner severity="error" message={recordingError} dismissible onDismiss={() => (recordingError = '')} />
-{/if}
+	const isPreparing = $derived($globalSttState.isPreparing);
+	const audioLevel = $derived($globalSttAudio.level);
+
+	function toggleRecording() {
+		toggleVoiceInput(onTranscription);
+	}
+</script>
 
 <!-- Voice button is rendered inline within the send-button-wrapper -->
 <div class="voice-btn-wrapper">
 	<button
 		type="button"
 		onclick={toggleRecording}
-		disabled={disabled || isTranscribing || isPreparing || !canRecord}
+		disabled={disabled || isTranscribing || isPreparing}
 		class="voice-btn"
 		class:preparing={isPreparing}
 		class:recording={isRecording}
 		class:transcribing={isTranscribing}
-		title={!canRecord ? 'Configure OpenAI API key in Settings to use voice input' : isPreparing ? 'Preparing...' : isRecording ? 'Tap to stop' : isTranscribing ? 'Transcribing...' : 'Voice input'}
+		title={isPreparing ? 'Starting...' : isRecording ? 'Tap to stop' : isTranscribing ? 'Transcribing...' : 'Voice input'}
 		style="--audio-level: {audioLevel}"
 	>
 		{#if isRecording}

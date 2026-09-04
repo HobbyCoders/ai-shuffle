@@ -11,6 +11,7 @@
 	 * Replaces the monolithic inline AI tab in SettingsCard.
 	 */
 	import '../card-design-system.css';
+	import { invalidateSttCapability } from '$lib/services/sttStream';
 	import { api } from '$lib/api/client';
 	import { onMount } from 'svelte';
 	import { AI_TOOL_CATEGORIES, getDefaultModelSelections } from '$lib/types/ai-tool-registry';
@@ -127,6 +128,9 @@
 						await api.patch<{ success: boolean }>(tool.modelEndpoint, {
 							model: model.endpoint_id,
 						});
+						if (tool.modelSettingKey === 'stt_model') {
+							invalidateSttCapability();
+						}
 						modelSelections[tool.modelSettingKey] = model.endpoint_id;
 						modelSelections = { ...modelSelections };
 					} catch (e) {
