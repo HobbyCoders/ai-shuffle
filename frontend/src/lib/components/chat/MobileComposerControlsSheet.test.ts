@@ -17,6 +17,68 @@ it('explains no adjustable effort and keeps fast mode available', async () => {
 	await fireEvent.click(screen.getByRole('switch', { name: 'Fast mode' }));
 	expect(onToggleFast).toHaveBeenCalledOnce();
 });
+it('reserves a hero window, falling back to a usable normal-flow panel on short empty surfaces', async () => {
+	const width = window.innerWidth;
+	window.innerWidth = 412;
+	const surface = document.createElement('div');
+	surface.className = 'chat-view is-empty';
+	const setHeight = (value: number) => Object.defineProperty(surface, 'clientHeight', { configurable: true, value });
+	setHeight(421);
+	const slot = document.createElement('div'); slot.className = 'input-slot';
+	surface.append(slot); document.body.append(surface);
+	vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+		return { height: this === slot ? 346 : this.classList.contains('panel-reveal') ? 220 : 0 } as DOMRect;
+	});
+	const scrollIntoView = vi.fn();
+	const { unmount, rerender } = render(MobileComposerControlsSheet, { target: slot, props: props() });
+	const panel = screen.getByRole('region', { name: 'Chat controls' });
+	panel.scrollIntoView = scrollIntoView;
+	expect(panel.style.getPropertyValue('--empty-panel-limit')).toBe('199px');
+	expect(slot.hasAttribute('data-panel-flow')).toBe(false);
+	await fireEvent.click(screen.getByRole('button', { name: /model: sonnet/i }));
+	expect(panel.style.getPropertyValue('--empty-panel-limit')).toBe('199px');
+	// 126px editor + 194px panel used to cover this entire 320px surface.
+	setHeight(320);
+	await fireEvent(window, new Event('resize'));
+	expect(panel.style.getPropertyValue('--empty-panel-limit')).toBe('194px');
+	expect(slot.hasAttribute('data-panel-flow')).toBe(true);
+	await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' }));
+	scrollIntoView.mockClear();
+	await fireEvent.focusIn(panel);
+	await waitFor(() => expect(scrollIntoView).toHaveBeenCalledOnce());
+	setHeight(200);
+	await fireEvent(window, new Event('resize'));
+	expect(panel.style.getPropertyValue('--empty-panel-limit')).toBe('160px');
+	expect(slot.hasAttribute('data-panel-flow')).toBe(true);
+	// Exactly 96px of hero + the minimum 160px panel still fits sticky.
+	setHeight(382);
+	await fireEvent(window, new Event('resize'));
+	expect(panel.style.getPropertyValue('--empty-panel-limit')).toBe('160px');
+	expect(slot.hasAttribute('data-panel-flow')).toBe(false);
+	setHeight(381);
+	await fireEvent(window, new Event('resize'));
+	expect(slot.hasAttribute('data-panel-flow')).toBe(true);
+	await rerender(props({ open: false }));
+	expect(panel.style.getPropertyValue('--empty-panel-limit')).toBe('');
+	expect(slot.hasAttribute('data-panel-flow')).toBe(false);
+	await rerender(props());
+	expect(slot.hasAttribute('data-panel-flow')).toBe(true);
+	window.innerWidth = 1280;
+	await fireEvent(window, new Event('resize'));
+	expect(panel.style.getPropertyValue('--empty-panel-limit')).toBe('');
+	expect(slot.hasAttribute('data-panel-flow')).toBe(false);
+	window.innerWidth = 412;
+	await fireEvent(window, new Event('resize'));
+	expect(slot.hasAttribute('data-panel-flow')).toBe(true);
+	surface.classList.remove('is-empty');
+	await waitFor(() => expect(panel.style.getPropertyValue('--empty-panel-limit')).toBe(''));
+	expect(slot.hasAttribute('data-panel-flow')).toBe(false);
+	surface.classList.add('is-empty');
+	await waitFor(() => expect(slot.hasAttribute('data-panel-flow')).toBe(true));
+	unmount();
+	expect(slot.hasAttribute('data-panel-flow')).toBe(false);
+	surface.remove(); window.innerWidth = width;
+});
 it('supports a single effort option', async () => {
 	const onEffortSelect = vi.fn();
 	render(MobileComposerControlsSheet, { props: props({ effortOptions: [{ value: 'high', label: 'High', description: 'Thorough' }], onEffortSelect }) });

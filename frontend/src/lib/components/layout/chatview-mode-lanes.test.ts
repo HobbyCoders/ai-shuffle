@@ -6,11 +6,8 @@
  *     shows its own title in EVERY lane — reordering those branches would make
  *     a cleared chat-lane session read as a brand-new one, the exact regression
  *     #558 fixed for the code lane.
- *  2. The composer is withheld only for the voice lane's UNBOUND surface. Drop
- *     the `sessionId` half of that condition and an existing voice session loses
- *     its composer (and with it the resume-call button); drop the gate entirely
- *     and the new-voice screen grows a text send with no session behind it.
- *  3. The bottom spacer follows the composer, or the hero stops being centred.
+ *  2. All three lanes keep the same mounted composer and its draft.
+ *  3. Only desktop balances the hero and input; mobile scrolls natural content.
  *
  * Mounting ChatView pulls in the whole session/store graph (see
  * chatview-modal-stop-dock.test.ts, which makes the same call), so these pin the
@@ -19,6 +16,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { compile } from 'svelte/compiler';
 
 // Vitest runs from `frontend/`, and `import.meta.url` is a Vite dev-server URL
 // inside a transformed module — so resolve off cwd.
@@ -78,23 +76,31 @@ describe('ChatView — the composer gate', () => {
 	});
 });
 
-describe('ChatView — keyboard-surface hero layout', () => {
-	it('leaves invitation typography to WorkspaceSelector when the keyboard opens', () => {
-		const workspace = stripComments(src('WorkspaceSelector.svelte'));
-		expect(workspace).toMatch(/\.hero-heading\s*\{[^}]*font-size:\s*2rem;/);
-		expect(workspace).toMatch(/\.picker-name\s*\{[^}]*font-size:\s*1\.75rem;/);
-		const keyboardRules = codeOnly.match(/[^{}]*\.keyboard-surface[^{}]*\{[^{}]*\}/g) ?? [];
-		expect(keyboardRules.length).toBeGreaterThan(0);
-		expect(keyboardRules.join('\n')).not.toMatch(/font(?:-size)?\s*:/);
+describe('ChatView — stable mobile empty layout', () => {
+	it('retains the action-applied panel-flow fallback in compiled CSS', () => {
+		const { css, warnings } = compile(chatView, { filename: 'ChatView.svelte' });
+		expect(css?.code).toMatch(/[^{}]*\[data-panel-flow\][^{}]*\{\s*position: static;/);
+		expect(warnings.filter((warning) =>
+			warning.code === 'css_unused_selector' && warning.message.includes('data-panel-flow')
+		)).toEqual([]);
 	});
-
-	it('keeps compact spacing, logo hiding and the model-panel escape hatch', () => {
-		expect(codeOnly).toMatch(/class:keyboard-surface=\{surfaceHeight > 0 && surfaceHeight <= 420\}/);
-		expect(codeOnly).toMatch(/\.short-surface \.empty-hero-content\s*\{\s*--workspace-hero-padding: 12px 16px;/);
-		expect(codeOnly).toMatch(/\.short-surface \.empty-hero-content :global\(\.logo-mark\)\s*\{\s*display: none;/);
-		expect(codeOnly).toMatch(/\.keyboard-surface \.empty-hero-content\s*\{\s*--workspace-hero-padding: 4px 16px;/);
-		expect(codeOnly).toMatch(/\.keyboard-surface \.empty-bottom-spacer\s*\{\s*flex: 0;/);
-		expect(codeOnly).toMatch(/\.keyboard-surface:has\(:global\(\.controls-panel\.models\)\) \.empty-hero\s*\{\s*display: none;/);
+	it('never compacts or hides the hero based on height or controls', () => {
+		expect(codeOnly).not.toMatch(/short-surface|keyboard-surface|mobile-controls-open|controls-panel\.models|logo-mark/);
+		expect(codeOnly).toContain('bind:clientHeight={surfaceHeight}');
+		expect(codeOnly).toContain('style:--chat-surface-height=');
+	});
+	it('scrolls the empty surface with a nonshrinking top-aligned invitation', () => {
+		expect(codeOnly).toMatch(/\.chat-view\.is-empty\s*\{\s*overflow-y: auto;/);
+		expect(codeOnly).toMatch(/\.is-empty \.empty-hero\s*\{[^}]*flex: 0 0 auto;[^}]*justify-content: flex-start;[^}]*padding-top: 1rem;/);
+		expect(codeOnly).toMatch(/\.is-empty \.empty-bottom-spacer\s*\{ display: none;/);
+	});
+	it('keeps a sticky, unclipped composer with a normal-flow overflow fallback', () => {
+		expect(codeOnly).toMatch(/\.input-slot\.empty-input-layout\s*\{[^}]*position: sticky;[^}]*bottom: 0;/);
+		expect(codeOnly).toMatch(/\.empty-input-layout\.composer-overflow\s*\{ position: static;/);
+		expect(codeOnly).toMatch(/\.empty-input-layout:global\(\[data-panel-flow\]\)\s*\{ position: static;/);
+		expect(codeOnly).toContain("focused.scrollIntoView({ block: 'nearest' })");
+		expect(codeOnly.match(/<ChatInput\s/g)).toHaveLength(1);
+		expect(codeOnly).toContain('{onBrowserToggle} {onBrowserPreload} {browserOpen}');
 	});
 });
 

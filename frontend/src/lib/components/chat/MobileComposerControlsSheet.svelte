@@ -85,6 +85,62 @@
 		event.stopPropagation();
 		if (page !== 'overview') void back(); else closePanel();
 	}
+	// Only the empty mobile surface needs a measured budget. Subtract the
+	// actual editor, attachments, toolbar and dock gutters, not a fixed estimate.
+	function emptyPanelBudget(node: HTMLElement, expanded: boolean) {
+		const surface = node.closest<HTMLElement>('.chat-view');
+		const slot = node.closest<HTMLElement>('.input-slot');
+		const reveal = node.parentElement;
+		if (!surface || !slot || !reveal) return;
+		let revealFrame = 0;
+		function revealFocus() {
+			cancelAnimationFrame(revealFrame);
+			revealFrame = requestAnimationFrame(() => {
+				const focused = document.activeElement;
+				if (slot?.hasAttribute('data-panel-flow') && focused instanceof HTMLElement && slot.contains(focused)) {
+					focused.scrollIntoView({ block: 'nearest' });
+				}
+			});
+		}
+		function measure() {
+			if (!surface || !slot || !reveal) return;
+			if (!expanded || window.innerWidth > 1080 || !surface.classList.contains('is-empty')) {
+				node.style.removeProperty('--empty-panel-limit');
+				slot.removeAttribute('data-panel-flow');
+				return;
+			}
+			const style = getComputedStyle(slot);
+			const gutters = (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
+			const nonPanelHeight = slot.getBoundingClientRect().height - reveal.getBoundingClientRect().height + gutters;
+			// A sticky dock must leave a real window onto the scrollable hero.
+			// Below a 160px touch panel + 96px hero window, scroll the whole dock
+			// in normal flow instead of trapping either region behind the other.
+			const available = surface.clientHeight - nonPanelHeight - 96;
+			const normalFlow = available < 160;
+			const wasNormalFlow = slot.hasAttribute('data-panel-flow');
+			slot.toggleAttribute('data-panel-flow', normalFlow);
+			node.style.setProperty('--empty-panel-limit', `${Math.min(390, Math.max(160, normalFlow ? surface.clientHeight - nonPanelHeight : available))}px`);
+			if (normalFlow && !wasNormalFlow) revealFocus();
+		}
+		const observer = new ResizeObserver(measure);
+		for (const element of [surface, slot, reveal]) observer.observe(element);
+		const classes = new MutationObserver(measure);
+		classes.observe(surface, { attributes: true, attributeFilter: ['class'] });
+		window.addEventListener('resize', measure);
+		slot.addEventListener('focusin', revealFocus);
+		measure();
+		return {
+			update(value: boolean) { expanded = value; measure(); },
+			destroy() {
+				observer.disconnect();
+				classes.disconnect();
+				cancelAnimationFrame(revealFrame);
+				slot.removeAttribute('data-panel-flow');
+				slot.removeEventListener('focusin', revealFocus);
+				window.removeEventListener('resize', measure);
+			}
+		};
+	}
 	function panelGestures(node: HTMLElement) {
 		const action = attachPanelDismiss(node, {
 			enabled: () => open && !inertToolbar,
@@ -119,6 +175,7 @@
 			id={panelId}
 			bind:this={panelRef}
 			use:panelGestures
+			use:emptyPanelBudget={open}
 			bind:clientHeight={panelHeight}
 			class="controls-panel"
 			class:models={page === 'models'}
@@ -193,7 +250,7 @@
 		--composer-control-bg: var(--card);
 		--composer-control-radius: 10px;
 		display: flex; flex-direction: column; gap: 14px; padding: 10px 14px 14px;
-		max-height: var(--mobile-panel-limit); overflow-y: auto; overscroll-behavior: contain;
+		box-sizing: border-box; max-height: var(--empty-panel-limit, var(--mobile-panel-limit)); overflow-y: auto; overscroll-behavior: contain;
 		-webkit-overflow-scrolling: touch; touch-action: pan-y; color: var(--foreground); outline: none;
 	}
 	.controls-panel > :global(*) { flex-shrink: 0; }
@@ -220,7 +277,7 @@
 	.back-button { width: 44px; height: 44px; display: grid; place-items: center; border: 0; border-radius: 12px; background: var(--muted); color: inherit; cursor: pointer; }
 	.controls-panel.models {
 		--mobile-panel-limit: min(390px, max(160px, calc(var(--chat-surface-height, var(--app-viewport-height, 100dvh)) - 168px)));
-		height: var(--mobile-panel-limit); gap: 8px;
+		height: var(--empty-panel-limit, var(--mobile-panel-limit)); gap: 8px;
 	}
 	/* A keyboard may leave less space than the search + context footer need.
 	   Keep a usable list, and let this picker panel scroll to expose its footer. */

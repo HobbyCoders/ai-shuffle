@@ -34,6 +34,7 @@
 	// can clip this popup. Desktop keeps its existing anchored dropdown.
 	function mobilePopup(node: HTMLDivElement) {
 		const viewport = window.visualViewport;
+		const scrollport = dropdownRef?.closest<HTMLElement>('.chat-view');
 		let topLayer = false;
 		function position() {
 			if (window.innerWidth > 1080) {
@@ -52,6 +53,11 @@
 			}
 			const anchor = dropdownRef?.getBoundingClientRect();
 			if (!anchor) return;
+			const bounds = scrollport?.getBoundingClientRect();
+			if (bounds && (anchor.bottom <= bounds.top || anchor.top >= bounds.bottom)) {
+				showDropdown = false;
+				return;
+			}
 			const edge = 12;
 			const viewTop = viewport?.offsetTop ?? 0;
 			const viewBottom = viewTop + (viewport?.height ?? window.innerHeight);
@@ -72,12 +78,14 @@
 		observer.observe(node);
 		const hero = dropdownRef?.closest('.empty-hero');
 		if (hero) observer.observe(hero);
+		scrollport?.addEventListener('scroll', position);
 		window.addEventListener('resize', position);
 		viewport?.addEventListener('resize', position);
 		viewport?.addEventListener('scroll', position);
 		position();
 		return { destroy() {
 			observer.disconnect();
+			scrollport?.removeEventListener('scroll', position);
 			window.removeEventListener('resize', position);
 			viewport?.removeEventListener('resize', position);
 			viewport?.removeEventListener('scroll', position);

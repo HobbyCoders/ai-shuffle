@@ -2,7 +2,7 @@
 	/**
 	/** Chat surface for code, chat and voice. Lane-specific heroes share one
 	 * persistent editor. A live voice call adds compact controls alongside it. */
-	import { onDestroy, untrack } from 'svelte';
+	import { onDestroy, tick, untrack } from 'svelte';
 	import { activeSession, activeWsConnected } from '$lib/stores/active-session';
 	import { notify } from '$lib/stores/notifications';
 	import { createConnectionBannerGrace } from '$lib/stores/session/connection-banner-grace';
@@ -73,6 +73,17 @@
 	// Keep the editor mounted through call transitions so drafts and file chips survive.
 	const showComposer = true;
 	let surfaceHeight = $state(0);
+	let composerHeight = $state(0);
+	$effect(() => {
+		if (showEmptyHero && surfaceHeight > 0 && composerHeight > surfaceHeight && window.innerWidth <= 1080) {
+			void tick().then(() => {
+				const focused = document.activeElement;
+				if (focused instanceof HTMLElement && focused.closest('.empty-input-layout')) {
+					focused.scrollIntoView({ block: 'nearest' });
+				}
+			});
+		}
+	});
 
 	// VM23 (user directive, 2026-08-15): while a call is live, worker permission
 	// requests are the VOICE agent's to relay — it reads them out and answers via
@@ -201,7 +212,7 @@
 	});
 </script>
 
-<div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined} class:short-surface={surfaceHeight > 0 && surfaceHeight <= 680} class:keyboard-surface={surfaceHeight > 0 && surfaceHeight <= 420} class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}>
+<div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined} class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}>
 	{#if showEmptyHero}
 		<!-- Empty state hero: workspace selector / cleared hint. The ChatInput is
 		     NOT rendered here — it lives in the always-mounted .input-slot below so
@@ -284,10 +295,9 @@
 	     is never torn down at the isEmptyState boundary (#665). Only the `compact`
 	     prop and the surrounding layout classes change between states; the
 	     conditional strips below are siblings of ChatInput, not ancestors, so they
-	     never remount it. The `showComposer` gate is the single lane-level
-	     exception to that rule — see its derivation above. -->
+	     never remount it. All three lanes keep this same editor. -->
 	{#if showComposer}
-		<div class="input-slot" class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
+		<div class="input-slot" bind:clientHeight={composerHeight} class:composer-overflow={surfaceHeight > 0 && composerHeight > surfaceHeight} class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
 			{#if voiceCallActive && $activeSession.sessionId}
 				<VoiceCallPanel sessionId={$activeSession.sessionId} compact />
 			{/if}
@@ -296,7 +306,7 @@
 	{/if}
 
 	{#if showEmptyHero && showComposer}
-		<!-- Balances the flex:1 hero above so the hero + persistent input pair sits
+		<!-- Desktop only: balances the flex:1 hero so the hero + persistent input pair sits
 		     vertically centered — reproduces the old .empty-state
 		     justify-content:center grouping without wrapping the input in a
 		     state-specific ancestor (#665). -->
@@ -461,38 +471,31 @@
 	}
 
 	@media (max-width: 1080px) {
-		/* Keep the hero out of the scrolling hierarchy: project popups must
-		   float over the composer, with scrolling confined to their own list. */
-		.empty-hero {
-			min-height: 0;
-			padding-top: 0;
-			overflow: visible;
+		/* The invitation stays at its natural size and a fixed top inset. The
+		   whole empty surface scrolls; the workspace popup uses the top layer. */
+		.chat-view.is-empty { overflow-y: auto; }
+		.is-empty .empty-hero {
+			flex: 0 0 auto;
+			justify-content: flex-start;
+			padding-top: 1rem;
 		}
-
-		.empty-hero-content {
-			flex-shrink: 0;
-		}
-
-		.chat-view .input-slot.empty-input-layout {
+		.is-empty .empty-hero-content { flex-shrink: 0; }
+		.is-empty .empty-bottom-spacer { display: none; }
+		.chat-view.is-empty .input-slot.empty-input-layout {
+			position: sticky;
+			bottom: 0;
+			z-index: 10;
+			background: var(--background);
 			margin-top: 0;
 		}
-
-		.empty-hero:has(:global(.picker-dropdown)) { z-index: 40; }
-		.chat-view:has(:global(.mobile-controls-open)) .empty-hero-content { --workspace-hero-padding: 4px 16px; }
-		.chat-view:has(:global(.mobile-controls-open)) .empty-hero-content :global(.logo-mark) { display: none; }
-
-		/* Compact the invitation, rather than turning it into a scroll pane,
-		   when the keyboard or expanded dock leaves little vertical room. */
-		.short-surface .empty-hero-content { --workspace-hero-padding: 12px 16px; }
-		.short-surface .empty-hero-content :global(.logo-mark) { display: none; }
-		.keyboard-surface .empty-hero-content { --workspace-hero-padding: 4px 16px; }
-		.keyboard-surface .empty-bottom-spacer { flex: 0; }
-		.keyboard-surface:has(:global(.controls-panel.models)) .empty-hero { display: none; }
+		/* An oversized dock must scroll normally, not pin its editor offscreen.
+		   Do not clip the slot: its anchored popovers extend outside the dock. */
+		.chat-view.is-empty .input-slot.empty-input-layout.composer-overflow { position: static; }
+		/* Short expanded panels must not permanently cover the invitation. */
+		.chat-view.is-empty .input-slot.empty-input-layout:global([data-panel-flow]) { position: static; }
 	}
 
-	/* Voice lane, unbound: no composer and therefore no bottom spacer to balance
-	   against, so the hero centres itself inside the whole region instead of
-	   bottom-anchoring against a partner that isn't there. */
+	/* A composer-free surface can center its hero on desktop. */
 	.empty-hero.hero-only {
 		justify-content: center;
 		padding-bottom: 1rem;

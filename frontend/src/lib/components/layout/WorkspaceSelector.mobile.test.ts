@@ -29,6 +29,30 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 afterAll(() => { window.innerWidth = originalWidth; window.innerHeight = originalHeight; vi.unstubAllGlobals(); });
 
 describe('mobile workspace popup', () => {
+	it('repositions on surface scroll, ignores catalog scroll, and dismisses offscreen with cleanup', async () => {
+		const surface = document.createElement('div');
+		surface.className = 'chat-view';
+		document.body.append(surface);
+		Object.defineProperty(surface, 'getBoundingClientRect', { value: () => ({ top: 0, bottom: 600 } as DOMRect) });
+		const remove = vi.spyOn(surface, 'removeEventListener');
+		const { container, unmount } = render(WorkspaceSelector, { target: surface, props: { selectedProject: null, onSelectProject: vi.fn() } });
+		const trigger = screen.getByRole('button', { name: 'your project' });
+		await fireEvent.click(trigger);
+		const anchor = trigger.closest('.picker-container')!;
+		const rect = vi.fn();
+		Object.defineProperty(anchor, 'getBoundingClientRect', { value: rect });
+		rect.mockReturnValue({ top: 100, bottom: 140, left: 35, width: 320 } as DOMRect);
+		const popup = container.querySelector('.picker-dropdown') as HTMLElement;
+		await fireEvent.scroll(surface);
+		expect(popup.style.getPropertyValue('--picker-top')).toBe('148px');
+		rect.mockReturnValue({ top: -80, bottom: -40, left: 35, width: 320 } as DOMRect);
+		await fireEvent.scroll(popup);
+		expect(trigger.getAttribute('aria-expanded')).toBe('true');
+		await fireEvent.scroll(surface);
+		expect(trigger.getAttribute('aria-expanded')).toBe('false');
+		expect(remove).toHaveBeenCalledWith('scroll', expect.any(Function));
+		unmount(); surface.remove();
+	});
 	it('keeps a long catalog selectable and closes after selecting its final project', async () => {
 		const onSelectProject = vi.fn();
 		render(WorkspaceSelector, { selectedProject: null, onSelectProject });
