@@ -30,8 +30,23 @@ export async function verifyComposerSuggestions() {
 		await f.offer();
 		await flush();
 	};
+	await clear();
+	const placeholder = () => editor().querySelector('p').getAttribute('data-placeholder');
+	const originalPlaceholder = placeholder();
+	const heights = () => ['.chat-input-container', '.tiptap-editor', '.ProseMirror'].map(
+		selector => document.querySelector(selector).getBoundingClientRect().height
+	);
+	const emptyHeights = heights();
+	const placeholderStyle = getComputedStyle(editor().querySelector('p'), '::before');
+	const originalColor = placeholderStyle.color;
 	await offer();
 	check(!!ghost(), 'ghost visible');
+	check(placeholder() === f.literal, 'suggestion uses existing placeholder');
+	check(getComputedStyle(editor().querySelector('p'), '::before').color === originalColor,
+		'suggestion matches placeholder color');
+	check(heights().every((height, index) => height === emptyHeights[index]), 'suggestion leaves empty composer height unchanged');
+	check(!document.querySelector('[aria-label="Use suggested reply"], [aria-label="Dismiss suggested reply"], .suggestion-actions'), 'no suggestion action buttons');
+	check(![...document.querySelectorAll('.chat-input-container button')].some(button => /Use reply|Dismiss|Delete/.test(button.textContent)), 'no suggestion action button text');
 	check(
 		!editor().textContent && !f.draft.includes('Keep this literal'),
 		'ghost absent from editor and draft'
@@ -65,6 +80,7 @@ export async function verifyComposerSuggestions() {
 	await offer();
 	await key('Escape');
 	check(!ghost(), 'Escape dismisses');
+	check(placeholder() === originalPlaceholder, 'Escape restores original placeholder');
 	f.receive();
 	await flush();
 	check(!ghost(), 'dismissal rejects late duplicate');
@@ -117,13 +133,16 @@ export async function verifyComposerSuggestions() {
 	f.receive();
 	await flush();
 	check(!ghost(), 're-enable does not resurrect');
-	await offer();
-	document.querySelector('[aria-label="Use suggested reply"]').click();
+	await clear();
+	const longReply = ('A long suggested reply that stays on the placeholder line. '.repeat(40) + '\nSecond line');
+	await f.offer(longReply);
 	await flush();
-	check(
-		editor().textContent === f.literal && f.sends === 0,
-		'touch affordance accepts without sending'
-	);
+	check(placeholder() === longReply && !editor().textContent && !f.draft.includes(longReply), 'long multiline suggestion stays outside draft');
+	check(heights().every((height, index) => height === emptyHeights[index]), 'long suggestion leaves empty composer height unchanged');
+	const style = getComputedStyle(editor().querySelector('p'), '::before');
+	check(style.whiteSpace === 'nowrap' && style.overflowX === 'hidden' && style.textOverflow === 'ellipsis', 'long suggestion clipped to one placeholder line');
+	await key('Tab');
+	check([...editor().querySelectorAll('p')].map(p => p.textContent).join('\n') === longReply && f.sends === 0, 'long suggestion accepts in full without sending');
 	check(document.documentElement.scrollWidth <= innerWidth, 'no horizontal overflow');
 	await offer();
 	return { viewport: [innerWidth, innerHeight], checks: results.length, results, sends: f.sends };

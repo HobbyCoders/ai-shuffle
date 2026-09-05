@@ -15,6 +15,7 @@
 
 	interface Props {
 		placeholder?: string;
+		suggestion?: string;
 		initialContent?: string;
 		disabled?: boolean;
 		onTextChange?: (text: string) => void;
@@ -25,6 +26,7 @@
 
 	let {
 		placeholder = 'Message...',
+		suggestion = '',
 		initialContent = '',
 		disabled = false,
 		onTextChange,
@@ -97,7 +99,7 @@
 
 	// Update TipTap's placeholder when the prop changes (e.g. when profile changes)
 	$effect(() => {
-		const newPlaceholder = placeholder;
+		const newPlaceholder = suggestion || placeholder;
 		if (!editor) return;
 		setEditorPlaceholder(editor, newPlaceholder);
 	});
@@ -306,6 +308,8 @@
 <div
 	bind:this={editorElement}
 	class="tiptap-editor"
+	class:has-suggestion={!!suggestion}
+	data-testid={suggestion ? 'composer-suggestion' : undefined}
 	class:focused={isFocused}
 	class:disabled
 ></div>
@@ -356,6 +360,17 @@
 		pointer-events: none;
 		float: left;
 		height: 0;
+	}
+
+	/* Use the real placeholder line without adding content or height to the draft. */
+	.tiptap-editor.has-suggestion :global(.ProseMirror p.is-editor-empty:first-child::before) {
+		position: absolute;
+		inset-inline: 0;
+		float: none;
+		height: auto;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	/* File chip node styling */

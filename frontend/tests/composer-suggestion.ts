@@ -104,9 +104,9 @@ Object.assign(window, {
 				suggestion: text
 			});
 		},
-		async offer() {
+		async offer(text = literal) {
 			await this.start();
-			this.receive();
+			this.receive(undefined, undefined, text);
 			await this.settle();
 		},
 		async clear() {

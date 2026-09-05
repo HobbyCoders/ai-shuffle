@@ -980,18 +980,10 @@
 							onClose={() => showFileAutocomplete = false}
 						/>
 
-						{#if ghostReply}
-							<div class="composer-suggestion" data-testid="composer-suggestion">
-								<span class="suggestion-text">{ghostReply}</span>
-								<div class="suggestion-actions">
-									<button type="button" onclick={acceptSuggestion} aria-label="Use suggested reply">Use reply <span aria-hidden="true">↹</span></button>
-									<button type="button" onclick={() => composerSuggestion.invalidate()} aria-label="Dismiss suggested reply">Dismiss</button>
-								</div>
-							</div>
-						{/if}
 						<TiptapEditor
 							bind:this={editorRef}
-							placeholder={ghostReply ? '' : composerPlaceholder}
+							placeholder={composerPlaceholder}
+							suggestion={ghostReply}
 							initialContent={initialComposerDraft}
 							disabled={!$anyCredential}
 							onTextChange={(text) => {
@@ -1091,42 +1083,6 @@
 </div>
 
 <style>
-	.composer-suggestion {
-		color: var(--muted-foreground);
-		padding: 0.5rem 0.75rem 0;
-		font-size: 0.875rem;
-	}
-
-	.suggestion-text {
-		white-space: pre-wrap;
-		overflow-wrap: anywhere;
-		display: block;
-		max-height: 8rem;
-		overflow: auto;
-	}
-
-	.suggestion-actions {
-		display: flex;
-		gap: 0.5rem;
-	}
-
-	.suggestion-actions button {
-		min-height: 44px;
-		padding: 0 0.5rem;
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-	}
-
-	.suggestion-actions button:hover {
-		color: var(--foreground);
-	}
-
-	.suggestion-actions button:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-		border-radius: 4px;
-	}
-
 	/* ===== DOCK =====
 	   Mirrors the mockup's `.dock`: the composer floats over the transcript with
 	   generous bottom padding and no surface of its own. */
