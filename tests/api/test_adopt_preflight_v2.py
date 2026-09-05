@@ -3,13 +3,10 @@
 
 PR-B deleted the legacy ``_adopt_preflight_sync`` (link-group resolution +
 branch-push heuristic that rewrote ``sessions.project_id``). EVERY session with a
-project now takes a single ``project_resolver.has_local_base_checkout`` gate — no
-``project_v2_id`` special-casing:
-  - no local BASE checkout on this runner → 409 (the one deliberate blocker). The
-    gate is base availability, NOT the branch checkout — a branch session adopts
-    on the base being present (its branch materializes lazily at spawn).
-  - base checkout present → adopt proceeds, ``instance_id`` flips, ``project_id``
-    is NEVER rewritten (``set_session_project`` untouched).
+project requires a local base checkout and successful canonical checkout
+preparation before ownership changes. Missing checkouts return 409; unexpected
+resolver failures return 503. ``project_id`` is NEVER rewritten
+(``set_session_project`` untouched).
 A pre-cutover session (only a legacy ``project_id``) goes through the SAME gate,
 which self-heals its project_v2 binding off the legacy id.
 """
@@ -64,6 +61,14 @@ def _not_streaming():
     """No lease-valid active run so the streaming gate never blocks adopt."""
     with patch("app.core.streaming_status.has_active_run", return_value=False):
         yield
+
+
+@pytest.fixture(autouse=True)
+def prepared_checkout():
+    with patch(
+        "app.core.project_resolver.resolve_cwd", return_value="/local/branch"
+    ) as resolve:
+        yield resolve
 
 
 def _v2_session():
@@ -138,7 +143,7 @@ def test_v2_checkout_present_adopts_without_project_rewrite(client, mock_databas
     )
 
 
-def test_follow_already_local_nulls_placement(client, mock_database):
+def test_follow_already_local_nulls_placement(client, mock_database, prepared_checkout):
     """``follow=true`` on a local pinned session NULLs placement only."""
     session = {
         **_v2_session(),
@@ -157,6 +162,7 @@ def test_follow_already_local_nulls_placement(client, mock_database):
     assert data["adopted"] is True
     assert data["status"] == "unpinned"
     assert data["instance_id"] == settings.effective_instance_id
+    prepared_checkout.assert_not_called()
     mock_database.unpin_session.assert_called_once_with(
         "test-session-id", settings.effective_instance_id
     )
@@ -293,3 +299,103 @@ def test_legacy_session_also_uses_resolver_gate(client, mock_database):
     assert response.json()["adopted"] is True
     v2_gate.assert_called_once()
     mock_database.set_session_project.assert_not_called()
+
+
+@pytest.mark.parametrize("follow", [False, True])
+@pytest.mark.parametrize("failure", ["no_base", "missing", "resolver_error", "base_error"])
+def test_preparation_failure_keeps_owner(
+    client, mock_database, prepared_checkout, follow, failure
+):
+    session = {**_v2_session(), "branch": "feature/shared"}
+    mock_database.get_session.return_value = session
+    if failure == "missing":
+        prepared_checkout.return_value = None
+    elif failure == "resolver_error":
+        prepared_checkout.side_effect = RuntimeError("private internal detail")
+    with patch(
+        "app.core.project_resolver.has_local_base_checkout",
+        return_value=failure != "no_base",
+        side_effect=RuntimeError("private internal detail") if failure == "base_error" else None,
+    ), patch("app.api.git_helpers.invalidate_working_dir_cache") as invalidate:
+        response = client.post(
+            "/api/v1/sessions/test-session-id/adopt", json={"follow": follow}
+        )
+    expected = 503 if failure.endswith("error") else 409
+    assert response.status_code == expected
+    assert "try again" in response.json()["detail"]
+    assert "private internal detail" not in response.text
+    mock_database.adopt_session.assert_not_called()
+    mock_database.unpin_session.assert_not_called()
+    invalidate.assert_not_called()
+    if failure in ("no_base", "base_error"):
+        prepared_checkout.assert_not_called()
+
+
+@pytest.mark.parametrize("follow", [False, True])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_checkout_precedes_transfer_and_clears_cached_paths(
+    client, mock_database, prepared_checkout, follow, legacy
+):
+    from app.api import git_helpers
+
+    session = {**_v2_session(), "branch": "feature/shared"}
+    if legacy:
+        session["project_v2_id"] = None
+    mock_database.get_session.return_value = session
+    events = []
+    prepared_checkout.side_effect = lambda row: events.append("prepare") or "/local/branch"
+
+    def transfer(*args):
+        events.append("transfer")
+        return {**session, "instance_id": settings.effective_instance_id}
+
+    mock_database.adopt_session.side_effect = transfer
+    mock_database.unpin_session.side_effect = transfer
+    key = (session["project_id"], None, session["id"])
+    other_key = (session["project_id"], None, "other-session")
+    git_helpers.invalidate_working_dir_cache()
+    git_helpers._working_dir_cache.set(key, "/foreign/base")
+    git_helpers._working_dir_cache.set(other_key, "/unrelated")
+    try:
+        with patch("app.core.project_resolver.has_local_base_checkout", return_value=True):
+            response = client.post(
+                "/api/v1/sessions/test-session-id/adopt", json={"follow": follow}
+            )
+        assert response.status_code == 200
+        assert events == ["prepare", "transfer"]
+        prepared_checkout.assert_called_once_with(session)
+        assert git_helpers._working_dir_cache.get_or_miss(key) is git_helpers.CACHE_MISS
+        assert git_helpers._working_dir_cache.get(other_key) == "/unrelated"
+        mock_database.set_session_project.assert_not_called()
+    finally:
+        git_helpers.invalidate_working_dir_cache()
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_failed_transfer_does_not_invalidate_cache(client, mock_database, follow):
+    mock_database.get_session.return_value = _v2_session()
+    mock_database.adopt_session.return_value = None
+    mock_database.unpin_session.return_value = None
+    with patch("app.core.project_resolver.has_local_base_checkout", return_value=True), \
+         patch("app.api.git_helpers.invalidate_working_dir_cache") as invalidate:
+        response = client.post(
+            "/api/v1/sessions/test-session-id/adopt", json={"follow": follow}
+        )
+    assert response.status_code == 404
+    invalidate.assert_not_called()
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_projectless_transfer_skips_checkout(client, mock_database, prepared_checkout, follow):
+    session = {**_v2_session(), "project_id": None, "project_v2_id": None}
+    mock_database.get_session.return_value = session
+    updated = {**session, "instance_id": settings.effective_instance_id}
+    mock_database.adopt_session.return_value = updated
+    mock_database.unpin_session.return_value = updated
+    with patch("app.core.project_resolver.has_local_base_checkout") as base:
+        response = client.post(
+            "/api/v1/sessions/test-session-id/adopt", json={"follow": follow}
+        )
+    assert response.status_code == 200
+    base.assert_not_called()
+    prepared_checkout.assert_not_called()

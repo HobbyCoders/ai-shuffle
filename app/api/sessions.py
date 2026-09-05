@@ -187,10 +187,10 @@ async def _parse_adopt_request(request: Request) -> AdoptRequest:
         )
 
 
-async def _require_local_base_checkout(session: dict, session_id: str, me: str) -> None:
-    """409 when this disk has no base checkout of the session's project.
+async def _prepare_local_checkout(session: dict, session_id: str, me: str) -> None:
+    """Prepare the canonical local checkout before transferring ownership.
 
-    Fails open on any non-409 resolver error. Project-less sessions skip.
+    Project-less sessions skip. Resolution failures leave ownership unchanged.
     """
     if not (session.get("project_v2_id") or session.get("project_id")):
         return
@@ -209,13 +209,32 @@ async def _require_local_base_checkout(session: dict, session_id: str, me: str) 
                     "open the project), then try again."
                 ),
             )
+        cwd = await run_sync(project_resolver.resolve_cwd, session)
+        if not cwd:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This session's checkout could not be prepared on this device. "
+                    "Make sure its branch is available locally or pushed to the "
+                    "repository's remote, and check for a conflicting checkout "
+                    "directory here. Then try again."
+                ),
+            )
     except HTTPException:
         raise
-    except Exception:  # noqa: BLE001 — fail open on any non-409 resolver error
+    except Exception:
         logger.warning(
-            "Adopt preflight errored for session %s; proceeding fail-open",
+            "Adopt checkout preparation failed for session %s",
             session_id,
             exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Could not prepare this session's local checkout. Ownership has "
+                "not changed. Check repository access and the server logs, then "
+                "try again."
+            ),
         )
 
 
@@ -237,6 +256,7 @@ async def adopt_session_endpoint(
     """
     from app.core.config import settings
     from app.core import streaming_status
+    from app.api.git_helpers import invalidate_working_dir_cache
 
     body = await _parse_adopt_request(request)
     session = await require_session(request, session_id)
@@ -256,13 +276,14 @@ async def adopt_session_endpoint(
 
     if body.follow:
         if (session.get("project_v2_id") or session.get("project_id")) and owner != me:
-            await _require_local_base_checkout(session, session_id, me)
+            await _prepare_local_checkout(session, session_id, me)
         updated = await run_sync(database.unpin_session, session_id, me)
         if not updated:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Session not found: {session_id}",
             )
+        invalidate_working_dir_cache(session_id=session_id)
         await run_sync(apply_sdk_session_keep, updated, me)
         logger.info(
             "Unpinned session %s (owner %s -> %s, placement NULL)",
@@ -284,7 +305,7 @@ async def adopt_session_endpoint(
             status="already_local",
         )
 
-    await _require_local_base_checkout(session, session_id, me)
+    await _prepare_local_checkout(session, session_id, me)
 
     updated = await run_sync(database.adopt_session, session_id, me)
     if not updated:
@@ -293,6 +314,7 @@ async def adopt_session_endpoint(
             detail=f"Session not found: {session_id}",
         )
 
+    invalidate_working_dir_cache(session_id=session_id)
     await run_sync(apply_sdk_session_keep, updated, me)
     logger.info("Adopted session %s from install %s -> %s", session_id, owner, me)
     return AdoptSessionResponse(

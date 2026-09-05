@@ -2238,8 +2238,7 @@ class TestAdoptSession:
 
     def test_adopt_blocks_when_project_not_checked_out_here(self, client, mock_database, sample_session):
         """Preflight (resolver-only): the session's project has no BASE checkout on
-        this runner -> 409, no adopt write. has_local_base_checkout is the single
-        gate (base availability, NOT the branch checkout)."""
+        this runner -> 409, no adopt write or branch preparation."""
         sample_session["instance_id"] = "other-install-xyz"
         sample_session["project_id"] = "proj-1"
         mock_database.get_session.return_value = sample_session
@@ -2256,14 +2255,12 @@ class TestAdoptSession:
         mock_database.adopt_session.assert_not_called()
 
     def test_adopt_succeeds_when_checkout_present(self, client, mock_database, sample_session):
-        """Base checkout present on this runner -> adopt proceeds (ownership flip
-        only); project_id is NEVER rewritten under the resolver-only path. A branch
-        session adopts on base availability alone (branch materializes at spawn)."""
+        """Base present and branch prepared -> ownership flips without project rewrite."""
         from app.core.config import settings
 
         sample_session["instance_id"] = "other-install-xyz"
         sample_session["project_id"] = "proj-1"
-        sample_session["branch"] = "feature-x"  # branch session: base gate suffices
+        sample_session["branch"] = "feature-x"
         mock_database.get_session.return_value = sample_session
         mock_database.get_install.return_value = {"device_name": "Studio Mac", "online": False}
         mock_database.adopt_session.return_value = {
@@ -2272,8 +2269,11 @@ class TestAdoptSession:
 
         with patch(
             "app.core.project_resolver.has_local_base_checkout", return_value=True
-        ):
+        ), patch(
+            "app.core.project_resolver.resolve_cwd", return_value="/local/feature-x"
+        ) as prepare:
             response = client.post("/api/v1/sessions/test-session-id/adopt")
+        prepare.assert_called_once_with(sample_session)
 
         assert response.status_code == 200
         data = response.json()
@@ -2285,9 +2285,8 @@ class TestAdoptSession:
             "test-session-id", settings.effective_instance_id
         )
 
-    def test_adopt_preflight_error_fails_open(self, client, mock_database, sample_session):
-        """A preflight bug must never make an adoptable session un-adoptable: a
-        resolver error (non-409) fails open and the adopt still proceeds."""
+    def test_adopt_preflight_error_keeps_owner(self, client, mock_database, sample_session):
+        """A resolver error must not transfer ownership without a local checkout."""
         from app.core.config import settings
 
         sample_session["instance_id"] = "other-install-xyz"
@@ -2304,9 +2303,9 @@ class TestAdoptSession:
         ):
             response = client.post("/api/v1/sessions/test-session-id/adopt")
 
-        assert response.status_code == 200
-        assert response.json()["adopted"] is True
-        mock_database.adopt_session.assert_called_once()
+        assert response.status_code == 503
+        assert "Ownership has not changed" in response.json()["detail"]
+        mock_database.adopt_session.assert_not_called()
 
 
 # =============================================================================

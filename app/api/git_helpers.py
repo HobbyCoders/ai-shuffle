@@ -196,6 +196,15 @@ def _resolve_working_dir(
             cwd = resolve_existing_cwd(session)
             if cwd:
                 return cwd, True
+            if session.get("project_v2_id"):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "This session's checkout is not available on this device. "
+                        "Resume it here to prepare its local checkout, or restore "
+                        "the missing checkout before retrying."
+                    ),
+                )
 
     return get_project_path(project_id), not session_id
 

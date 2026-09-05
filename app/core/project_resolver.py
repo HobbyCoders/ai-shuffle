@@ -217,11 +217,10 @@ def has_local_base_checkout(
     """Whether this session's project has its BASE checkout materialized on THIS
     runner (branch-independent).
 
-    The adopt preflight gate: a branch session can be adopted here as long as the
-    project's base is present on disk — the branch checkout itself is materialized
-    lazily by ``checkout_manager.ensure_checkout`` at spawn time. Gating adopt on
-    the BRANCH checkout (as ``resolve_local_checkout`` would) spuriously 409s a
-    branch session whenever only the base is present.
+    The first adopt preflight gate: the project's base must be present on disk.
+    Adopt then calls ``resolve_cwd`` to prepare the canonical branch checkout
+    before transferring ownership. Requiring an already-existing BRANCH checkout
+    here would reject sessions whose branches can be recovered from the remote.
 
     True iff ``resolve_project_v2`` resolves, its base ``checkouts`` row (branch
     NULL, legacy-fallback honored) exists, AND that row's ``path`` is a directory
