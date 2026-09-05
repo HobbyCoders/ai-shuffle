@@ -59,13 +59,25 @@ def upsert_provider_usage_snapshot(
     credits: Optional[Dict[str, Any]],
     raw: Optional[Dict[str, Any]],
     fetched_at: Optional[int],
-) -> None:
-    """Insert or replace this provider's usage snapshot row."""
+    expected_binding: Optional[tuple[str, str]] = None,
+) -> bool:
+    """Insert or replace a snapshot, rejecting observations of an old binding."""
     now = datetime.now(timezone.utc).isoformat()
     if provider_type == "openai" and credits is not None:
         raw = {**(raw or {}), "billing_fetched_at": fetched_at}
     with get_db() as conn:
         cursor = conn.cursor()
+        if provider_type == "openai":
+            cursor.execute(
+                "SELECT openai_billing_org_id, openai_billing_instance_id FROM model_providers WHERE id = %s FOR UPDATE",
+                (provider_id,),
+            )
+            binding = cursor.fetchone() or {}
+            current = (binding.get("openai_billing_org_id"), binding.get("openai_billing_instance_id"))
+            if expected_binding is not None and current != expected_binding:
+                return False
+            if credits is not None and current[0] and expected_binding is None:
+                return False
         cursor.execute(
             """
             INSERT INTO provider_usage_snapshots
@@ -93,14 +105,33 @@ def upsert_provider_usage_snapshot(
                 now,
             ),
         )
+    return True
 
 
-def record_provider_usage_failure(provider_id: str, provider_type: str, error_kind: str) -> None:
-    if error_kind not in {"billing_access_denied", "missing_credentials", "timeout", "unavailable"}:
+def record_provider_usage_failure(
+    provider_id: str, provider_type: str, error_kind: str,
+    expected_binding: Optional[tuple[str, str]] = None,
+) -> None:
+    if error_kind not in {
+        "billing_access_denied", "missing_credentials", "timeout", "unavailable",
+        "billing_browser_unavailable", "billing_sign_in_required", "billing_organization_mismatch",
+        "billing_organization_required", "billing_invalid_response", "billing_timeout",
+    }:
         error_kind = "unavailable"
     now = datetime.now(timezone.utc)
     with get_db() as conn:
         cursor = conn.cursor()
+        if provider_type == "openai":
+            cursor.execute(
+                "SELECT openai_billing_org_id, openai_billing_instance_id FROM model_providers WHERE id = %s FOR UPDATE",
+                (provider_id,),
+            )
+            binding = cursor.fetchone() or {}
+            current = (binding.get("openai_billing_org_id"), binding.get("openai_billing_instance_id"))
+            if expected_binding is not None and current != expected_binding:
+                return
+            if current[0] and expected_binding is None:
+                return
         cursor.execute(
             "SELECT raw, credits, fetched_at FROM provider_usage_snapshots WHERE provider_id = %s",
             (provider_id,),
@@ -111,7 +142,11 @@ def record_provider_usage_failure(provider_id: str, provider_type: str, error_ki
         billing_fetched_at = previous_raw.get(
             "billing_fetched_at", previous.get("fetched_at") if previous.get("credits") else None
         )
+        metadata = {}
+        if previous_raw.get("source") == "browser_platform":
+            metadata = {key: previous_raw.get(key) for key in ("source", "organization_id")}
         raw = json.dumps({
+            **metadata,
             "usage_error": error_kind,
             "usage_attempted_at": int(now.timestamp() * 1000),
             "billing_fetched_at": billing_fetched_at,

@@ -487,7 +487,6 @@ class TestPollOnceSkipsXai:
              patch.object(monitor, "_poll_provider", new=AsyncMock()) as poll_or, \
              patch.object(monitor, "_poll_grok_provider", new=AsyncMock()) as poll_grok, \
              patch.object(monitor, "_poll_openai_provider", new=AsyncMock()) as poll_openai, \
-             patch.object(monitor, "_poll_openai_via_chatgpt", new=AsyncMock()), \
              patch.object(monitor, "_poll_fal", new=AsyncMock()):
             await monitor.poll_once()
 

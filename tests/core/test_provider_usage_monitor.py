@@ -103,17 +103,18 @@ class TestRefreshScheduling:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("success", [True, False])
-    async def test_only_current_api_success_suppresses_oauth(self, success):
+    async def test_api_result_does_not_trigger_subscription_billing(self, success):
         monitor = ProviderUsageMonitor()
         rows = [{"id": "api", "provider_type": "openai", "base_url": "https://api.openai.com"},
                 {"id": "sub", "provider_type": "chatgpt"}]
         with patch("app.db.database.get_enabled_model_providers", return_value=rows), patch.object(
             monitor, "_poll_openai_provider", new=AsyncMock(return_value=success)
-        ), patch.object(monitor, "_poll_openai_via_chatgpt", new=AsyncMock()) as fallback, patch.object(
+        ) as poll, patch("app.db.database.get_codex_tokens") as tokens, patch.object(
             monitor, "_poll_fal", new=AsyncMock()
         ):
             await monitor.poll_once()
-        assert fallback.await_count == (0 if success else 1)
+        poll.assert_awaited_once_with(rows[0])
+        tokens.assert_not_called()
 
 
 class TestOpenrouterWindowsAndCredits:
@@ -269,15 +270,12 @@ class TestPollOnce:
              patch.object(monitor, "_poll_provider", new=AsyncMock()) as poll_provider, \
              patch.object(monitor, "_poll_grok_provider", new=AsyncMock()) as poll_grok, \
              patch.object(monitor, "_poll_openai_provider", new=AsyncMock()) as poll_openai, \
-             patch.object(monitor, "_poll_openai_via_chatgpt", new=AsyncMock()) as poll_chatgpt, \
              patch.object(monitor, "_poll_fal", new=AsyncMock()) as poll_fal:
             await monitor.poll_once()
 
         poll_provider.assert_not_called()
         poll_grok.assert_not_called()
         poll_openai.assert_not_called()
-        poll_chatgpt.assert_called_once()
-        assert poll_chatgpt.call_args[0][0] == [rows[0]]
         poll_fal.assert_called_once()
 
     @pytest.mark.asyncio
@@ -293,15 +291,12 @@ class TestPollOnce:
              patch.object(monitor, "_poll_provider", new=AsyncMock()) as poll_provider, \
              patch.object(monitor, "_poll_grok_provider", new=AsyncMock()) as poll_grok, \
              patch.object(monitor, "_poll_openai_provider", new=AsyncMock()) as poll_openai, \
-             patch.object(monitor, "_poll_openai_via_chatgpt", new=AsyncMock()) as poll_chatgpt, \
              patch.object(monitor, "_poll_fal", new=AsyncMock()) as poll_fal:
             await monitor.poll_once()
 
         poll_provider.assert_called_once_with(rows[1])
         poll_grok.assert_called_once_with(rows[2])
         poll_openai.assert_called_once_with(rows[3])
-        poll_chatgpt.assert_called_once()
-        assert poll_chatgpt.call_args[0][0] == [rows[0]]
         poll_fal.assert_called_once()
 
     @pytest.mark.asyncio
@@ -309,11 +304,9 @@ class TestPollOnce:
         with patch(
             "app.db.database.get_enabled_model_providers",
             side_effect=RuntimeError("db down"),
-        ), patch.object(monitor, "_poll_openai_via_chatgpt", new=AsyncMock()) as poll_chatgpt, \
-             patch.object(monitor, "_poll_fal", new=AsyncMock()) as poll_fal:
+        ), patch.object(monitor, "_poll_fal", new=AsyncMock()) as poll_fal:
             await monitor.poll_once()  # must not raise
-        # fal / chatgpt-oauth are independent of the model-provider list.
-        poll_chatgpt.assert_called_once_with([])
+        # fal is independent of the model-provider list.
         poll_fal.assert_called_once()
 
     @pytest.mark.asyncio
@@ -328,7 +321,6 @@ class TestPollOnce:
             return []
 
         with patch("app.db.database.get_enabled_model_providers", side_effect=_fake_get_enabled), \
-             patch.object(monitor, "_poll_openai_via_chatgpt", new=AsyncMock()), \
              patch.object(monitor, "_poll_fal", new=AsyncMock()):
             await monitor.poll_once()
 

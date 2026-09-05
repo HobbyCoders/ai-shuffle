@@ -76,6 +76,17 @@ describe('browser stream client revive path', () => {
 		globalThis.WebSocket = originalWebSocket;
 	});
 
+	it('uses an encoded provider endpoint without requiring a chat session', () => {
+		client = createBrowserStreamClient({ providerId: 'provider/one', getAuthToken: () => 'tok', onStatus: () => {}, onFrame: () => {} });
+		client.connect();
+		expect(latest().url).toContain('/api/v1/model-providers/provider%2Fone/openai-billing/browser?token=tok');
+	});
+
+	it('keeps the existing chat endpoint unchanged', () => {
+		client = newClient(); client.connect();
+		expect(latest().url).toContain('/api/v1/ws/browser/s1?token=tok');
+	});
+
 	it('leaves a healthy OPEN socket alone when the tab becomes visible', () => {
 		client = newClient();
 		client.connect();

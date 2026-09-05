@@ -247,108 +247,33 @@ class TestPollOpenAiProvider:
             assert _TOKEN_KEY_RE.search(record.getMessage()) is None or _KEY not in record.getMessage()
 
 
-_OAUTH = "chatgpt-oauth-must-never-log"
-_CHATGPT_ROW = {
-    "id": "prov-chatgpt-1",
-    "provider_type": "chatgpt",
-    "auth_mode": "chatgpt",
-}
-
-
-class TestPollOpenAiViaChatgpt:
+class TestOpenAiBillingIsolation:
     @pytest.mark.asyncio
     async def test_timeout_records_only_safe_reason(self, monitor):
         with patch.object(monitor, "_request_openai_credit_grants", new=AsyncMock(
             side_effect=httpx.ReadTimeout("private upstream diagnostic")
         )), patch.object(monitor, "_record_openai_failure", new=AsyncMock()) as failure:
-            assert not await monitor._fetch_openai_balance("openai-api", {})
-        failure.assert_awaited_once_with("openai-api", "timeout")
+            assert not await monitor._fetch_openai_balance(_ROW["id"], {})
+        failure.assert_awaited_once_with(_ROW["id"], "timeout")
 
     @pytest.mark.asyncio
-    async def test_billing_401_does_not_refresh_codex_login(self, monitor):
-        with patch("app.db.database.get_codex_tokens", return_value={"codex_access_token": "stored"}), patch(
-            "app.core.provider_usage._decrypt_grok_access_token", return_value=_OAUTH
-        ), patch.object(monitor, "_request_openai_credit_grants", new=AsyncMock(return_value=(None, None, 401))), patch.object(
-            monitor, "_record_openai_failure", new=AsyncMock()
-        ) as failure, patch("app.core.codex_token_refresh.refresh_on_401_once", new=AsyncMock()) as refresh:
-            assert not await monitor._poll_openai_chatgpt_row(_CHATGPT_ROW)
-        refresh.assert_not_awaited()
-        failure.assert_awaited_once_with("openai-api", "billing_access_denied")
-
-    @pytest.mark.asyncio
-    async def test_200_upserts_synthetic_openai_api_row(self, monitor):
-        upsert = MagicMock()
-        seen = []
-        tokens = {
-            "codex_access_token": "enc:chatgpt-access",
-            "codex_account_id": "acct-123",
-        }
-        with patch(
-            "app.db.database.get_all_provider_usage_snapshots", return_value=[]
-        ), patch("app.db.database.get_codex_tokens", return_value=tokens), patch(
-            "app.core.provider_usage._decrypt_grok_access_token", return_value=_OAUTH
-        ), patch(
-            "app.core.provider_usage.httpx.AsyncClient",
-            side_effect=_mock_transport_client(
-                _grants_handler(seen=seen, bearer=_OAUTH)
-            ),
-        ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
-            await monitor._poll_openai_via_chatgpt([_CHATGPT_ROW])
-
-        upsert.assert_called_once()
-        provider_id, provider_type, plan_type, windows, credits, raw, fetched_at = (
-            upsert.call_args[0]
-        )
-        assert provider_id == "openai-api"
-        assert provider_type == "openai"
-        assert plan_type is None
-        assert windows == []
-        assert credits["balance_remaining"] == pytest.approx(20.75)
-        assert isinstance(fetched_at, int)
-        assert seen and seen[0].headers.get("authorization") == f"Bearer {_OAUTH}"
-        assert seen[0].headers.get("chatgpt-account-id") == "acct-123"
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("provider_id", ["prov-openai-1", "openai-api"])
-    async def test_old_balance_does_not_suppress_fallback(self, monitor, provider_id):
-        with patch(
-            "app.db.database.get_all_provider_usage_snapshots",
-            return_value=[{"provider_id": provider_id, "provider_type": "openai",
-                           "credits": {"balance_remaining": 5.0}}],
-        ), patch.object(monitor, "_poll_openai_chatgpt_row", new=AsyncMock(return_value=True)) as poll:
-            await monitor._poll_openai_via_chatgpt([_CHATGPT_ROW])
-        poll.assert_awaited_once_with(_CHATGPT_ROW)
-
-    @pytest.mark.asyncio
-    async def test_403_does_not_upsert(self, monitor):
-        upsert = MagicMock()
-        tokens = {"codex_access_token": "enc:chatgpt-access"}
-        with patch(
-            "app.db.database.get_all_provider_usage_snapshots", return_value=[]
-        ), patch("app.db.database.get_codex_tokens", return_value=tokens), patch(
-            "app.core.provider_usage._decrypt_grok_access_token", return_value=_OAUTH
-        ), patch(
-            "app.core.provider_usage.httpx.AsyncClient",
-            side_effect=_mock_transport_client(
-                _grants_handler(status=403, body={}, bearer=_OAUTH)
-            ),
-        ), patch("app.db.database.upsert_provider_usage_snapshot", upsert):
-            await monitor._poll_openai_via_chatgpt([_CHATGPT_ROW])
-        upsert.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_oauth_token_never_appears_in_logs(self, monitor, caplog):
-        caplog.set_level(logging.DEBUG)
-        tokens = {"codex_access_token": "enc:chatgpt-access"}
-        with patch(
-            "app.db.database.get_all_provider_usage_snapshots", return_value=[]
-        ), patch("app.db.database.get_codex_tokens", return_value=tokens), patch(
-            "app.core.provider_usage._decrypt_grok_access_token", return_value=_OAUTH
-        ), patch(
-            "app.core.provider_usage.httpx.AsyncClient",
-            side_effect=_mock_transport_client(
-                _grants_handler(status=500, body={}, bearer=_OAUTH)
-            ),
-        ), patch("app.db.database.upsert_provider_usage_snapshot", MagicMock()):
-            await monitor._poll_openai_via_chatgpt([_CHATGPT_ROW])
-        assert _OAUTH not in caplog.text
+    @pytest.mark.parametrize("api_result", [True, False, None])
+    async def test_platform_poll_never_uses_chatgpt_credentials(self, monitor, api_result):
+        rows = [{"id": "chatgpt-1", "provider_type": "chatgpt", "auth_mode": "chatgpt"}]
+        if api_result is not None:
+            rows.extend([_ROW, {**_ROW, "id": "prov-openai-2"}])
+        with patch("app.db.database.get_enabled_model_providers", return_value=rows), patch(
+            "app.db.database.get_codex_tokens"
+        ) as tokens, patch.object(
+            monitor, "_poll_openai_provider", new=AsyncMock(return_value=api_result)
+        ) as poll, patch.object(monitor, "_poll_fal", new=AsyncMock()), patch.object(
+            monitor, "_request_openai_credit_grants", new=AsyncMock()
+        ) as request:
+            await monitor._poll_providers()
+        tokens.assert_not_called()
+        request.assert_not_awaited()
+        assert poll.await_count == (0 if api_result is None else 2)
+        if api_result is not None:
+            assert [call.args[0]["id"] for call in poll.await_args_list] == [
+                "prov-openai-1", "prov-openai-2"
+            ]

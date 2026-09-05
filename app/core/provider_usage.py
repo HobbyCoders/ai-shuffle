@@ -51,13 +51,12 @@ is exactly the silent failure this poller used to produce. Custom
 OpenAI-compatible gateways are never sent to that host. The decrypted key is
 used only as a Bearer header and is NEVER logged.
 
-When no API-key snapshot has a balance, ChatGPT/Codex OAuth rows are tried
-against the same credit-grants URL (Bearer access token + optional
-``ChatGPT-Account-Id``). A hit is stored under the synthetic id
-``openai-api`` so the popover can show **OpenAI · API** ``$X.XX left``
-alongside the ChatGPT subscription quota row. This is a best-effort compatibility
-path, not a documented authorization grant: Codex credentials do not establish
-access to Platform billing. Rejections must not refresh the Codex login.
+Explicit Platform-browser connections take precedence over API-key billing.
+They refresh every five minutes on the owning installation and retain the last
+successful balance when reauthentication is needed. Browser observations are
+bound to one organization; authentication stays in the shared browser profile.
+ChatGPT/Codex OAuth credentials are not used for Platform billing. Subscription
+quotas and prepaid API balances belong to separate billing systems.
 
 **fal.ai credits poller.** The same monitor reads the install's
 ``fal_api_key`` (not a model-provider row) and polls the official Platform
@@ -1034,11 +1033,8 @@ def _is_openai_platform_row(row: Optional[Dict[str, Any]]) -> bool:
     return host in ("", OPENAI_CREDIT_GRANTS_HOST)
 
 
-# Synthetic snapshot for prepaid API credits fetched via ChatGPT OAuth when
-# there is no (successful) openai API-key provider poll.
+# Retained only to exclude persisted snapshots from the retired OAuth fallback.
 OPENAI_API_USAGE_PROVIDER_ID = "openai-api"
-OPENAI_API_USAGE_PROVIDER_TYPE = "openai"
-OPENAI_API_USAGE_PROVIDER_NAME = "OpenAI"
 
 
 def _is_chatgpt_subscription_row(row: Optional[Dict[str, Any]]) -> bool:
@@ -1213,6 +1209,57 @@ class ProviderUsageMonitor:
     def __init__(self) -> None:
         self._poll_task: Optional[asyncio.Task] = None
         self._last_poll_finished: Optional[float] = None
+        self._billing_task: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        if self._billing_task is None or self._billing_task.done():
+            self._billing_task = asyncio.create_task(self._billing_loop())
+
+    async def stop(self) -> None:
+        from app.core.openai_billing_browser import openai_billing_browser
+
+        tasks = [task for task in (self._billing_task, self._poll_task) if task]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._billing_task = self._poll_task = None
+        await openai_billing_browser.shutdown()
+
+    async def _reconcile_billing(self, rows: List[Dict[str, Any]]) -> None:
+        from app.core.config import settings
+        from app.core.openai_billing_browser import openai_billing_browser
+
+        active = {
+            row["id"] for row in rows if row.get("id") and _is_openai_platform_row(row)
+            and row.get("enabled", True)
+            and row.get("openai_billing_instance_id") in (None, settings.effective_instance_id)
+        }
+        await openai_billing_browser.reconcile(active)
+
+    async def _poll_billing_connections(self) -> None:
+        from app.db import database as db
+
+        rows = await run_sync(db.get_enabled_model_providers)
+        await self._reconcile_billing(rows)
+        semaphore = asyncio.Semaphore(4)
+
+        async def poll(row):
+            async with semaphore:
+                await self._poll_openai_provider(row)
+
+        await asyncio.gather(*(
+            poll(row) for row in rows if _is_openai_platform_row(row)
+            and row.get("openai_billing_org_id")
+        ), return_exceptions=True)
+
+    async def _billing_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.wait_for(self._poll_billing_connections(), timeout=90)
+            except Exception:
+                logger.warning("OpenAI browser credit refresh failed")
+            await asyncio.sleep(300)
 
     @property
     def refreshing(self) -> bool:
@@ -1247,6 +1294,7 @@ class ProviderUsageMonitor:
             rows = await run_sync(
                 functools.partial(db.get_enabled_model_providers, include_token=True)
             )
+            await self._reconcile_billing(rows or [])
         except Exception:
             logger.debug("Provider usage poll: provider read skipped")
             rows = []
@@ -1261,23 +1309,15 @@ class ProviderUsageMonitor:
                     logger.warning("Provider usage job failed")
                     return False
 
-        chatgpt_rows = [r for r in rows or [] if _is_chatgpt_subscription_row(r or {})]
-        openai_rows = [r for r in rows or [] if _is_openai_platform_row(r or {})]
-
-        async def openai_credits():
-            results = await asyncio.gather(
-                *(bounded(self._poll_openai_provider, row) for row in openai_rows)
-            )
-            if not any(result is True for result in results):
-                await bounded(self._poll_openai_via_chatgpt, chatgpt_rows)
-
-        jobs = [openai_credits(), bounded(self._poll_fal)]
+        jobs = [bounded(self._poll_fal)]
         for row in rows or []:
             r = row or {}
             if r.get("provider_type") == "openrouter":
                 jobs.append(bounded(self._poll_provider, r))
             elif _is_grok_subscription_row(r):
                 jobs.append(bounded(self._poll_grok_provider, r))
+            elif _is_openai_platform_row(r):
+                jobs.append(bounded(self._poll_openai_provider, r))
         await asyncio.gather(*jobs, return_exceptions=True)
 
     async def _poll_provider(self, row: Dict[str, Any]) -> None:
@@ -1515,11 +1555,17 @@ class ProviderUsageMonitor:
             return credits, raw, last_status
         return None, None, last_status
 
-    async def _record_openai_failure(self, provider_id: str, error_kind: str) -> None:
+    async def _record_openai_failure(
+        self, provider_id: str, error_kind: str,
+        expected_binding: Optional[tuple[str, str]] = None,
+    ) -> None:
         from app.db.provider_usage_snapshots import record_provider_usage_failure
 
         try:
-            await run_sync(record_provider_usage_failure, provider_id, "openai", error_kind)
+            await run_sync(
+                record_provider_usage_failure, provider_id, "openai", error_kind,
+                expected_binding=expected_binding,
+            )
         except Exception:
             logger.warning("OpenAI billing status could not be saved")
 
@@ -1575,64 +1621,49 @@ class ProviderUsageMonitor:
         return False
 
     async def _poll_openai_provider(self, row: Dict[str, Any]) -> bool:
+        from app.core.config import settings
+        from app.core.openai_billing_browser import BillingBrowserError, openai_billing_browser
+        from app.db import database as db
+
         provider_id = row.get("id")
         if not provider_id:
             return False
-        try:
-            key = _decrypt_provider_auth_token(row)
-        except Exception:
-            key = None
-        if not key:
-            await self._record_openai_failure(provider_id, "missing_credentials")
-            return False
-        return await self._fetch_openai_balance(
-            provider_id, {"Authorization": f"Bearer {key}", "Accept": "application/json"}
-        )
-
-    async def _poll_openai_via_chatgpt(self, rows: List[Dict[str, Any]]) -> None:
-        for row in rows:
-            if await self._poll_openai_chatgpt_row(row):
-                return
-
-    async def _poll_openai_chatgpt_row(self, row: Dict[str, Any]) -> bool:
-        from app.db import database as db
-        from app.core.codex_rate_limit_resets import CODEX_USER_AGENT
-
-        provider_id = row.get("id")
-        try:
-            stored = await run_sync(db.get_codex_tokens, provider_id) if provider_id else None
-            access = None
-            if stored and not stored.get("needs_reauth") and not row.get("needs_reauth"):
-                access = _decrypt_grok_access_token(stored.get("codex_access_token"))
-            if not access:
-                await self._record_openai_failure(OPENAI_API_USAGE_PROVIDER_ID, "missing_credentials")
+        async with openai_billing_browser.operation_lock(provider_id):
+            state = openai_billing_browser.status(provider_id)
+            if state["status"] in {"pending", "ready"}:
                 return False
-            headers = {
-                "Authorization": f"Bearer {access}",
-                "Accept": "application/json",
-                "User-Agent": CODEX_USER_AGENT,
-            }
-            account_id = stored.get("codex_account_id")
-            if isinstance(account_id, str) and account_id.strip():
-                headers["ChatGPT-Account-Id"] = account_id.strip()
-            stored_balance = await self._fetch_openai_balance(
-                OPENAI_API_USAGE_PROVIDER_ID, headers
+            if row.get("openai_billing_org_id") or state["status"] != "not_connected":
+                row = await run_sync(db.get_model_provider, provider_id)
+                if not row or not row.get("enabled", True) or not _is_openai_platform_row(row):
+                    await openai_billing_browser.close(provider_id)
+                    return False
+            organization_id = row.get("openai_billing_org_id")
+            if organization_id:
+                instance_id = row.get("openai_billing_instance_id")
+                if instance_id != settings.effective_instance_id:
+                    return False
+                binding = (organization_id, instance_id)
+                try:
+                    observation = await openai_billing_browser.refresh(provider_id, organization_id)
+                    saved = await run_sync(
+                        db.upsert_provider_usage_snapshot,
+                        provider_id, "openai", None, [], observation["credits"], observation["raw"],
+                        observation["fetched_at"], expected_binding=binding,
+                    )
+                    return saved is not False
+                except BillingBrowserError as error:
+                    await self._record_openai_failure(provider_id, error.kind, binding)
+                    return False
+            try:
+                key = _decrypt_provider_auth_token(row)
+            except Exception:
+                key = None
+            if not key:
+                await self._record_openai_failure(provider_id, "missing_credentials")
+                return False
+            return await self._fetch_openai_balance(
+                provider_id, {"Authorization": f"Bearer {key}", "Accept": "application/json"}
             )
-            if stored_balance:
-                # Poll recovered: forget the suppressed-failure state so the
-                # next failure is reported at ERROR straight away.
-                _clear_poll_failure(f"openai-credits-oauth-poll:{provider_id}")
-            return stored_balance
-        except Exception as e:
-            # Never include the access token here.
-            _log_poll_failure(
-                f"openai-credits-oauth-poll:{provider_id}",
-                "OpenAI credits poll via ChatGPT oauth for provider %s failed: %s",
-                provider_id,
-                e,
-            )
-            await self._record_openai_failure(OPENAI_API_USAGE_PROVIDER_ID, "unavailable")
-            return False
 
     async def _poll_fal(self) -> None:
         """Fetch fal.ai account credits and upsert the synthetic snapshot. Never raises.

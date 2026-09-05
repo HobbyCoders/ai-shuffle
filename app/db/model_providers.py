@@ -65,6 +65,8 @@ class ModelProviderRow(TypedDict, total=False):
     codex_id_token_expires_at: Optional[str]
     codex_last_refresh: Optional[str]
     needs_reauth: bool
+    openai_billing_org_id: Optional[str]
+    openai_billing_instance_id: Optional[str]
     created_at: str
     updated_at: str
 
@@ -79,6 +81,7 @@ _PUBLIC_COLUMNS = (
     "default_model, small_fast_model, extra_env_json, context_window, "
     "max_output_tokens, enabled, auth_mode, codex_account_id, "
     "codex_id_token_expires_at, codex_last_refresh, needs_reauth, "
+    "openai_billing_org_id, openai_billing_instance_id, "
     "created_at, updated_at"
 )
 
@@ -298,6 +301,68 @@ def update_model_provider(provider_id: str, **kwargs: Any) -> Optional[ModelProv
         )
         if cursor.rowcount == 0:
             return None
+    return get_model_provider(provider_id)
+
+
+def set_openai_billing_binding(provider_id: str, organization_id: str, instance_id: str) -> Optional[ModelProviderRow]:
+    """Bind credit tracking without changing model credentials."""
+    from urllib.parse import urlsplit
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT provider_type, base_url, auth_mode, enabled, openai_billing_instance_id FROM model_providers WHERE id = %s FOR UPDATE",
+            (provider_id,),
+        )
+        row = cursor.fetchone()
+        if not row or row["provider_type"] != "openai" or not row["enabled"]:
+            return None
+        if row.get("openai_billing_instance_id") not in (None, instance_id):
+            return None
+        try:
+            url = urlsplit(row["base_url"])
+            if (
+                url.scheme != "https" or url.hostname != "api.openai.com"
+                or url.port not in (None, 443) or url.username or url.password
+                or row.get("auth_mode") in {"codex", "chatgpt"}
+            ):
+                return None
+        except ValueError:
+            return None
+        cursor.execute(
+            "UPDATE model_providers SET openai_billing_org_id = %s, openai_billing_instance_id = %s, updated_at = %s WHERE id = %s",
+            (organization_id, instance_id, datetime.now(timezone.utc).isoformat(), provider_id),
+        )
+        cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
+    return get_model_provider(provider_id)
+
+
+def clear_openai_billing_binding(
+    provider_id: str, expected_instance_id: Optional[str] = None,
+) -> Optional[ModelProviderRow]:
+    """Forget the binding and its browser balance, not the shared browser login."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, openai_billing_instance_id FROM model_providers WHERE id = %s FOR UPDATE", (provider_id,)
+        )
+        row = cursor.fetchone()
+        if not row or (expected_instance_id and row.get("openai_billing_instance_id") not in (None, expected_instance_id)):
+            return None
+        cursor.execute(
+            "UPDATE model_providers SET openai_billing_org_id = NULL, openai_billing_instance_id = NULL, updated_at = %s WHERE id = %s",
+            (datetime.now(timezone.utc).isoformat(), provider_id),
+        )
+        cursor.execute("SELECT raw FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
+        snapshot = cursor.fetchone()
+        raw = snapshot.get("raw") if snapshot else None
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                raw = None
+        if isinstance(raw, dict) and raw.get("source") == "browser_platform":
+            cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
     return get_model_provider(provider_id)
 
 

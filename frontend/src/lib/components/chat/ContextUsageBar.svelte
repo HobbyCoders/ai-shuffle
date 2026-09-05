@@ -137,10 +137,13 @@
 			return;
 		}
 		const r = el.getBoundingClientRect();
+		// Bounds already include the current translation; solve from the unshifted position.
+		const left = r.left - popShift;
+		const right = r.right - popShift;
 		const PAD = 12;
 		let shift = 0;
-		if (r.right > window.innerWidth - PAD) shift = window.innerWidth - PAD - r.right;
-		if (r.left + shift < PAD) shift = PAD - r.left;
+		if (right > window.innerWidth - PAD) shift = window.innerWidth - PAD - right;
+		if (left + shift < PAD) shift = PAD - left;
 		popShift = Math.round(shift);
 	}
 
@@ -399,10 +402,11 @@
 	}
 
 	function providerStatusText(pb: ProviderUsageBucket): string | null {
+		const isOpenAI = pb.providerType?.toLowerCase() === 'openai';
 		const reason = pb.lastErrorKind === 'billing_access_denied'
-			? 'Billing access required'
+			? isOpenAI ? 'This credential cannot read OpenAI Platform billing' : 'Billing access required'
 			: pb.lastErrorKind === 'missing_credentials'
-				? 'Sign in to view usage'
+				? isOpenAI ? 'OpenAI API credential required' : 'Sign in to view usage'
 				: pb.lastErrorKind === 'timeout' ? 'Refresh timed out' : 'Usage unavailable';
 		if (pb.status === 'stale') return `Last known usage · ${pb.lastErrorKind ? reason : 'Refresh pending'}`;
 		if (pb.status === 'unavailable' || pb.status === 'never_fetched') return reason;
@@ -423,9 +427,9 @@
 				? `$${remaining.toFixed(2)} left · $${spent.toFixed(2)} used`
 				: `$${remaining.toFixed(2)} left`;
 		}
-		// ChatGPT/Codex extra-credit headers (balance / unlimited) belong on
-		// the subscription quota row and are usually $0 — prepaid API $ is
-		// the separate OpenAI · API row (balance_remaining).
+		// ChatGPT/Codex extra-credit headers are not prepaid Platform balances.
+		// Keep subscription quotas separate from configured OpenAI API rows;
+		// show an API balance only when billing actually reports one.
 		if ((providerType || '').toLowerCase() === 'chatgpt') return null;
 		if (credits.unlimited === true) return 'Credits: unlimited';
 		const used = typeof credits.usage === 'number' ? credits.usage : null;
@@ -810,7 +814,7 @@
 					>
 						<span class="sec-head-labels">
 							<span class="section-device">{pbDisplay.name}</span>
-							{#if pbStatus}<span class="section-account">{pbStatus}</span>{/if}
+							{#if pbStatus}<span class="section-account provider-status">{pbStatus}</span>{/if}
 							{#if pbDisplay.subtext}
 								<span class="section-account">{pbDisplay.subtext}</span>
 							{/if}
@@ -840,6 +844,14 @@
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 						</svg>
 					</button>
+					{#if pbStatus && pb.providerType?.toLowerCase() === 'openai' && pb.lastErrorKind === 'billing_access_denied'}
+						<a
+							class="provider-billing-link"
+							href="https://platform.openai.com/settings/organization/billing/overview"
+							target="_blank"
+							rel="noopener noreferrer"
+						>View balance in OpenAI Platform billing</a>
+					{/if}
 				</div>
 				{#if pbOpen}
 					{#each pbWindows as w (w.type)}
@@ -1208,6 +1220,23 @@
 		color: inherit;
 		cursor: pointer;
 	}
+	/* Guidance is prose, not a single-line account label. Allow it to shrink
+	   beside collapsed balances and wrap inside the viewport-clamped panel. */
+	.provider-status,
+	.provider-billing-link {
+		min-width: 0;
+		max-width: 100%;
+		white-space: normal;
+		overflow-wrap: anywhere;
+	}
+	.provider-billing-link {
+		align-self: flex-start;
+		font-size: 10.5px;
+		color: var(--muted-foreground);
+		text-decoration: underline;
+		text-underline-offset: 2px;
+	}
+	.provider-billing-link:focus-visible,
 	.sec-header:focus-visible {
 		outline: 2px solid var(--ring, var(--primary));
 		outline-offset: 2px;

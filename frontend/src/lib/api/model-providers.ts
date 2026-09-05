@@ -78,6 +78,9 @@ export interface ModelProvider {
 	// `app/api/model_providers.py::ModelProviderResponse` — `auth_mode` and
 	// `codex_account_id` are `Optional[str] = None`; the three booleans default
 	// to `false` in the response model, so they are always present on the wire.
+	/** Non-secret credit tracking binding; managed only by the billing endpoints. */
+	openai_billing_org_id?: string | null;
+	openai_billing_instance_id?: string | null;
 	auth_mode?: string | null;
 	codex_account_id?: string | null;
 	needs_reauth?: boolean;

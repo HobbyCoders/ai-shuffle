@@ -1308,6 +1308,8 @@ def create_postgres_schema(cursor) -> None:
             needs_reauth BOOLEAN DEFAULT FALSE,
             codex_refresh_lease_owner TEXT,
             codex_refresh_lease_expires_at TIMESTAMP WITH TIME ZONE,
+            openai_billing_org_id TEXT,
+            openai_billing_instance_id TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )

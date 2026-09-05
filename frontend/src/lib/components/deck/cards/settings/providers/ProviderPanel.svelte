@@ -38,6 +38,8 @@
 	import { notify } from '$lib/stores/notifications';
 	import { getModels } from '$lib/constants/models.svelte';
 	import BankedResetsPanel from './BankedResetsPanel.svelte';
+	import OpenAICredits from './OpenAICredits.svelte';
+	import { supportsOpenAIBilling } from '$lib/api/openai-billing';
 
 	interface Props {
 		/** Drives the primary button's wording: `Sign in` vs `Add key`. */
@@ -551,6 +553,12 @@
 			{/each}
 		</div>
 	</div>
+{/if}
+
+{#if provider && supportsOpenAIBilling(provider)}
+	{#key provider.id}
+		<OpenAICredits {provider} />
+	{/key}
 {/if}
 
 {#if bankedResets && provider}

@@ -48,7 +48,9 @@ export interface FrameMessageMetadata {
 
 export interface BrowserStreamConfig {
 	/** Session whose browser page is being streamed. */
-	sessionId: string;
+	sessionId?: string;
+	/** Dedicated provider credit-login stream, independent of chat sessions. */
+	providerId?: string;
 	/** Auth token from cookies (mirrors the chat WS client), or null if none. */
 	getAuthToken: () => string | null;
 	/** A `status` frame arrived. */
@@ -89,10 +91,14 @@ export interface BrowserStreamClient {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function buildUrl(sessionId: string, token: string | null): string {
+function buildUrl(sessionId: string | undefined, token: string | null, providerId?: string): string {
 	const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 	const host = window.location.host;
-	let url = `${protocol}//${host}/api/v1/ws/browser/${encodeURIComponent(sessionId)}`;
+	if (!providerId && !sessionId) throw new Error('A browser session or provider is required');
+	const path = providerId
+		? `/api/v1/model-providers/${encodeURIComponent(providerId)}/openai-billing/browser`
+		: `/api/v1/ws/browser/${encodeURIComponent(sessionId!)}`;
+	let url = `${protocol}//${host}${path}`;
 	if (token) url += `?token=${encodeURIComponent(token)}`;
 	return url;
 }
@@ -126,7 +132,7 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 		if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
 		intentionalDisconnect = false;
-		const url = buildUrl(config.sessionId, config.getAuthToken());
+		const url = buildUrl(config.sessionId, config.getAuthToken(), config.providerId);
 		ws = new WebSocket(url);
 
 		ws.onopen = () => {

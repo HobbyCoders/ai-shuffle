@@ -302,8 +302,9 @@ export function getClaudeAuth(): ClaudeAuthInfo {
 //   native Claude            → "Claude" · <plan> for a subscription account,
 //                              "Claude" · "API" for Anthropic API-key auth
 //
-// The two OpenAI rows deliberately keep their own groups/sections — the
-// subtext is what disambiguates them; nothing here merges or dedupes rows.
+// Configured OpenAI API rows and ChatGPT subscription rows keep separate
+// groups/sections when present; a subscription does not imply an API billing
+// row. The subtext disambiguates them; nothing here merges or dedupes rows.
 // ---------------------------------------------------------------------------
 
 /** Brand name for the native Claude group/section. */

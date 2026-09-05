@@ -95,6 +95,52 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
+describe('ContextUsageBar — popover positioning', () => {
+	it('keeps translated bounds stable through repeated desktop and mobile resizes', async () => {
+		const originalWidth = window.innerWidth;
+		let unshiftedLeft = 1201;
+		let width = 373;
+		const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect');
+		rectSpy.mockImplementation(function (this: HTMLElement) {
+			const shift = Number(this.style.transform.match(/translateX\((-?[\d.]+)px\)/)?.[1] ?? 0);
+			return DOMRect.fromRect({ x: unshiftedLeft + shift, y: 0, width, height: 200 });
+		});
+		try {
+			window.innerWidth = 1280;
+			const { container } = render(ContextUsageBar);
+			await openPopover(container);
+			const popover = container.querySelector('.usage-popover') as HTMLElement;
+			const expectBounds = async (shift: number, left: number) => {
+				await waitFor(() => expect(popover.style.transform).toBe(`translateX(${shift}px)`));
+				const rect = popover.getBoundingClientRect();
+				expect(rect.left).toBe(left);
+				expect(rect.left).toBeGreaterThanOrEqual(12);
+				expect(rect.right).toBeLessThanOrEqual(window.innerWidth - 12);
+			};
+			await expectBounds(-306, 895);
+			// The browser returns already-translated bounds, including on a second
+			// resize with unchanged geometry. Never lose that existing translation.
+			for (const layout of [
+				{ viewport: 1280, left: 1201, width: 373, shift: -306, translatedLeft: 895 },
+				{ viewport: 390, left: 327, width: 366, shift: -315, translatedLeft: 12 },
+				{ viewport: 1280, left: 1201, width: 373, shift: -306, translatedLeft: 895 },
+				{ viewport: 1280, left: 40, width: 373, shift: 0, translatedLeft: 40 },
+			]) {
+				window.innerWidth = layout.viewport;
+				unshiftedLeft = layout.left;
+				width = layout.width;
+				for (let repeat = 0; repeat < 2; repeat++) {
+					await fireEvent(window, new Event('resize'));
+					await expectBounds(layout.shift, layout.translatedLeft);
+				}
+			}
+		} finally {
+			rectSpy.mockRestore();
+			window.innerWidth = originalWidth;
+		}
+	});
+});
+
 describe('ContextUsageBar — pill', () => {
 	it('always renders the pill as a bare progress ring (no inline percent text)', () => {
 		const { container } = render(ContextUsageBar);
@@ -145,6 +191,62 @@ describe('ContextUsageBar — pill', () => {
 });
 
 describe('ContextUsageBar — provider refresh status', () => {
+	it.each(['unavailable', 'stale'] as const)('links to Platform billing when OpenAI billing is %s', async (status) => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status,
+				last_error_kind: 'billing_access_denied',
+				...(status === 'stale' ? { credits: { balance_remaining: 12.34 }, fetched_at: 123 } : {}) },
+		] });
+		const { container, getByRole } = render(ContextUsageBar);
+		await openPopover(container);
+		// Keep long guidance in the wrapping prose class, not just an account label.
+		const guidance = container.querySelector('.provider-status');
+		expect(guidance?.textContent).toBe(status === 'stale'
+			? 'Last known usage · This credential cannot read OpenAI Platform billing'
+			: 'This credential cannot read OpenAI Platform billing');
+		expect(container.textContent).not.toContain('Sign in');
+		expect(container.textContent).not.toContain('$0.00');
+		if (status === 'stale') {
+			expect(container.textContent).toContain('Last known usage · This credential cannot read OpenAI Platform billing');
+			expect(container.textContent).toContain('$12.34 left');
+		}
+		const link = getByRole('link', { name: 'View balance in OpenAI Platform billing' });
+		expect(link.getAttribute('href')).toBe('https://platform.openai.com/settings/organization/billing/overview');
+		expect(link.getAttribute('target')).toBe('_blank');
+		expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+		expect(link.closest('button')).toBeNull();
+		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
+		expect(getByRole('link', { name: 'View balance in OpenAI Platform billing' })).toBe(link);
+		if (status === 'stale') expect(container.textContent).toContain('$12.34 left');
+	});
+
+	it.each([12.34, 0])('preserves a successful OpenAI API balance of %s', async (balance) => {
+		rateLimit.applySnapshot({ windows: [], available: true, providers: [
+			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status: 'fresh',
+				credits: { balance_remaining: balance } },
+		] });
+		const { container, getByRole } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.textContent).toContain(`$${balance.toFixed(2)} left`);
+		expect(container.querySelector('.provider-billing-link')).toBeNull();
+		expect(container.textContent).not.toContain('cannot read');
+		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
+		expect(container.textContent).toContain(`$${balance.toFixed(2)} left`);
+	});
+
+	it('requests an API credential rather than ChatGPT sign-in for missing OpenAI credentials', async () => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'api', provider_type: 'openai', status: 'unavailable', last_error_kind: 'missing_credentials' },
+			{ provider_id: 'other', provider_type: 'openrouter', status: 'unavailable', last_error_kind: 'billing_access_denied' },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.textContent).toContain('OpenAI API credential required');
+		expect(container.textContent).not.toContain('Sign in');
+		expect(container.textContent).toContain('Billing access required');
+		expect(container.querySelector('.provider-billing-link')).toBeNull();
+	});
+
 	it('keeps stale API balances and explains unavailable billing without inventing zero', async () => {
 		rateLimit.applySnapshot({ windows: [], available: false, providers: [
 			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status: 'stale', last_error_kind: 'timeout', credits: { balance_remaining: 12.34 }, fetched_at: 123 },
@@ -154,7 +256,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		await openPopover(container);
 		expect(container.textContent).toContain('$12.34');
 		expect(container.textContent).toContain('Last known usage · Refresh timed out');
-		expect(container.textContent).toContain('Billing access required');
+		expect(container.textContent).toContain('This credential cannot read OpenAI Platform billing');
 		expect(container.textContent).not.toContain('$0.00');
 	});
 });

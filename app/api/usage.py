@@ -164,11 +164,13 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
             FAL_USAGE_PROVIDER_ID,
             FAL_USAGE_PROVIDER_NAME,
             OPENAI_API_USAGE_PROVIDER_ID,
-            OPENAI_API_USAGE_PROVIDER_NAME,
         )
 
         entries: List[ProviderUsageEntry] = []
         for row in rows:
+            # Retired OAuth fallback snapshots are not Platform billing accounts.
+            if row["provider_id"] == OPENAI_API_USAGE_PROVIDER_ID:
+                continue
             # xAI API-key snapshots stay excluded: their only content is
             # per-minute x-ratelimit headroom (~always 0%), and xAI exposes
             # no credits endpoint a secret key may call. OpenAI rows are
@@ -195,14 +197,12 @@ async def _load_provider_usage() -> List[ProviderUsageEntry]:
                 windows = []
             # ChatGPT/Codex header credits (x-codex-credits-balance, often 0)
             # are extra-credit crumbs on the subscription quota row — not
-            # prepaid API balance. That figure lives on the openai-api row.
+            # prepaid API balance. That figure belongs to configured OpenAI rows.
             if ptype == "chatgpt":
                 credits = None
             name = names.get(row["provider_id"])
             if not name and row["provider_id"] == FAL_USAGE_PROVIDER_ID:
                 name = FAL_USAGE_PROVIDER_NAME
-            if not name and row["provider_id"] == OPENAI_API_USAGE_PROVIDER_ID:
-                name = OPENAI_API_USAGE_PROVIDER_NAME
             entries.append(
                 ProviderUsageEntry(
                     provider_id=row["provider_id"],

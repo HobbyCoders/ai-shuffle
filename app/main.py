@@ -235,7 +235,13 @@ async def lifespan(app: FastAPI):
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
 
+    from app.core.provider_usage import provider_usage_monitor
+    if runner_approved:
+        provider_usage_monitor.start()
+
     yield
+
+    await provider_usage_monitor.stop()
 
     # Shutdown
     if orphan_backfill_task is not None and not orphan_backfill_task.done():

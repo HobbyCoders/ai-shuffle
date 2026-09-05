@@ -156,19 +156,31 @@ async def browser_panel_websocket(
         await websocket.close(code=4003, reason="Access denied")
         return
 
+    await serve_browser_panel(websocket, session_id)
+
+
+async def serve_browser_panel(
+    websocket: WebSocket, session_id: str, *, login_only: bool = False,
+) -> None:
     # Handshake: hello, then the initial status (sent directly — no viewer
     # sender is running yet, so there is no concurrent writer to race).
     await safe_ws_send(websocket, {"type": "hello", "protocol": 1})
-    await safe_ws_send(websocket, await _initial_status(session_id))
+    initial = await _initial_status(session_id)
+    if login_only:
+        initial["url"] = None
+    await safe_ws_send(websocket, initial)
 
-    hub, viewer = await browser_stream.attach_viewer(session_id, websocket)
+    if login_only:
+        hub, viewer = await browser_stream.attach_viewer(session_id, websocket, redact_urls=True)
+    else:
+        hub, viewer = await browser_stream.attach_viewer(session_id, websocket)
     # Toolbar state for a hub that already existed (mid-navigation reconnect):
     # a brand-new hub broadcasts its first page frame soon after anyway.
     if isinstance(hub, browser_stream.BrowserStreamHub) and (
         hub.page_url is not None or hub.page_loading
     ):
-        await safe_ws_send(
-            websocket, {"type": "page", "url": hub.page_url, "loading": hub.page_loading}
+        await hub.send_to_viewer(
+            viewer, {"type": "page", "url": hub.page_url, "loading": hub.page_loading}
         )
     ping_task = asyncio.create_task(_panel_ping(hub, viewer))
 
@@ -190,6 +202,9 @@ async def browser_panel_websocket(
             mtype = data.get("type")
             if mtype == "pong":
                 continue
+            if login_only and mtype not in ("input", "command", "viewport"):
+                await websocket.close(code=4400, reason="Protocol violation")
+                break
             if mtype in ("input", "navigate", "command", "viewport"):
                 try:
                     cdp_cmd = browser_stream.translate_input(

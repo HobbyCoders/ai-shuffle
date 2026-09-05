@@ -1100,6 +1100,8 @@ def _run_column_migrations(cursor):
             ("needs_reauth", "BOOLEAN DEFAULT FALSE"),
             ("codex_refresh_lease_owner", "TEXT"),
             ("codex_refresh_lease_expires_at", "TIMESTAMP WITH TIME ZONE"),
+            ("openai_billing_org_id", "TEXT"),
+            ("openai_billing_instance_id", "TEXT"),
         )
         for _col, _decl in _codex_provider_columns:
             if not column_exists(cursor, "model_providers", _col):
@@ -2866,6 +2868,8 @@ from app.db.model_providers import (  # noqa: F401
     get_codex_tokens,
     try_claim_codex_refresh,
     release_codex_refresh_claim,
+    set_openai_billing_binding,
+    clear_openai_billing_binding,
 )
 
 from app.db.usage_snapshots import (  # noqa: F401
@@ -2875,6 +2879,7 @@ from app.db.usage_snapshots import (  # noqa: F401
 )
 
 from app.db.provider_usage_snapshots import (  # noqa: F401
+    record_provider_usage_failure,
     upsert_provider_usage_snapshot,
     get_all_provider_usage_snapshots,
     delete_provider_usage_snapshot,

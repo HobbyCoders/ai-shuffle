@@ -315,11 +315,11 @@ class TestUsageLimitsProviders:
         fetched = int(time.time() * 1000)
         if balance is not None:
             db.upsert_provider_usage_snapshot(
-                "openai-api", "openai", None, [], {"balance_remaining": balance}, {}, fetched
+                "prov-openai", "openai", None, [], {"balance_remaining": balance}, {}, fetched
             )
-        record_provider_usage_failure("openai-api", "openai", "billing_access_denied")
+        record_provider_usage_failure("prov-openai", "openai", "billing_access_denied")
         db.upsert_provider_usage_snapshot(
-            "openai-api", "openai", None, [], None, {"x-ratelimit-limit-requests": "500"}, fetched + 9999
+            "prov-openai", "openai", None, [], None, {"x-ratelimit-limit-requests": "500"}, fetched + 9999
         )
         with patch("app.api.usage.usage_limits_monitor") as mon:
             mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
@@ -340,6 +340,43 @@ class TestUsageLimitsProviders:
         assert response.json()["provider_refreshing"] is True
         cached_provider_poll.request_refresh.assert_called_once_with(force=True)
         cached_provider_poll.poll_once.assert_not_called()
+
+    @pytest.mark.parametrize("balance", [None, 0.0, 12.5])
+    @pytest.mark.parametrize("configured", [False, True])
+    def test_retired_oauth_snapshot_hidden_without_merging_real_providers(self, balance, configured):
+        from app.db import database as db
+        from app.db.provider_usage_snapshots import record_provider_usage_failure
+
+        fetched = int(time.time() * 1000)
+        db.upsert_provider_usage_snapshot(
+            "openai-api", "openai", None, [],
+            {"balance_remaining": balance} if balance is not None else None, {}, fetched,
+        )
+        record_provider_usage_failure("openai-api", "openai", "billing_access_denied")
+        db.upsert_provider_usage_snapshot(
+            "prov-chatgpt", "chatgpt", "pro", [{"type": "five_hour", "utilization": 12}],
+            {"balance": 99}, {}, fetched,
+        )
+        if configured:
+            record_provider_usage_failure("prov-openai", "openai", "billing_access_denied")
+            db.upsert_provider_usage_snapshot(
+                "prov-openai-2", "openai", None, [], {"balance_remaining": 0}, {}, fetched,
+            )
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=dict(_CLAUDE_SNAPSHOT))
+            response = _client().get("/api/v1/usage/limits")
+        assert response.status_code == 200
+        body = response.json()
+        _assert_claude_fields_unchanged(body)
+        entries = {entry["provider_id"]: entry for entry in body["providers"]}
+        expected = {"prov-chatgpt", "prov-openai", "prov-openai-2"} if configured else {"prov-chatgpt"}
+        assert set(entries) == expected
+        assert entries["prov-chatgpt"]["credits"] is None
+        assert entries["prov-chatgpt"]["windows"][0]["utilization"] == 12
+        if configured:
+            assert entries["prov-openai"]["last_error_kind"] == "billing_access_denied"
+            assert entries["prov-openai-2"]["credits"] == {"balance_remaining": 0}
+        assert any(row["provider_id"] == "openai-api" for row in db.get_all_provider_usage_snapshots())
 
     def test_seeded_rows_returned_with_joined_name(self):
         from app.db import database as db
@@ -524,8 +561,8 @@ class TestUsageLimitsProviders:
         assert entry["provider_type"] == "fal"
         assert entry["credits"]["balance_remaining"] == 24.5
 
-    def test_openai_api_synthetic_snapshot_surfaces_with_brand_name(self):
-        """ChatGPT-oauth credit_grants lands under synthetic id openai-api."""
+    def test_retired_oauth_balance_is_not_a_platform_account(self):
+        """Old successful OAuth snapshots must not outlive the retired fallback."""
         from app.db import database as db
 
         db.upsert_provider_usage_snapshot(
@@ -540,13 +577,7 @@ class TestUsageLimitsProviders:
 
         assert resp.status_code == 200
         providers = resp.json()["providers"]
-        assert len(providers) == 1
-        entry = providers[0]
-        assert entry["provider_id"] == "openai-api"
-        assert entry["provider_name"] == "OpenAI"
-        assert entry["provider_type"] == "openai"
-        assert entry["windows"] == []
-        assert entry["credits"]["balance_remaining"] == 12.5
+        assert providers == []
 
     def test_provider_load_exception_yields_empty_providers_with_200(self):
         """A DB hiccup inside _load_provider_usage degrades to providers: [] and

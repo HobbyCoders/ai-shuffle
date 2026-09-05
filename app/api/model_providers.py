@@ -41,9 +41,12 @@ from app.core import (
 )
 from app.db import database as db
 
+from app.api import openai_billing
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/model-providers", tags=["Model Providers"])
+router.include_router(openai_billing.router)
 
 _VALID_PROVIDER_TYPES = ("openrouter", "custom", "openai", "chatgpt", "xai", "grok")
 
@@ -113,6 +116,8 @@ class ModelProviderResponse(BaseModel):
     needs_reauth: bool = False
     codex_access_token_set: bool = False
     codex_refresh_token_set: bool = False
+    openai_billing_org_id: Optional[str] = None
+    openai_billing_instance_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -309,6 +314,8 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         needs_reauth=bool(row.get("needs_reauth")),
         codex_access_token_set=bool(row.get("_codex_access_token_set")),
         codex_refresh_token_set=bool(row.get("_codex_refresh_token_set")),
+        openai_billing_org_id=row.get("openai_billing_org_id"),
+        openai_billing_instance_id=row.get("openai_billing_instance_id"),
         created_at=_iso(row.get("created_at")),
         updated_at=_iso(row.get("updated_at")),
     )
@@ -823,10 +830,13 @@ async def update_provider(
         updates["auth_token"] = _encrypt_token_or_400(raw_token)
 
     if updates:
-        row = db.update_model_provider(provider_id, **updates)
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                                detail="Model provider not found")
+        async with openai_billing.openai_billing_browser.operation_lock(provider_id):
+            row = db.update_model_provider(provider_id, **updates)
+            if row is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                    detail="Model provider not found")
+            if not row.get("enabled") or not openai_billing._is_openai_platform_row(row):
+                await openai_billing.close_provider_billing(provider_id)
 
     full_row = _row_with_token_flags(provider_id)
     return _public_provider(full_row)
@@ -841,10 +851,12 @@ async def delete_provider(provider_id: str, token: str = Depends(require_admin))
     failure NEVER blocks deletion (the credential row is going away regardless).
     """
     await _best_effort_revoke_codex(provider_id)
-    deleted = db.delete_model_provider(provider_id)
-    if not deleted:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail="Model provider not found")
+    async with openai_billing.openai_billing_browser.operation_lock(provider_id):
+        await openai_billing.close_provider_billing(provider_id)
+        deleted = db.delete_model_provider(provider_id)
+        if not deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Model provider not found")
     return {"success": True}
 
 
@@ -877,10 +889,13 @@ async def toggle_provider(provider_id: str, token: str = Depends(require_admin))
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
 
-    row = db.set_model_provider_enabled(provider_id, not bool(existing.get("enabled")))
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail="Model provider not found")
+    async with openai_billing.openai_billing_browser.operation_lock(provider_id):
+        row = db.set_model_provider_enabled(provider_id, not bool(existing.get("enabled")))
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Model provider not found")
+        if not row.get("enabled"):
+            await openai_billing.close_provider_billing(provider_id)
 
     full_row = _row_with_token_flags(provider_id)
     return _public_provider(full_row)

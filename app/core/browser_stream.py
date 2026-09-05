@@ -395,10 +395,11 @@ class _Viewer:
     the frame sender, status broadcasts and pings never interleave.
     """
 
-    __slots__ = ("websocket", "queue", "sender_task", "send_lock")
+    __slots__ = ("websocket", "queue", "sender_task", "send_lock", "redact_urls")
 
-    def __init__(self, websocket: WebSocket) -> None:
+    def __init__(self, websocket: WebSocket, *, redact_urls: bool = False) -> None:
         self.websocket = websocket
+        self.redact_urls = redact_urls
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         self.sender_task: Optional[asyncio.Task] = None
         self.send_lock = asyncio.Lock()
@@ -445,8 +446,8 @@ class BrowserStreamHub:
         return len(self.viewers)
 
     # -- viewers -------------------------------------------------------------
-    async def add_viewer(self, websocket: WebSocket) -> _Viewer:
-        viewer = _Viewer(websocket)
+    async def add_viewer(self, websocket: WebSocket, *, redact_urls: bool = False) -> _Viewer:
+        viewer = _Viewer(websocket, redact_urls=redact_urls)
         self.viewers.add(viewer)
         viewer.sender_task = asyncio.create_task(self._viewer_sender(viewer))
         return viewer
@@ -474,6 +475,8 @@ class BrowserStreamHub:
 
     async def send_to_viewer(self, viewer: _Viewer, msg: dict) -> bool:
         """Serialised write to one viewer. Returns False on a dead connection."""
+        if viewer.redact_urls and "url" in msg:
+            msg = {**msg, "url": None}
         async with viewer.send_lock:
             try:
                 await safe_ws_send(viewer.websocket, msg)
@@ -868,14 +871,16 @@ _hubs: Dict[str, BrowserStreamHub] = {}
 _hubs_lock = asyncio.Lock()
 
 
-async def attach_viewer(session_id: str, websocket: WebSocket) -> Tuple[BrowserStreamHub, _Viewer]:
+async def attach_viewer(
+    session_id: str, websocket: WebSocket, *, redact_urls: bool = False,
+) -> Tuple[BrowserStreamHub, _Viewer]:
     async with _hubs_lock:
         hub = _hubs.get(session_id)
         if hub is None:
             hub = BrowserStreamHub(session_id)
             _hubs[session_id] = hub
             hub.start()
-        viewer = await hub.add_viewer(websocket)
+        viewer = await hub.add_viewer(websocket, redact_urls=redact_urls)
         return hub, viewer
 
 
