@@ -1,0 +1,81 @@
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { mkdir } from 'node:fs/promises';
+const require = createRequire(new URL('../../browser-mcp/package.json', import.meta.url));
+const { chromium } = require('playwright-core');
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium', headless: true, args: ['--no-sandbox','--disable-gpu'] });
+const url = process.env.COMPOSER_FIXTURE_URL || 'http://127.0.0.1:5181/tests/composer-gesture.html';
+const artifacts = process.env.COMPOSER_ARTIFACTS || '/tmp/composer-gesture-artifacts';
+await mkdir(artifacts, { recursive: true });
+try {
+ const context = await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true,deviceScaleFactor:1,serviceWorkers:'block'});
+ const page = await context.newPage(); const errors=[]; page.on('pageerror', e=>{ errors.push(e.message); console.error(e.message); });
+ await context.route(url => url.pathname.startsWith('/api/'), route=>route.fulfill({json:[]}));
+ await page.goto(url); await page.locator('.tiptap').waitFor();
+ await page.screenshot({path:`${artifacts}/initial.png`});
+ const cdp=await context.newCDPSession(page);
+ async function swipe(selector, dx, dy, cancel=false) {
+  const box=await page.locator(selector).first().boundingBox(); assert.ok(box,selector);
+  const x=box.x+Math.min(box.width/2,80), y=box.y+box.height/2;
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y,id:1}]});
+  for(let i=1;i<=8;i++) { await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:x+dx*i/8,y:y+dy*i/8,id:1}]}); await page.waitForTimeout(25); }
+  await cdp.send('Input.dispatchTouchEvent',{type:cancel?'touchCancel':'touchEnd',touchPoints:[]});
+  await page.waitForTimeout(350);
+ }
+ const isOpen=()=>page.locator('.panel-reveal').getAttribute('aria-hidden').then(v=>v==='false');
+ await swipe('.tiptap',0,-90); assert.equal(await isOpen(),true,'collapsed editor swipe opens');
+ assert.equal(await page.locator('.tiptap').evaluate(e=>e.contains(document.activeElement)),false,'opening does not focus editor');
+ await page.screenshot({path:`${artifacts}/mobile-open.png`});
+ await swipe('.controls-panel .setting-label',0,100); assert.equal(await isOpen(),false,'down closes');
+ console.log('PASS collapsed swipe up, no focus theft, swipe down');
+ await page.locator('.tiptap').tap();
+ assert.equal(await isOpen(),false,'expanding tap does not activate settings');
+
+ await page.locator('.mobile-settings-trigger').tap(); assert.equal(await isOpen(),true,'settings button opens');
+ await page.locator('.mobile-settings-trigger').tap(); assert.equal(await isOpen(),false,'settings button closes');
+ console.log('PASS settings button');
+ await swipe('.controls-dock',0,-80,true); assert.equal(await isOpen(),false,'cancel does not open');
+ await swipe('.controls-dock',95,-5); assert.equal(await isOpen(),false,'horizontal does not open');
+ await swipe('.controls-dock',0,35); assert.equal(await isOpen(),false,'downward does not open');
+ console.log('PASS cancel, horizontal, downward');
+ const cancelBox=await page.locator('.controls-dock').boundingBox();
+ const cx=cancelBox.x+80,cy=cancelBox.y+cancelBox.height/2;
+ await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:cx,y:cy,id:1}]});
+ await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:cx,y:cy-20,id:1}]});
+ await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:cx,y:cy-20,id:1},{x:cx+30,y:cy-20,id:2}]});
+ await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+ assert.equal(await isOpen(),false,'multitouch cancels opening');
+ console.log('PASS multitouch cancellation');
+
+ await swipe('.controls-dock',0,-90); assert.equal(await isOpen(),true,'expanded non-editor surface opens');
+ await page.locator('.mobile-settings-trigger').tap();
+ assert.equal(await isOpen(),false,'deliberate tap after opening closes immediately');
+ console.log('PASS expanded composer');
+ await page.locator('.tiptap').fill(Array.from({length:35},(_,i)=>`Draft line ${i}: preserve native editor scrolling.`).join('\n'));
+ const scrollOwner=await page.locator('.tiptap').evaluate(e=> { let n=e; while(n && !(n.scrollHeight>n.clientHeight && /auto|scroll/.test(getComputedStyle(n).overflowY))) n=n.parentElement; if(!n) throw Error('No scroll owner'); n.scrollTop=0; n.setAttribute('data-fixture-scroll','true'); return n.className; });
+ await page.waitForTimeout(350);
+ await page.locator('[data-fixture-scroll]').evaluate(e=>e.scrollTop=0);
+ await page.screenshot({path:`${artifacts}/draft-before.png`});
+ await page.evaluate(()=>{ window.touchTrace=[]; for(const name of ['touchstart','touchmove','touchend','pointercancel']) window.addEventListener(name,e=>window.touchTrace.push({type:name,prevented:e.defaultPrevented,target:e.target.className}),{passive:true}); });
+ await swipe('[data-fixture-scroll]',0,-90);
+ assert.equal(await page.evaluate(()=>window.touchTrace.some(e=>e.prevented)),false,'draft touch events remain native'); assert.equal(await isOpen(),false,'draft swipe stays editor scrolling');
+ assert.ok(await page.locator('[data-fixture-scroll]').evaluate(e=>e.scrollTop)>0,`native scroll moved ${scrollOwner}`);
+ await page.screenshot({path:`${artifacts}/mobile-draft-scroll.png`});
+ console.log('PASS native draft scroll');
+ await swipe('.controls-dock',0,-90); assert.equal(await isOpen(),true,'non-editor surface opens with draft');
+ await page.locator('.mobile-settings-trigger').tap();
+ const before=await page.locator('.tiptap').innerText();
+ assert.ok(before.includes('Draft line 34'),'draft preserved');
+ const desktop=await browser.newContext({viewport:{width:1280,height:900},hasTouch:true,serviceWorkers:'block'});
+ const desktopPage=await desktop.newPage(); await desktopPage.goto(url); await desktopPage.locator('.tiptap').waitFor();
+ const desktopCDP=await desktop.newCDPSession(desktopPage);
+ const db=await desktopPage.locator('.tiptap').boundingBox(); const tx=db.x+30,ty=db.y+10;
+ await desktopCDP.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:tx,y:ty,id:1}]});
+ await desktopCDP.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:tx,y:ty-90,id:1}]});
+ await desktopCDP.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+ assert.equal(await desktopPage.locator('.panel-reveal').getAttribute('aria-hidden'),'true','desktop touch does not open');
+ await desktopPage.screenshot({path:`${artifacts}/desktop.png`});
+ console.log('PASS desktop gating');
+ assert.deepEqual(errors,[]);
+ console.log(`PASS all composer touch regressions; screenshots: ${artifacts}`);
+} finally { await browser.close(); }

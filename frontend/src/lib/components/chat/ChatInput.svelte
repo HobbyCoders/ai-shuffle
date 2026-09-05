@@ -42,6 +42,7 @@
 	import VoiceCallButton from './VoiceCallButton.svelte';
 	import StopButton from './StopButton.svelte';
 	import ControlsDock from './ControlsDock.svelte';
+	import { attachComposerOpen } from './mobile-panel-gesture';
 	import ContextPillBar from './ContextPillBar.svelte';
 	import { CornerDownLeft } from 'lucide-svelte';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips } from './tiptap/serialization';
@@ -244,6 +245,14 @@
 	let showFileAutocomplete = $state(false);
 	let composerFocused = $state(false);
 	let mobileControlsOpen = $state(false);
+	let controlsDockRef = $state<ControlsDock | null>(null);
+	function composerOpenGesture(node: HTMLFormElement) {
+		return attachComposerOpen(node, {
+			enabled: () => isMobileComposerViewport() && !mobileControlsOpen,
+			allowEditor: () => mobileCollapsed && !inputValue.trim() && !composerFocused,
+			onOpen: () => controlsDockRef?.openMobileSheet()
+		});
+	}
 	let commandJustSelected = false;
 	let commandAutocompleteRef = $state<CommandAutocomplete | null>(null);
 	let fileAutocompleteRef = $state<FileAutocomplete | null>(null);
@@ -877,6 +886,7 @@
 		{/if}
 
 		<form
+			use:composerOpenGesture
 			onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}
 			onpointerdown={handleComposerPointerDown}
 		>
@@ -995,6 +1005,7 @@
 				     are handed to it as a snippet so they stay bound to this
 				     component's recording state and render inside the form. -->
 				<ControlsDock
+					bind:this={controlsDockRef}
 					{onBrowserToggle}
 					{onBrowserPreload}
 					{browserOpen}

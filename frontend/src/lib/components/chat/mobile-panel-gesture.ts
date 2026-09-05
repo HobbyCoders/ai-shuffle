@@ -207,3 +207,122 @@ export function attachPanelDismiss(panel: HTMLElement, options: DismissOptions) 
 		window.removeEventListener('blur', cancel);
 	} };
 }
+
+interface ComposerOpenOptions {
+	enabled: () => boolean;
+	allowEditor: () => boolean;
+	onOpen: () => void;
+}
+
+/** Editor eligibility is sampled before pointerdown expands the collapsed form.
+ * Other composer surfaces remain available with a draft or expanded editor. */
+export function canStartComposerOpen(target: EventTarget | null, composer: HTMLElement, allowEditor: boolean): boolean {
+	const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
+	if (!element || !composer.contains(element) || element.closest('.mobile-composer-controls')) return false;
+	if (element.closest('input, textarea, select, [role="slider"]')) return false;
+	const editor = element.closest('[contenteditable]:not([contenteditable="false"]), [role="textbox"]');
+	if (editor && (!allowEditor || editor.contains(document.activeElement) || !window.getSelection()?.isCollapsed)) return false;
+	for (let current: Element | null = element; current; current = current.parentElement) {
+		if (current.scrollHeight > current.clientHeight && current.clientHeight > 0 && /auto|scroll/.test(getComputedStyle(current).overflowY)) return false;
+		if (current === composer) return true;
+	}
+	return false;
+}
+
+/** Upward counterpart, deliberately separate from panel dismissal. Touch events
+ * arbitrate before native pan; Pointer Events only snapshot pre-reflow eligibility. */
+export function attachComposerOpen(composer: HTMLElement, options: ComposerOpenOptions) {
+	let snapshot: { target: EventTarget | null; eligible: boolean } | null = null;
+	let gesture: PanelGesture | null = null;
+	let identifier = -1;
+	let origin: EventTarget | null = null;
+	let consumed = false;
+	let dragged = false;
+	let exceededTapSlop = false;
+	let suppressClickUntil = 0;
+	const point = (x: number, y: number) => ({ x, y: -y, time: performance.now() });
+	function clear() {
+		gesture = null; snapshot = null; identifier = -1; origin = null;
+		consumed = false; dragged = false; exceededTapSlop = false;
+	}
+	function cancel() {
+		if (consumed) suppressClickUntil = performance.now() + 500;
+		clear();
+	}
+	function eligible(target: EventTarget | null) {
+		return options.enabled() && canStartComposerOpen(target, composer, options.allowEditor());
+	}
+	function pointerDown(event: PointerEvent) {
+		if (event.pointerType !== 'touch') return;
+		if (gesture || event.isPrimary === false) { cancel(); return; }
+		// A fresh touch is intentional, not the previous drag's synthetic click.
+		suppressClickUntil = 0;
+		snapshot = { target: event.target, eligible: eligible(event.target) };
+	}
+	function start(event: TouchEvent) {
+		if (event.touches.length !== 1) { cancel(); return; }
+		if (gesture) return;
+		const allowed = snapshot?.target === event.target ? snapshot.eligible : eligible(event.target);
+		snapshot = null;
+		if (!allowed || !options.enabled()) return;
+		const touch = event.touches[0];
+		identifier = touch.identifier; origin = event.target; suppressClickUntil = 0;
+		gesture = createPanelGesture({ ...point(touch.clientX, touch.clientY), eligible: true });
+	}
+	function move(event: TouchEvent) {
+		if (!gesture) return;
+		if (event.touches.length !== 1 || !options.enabled() || !event.cancelable) { cancel(); return; }
+		const touch = Array.from(event.touches).find(t => t.identifier === identifier);
+		if (!touch) { cancel(); return; }
+		const next = point(touch.clientX, touch.clientY);
+		const dx = next.x - gesture.start.x, dy = next.y - gesture.start.y;
+		if (Math.max(Math.abs(dx), Math.abs(dy)) > 8) exceededTapSlop = true;
+		// Match dismissal's first-move arbitration, preserving its visual slop.
+		if (gesture.mode === 'pending' && (dx || dy)) gesture.mode = dy > 0 && dy > Math.abs(dx) ? 'dismiss' : 'scroll';
+		updatePanelGesture(gesture, next);
+		if (gesture.mode !== 'dismiss') return;
+		event.preventDefault(); consumed = true;
+		if (gesture.offset > 8) dragged = true;
+	}
+	function end(event: TouchEvent) {
+		if (!gesture) { snapshot = null; return; }
+		if (event.touches.length) { cancel(); return; }
+		const touch = Array.from(event.changedTouches).find(t => t.identifier === identifier);
+		if (!touch) { cancel(); return; }
+		const next = point(touch.clientX, touch.clientY);
+		const withinSlop = Math.max(Math.abs(next.x - gesture.start.x), Math.abs(next.y - gesture.start.y)) <= 8;
+		const element = origin instanceof Element ? origin : null;
+		const tap = consumed && !dragged && !exceededTapSlop && withinSlop && next.time - gesture.start.time < 500 && options.enabled()
+			? element?.closest<HTMLElement>('button, a[href], [role="button"], [role="checkbox"]') : null;
+		const open = options.enabled() && dragged && finishPanelGesture(gesture, next, 0);
+		if (consumed) suppressClickUntil = performance.now() + 500;
+		clear();
+		if (open) options.onOpen();
+		else if (tap && composer.contains(tap)) tap.click();
+	}
+	function click(event: MouseEvent) {
+		if (event.detail !== 0 && performance.now() < suppressClickUntil) {
+			event.preventDefault(); event.stopImmediatePropagation(); suppressClickUntil = 0;
+		}
+	}
+	// Window capture runs before ChatInput's document/form expansion handlers.
+	window.addEventListener('pointerdown', pointerDown, true);
+	window.addEventListener('touchstart', start, { capture: true, passive: true });
+	window.addEventListener('touchmove', move, { passive: false });
+	window.addEventListener('touchend', end);
+	window.addEventListener('touchcancel', cancel);
+	window.addEventListener('pointercancel', cancel);
+	window.addEventListener('blur', cancel);
+	composer.addEventListener('click', click, true);
+	return { cancel, destroy() {
+		cancel();
+		window.removeEventListener('pointerdown', pointerDown, true);
+		window.removeEventListener('touchstart', start, true);
+		window.removeEventListener('touchmove', move);
+		window.removeEventListener('touchend', end);
+		window.removeEventListener('touchcancel', cancel);
+		window.removeEventListener('pointercancel', cancel);
+		window.removeEventListener('blur', cancel);
+		composer.removeEventListener('click', click, true);
+	} };
+}

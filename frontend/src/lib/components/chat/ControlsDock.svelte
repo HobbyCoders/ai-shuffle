@@ -138,6 +138,9 @@
 
 	let mobileSheetOpen = $state(false);
 	const mobilePanelId = $props.id();
+	export function openMobileSheet() {
+		setMobileSheetOpen(true);
+	}
 	function setMobileSheetOpen(open: boolean) {
 		closePopover();
 		if (!open && document.activeElement?.closest('.mobile-composer-controls')) {
