@@ -943,6 +943,11 @@ class TurnRecorder:
             api_error: Optional[Dict[str, Any]] = None
             if metadata.get("api_error_status") is not None:
                 api_error = {"api_error_status": metadata["api_error_status"]}
+            # A provider can report a failed ResultMessage without HTTP status.
+            # Preserve these gates for post-settlement consumers as well.
+            for key in ("is_error", "errors"):
+                if metadata.get(key):
+                    api_error = {**(api_error or {}), key: metadata[key]}
             events.append(self._event(
                 contract.TurnCompleted,
                 stop_reason=metadata.get("stop_reason"),

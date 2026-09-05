@@ -377,7 +377,15 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
 
     # (3) AUTO-CONTINUE (#557) — only when nothing is queued (a queued turn
     # resumes work on its own, same gate as the legacy path).
-    await _maybe_auto_continue(session_id, settled, terminal)
+    if await _maybe_auto_continue(session_id, settled, terminal):
+        return
+
+    # Ephemeral UI assistance is last: never compete with successor work or
+    # delay settlement on a generation provider.
+    if outcome == "completed":
+        from app.core.composer_suggestions import schedule_suggestion
+
+        schedule_suggestion(session_id, turn_id)
 
 
 async def _maybe_failover(
@@ -864,6 +872,7 @@ def _mark_terminal_notified(session_id: str, task_ids: List[str]) -> None:
         for task_id in task_ids:
             if not task_id:
                 continue
+            task_registry.mark_background_notification_delivered(session_id, task_id)
             if task_registry.mark_terminal_notified(session_id, task_id):
                 task_registry.update_task(session_id, task_id)
     except Exception:  # noqa: BLE001 — bookkeeping never breaks a delivery.

@@ -17,6 +17,18 @@ beforeEach(() => { vi.resetModules(); localStorage.clear(); bindings.clear(); sa
  Object.defineProperty(window, 'matchMedia', { configurable: true, value: vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })) });
 });
 describe('persistent semantic preference inventory', () => {
+ it('next-reply suggestions default off and sync through chat_behavior', async () => {
+  const loaded = await stores(); const chat = loaded[2].chatPreferences;
+  expect(chat.current.suggestNextResponse).toBe(false);
+  bindings.get('chat_behavior')!.apply({suggestNextResponse:true});
+  expect(chat.current.suggestNextResponse).toBe(true);
+  expect(save).not.toHaveBeenCalled();
+  bindings.get('chat_behavior')!.apply(undefined);
+  expect(chat.current.suggestNextResponse).toBe(false);
+  chat.updatePreference('suggestNextResponse', true);
+  expect((bindings.get('chat_behavior')!.read() as {suggestNextResponse:boolean}).suggestNextResponse).toBe(true);
+  expect(save).toHaveBeenCalled();
+ });
  it('registers every semantic preference, never navigation, auth, drafts, or device IDs', async () => {
   const loaded = await stores(); expect(bindings.size).toBe(loaded.length);
   expect([...bindings.keys()].sort()).toEqual(['theme','timezone','chat_behavior','hotkey_settings','git_action_settings','model_favorites','files_preferences','groups','layout','sidebar_workspace','session_mode','notification_sound','browser_panel'].sort());

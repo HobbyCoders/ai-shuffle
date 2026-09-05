@@ -19,6 +19,8 @@
 	import { tick, onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
+	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
+	import { composerSuggestion, suggestionKey, hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { profiles } from '$lib/stores/app-data.svelte';
@@ -179,8 +181,33 @@
 		saveDraftImmediately();
 	});
 
+	let isUploading = $state(false);
 	let editorRef = $state<TiptapEditor | null>(null);
 	let prevSessionId = $state($activeSession.sessionId);
+
+	// Subscribe synchronously: effects may coalesce a short live→idle transition.
+	onMount(() => {
+		let session = get(activeSession);
+		let enabled = chatPreferences.current.suggestNextResponse;
+		const observe = () => composerSuggestion.observe({
+			sessionId: session.sessionId, mode: session.mode, enabled,
+			turnId: session.liveTurnId, streaming: session.isStreaming,
+			blocked: hasComposerDraft(session.draft) || !!session.error
+		});
+		const stopSession = activeSession.subscribe(value => { session = value; observe(); });
+		const stopPrefs = chatPreferences.subscribe(value => { enabled = value.suggestNextResponse; observe(); });
+		return () => { stopSession(); stopPrefs(); composerSuggestion.reset(); };
+	});
+	$effect(() => {
+		if (hasComposerDraft(inputValue) || uploadedFiles.length || isUploading) composerSuggestion.invalidate();
+	});
+	const ghostReply = $derived($composerSuggestion && !hasComposerDraft(inputValue) && !uploadedFiles.length &&
+		!isUploading && !$activeSession.isStreaming && $chatPreferences.suggestNextResponse ? $composerSuggestion : '');
+	function acceptSuggestion() {
+		if (!ghostReply || !editorRef) return;
+		const text = composerSuggestion.accept();
+		if (text) { editorRef.setPlainText(text); editorRef.focus(); }
+	}
 
 	// Sync editor content when session changes (ChatInput is NOT keyed by sessionId).
 	// Because this single component is reused across sessions, it is solely
@@ -231,7 +258,6 @@
 
 
 	let fileInputRef = $state<HTMLInputElement | null>(null);
-	let isUploading = $state(false);
 
 	// Voice recording state (bindable from VoiceRecorder)
 	let isRecording = $state(false);
@@ -504,6 +530,7 @@
 	// steer, or the start of the next turn). Until then it renders as a pending
 	// bubble at the tail of the transcript.
 	async function sendMessage(finalPrompt: string) {
+		composerSuggestion.invalidate();
 		// Mark that we're sending - prevents onDestroy from overwriting the cleared draft
 		// This is critical for the first message when the component gets destroyed/recreated
 		messageSent = true;
@@ -588,6 +615,18 @@
 
 	// Handle keydown for textarea
 	function handleKeyDown(e: KeyboardEvent) {
+		// Never turn an IME confirmation, held key, or modifier shortcut into Send.
+		if (e.isComposing || e.keyCode === 229 || e.repeat || e.ctrlKey || e.altKey || e.metaKey) return;
+		if (ghostReply) {
+			const action = suggestionKey(e);
+			if (action) {
+				e.preventDefault();
+				e.stopImmediatePropagation();
+				if (action === 'accept') acceptSuggestion();
+				else composerSuggestion.invalidate();
+				return true;
+			}
+		}
 		// Let command autocomplete handle the event first
 		if (commandAutocompleteRef && showCommandAutocomplete) {
 			const handled = commandAutocompleteRef.handleKeyDown(e);
@@ -941,17 +980,28 @@
 							onClose={() => showFileAutocomplete = false}
 						/>
 
+						{#if ghostReply}
+							<div class="composer-suggestion" data-testid="composer-suggestion">
+								<span class="suggestion-text">{ghostReply}</span>
+								<div class="suggestion-actions">
+									<button type="button" onclick={acceptSuggestion} aria-label="Use suggested reply">Use reply <span aria-hidden="true">↹</span></button>
+									<button type="button" onclick={() => composerSuggestion.invalidate()} aria-label="Dismiss suggested reply">Dismiss</button>
+								</div>
+							</div>
+						{/if}
 						<TiptapEditor
 							bind:this={editorRef}
-							placeholder={composerPlaceholder}
+							placeholder={ghostReply ? '' : composerPlaceholder}
 							initialContent={initialComposerDraft}
 							disabled={!$anyCredential}
 							onTextChange={(text) => {
+								composerSuggestion.invalidate();
 								inputValue = text;
 								// Also update plain text for autocomplete (without chip @path serialization)
 								plainTextValue = editorRef?.getText() ?? '';
 								handleInputChange();
 							}}
+							onUserInput={() => composerSuggestion.invalidate()}
 							onKeyDown={handleKeyDown}
 							onFocusChange={(focused) => {
 								composerFocused = focused;
@@ -984,7 +1034,7 @@
 							{/if}
 							<StopButton
 								activeTasks={$activeSession.activeTasks}
-								onStop={() => activeSession.stopGeneration()}
+								onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
 							/>
 						{:else}
 							<button
@@ -1041,6 +1091,42 @@
 </div>
 
 <style>
+	.composer-suggestion {
+		color: var(--muted-foreground);
+		padding: 0.5rem 0.75rem 0;
+		font-size: 0.875rem;
+	}
+
+	.suggestion-text {
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		display: block;
+		max-height: 8rem;
+		overflow: auto;
+	}
+
+	.suggestion-actions {
+		display: flex;
+		gap: 0.5rem;
+	}
+
+	.suggestion-actions button {
+		min-height: 44px;
+		padding: 0 0.5rem;
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+	}
+
+	.suggestion-actions button:hover {
+		color: var(--foreground);
+	}
+
+	.suggestion-actions button:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+		border-radius: 4px;
+	}
+
 	/* ===== DOCK =====
 	   Mirrors the mockup's `.dock`: the composer floats over the transcript with
 	   generous bottom padding and no surface of its own. */

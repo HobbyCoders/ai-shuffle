@@ -18,6 +18,7 @@
 		initialContent?: string;
 		disabled?: boolean;
 		onTextChange?: (text: string) => void;
+		onUserInput?: () => void;
 		onKeyDown?: (event: KeyboardEvent) => boolean | void;
 		onFocusChange?: (focused: boolean) => void;
 	}
@@ -27,6 +28,7 @@
 		initialContent = '',
 		disabled = false,
 		onTextChange,
+		onUserInput,
 		onKeyDown,
 		onFocusChange
 	}: Props = $props();
@@ -71,13 +73,23 @@
 			liveDictation = createLiveDictation(editor);
 
 			// Add keydown handler to the editor element
-			boundElement.addEventListener('keydown', handleEditorKeyDown);
+			boundElement.addEventListener('keydown', handleEditorKeyDown, true);
+			boundElement.addEventListener('beforeinput', handleUserInput);
+			boundElement.addEventListener('input', handleUserInput);
+			boundElement.addEventListener('compositionstart', handleUserInput);
+			boundElement.addEventListener('paste', handleUserInput);
+			boundElement.addEventListener('drop', handleUserInput);
 		}
 	});
 
 	onDestroy(() => {
 		if (boundElement) {
-			boundElement.removeEventListener('keydown', handleEditorKeyDown);
+			boundElement.removeEventListener('keydown', handleEditorKeyDown, true);
+			boundElement.removeEventListener('beforeinput', handleUserInput);
+			boundElement.removeEventListener('input', handleUserInput);
+			boundElement.removeEventListener('compositionstart', handleUserInput);
+			boundElement.removeEventListener('paste', handleUserInput);
+			boundElement.removeEventListener('drop', handleUserInput);
 		}
 		liveDictation?.destroy();
 		editor?.destroy();
@@ -89,6 +101,8 @@
 		if (!editor) return;
 		setEditorPlaceholder(editor, newPlaceholder);
 	});
+
+	function handleUserInput() { onUserInput?.(); }
 
 	function handleEditorKeyDown(event: KeyboardEvent) {
 		// Let parent component handle first (for autocomplete, etc.)
@@ -136,6 +150,17 @@
 	/** Blur the editor, allowing the mobile composer to return to its compact state. */
 	export function blur() {
 		editor?.commands.blur();
+	}
+
+	/** Model suggestions are text, never HTML or an editor JSON document. */
+	export function setPlainText(text: string) {
+		editor?.commands.setContent({
+			type: 'doc',
+			content: text.split('\n').map(line => ({
+				type: 'paragraph',
+				...(line ? { content: [{ type: 'text', text: line }] } : {})
+			}))
+		});
 	}
 
 	/**

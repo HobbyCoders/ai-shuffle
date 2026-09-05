@@ -86,6 +86,17 @@
 </div>
 
 {#if chatPrefs}
+	<div class="set-group">
+		<div class="set-grouphead"><h3><MessageSquare />Reply suggestions</h3></div>
+		<div class="set-row">
+			<div class="lab"><h4>Suggest next reply</h4><p>In code chats, send the final assistant response to your configured generated-text model for a suggested reply. Uses an extra model call. Suggestions are never sent automatically.</p></div>
+			<div class="ctl">
+				<button type="button" class="switch" class:on={chatPrefs.suggestNextResponse}
+					role="switch" aria-checked={chatPrefs.suggestNextResponse} aria-label="Suggest next reply"
+					onclick={() => chatPreferences.updatePreference('suggestNextResponse', !chatPrefs?.suggestNextResponse)}><i></i></button>
+			</div>
+		</div>
+	</div>
 	<!-- Reasoning & tools -->
 	<div class="set-group">
 		<div class="set-grouphead">

@@ -872,6 +872,7 @@ class TaskRegistry:
             # back to running (failures stay terminal — that's a stale leak).
             if existing.get("status") == "completed":
                 existing["status"] = "running"
+                existing.pop("notification_delivered", None)
                 retained = self._recent_terminal.get(session_id)
                 if retained is not None:
                     retained.pop(task_id, None)
@@ -1216,6 +1217,33 @@ class TaskRegistry:
             return any(tuid not in resolved for tuid in launches)
         except Exception:  # noqa: BLE001 — a stray shape must never raise.
             return bool(launches)
+
+    def mark_background_notification_delivered(self, session_id: str, task_id: str) -> None:
+        """Model receipt, distinct from the terminal UI-chip callback latch."""
+        record = self._tasks.get(session_id, {}).get(task_id)
+        if record is not None:
+            record["notification_delivered"] = True
+
+    def has_pending_composer_work(self, session_id: str) -> bool:
+        """Completion hand-offs still awaiting delivery, including missing rows.
+
+        Unlike park/pool gates this is conservative: serving jobs also block
+        composer hints (the caller checks get_active). Never truncate to the
+        taskbar's retained/display limit or treat wake submission as delivery.
+        """
+        if session_id in self._unpark_pending:
+            return True
+        ids = (self._sdk_background_tasks.get(session_id, set())
+               | self._monitor_shell_tasks.get(session_id, set())
+               | self._subagent_background_tasks.get(session_id, set()))
+        ids = ids | {
+            task_id for task_id, record in self._tasks.get(session_id, {}).items()
+            if record.get("tool_use_id") in self._background_launches.get(session_id, set())
+        }
+        return any(
+            not self._tasks.get(session_id, {}).get(task_id, {}).get("notification_delivered")
+            for task_id in ids - self._wake_suppressed.get(session_id, set())
+        )
 
     def get_all(self, session_id: str, *, limit: int = 50) -> List[Dict[str, Any]]:
         """Running + recently-finished tasks, newest-first, each as a wire dict.

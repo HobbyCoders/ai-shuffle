@@ -22,6 +22,7 @@ import { startFixChat } from '$lib/services/fix-with-ai';
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
 import { pendingQueue } from './pending-queue';
+import { composerSuggestion } from './composer-suggestion';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -385,6 +386,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 		const state = getState();
 		const eventSessionId = data.session_id as string | undefined;
+		if (msgType === 'composer_suggestion') {
+			composerSuggestion.receive(data);
+			return;
+		}
+		if (['stopped', 'interrupted', 'error'].includes(msgType) &&
+			(!eventSessionId || eventSessionId === state.sessionId)) composerSuggestion.invalidate();
 
 		// Handle sync events from other devices / server-originated broadcasts
 		if (eventType) {

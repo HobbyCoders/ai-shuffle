@@ -51,6 +51,8 @@ import { notify } from '../notifications';
 import { startFixChat } from '$lib/services/fix-with-ai';
 import { feedController } from './v2/feed-controller';
 import { pendingQueue } from './pending-queue';
+import { composerSuggestion } from './composer-suggestion';
+import { get } from 'svelte/store';
 
 // ─── Test Helpers ───────────────────────────────────────────────────────────
 
@@ -164,6 +166,30 @@ describe('ws-message-handlers', () => {
 		(feedController.isFeeding as ReturnType<typeof vi.fn>).mockReturnValue(false);
 		deps = createMockDeps();
 		handlers = createMessageHandlers(deps);
+	});
+
+	describe('composer suggestions', () => {
+		const idle = { sessionId: 'session-1', mode: 'code', enabled: true, turnId: null, streaming: false, blocked: false };
+		const frame = { type: 'composer_suggestion', session_id: 'session-1', turn_id: 'reply-turn', suggestion: 'Explain the tests.' };
+		beforeEach(() => {
+			composerSuggestion.reset(); composerSuggestion.observe(idle);
+			composerSuggestion.observe({ ...idle, turnId: 'reply-turn', streaming: true });
+		});
+		it.each([true, false])('routes direct/enveloped broadcasts without ordering loss (envelope: %s)', envelope => {
+			handlers.handleMessage(envelope ? { event_type: 'stream_frame', data: frame } : frame);
+			expect(get(composerSuggestion)).toBe('');
+			handlers.handleMessage({type:'done',session_id:'session-1'});
+			composerSuggestion.observe(idle);
+			expect(get(composerSuggestion)).toBe(frame.suggestion);
+		});
+		it.each(['stopped','interrupted','error'])('invalidates current-session %s, not background events', type => {
+			composerSuggestion.observe(idle); handlers.handleMessage(frame);
+			handlers.handleMessage({type,session_id:'other',message:'test'});
+			expect(get(composerSuggestion)).toBe(frame.suggestion);
+			handlers.handleMessage({type,session_id:'session-1',message:'test'});
+			expect(get(composerSuggestion)).toBe('');
+			handlers.handleMessage(frame); expect(get(composerSuggestion)).toBe('');
+		});
 	});
 
 	describe('message dispatch', () => {

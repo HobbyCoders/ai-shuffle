@@ -20,6 +20,7 @@ import { createSubscribers } from './store-utils';
 
 // Default values for all chat preferences
 export interface ChatPreferences {
+	suggestNextResponse: boolean;       // Offer an ephemeral next-reply draft (extra model call)
 	// Thinking blocks
 	showThinkingBlocks: boolean;        // Whether to show thinking blocks at all
 	thinkingStartExpanded: boolean;     // Initial collapse state for thinking blocks
@@ -44,6 +45,7 @@ export interface ChatPreferences {
 }
 
 const DEFAULT_PREFERENCES: ChatPreferences = {
+	suggestNextResponse: false,
 	showThinkingBlocks: true,
 	thinkingStartExpanded: false,       // Collapsed by default (current behavior)
 	showThinkingSummary: true,          // Show summary when collapsed by default
