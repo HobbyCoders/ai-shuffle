@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { tick } from 'svelte';
+	import { NO_ADJUSTABLE_EFFORT } from '$lib/constants/model-effort';
 	import { attachPanelDismiss } from './mobile-panel-gesture';
 	import { ArrowLeft, ChevronRight, Zap } from 'lucide-svelte';
 	import ContextPillBar from './ContextPillBar.svelte';
@@ -133,13 +134,17 @@
 					<ContextPillBar sheetMode />
 				{/if}
 				<div class="quick-setting" role="group" aria-label="Reasoning effort">
-					<div class="setting-label"><span>Reasoning effort</span><small>{effortValue ? '' : 'Auto'}</small></div>
-					<div class="effort-choices">
+					<div class="setting-label"><span>Reasoning effort</span><small>{!effortOptions.length ? 'Not adjustable' : effortValue ? '' : 'Auto'}</small></div>
+					{#if !effortOptions.length}
+						<p class="setting-description">{NO_ADJUSTABLE_EFFORT}</p>
+					{:else}
+					<div class="effort-choices" style={`grid-template-columns: repeat(${effortOptions.length}, minmax(0, 1fr))`}>
 						{#each effortOptions as option (option.value)}
 							<button type="button" class="quick-choice" aria-pressed={option.value === effortValue}
 								title={option.description} onclick={() => onEffortSelect(option.value)}>{option.label}</button>
 						{/each}
 					</div>
+					{/if}
 				</div>
 				{#if showCodeControls}
 					<div class="quick-setting" role="group" aria-label="Tool access">

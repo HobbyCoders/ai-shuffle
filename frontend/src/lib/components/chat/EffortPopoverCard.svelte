@@ -4,7 +4,7 @@
 	 * composer's effort tag (mockup: docs/design/composer-split-chips.mockup.html,
 	 * state 03).
 	 *
-	 * Header "Effort · <level>" with a five-stop slider, tick marks, the stop
+	 * Header "Effort · <level>" with a model-specific slider, tick marks, the stop
 	 * names, and Faster / Smarter end labels. The Fast service tier rides along
 	 * in the header when the picked model carries it, so the compact card never
 	 * hides a knob the full controls popover offers.
@@ -15,6 +15,7 @@
 	 * drag pins a level.
 	 */
 	import { Zap } from 'lucide-svelte';
+	import { NO_ADJUSTABLE_EFFORT } from '$lib/constants/model-effort';
 
 	interface ControlOption {
 		value: string;
@@ -46,7 +47,7 @@
 	const maxIndex = $derived(Math.max(options.length - 1, 0));
 	const index = $derived(pinned ? pinnedIndex : Math.floor(maxIndex / 2));
 	const current = $derived(options[index]);
-	const currentLabel = $derived(pinned ? (current?.label ?? 'Effort') : 'Auto');
+	const currentLabel = $derived(!options.length ? 'Not adjustable' : pinned ? (current?.label ?? 'Effort') : 'Auto');
 	const progress = $derived(maxIndex > 0 ? (index / maxIndex) * 100 : 0);
 
 	function handleInput(event: Event) {
@@ -78,6 +79,12 @@
 		{/if}
 	</div>
 
+	{#if options.length === 0}
+		<p class="effort-explanation">{NO_ADJUSTABLE_EFFORT}</p>
+	{:else if options.length === 1}
+		<button type="button" class="single-effort" aria-pressed={pinned}
+			onclick={() => onSelect(options[0].value)}>{options[0].label}</button>
+	{:else}
 	<!-- The track, fill and ticks are drawn by hand underneath a native range
 	     input whose own track is transparent, so the thumb stays a real,
 	     keyboard-reachable control while the marks sit between it and the
@@ -102,15 +109,19 @@
 			oninput={handleInput}
 		/>
 	</div>
-	<div class="stops" aria-hidden="true">
+	<div class="stops" style={`grid-template-columns: repeat(${options.length}, 0fr)`} aria-hidden="true">
 		{#each options as option, i (option.value)}
 			<span class:on={pinned && i === index}>{option.label}</span>
 		{/each}
 	</div>
 	<div class="ends" aria-hidden="true"><span>Faster</span><span>Smarter</span></div>
+	{/if}
 </div>
 
 <style>
+	.effort-explanation { font-size: 12px; color: var(--muted-foreground); }
+	.single-effort { padding: 6px 12px; border-radius: 6px; background: var(--muted); color: var(--foreground); }
+	.single-effort:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 	.effort-pop-card {
 		padding: 12px 14px;
 		min-width: 0;
@@ -302,7 +313,7 @@
 	   its stop, inset by half the thumb like the track. */
 	.stops {
 		display: grid;
-		grid-template-columns: repeat(5, 0fr);
+		/* One label per effective level; the count comes from the registry. */
 		justify-content: space-between;
 		padding: 0 calc(var(--thumb) / 2);
 		margin-top: 4px;

@@ -17,6 +17,22 @@ function slider(): HTMLInputElement {
 }
 
 describe('EffortPopoverCard', () => {
+	it('explains no adjustable effort without hiding fast mode', async () => {
+		const onToggleFast = vi.fn();
+		render(EffortPopoverCard, { props: { options: [], value: null, onSelect: vi.fn(), fastSupported: true, onToggleFast } });
+		expect(screen.queryByRole('slider')).toBeNull();
+		expect(screen.getByText('Adjustable reasoning effort is not available for this model in AI Shuffle.')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Fast mode' }));
+		expect(onToggleFast).toHaveBeenCalledOnce();
+	});
+
+	it('renders a single supported level as a button, not a zero-range slider', async () => {
+		const onSelect = vi.fn();
+		render(EffortPopoverCard, { props: { options: [options[2]], value: null, onSelect } });
+		expect(screen.queryByRole('slider')).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: 'High' }));
+		expect(onSelect).toHaveBeenCalledWith('high');
+	});
 	it('shows the pinned level and a five-stop slider', () => {
 		render(EffortPopoverCard, { props: { options, value: 'high', onSelect: vi.fn() } });
 

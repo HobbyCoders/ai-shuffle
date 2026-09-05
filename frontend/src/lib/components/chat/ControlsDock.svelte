@@ -38,6 +38,7 @@
 	import EffortPopoverCard from './EffortPopoverCard.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
+	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort } from '$lib/constants/model-effort';
 	import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
 	import { Plus, SlidersHorizontal } from 'lucide-svelte';
 	import {
@@ -321,19 +322,21 @@
 		{ value: 'bypassPermissions', label: 'Bypass', description: 'Execute all tools' }
 	];
 
-	const effortLevels = [
-		{ value: 'low', label: 'Low', description: 'Quick, minimal reasoning' },
-		{ value: 'medium', label: 'Medium', description: 'Balanced reasoning' },
-		{ value: 'high', label: 'High', description: 'Thorough reasoning' },
-		{ value: 'xhigh', label: 'XHigh', description: 'Extreme reasoning' },
-		{ value: 'max', label: 'Max', description: 'Maximum reasoning depth' }
-	];
+	const effortModel = $derived(resolveEffortModel(
+		$activeSession.modelOverride, liveModel, liveRequestedModel, $activeSession.liveProvider
+	));
+	const effortCapability = $derived(resolveModelEffort(effortModel));
+	const effortLevels = $derived(effortCapability.options);
+	$effect(() => {
+		const reconciled = reconcileModelEffort(effortValue, effortCapability);
+		if (reconciled !== effortValue) activeSession.setEffortLevelOverride(reconciled);
+	});
 
 	// Effort shows its pinned level when one is set, else "Auto" (the model's
 	// own default); access always names the effective mode (it defaults to
 	// 'default' → Ask, never blank).
 	const effortLabel = $derived(
-		effortValue ? (effortLevels.find((m) => m.value === effortValue)?.label ?? 'Effort') : 'Auto'
+		!effortLevels.length ? 'Not adjustable' : effortValue ? (effortLevels.find((m) => m.value === effortValue)?.label ?? 'Auto') : 'Auto'
 	);
 	const permissionLabel = $derived(
 		permissionModes.find((m) => m.value === permissionValue)?.label ?? 'Ask'
@@ -504,7 +507,7 @@
 				class="dock-tag effort-btn"
 				class:open={openPopover === 'effort'}
 				onclick={() => togglePopover('effort')}
-				title={effortValue ? `Reasoning effort: ${effortLabel}` : 'Reasoning effort: model default'}
+				title={effortCapability.explanation ?? (effortValue ? `Reasoning effort: ${effortLabel}` : 'Reasoning effort: model default')}
 				aria-haspopup="dialog"
 				aria-expanded={openPopover === 'effort'}
 				aria-label="Effort: {effortLabel}"

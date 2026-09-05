@@ -33,6 +33,8 @@ export interface ModelOption {
 	 * opt-in toggle — the old `[1m]` suffix mechanism is retired.
 	 */
 	context_window?: number;
+	effort_levels?: string[];
+	default_effort?: string | null;
 }
 
 /**
@@ -177,6 +179,9 @@ export interface ProviderModel {
 	 * fall back to the default window.
 	 */
 	context_window?: number | null;
+	/** Effective levels accepted by this route; [] means no adjustable effort. */
+	effort_levels?: string[];
+	default_effort?: string | null;
 }
 
 /**
@@ -581,6 +586,8 @@ interface RegistryModelPayload {
 	label: string;
 	family: ModelFamily;
 	context_window?: number;
+	effort_levels?: string[];
+	default_effort?: string | null;
 }
 
 interface RegistryProviderPayload {
@@ -608,7 +615,9 @@ interface RegistryPayload {
 }
 
 function mapPayloadModel(m: RegistryModelPayload): ModelOption {
-	return { value: m.value, label: m.label, family: m.family, context_window: m.context_window };
+	return { value: m.value, label: m.label, family: m.family, context_window: m.context_window,
+		...(m.effort_levels !== undefined ? { effort_levels: m.effort_levels } : {}),
+		...(m.default_effort !== undefined ? { default_effort: m.default_effort } : {}) };
 }
 
 /**

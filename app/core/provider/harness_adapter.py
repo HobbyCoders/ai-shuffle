@@ -403,6 +403,7 @@ class HarnessAdapter(ProviderAdapter):
         kind = await asyncio.to_thread(_decide_provider_kind, options)
         self._is_delegated = kind == "delegated"
         self._provider_kind = kind
+        options.effort = await asyncio.to_thread(_effective_effort, options, options.effort, kind)
 
         self._registry = await self._build_registry(options, native=not self._is_delegated)
 
@@ -1798,10 +1799,15 @@ class HarnessAdapter(ProviderAdapter):
             return True
         # Effort is baked into the engine at construction (NativeLoop request
         # builder / DelegatedLoop argv), so a change needs a rebuild.
-        if _valid_effort(old.effort) != _valid_effort(
-            new_options.effort if new_options.effort is not None else old.effort
-        ):
-            return True
+        if old.effort is not None or new_options.effort is not None:
+            provider_id = (new_options.extra or {}).get("provider_id")
+            if provider_id and _lookup_provider_row(provider_id) is None:
+                return True
+            if _valid_effort(old.effort) != _effective_effort(
+                new_options,
+                new_options.effort if new_options.effort is not None else old.effort,
+            ):
+                return True
         # Fast mode is baked in the same way (DelegatedLoop --settings argv /
         # NativeLoop request_extra), so a flip is a rebuild, not a hot-swap.
         if bool(getattr(old, "fast", None)) != bool(
@@ -3102,6 +3108,16 @@ def _fluid_setting_sources(options: Any) -> Optional[tuple]:
             "[HarnessAdapter] dropping unknown setting_sources entries from %r", raw
         )
     return valid
+
+
+def _effective_effort(options: SessionOptions, value: Any, route: Optional[str] = None) -> Optional[str]:
+    from app.core.model_effort import normalize_effort
+
+    provider_id = (options.extra or {}).get("provider_id")
+    row = _lookup_provider_row(provider_id) if provider_id else None
+    if provider_id and row is None:
+        return None
+    return normalize_effort(value, options.model, row, route=route or _decide_provider_kind(options))
 
 
 def _valid_effort(value: Any) -> Optional[str]:

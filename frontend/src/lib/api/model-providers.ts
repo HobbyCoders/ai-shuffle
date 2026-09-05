@@ -33,6 +33,20 @@ export interface ProviderModelEntry {
 	 * row's single shared window.
 	 */
 	context_window?: number | null;
+	supported_parameters?: string[];
+	supported_reasoning_levels?: string[];
+	default_reasoning_level?: string | null;
+}
+
+/** Copy only upstream evidence. Computed /api/models effort fields are never saved.
+ * Undefined means absent; null defaults and empty arrays are explicit metadata.
+ */
+export function copyReasoningMetadata(model?: Partial<ProviderModelEntry>) {
+	return {
+		...(model?.supported_parameters !== undefined ? { supported_parameters: model.supported_parameters } : {}),
+		...(model?.supported_reasoning_levels !== undefined ? { supported_reasoning_levels: model.supported_reasoning_levels } : {}),
+		...(model?.default_reasoning_level !== undefined ? { default_reasoning_level: model.default_reasoning_level } : {})
+	};
 }
 
 /** Public (token-free) representation of a `model_providers` row. */

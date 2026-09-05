@@ -21,7 +21,7 @@
 	 */
 	import { Loader2, RefreshCw } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
-	import { createModelProvider, updateModelProvider } from '$lib/api/model-providers';
+	import { createModelProvider, updateModelProvider, copyReasoningMetadata, type ProviderModelEntry } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
 
 	interface Props {
@@ -46,7 +46,7 @@
 	let fetchError = $state('');
 	let fetchSource = $state<'preset' | 'upstream' | ''>('');
 	let fetchResults = $state<
-		{ id: string; label: string; checked: boolean; context_window?: number | null }[]
+		(ProviderModelEntry & { checked: boolean })[]
 	>([]);
 	let saving = $state(false);
 	let filter = $state('');
@@ -93,7 +93,8 @@
 				id: m.id,
 				label: m.label,
 				checked: false,
-				context_window: m.context_window
+				context_window: m.context_window,
+				...copyReasoningMetadata(m)
 			}));
 		} catch (e) {
 			fetchError = getErrorMessage(e, 'Could not fetch models');
@@ -126,7 +127,8 @@
 			.map((r) => ({
 				id: r.id.trim(),
 				label: (r.label || r.id).trim(),
-				...(r.context_window != null ? { context_window: r.context_window } : {})
+				...(r.context_window != null ? { context_window: r.context_window } : {}),
+				...copyReasoningMetadata(r)
 			}))
 			.filter((m) => m.id && m.label);
 		saving = true;

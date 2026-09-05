@@ -164,7 +164,7 @@ def test_registry_payload_shape():
     models = payload["models"]
     assert isinstance(models, list)
     assert "supports_1m" not in models[0]
-    assert {"value", "label", "family", "context_window"} == set(models[0])
+    assert {"value", "label", "family", "context_window", "effort_levels", "default_effort"} == set(models[0])
     # Claude windows travel to the frontend so the context meter is right.
     by_value = {entry["value"]: entry for entry in models}
     assert by_value["sonnet"]["context_window"] == 1_000_000
@@ -258,7 +258,7 @@ class TestRegistryPayloadProviders:
             provider_type="openrouter",
             base_url="https://openrouter.ai/api",
             auth_token="enc:tok-blob",
-            models=[{"id": "openai/gpt-5.6", "label": "GPT-5.6"}],
+            models=[{"id": "openai/gpt-5.6", "label": "GPT-5.6", "supported_parameters": ["reasoning_effort"]}],
             default_model="openai/gpt-5.6",
             enabled=True,
         )
@@ -287,6 +287,8 @@ class TestRegistryPayloadProviders:
                 # Additive metadata (Chunk D.4) — null when the row omits them.
                 "context_window": None,
                 "max_output_tokens": None,
+                "effort_levels": ["low", "medium", "high"],
+                "default_effort": None,
             }],
             "default_model": "openai/gpt-5.6",
         }
@@ -330,9 +332,11 @@ class TestRegistryPayloadProviders:
         entry = payload["providers"][0]
         assert entry["models"] == [
             {"id": "model-a", "label": "Model A",
-             "context_window": 200000, "max_output_tokens": 8192},
+             "context_window": 200000, "max_output_tokens": 8192,
+             "effort_levels": [], "default_effort": None},
             {"id": "model-b", "label": "Model B",
-             "context_window": 200000, "max_output_tokens": 8192},
+             "context_window": 200000, "max_output_tokens": 8192,
+             "effort_levels": [], "default_effort": None},
         ]
 
     def test_chatgpt_row_is_subscription_and_carries_its_plan_type(self, mock_db):

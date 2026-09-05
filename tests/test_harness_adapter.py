@@ -4486,13 +4486,14 @@ async def test_effort_reaches_the_delegated_loop(monkeypatch):
     )
 
     await ha.HarnessAdapter().connect(
-        SessionOptions(model="claude-sonnet-4-5", effort="xhigh")
+        SessionOptions(model="claude-sonnet-5", effort="xhigh")
     )
     assert _CapturingLoop.captured["effort"] == "xhigh"
 
 
 @pytest.mark.asyncio
-async def test_effort_reaches_the_native_loop(monkeypatch, tmp_path):
+@pytest.mark.parametrize("model,expected", [("gpt-5.6-sol", "high"), ("gpt-4o", None), ("z-ai/glm-5", None)])
+async def test_effort_reaches_the_native_loop(monkeypatch, tmp_path, model, expected):
     import app.core.provider.harness_adapter as ha
 
     monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
@@ -4502,9 +4503,9 @@ async def test_effort_reaches_the_native_loop(monkeypatch, tmp_path):
     )
 
     await ha.HarnessAdapter().connect(
-        SessionOptions(model="gpt-4o", cwd=str(tmp_path), effort="max")
+        SessionOptions(model=model, cwd=str(tmp_path), effort="max")
     )
-    assert _CapturingLoop.captured["effort"] == "max"
+    assert _CapturingLoop.captured["effort"] == expected
 
 
 @pytest.mark.asyncio
@@ -4526,17 +4527,18 @@ async def test_junk_effort_is_dropped(monkeypatch):
 
 def test_effort_change_requires_reconnect():
     adapter = HarnessAdapter()
-    adapter._options = SessionOptions(model="claude-sonnet-4-5", effort="high")
+    adapter._options = SessionOptions(model="claude-sonnet-5", effort="high")
     assert adapter.requires_reconnect(
-        SessionOptions(model="claude-sonnet-4-5", effort="low")
+        SessionOptions(model="claude-sonnet-5", effort="low")
     )
     assert not adapter.requires_reconnect(
-        SessionOptions(model="claude-sonnet-4-5", effort="high")
+        SessionOptions(model="claude-sonnet-5", effort="high")
     )
     # None means "no override" — keeps the old effort, no reconnect
     assert not adapter.requires_reconnect(
-        SessionOptions(model="claude-sonnet-4-5")
+        SessionOptions(model="claude-sonnet-5")
     )
+    assert adapter.requires_reconnect(SessionOptions(model="haiku"))
 
 
 # ─── _amend_native_task_spec ───────────────────────────────────────────────────

@@ -453,6 +453,10 @@ def _parse_models_response(
             }
             if kept:
                 model["pricing"] = kept
+        from app.core.model_effort import sanitize_effort_metadata
+
+        if isinstance(entry, dict):
+            model.update(sanitize_effort_metadata(entry))
         models.append(model)
         if len(models) >= _FETCH_MODELS_CAP:
             break

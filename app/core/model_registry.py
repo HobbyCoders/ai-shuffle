@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
 
 from app.core.model_catalog_presets import preset_context_window, preset_kind_for
+from app.core.model_effort import effort_capabilities
 
 if TYPE_CHECKING:  # pragma: no cover — annotation-only, avoids an import cycle
     from app.db.model_providers import ModelProviderRow
@@ -371,6 +372,7 @@ def _providers_payload() -> List[Dict[str, object]]:
                     ),
                     # Still per-ROW (no per-model output cap is modelled).
                     "max_output_tokens": row.get("max_output_tokens"),
+                    **effort_capabilities(model.get("id"), row, model),
                 }
                 for model in (row.get("models_json") or [])
             ],
@@ -425,6 +427,7 @@ def registry_payload() -> Dict[str, object]:
                 "label": m.label,
                 "family": m.family,
                 "context_window": m.context_window,
+                **effort_capabilities(m.value),
             }
             for m in MODELS
         ],

@@ -30,6 +30,7 @@
 	import { getErrorMessage } from '$lib/api/client';
 	import {
 		updateModelProvider,
+		copyReasoningMetadata,
 		type ModelProvider,
 		type ProviderModelEntry
 	} from '$lib/api/model-providers';
@@ -164,6 +165,7 @@
 				id: m.id,
 				label: m.label,
 				...(m.context_window != null ? { context_window: m.context_window } : {}),
+				...copyReasoningMetadata(m),
 				...(m.pricing ? { pricing: m.pricing } : {})
 			}));
 			const nextToken = token.trim();
@@ -214,12 +216,8 @@
 	let primaryLabel = $derived(kind === 'subscription' ? 'Sign in' : 'Add key');
 
 	// ----- Models -------------------------------------------------------------
-	interface ModelRow {
-		id: string;
-		label: string;
+	interface ModelRow extends ProviderModelEntry {
 		checked: boolean;
-		context_window?: number | null;
-		pricing?: ProviderModelEntry['pricing'];
 	}
 
 	let results = $state<ModelRow[]>([]);
@@ -286,7 +284,8 @@
 					label: m.label,
 					checked: true,
 					context_window: m.context_window,
-					pricing: m.pricing
+					pricing: m.pricing,
+					...copyReasoningMetadata(m)
 				}));
 
 			// Pre-check: an already-curated row checks exactly its own ids;
@@ -294,12 +293,15 @@
 			// A stored per-model window wins over the freshly-fetched one.
 			const storedWindows = new Map(stored.map((m) => [m.id, m.context_window]));
 			const storedPricing = new Map(stored.map((m) => [m.id, m.pricing]));
+			const storedModels = new Map(stored.map((m) => [m.id, m]));
 			const catalogRows = catalog.map((m) => ({
 				id: m.id,
 				label: m.label,
 				checked: hasCurated ? curatedIds.has(m.id) : res.source === 'preset',
 				context_window: storedWindows.get(m.id) ?? m.context_window,
-				pricing: storedPricing.get(m.id) ?? m.pricing
+				pricing: storedPricing.get(m.id) ?? m.pricing,
+				...copyReasoningMetadata(storedModels.get(m.id)),
+				...copyReasoningMetadata(m)
 			}));
 
 			results = [...extras, ...catalogRows];
@@ -313,7 +315,8 @@
 				label: m.label,
 				checked: true,
 				context_window: m.context_window,
-				pricing: m.pricing
+				pricing: m.pricing,
+				...copyReasoningMetadata(m)
 			}));
 		} finally {
 			modelsLoading = false;
@@ -327,6 +330,7 @@
 				id: r.id.trim(),
 				label: (r.label || r.id).trim(),
 				...(r.context_window != null ? { context_window: r.context_window } : {}),
+				...copyReasoningMetadata(r),
 				...(r.pricing ? { pricing: r.pricing } : {})
 			}))
 			.filter((m) => m.id && m.label);

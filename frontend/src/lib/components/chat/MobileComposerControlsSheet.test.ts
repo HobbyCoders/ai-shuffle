@@ -9,6 +9,21 @@ vi.hoisted(() => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }));
 });
 
+it('explains no adjustable effort and keeps fast mode available', async () => {
+	const onToggleFast = vi.fn();
+	render(MobileComposerControlsSheet, { props: props({ effortOptions: [], effortValue: null, fastSupported: true, onToggleFast }) });
+	expect(screen.getByText('Adjustable reasoning effort is not available for this model in AI Shuffle.')).toBeTruthy();
+	expect(document.querySelectorAll('.effort-choices button')).toHaveLength(0);
+	await fireEvent.click(screen.getByRole('switch', { name: 'Fast mode' }));
+	expect(onToggleFast).toHaveBeenCalledOnce();
+});
+it('supports a single effort option', async () => {
+	const onEffortSelect = vi.fn();
+	render(MobileComposerControlsSheet, { props: props({ effortOptions: [{ value: 'high', label: 'High', description: 'Thorough' }], onEffortSelect }) });
+	await fireEvent.click(screen.getByRole('button', { name: 'High' }));
+	expect(onEffortSelect).toHaveBeenCalledWith('high');
+});
+
 function props(overrides: Record<string, unknown> = {}) {
 	return {
 		open: true,
