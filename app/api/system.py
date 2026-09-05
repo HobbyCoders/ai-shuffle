@@ -77,14 +77,19 @@ async def _readiness_report() -> tuple[bool, dict]:
         pool = get_session_pool()
         pool_size = len(pool)
         hard_cap = pool.hard_cap
+        # The cap counts SUBPROCESS (delegated-lane) sessions only, so the
+        # readiness reason has to report that number rather than the whole
+        # pool's — native in-process sessions never make the box unready.
+        delegated = getattr(pool, "delegated_size", pool_size)
         checks["session_pool"] = {
             "size": pool_size,
+            "delegated_size": delegated,
             "max_size": pool.max_size,
             "hard_cap": hard_cap,
         }
         if pool.is_at_hard_cap():
             reasons.append(
-                f"session pool at hard cap ({pool_size}/{hard_cap})"
+                f"session pool at hard cap ({delegated}/{hard_cap})"
             )
     except Exception as e:  # noqa: BLE001
         checks["session_pool"] = "error"

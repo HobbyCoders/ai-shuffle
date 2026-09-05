@@ -371,6 +371,18 @@ class HarnessAdapter(ProviderAdapter):
         """Direct access to the underlying fluid engine (parallels sdk_client)."""
         return self._engine
 
+    @property
+    def provider_kind(self) -> Optional[str]:
+        """The leg this adapter connected on, or None before connect().
+
+        ``"delegated"`` means a claude CLI subprocess; every other value
+        ("anthropic", "openai_responses", "openrouter") is an in-process native
+        engine. Public because the session pool has to tell the two apart — its
+        size bound and hard cap bound SUBPROCESSES, and a native session owns
+        none (see ``app.core.session_pool.adapter_lane``).
+        """
+        return self._provider_kind
+
     # ─── Connection Lifecycle ─────────────────────────────────────────
 
     async def connect(self, options: SessionOptions) -> None:

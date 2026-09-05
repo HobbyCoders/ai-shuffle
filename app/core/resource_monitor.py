@@ -55,6 +55,10 @@ async def _collect_metrics() -> dict:
             pool = get_session_pool()
             metrics["pool_size"] = len(pool._pool)
             metrics["pool_max_size"] = pool._max_size
+            # The size bound counts SUBPROCESS sessions only, so the capacity
+            # and subprocess-leak heuristics below need that number rather than
+            # the whole pool's (which now includes native in-process sessions).
+            metrics["pool_delegated"] = pool.delegated_size
             # Count streaming sessions in pool
             pool_streaming = sum(1 for s in pool._pool.values() if s.is_streaming)
             metrics["pool_streaming"] = pool_streaming
@@ -290,16 +294,20 @@ def _check_warnings(metrics: dict) -> list[str]:
 
     # Too many child processes
     children = metrics.get("child_processes", 0)
-    pool_size = metrics.get("pool_size", 0)
-    if children > pool_size + 2:  # Allow some slack
-        warnings.append(f"{children} child processes but pool size is {pool_size} - possible subprocess leak")
+    # Subprocesses come from DELEGATED sessions; a native in-process session
+    # spawns none, so counting it here would hide a real leak behind slack it
+    # never earned.
+    delegated = metrics.get("pool_delegated", metrics.get("pool_size", 0))
+    if children > delegated + 2:  # Allow some slack
+        warnings.append(f"{children} child processes but pool size is {delegated} - possible subprocess leak")
 
-    # Session pool at capacity. pool_max_size is reported by _collect_metrics
+    # Session pool at capacity — the SUBPROCESS half of it, which is what
+    # pool_max_size bounds. pool_max_size is reported by _collect_metrics
     # straight off the live pool; the fallback reads the CONFIGURED size rather
     # than a hardcoded constant, which is what previously went stale when the
     # default moved (it still said 3 long after the default was 8). If neither
     # is available the pool is not up yet — there is nothing to warn about.
-    pool_size = metrics.get("pool_size", 0)
+    pool_size = metrics.get("pool_delegated", metrics.get("pool_size", 0))
     pool_max = metrics.get("pool_max_size")
     if pool_max is None:
         try:

@@ -43,21 +43,37 @@ def _clean_admission_state():
 class _FakePool:
     """A pool whose occupancy the test drives directly.
 
+    ``in_pool`` is the DELEGATED (subprocess) occupancy — the number the hard
+    cap actually counts. Native occupancy is passed separately because it gates
+    nothing: a native dispatch is refused only by ``refusal`` (the real resource
+    guards), which is what ``admission_check`` would have returned for that lane.
+
     ``peek`` answers "is this session really pooled yet" — the signal that
     retires an admission reservation — and stays empty here, so a reservation
     only ever ages out or is released by the dispatch itself.
     """
 
-    def __init__(self, in_pool=0, hard_cap=8, refusal=None):
+    def __init__(self, in_pool=0, hard_cap=8, refusal=None, native_in_pool=0,
+                 native_refusal=None):
         self.in_pool = in_pool
         self.hard_cap = hard_cap
         self.refusal = refusal
+        self.native_in_pool = native_in_pool
+        self.native_refusal = native_refusal
         self.snapshots = 0
+        self.lanes = []
 
-    def admission_snapshot(self):
+    def admission_snapshot(self, lane="delegated"):
         self.snapshots += 1
+        self.lanes.append(lane)
+        native = lane == "native"
         return AdmissionSnapshot(
-            refusal=self.refusal, in_pool=self.in_pool, hard_cap=self.hard_cap
+            refusal=self.native_refusal if native else self.refusal,
+            in_pool=self.in_pool + self.native_in_pool,
+            hard_cap=self.hard_cap,
+            delegated_in_pool=self.in_pool,
+            native_in_pool=self.native_in_pool,
+            lane=lane,
         )
 
     def peek(self, session_id):
@@ -235,7 +251,8 @@ async def test_sync_dispatch_releases_its_reservation(agents, monkeypatch):
 
 
 async def test_expired_reservations_stop_counting(monkeypatch):
-    td._PENDING_ADMISSIONS["stale"] = 0.0  # monotonic 0 is always in the past
+    # monotonic 0 is always in the past
+    td._PENDING_ADMISSIONS["stale"] = td._Reservation(expires=0.0)
     assert td._pending_admission_count() == 0
     assert td._PENDING_ADMISSIONS == {}
 
@@ -246,11 +263,197 @@ async def test_pooled_worker_stops_holding_its_reservation(monkeypatch):
             return object()
 
     _install_pool(monkeypatch, _Pooled())
-    td._PENDING_ADMISSIONS["w-live"] = float("inf")
+    td._PENDING_ADMISSIONS["w-live"] = td._Reservation(expires=float("inf"))
     assert td._pending_admission_count() == 0
 
 
+async def test_reservations_are_counted_per_lane_and_per_parent(monkeypatch):
+    """A native reservation holds no subprocess slot; a parent's holds its own."""
+    _install_pool(monkeypatch, _FakePool())
+    far = float("inf")
+    td._PENDING_ADMISSIONS.update(
+        {
+            "d-1": td._Reservation(expires=far, lane="delegated", parent="s-root"),
+            "n-1": td._Reservation(expires=far, lane="native", parent="s-root"),
+            "n-2": td._Reservation(expires=far, lane="native", parent="s-other"),
+        }
+    )
+
+    assert td._pending_admission_count() == 3
+    assert td._pending_admission_count(lane="delegated") == 1
+    assert td._pending_admission_count(lane="native") == 2
+    assert td._pending_admission_count(parent="s-root") == 2
+
+
 # ── an unconfigured / empty pool never blocks a dispatch ─────────────────────
+
+
+# ── lanes: the subprocess cap only gates the lane that owns a subprocess ─────
+
+
+@pytest.fixture()
+def native_agent(agents):
+    """A subagent bound to a native (in-process) model."""
+    agents.create_profile("gpt-helper", "GPT Helper", None, {"model": "gpt-6-astra"})
+    return agents
+
+
+async def test_native_worker_is_admitted_past_the_subprocess_hard_cap(
+    native_agent, monkeypatch
+):
+    """The 2026-09-04 audit case: a native fan-out refused by a cap it cannot fill.
+
+    The pool is wedged at 8/8 SUBPROCESS sessions and the parent dispatches more
+    native workers than that cap has slots. Each is coroutines in this process,
+    so each must be admitted.
+    """
+    from app.core import config as cfg
+
+    _install_pool(monkeypatch, _FakePool(in_pool=8, hard_cap=8))
+    monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        cfg.settings, "subagent_max_concurrent_per_session", 0, raising=False
+    )
+    started = []
+
+    async def fake_worker(**kwargs):
+        started.append(kwargs["worker_session_id"])
+        return WorkerOutcome(ok=True, session_id=kwargs["worker_session_id"])
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker), \
+         patch.object(td, "_await_worker_registration", return_value=None):
+        payloads = [
+            await _dispatch(
+                {"agent": "gpt-helper", "prompt": f"go {i}", "mode": "background"}
+            )
+            for i in range(10)
+        ]
+
+    for _ in range(50):  # let the last background task reach its worker
+        if len(started) == 10:
+            break
+        await asyncio.sleep(0.01)
+
+    assert all(p["ok"] for p in payloads), payloads
+    assert len(started) == 10
+
+
+async def test_delegated_worker_is_still_refused_at_the_delegated_cap(
+    native_agent, monkeypatch
+):
+    """Exempting natives must not soften the lane that does cost a subprocess."""
+    _install_pool(
+        monkeypatch, _FakePool(in_pool=8, hard_cap=8, native_in_pool=12)
+    )
+    monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 0.05)
+
+    with patch("app.core.provider_agent.dispatch_worker") as worker:
+        payload = await _dispatch({"agent": "helper", "prompt": "go"})
+
+    assert payload["ok"] is False and payload["reason"] == "capacity"
+    assert "8/8" in payload["error"]
+    worker.assert_not_called()
+
+
+async def test_natives_in_the_pool_do_not_block_a_delegated_worker(
+    native_agent, monkeypatch
+):
+    """Only the delegated occupancy is compared against the cap."""
+    _install_pool(monkeypatch, _FakePool(in_pool=2, hard_cap=8, native_in_pool=30))
+
+    async def fake_worker(**kwargs):
+        return WorkerOutcome(ok=True, session_id=kwargs["worker_session_id"],
+                             report="done")
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = await _dispatch({"agent": "helper", "prompt": "go", "mode": "sync"})
+
+    assert payload["ok"] is True
+
+
+async def test_rss_guard_still_refuses_a_native_worker(native_agent, monkeypatch):
+    """The real resource ceiling applies to every lane, and says what it was."""
+    _install_pool(
+        monkeypatch,
+        _FakePool(
+            in_pool=0,
+            hard_cap=8,
+            native_refusal="server busy: tree RSS 9000MB >= ceiling 8000MB",
+        ),
+    )
+    monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 0.05)
+
+    with patch("app.core.provider_agent.dispatch_worker") as worker:
+        payload = await _dispatch({"agent": "gpt-helper", "prompt": "go"})
+
+    assert payload["ok"] is False and payload["reason"] == "capacity"
+    assert "tree RSS 9000MB" in payload["error"]
+    worker.assert_not_called()
+
+
+# ── the per-parent fan-out limit is the native lane's backpressure ───────────
+
+
+async def test_per_parent_fanout_limit_refuses_with_the_capacity_shape(
+    native_agent, monkeypatch
+):
+    from app.core import config as cfg, provider_agent_supervisor as sup
+
+    _install_pool(monkeypatch, _FakePool(in_pool=0, hard_cap=8))
+    monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        cfg.settings, "subagent_max_concurrent_per_session", 2, raising=False
+    )
+    monkeypatch.setattr(
+        sup, "_LIVE", {"s-root": {"w-1": object(), "w-2": object()}}, raising=False
+    )
+
+    with patch("app.core.provider_agent.dispatch_worker") as worker:
+        payload = await _dispatch({"agent": "gpt-helper", "prompt": "go"})
+
+    assert payload["ok"] is False
+    assert payload["reason"] == "capacity" and payload["retryable"] is True
+    assert "limit 2" in payload["error"]
+    worker.assert_not_called()
+
+
+async def test_per_parent_fanout_limit_counts_unregistered_dispatches(
+    native_agent, monkeypatch
+):
+    """Reservations count too — the race a simultaneous fan-out actually loses.
+
+    ``task_tool_max_workers`` sees only workers that already registered, so two
+    dispatches racing each other both read zero. The reservation is what makes
+    the second one wait.
+    """
+    from app.core import config as cfg, provider_agent_supervisor as sup
+
+    _install_pool(monkeypatch, _FakePool(in_pool=0, hard_cap=8))
+    monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(td, "_ADMISSION_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        cfg.settings, "subagent_max_concurrent_per_session", 1, raising=False
+    )
+    monkeypatch.setattr(sup, "_LIVE", {}, raising=False)
+    running = asyncio.Event()
+
+    async def fake_worker(**kwargs):
+        await running.wait()
+        return WorkerOutcome(ok=True, session_id=kwargs["worker_session_id"])
+
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker), \
+         patch.object(td, "_await_worker_registration", return_value=None):
+        first, second = await asyncio.gather(
+            _dispatch({"agent": "gpt-helper", "prompt": "a", "mode": "background"}),
+            _dispatch({"agent": "gpt-helper", "prompt": "b", "mode": "background"}),
+        )
+    running.set()
+    await asyncio.sleep(0)
+
+    assert sorted([bool(first["ok"]), bool(second["ok"])]) == [False, True]
+    refused = first if not first["ok"] else second
+    assert refused["reason"] == "capacity"
+    assert "already running for this session" in refused["error"]
 
 
 async def test_no_pool_yet_admits_immediately(agents, monkeypatch):

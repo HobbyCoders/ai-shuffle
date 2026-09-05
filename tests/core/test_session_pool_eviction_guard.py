@@ -127,6 +127,57 @@ async def test_evict_if_needed_force_evicts_busy_at_hard_cap():
     assert seen == [("busy-old", "lru_force")]
 
 
+# ─── LRU capacity is a SUBPROCESS bound ─────────────────────────────────────
+
+
+def _native_state(**kwargs) -> SessionState:
+    """A pooled session on a native in-process leg (no CLI subprocess)."""
+    state = _make_state(**kwargs)
+    state.adapter.provider_kind = "openai_responses"
+    return state
+
+
+@pytest.mark.asyncio
+async def test_lru_eviction_ignores_native_sessions():
+    """Native sessions neither fill the bound nor get evicted to satisfy it.
+
+    Evicting one frees no subprocess, which is all this path exists to reclaim
+    — and it would tear the in-process engine out from under whatever the
+    session is running.
+    """
+    pool = SessionPool(max_size=2)
+    for i in range(6):
+        pool.put(f"native-{i}", _native_state())
+
+    assert await pool.evict_if_needed() is None
+    assert len(pool) == 6
+
+
+@pytest.mark.asyncio
+async def test_lru_eviction_picks_the_delegated_session():
+    """With both lanes pooled, the victim is the subprocess one."""
+    pool = SessionPool(max_size=1)
+    pool.put("native", _native_state())   # LRU, but frees nothing
+    pool.put("cli", _make_state())
+
+    assert await pool.evict_if_needed() == "cli"
+    assert "native" in pool
+
+
+@pytest.mark.asyncio
+async def test_hard_cap_force_evict_never_takes_a_native_session():
+    """The ultimate bound is still a subprocess bound: with only native
+    sessions left there is nothing it can usefully force."""
+    pool = SessionPool(max_size=1)  # hard cap = 2
+    pool.put("native-old", _native_state())
+    pool.put("native-new", _native_state())
+    _mark_busy("native-old")
+    _mark_busy("native-new")
+
+    assert await pool.evict_if_needed() is None
+    assert len(pool) == 2
+
+
 # ─── (1) Busy guard: evict_idle ─────────────────────────────────────────────
 
 

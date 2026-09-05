@@ -55,7 +55,7 @@ class _StubPool:
     def put(self, session_id, state):
         self.state = state
 
-    def admission_check(self):
+    def admission_check(self, lane="delegated"):
         return None
 
     async def evict_if_needed(self):

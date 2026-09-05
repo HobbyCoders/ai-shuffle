@@ -421,13 +421,33 @@ class Settings(BaseSettings):
     # floor. All of it is configurable; see app.core.session_pool.IdlePolicy,
     # which is the single place the policy is expressed.
 
-    # Max concurrent subprocess sessions kept alive between queries. 4 covers
+    # Max concurrent SUBPROCESS sessions kept alive between queries. 4 covers
     # the realistic concurrent working set (the chat you are in, the one you
     # just left, and a running automation or two) while capping the worst case
     # at ~4 subprocesses instead of 8. The hard cap is still 2x this (see
     # SessionPool._HARD_CAP_MULTIPLIER), so bursts still get headroom; only the
     # steady state shrinks. Raise it on a big box via SDK_SESSION_POOL_SIZE.
+    #
+    # SUBPROCESS ONLY, both this and the hard cap. It is sized against the
+    # 100-300MB node CLI a DELEGATED session owns. A session on a native leg
+    # (openai_responses / anthropic / openrouter) is coroutines inside this
+    # process and is not counted here at all — counting it refused subagent
+    # workers that cost no process (2026-09-04 audit: "session pool at hard cap
+    # (8/8)" for native workers). What governs native sessions and native
+    # subagent workers instead: the real resource guards
+    # (sdk_admission_min_available_mb, sdk_max_child_processes,
+    # sdk_admission_rss_mb), the per-parent fan-out limit
+    # subagent_max_concurrent_per_session, and sdk_native_session_soft_cap.
     sdk_session_pool_size: int = 4
+
+    # Safety valve for the NATIVE lane: the most in-process sessions the pool
+    # will admit. Deliberately generous — a native session costs Python objects,
+    # not a process, so this exists to stop a runaway fan-out from growing
+    # without any bound at all, not to shape normal use. The RSS/host-memory
+    # guards above are the ceiling that actually reflects cost; this one just
+    # fails earlier and more legibly. 0 disables it.
+    # Override via SDK_NATIVE_SESSION_SOFT_CAP.
+    sdk_native_session_soft_cap: int = 64
 
     # HOT tier size: how many most-recently-used sessions keep the long idle
     # timeout below. These are the ones a user realistically comes back to
@@ -577,6 +597,17 @@ class Settings(BaseSettings):
     # tree. Set via TASK_TOOL_MAX_DEPTH / TASK_TOOL_MAX_WORKERS.
     task_tool_max_depth: int = 5
     task_tool_max_workers: int = 8
+
+    # Per-parent concurrent subagent workers, enforced in the dispatch admission
+    # gate (app/core/task_dispatch.py). This is the NATIVE lane's backpressure:
+    # native workers are coroutines, so the subprocess pool cap does not bound
+    # them and something has to. Unlike task_tool_max_workers — a per-root-tree
+    # budget checked against workers that have already REGISTERED — this one
+    # also counts dispatches admitted but not yet registered, which is the race
+    # a simultaneous fan-out actually loses, and it waits briefly for a worker
+    # to finish before refusing with a retryable capacity error. 0 disables it.
+    # Override via SUBAGENT_MAX_CONCURRENT_PER_SESSION.
+    subagent_max_concurrent_per_session: int = 8
 
     # Compiled system prompt on the delegated (claude CLI) leg (agents-program
     # ruling A3). True (default since the 2026-08 prompt overhaul): the fluid

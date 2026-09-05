@@ -20,11 +20,15 @@ What this module adds on top of raw ``dispatch_worker``:
 * worker budget (A9) — at most ``settings.task_tool_max_workers`` live
   workers per root session tree;
 * pool admission — the worker budget is a per-tree ceiling, not a statement
-  about the box; a dispatch also has to fit in the SDK session pool. That is
-  checked HERE, before anything is returned: a dispatch at the ceiling waits
-  briefly for a slot and is then refused with ``ok=False`` (see
-  :func:`_reserve_admission`), because a background receipt is a promise to
-  wake the parent and a worker that never started keeps no promises;
+  about the box; a dispatch also has to fit on the box. That is checked HERE,
+  before anything is returned: a dispatch at a ceiling waits briefly and is
+  then refused with ``ok=False`` (see :func:`_reserve_admission`), because a
+  background receipt is a promise to wake the parent and a worker that never
+  started keeps no promises. Which ceiling applies depends on the worker's
+  lane: a DELEGATED worker owns a CLI subprocess and is bounded by the session
+  pool's subprocess cap, while a NATIVE (in-process) worker is bounded by the
+  real resource guards plus ``settings.subagent_max_concurrent_per_session``,
+  the per-parent fan-out limit;
 * root routing (A9) — approvals, progress cards, and supervisor registration
   land on the ROOT session (the one with a human watching), while
   project/worktree/cwd inheritance still reads the direct caller;
@@ -97,8 +101,12 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from app.core.session_pool import DELEGATED_LANE, NATIVE_LANE
 
 if TYPE_CHECKING:  # pragma: no cover — annotation-only; every DB import here is
     # deliberately lazy (see the function bodies), so the row types ride the
@@ -138,6 +146,16 @@ _PROVIDER_UNSET = object()
 # session pool at hard cap (8/8)" frames, then a re-dispatch that failed the
 # same way. Admission is now decided here, synchronously, and a dispatch that
 # cannot be admitted is refused outright rather than receipted.
+#
+# WHICH CEILING applies depends on the worker's LANE (the same 2026-09-04
+# audit, second finding). The pool's hard cap counts node CLI subprocesses; a
+# DELEGATED worker is one, so it is gated by the cap exactly as before. A
+# NATIVE worker (openai_responses / anthropic / openrouter) is coroutines in
+# this process — it was being refused by a subprocess cap it could never
+# contribute to, which is how two gpt-6-astra fan-outs lost seven dispatches to
+# "8/8". Native workers are gated instead by what actually costs something: the
+# pool's host-memory / descendant-process / tree-RSS guards, and the per-parent
+# fan-out limit below.
 
 #: How long a dispatch waits for a pool slot before refusing. Covers the common
 #: case — a fan-out that is only transiently over the cap because a sibling is
@@ -155,8 +173,23 @@ _ADMISSION_POLL_SECONDS = 0.5
 #: dropped as soon as its session is really pooled, and expires regardless.
 _ADMISSION_RESERVATION_SECONDS = 180.0
 
-#: worker session id -> monotonic expiry of its admission reservation.
-_PENDING_ADMISSIONS: Dict[str, float] = {}
+
+@dataclass(frozen=True)
+class _Reservation:
+    """One admitted-but-not-yet-connected dispatch.
+
+    ``lane`` decides which ceiling this reservation counts against (only a
+    delegated one holds a subprocess slot); ``parent`` is the session whose
+    fan-out budget it is spending.
+    """
+
+    expires: float
+    lane: str = DELEGATED_LANE
+    parent: Optional[str] = None
+
+
+#: worker session id -> its admission reservation.
+_PENDING_ADMISSIONS: Dict[str, _Reservation] = {}
 
 #: (loop, lock) for the admission critical section. Rebuilt when the running
 #: loop differs, because an ``asyncio.Lock`` belongs to the loop that awaited
@@ -284,13 +317,19 @@ def _admission_lock() -> asyncio.Lock:
     return _ADMISSION_LOCK[1]
 
 
-def _pending_admission_count() -> int:
+def _pending_admission_count(
+    *, lane: Optional[str] = None, parent: Optional[str] = None
+) -> int:
     """Dispatches admitted here that the pool has not counted yet.
 
     Prunes as it counts: a reservation is dropped once its session is really in
     the pool (the pool's own number now covers it) or once it has aged out (the
     dispatch died before connecting, or is wedged — either way it must stop
     holding a slot hostage).
+
+    ``lane`` and ``parent`` narrow the count to the reservations that gate the
+    ceiling being checked: the subprocess cap only sees delegated reservations,
+    and a parent's fan-out budget only sees its own.
     """
     if not _PENDING_ADMISSIONS:
         return 0
@@ -298,8 +337,8 @@ def _pending_admission_count() -> int:
 
     pool = getattr(pool_module, "_session_pool", None)
     now = time.monotonic()
-    for key, expiry in list(_PENDING_ADMISSIONS.items()):
-        if expiry <= now:
+    for key, reservation in list(_PENDING_ADMISSIONS.items()):
+        if reservation.expires <= now:
             _PENDING_ADMISSIONS.pop(key, None)
             continue
         try:
@@ -307,7 +346,51 @@ def _pending_admission_count() -> int:
                 _PENDING_ADMISSIONS.pop(key, None)
         except Exception:  # noqa: BLE001 — a bookkeeping read, never fatal
             continue
-    return len(_PENDING_ADMISSIONS)
+    return sum(
+        1
+        for reservation in _PENDING_ADMISSIONS.values()
+        if (lane is None or reservation.lane == lane)
+        and (parent is None or reservation.parent == parent)
+    )
+
+
+def _live_worker_count_for_parent(parent_session_id: Optional[str]) -> int:
+    """Live workers registered under ``parent_session_id``.
+
+    The supervisor keys its live set by the parent id a dispatch registered
+    under (:mod:`app.core.provider_agent_supervisor`), which is what a fan-out
+    budget is about: how many workers THIS parent has running right now.
+    """
+    if not parent_session_id:
+        return 0
+    from app.core import provider_agent_supervisor as sup
+
+    try:
+        return len(getattr(sup, "_LIVE", {}).get(parent_session_id, ()) or ())
+    except Exception:  # noqa: BLE001 — a bookkeeping read, never fatal
+        return 0
+
+
+def _worker_lane(provider_id: Optional[str], model_id: Optional[str]) -> str:
+    """Which lane a worker with this provider/model binding will run on.
+
+    Defers to the harness adapter's single leg-decision table rather than
+    re-deriving it (a second copy would drift the moment the provider table
+    changes), by projecting the binding onto the same ``aih_*`` fields
+    ``provider_kind_for_sdk_options`` reads. Anything unknowable degrades to
+    ``delegated``: the conservative answer, since that is the lane with the
+    subprocess cap.
+    """
+    try:
+        from app.core.provider.harness_adapter import provider_kind_for_sdk_options
+
+        kind = provider_kind_for_sdk_options(
+            SimpleNamespace(model=model_id, aih_provider_id=provider_id)
+        )
+    except Exception:  # noqa: BLE001 — never fail a dispatch over a lane guess
+        logger.debug("task_dispatch: could not decide worker lane", exc_info=True)
+        return DELEGATED_LANE
+    return DELEGATED_LANE if kind in (None, DELEGATED_LANE) else NATIVE_LANE
 
 
 def _release_admission(worker_session_id: str) -> None:
@@ -315,16 +398,42 @@ def _release_admission(worker_session_id: str) -> None:
     _PENDING_ADMISSIONS.pop(worker_session_id, None)
 
 
+def _fanout_limit() -> int:
+    """Per-parent concurrent-worker limit (0 = disabled)."""
+    try:
+        from app.core.config import settings
+
+        return int(getattr(settings, "subagent_max_concurrent_per_session", 0) or 0)
+    except Exception:  # noqa: BLE001 — a missing setting must not gate dispatch
+        return 0
+
+
 async def _reserve_admission(
-    worker_session_id: str, *, wait_seconds: Optional[float] = None
+    worker_session_id: str,
+    *,
+    lane: str = DELEGATED_LANE,
+    parent_session_id: Optional[str] = None,
+    wait_seconds: Optional[float] = None,
 ) -> Optional[str]:
-    """Hold a pool slot for ``worker_session_id``, waiting briefly if needed.
+    """Hold a slot for ``worker_session_id``, waiting briefly if needed.
 
     Returns ``None`` once the slot is reserved, or a caller-facing refusal
     string if the box is still at a ceiling when the wait runs out. The wait is
     what makes a fan-out behave: dispatches queue on the lock in arrival order
     and take slots as siblings settle, so a transient cap costs seconds instead
     of a false receipt.
+
+    Which ceilings apply depends on ``lane``:
+
+    * DELEGATED — the pool's subprocess hard cap (plus this module's own
+      reservations for delegated workers, which the pool cannot see yet), and
+      every resource guard in ``admission_check``.
+    * NATIVE — no subprocess cap; the resource guards (host memory, descendant
+      processes, tree RSS, native soft cap) and the per-parent fan-out limit.
+
+    The per-parent limit applies to BOTH lanes: a parent with that many workers
+    already running is fanning out faster than it can use the answers, whatever
+    they cost.
 
     The refusal is deliberately a REAL error rather than a queued receipt. A
     receipt is a promise the parent will be woken, and nothing outside this
@@ -336,43 +445,64 @@ async def _reserve_admission(
 
     budget = _ADMISSION_WAIT_SECONDS if wait_seconds is None else wait_seconds
     deadline = time.monotonic() + max(0.0, float(budget))
+    fanout_limit = _fanout_limit()
     lock = _admission_lock()
     waited = False
     while True:
         async with lock:
             # Off the loop, like every other admission_check caller: the
             # ceiling checks can walk the process tree with psutil.
-            snapshot = await asyncio.to_thread(pool_module.admission_snapshot)
-            pending = _pending_admission_count()
+            snapshot = await asyncio.to_thread(pool_module.admission_snapshot, lane)
+            # Only DELEGATED reservations hold a subprocess slot.
+            pending = _pending_admission_count(lane=DELEGATED_LANE)
             at_cap = (
-                snapshot.hard_cap > 0
-                and (snapshot.in_pool + pending) >= snapshot.hard_cap
+                lane == DELEGATED_LANE
+                and snapshot.hard_cap > 0
+                and (snapshot.delegated_in_pool + pending) >= snapshot.hard_cap
             )
-            if snapshot.refusal is None and not at_cap:
-                _PENDING_ADMISSIONS[worker_session_id] = (
-                    time.monotonic() + _ADMISSION_RESERVATION_SECONDS
+            siblings = 0
+            over_fanout = False
+            if fanout_limit > 0 and parent_session_id:
+                siblings = _live_worker_count_for_parent(
+                    parent_session_id
+                ) + _pending_admission_count(parent=parent_session_id)
+                over_fanout = siblings >= fanout_limit
+            if snapshot.refusal is None and not at_cap and not over_fanout:
+                _PENDING_ADMISSIONS[worker_session_id] = _Reservation(
+                    expires=time.monotonic() + _ADMISSION_RESERVATION_SECONDS,
+                    lane=lane,
+                    parent=parent_session_id,
                 )
                 if waited:
                     logger.info(
-                        "task_dispatch: worker %s admitted after waiting for a "
-                        "pool slot (%d/%d pooled, %d reserved)",
-                        worker_session_id, snapshot.in_pool,
-                        snapshot.hard_cap, pending,
+                        "task_dispatch: %s worker %s admitted after waiting "
+                        "(%d/%d subprocess sessions, %d reserved, %d sibling "
+                        "worker(s))",
+                        lane, worker_session_id, snapshot.delegated_in_pool,
+                        snapshot.hard_cap, pending, siblings,
                     )
                 return None
-            reason = snapshot.refusal or (
-                f"session pool at hard cap ({snapshot.in_pool}/"
-                f"{snapshot.hard_cap}) with {pending} worker(s) already "
-                "admitted and starting"
-            )
+            if snapshot.refusal is not None:
+                reason = snapshot.refusal
+            elif at_cap:
+                reason = (
+                    f"session pool at hard cap ({snapshot.delegated_in_pool}/"
+                    f"{snapshot.hard_cap} subprocess sessions) with {pending} "
+                    "worker(s) already admitted and starting"
+                )
+            else:
+                reason = (
+                    f"{siblings} worker(s) already running for this session "
+                    f"(limit {fanout_limit})"
+                )
             if time.monotonic() >= deadline:
                 logger.warning(
-                    "task_dispatch: refusing dispatch %s at capacity — %s",
-                    worker_session_id, reason,
+                    "task_dispatch: refusing %s dispatch %s at capacity — %s",
+                    lane, worker_session_id, reason,
                 )
                 return (
                     f"Server is at capacity — {reason}. The worker was NOT "
-                    f"started (no slot freed in {max(0.0, float(budget)):.0f}s). "
+                    f"started (nothing freed in {max(0.0, float(budget)):.0f}s). "
                     "Wait for a running worker to finish before dispatching "
                     "another, or do this work yourself."
                 )
@@ -921,7 +1051,13 @@ async def dispatch_task_tool(
     # Admission BEFORE any receipt. A worker that the session pool cannot admit
     # must fail here, as a tool error the model can act on, rather than three
     # layers down inside a turn the parent has already been told to park on.
-    capacity_error = await _reserve_admission(worker_id)
+    # The lane decides WHICH ceiling applies (a native worker spawns no
+    # subprocess, so the subprocess cap is not its ceiling) — resolving it can
+    # read the provider row, so it runs off the loop.
+    lane = await asyncio.to_thread(_worker_lane, effective_provider_id, model_id)
+    capacity_error = await _reserve_admission(
+        worker_id, lane=lane, parent_session_id=root_session_id
+    )
     if capacity_error:
         return {
             "ok": False,

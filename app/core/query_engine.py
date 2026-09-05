@@ -1578,7 +1578,12 @@ async def stream_query(
         # Admission backpressure: refuse a NEW session if the box is at its
         # process/RAM/pool ceiling, rather than killing in-flight work later.
         # psutil process-tree walk — off the loop.
-        refusal = await asyncio.to_thread(pool.admission_check)
+        # Lane-aware: the pool's subprocess cap counts DELEGATED sessions
+        # only, and deciding the leg can read the provider row, so both
+        # run in the same worker thread.
+        refusal = await asyncio.to_thread(
+            lambda: pool.admission_check(memory_leg_for_options(options))
+        )
         if refusal is not None:
             logger.warning(f"[Admission] Refusing new session {session_id}: {refusal}")
             yield {"type": "error", "message": f"Server is at capacity — {refusal}. Please retry shortly."}
@@ -2813,7 +2818,12 @@ async def _stream_to_websocket_impl(
         # Admission backpressure: refuse a NEW session if the box is at its
         # process/RAM/pool ceiling, rather than killing in-flight work later.
         # psutil process-tree walk — off the loop.
-        refusal = await asyncio.to_thread(pool.admission_check)
+        # Lane-aware: the pool's subprocess cap counts DELEGATED sessions
+        # only, and deciding the leg can read the provider row, so both
+        # run in the same worker thread.
+        refusal = await asyncio.to_thread(
+            lambda: pool.admission_check(memory_leg_for_options(options))
+        )
         if refusal is not None:
             logger.warning(f"[Admission] Refusing new session {session_id}: {refusal}")
             yield {"type": "error", "message": f"Server is at capacity — {refusal}. Please retry shortly."}

@@ -251,6 +251,108 @@ def test_admission_refuses_at_hard_cap():
     assert "hard cap" in refusal
 
 
+def _native_state(**kwargs) -> SessionState:
+    """A pooled session on a native in-process leg (no CLI subprocess)."""
+    state = _make_state(**kwargs)
+    state.adapter.provider_kind = "openai_responses"
+    return state
+
+
+def test_native_sessions_do_not_count_against_the_subprocess_cap():
+    """The cap bounds node subprocesses; native sessions own none.
+
+    Rewritten from the old single-count invariant (2026-09-04 audit): a pool
+    stuffed past the hard cap with native sessions used to read as "at hard
+    cap" and refuse work that costs no process.
+    """
+    pool = SessionPool(max_size=2)  # hard cap = 4
+    for i in range(pool.hard_cap * 2):
+        pool.put(f"native-{i}", _native_state(is_streaming=True))
+
+    assert pool.native_size == pool.hard_cap * 2
+    assert pool.delegated_size == 0
+    assert not pool.is_at_hard_cap()
+    assert pool.admission_check() is None
+    assert pool.admission_check("native") is None
+
+
+def test_native_sessions_are_not_counted_by_a_delegated_admission():
+    """A delegated session is admitted while natives fill the pool."""
+    pool = SessionPool(max_size=2)  # hard cap = 4
+    for i in range(6):
+        pool.put(f"native-{i}", _native_state(is_streaming=True))
+    pool.put("ses-cli", _make_state(is_streaming=True))
+
+    assert pool.lane_counts() == (1, 6)
+    assert pool.admission_check() is None
+
+
+def test_delegated_lane_still_refuses_at_its_cap_with_natives_pooled():
+    """Natives are exempt; the delegated lane's own cap is unchanged."""
+    pool = SessionPool(max_size=2)  # hard cap = 4
+    for i in range(pool.hard_cap):
+        pool.put(f"ses-{i}", _make_state(is_streaming=True))
+    for i in range(3):
+        pool.put(f"native-{i}", _native_state(is_streaming=True))
+
+    assert pool.is_at_hard_cap()
+    refusal = pool.admission_check()
+    assert refusal is not None and "hard cap" in refusal
+    assert "4/4" in refusal
+    # ...and the same box still admits a native worker.
+    assert pool.admission_check("native") is None
+
+
+def test_native_soft_cap_refuses_when_configured(monkeypatch):
+    """The native safety valve is the only pool-count ceiling natives meet."""
+    from app.core import config as cfg
+
+    pool = SessionPool(max_size=2)
+    monkeypatch.setattr(cfg.settings, "sdk_native_session_soft_cap", 3, raising=False)
+    for i in range(3):
+        pool.put(f"native-{i}", _native_state(is_streaming=True))
+
+    refusal = pool.admission_check("native")
+    assert refusal is not None
+    assert "native in-process sessions" in refusal
+    assert "ceiling 3" in refusal
+    # A delegated admission is untouched by it.
+    assert pool.admission_check() is None
+
+
+def test_rss_ceiling_still_refuses_a_native_admission(monkeypatch):
+    """The real resource guard applies to every lane, and says RSS."""
+    pytest.importorskip("psutil")
+    from app.core import config as cfg
+
+    pool = SessionPool(max_size=10)
+    monkeypatch.setattr(cfg.settings, "sdk_max_child_processes", 0, raising=False)
+    monkeypatch.setattr(cfg.settings, "sdk_admission_rss_mb", 1, raising=False)
+    monkeypatch.setattr(cfg.settings, "sdk_native_session_soft_cap", 0, raising=False)
+    pool.put("native-0", _native_state(is_streaming=True))
+
+    refusal = pool.admission_check("native")
+    assert refusal is not None
+    assert "tree RSS" in refusal and "ceiling 1MB" in refusal
+
+
+def test_admission_snapshot_reports_the_counts_that_gate():
+    pool = SessionPool(max_size=2)  # hard cap = 4
+    for i in range(3):
+        pool.put(f"ses-{i}", _make_state(is_streaming=True))
+    for i in range(5):
+        pool.put(f"native-{i}", _native_state(is_streaming=True))
+
+    snap = pool.admission_snapshot()
+    assert snap.lane == "delegated"
+    assert (snap.delegated_in_pool, snap.native_in_pool) == (3, 5)
+    assert snap.in_pool == 8 and snap.hard_cap == 4
+    assert snap.refusal is None  # 3 delegated < cap 4, despite 8 in the pool
+
+    native_snap = pool.admission_snapshot("native")
+    assert native_snap.lane == "native" and native_snap.refusal is None
+
+
 def test_admission_refuses_at_child_process_ceiling(monkeypatch):
     """With a configured child-process ceiling, admission refuses when exceeded."""
     pytest.importorskip("psutil")
