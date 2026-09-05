@@ -33,6 +33,7 @@ here imports a caller.
 from __future__ import annotations
 
 import asyncio
+import time
 import logging
 import threading
 from typing import Any, Callable, Dict, Optional, Set, Tuple
@@ -421,6 +422,9 @@ async def interrupt_async(
 # SLOWER cadence than this keeps its own interval (the ceiling is never allowed
 # to speed a poll up).
 MAX_POLL_INTERVAL = 2.0
+# asyncio treats a timer as due when it is within one clock resolution of
+# firing, so a wait can return that much before the deadline it was given.
+_CLOCK_SLACK = time.get_clock_info("monotonic").resolution
 
 # Growth factor per un-woken poll.
 POLL_BACKOFF_FACTOR = 2.0
@@ -574,7 +578,11 @@ async def wait_settled(
                 # Only now do we know which session's ticks to listen for.
                 wake.bind(turn.get("session_id"))
             remaining = deadline - loop.time()
-            if remaining <= 0:
+            # asyncio may fire a timer up to one clock resolution early, so
+            # a deadline within that slack has lapsed: without this the final
+            # backstop wait returns with microseconds left and the loop reads
+            # the row one extra time before giving up.
+            if remaining <= _CLOCK_SLACK:
                 return None
             if await wake.wait(min(interval, remaining)):
                 interval = poll_interval  # Session is moving — stay responsive.
@@ -605,7 +613,11 @@ async def wait_session_idle(
             if await asyncio.to_thread(_session_is_idle, session_id):
                 return True
             remaining = deadline - loop.time()
-            if remaining <= 0:
+            # asyncio may fire a timer up to one clock resolution early, so
+            # a deadline within that slack has lapsed: without this the final
+            # backstop wait returns with microseconds left and the loop reads
+            # the row one extra time before giving up.
+            if remaining <= _CLOCK_SLACK:
                 return False
             if await wake.wait(min(interval, remaining)):
                 interval = poll_interval

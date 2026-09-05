@@ -579,6 +579,16 @@ def _run_column_migrations(cursor):
         if not column_exists(cursor, "sessions", "launched_model"):
             cursor.execute("ALTER TABLE sessions ADD COLUMN launched_model TEXT")
             migrations_applied.append("sessions.launched_model")
+        # ``launched_model`` is overwritten by every mid-session model switch,
+        # so it answers "what is this session on NOW", never "what did it start
+        # on". A session that ran turns 1-6 on grok-4.5 and 7-16 on grok-4.6
+        # read as grok-4.6 only, and nothing could attribute the early turns.
+        # Written once and never overwritten (see sessions.update_session);
+        # pre-existing rows stay NULL rather than being back-stamped with a
+        # model that may not be the one they started on.
+        if not column_exists(cursor, "sessions", "first_model"):
+            cursor.execute("ALTER TABLE sessions ADD COLUMN first_model TEXT")
+            migrations_applied.append("sessions.first_model")
         # True token accounting (audit P8). `total_tokens_in` holds FRESH input
         # only — the provider normalizes usage Anthropic-style, so cache reads are
         # excluded — while the per-turn cache numbers only ever landed in the
@@ -2676,6 +2686,7 @@ from app.db.sessions import (  # noqa: F401
     unpin_session,
     set_session_project,
     set_session_branch,
+    resync_session_branch,
     update_session_pr_state,
     list_sessions_by_pr_number,
     list_sessions_for_branch,

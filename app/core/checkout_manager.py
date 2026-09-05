@@ -29,6 +29,7 @@ No callers are wired in this commit (P4 does that). Reuses ``git_service`` and
 
 from __future__ import annotations
 
+import json
 import logging
 import ntpath
 import os
@@ -580,7 +581,19 @@ def _ensure_branch_checkout(
     # run in it. Best-effort by contract: a failure here degrades the worktree,
     # it does not invalidate it.
     try:
-        provision_worktree_runtime(base_path, dest_str)
+        provisioning = provision_worktree_runtime(base_path, dest_str)
+        # Said out loud on one line, because the alternative is somebody
+        # spending ten minutes deciding whether a build failure is their code.
+        logger.info(
+            "checkout_manager: provisioned %s — linked=%s installed=%s "
+            "synced=%s skipped=%s errors=%s",
+            dest_str,
+            provisioning.get("linked"),
+            provisioning.get("installed"),
+            provisioning.get("synced"),
+            provisioning.get("skipped"),
+            provisioning.get("errors"),
+        )
     except Exception as e:  # noqa: BLE001 - defence in depth
         logger.warning(
             "checkout_manager: runtime provisioning raised for %s: %s", dest_str, e
@@ -606,7 +619,23 @@ def _ensure_branch_checkout(
 # A worktree starts with no node_modules — it is gitignored, so `git worktree
 # add` never brings it across. Every frontend command in the new checkout then
 # fails until someone reinstalls a tree that already exists one directory over,
-# on the same lockfile, for the same project. Linking it is instant.
+# for the same project. Linking it is instant — but only correct while the
+# branch wants the same packages the source tree has installed.
+#
+# When it doesn't, the link is worse than nothing. A branch that upgraded
+# Tailwind (3 -> 4, adding @tailwindcss/vite) linked against a source tree still
+# on the old install, and every frontend command in that worktree failed in a
+# way that reads like a code bug rather than a provisioning one: "Cannot
+# optimize dependency", "Can't resolve 'tailwindcss'", 152 phantom svelte-check
+# errors. Three audited sessions burned minutes and a diagnosis sub-agent on it.
+#
+# So provisioning checks freshness before it links: npm's own record of the
+# installed tree (node_modules/.package-lock.json) against the WORKTREE's
+# package-lock.json. Satisfied -> link, instantly, as before. Not satisfied ->
+# install into the worktree's own package dir instead, with `npm ci`, which is
+# how CI and the Dockerfile install this repo. Unknowable (no readable
+# lockfile) -> link, because provisioning never had this check and an
+# unreadable lockfile is not worth minutes of install time.
 
 _SVELTE_CONFIG_NAMES = (
     "svelte.config.js",
@@ -618,6 +647,16 @@ _SVELTE_CONFIG_NAMES = (
 # `svelte-kit sync` generates .svelte-kit/ (tsconfig, $types, route manifests).
 # Without it svelte-check and vite fail on a fresh checkout.
 _SVELTE_SYNC_TIMEOUT_SECONDS = 300
+
+# The project's lockfile, and npm's own record of what a node_modules actually
+# holds (npm writes the latter on every install).
+_LOCKFILE_NAME = "package-lock.json"
+_INSTALLED_TREE_RECORD = ".package-lock.json"
+
+# A cold `npm ci` on this repo's frontend takes a couple of minutes; a slow
+# registry can take several. Bounded so a hung install cannot pin a checkout
+# forever, generous enough that a normal one is never cut short.
+_NPM_INSTALL_TIMEOUT_SECONDS = 1200
 
 
 def _node_package_dirs(root: Path) -> List[Path]:
@@ -662,6 +701,118 @@ def _link_directory(source: Path, dest: Path) -> None:
         os.symlink(str(source), str(dest), target_is_directory=True)
 
 
+def _read_json_file(path: Path) -> Optional[Dict[str, Any]]:
+    """Parse a JSON object from ``path``, or ``None`` if it cannot be read."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _required_packages(lockfile: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """The ``node_modules/...`` -> version map a lockfile says must be present.
+
+    Optional and platform-gated entries are dropped: npm legitimately leaves
+    them uninstalled on a machine they do not apply to, so demanding them would
+    make every tree look stale. Returns ``None`` for a lockfile shape this does
+    not understand (npm 6 and older, where there is no ``packages`` map).
+    """
+    packages = lockfile.get("packages")
+    if not isinstance(packages, dict):
+        return None
+    required: Dict[str, str] = {}
+    for key, entry in packages.items():
+        if not isinstance(key, str) or not key.startswith("node_modules/"):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("optional") or entry.get("os") or entry.get("cpu"):
+            continue
+        version = entry.get("version")
+        if isinstance(version, str) and version:
+            required[key] = version
+    return required
+
+
+def _installed_tree_verdict(source_modules: Path, dest_package: Path) -> Tuple[str, str]:
+    """Whether ``source_modules`` satisfies ``dest_package``'s lockfile.
+
+    Returns ``(verdict, reason)``. ``"match"`` means the link is safe,
+    ``"stale"`` means it would hand the branch the wrong packages, and
+    ``"unknown"`` means there is nothing to compare — which links, keeping the
+    behaviour provisioning has always had.
+    """
+    dest_lock = _read_json_file(dest_package / _LOCKFILE_NAME)
+    if dest_lock is None:
+        return "unknown", "worktree has no readable lockfile"
+    required = _required_packages(dest_lock)
+    if not required:
+        return "unknown", "worktree lockfile names no packages"
+
+    installed_record = _read_json_file(source_modules / _INSTALLED_TREE_RECORD)
+    if installed_record is None:
+        # No npm record of the source install (npm 6, or a tree assembled by
+        # hand). Comparing the two LOCKFILES still catches the case that hurts:
+        # a branch that moved its dependencies away from the source checkout's.
+        source_lock = _read_json_file(source_modules.parent / _LOCKFILE_NAME)
+        if source_lock is None:
+            return "unknown", "source tree has no npm install record"
+        if _required_packages(source_lock) == required:
+            return "match", "source lockfile matches the worktree's"
+        return "stale", "source lockfile differs from the worktree's"
+
+    installed = _required_packages(installed_record)
+    if installed is None:
+        return "unknown", "unreadable npm install record"
+
+    differing = sorted(
+        key for key, version in required.items() if installed.get(key) != version
+    )
+    if not differing:
+        return "match", "installed tree satisfies the worktree's lockfile"
+    names = [key[len("node_modules/"):] for key in differing[:3]]
+    suffix = ", ..." if len(differing) > 3 else ""
+    return (
+        "stale",
+        f"{len(differing)} package(s) missing or at another version "
+        f"({', '.join(names)}{suffix})",
+    )
+
+
+def _run_npm_install(package_dir: Path) -> Tuple[bool, str]:
+    """Install ``package_dir``'s own dependencies. Returns ``(ok, detail)``.
+
+    ``npm ci`` when there is a lockfile — the reproducible install CI and the
+    Dockerfile use — and ``npm install`` when there is not, since ``npm ci``
+    refuses to run without one.
+    """
+    if (package_dir / _LOCKFILE_NAME).is_file():
+        command = ["npm", "ci", "--no-audit", "--no-fund"]
+    else:
+        command = ["npm", "install", "--no-audit", "--no-fund"]
+    printable = " ".join(command)
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(package_dir),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_NPM_INSTALL_TIMEOUT_SECONDS,
+            shell=(os.name == "nt"),
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"{printable} could not run: {e}"
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[:400]
+        return False, f"{printable} failed (rc={result.returncode}): {detail}"
+    return True, printable
+
+
 def _run_svelte_kit_sync(package_dir: Path) -> bool:
     """Best-effort ``npx svelte-kit sync``. Returns whether it succeeded."""
     try:
@@ -697,16 +848,22 @@ def _run_svelte_kit_sync(package_dir: Path) -> bool:
 def provision_node_modules(source_root: str, dest_root: str) -> Dict[str, List[str]]:
     """Give a fresh worktree the source checkout's installed node packages.
 
-    For each package directory the two checkouts share, links the source's
-    ``node_modules`` into the worktree and then runs ``svelte-kit sync`` where a
-    svelte config says it is a SvelteKit app.
+    For each package directory the two checkouts share, either links the
+    source's ``node_modules`` into the worktree (when the source's installed
+    tree satisfies the WORKTREE's lockfile) or installs the worktree's own
+    dependencies in place (when it does not — see the note above
+    ``_SVELTE_CONFIG_NAMES``). Then runs ``svelte-kit sync`` where a svelte
+    config says it is a SvelteKit app.
 
     Entirely best-effort and never raises: a worktree without node_modules is
     degraded, not broken, and it must not cost anyone a checkout. Returns a
-    summary of what happened, which is what the tests assert on.
+    summary of what happened — including which path each package took, so the
+    provisioning log answers "why does this branch not build" on its own —
+    which is what the tests assert on.
     """
     summary: Dict[str, List[str]] = {
         "linked": [],
+        "installed": [],
         "synced": [],
         "skipped": [],
         "errors": [],
@@ -732,17 +889,48 @@ def provision_node_modules(source_root: str, dest_root: str) -> Dict[str, List[s
             elif not source_modules.is_dir():
                 summary["skipped"].append(f"{label}: source has no node_modules")
             else:
-                _link_directory(source_modules, dest_modules)
-                summary["linked"].append(label)
-                logger.info(
-                    "checkout_manager: linked node_modules for %s into %s",
-                    label,
-                    package,
-                )
+                verdict, reason = _installed_tree_verdict(source_modules, package)
+                if verdict == "stale":
+                    logger.info(
+                        "checkout_manager: not linking node_modules for %s into %s "
+                        "(%s) — installing the worktree's own dependencies",
+                        label,
+                        package,
+                        reason,
+                    )
+                    ok, detail = _run_npm_install(package)
+                    if not ok:
+                        summary["errors"].append(f"{label}: install failed: {detail}")
+                        logger.warning(
+                            "checkout_manager: could not install node_modules for "
+                            "%s in %s: %s",
+                            label,
+                            package,
+                            detail,
+                        )
+                        # No modules means sync cannot work either.
+                        continue
+                    summary["installed"].append(f"{label}: {detail} ({reason})")
+                    logger.info(
+                        "checkout_manager: installed node_modules for %s in %s "
+                        "via %s",
+                        label,
+                        package,
+                        detail,
+                    )
+                else:
+                    _link_directory(source_modules, dest_modules)
+                    summary["linked"].append(label)
+                    logger.info(
+                        "checkout_manager: linked node_modules for %s into %s (%s)",
+                        label,
+                        package,
+                        reason,
+                    )
         except Exception as e:  # noqa: BLE001
             summary["errors"].append(f"{label}: link failed: {e}")
             logger.warning(
-                "checkout_manager: could not link node_modules for %s in %s: %s",
+                "checkout_manager: could not provision node_modules for %s in %s: %s",
                 label,
                 package,
                 e,

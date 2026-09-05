@@ -19,6 +19,12 @@ What this module adds on top of raw ``dispatch_worker``:
   be dispatched again beneath itself;
 * worker budget (A9) — at most ``settings.task_tool_max_workers`` live
   workers per root session tree;
+* pool admission — the worker budget is a per-tree ceiling, not a statement
+  about the box; a dispatch also has to fit in the SDK session pool. That is
+  checked HERE, before anything is returned: a dispatch at the ceiling waits
+  briefly for a slot and is then refused with ``ok=False`` (see
+  :func:`_reserve_admission`), because a background receipt is a promise to
+  wake the parent and a worker that never started keeps no promises;
 * root routing (A9) — approvals, progress cards, and supervisor registration
   land on the ROOT session (the one with a human watching), while
   project/worktree/cwd inheritance still reads the direct caller;
@@ -89,6 +95,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -121,6 +128,40 @@ _REPORT_DIR_PARTS = (".fluid", "task-reports")
 # effective turn provider must be able to pass it distinctly from callers that
 # omitted provider context and need the session-row compatibility fallback.
 _PROVIDER_UNSET = object()
+
+# ── session-pool admission, checked BEFORE any receipt is returned ───────────
+# A worker is a new pooled session, so it is subject to
+# ``SessionPool.admission_check`` — but that check used to run deep inside the
+# worker's own turn, seconds AFTER this module had already handed the model a
+# background receipt saying "end the turn, you will be woken". The 2026-09-04
+# audit caught the result: seven receipts, then seven "worker failed to start:
+# session pool at hard cap (8/8)" frames, then a re-dispatch that failed the
+# same way. Admission is now decided here, synchronously, and a dispatch that
+# cannot be admitted is refused outright rather than receipted.
+
+#: How long a dispatch waits for a pool slot before refusing. Covers the common
+#: case — a fan-out that is only transiently over the cap because a sibling is
+#: about to settle — without turning a full box into an unbounded stall.
+_ADMISSION_WAIT_SECONDS = 90.0
+
+#: Re-check cadence while waiting for a slot.
+_ADMISSION_POLL_SECONDS = 0.5
+
+#: How long an admitted-but-not-yet-connected dispatch keeps counting against
+#: the pool. A worker occupies its slot only once its turn connects an adapter,
+#: which is seconds to minutes after admission; without this reservation window
+#: every waiter would see the same free slot and all pile into it (the exact
+#: check-then-act race that overshot the cap). Self-limiting: a reservation is
+#: dropped as soon as its session is really pooled, and expires regardless.
+_ADMISSION_RESERVATION_SECONDS = 180.0
+
+#: worker session id -> monotonic expiry of its admission reservation.
+_PENDING_ADMISSIONS: Dict[str, float] = {}
+
+#: (loop, lock) for the admission critical section. Rebuilt when the running
+#: loop differs, because an ``asyncio.Lock`` belongs to the loop that awaited
+#: it and this module is imported once across many test loops.
+_ADMISSION_LOCK: Optional[Tuple[Any, asyncio.Lock]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +268,116 @@ def _live_worker_count_for_root(root_session_id: str) -> int:
         if root == root_session_id or parent_id == root_session_id:
             count += len(bucket)
     return count
+
+
+# ---------------------------------------------------------------------------
+# Session-pool admission
+# ---------------------------------------------------------------------------
+
+def _admission_lock() -> asyncio.Lock:
+    """The admission critical section's lock, bound to the running loop."""
+    global _ADMISSION_LOCK
+
+    loop = asyncio.get_running_loop()
+    if _ADMISSION_LOCK is None or _ADMISSION_LOCK[0] is not loop:
+        _ADMISSION_LOCK = (loop, asyncio.Lock())
+    return _ADMISSION_LOCK[1]
+
+
+def _pending_admission_count() -> int:
+    """Dispatches admitted here that the pool has not counted yet.
+
+    Prunes as it counts: a reservation is dropped once its session is really in
+    the pool (the pool's own number now covers it) or once it has aged out (the
+    dispatch died before connecting, or is wedged — either way it must stop
+    holding a slot hostage).
+    """
+    if not _PENDING_ADMISSIONS:
+        return 0
+    from app.core import session_pool as pool_module
+
+    pool = getattr(pool_module, "_session_pool", None)
+    now = time.monotonic()
+    for key, expiry in list(_PENDING_ADMISSIONS.items()):
+        if expiry <= now:
+            _PENDING_ADMISSIONS.pop(key, None)
+            continue
+        try:
+            if pool is not None and pool.peek(key) is not None:
+                _PENDING_ADMISSIONS.pop(key, None)
+        except Exception:  # noqa: BLE001 — a bookkeeping read, never fatal
+            continue
+    return len(_PENDING_ADMISSIONS)
+
+
+def _release_admission(worker_session_id: str) -> None:
+    """Drop a reservation (the dispatch settled, or never started)."""
+    _PENDING_ADMISSIONS.pop(worker_session_id, None)
+
+
+async def _reserve_admission(
+    worker_session_id: str, *, wait_seconds: Optional[float] = None
+) -> Optional[str]:
+    """Hold a pool slot for ``worker_session_id``, waiting briefly if needed.
+
+    Returns ``None`` once the slot is reserved, or a caller-facing refusal
+    string if the box is still at a ceiling when the wait runs out. The wait is
+    what makes a fan-out behave: dispatches queue on the lock in arrival order
+    and take slots as siblings settle, so a transient cap costs seconds instead
+    of a false receipt.
+
+    The refusal is deliberately a REAL error rather than a queued receipt. A
+    receipt is a promise the parent will be woken, and nothing outside this
+    process would keep that promise for a dispatch that never started — the
+    registry row, the park gate and the completion wake are all armed inside
+    ``provider_agent.dispatch_worker``, i.e. only once the worker really runs.
+    """
+    from app.core import session_pool as pool_module
+
+    budget = _ADMISSION_WAIT_SECONDS if wait_seconds is None else wait_seconds
+    deadline = time.monotonic() + max(0.0, float(budget))
+    lock = _admission_lock()
+    waited = False
+    while True:
+        async with lock:
+            # Off the loop, like every other admission_check caller: the
+            # ceiling checks can walk the process tree with psutil.
+            snapshot = await asyncio.to_thread(pool_module.admission_snapshot)
+            pending = _pending_admission_count()
+            at_cap = (
+                snapshot.hard_cap > 0
+                and (snapshot.in_pool + pending) >= snapshot.hard_cap
+            )
+            if snapshot.refusal is None and not at_cap:
+                _PENDING_ADMISSIONS[worker_session_id] = (
+                    time.monotonic() + _ADMISSION_RESERVATION_SECONDS
+                )
+                if waited:
+                    logger.info(
+                        "task_dispatch: worker %s admitted after waiting for a "
+                        "pool slot (%d/%d pooled, %d reserved)",
+                        worker_session_id, snapshot.in_pool,
+                        snapshot.hard_cap, pending,
+                    )
+                return None
+            reason = snapshot.refusal or (
+                f"session pool at hard cap ({snapshot.in_pool}/"
+                f"{snapshot.hard_cap}) with {pending} worker(s) already "
+                "admitted and starting"
+            )
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "task_dispatch: refusing dispatch %s at capacity — %s",
+                    worker_session_id, reason,
+                )
+                return (
+                    f"Server is at capacity — {reason}. The worker was NOT "
+                    f"started (no slot freed in {max(0.0, float(budget)):.0f}s). "
+                    "Wait for a running worker to finish before dispatching "
+                    "another, or do this work yourself."
+                )
+        waited = True
+        await asyncio.sleep(_ADMISSION_POLL_SECONDS)
 
 
 # ---------------------------------------------------------------------------
@@ -758,17 +909,37 @@ async def dispatch_task_tool(
     if tool_allowlist:
         kwargs["tool_allowlist"] = tool_allowlist
 
+    # Allocate the durable identity before scheduling the worker. Fluid uses
+    # this exact id as its background detach receipt (polling by label could
+    # bind two same-label launches to the wrong worker or return None under
+    # load), and BOTH modes need it up front now: it is the key the admission
+    # reservation below is held under, and the one the pool will show when the
+    # worker's turn actually connects.
+    worker_id = str(uuid.uuid4())
+    kwargs["worker_session_id"] = worker_id
+
+    # Admission BEFORE any receipt. A worker that the session pool cannot admit
+    # must fail here, as a tool error the model can act on, rather than three
+    # layers down inside a turn the parent has already been told to park on.
+    capacity_error = await _reserve_admission(worker_id)
+    if capacity_error:
+        return {
+            "ok": False,
+            "error": capacity_error,
+            "reason": "capacity",
+            "retryable": True,
+        }
+
     if mode == "background":
-        # Allocate the durable identity before scheduling the worker. Fluid uses
-        # this exact id as its detach receipt; polling by label could bind two
-        # same-label launches to the wrong worker or return None under load.
-        worker_id = str(uuid.uuid4())
-        kwargs["worker_session_id"] = worker_id
         task = asyncio.create_task(
             provider_agent.dispatch_worker(background=True, **kwargs)
         )
         _BACKGROUND_TASKS.add(task)
         task.add_done_callback(_BACKGROUND_TASKS.discard)
+        # The reservation stops counting once the worker is pooled (or ages
+        # out); this also frees it the moment a dispatch dies before it ever
+        # got that far.
+        task.add_done_callback(lambda _t, _w=worker_id: _release_admission(_w))
         registered = await _await_worker_registration(
             root_session_id, worker_id, task=task
         )
@@ -824,7 +995,13 @@ async def dispatch_task_tool(
         background_payload["note"] = note
         return background_payload
 
-    outcome = await provider_agent.dispatch_worker(**kwargs)
+    try:
+        outcome = await provider_agent.dispatch_worker(**kwargs)
+    finally:
+        # A sync worker holds its slot for as long as it runs, and the pool is
+        # what counts that; the reservation only ever covered the gap before it
+        # connected (and is dropped by the pool check anyway once it has).
+        _release_admission(worker_id)
     payload: Dict[str, Any] = {
         "ok": outcome.ok,
         "mode": "sync",

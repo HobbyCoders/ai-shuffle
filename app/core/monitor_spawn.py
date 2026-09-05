@@ -30,6 +30,22 @@ Three guardrails live here, all from the round-4 park audit:
 * a BOUNDED WAKE SUMMARY (``monitor_summary_max_chars``) — and, for a
   deliberate stop, the attribution REPLACES the output tail rather than
   riding along with it. The full buffer stays available via TaskOutput.
+
+Three more from the round-6 audit:
+
+* the SESSION CWD (``ctx.cwd``) when the model named none, exactly as fluid's
+  Bash resolves it. The shell used to inherit the server's directory, and four
+  audited worktree sessions lost a park+wake+turn each to "fatal: not a git
+  repository".
+* an INLINE WAIT (``wait_seconds``) — a command that settles inside the window
+  returns its exit code and output in the receipt, so a six-second test run no
+  longer costs a park, a wake, a fresh turn and a full prompt re-send. The
+  still-running case is unchanged, receipt wording included.
+* an OUTCOME-DERIVED STATUS (:func:`record_settled_status`) — a watcher that
+  swallowed a failure (``… || true``) exits 0 while its own last word is
+  ``EXIT:1``, and the notification said "completed" over a summary that said
+  the run had failed. The row and the notification are now written from, and
+  re-read at, one place.
 """
 
 from __future__ import annotations
@@ -54,6 +70,32 @@ _LOG_TAIL_BYTES = 2_000
 
 # How often the completion watcher looks at the process (and at its deadline).
 _WATCH_POLL_SECONDS = 0.5
+
+# wait_seconds is a bounded inline-settle window for short commands. Return a completed command in its receipt
+# instead of creating an unnecessary park and wake; detach genuinely longer work.
+MAX_WAIT_SECONDS = 120
+
+# How often the inline wait looks at the process. Much tighter than the
+# completion watcher's poll — the whole point is to return the moment the
+# command exits.
+_INLINE_POLL_SECONDS = 0.1
+
+# After the process is gone, how long the inline wait gives the output reader
+# to finish draining the pipe and record the exit code.
+_DRAIN_GRACE_SECONDS = 2.0
+
+# Cap on the output folded into an inline (settled) receipt. Far above the wake
+# summary's budget: an inline result is a tool result like Bash's, read in the
+# turn that asked for it, not a wake-turn preamble.
+_INLINE_OUTPUT_MAX_CHARS = 30_000
+
+# An explicit exit-code marker a watcher prints for itself — `echo "EXIT:$?"`,
+# the shape audited CI watchers use. When the command's own exit code says 0
+# because the watcher swallowed the failure (`… || true`, or a self-exit after
+# the tool it ran errored), this marker is the only honest outcome in the
+# buffer, and the notification used to carry <status>completed</status> above a
+# summary that said EXIT:1.
+_EXIT_MARKER_RE = re.compile(r"\bEXIT[:=]\s*(-?\d+)")
 
 # Registry ``reason`` stamps this module writes. They are what turns a
 # deliberate stop into a CAUSE the model can read, instead of the bare
@@ -133,6 +175,66 @@ def monitor_serving_receipt_text(task_id: str) -> str:
         "notified if it stops or dies. Do not sleep, poll, or check on it "
         "yourself."
     )
+
+
+def clamp_wait_seconds(value: Any) -> int:
+    """The requested inline wait, bounded to ``[0, MAX_WAIT_SECONDS]``.
+
+    Anything unparseable is 0 — "no inline wait", the historical behaviour —
+    rather than an error: a bad ``wait_seconds`` must never cost the spawn.
+    """
+    try:
+        seconds = int(float(value))
+    except (TypeError, ValueError):
+        return 0
+    if seconds <= 0:
+        return 0
+    return min(seconds, MAX_WAIT_SECONDS)
+
+
+def monitor_inline_receipt_text(
+    task_id: str,
+    exit_code: Optional[int],
+    output: str,
+    *,
+    failed: bool = False,
+) -> str:
+    """The receipt for a command that SETTLED inside its inline wait.
+
+    No park, no wake, no fresh turn: the result is right here, so the text says
+    the work is done instead of telling the model to end the turn.
+    """
+    code = "unknown" if exit_code is None else str(exit_code)
+    verdict = "finished with a failure" if failed else "finished"
+    return (
+        f"The command {verdict} while you waited (task {task_id}, exit code "
+        f"{code}). Nothing is running and nothing will wake you — this is the "
+        "whole result.\n\n" + (output or "(no output)")
+    )
+
+
+def monitor_still_running_note(wait_seconds: int) -> str:
+    """The clause appended when an inline wait expired with work still running."""
+    return (
+        f" It was still running after the {wait_seconds}s you waited, so it "
+        "stays in the background."
+    )
+
+
+def last_exit_marker(text: str) -> Optional[int]:
+    """The LAST explicit ``EXIT:<n>`` a command printed for itself, if any.
+
+    Last, not any: a watcher that retries prints EXIT:1 on the attempt that
+    failed and EXIT:0 on the one that worked, and the final marker is the
+    outcome. ``None`` when the command printed none.
+    """
+    codes = _EXIT_MARKER_RE.findall(text or "")
+    if not codes:
+        return None
+    try:
+        return int(codes[-1])
+    except ValueError:  # pragma: no cover — the pattern only matches digits
+        return None
 
 
 def command_has_own_time_bound(command: str) -> bool:
@@ -351,7 +453,107 @@ def settle_monitor_task(
         )
     if not summary:
         summary = f"(no output; exit code {exit_code})"
-    return ("completed" if exit_code == 0 else "error"), summary
+    # The OUTCOME the summary shows beats the process's disposition. A watcher
+    # ending `…; gh pr checks N || true`, or one that self-exited after the
+    # command inside it errored, exits 0 while its own last word is `EXIT:1` —
+    # and the notification carried <status>completed</status> above a summary
+    # that said the run had failed.
+    marker = last_exit_marker(summary)
+    failed = exit_code != 0 or (marker is not None and marker != 0)
+    return ("error" if failed else "completed"), summary
+
+
+def record_settled_status(
+    session_id: Optional[str],
+    task_id: str,
+    status: str,
+    summary: str,
+    *,
+    serves: bool,
+) -> Tuple[str, str]:
+    """Write the settled outcome onto the task row and return what the row says.
+
+    The notification and the row are two views of one event and they used to
+    disagree: a TaskStop that raced a self-exit reached the model as
+    ``completed`` in the notification and ``killed`` in the row, and an
+    ``EXIT:1`` run reached it as ``completed`` in both. So the row is re-read
+    HERE, after the settle and immediately before the wake frame is built:
+
+    * a deliberate stop the registry recorded while the watcher was settling
+      still wins — the row is right and the frame adopts it;
+    * otherwise the settled status is written onto the row, so what the model
+      reads in the notification is what ``/live``, ``TaskGet`` and the terminal
+      chip show.
+    """
+    if not session_id:
+        return status, summary
+    try:
+        from app.core.task_registry import task_registry
+
+        record = task_registry.get_task(session_id, task_id) or {}
+        recorded = str(record.get("status") or "")
+        if recorded in _DELIBERATE_STATUSES and status != "killed":
+            # The stop landed after the settle read the registry. The row is
+            # the honest one; rebuild the summary from its attribution.
+            return "killed", _cause_line(
+                str(record.get("reason") or ""),
+                str(record.get("summary") or ""),
+                serves=serves,
+            )
+        if recorded != status:
+            task_registry.complete_task(
+                session_id, task_id, status, summary=summary
+            )
+        else:
+            task_registry.update_task(session_id, task_id, summary=summary)
+    except Exception:  # noqa: BLE001 — the registry is best-effort
+        logger.debug("monitor_spawn: settled-status write failed", exc_info=True)
+    return status, summary
+
+
+def settle_inline_monitor_task(
+    task: Any,
+    *,
+    command: str,
+    cwd: Optional[str],
+    session_id: Optional[str],
+) -> Tuple[str, str]:
+    """``(status, output)`` for a task that settled inside its inline wait.
+
+    Same honest status as a background settle; the OUTPUT is the difference —
+    an inline result is read in the turn that asked for it, not as a wake-turn
+    preamble, so it gets the far larger inline budget.
+    """
+    status, output = settle_monitor_task(
+        exit_code=task.exit_code,
+        lines=list(task.lines),
+        command=command,
+        cwd=cwd,
+        session_id=session_id,
+        task_id=task.task_id,
+        serves=False,
+    )
+    if task.lines:
+        output = _summarize(list(task.lines), budget=_INLINE_OUTPUT_MAX_CHARS)
+    return status, output
+
+
+async def wait_for_inline_settle(task: Any, wait_seconds: int) -> bool:
+    """Block up to ``wait_seconds`` for ``task`` to exit. True if it did."""
+    import asyncio
+
+    deadline = time.monotonic() + wait_seconds
+    while task.is_running():
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(_INLINE_POLL_SECONDS)
+    # The process is gone, but the reader drains stdout on its own task and
+    # only then records the exit code. Give it a bounded moment so the receipt
+    # quotes the whole buffer instead of a prefix.
+    drain_deadline = time.monotonic() + _DRAIN_GRACE_SECONDS
+    while task.exit_code is None and time.monotonic() < drain_deadline:
+        await asyncio.sleep(_INLINE_POLL_SECONDS)
+    return True
 
 
 async def _enforce_deadline(
@@ -394,6 +596,59 @@ async def _enforce_deadline(
     )
 
 
+WAIT_SECONDS_PARAM = (
+    f"Seconds to wait here for the command to finish (0-{MAX_WAIT_SECONDS}, "
+    "default 0 = don't wait). If it finishes inside the wait you get its exit "
+    "code and output in this result and nothing is left running — no "
+    "notification, no extra turn. If it is still going when the wait expires "
+    "you get the usual background receipt and are woken as normal. Set it to "
+    "a few seconds for work that will probably be quick (a focused test file, "
+    "a lint run, a git or gh command); leave it 0 for a build, a full suite or "
+    "a CI wait. Ignored when `serves` is set."
+)
+
+WAIT_SECONDS_DESCRIPTION_CLAUSE = (
+    "\n\n**`wait_seconds` for work that is probably quick.** Waiting a few "
+    "seconds here is cheaper than a completion: if the command finishes inside "
+    "the wait, its exit code and output come back in this result and no "
+    "notification, wake or extra turn happens at all. If it does not, you get "
+    "the normal background receipt and end the turn exactly as you would have. "
+    "It is never a reason to wait in Bash instead."
+)
+
+
+def amend_native_monitor_spec(registry: Any) -> None:
+    """Teach fluid's registered Monitor spec about ``wait_seconds``.
+
+    Ruling A13 splits the tool: fluid owns Monitor's shape, the app owns its
+    supervision — and the inline wait is supervision. The parameter is
+    therefore added to the vendored spec here rather than in vendor/fluid, the
+    same way :func:`_amend_native_task_spec` installs the app's Task contract.
+    Fully defensive: a failure leaves the vendor spec as-is and the spawner
+    simply never sees a ``wait_seconds``.
+    """
+    spec = registry.get("Monitor")
+    if spec is None:
+        # Monitor is not on this session's surface. Amending would ADD it.
+        return
+    schema = dict(spec.input_schema or {})
+    properties = dict(schema.get("properties") or {})
+    if "wait_seconds" in properties:
+        return
+    properties["wait_seconds"] = {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": MAX_WAIT_SECONDS,
+        "description": WAIT_SECONDS_PARAM,
+    }
+    schema["properties"] = properties
+    registry.amend_spec(
+        "Monitor",
+        description=(spec.description or "") + WAIT_SECONDS_DESCRIPTION_CLAUSE,
+        input_schema=schema,
+    )
+
+
 def make_fluid_monitor_spawner(
     session_id: "str | Callable[[], Optional[str]]",
 ) -> Callable[[Dict[str, Any], Any], Any]:
@@ -426,7 +681,15 @@ def make_fluid_monitor_spawner(
                 )
                 caller_session_id = None
 
-        cwd = input.get("cwd")
+        # The session's own working directory when the model named none —
+        # exactly what fluid's Bash does (`input.get("cwd") or ctx.cwd`), which
+        # is what the shared cwd parameter text promises ("default: the session
+        # cwd"). Without the fallback the shell inherited the SERVER's cwd:
+        # four audited sessions launched `gh pr checks … --watch` from a
+        # worktree and every one died with "fatal: not a git repository",
+        # costing a park, a wake and a turn each.
+        cwd = input.get("cwd") or getattr(ctx, "cwd", None) or None
+        wait_seconds = clamp_wait_seconds((input or {}).get("wait_seconds"))
         # A SERVICE, not a job (fluid's Monitor `serves` input): a process
         # meant to stay up. It gets no time budget, its SIGTERM is a stop
         # rather than a failure, and fluid keeps it out of park accounting so
@@ -456,6 +719,31 @@ def make_fluid_monitor_spawner(
             # parked parent never wakes.
             task_registry.mark_monitor_shell_task(caller_session_id, task.task_id)
 
+        # INLINE WAIT: block here for the window the model asked for. A command
+        # that settles inside it costs no park, no wake, no fresh turn and no
+        # prompt re-send — its output comes back in this very receipt. Only
+        # when the window expires does the background machinery below start.
+        # A `serves` process is exempt: it is meant to stay up, so there is
+        # nothing to wait for.
+        if wait_seconds and not serves:
+            from fluid.tools.registry import ToolOutcome
+
+            if await wait_for_inline_settle(task, wait_seconds):
+                exit_code = task.exit_code
+                status, output = settle_inline_monitor_task(
+                    task,
+                    command=command,
+                    cwd=cwd,
+                    session_id=caller_session_id,
+                )
+                failed = status != "completed"
+                return ToolOutcome(
+                    text=monitor_inline_receipt_text(
+                        task.task_id, exit_code, output, failed=failed
+                    ),
+                    is_error=failed,
+                )
+
         # Completion watcher: fold the output tail into the registry record and
         # fire the scheduler's terminal seam so a parked parent wakes with the
         # result. Detached — it must outlive this tool call by construction.
@@ -482,14 +770,14 @@ def make_fluid_monitor_spawner(
                     task_id=task.task_id,
                     serves=serves,
                 )
-                try:
-                    from app.core.task_registry import task_registry
-
-                    task_registry.update_task(
-                        caller_session_id, task.task_id, summary=summary
-                    )
-                except Exception:  # noqa: BLE001 — registry is best-effort
-                    logger.debug("monitor_spawn: summary write failed", exc_info=True)
+                # One event, one status: the row is written from the settle and
+                # re-read, so the notification below cannot say "completed"
+                # over a row that says "killed" (a TaskStop racing a self-exit)
+                # or over a summary that says the run failed.
+                status, summary = record_settled_status(
+                    caller_session_id, task.task_id, status, summary,
+                    serves=serves,
+                )
                 try:
                     from app.core import turn_scheduler
 
@@ -533,6 +821,10 @@ def make_fluid_monitor_spawner(
             if serves
             else monitor_receipt_text(task.task_id)
         )
+        if wait_seconds and not serves:
+            # The wait expired with work still running: say so, then the
+            # unchanged park instruction above stands.
+            text += monitor_still_running_note(wait_seconds)
         if budget:
             text += (
                 f" It carries a {budget}s time budget: if it is still running "

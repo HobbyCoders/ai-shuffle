@@ -8,8 +8,23 @@ Attached once at startup (``app/main.py`` lifespan, after the DB pool is up) via
 then lands in the same store the ``GetAppErrors`` MCP tool and the admin UI read
 from, with no scattered explicit calls.
 
+Capture level
+-------------
+ERROR and above are always persisted. WARNING is captured too by default
+(``ERROR_LOG_CAPTURE_WARNINGS=false`` turns it off), because ERROR-only capture
+made whole classes of failure invisible to the one tool an agent has for
+looking: the provider credit pollers logged their HTTP failures at warning and
+debug, so an agent chasing a silent 403 got ``{"errors": [], "count": 0}`` from
+``GetAppErrors`` and concluded nothing was wrong. Warnings do NOT change what
+that tool returns by default — it still asks for ERROR+ unless the caller passes
+``min_level: "WARNING"`` — they are simply there to be asked for.
+
+The warning population is bounded rather than unbounded: repeats inside the
+dedupe window collapse onto one row (``app.db.error_logs``), and pruning trims
+warnings to their own smaller ceiling BEFORE the table-wide trim, so a chatty
+warning can never evict the errors this table exists for.
+
 Guards (all essential):
-- Only records at ERROR or above are persisted.
 - Records from ``app.db*`` loggers are skipped — a DB error logging into the DB
   would risk a feedback loop.
 - A thread-local re-entrancy flag stops anything logged *inside* record_error
@@ -66,14 +81,33 @@ def _fatal_stderr_tail(session_id: str) -> "str | None":
         return None
 
 
+def _capture_level() -> int:
+    """Lowest level persisted to ``error_log``.
+
+    WARNING unless ``ERROR_LOG_CAPTURE_WARNINGS=false``. Read through a
+    function (not a constant) so a test — or an operator flipping the setting —
+    does not have to reinstall the handler.
+    """
+    try:
+        from app.core.config import settings
+
+        if getattr(settings, "error_log_capture_warnings", True):
+            return logging.WARNING
+    except Exception:  # noqa: BLE001 — logging must not depend on config load
+        pass
+    return logging.ERROR
+
+
 class ErrorLogDBHandler(logging.Handler):
-    """Persist ERROR+ log records to the ``error_log`` table."""
+    """Persist WARNING+ (configurable; ERROR+ always) records to ``error_log``."""
 
     def __init__(self) -> None:
-        super().__init__(level=logging.ERROR)
+        # The handler's own level is the widest it may ever capture; the
+        # per-record check below applies the current setting.
+        super().__init__(level=logging.WARNING)
 
     def emit(self, record: logging.LogRecord) -> None:
-        if record.levelno < logging.ERROR:
+        if record.levelno < _capture_level():
             return
         # Never capture our own DB layer or this handler — avoids feedback loops.
         if record.name.startswith("app.db") or record.name == __name__:
@@ -172,7 +206,10 @@ def install_error_log_handler() -> None:
         return
     _handler = ErrorLogDBHandler()
     logging.getLogger().addHandler(_handler)
-    logger.info("ErrorLogDBHandler attached — backend errors persist to error_log")
+    logger.info(
+        "ErrorLogDBHandler attached — backend records at %s+ persist to error_log",
+        logging.getLevelName(_capture_level()),
+    )
 
 
 def uninstall_error_log_handler() -> None:

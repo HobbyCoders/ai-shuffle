@@ -14,7 +14,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Iterable, List, Optional
 
 from claude_agent_sdk import ClaudeAgentOptions
 
@@ -203,6 +203,45 @@ def _ai_tools_available() -> bool:
     except Exception:  # noqa: BLE001 — an unreadable key is an unavailable one
         logger.debug("could not resolve the fal.ai key", exc_info=True)
         return False
+
+
+# The background-work MANAGERS. Every one of them reports on, reads or stops
+# work that Task or Monitor started — none of them can start anything — so a
+# surface with neither producer leaves the model four tools that can only ever
+# answer "no tasks". Bare names are checked alongside the bridged ones because
+# a native leg runs fluid's bare Task/Monitor while keeping these MCP copies.
+_TASK_MANAGER_TOOLS = (
+    "mcp__builtins__TaskGet",
+    "mcp__builtins__TaskList",
+    "mcp__builtins__TaskOutput",
+    "mcp__builtins__TaskStop",
+)
+_BACKGROUND_PRODUCERS = (
+    "mcp__builtins__Task",
+    "mcp__builtins__Monitor",
+    "Task",
+    "Monitor",
+)
+
+
+def _drop_orphan_task_managers(
+    names: List[str],
+    allowed: Optional[Iterable[str]],
+    disallowed: Optional[Iterable[str]],
+) -> List[str]:
+    """Strip the task managers when nothing on the surface can start a task.
+
+    Monitor counts as a producer, not just Task: TaskOutput/TaskStop are the
+    Monitor's companions and a session with Monitor but no Task still needs
+    them. Only when BOTH producers are off do the four managers become tools
+    with nothing to manage.
+    """
+    if any(
+        tool_permitted(name, allowed, disallowed)
+        for name in _BACKGROUND_PRODUCERS
+    ):
+        return names
+    return [name for name in names if name not in _TASK_MANAGER_TOOLS]
 
 
 def _app_config_permitted(config: Optional[Dict[str, Any]]) -> bool:
@@ -828,6 +867,11 @@ def build_options_from_profile(
     # Build system prompt
     system_prompt = config.get("system_prompt")
     override_append = overrides.get("system_prompt_append", "")
+    # Set only by the one prompt shape that carries the app's <env> block: the
+    # inputs its volatile half needs, re-rendered per turn onto the user message
+    # (see generate_turn_environment_note). None on every other shape, so a
+    # profile that never had the app env block does not start getting one.
+    turn_env: Optional[Dict[str, Any]] = None
 
     # Get the active security instructions (custom or default)
     security_instructions = get_security_instructions()
@@ -851,12 +895,24 @@ def build_options_from_profile(
             prompt_parts = [security_instructions]
 
             # Add environment details if enabled (includes AI tools based on ai_tools_config)
+            #
+            # STABLE HALF ONLY. The date and the branch pair change under a
+            # session nobody touched, and everything in this prompt is the
+            # provider's cached prefix — one changed character there re-bills
+            # system + tools + the whole history on the next turn. They ride
+            # the turn's user message instead, rendered per turn by the
+            # harness adapter from ``aih_turn_env`` below.
             if inject_env:
                 prompt_parts.append(generate_environment_details(
                     working_dir,
                     execution_mode=execution_mode,
-                    worktree_info=worktree_info
+                    worktree_info=worktree_info,
+                    include_volatile=False,
                 ))
+                turn_env = {
+                    "execution_mode": execution_mode,
+                    "worktree_info": worktree_info,
+                }
 
             # Add custom content if provided
             if custom_content:
@@ -1236,7 +1292,11 @@ def build_options_from_profile(
     # harness-level tools that the CLI ships natively; under the SDK we provide
     # our own implementations bridged to AI Shuffle infrastructure.
     from app.mcp.builtin_tools import get_builtin_tool_names
-    mcp_allowed_tools.extend(get_builtin_tool_names())
+    mcp_allowed_tools.extend(
+        _drop_orphan_task_managers(
+            get_builtin_tool_names(), access.allowed, access.disallowed
+        )
+    )
 
     # P2c: the standalone ProviderAgent tool is superseded by the unified Task
     # tool (mcp__builtins__Task / fluid's bare Task builtin), which is depth-
@@ -1681,6 +1741,14 @@ def build_options_from_profile(
     # fluid id at connect time at all.
     options.aih_session_id = session_id
     options.aih_profile_id = profile.get("id")
+
+    # The volatile half of the app's <env> block — execution mode and the
+    # branch pair — carried as INPUTS, not as rendered text. The adapter
+    # re-renders the note (with the date) on every send_query, so a pooled
+    # client that is reused for twenty turns still tells the model today's
+    # date and the branch it is actually on. None when the profile's prompt
+    # shape carries no app env block at all.
+    options.aih_turn_env = turn_env
 
     # The old ``aih_memory_dir`` stamping lived here (rulings MEM1/MEM3): the
     # native leg's per-project memory dir, rendered into the prompt as a

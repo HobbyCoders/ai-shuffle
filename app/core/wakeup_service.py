@@ -9,7 +9,9 @@ parks forever because no next turn arrives:
    wake. :func:`schedule` now persists the wake to ``pending_wakeups`` first, and
    :func:`rehydrate_pending` re-arms this install's rows on boot. Firing is a
    *claim* (delete the row, then run) so a rehydrated timer and a peer install
-   cannot double-fire.
+   cannot double-fire — and because the claim is destructive, a submit that
+   raises or refuses puts the row BACK with a backed-off ``fire_at`` instead of
+   dropping the wake on the floor.
 
 2. **Idle-at-edge watchdog.** :func:`scan_once` (run on a timer by
    :func:`watchdog_loop`) finds sessions sitting IDLE above the context-window
@@ -65,6 +67,24 @@ WATCHDOG_NUDGE_PROMPT = (
 # outage does not stampede the query engine at startup.
 _REHYDRATE_STAGGER_SECONDS = 3.0
 _REHYDRATE_STAGGER_CAP_SECONDS = 60.0
+
+# Submit-failure retry policy. The claim is destructive (the row is deleted
+# before the turn is submitted, which is what stops a double fire), so a submit
+# that raises or refuses would otherwise lose the wake outright. A failed submit
+# re-inserts the SAME row id with a backed-off ``fire_at`` and re-arms it; after
+# _RETRY_MAX_ATTEMPTS the wake is dropped loudly (log + a system note on the
+# session) instead of silently.
+_RETRY_BASE_SECONDS = 5.0
+_RETRY_MAX_SECONDS = 120.0
+_RETRY_MAX_ATTEMPTS = 5
+
+# Per-wakeup submit-failure counter, keyed by wakeup id. In-process only: a
+# restart resets it, which at worst grants a rehydrated row one more round of
+# retries — the safe direction for a wake that has not run yet.
+_retry_attempts: "dict[str, int]" = {}
+
+#: ``system.note`` subtype for the "this wake never ran" line.
+DROPPED_NOTE_SUBTYPE = "wakeup_dropped"
 
 # Live references to in-flight wake timer tasks, keyed by wakeup id (asyncio
 # keeps only weak refs, and the key is what lets a specific wake be disarmed
@@ -144,15 +164,125 @@ async def _resolve_profile_id(row: Dict[str, Any]) -> Optional[str]:
     return (session or {}).get("profile_id") or None
 
 
+async def _announce_dropped_wake(row: Dict[str, Any], reason: str) -> None:
+    """Tell the SESSION that a wake it was promised will never run.
+
+    A dropped wake used to be a log line and nothing else: the agent had parked
+    expecting to be woken, so the session simply sat there until a human typed
+    something (the 2026-09-04 audit measured 15.6 minutes of that). The note is
+    an unfenced ``system`` frame on the session's own log — the same seam the
+    supervisor's teardown note uses — so the stall is visible where the user is
+    already looking. Strictly best-effort: never raises.
+    """
+    session_id = row.get("session_id")
+    if not session_id:
+        return
+    message = (
+        "A scheduled wake-up for this session could not be started "
+        f"({reason}). Nothing resumed automatically — send a message to "
+        "continue."
+    )
+    try:
+        from app.core.turn_recorder import record_drained_event
+
+        await record_drained_event(str(session_id), {
+            "type": "system",
+            "subtype": DROPPED_NOTE_SUBTYPE,
+            "data": {
+                "message": message,
+                "reason": reason,
+                "source": row.get("source"),
+                "wakeup_id": row.get("id"),
+            },
+        })
+    except Exception:  # noqa: BLE001 — a note must never break the wake path.
+        logger.debug(
+            "wakeup drop note failed for session %s", session_id, exc_info=True
+        )
+
+
+async def _rearm_after_failed_submit(row: Dict[str, Any], reason: str) -> None:
+    """Re-insert and re-arm a claimed wake whose turn submission did not take.
+
+    The claim already deleted the row, so this is what keeps the wake alive:
+    the SAME id is written back with a backed-off ``fire_at`` and a fresh timer
+    is armed on it. Re-using the id keeps the one-row-per-wake invariant (and
+    the claim's double-fire guarantee) intact for the retry.
+
+    After :data:`_RETRY_MAX_ATTEMPTS` the wake is given up on — logged at ERROR
+    with the last refusal reason and announced on the session — rather than
+    retried forever against a condition that is clearly not clearing.
+    """
+    wakeup_id = row.get("id")
+    session_id = row.get("session_id")
+    attempt = _retry_attempts.get(str(wakeup_id), 0) + 1 if wakeup_id else 1
+    if attempt > _RETRY_MAX_ATTEMPTS:
+        if wakeup_id:
+            _retry_attempts.pop(str(wakeup_id), None)
+        logger.error(
+            "wakeup %s (session %s, source %s) dropped after %d failed submit "
+            "attempts: %s",
+            wakeup_id, session_id, row.get("source"), _RETRY_MAX_ATTEMPTS,
+            reason,
+        )
+        await _announce_dropped_wake(row, reason)
+        return
+
+    delay = min(
+        _RETRY_BASE_SECONDS * (2 ** (attempt - 1)), _RETRY_MAX_SECONDS
+    )
+    fire_at = _now_epoch() + delay
+    try:
+        replacement = await asyncio.to_thread(
+            wakeups_db.create_wakeup,
+            id=str(wakeup_id),
+            session_id=str(session_id),
+            prompt=row.get("prompt"),
+            fire_at=fire_at,
+            profile_id=row.get("profile_id"),
+            project_id=row.get("project_id"),
+            reason=row.get("reason"),
+            model=row.get("model"),
+            source=row.get("source") or "schedule_wakeup",
+            instance_id=row.get("instance_id") or settings.effective_instance_id,
+        )
+    except Exception:  # noqa: BLE001 — a re-arm failure is a real drop.
+        logger.exception(
+            "wakeup %s (session %s) could not be re-armed after a failed "
+            "submit (%s) — the wake is lost",
+            wakeup_id, session_id, reason,
+        )
+        await _announce_dropped_wake(row, reason)
+        return
+
+    if wakeup_id:
+        _retry_attempts[str(wakeup_id)] = attempt
+    logger.warning(
+        "wakeup %s (session %s, source %s) submit failed (%s) — re-armed in "
+        "%.0fs (attempt %d/%d)",
+        wakeup_id, session_id, row.get("source"), reason, delay, attempt,
+        _RETRY_MAX_ATTEMPTS,
+    )
+    _arm(replacement, delay)
+
+
 async def _fire(row: Dict[str, Any]) -> None:
     """Claim one wakeup (delete its row) and enrol its prompt in the turn queue.
 
     The claim stays first and stays atomic: it is what stops a rehydrated timer
-    and a peer install from both firing. What follows the claim changed — the
-    wake is now a ``source="wakeup"`` turn submitted through
-    :func:`app.core.turn_manager.submit` rather than a direct query-engine call.
-    If the session already has a live turn the new turn simply queues behind it
-    and drains at settlement, instead of racing it with a second agent loop.
+    and a peer install from both firing. The wake is a ``source="wakeup"`` turn
+    submitted through :func:`app.core.turn_manager.submit` rather than a direct
+    query-engine call. If the session already has a live turn the new turn
+    simply queues behind it and drains at settlement, instead of racing it with
+    a second agent loop.
+
+    Failure-safe since the 2026-09-04 audit: the claim is destructive, so every
+    way the submit can fail to produce a turn — it raises, or it refuses and
+    returns no turn id — re-inserts the row with a backed-off ``fire_at`` and
+    re-arms it (:func:`_rearm_after_failed_submit`). A wake that is ultimately
+    given up on, or that cannot resolve a profile at all, says so on the
+    session (:func:`_announce_dropped_wake`) instead of vanishing into a log
+    line while the agent stays parked waiting for it.
     """
     wakeup_id = row.get("id")
     session_id = row.get("session_id")
@@ -172,6 +302,11 @@ async def _fire(row: Dict[str, Any]) -> None:
             "that cannot run",
             wakeup_id, session_id, row.get("source"),
         )
+        if wakeup_id:
+            _retry_attempts.pop(str(wakeup_id), None)
+        await _announce_dropped_wake(
+            row, "no agent profile could be resolved for the wake"
+        )
         return
 
     # The wake must run on the scheduling turn's effective model, not the
@@ -182,14 +317,32 @@ async def _fire(row: Dict[str, Any]) -> None:
 
     from app.core import turn_manager
 
-    turn_id = await turn_manager.submit_async(
-        session_id,
-        "wakeup",
-        prompt=row.get("prompt"),
-        profile_id=profile_id,
-        project_id=row.get("project_id"),
-        overrides=overrides,
-    )
+    try:
+        turn_id = await turn_manager.submit_async(
+            session_id,
+            "wakeup",
+            prompt=row.get("prompt"),
+            profile_id=profile_id,
+            project_id=row.get("project_id"),
+            overrides=overrides,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a raise must not lose the wake.
+        logger.warning(
+            "wakeup %s (session %s) submit raised", wakeup_id, session_id,
+            exc_info=True,
+        )
+        await _rearm_after_failed_submit(row, f"{type(exc).__name__}: {exc}")
+        return
+    if not turn_id:
+        await _rearm_after_failed_submit(
+            row, "the turn manager refused the wake (no turn id returned)"
+        )
+        return
+
+    if wakeup_id:
+        _retry_attempts.pop(str(wakeup_id), None)
     logger.info(
         "wakeup fired: id=%s session=%s source=%s -> turn %s",
         wakeup_id, session_id, row.get("source"), turn_id,

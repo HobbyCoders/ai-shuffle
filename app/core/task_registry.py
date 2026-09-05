@@ -47,9 +47,23 @@ def _now_epoch() -> float:
 # server-side). See ``_recent_terminal`` / ``get_visible``.
 _RECENT_TERMINAL_WINDOW_SECONDS = 120.0
 
-# How long a cleanly COMPLETED background task stays surfaced. Much shorter than
-# the failure window — it exists to bridge the completion → unpark hand-off, not
-# to display a result. ``complete_task`` drops a task from ``get_active`` the
+# How long a cleanly COMPLETED background task stays READABLE after it finishes.
+#
+# This is the parent's hand-off window, and it used to be fifteen seconds — sized
+# for the poller gap below and nothing else. That is far shorter than the thing
+# it actually has to cover: a parent woken about its worker reads the result on
+# its wake TURN, which starts whenever the session next gets a run lease. The
+# audit caught a ``TaskGet`` thirty-five seconds after the worker finished
+# answering "task not found", with ``TaskList(include_finished=True)`` returning
+# an empty list beside it — the row had aged out before the parent it was written
+# for ever looked. Minutes, not seconds: a wake can queue behind a long turn, and
+# a stale record costs nothing but a little memory.
+_RECENT_COMPLETED_WINDOW_SECONDS = 600.0
+
+# How long a cleanly completed task stays SURFACED on ``/live`` (``get_visible``).
+# Deliberately separate from — and much shorter than — the readability window
+# above: this one exists to bridge the completion → unpark hand-off, not to
+# display a result. ``complete_task`` drops a task from ``get_active`` the
 # moment its completion is consumed (for Monitor shells: the moment the process
 # exits), but the ``unpark_pending`` latch is only set a beat later — after the
 # drain pump's dispatch awaits, or, for shells, after the SDK's own terminal
@@ -62,13 +76,21 @@ _RECENT_TERMINAL_WINDOW_SECONDS = 120.0
 # streamed into a dead UI until a manual refresh. Retaining the completed row
 # keeps park-polling and load classification alive across the gap; the
 # ``unpark_pending`` latch takes over well within the window. Self-limiting:
-# with no follow-up coming, the poller goes idle when the window expires.
-_RECENT_COMPLETED_WINDOW_SECONDS = 15.0
+# with no follow-up coming, the poller goes idle when the window expires — which
+# is why the taskbar keeps the SHORT window while the record itself lives on.
+_COMPLETED_VISIBLE_WINDOW_SECONDS = 15.0
 
 # Statuses that mean a task DIED rather than finished cleanly. These get the
 # long retention window above (the user must SEE the failure); a clean
 # "completed" is retained only for the short hand-off window.
 _FAILURE_STATUSES = frozenset({"error", "killed"})
+
+# Terminal statuses that mean a task was STOPPED rather than that it failed on
+# its own. ``killed`` is in both sets on purpose: it is a failure as far as
+# RETENTION is concerned (the user must see the row) and a cancellation as far
+# as WAKES are concerned (see ``is_unattributed_cancellation``). The fluid
+# adapter's wire vocabulary adds "cancelled"/"stopped" for the same state.
+_CANCELLATION_STATUSES = frozenset({"killed", "cancelled", "stopped"})
 
 # Kill attribution for shutdown-origin reaps (lifecycle batch, item 4a): a
 # background task killed because the SERVER is restarting must say so instead
@@ -566,6 +588,32 @@ class TaskRegistry:
             return False
         return task_id in self._wake_suppressed.get(session_id, set())
 
+    def is_unattributed_cancellation(self, session_id: str, task_id: str) -> bool:
+        """True iff this task was STOPPED and nobody claimed the stop.
+
+        The discriminator every kill site already writes: a stop with an outside
+        cause stamps a ``reason`` on the record — ``user_stopped``,
+        ``server_shutdown``, ``monitor_timeout``, ``parent_turn_ended``,
+        ``provider_rate_limited`` — and a stop with none is the one the SESSION
+        ITSELF asked for, the ``TaskStop`` a model fires at its own stale
+        watcher. (``monitor_spawn._cause_line`` draws the same line from the same
+        field, which is where "Stopped deliberately by the app or by an agent,
+        not by a crash" comes from.)
+
+        The scheduler uses it to retire such a terminal without waking a turn:
+        the model stopped the thing on purpose seconds ago, and a whole wake turn
+        whose only output is "noted" is pure churn. An ATTRIBUTED stop keeps its
+        wake — a task killed by a shutdown, a timeout or a rate limit is news the
+        parent did not already have.
+        """
+        record = self.get_task(session_id, task_id)
+        if record is None:
+            return False
+        return (
+            record.get("status") in _CANCELLATION_STATUSES
+            and not record.get("reason")
+        )
+
     def link_child_to_owner(
         self, session_id: str, child_launch_tuid: str, owner_launch_tuid: str
     ) -> None:
@@ -1046,9 +1094,20 @@ class TaskRegistry:
             return active
         seen = {t.get("id") for t in active}
         merged = list(active)
+        now = _now_epoch()
         for entry in retained.values():
             wire = entry.get("task") or {}
             if wire.get("id") in seen:
+                continue
+            # A clean completion is now RETAINED for minutes (the parent's
+            # hand-off window) but DISPLAYED for seconds — long enough to bridge
+            # the poller gap, short enough that the taskbar does not carry a
+            # finished row (and keep a dead session park-polling) for ten
+            # minutes. Failures keep showing for their whole retention.
+            if wire.get("status") not in _FAILURE_STATUSES and (
+                now - entry.get("recorded_at", 0.0)
+                > _COMPLETED_VISIBLE_WINDOW_SECONDS
+            ):
                 continue
             merged.append(wire)
         merged.sort(key=lambda t: t.get("startedAt") or "", reverse=True)
@@ -1163,23 +1222,104 @@ class TaskRegistry:
 
         Ordered by ``updated_at`` so just-finished tasks surface near the top,
         then truncated to ``limit``.
-        """
-        bucket = self._tasks.get(session_id)
-        if not bucket:
-            return []
-        records = list(bucket.values())
-        records.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
-        return [to_wire(r) for r in records[:limit]]
 
-    def get_task(self, session_id: str, task_id: str) -> Optional[Dict[str, Any]]:
+        The retention store is merged in behind the live map. ``TaskList`` is how
+        a woken parent finds the id of the worker it was woken about, and it used
+        to read ``_tasks`` alone — so a session whose pooled client had been
+        evicted (``clear_session`` wipes ``_tasks``, deliberately NOT the
+        retention store) answered an empty list to ``include_finished=True``
+        seconds after a worker finished. A live record always wins over its
+        retained snapshot.
+        """
+        records = list((self._tasks.get(session_id) or {}).values())
+        wire = [to_wire(r) for r in records]
+        seen = {w.get("id") for w in wire}
+        self._prune_recent_terminal(session_id)
+        for task_id, entry in (self._recent_terminal.get(session_id) or {}).items():
+            if task_id in seen:
+                continue
+            snapshot = entry.get("task")
+            if isinstance(snapshot, dict):
+                wire.append(dict(snapshot))
+        wire.sort(key=lambda w: w.get("updatedAt") or "", reverse=True)
+        return wire[:limit]
+
+    def get_task(
+        self, session_id: str, task_id: str, *, durable: bool = False
+    ) -> Optional[Dict[str, Any]]:
         """A single task as a wire dict, or None if the task is unknown.
 
-        Lets the ``TaskGet`` tool (and registry-aware ``TaskOutput``/``TaskStop``)
-        resolve one task by id across BOTH sources without reaching into the
-        private ``_tasks`` map.
+        Three sources, in order of fidelity:
+
+        1. the LIVE ``_tasks`` record — everything, including the agent-report
+           handles ``complete_task`` stamped on it;
+        2. the ``_recent_terminal`` retention snapshot, which SURVIVES
+           ``clear_session`` — a full wire dict taken at the terminal transition,
+           so it still carries ``summary``/``reportPath``/``reportChars``;
+        3. with ``durable=True``, the ``background_tasks`` row.
+
+        Only the live map was ever consulted, which is how a parent woken about
+        its own worker got ``{"success": false, "error": "task not found."}`` from
+        ``TaskGet`` thirty-five seconds after that worker finished. The durable
+        read is opt-in because the callers that poll this (the idle reader's
+        phantom-task filter, ``running_background_task_for_tool_use``) want a
+        cheap in-memory miss, not a DB round trip; the task TOOLS pass it.
         """
         record = self._tasks.get(session_id, {}).get(task_id)
-        return to_wire(record) if record is not None else None
+        if record is not None:
+            return to_wire(record)
+        self._prune_recent_terminal(session_id)
+        entry = self._recent_terminal.get(session_id, {}).get(task_id)
+        snapshot = entry.get("task") if isinstance(entry, dict) else None
+        if isinstance(snapshot, dict):
+            return dict(snapshot)
+        if durable:
+            return self._durable_task(session_id, task_id)
+        return None
+
+    def _durable_task(
+        self, session_id: str, task_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """One task read back out of the durable ``background_tasks`` mirror.
+
+        The last resort behind ``get_task``: a restart, an eviction, or simply a
+        retention window that finally expired leaves nothing in memory, and the
+        row is then the only surviving record that the task existed and how it
+        ended. It carries less than a live record (the table stores identity and
+        lifecycle, not the summary or the report handles), which is exactly why
+        it is last — but "completed, kind=agent" is enough for ``TaskGet`` to
+        reach the report through the worker's own event log.
+
+        Never raises: any failure is an unknown task, as before.
+        """
+        if not session_id or not task_id:
+            return None
+        try:
+            from app.db import background_tasks as background_tasks_db
+
+            row = background_tasks_db.get_background_task(task_id, session_id)
+        except Exception:  # noqa: BLE001 — a durable miss is just a miss.
+            logger.debug("durable task read failed", exc_info=True)
+            return None
+        if not row:
+            return None
+        def _stamp(value: Any) -> Optional[str]:
+            # The column is a timestamptz on Postgres and a string on the test
+            # shim; the wire contract is an ISO-8601 string either way.
+            if value is None or isinstance(value, str):
+                return value
+            iso = getattr(value, "isoformat", None)
+            return iso() if callable(iso) else str(value)
+
+        return to_wire({
+            "task_id": row.get("task_id"),
+            "title": row.get("title"),
+            "status": row.get("status"),
+            "kind": row.get("kind"),
+            "tool_use_id": row.get("tool_use_id"),
+            "started_at": _stamp(row.get("started_at")),
+            "updated_at": _stamp(row.get("updated_at")),
+        })
 
     def get_task_tool_use_id(self, session_id: str, task_id: str) -> Optional[str]:
         """The launch ``tool_use_id`` for a task, or None if it can't be resolved.

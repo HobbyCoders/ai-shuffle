@@ -24,6 +24,7 @@ from app.core.task_registry import (
     TaskRegistry,
     to_wire,
     task_registry,
+    _COMPLETED_VISIBLE_WINDOW_SECONDS,
     _RECENT_COMPLETED_WINDOW_SECONDS,
     _RECENT_TERMINAL_WINDOW_SECONDS,
 )
@@ -1098,26 +1099,37 @@ class TestRecentTerminalRetention:
         assert [t["id"] for t in visible] == ["bg1"]
         assert visible[0]["status"] == "completed"
 
-    def test_completed_retention_uses_short_window(self, reg):
-        # The completed hand-off window is much shorter than the failure
-        # display window: age the entry just past it and it prunes, long
-        # before a failure would.
+    def test_completed_leaves_the_taskbar_but_stays_readable(self, reg):
+        # The two windows are different lengths on purpose. Past the DISPLAY
+        # window the finished row is off /live; the RECORD is still there for
+        # the parent that gets woken about it.
         reg.start_task("s1", "bg1", "agent", "done well")
         reg.complete_task("s1", "bg1", "completed")
         entry = reg._recent_terminal["s1"]["bg1"]
         assert entry["ttl"] == _RECENT_COMPLETED_WINDOW_SECONDS
-        assert _RECENT_COMPLETED_WINDOW_SECONDS < _RECENT_TERMINAL_WINDOW_SECONDS
-        entry["recorded_at"] -= _RECENT_COMPLETED_WINDOW_SECONDS + 1.0
+        assert _COMPLETED_VISIBLE_WINDOW_SECONDS < _RECENT_COMPLETED_WINDOW_SECONDS
+        reg.clear_session("s1")
+        entry["recorded_at"] -= _COMPLETED_VISIBLE_WINDOW_SECONDS + 1.0
         assert reg.get_visible("s1") == []
+        assert reg.get_task("s1", "bg1")["status"] == "completed"
 
-    def test_failure_retention_outlives_completed_window(self, reg):
-        # A failure aged past the SHORT window is still visible — it gets the
-        # long display window so the user actually sees it.
+    def test_completed_prunes_once_the_hand_off_window_expires(self, reg):
+        reg.start_task("s1", "bg1", "agent", "done well")
+        reg.complete_task("s1", "bg1", "completed")
+        reg.clear_session("s1")
+        reg._recent_terminal["s1"]["bg1"]["recorded_at"] -= (
+            _RECENT_COMPLETED_WINDOW_SECONDS + 1.0
+        )
+        assert reg.get_task("s1", "bg1") is None
+
+    def test_failure_stays_visible_past_the_completed_display_window(self, reg):
+        # A failure aged past the SHORT display window is still on the taskbar
+        # — it gets the long display window so the user actually sees it.
         reg.start_task("s1", "bg1", "agent", "boom")
         reg.complete_task("s1", "bg1", "killed")
         entry = reg._recent_terminal["s1"]["bg1"]
         assert entry["ttl"] == _RECENT_TERMINAL_WINDOW_SECONDS
-        entry["recorded_at"] -= _RECENT_COMPLETED_WINDOW_SECONDS + 1.0
+        entry["recorded_at"] -= _COMPLETED_VISIBLE_WINDOW_SECONDS + 1.0
         assert [t["id"] for t in reg.get_visible("s1")] == ["bg1"]
 
     def test_get_visible_merges_running_and_failed(self, reg):

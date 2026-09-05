@@ -111,16 +111,99 @@ class TestResumeSession:
         assert response.status_code == 404
         submit_seam[0].assert_not_called()
 
-    def test_unsettled_turn_is_409(self, client, mock_database, fluid_session, submit_seam):
-        """A resume must never race a turn already in flight OR queued — the
-        busy check counts every non-terminal turn state in one atomic read."""
+    def test_unsettled_turn_queues_instead_of_refusing(
+        self, client, mock_database, fluid_session, submit_seam
+    ):
+        """The busy path enqueues. Refusing lost the user's Retry entirely —
+        an error toast and nothing durable — while every other mid-turn
+        submission in the app rides the queue."""
+        submit, notify = submit_seam
+        mock_database.get_session.return_value = fluid_session
+
+        with patch("app.db.turns.session_has_unsettled_turns", return_value=True),                 patch("app.db.turns.get_queued_turns", return_value=[]):
+            response = client.post("/api/v1/sessions/test-session-id/resume")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "turn_id": "turn-1",
+            "session_id": "test-session-id",
+            "queued": True,
+        }
+        submit.assert_called_once()
+        assert submit.call_args.args == ("test-session-id", "resume")
+        notify.assert_called_once_with("test-session-id")
+
+    def test_busy_queue_skips_a_resume_already_waiting(
+        self, client, mock_database, fluid_session, submit_seam
+    ):
+        """Two Retry presses are one request: a resume carries no prompt, so
+        stacking a second would re-run the head twice — the duplicate the old
+        409 existed to prevent."""
+        submit, notify = submit_seam
+        mock_database.get_session.return_value = fluid_session
+
+        with patch("app.db.turns.session_has_unsettled_turns", return_value=True),                 patch(
+                    "app.db.turns.get_queued_turns",
+                    return_value=[
+                        {"id": "turn-user", "source": "user"},
+                        {"id": "turn-resume", "source": "resume"},
+                    ],
+                ):
+            response = client.post("/api/v1/sessions/test-session-id/resume")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "turn_id": "turn-resume",
+            "session_id": "test-session-id",
+            "queued": True,
+            "duplicate": True,
+        }
+        submit.assert_not_called()
+        notify.assert_not_called()
+
+    def test_if_busy_conflict_restores_the_refusal(
+        self, client, mock_database, fluid_session, submit_seam
+    ):
+        """The explicit opt-out for a caller that must not have a resume land
+        later. The busy check stays ONE atomic read — a turn flipping
+        queued->running between two reads is invisible to both (the
+        wait_session_idle race, 2026-08-28)."""
+        mock_database.get_session.return_value = fluid_session
+
+        with patch("app.db.turns.session_has_unsettled_turns", return_value=True):
+            response = client.post(
+                "/api/v1/sessions/test-session-id/resume?if_busy=conflict"
+            )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "a turn is already running"
+        submit_seam[0].assert_not_called()
+
+    def test_unknown_if_busy_value_is_rejected(
+        self, client, mock_database, fluid_session, turns_idle, submit_seam
+    ):
+        mock_database.get_session.return_value = fluid_session
+
+        response = client.post(
+            "/api/v1/sessions/test-session-id/resume?if_busy=explode"
+        )
+
+        assert response.status_code == 422
+        submit_seam[0].assert_not_called()
+
+    def test_non_fluid_session_still_refuses_when_busy(
+        self, client, mock_database, fluid_session, submit_seam
+    ):
+        """The fluid check is not softened by queueing — there is no head node
+        to resume from either way."""
+        fluid_session["sdk_session_id"] = "sdk-123"
         mock_database.get_session.return_value = fluid_session
 
         with patch("app.db.turns.session_has_unsettled_turns", return_value=True):
             response = client.post("/api/v1/sessions/test-session-id/resume")
 
         assert response.status_code == 409
-        assert response.json()["detail"] == "a turn is already running"
+        assert response.json()["detail"] == "resume needs a fluid session"
         submit_seam[0].assert_not_called()
 
     @pytest.mark.parametrize("sdk_session_id", ["sdk-123", "", None])
@@ -149,6 +232,7 @@ class TestResumeSession:
         assert response.json() == {
             "turn_id": "turn-1",
             "session_id": "test-session-id",
+            "queued": False,
         }
 
         submit.assert_called_once()

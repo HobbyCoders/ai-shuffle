@@ -55,9 +55,19 @@ def test_register_url_os_override(monkeypatch):
 
 # --- BROWSER_SSRF_ALLOW policy -------------------------------------------------
 #
-# Matrix: loopback is allowed on local/self-hosted installs (where the agent is
-# the only tenant and routinely needs to view a dev server it just started) and
-# blocked everywhere else. An explicit BROWSER_SSRF_ALLOW always wins.
+# Matrix (most specific first): an explicit BROWSER_SSRF_ALLOW always wins; then
+# BROWSER_SSRF_ALLOW_LOOPBACK true/false; then the default, which ALLOWS
+# loopback. AI Shuffle exposes no tenancy setting, so "self-hosted single user"
+# is what an install is — Docker included. The deployment-mode probe is no
+# longer consulted at all.
+
+
+def test_default_allows_loopback(monkeypatch):
+    """Unset knob, non-local (Docker) deployment: loopback is allowed."""
+    _set_local_mode(monkeypatch, False)
+
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK
 
 
 def test_local_mode_allows_loopback_by_default(monkeypatch):
@@ -67,7 +77,21 @@ def test_local_mode_allows_loopback_by_default(monkeypatch):
     assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK
 
 
-def test_non_local_mode_leaves_loopback_blocked():
+def test_deployment_mode_is_not_consulted(monkeypatch):
+    """The old rule keyed off is_local_mode(); nothing does any more."""
+    def _boom(self):  # pragma: no cover - fails the test if it is ever called
+        raise AssertionError("is_local_mode must not gate the SSRF policy")
+
+    monkeypatch.setattr(type(settings), "is_local_mode", _boom)
+
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK
+
+
+def test_setting_false_blocks_loopback(monkeypatch):
+    """An install fronted for other people turns it back off explicitly."""
+    monkeypatch.setattr(settings, "browser_ssrf_allow_loopback", False)
+
     env = mcp_config._build_browser_server_env({}, session_id=None)
     assert "BROWSER_SSRF_ALLOW" not in env
 
@@ -79,44 +103,18 @@ def test_setting_forces_loopback_on_in_docker(monkeypatch):
     assert env["BROWSER_SSRF_ALLOW"] == LOOPBACK
 
 
-def test_setting_forces_loopback_off_in_local_mode(monkeypatch):
-    _set_local_mode(monkeypatch, True)
+def test_explicit_allow_from_session_env_passes_through(monkeypatch):
+    """An operator-stated policy is handed over verbatim — never appended to."""
     monkeypatch.setattr(settings, "browser_ssrf_allow_loopback", False)
 
-    env = mcp_config._build_browser_server_env({}, session_id=None)
-    assert "BROWSER_SSRF_ALLOW" not in env
-
-
-def test_explicit_session_allow_wins_over_local_default(monkeypatch):
-    _set_local_mode(monkeypatch, True)
-
     env = mcp_config._build_browser_server_env(
-        {"BROWSER_SSRF_ALLOW": "10.9.0.0/16"}, session_id=None
+        {"BROWSER_SSRF_ALLOW": "10.0.0.0/8"}, session_id=None
     )
-    assert env["BROWSER_SSRF_ALLOW"] == "10.9.0.0/16"
+    assert env["BROWSER_SSRF_ALLOW"] == "10.0.0.0/8"
 
 
-def test_explicit_process_allow_wins_and_reaches_the_server(monkeypatch):
-    # An operator sets this in .env / compose, not in the session profile.
-    _set_local_mode(monkeypatch, True)
-    monkeypatch.setenv("BROWSER_SSRF_ALLOW", "192.168.50.0/24")
+def test_explicit_allow_from_process_env_passes_through(monkeypatch):
+    monkeypatch.setenv("BROWSER_SSRF_ALLOW", "192.168.0.0/16")
 
     env = mcp_config._build_browser_server_env({}, session_id=None)
-    assert env["BROWSER_SSRF_ALLOW"] == "192.168.50.0/24"
-
-
-def test_process_block_list_reaches_the_server(monkeypatch):
-    monkeypatch.setenv("BROWSER_SSRF_BLOCK", "10.0.0.0/8")
-
-    env = mcp_config._build_browser_server_env({}, session_id=None)
-    assert env["BROWSER_SSRF_BLOCK"] == "10.0.0.0/8"
-
-
-def test_local_mode_probe_failure_falls_back_to_blocking(monkeypatch):
-    def boom(self):
-        raise RuntimeError("deployment probe exploded")
-
-    monkeypatch.setattr(type(settings), "is_local_mode", boom)
-
-    env = mcp_config._build_browser_server_env({}, session_id=None)
-    assert "BROWSER_SSRF_ALLOW" not in env
+    assert env["BROWSER_SSRF_ALLOW"] == "192.168.0.0/16"

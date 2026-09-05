@@ -131,8 +131,13 @@ def get_recent_errors(
     level: Optional[str] = None,
     session_id: Optional[str] = None,
     since: Optional[datetime] = None,
+    levels: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Return recent errors, most-recently-seen first.
+
+    ``level`` matches one level exactly; ``levels`` matches any of a set — how
+    a "min level" reads once WARNING rows share the table with ERROR ones (see
+    ``GetAppErrors``'s ``min_level``). Passing both applies both.
 
     JSON-serializable: timestamps become ISO strings and ``context`` is a dict.
     Returns ``[]`` on any failure rather than raising.
@@ -146,6 +151,12 @@ def get_recent_errors(
         if level:
             query += " AND level = %s"
             params.append(level.upper())
+        if levels:
+            wanted = [str(lv).upper() for lv in levels if str(lv).strip()]
+            if wanted:
+                placeholders = ", ".join(["%s"] * len(wanted))
+                query += f" AND level IN ({placeholders})"
+                params.extend(wanted)
         if session_id:
             query += " AND session_id = %s"
             params.append(session_id)
@@ -177,11 +188,26 @@ def get_recent_errors(
         return []
 
 
+def _max_warning_rows() -> int:
+    """Ceiling on retained WARNING rows (0 disables the warning-only trim)."""
+    try:
+        from app.core.config import settings
+
+        return max(0, int(getattr(settings, "error_log_max_warning_rows", 1000)))
+    except Exception:  # noqa: BLE001 — pruning must never raise
+        return 1000
+
+
 def prune_errors(keep_days: int = 7, max_rows: int = 5000) -> int:
     """Bound table growth.
 
-    Deletes rows older than ``keep_days``, then trims to the newest
-    ``max_rows``. Returns rows deleted. Never raises.
+    Deletes rows older than ``keep_days``, trims WARNING rows to their own
+    (smaller) ceiling, then trims the whole table to the newest ``max_rows``.
+
+    The warning-only trim is what makes WARNING capture safe: warnings are far
+    more numerous than errors, and without their own ceiling a chatty warning
+    would push the ERROR rows this table exists for out of the table-wide
+    5,000. Returns rows deleted. Never raises.
     """
     deleted = 0
     try:
@@ -190,6 +216,19 @@ def prune_errors(keep_days: int = 7, max_rows: int = 5000) -> int:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM error_log WHERE updated_at < %s", (cutoff,))
             deleted += cursor.rowcount or 0
+            warning_cap = _max_warning_rows()
+            if warning_cap:
+                cursor.execute(
+                    """DELETE FROM error_log
+                        WHERE id IN (
+                            SELECT id FROM error_log
+                             WHERE level = 'WARNING'
+                             ORDER BY updated_at DESC
+                             OFFSET %s
+                        )""",
+                    (warning_cap,),
+                )
+                deleted += cursor.rowcount or 0
             cursor.execute(
                 """DELETE FROM error_log
                     WHERE id IN (

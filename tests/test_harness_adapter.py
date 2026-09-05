@@ -5748,14 +5748,21 @@ async def test_no_project_memory_section_without_a_memory_dir(
 
 
 @pytest.mark.asyncio
-async def test_compile_passes_the_learner_memories_dir(
+async def test_learner_memories_never_reach_the_compiler(
     monkeypatch, agent_workspace
 ):
-    """The continual learner's memory snapshot rides the compiler: with
-    continual learning on (the default) the skills root is handed over as
-    ``memories_dir``; switched off, no learner section can appear."""
+    """The learner's snapshot is NOT compiled into the system prompt.
+
+    The memories file is install-global, so a Remember in any session used to
+    rewrite the ``# Memory`` section of every other session's prompt — and with
+    it the cached prefix they were still paying for. The compiler is handed no
+    memories dir at all now; the snapshot rides the turn's user message
+    instead (see ``_memory_snapshot``)."""
     import app.core.provider.harness_adapter as ha
-    from app.core.config import settings
+    from fluid.codemode.skills import SkillStore
+
+    store = SkillStore(ha._fluid_skills_root())
+    store.save_memory("the deploy script lives in ops/deploy.sh")
 
     captured_inputs = {}
     from fluid.context import compiler as fluid_compiler
@@ -5767,12 +5774,29 @@ async def test_compile_passes_the_learner_memories_dir(
         return real_compile(inputs)
 
     monkeypatch.setattr(fluid_compiler, "compile_prompt", _spy)
-    await _connect_with_memory_dir(monkeypatch, agent_workspace, None)
-    assert captured_inputs["memories_dir"] == str(ha._fluid_skills_root())
-
-    monkeypatch.setattr(settings, "fluid_continual", False)
-    await _connect_with_memory_dir(monkeypatch, agent_workspace, None)
+    captured = await _connect_with_memory_dir(monkeypatch, agent_workspace, None)
     assert captured_inputs["memories_dir"] is None
+    assert "# Memory\n" not in captured["system"]
+    assert "ops/deploy.sh" not in captured["system"]
+
+
+@pytest.mark.asyncio
+async def test_learner_memories_ride_the_turn_instead(monkeypatch, agent_workspace):
+    """Same facts, later in the request: after every cache breakpoint."""
+    import app.core.provider.harness_adapter as ha
+    from fluid.codemode.skills import SkillStore
+
+    store = SkillStore(ha._fluid_skills_root())
+    store.save_memory("the deploy script lives in ops/deploy.sh")
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(_agents_options(agent_workspace))
+
+    snapshot = adapter._memory_snapshot()
+    assert snapshot is not None
+    assert "ops/deploy.sh" in snapshot
 
 
 # ─── The "# GitHub" section (gh installed AND signed in) ─────────────────────

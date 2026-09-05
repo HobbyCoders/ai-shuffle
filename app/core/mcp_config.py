@@ -56,10 +56,10 @@ _BROWSER_ENV_OS_FALLBACK_KEYS = (
 # a non-default host/port when the backend is not on 127.0.0.1:{settings.port}).
 _BROWSER_PANEL_REGISTER_URL_OS_KEY = "BROWSER_PANEL_REGISTER_URL"
 
-# Loopback CIDRs handed to browser-mcp's BROWSER_SSRF_ALLOW when the deployment
-# opts in. browser-mcp blocks these by default; without them an agent cannot view
-# a dev server it started itself, which is the single most common thing it wants
-# a browser for on a self-hosted box.
+# Loopback CIDRs handed to browser-mcp's BROWSER_SSRF_ALLOW unless the operator
+# has disabled it. browser-mcp blocks these by default; without them an agent
+# cannot view a dev server it started itself, which is the single most common
+# thing it wants a browser for on a self-hosted box.
 _LOOPBACK_ALLOW = "127.0.0.0/8,::1/128"
 
 
@@ -67,24 +67,30 @@ def _browser_ssrf_allow(explicit: Optional[str]) -> Optional[str]:
     """
     Resolve the BROWSER_SSRF_ALLOW value for the spawned browser MCP server.
 
-    An explicitly-configured value (session env or process env) is passed through
-    untouched — the operator has stated the policy and we do not append to it.
-    Otherwise loopback is allowed when ``settings.browser_ssrf_allow_loopback`` is
-    true, or (when that is unset) when the install is in local mode. Cloud /
-    multi-tenant style deployments therefore keep blocking loopback by default.
+    Resolution order, most specific first:
 
-    Returns None when nothing should be injected, leaving browser-mcp on its own
-    default-block policy.
+    1. An explicitly-configured ``BROWSER_SSRF_ALLOW`` (session env or process
+       env) is passed through untouched — the operator has stated the policy
+       and we do not append to it.
+    2. ``BROWSER_SSRF_ALLOW_LOOPBACK`` true/false, when set, decides.
+    3. Unset: loopback is ALLOWED. AI Shuffle has no multi-tenant or cloud mode
+       to detect — one admin password, one operator, and the agent already has
+       a shell on the same host — so a self-hosted install is single-user by
+       construction whether it runs in Docker or natively. The old rule keyed
+       off ``is_local_mode()``, which is a Docker-vs-native probe and not a
+       tenancy signal: on a single-user Unraid deployment it read False and the
+       one model that tried to verify a UI on 127.0.0.1 was refused twice
+       (audit R6/6). An install fronted for other people sets
+       ``BROWSER_SSRF_ALLOW_LOOPBACK=false``.
+
+    Returns None only when loopback is explicitly disabled, leaving browser-mcp
+    on its own default-block policy.
     """
     if explicit:
         return explicit
     opt_in = settings.browser_ssrf_allow_loopback
     if opt_in is None:
-        try:
-            opt_in = settings.is_local_mode()
-        except Exception:  # pragma: no cover - defensive: never break session start
-            logger.debug("browser ssrf: local-mode probe failed", exc_info=True)
-            opt_in = False
+        opt_in = True
     return _LOOPBACK_ALLOW if opt_in else None
 
 

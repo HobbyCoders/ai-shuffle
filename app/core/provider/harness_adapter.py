@@ -1005,6 +1005,14 @@ class HarnessAdapter(ProviderAdapter):
         declared_agents = getattr(sdk_options, "aih_declared_agents", None)
         if declared_agents:
             opts.extra["declared_agents"] = list(declared_agents)
+        # Inputs for the per-turn environment note (execution mode + branch
+        # pair). Present only when the profile's prompt carries the app's <env>
+        # block; ``send_query`` renders the note from these each turn, which is
+        # what keeps the date and the branch out of the cached prefix without
+        # keeping them from the model.
+        turn_env = getattr(sdk_options, "aih_turn_env", None)
+        if turn_env:
+            opts.extra["turn_env"] = dict(turn_env)
         # The app's permission prompt flow rides on this callback (see
         # _bridge_permission) — same wiring the SDK path uses.
         self._can_use_tool = getattr(sdk_options, "can_use_tool", None)
@@ -1100,10 +1108,78 @@ class HarnessAdapter(ProviderAdapter):
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
         self._mark_turn_floor()
+        # Everything that changes between turns rides HERE, at the tail of the
+        # request, rather than in the system prompt: today's date, the branch
+        # pair, and the continual learner's # Memory snapshot. The system
+        # prompt and the tool schemas are the provider's cached prefix, and a
+        # session that only wanted to say "continue" was re-billing all of it
+        # because a clock ticked past midnight or another session wrote a
+        # memory. Rendered fresh on every send, so nothing the model reads is
+        # older than this turn.
+        note = await asyncio.to_thread(self._turn_context_note)
+        content = f"{prompt}\n\n{note}" if note else prompt
         # fluid annotates ``UserTurn.content`` as a list, but its own callers and
         # tests pass the prompt string straight through (the loops normalize it),
         # so the cast bridges the vendor annotation without touching the value.
-        await self._engine.submit(UserTurn(content=cast(Any, prompt)))
+        await self._engine.submit(UserTurn(content=cast(Any, content)))
+
+    def _turn_context_note(self) -> Optional[str]:
+        """The turn's volatile context: environment facts, then memory.
+
+        Blocking (a JSON read for the memory store), so callers hand it to a
+        thread. Never raises: a turn is never worth losing over a reminder.
+        """
+        blocks = [self._env_note(), self._memory_snapshot()]
+        present = [block for block in blocks if block]
+        return "\n\n".join(present) if present else None
+
+    def _env_note(self) -> Optional[str]:
+        """The volatile half of the app's <env> block for this turn.
+
+        ``None`` unless the profile's prompt actually carries that block —
+        the stable half and this one arrive together or not at all.
+        """
+        turn_env = (getattr(self._options, "extra", None) or {}).get("turn_env")
+        if not isinstance(turn_env, dict) or not turn_env:
+            return None
+        try:
+            from app.core.environment import generate_turn_environment_note
+
+            return generate_turn_environment_note(
+                execution_mode=str(turn_env.get("execution_mode") or "local"),
+                worktree_info=turn_env.get("worktree_info"),
+            )
+        except Exception:  # noqa: BLE001 — a reminder never fails a turn
+            logger.warning("[HarnessAdapter] turn env note failed", exc_info=True)
+            return None
+
+    def _memory_snapshot(self) -> Optional[str]:
+        """The continual learner's ``# Memory`` block for this turn.
+
+        Same text the prompt compiler used to render into the system prompt,
+        and the same project scoping — only the position changed. Native legs
+        with continual learning on; the delegated claude CLI owns its own
+        memory and would double up.
+        """
+        if self._is_delegated or self._options is None:
+            return None
+        try:
+            from app.core.config import settings
+
+            if not settings.fluid_continual:
+                return None
+            from fluid.codemode.skills import SkillStore, project_key_for
+
+            store = SkillStore(_fluid_skills_root())
+            section = store.render_memory_section(
+                project_key_for(self._options.cwd or ".")
+            )
+            if not section:
+                return None
+            return f"<system-reminder>\n{section}\n</system-reminder>"
+        except Exception:  # noqa: BLE001 — a reminder never fails a turn
+            logger.warning("[HarnessAdapter] memory snapshot failed", exc_info=True)
+            return None
 
     async def send_resume(self) -> None:
         if self._engine is None:
@@ -2211,17 +2287,21 @@ class HarnessAdapter(ProviderAdapter):
         code-mode schema carries four tools instead of forty.
 
         ``native`` says whether this compilation feeds a native leg. It gates
-        the ``# Memory`` snapshot and the steering/guidance/recall extras:
-        under ``prompt_full_replace`` this same compiler also builds the
-        DELEGATED leg's prompt, and there the claude CLI owns memory and
-        gathers it itself, so naming the fluid store would double it up.
+        the steering/guidance/recall extras: under ``prompt_full_replace``
+        this same compiler also builds the DELEGATED leg's prompt, and there
+        the claude CLI owns those concerns itself.
+
+        The ``# Memory`` snapshot is no longer compiled in at all — it is a
+        per-turn block on the user message now (:meth:`_memory_snapshot` and
+        :meth:`send_query`), because an install-global store that any session
+        can write must not sit inside every session's cached prefix.
 
         The old ``# Project memory`` section (ruling MEM3) is gone (2026-08-31
         decision, see docs/MEMORY_ARCHITECTURE.md): its write path — the
         Memory tool — was removed in PR #997, and a standing instruction the
         model cannot follow poisons trust in the rest of the prompt. Durable
         facts now travel through the continual learner (Remember → journal →
-        synthesizer → the ``# Memory`` snapshot above).
+        synthesizer → the ``# Memory`` snapshot).
         """
         try:
             from fluid.context.compiler import (
@@ -2238,17 +2318,15 @@ class HarnessAdapter(ProviderAdapter):
             # ``Task`` is. None is fluid's own "no filter" value, so an
             # unrestricted agent compiles exactly as it did before.
             permitted = _permitted_tool_names(options, registry)
-            # The continual learner's ``# Memory`` snapshot (facts the
-            # synthesizer distilled from past sessions' journals) — native legs
-            # only, and only when continual learning is on. The delegated
-            # claude CLI owns its own memory and would double up.
-            from app.core.config import settings as _settings
-
-            memories_dir = (
-                str(_fluid_skills_root())
-                if native and _settings.fluid_continual
-                else None
-            )
+            # ``memories_dir=None``, always: the continual learner's
+            # ``# Memory`` snapshot no longer belongs to the system prompt.
+            # The store is INSTALL-GLOBAL, so any session's Remember rewrote
+            # the snapshot every other session's prompt would compile next —
+            # a cached prefix invalidated from outside the session that paid
+            # for it. It rides the turn's user message instead
+            # (:meth:`_memory_snapshot`), which is after every cache
+            # breakpoint and, as a bonus, one turn fresher than a snapshot
+            # frozen at connect.
             compiled = compile_prompt(
                 PromptInputs(
                     base=system,
@@ -2256,7 +2334,7 @@ class HarnessAdapter(ProviderAdapter):
                     cwd=options.cwd or ".",
                     include_env=not has_app_env,
                     include_agents=False,
-                    memories_dir=memories_dir,
+                    memories_dir=None,
                     tools=permitted,
                     # Profile scope filter (user/project/local) — gates fluid's
                     # instruction files, skills, agents, and plugin discovery.
@@ -2470,6 +2548,20 @@ class HarnessAdapter(ProviderAdapter):
             except ImportError:
                 pass  # older vendored fluid without the refinement seam
             _amend_native_task_spec(registry, options)
+            # Same A13 split for Monitor: fluid owns its shape, the app owns
+            # its supervision — and `wait_seconds` (the inline settle window)
+            # is supervision, so the parameter is spliced onto the vendor spec
+            # here, after the description refinement above.
+            try:
+                from app.core.monitor_spawn import amend_native_monitor_spec
+
+                amend_native_monitor_spec(registry)
+            except Exception:  # noqa: BLE001 — must never break session connect
+                logger.warning(
+                    "[HarnessAdapter] failed to add wait_seconds to the native "
+                    "Monitor spec; leaving the vendor spec as-is.",
+                    exc_info=True,
+                )
 
         # The app's own in-proc SDK servers (builtins, app-config, ai-tools,
         # computer-use, provider-agent): their @tool objects were recorded per

@@ -99,6 +99,11 @@ class SessionRow(TypedDict):
     # A record of what RAN — distinct from ``model`` below, which is what the
     # user picked.
     launched_model: Optional[str]
+    # The FIRST model this session ever ran on, written once and never
+    # overwritten. ``launched_model`` answers "what is it on now"; a session
+    # that switched mid-flight lost the answer to "what did it start on"
+    # entirely. NULL on rows created before the column existed.
+    first_model: Optional[str]
     # The run binding chosen when this session was created (v79). ``model`` is
     # the raw pick: a bare id/alias, or a ``prov:<providerId>:<modelId>``
     # composite that also settles ``provider_id``. NULL on pre-v79 rows, which
@@ -744,7 +749,9 @@ def update_session(
             have to exist separately.
         launched_model: Effective model the session was launched (or switched)
             with, persisted at spawn/link time so the host-op guard can read it
-            without waiting for turn-end message commits.
+            without waiting for turn-end message commits. Also seeds
+            ``first_model`` on the FIRST write only (COALESCE) — that column
+            records what the session started on and is never overwritten.
     """
     _ph = ph()
     updates = [f"updated_at = {_ph}"]
@@ -809,6 +816,15 @@ def update_session(
         values.append(cache_read_tokens)
     if launched_model is not None:
         updates.append(f"launched_model = {_ph}")
+        values.append(launched_model)
+        # Same write, second column, set-once semantics: COALESCE keeps the
+        # FIRST value and ignores every later one, so no caller has to remember
+        # to pass it and no mid-session switch can clobber it. Doing it here
+        # rather than at the call sites is deliberate — ``launched_model`` is
+        # persisted from four separate spawn/switch paths, and an attribution
+        # column that depends on all of them remembering is one that will
+        # eventually be wrong.
+        updates.append(f"first_model = COALESCE(first_model, {_ph})")
         values.append(launched_model)
     if v2_stream is not None:
         updates.append(f"v2_stream = {_ph}")
@@ -1171,6 +1187,38 @@ def set_session_branch(
             )
         return row_to_dict(cursor.fetchone())
 
+
+def resync_session_branch(session_id: str, branch: str) -> Optional[SessionRow]:
+    """Correct a session's recorded branch to the one its checkout is really on.
+
+    :func:`set_session_branch` is the *intake* write — the user picks a branch,
+    the app records it. Nothing wrote it again afterwards, so a session whose
+    agent ran a plain ``git checkout -b`` inside its worktree kept the old name
+    in its row forever, and everything reading that row (the sidebar's PR state
+    most visibly) kept answering about the branch the session had left. The
+    session that shipped the sidebar's second-PR fix desynced its own row this
+    way.
+
+    Writes ``branch`` and — only when the session already carries the legacy
+    ``worktree_branch`` — that column too, since PR reconciliation prefers it.
+    A session that never had one does not acquire one here: an empty
+    ``worktree_branch`` is how the v2 branch-intake path marks itself, and
+    filling it in would make a v2 session look legacy. Returns the updated row,
+    or ``None`` when no such session exists.
+    """
+    _ph = ph()
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE sessions SET branch = {_ph}, "
+            "worktree_branch = CASE "
+            "WHEN worktree_branch IS NULL OR worktree_branch = '' "
+            f"THEN worktree_branch ELSE {_ph} END, "
+            f"updated_at = {_ph} WHERE id = {_ph} RETURNING *",
+            (branch, branch, now, session_id),
+        )
+        return row_to_dict(cursor.fetchone())
 
 
 def update_session_pr_state(

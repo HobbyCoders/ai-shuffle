@@ -426,6 +426,14 @@ class Session(SessionBase):
     effort: Optional[str] = None
     permission_mode: Optional[str] = None
     context_window: Optional[int] = None
+    # What this session actually RAN on, as opposed to what was picked.
+    # ``launched_model`` tracks the CURRENT one and is rewritten by every
+    # mid-session switch; ``first_model`` records the one it started with and is
+    # never overwritten, so a session that moved from grok-4.5 to grok-4.6
+    # halfway through can still account for its early turns. NULL on rows
+    # written before the column existed.
+    launched_model: Optional[str] = None
+    first_model: Optional[str] = None
     # Per-session fast mode (v81): True asks the leg for its expedited service.
     # NULL on every pre-v81 row, which runs standard — left uncoalesced so the
     # client can tell "never picked" from an explicit off.

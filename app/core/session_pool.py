@@ -577,6 +577,21 @@ def _default_attachment_probe(session_id: str) -> Optional[bool]:
         return None
 
 
+@dataclass(frozen=True)
+class AdmissionSnapshot:
+    """One admission verdict plus the occupancy it was decided on.
+
+    ``refusal`` is exactly what :meth:`SessionPool.admission_check` returns
+    (``None`` == admit). ``in_pool``/``hard_cap`` are the pool's live size and
+    its absolute ceiling, so a caller can say HOW full the box is and can add
+    its own not-yet-connected admissions to the count.
+    """
+
+    refusal: Optional[str]
+    in_pool: int
+    hard_cap: int
+
+
 class SessionPool:
     """
     Bounded LRU pool of SDK client sessions.
@@ -759,6 +774,21 @@ class SessionPool:
         with a "server busy" error if True.
         """
         return len(self._pool) >= self.hard_cap
+
+    def admission_snapshot(self) -> "AdmissionSnapshot":
+        """:func:`admission_check` plus the occupancy numbers behind it.
+
+        Callers that must decide BEFORE starting work — Task dispatch, which
+        would otherwise hand the model a background receipt for a worker the
+        pool cannot admit — need the counts as well as the verdict: to tell a
+        caller how full the box is, and to reason about dispatches already
+        admitted but not yet connected. Pure read; same refusal string.
+        """
+        return AdmissionSnapshot(
+            refusal=self.admission_check(),
+            in_pool=len(self._pool),
+            hard_cap=self.hard_cap,
+        )
 
     def admission_check(self) -> Optional[str]:
         """Admission backpressure: decide whether a NEW session may be admitted.
@@ -1582,6 +1612,23 @@ def get_session_pool() -> SessionPool:
             policy.cold_idle_seconds, policy.detached_grace_seconds,
         )
     return _session_pool
+
+
+def admission_snapshot() -> AdmissionSnapshot:
+    """Module-level :meth:`SessionPool.admission_snapshot`. Never raises.
+
+    Reads the singleton WITHOUT creating it: a process that has not pooled a
+    session yet cannot be at any ceiling, so "no pool" answers "admit", and a
+    measurement error does the same (admission has always failed open).
+    """
+    pool = _session_pool
+    if pool is None:
+        return AdmissionSnapshot(refusal=None, in_pool=0, hard_cap=0)
+    try:
+        return pool.admission_snapshot()
+    except Exception:  # noqa: BLE001 — never block on a measurement error
+        logger.debug("[Pool] admission_snapshot failed", exc_info=True)
+        return AdmissionSnapshot(refusal=None, in_pool=0, hard_cap=0)
 
 
 def note_session_attached(session_id: str) -> None:

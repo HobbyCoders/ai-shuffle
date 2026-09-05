@@ -46,6 +46,8 @@ def _create_schema(cursor: sqlite3.Cursor) -> None:
             worktree_id TEXT,
             sdk_session_id TEXT,
             launched_model TEXT,
+            -- Seeded by the same write, set-once (see test_session_first_model).
+            first_model TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )

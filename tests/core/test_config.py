@@ -856,3 +856,122 @@ class TestSettingsConfigClass:
         assert Settings.model_config.get('env_file') == '.env'
         assert Settings.model_config.get('env_file_encoding') == 'utf-8'
 
+
+
+class TestDatabaseUrlNormalization:
+    """A DATABASE_URL whose password carries reserved characters.
+
+    Python's ``urlsplit`` splits userinfo at the LAST ``@``; libpq splits at
+    the FIRST. An unencoded ``@`` in the password therefore makes the same
+    string name two different hosts depending on who reads it — a worker
+    container reported ``could not translate host name "Pwd@10.0.0.200"`` and
+    put a password fragment in the event log. Normalizing at load makes both
+    readings agree.
+    """
+
+    def test_unencoded_at_in_password_is_encoded(self):
+        from app.core.config import normalize_database_url
+
+        assert normalize_database_url(
+            "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle"
+        ) == "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle"
+
+    def test_normalization_is_idempotent(self):
+        from app.core.config import normalize_database_url
+
+        once = normalize_database_url(
+            "postgresql://REDACTED@db.local:5432/app"
+        )
+        assert normalize_database_url(once) == once
+        assert once == "postgresql://REDACTED@db.local:5432/app"
+
+    def test_colon_in_password_is_encoded(self):
+        """The userinfo splits on the FIRST colon, so a password may contain
+        more of them — they come back encoded."""
+        from app.core.config import normalize_database_url
+
+        assert normalize_database_url(
+            "postgresql://REDACTED@host:5432/app"
+        ) == "postgresql://REDACTED@host:5432/app"
+
+    def test_password_with_a_slash_is_left_alone(self):
+        """``/``, ``?`` and ``#`` end the netloc, so a URL carrying one bare in
+        the password is not recoverable by anyone — including us. It is
+        returned untouched rather than silently rewritten into a different
+        connection string; the operator must encode those themselves (the
+        POSTGRES_* path already does)."""
+        from app.core.config import normalize_database_url
+
+        broken = "postgresql://u:pa/ss@host:5432/app"
+        assert normalize_database_url(broken) == broken
+
+    def test_clean_url_is_untouched(self):
+        from app.core.config import normalize_database_url
+
+        clean = "postgresql://REDACTED@10.0.0.5:5433/mydb"
+        assert normalize_database_url(clean) == clean
+
+    def test_url_without_credentials_is_untouched(self):
+        from app.core.config import normalize_database_url
+
+        bare = "postgresql://localhost:5432/mydb"
+        assert normalize_database_url(bare) == bare
+
+    def test_empty_and_garbage_never_raise(self):
+        from app.core.config import normalize_database_url
+
+        assert normalize_database_url("") == ""
+        assert normalize_database_url("   ") == ""
+        # No scheme, no credentials: returned as given rather than mangled.
+        assert normalize_database_url("not a url at all") == "not a url at all"
+
+    def test_settings_normalizes_at_load(self):
+        """The rewrite happens once, at load, so every consumer of
+        ``get_database_url()`` sees the encoded form."""
+        with patch.dict(os.environ, {
+            "DATABASE_URL": "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle",
+        }, clear=False):
+            os.environ.pop("POSTGRES_PASSWORD", None)
+            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
+                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
+                    from app.core.config import Settings
+                    settings = Settings(_env_file=None)
+
+                    assert settings.database_url == (
+                        "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle"
+                    )
+                    assert settings.get_database_url() == settings.database_url
+
+    def test_normalized_url_parses_back_to_the_real_password(self):
+        """The point of the exercise: the credentials still decode correctly,
+        and the host is the host."""
+        with patch.dict(os.environ, {
+            "DATABASE_URL": "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle",
+        }, clear=False):
+            os.environ.pop("POSTGRES_PASSWORD", None)
+            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
+                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
+                    from app.core.config import Settings
+                    from app.db.base import parse_database_url
+                    settings = Settings(_env_file=None)
+
+                    parsed = parse_database_url(settings.get_database_url())
+                    assert parsed["host"] == "10.0.0.200"
+                    assert parsed["password"] == "Pwd@word"
+                    assert parsed["user"] == "ai_shuffle"
+                    # And the POSTGRES_* import took the same decoded values.
+                    assert settings.postgres_host == "10.0.0.200"
+                    assert settings.postgres_password == "Pwd@word"
+
+    def test_libpq_first_at_split_now_finds_the_host(self):
+        """Simulates libpq's split (FIRST ``@``) on the normalized string: with
+        the password encoded there is exactly one ``@`` left, so both splitters
+        agree."""
+        from app.core.config import normalize_database_url
+
+        normalized = normalize_database_url(
+            "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle"
+        )
+        after_scheme = normalized.split("://", 1)[1]
+        assert after_scheme.count("@") == 1
+        assert after_scheme.split("@", 1)[1] == "10.0.0.200:5432/ai_shuffle"

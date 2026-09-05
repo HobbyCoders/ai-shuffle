@@ -53,7 +53,7 @@ def completed_agent(monkeypatch, tmp_path):
         monkeypatch.setattr(
             task_registry,
             "get_task",
-            lambda sid, tid: {
+            lambda sid, tid, **_kw: {
                 "id": tid,
                 "kind": "agent",
                 "status": "completed",
@@ -102,7 +102,7 @@ def test_a_pre_existing_task_falls_back_to_the_event_log(mock_db, monkeypatch):
     monkeypatch.setattr(
         task_registry,
         "get_task",
-        lambda sid, tid: {"id": tid, "kind": "agent", "status": "completed"},
+        lambda sid, tid, **_kw: {"id": tid, "kind": "agent", "status": "completed"},
     )
     monkeypatch.setattr(
         pa, "final_turn_outcome",
@@ -128,7 +128,7 @@ def test_a_vanished_report_file_falls_back_too(mock_db, monkeypatch, tmp_path):
     monkeypatch.setattr(
         task_registry,
         "get_task",
-        lambda sid, tid: {
+        lambda sid, tid, **_kw: {
             "id": tid, "kind": "agent", "status": "completed",
             "reportPath": str(tmp_path / "gone" / "w-1.md"),
             "reportChars": 12,
@@ -155,7 +155,7 @@ def test_a_running_agent_task_gets_no_report_fields(mock_db, monkeypatch):
     monkeypatch.setattr(
         task_registry,
         "get_task",
-        lambda sid, tid: {"id": tid, "kind": "agent", "status": "running"},
+        lambda sid, tid, **_kw: {"id": tid, "kind": "agent", "status": "running"},
     )
 
     body = _get()
@@ -170,7 +170,7 @@ def test_a_shell_task_is_untouched(mock_db, monkeypatch):
     monkeypatch.setattr(
         task_registry,
         "get_task",
-        lambda sid, tid: {"id": tid, "kind": "shell", "status": "completed"},
+        lambda sid, tid, **_kw: {"id": tid, "kind": "shell", "status": "completed"},
     )
 
     body = _get()
@@ -195,3 +195,70 @@ def test_agent_summary_is_not_the_bare_model_label(mock_db, completed_agent):
     assert task["summary"] == "Retry backoff is unbounded"
     assert task["model"] == "OpenRouter · openai/gpt-5.6-luna"
     assert task["summary"] != task["model"]
+
+
+def test_a_task_only_the_retention_store_remembers_still_serves_its_report(
+    mock_db, tmp_path
+):
+    """The wake can land long after the pooled client was evicted.
+
+    ``clear_session`` wipes the live map; the retention snapshot survives it.
+    TaskGet used to read only the live map, so a parent woken about its own
+    worker got "task not found" and went and redid the work by hand.
+    """
+    from app.core.task_registry import task_registry
+
+    report = tmp_path / "w-1.md"
+    report.write_text("PR #1084 is up; CI is green.", encoding="utf-8")
+
+    task_registry.reset_all()
+    try:
+        task_registry.start_task(
+            "session-parent", "w-1", "agent", "Ship the fix",
+        )
+        task_registry.complete_task(
+            "session-parent", "w-1", "completed",
+            summary="PR #1084 is up", report_path=str(report),
+        )
+        task_registry.clear_session("session-parent")
+
+        body = _get()
+
+        assert body["success"] is True
+        assert body["task"]["status"] == "completed"
+        assert body["report_head"].startswith("PR #1084 is up")
+        assert body["report_path"] == str(report)
+    finally:
+        task_registry.reset_all()
+
+
+def test_a_task_only_the_durable_row_remembers_is_still_found(mock_db, monkeypatch):
+    """Last resort: nothing in memory at all, and the DB row is the record."""
+    from app.core import provider_agent as pa
+    from app.core.task_registry import task_registry
+    from app.db import background_tasks as bt_db
+
+    task_registry.reset_all()
+    monkeypatch.setattr(
+        bt_db, "get_background_task",
+        lambda tid, sid: {
+            "task_id": tid, "session_id": sid, "kind": "agent",
+            "tool_use_id": tid, "title": "Ship the fix", "status": "completed",
+            "started_at": "2026-09-04T10:00:00+00:00",
+            "updated_at": "2026-09-04T10:09:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        pa, "final_turn_outcome",
+        lambda sid: {
+            "usage": {}, "error": None, "interrupted": False,
+            "terminal_found": True,
+        },
+    )
+    monkeypatch.setattr(pa, "final_assistant_text", lambda sid: "Merged in #1084.")
+
+    body = _get()
+
+    assert body["success"] is True
+    assert body["task"]["status"] == "completed"
+    assert body["report_head"] == "Merged in #1084."

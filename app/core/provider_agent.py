@@ -606,12 +606,27 @@ def final_turn_outcome(session_id: str) -> Dict[str, Any]:
 
 
 def final_assistant_text(session_id: str) -> str:
-    """The worker's final assistant text, from the V2 event log.
+    """The worker's REPORT: the text it wrote after its last tool result.
 
-    Mirrors ``AutomationManager._extract_final_assistant_text``: concatenate the
-    LAST completed turn's ``assistant.text_delta`` payloads in seq order, falling
-    back to the turn of the last assistant text event when nothing completed.
-    Never raises (returns "").
+    The report is the answer the worker addressed to whoever dispatched it, and
+    an agentic worker writes it in one place — at the end, once the tools have
+    stopped. Everything before that is working narration addressed to nobody:
+    "I'll start by mapping the call sites", "Next I'll read the adapter". The
+    old version concatenated EVERY ``assistant.text_delta`` of the last turn, so
+    a parent that asked for a report got the whole monologue run together, and
+    :func:`_completion_summary` — which takes the first non-empty line — put the
+    worker's OPENING sentence on the registry row as the headline of what came
+    back. The audited case read "I'll start by mapping…" as the result of a job
+    that had actually ended "PR #1084 is up. Parking on CI."
+
+    So: the last turn's text, cut at its last ``tool.result``. The whole
+    concatenation is the fallback for the one worker shape that has no such cut
+    — a single answer with no tool calls at all — and for a final turn that ends
+    on a tool result with nothing after it.
+
+    The turn is chosen as before: the LAST completed turn, falling back to the
+    turn of the last assistant text event when nothing completed. Never raises
+    (returns "").
     """
     events = _load_session_events(session_id)
 
@@ -629,11 +644,17 @@ def final_assistant_text(session_id: str) -> str:
         return ""
 
     parts: List[str] = []
+    #: Text seen since the LAST ``tool.result`` — reset every time one lands, so
+    #: what survives the loop is exactly the closing statement.
+    tail: List[str] = []
     for ev in events:
         if ev.get("turn_id") != target_turn_id:
             continue
         etype = ev.get("event_type")
         payload = ev.get("payload") or {}
+        if etype == "tool.result":
+            tail = []
+            continue
         if etype == "assistant.text_delta":
             text = payload.get("text")
         elif etype == "message.assistant":
@@ -644,7 +665,8 @@ def final_assistant_text(session_id: str) -> str:
             continue
         if isinstance(text, str):
             parts.append(text)
-    return "".join(parts).strip()
+            tail.append(text)
+    return "".join(tail).strip() or "".join(parts).strip()
 
 
 def _parent_cwd(parent_row: Optional[Mapping[str, Any]]) -> Optional[str]:
@@ -785,6 +807,56 @@ async def _await_worker_idle(
             waiter.cancel()
             with contextlib.suppress(BaseException):
                 await waiter
+
+
+#: How long to wait between re-reads while a worker sits PARKED on background
+#: work of its own. Long enough that a worker parked on a half-hour CI run costs
+#: two cheap indexed reads a minute, short enough that its wake is noticed.
+PARK_RECHECK_SECONDS = 5.0
+
+
+def _worker_still_working(worker_session_id: str) -> bool:
+    """True when a worker that LOOKS idle has not actually finished.
+
+    A parked turn releases its run lease and its live-turn slot, so a worker that
+    ended its turn to wait on its OWN background work — "PR #1084 is open;
+    waiting on CI before merge" — reads as an idle session. ``_await_worker_idle``
+    returned on it, the outcome reader saw ``turn.parked`` (which it treats as a
+    clean, empty end) and the dispatch booked the worker ``completed`` with a
+    half-written brief as its report, which is what the parent then relayed.
+
+    A park is not an ending. It is an ending only once the work being waited on
+    is gone: either the worker unparks and finishes for real, or its background
+    tasks drain and the park is stranded, in which case there is nothing left to
+    wait for and the caller settles on what it has.
+
+    Deliberately narrow — a PARKED latest turn with live background work behind
+    it, and nothing else. The caller has just come back from
+    ``_await_worker_idle``, so a running or queued turn is already its problem,
+    and anything this predicate is unsure about must answer "finished": it gates
+    a wait, and a wait that never ends is worse than the settle it replaces.
+
+    Blocking (two indexed reads) — call it off the loop. Never raises: anything
+    unreadable answers "not working", which is the pre-existing behavior.
+    """
+    try:
+        from app.db import turns as turns_db
+
+        row = turns_db.get_latest_turn(worker_session_id)
+    except Exception:  # noqa: BLE001 — an unreadable row settles as before
+        logger.debug(
+            "ProviderAgent: park probe failed for worker %s",
+            worker_session_id, exc_info=True,
+        )
+        return False
+    if (row or {}).get("state") != "parked":
+        return False
+    try:
+        from app.core.task_registry import task_registry
+
+        return bool(task_registry.get_active(worker_session_id))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _torn_down_error(reason: Optional[str], worker_session_id: str) -> str:
@@ -1407,6 +1479,26 @@ async def dispatch_worker(
         feed.start_following()
 
         rate_limited = await _await_worker_idle(worker_session_id, provider_id)
+
+        # A worker that PARKED on its own background work is idle but not
+        # finished (see ``_worker_still_working``). Keep waiting for the wake
+        # turn instead of booking a half-done brief as its report. Self-limiting:
+        # the moment the work it parked on is gone, so is the loop.
+        announced_park = False
+        while not rate_limited and not supervised.torn_down:
+            if not await asyncio.to_thread(
+                _worker_still_working, worker_session_id
+            ):
+                break
+            if not announced_park:
+                announced_park = True
+                logger.info(
+                    "ProviderAgent: worker %s is parked on its own background "
+                    "work — waiting for it to finish rather than settling the "
+                    "task", worker_session_id,
+                )
+            await asyncio.sleep(PARK_RECHECK_SECONDS)
+            rate_limited = await _await_worker_idle(worker_session_id, provider_id)
 
         # torn_down FIRST, on every branch: the supervisor may have killed this
         # worker while we waited (turn end, stop-all), and a killed worker's

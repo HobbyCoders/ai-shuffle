@@ -8,11 +8,14 @@ Supports both Docker and Local deployment modes:
 Set LOCAL_MODE=true environment variable to force local mode.
 """
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
 
 # Name of the env var that points this process at a config file living
 # somewhere other than its own working directory.
@@ -75,6 +78,57 @@ def _parse_legacy_database_url(db_url: str) -> dict:
         "user": unquote(parsed.username or ""),
         "password": unquote(parsed.password or ""),
     }
+
+
+def normalize_database_url(db_url: str) -> str:
+    """Return ``db_url`` with its userinfo percent-encoded.
+
+    A password containing a reserved character — ``@`` above all — makes the
+    same connection string mean two different things depending on who reads it.
+    Python's ``urlsplit`` splits userinfo at the LAST ``@``, which is what
+    :func:`_parse_legacy_database_url` (and therefore every psycopg2 connection
+    the app opens from kwargs) relies on. **libpq splits at the FIRST ``@``**,
+    so anything that hands the raw string to a client — a subprocess reading
+    ``DATABASE_URL`` from the environment, a psql invocation, a tool that
+    connects by DSN — resolves the wrong host. The observed failure was a
+    worker container reporting ``could not translate host name "Pwd@10.0.0.200"``:
+    libpq had taken the tail of the password as part of the hostname, and the
+    fragment went into the event log with the error.
+
+    Normalizing at load makes the two readings agree: the credentials are
+    decoded with the app's own parser and re-encoded with nothing left bare, so
+    both splitters land on the same ``@``. Idempotent — an already-encoded URL
+    round-trips to itself — and never raises: an unparseable string is returned
+    untouched rather than blocking boot.
+    """
+    from urllib.parse import quote, unquote, urlsplit, urlunsplit
+
+    raw = (db_url or "").strip()
+    if not raw:
+        return raw
+    candidate = raw
+    if not candidate.startswith(("postgresql://", "postgres://")):
+        candidate = f"postgresql://{candidate}"
+    try:
+        parts = urlsplit(candidate)
+        raw_userinfo, sep, hostinfo = parts.netloc.rpartition("@")
+        if not sep:
+            return raw  # No credentials in the URL at all: nothing to encode.
+        # Split the credentials on the FIRST colon — a password may contain
+        # one, a username may not. ``unquote`` first so an already-encoded URL
+        # round-trips to itself instead of double-encoding.
+        raw_user, _, raw_password = raw_userinfo.partition(":")
+        userinfo = quote(unquote(raw_user), safe="")
+        if raw_password:
+            userinfo = f"{userinfo}:{quote(unquote(raw_password), safe='')}"
+        # ``hostinfo`` is copied verbatim: urlsplit would lowercase the host
+        # and re-render the port, which changes the string for no gain.
+        netloc = f"{userinfo}@{hostinfo}"
+        return urlunsplit(
+            (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
+        )
+    except Exception:  # noqa: BLE001 — a malformed URL must never block boot
+        return raw
 
 
 _cached_persisted_instance_id: Optional[str] = None
@@ -630,6 +684,18 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Whether WARNING records join ERROR+ in the durable ``error_log`` table
+    # (app.core.error_log_handler). ON by default: ERROR-only capture is what
+    # made a silent provider 403 invisible to ``GetAppErrors``, which answered
+    # {"errors": [], "count": 0} to an agent that was looking straight at the
+    # failure. Warnings never change that tool's DEFAULT output — it asks for
+    # ERROR+ unless the caller passes min_level: "WARNING" — and they are
+    # trimmed to their own smaller ceiling before the table-wide prune, so they
+    # cannot evict errors. Set false to restore ERROR-only capture.
+    error_log_capture_warnings: bool = True
+    # Ceiling on retained WARNING rows, applied before the table-wide trim.
+    error_log_max_warning_rows: int = 1000
+
     # Whether the browser MCP server may reach loopback (127.0.0.0/8, ::1,
     # "localhost"). browser-mcp blocks loopback by default: on a shared/multi-user
     # deployment a hostile page could steer the agent's browser into the app's own
@@ -638,9 +704,17 @@ class Settings(BaseSettings):
     # shell, and blocking it means an agent cannot view the dev server it just
     # started; avoid requiring needless rebinding for permitted local access.
     #
-    # None (default) = auto: allowed in local mode, blocked otherwise.
-    # True/False force it either way. Setting BROWSER_SSRF_ALLOW explicitly always
-    # wins over this — see app.core.mcp_config._browser_ssrf_allow.
+    # None (default) = auto. AI Shuffle exposes no tenancy model: there is one
+    # admin password, one operator, and every session's agent already has an
+    # unrestricted shell on the box, so "self-hosted single user" is what an
+    # install IS — a Docker/Unraid deployment is not a shared one. Auto
+    # therefore ALLOWS loopback, in Docker as well as in local mode; the
+    # permit local verification under the configured policy.
+    #
+    # BROWSER_SSRF_ALLOW_LOOPBACK=false turns it back off for an install that
+    # is fronted for other people. Setting BROWSER_SSRF_ALLOW explicitly is
+    # stronger still: that value is passed through verbatim and nothing is
+    # appended to it — see app.core.mcp_config._browser_ssrf_allow.
     browser_ssrf_allow_loopback: Optional[bool] = Field(
         default=None,
         validation_alias=AliasChoices(
@@ -688,11 +762,35 @@ class Settings(BaseSettings):
         if self.workspace_dir is None:
             object.__setattr__(self, 'workspace_dir', _get_default_workspace_dir())
 
+        # Percent-encode the connection string's credentials BEFORE anything
+        # reads them, so every consumer — this process, a subprocess handed
+        # DATABASE_URL, libpq itself — splits the userinfo at the same ``@``.
+        self._normalize_database_url()
+
         # A pre-split install carries only a legacy DATABASE_URL. Decompose it
         # into the POSTGRES_* fields so the rest of the app (setup checks, the
         # Docker compose gate, harness_adapter's has-database probe) sees a
         # fully configured database without re-running setup.
         self._import_legacy_database_url()
+
+    def _normalize_database_url(self) -> None:
+        """Rewrite ``database_url`` in place with its credentials encoded.
+
+        See :func:`normalize_database_url`. The rewrite is logged at DEBUG and
+        the value is NEVER logged — the whole reason this exists is that a
+        password fragment leaked into an error message.
+        """
+        raw = (self.database_url or "").strip()
+        if not raw:
+            return
+        normalized = normalize_database_url(raw)
+        if normalized == raw:
+            return
+        object.__setattr__(self, "database_url", normalized)
+        logger.debug(
+            "DATABASE_URL normalized: userinfo percent-encoded so libpq and "
+            "urlsplit agree on the credential/host boundary (value not logged)"
+        )
 
     def _import_legacy_database_url(self) -> None:
         """Fill empty POSTGRES_* fields from a legacy DATABASE_URL.
@@ -827,8 +925,11 @@ class Settings(BaseSettings):
         Credentials are percent-encoded so passwords containing '@', '/', or
         '%' survive the round-trip through app.db.base.parse_database_url.
         """
+        # Already normalized at load (``_normalize_database_url``); re-running
+        # the idempotent encode here covers a value assigned after init (tests,
+        # a runtime override).
         if self.database_url and self.database_url.strip():
-            return self.database_url.strip()
+            return normalize_database_url(self.database_url.strip())
         if not self.postgres_password:
             raise ValueError(
                 "Database connection is not configured. Set POSTGRES_HOST, "

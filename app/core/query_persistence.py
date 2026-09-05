@@ -439,6 +439,21 @@ async def _persist_turn_results(
                 # get their own column. An errored turn counts neither — same
                 # gating as the usage log below.
                 turn_increment=0 if metadata.get("error") else 1,
+                # NOT the same as SUM(TurnComplete.num_model_calls) over the
+                # fluid event log, and deliberately so — an audit compared the
+                # two, found this column roughly double, and read it as a
+                # double count. It is not. This is the ONLY runtime writer of
+                # ``total_model_calls`` per turn (the kill path in
+                # ``settle_killed_session`` books instead of it, never as well:
+                # the atomic ``settle_turn`` claim lets exactly one of them
+                # win), and it counts the calls of EVERY terminal — the
+                # Interrupted and ErrorEvent ones too, which a
+                # TurnComplete-only sum cannot see. Those are real spend: a
+                # stopped turn's calls were billed, and a failover retry runs
+                # the work twice for one user-visible turn. Booking only
+                # completed turns is the undercount this column was created to
+                # fix (a session with 167 calls read as 11 — see
+                # harness_adapter's Interrupted branch).
                 model_calls_increment=metadata.get("num_turns") or 0,
                 # Persist per-turn context-window values so /live can render
                 # the context bar on session reload without scanning JSONL.

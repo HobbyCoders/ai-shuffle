@@ -9,15 +9,17 @@ These tests cover the DECISION logic on real tmp directories. `npx` is always
 stubbed: the suite must not depend on a node toolchain being installed.
 """
 
+import json
 import os
 
 import pytest
 
 import app.core.checkout_manager as cm
 
-# Captured before the autouse stub below replaces it, so the one test that
-# exercises the real helper can still reach it.
+# Captured before the autouse stubs below replace them, so the tests that
+# exercise the real helpers can still reach them.
 _REAL_SYNC = cm._run_svelte_kit_sync
+_REAL_NPM_INSTALL = cm._run_npm_install
 
 
 @pytest.fixture(autouse=True)
@@ -30,6 +32,20 @@ def no_real_npx(monkeypatch):
         return True
 
     monkeypatch.setattr(cm, "_run_svelte_kit_sync", fake_sync)
+    return calls
+
+
+@pytest.fixture(autouse=True)
+def no_real_npm(monkeypatch):
+    """Record npm installs instead of running one. Creates node_modules."""
+    calls = []
+
+    def fake_install(package_dir):
+        calls.append(str(package_dir))
+        (package_dir / "node_modules").mkdir(exist_ok=True)
+        return True, "npm ci --no-audit --no-fund"
+
+    monkeypatch.setattr(cm, "_run_npm_install", fake_install)
     return calls
 
 
@@ -84,7 +100,13 @@ def test_skips_when_the_worktree_has_no_package_json(tmp_path):
 
     summary = cm.provision_node_modules(str(source), str(dest))
 
-    assert summary == {"linked": [], "synced": [], "skipped": [], "errors": []}
+    assert summary == {
+        "linked": [],
+        "installed": [],
+        "synced": [],
+        "skipped": [],
+        "errors": [],
+    }
     assert not (dest / "node_modules").exists()
 
 
@@ -252,3 +274,245 @@ def test_link_directory_makes_the_source_readable_through_dest(tmp_path):
     assert dest.is_dir()
     if os.name != "nt":
         assert dest.is_symlink()
+
+
+# --- freshness: link only what the branch's lockfile actually wants ---------
+#
+# Linking a source tree the branch has outgrown is worse than linking nothing:
+# audited sessions lost minutes to "Cannot optimize dependency" and phantom
+# svelte-check errors that read like code bugs. These cover the decision.
+
+
+def _write_json(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _lockfile(**versions):
+    packages = {"": {"name": "app"}}
+    for name, version in versions.items():
+        packages[f"node_modules/{name}"] = {"version": version}
+    return {"lockfileVersion": 3, "packages": packages}
+
+
+def _seed_pair(tmp_path, *, source_lock=None, installed=None, dest_lock=None):
+    """A source checkout with an install, and a worktree, both at ``frontend/``."""
+    source = tmp_path / "src"
+    dest = tmp_path / "wt"
+    _mk_package(source, "frontend", node_modules=True)
+    _mk_package(dest, "frontend")
+    if source_lock is not None:
+        _write_json(source / "frontend" / "package-lock.json", source_lock)
+    if installed is not None:
+        _write_json(
+            source / "frontend" / "node_modules" / ".package-lock.json", installed
+        )
+    if dest_lock is not None:
+        _write_json(dest / "frontend" / "package-lock.json", dest_lock)
+    return source, dest
+
+
+def test_links_when_the_installed_tree_satisfies_the_branch_lockfile(
+    tmp_path, no_real_npm
+):
+    source, dest = _seed_pair(
+        tmp_path,
+        installed=_lockfile(tailwindcss="4.0.0"),
+        dest_lock=_lockfile(tailwindcss="4.0.0"),
+    )
+
+    summary = cm.provision_node_modules(str(source), str(dest))
+
+    assert summary["linked"] == ["frontend"]
+    assert summary["installed"] == []
+    assert no_real_npm == []
+
+
+def test_installs_when_the_branch_wants_another_version(tmp_path, no_real_npm):
+    """The Tailwind 3-vs-4 case: linking here breaks every frontend command."""
+    source, dest = _seed_pair(
+        tmp_path,
+        installed=_lockfile(tailwindcss="3.4.1"),
+        dest_lock=_lockfile(tailwindcss="4.0.0"),
+    )
+
+    summary = cm.provision_node_modules(str(source), str(dest))
+
+    assert summary["linked"] == []
+    assert no_real_npm == [str(dest / "frontend")]
+    assert len(summary["installed"]) == 1
+    assert summary["installed"][0].startswith("frontend: npm ci")
+    assert "tailwindcss" in summary["installed"][0]
+    assert not summary["errors"]
+    # Installed in the worktree's own dir, not linked out to the source.
+    assert not (dest / "frontend" / "node_modules").is_symlink()
+
+
+def test_installs_when_the_branch_adds_a_package_the_source_lacks(
+    tmp_path, no_real_npm
+):
+    """A branch-only dependency (the missing @tailwindcss/vite case)."""
+    source, dest = _seed_pair(
+        tmp_path,
+        installed=_lockfile(tailwindcss="4.0.0"),
+        dest_lock=_lockfile(tailwindcss="4.0.0", vite_plugin="4.0.0"),
+    )
+
+    summary = cm.provision_node_modules(str(source), str(dest))
+
+    assert summary["linked"] == []
+    assert no_real_npm == [str(dest / "frontend")]
+
+
+def test_links_when_there_is_no_lockfile_to_compare(tmp_path, no_real_npm):
+    """Unknowable is not a reason to spend minutes installing."""
+    source, dest = _seed_pair(tmp_path, installed=_lockfile(tailwindcss="3.4.1"))
+
+    summary = cm.provision_node_modules(str(source), str(dest))
+
+    assert summary["linked"] == ["frontend"]
+    assert no_real_npm == []
+
+
+def test_falls_back_to_comparing_lockfiles_without_an_install_record(
+    tmp_path, no_real_npm
+):
+    """npm 6, or a hand-assembled tree: the two lockfiles still decide."""
+    source, dest = _seed_pair(
+        tmp_path,
+        source_lock=_lockfile(tailwindcss="4.0.0"),
+        dest_lock=_lockfile(tailwindcss="4.0.0"),
+    )
+    assert cm.provision_node_modules(str(source), str(dest))["linked"] == ["frontend"]
+    assert no_real_npm == []
+
+    source2, dest2 = _seed_pair(
+        tmp_path / "second",
+        source_lock=_lockfile(tailwindcss="3.4.1"),
+        dest_lock=_lockfile(tailwindcss="4.0.0"),
+    )
+    summary = cm.provision_node_modules(str(source2), str(dest2))
+    assert summary["linked"] == []
+    assert no_real_npm == [str(dest2 / "frontend")]
+
+
+def test_optional_and_platform_gated_packages_do_not_force_an_install(
+    tmp_path, no_real_npm
+):
+    """npm leaves these out on purpose; demanding them makes every tree stale."""
+    dest_lock = _lockfile(tailwindcss="4.0.0")
+    dest_lock["packages"]["node_modules/fsevents"] = {
+        "version": "2.3.3",
+        "optional": True,
+        "os": ["darwin"],
+    }
+    source, dest = _seed_pair(
+        tmp_path, installed=_lockfile(tailwindcss="4.0.0"), dest_lock=dest_lock
+    )
+
+    summary = cm.provision_node_modules(str(source), str(dest))
+
+    assert summary["linked"] == ["frontend"]
+    assert no_real_npm == []
+
+
+def test_a_failed_install_is_recorded_and_stops_sync(tmp_path, monkeypatch):
+    """Better an obviously empty node_modules than a quietly wrong one."""
+    source, dest = _seed_pair(
+        tmp_path,
+        installed=_lockfile(tailwindcss="3.4.1"),
+        dest_lock=_lockfile(tailwindcss="4.0.0"),
+    )
+    (dest / "frontend" / "svelte.config.js").write_text(
+        "export default {};", encoding="utf-8"
+    )
+
+    monkeypatch.setattr(
+        cm, "_run_npm_install", lambda d: (False, "npm ci failed (rc=1): boom")
+    )
+    sync_calls = []
+    monkeypatch.setattr(
+        cm, "_run_svelte_kit_sync", lambda d: sync_calls.append(str(d)) or True
+    )
+
+    summary = cm.provision_node_modules(str(source), str(dest))
+
+    assert summary["linked"] == []
+    assert summary["installed"] == []
+    assert any("install failed" in e for e in summary["errors"])
+    assert sync_calls == []
+    assert not (dest / "frontend" / "node_modules").exists()
+
+
+def test_svelte_sync_still_runs_after_an_install(tmp_path, no_real_npm, no_real_npx):
+    source, dest = _seed_pair(
+        tmp_path,
+        installed=_lockfile(tailwindcss="3.4.1"),
+        dest_lock=_lockfile(tailwindcss="4.0.0"),
+    )
+    (dest / "frontend" / "svelte.config.js").write_text(
+        "export default {};", encoding="utf-8"
+    )
+
+    summary = cm.provision_node_modules(str(source), str(dest))
+
+    assert summary["synced"] == ["frontend"]
+    assert no_real_npx == [str(dest / "frontend")]
+
+
+# --- the installer itself ---------------------------------------------------
+
+
+def test_install_uses_npm_ci_with_a_lockfile_and_npm_install_without(
+    tmp_path, monkeypatch
+):
+    """`npm ci` is how CI and the Dockerfile install this repo; it needs a lockfile."""
+    seen = []
+
+    class _Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        seen.append((command, kwargs.get("cwd")))
+        return _Result()
+
+    monkeypatch.setattr(cm.subprocess, "run", fake_run)
+
+    with_lock = tmp_path / "with"
+    with_lock.mkdir()
+    (with_lock / "package-lock.json").write_text("{}", encoding="utf-8")
+    ok, detail = _REAL_NPM_INSTALL(with_lock)
+    assert ok and detail.startswith("npm ci")
+    assert seen[-1][0][:2] == ["npm", "ci"]
+    assert seen[-1][1] == str(with_lock)
+
+    without = tmp_path / "without"
+    without.mkdir()
+    ok, detail = _REAL_NPM_INSTALL(without)
+    assert ok and detail.startswith("npm install")
+    assert seen[-1][0][:2] == ["npm", "install"]
+
+
+def test_install_helper_never_raises_when_npm_is_missing(tmp_path, monkeypatch):
+    def boom(*a, **kw):
+        raise FileNotFoundError("npm not found")
+
+    monkeypatch.setattr(cm.subprocess, "run", boom)
+    ok, detail = _REAL_NPM_INSTALL(tmp_path)
+    assert ok is False
+    assert "could not run" in detail
+
+
+def test_install_helper_reports_a_nonzero_exit(tmp_path, monkeypatch):
+    class _Result:
+        returncode = 1
+        stdout = ""
+        stderr = "ERESOLVE could not resolve"
+
+    monkeypatch.setattr(cm.subprocess, "run", lambda *a, **kw: _Result())
+    ok, detail = _REAL_NPM_INSTALL(tmp_path)
+    assert ok is False
+    assert "rc=1" in detail
+    assert "ERESOLVE" in detail

@@ -94,3 +94,32 @@ async def test_real_usage_values_pass_through(captured_updates):
     # total_model_calls. One persisted turn is one turn.
     assert kwargs["model_calls_increment"] == 3
     assert kwargs["turn_increment"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_turn_books_its_model_calls_but_not_a_turn(captured_updates):
+    """The invariant an audit mistook for a double count.
+
+    ``total_model_calls`` counts the API hops of EVERY terminal, including the
+    interrupted and errored ones. A TurnComplete-only sum over the fluid event
+    log therefore comes in BELOW this column — that is the log undercounting,
+    not the column double counting. The calls a stopped or failed turn made
+    were really made and really billed; booking only completed turns is the bug
+    this column was added to fix (a session with 167 calls read as 11).
+    """
+    await _persist({"num_turns": 9, "error": "provider connection reset"})
+
+    kwargs = captured_updates[0]
+    assert kwargs["model_calls_increment"] == 9
+    # …and it is NOT a user-visible turn.
+    assert kwargs["turn_increment"] == 0
+
+
+@pytest.mark.asyncio
+async def test_one_turn_books_exactly_one_increment(captured_updates):
+    """There is one runtime writer per turn. ``settle_killed_session`` is the
+    only other writer and books INSTEAD of this one, never as well: the atomic
+    ``settle_turn`` claim lets exactly one of them win."""
+    await _persist({"num_turns": 4})
+
+    assert len([c for c in captured_updates if "model_calls_increment" in c]) == 1

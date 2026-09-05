@@ -23,6 +23,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
+from app.core.monitor_spawn import MAX_WAIT_SECONDS, WAIT_SECONDS_PARAM
 from app.mcp.config_helpers import _json_default
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,61 @@ def _ok(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     import json as _json
     return {"content": [{"type": "text", "text": _json.dumps({"success": True, **payload}, default=_json_default)}]}
+
+
+def _park_doctrine() -> str:
+    """Fluid's canonical park sentence, so the two legs cannot drift.
+
+    Imported lazily and with a literal fallback: the delegated leg must build
+    its tool surface even where the vendored harness is not importable.
+    """
+    try:
+        from fluid.tools.fragments import END_TURN_ON_BACKGROUND
+
+        return END_TURN_ON_BACKGROUND
+    except Exception:  # noqa: BLE001 — a description must never fail a build
+        return (
+            "When background work is all that remains, end your turn — the "
+            "completion wakes the session; do not sleep, poll, or hold the "
+            "turn open waiting."
+        )
+
+
+def _monitor_description() -> str:
+    """Monitor's description on the DELEGATED (Claude Code CLI) leg.
+
+    The native leg splices fluid's park doctrine into Monitor's description;
+    this copy carried none of it and read as a tool for dev servers ("a server
+    started here keeps running…"). The audited consequence: an Opus session on
+    this lane never called Monitor once and spent 26.7 of its 45 minutes in
+    blocking Bash sleep-polls, one of which looped for ten minutes and returned
+    nothing. So the trigger is stated outright — anything expected to outlast a
+    Bash call — and the doctrine comes from fluid's own fragment.
+    """
+    return (
+        "Run a long-running shell command in the background and be woken when "
+        "it finishes. Returns a task_id immediately; when the command exits "
+        "you receive its exit code and an output summary as a notification in "
+        "a later turn. Read the buffer with TaskOutput, cancel with TaskStop.\n"
+        "\n"
+        "USE IT FOR ANY COMMAND EXPECTED TO OUTLAST A BASH CALL — a test "
+        "suite, a build or type-check, an install, a CI wait, a deploy — not "
+        "just for servers. Waiting happens inside the Monitor command, never "
+        "in a foreground Bash call: no sleep loops, no polling with `wait`, no "
+        "re-running the check to see if it is done yet. "
+        f"{_park_doctrine()}\n"
+        "\n"
+        "The command must exit for a completion to fire, so give a watch its "
+        "own end condition and time budget — for GitHub CI that is "
+        "`gh pr checks <PR> --watch --fail-fast`, which blocks until the "
+        "checks settle. Pass wait_seconds for work that will probably be "
+        "quick: if it finishes inside the wait you get the result right here "
+        "and nothing parks at all.\n"
+        "\n"
+        "The shell survives the user pressing Stop — a server started here "
+        "keeps running until TaskStop, the task's x button, or the session "
+        "ending."
+    )
 
 
 def _err(message: str, **extra: Any) -> Dict[str, Any]:
@@ -63,6 +119,81 @@ def _err(message: str, **extra: Any) -> Dict[str, Any]:
 #: three times and then re-did its own child's work. Completions wake the
 #: session, so a result where everything is still running has nothing in it.
 _PARK_NUDGE = "all tasks still running — park; you will be woken on completion."
+
+
+# Bound GetAppErrors output on the server, including repeated stack traces and the serialized envelope. Tool-
+# description guidance alone cannot guarantee the response size.
+_APP_ERRORS_MAX_LIMIT = 50
+#: Whole-payload ceiling. Entries are emitted until it is reached.
+_APP_ERRORS_MAX_CHARS = 20_000
+#: Per-entry ceiling on the stack trace, applied before the payload budget so
+#: one enormous traceback cannot crowd out every other entry.
+_APP_ERRORS_MAX_DETAIL_CHARS = 2_000
+
+#: ``min_level`` → the level set it selects. A "minimum" only reads as one
+#: because the table stores level names, not ordinals.
+_APP_ERROR_LEVELS = {
+    "ERROR": ["ERROR", "CRITICAL"],
+    "WARNING": ["WARNING", "ERROR", "CRITICAL"],
+}
+
+
+def _clip(text: Any, limit: int) -> Any:
+    """Clip a string to ``limit`` chars with a visible marker; pass anything
+    else through untouched."""
+    if not isinstance(text, str) or len(text) <= limit:
+        return text
+    dropped = len(text) - limit
+    return f"{text[:limit]}\n… [{dropped} more characters clipped]"
+
+
+def _cap_app_errors(rows: List[Dict[str, Any]]) -> tuple:
+    """Bound a GetAppErrors payload. Returns ``(rows, truncation_note)``.
+
+    Two passes: clip every stack trace to
+    ``_APP_ERRORS_MAX_DETAIL_CHARS``, then emit entries until the running
+    character total would exceed ``_APP_ERRORS_MAX_CHARS``. At least one entry
+    always comes back — a single oversized row is clipped, never dropped, or
+    the tool would answer a real error with an empty list.
+    """
+    import json as _json
+
+    capped: List[Dict[str, Any]] = []
+    used = 0
+    detail_clipped = 0
+    for row in rows:
+        entry = dict(row or {})
+        detail = entry.get("detail")
+        if isinstance(detail, str) and len(detail) > _APP_ERRORS_MAX_DETAIL_CHARS:
+            entry["detail"] = _clip(detail, _APP_ERRORS_MAX_DETAIL_CHARS)
+            detail_clipped += 1
+        try:
+            size = len(_json.dumps(entry, default=_json_default))
+        except Exception:  # noqa: BLE001 — sizing must never fail the tool
+            size = _APP_ERRORS_MAX_DETAIL_CHARS
+        if capped and used + size > _APP_ERRORS_MAX_CHARS:
+            break
+        capped.append(entry)
+        used += size
+
+    notes = []
+    if len(capped) < len(rows):
+        notes.append(
+            f"{len(rows) - len(capped)} more matching entries omitted to stay "
+            f"under the {_APP_ERRORS_MAX_CHARS}-character output cap"
+        )
+    if detail_clipped:
+        notes.append(
+            f"{detail_clipped} stack trace(s) clipped to "
+            f"{_APP_ERRORS_MAX_DETAIL_CHARS} characters"
+        )
+    if not notes:
+        return capped, None
+    return capped, (
+        "; ".join(notes)
+        + ". Narrow the query (source, since_minutes, this_session_only) "
+        "rather than raising limit."
+    )
 
 
 def _strip_ansi(text: str) -> str:
@@ -188,6 +319,11 @@ class _BackgroundTask:
 
 _background_tasks: Dict[str, _BackgroundTask] = {}
 _BACKGROUND_LINE_LIMIT = 5000  # avoid unbounded growth
+
+# Terminal statuses the output reader must not overwrite: each was written by a
+# path that knows more than an exit code does (a deliberate stop, or the
+# monitor watcher's outcome-derived settle).
+_SETTLED_STATUSES = frozenset({"killed", "stopped", "cancelled", "error", "completed"})
 
 
 def _registry_safe(fn) -> None:
@@ -533,12 +669,17 @@ async def _spawn_background(
             settled: Dict[str, Any] = {}
 
             def _finish() -> None:
-                # Don't clobber a deliberate TaskStop "killed" with the reader's
-                # "error" (terminate() yields a non-zero exit code).
+                # Never downgrade a status somebody else settled honestly:
+                # a deliberate TaskStop "killed" (terminate() yields a non-zero
+                # exit code, indistinguishable from a crash here), or the
+                # monitor watcher's outcome-derived "error" for a command that
+                # exited 0 while its own last word was `EXIT:1`. The exit code
+                # is the WEAKEST of the three signals, so it only fills a gap.
                 existing = (
                     task_registry._tasks.get(session_id, {}).get(task_id) or {}
                 ).get("status")
-                if existing == "killed":
+                if existing in _SETTLED_STATUSES:
+                    settled["status"] = existing
                     return
                 task_registry.complete_task(session_id, task_id, status)
                 settled["status"] = status
@@ -547,8 +688,10 @@ async def _spawn_background(
             # Terminal chip row. complete_task's guaranteed notification covers
             # error/killed; this is what settles a shell that exited cleanly, so
             # the running chip its start row painted resolves on replay too.
+            # Idempotent by ``mark_chipped``, so a status another path already
+            # chipped costs nothing here.
             if settled.get("status"):
-                await _emit_shell_settle_frame(session_id, task_id, status)
+                await _emit_shell_settle_frame(session_id, task_id, settled["status"])
 
     task._reader_task = asyncio.create_task(_reader(), name=f"monitor-{task_id}")
     _background_tasks[task_id] = task
@@ -964,7 +1107,14 @@ def create_builtin_tools_server(
     @tool(
         "NotifyDevices",
         "Send a push notification to all registered mobile devices. "
-        "Use for alerting the user to long-running task completion or important events.",
+        "Use for alerting the user to long-running task completion or important "
+        "events.\n"
+        "\n"
+        "This install may have NO registered devices, in which case nothing is "
+        "delivered and the result says so explicitly (sent: 0, delivered: "
+        "false). Treat that as 'the user has not been told' — say it in chat "
+        "instead. A non-zero `sent` with `successful: 0` means every device "
+        "rejected the push; that is also undelivered.",
         {
             "type": "object",
             "properties": {
@@ -986,7 +1136,27 @@ def create_builtin_tools_server(
                 title=title, body=body, data=args.get("data"),
             )
             successful = sum(1 for r in results if getattr(r, "success", False))
-            return _ok({"sent": len(results), "successful": successful})
+            payload: Dict[str, Any] = {
+                "sent": len(results),
+                "successful": successful,
+                "delivered": successful > 0,
+            }
+            # A bare {"sent": 0, "successful": 0} reads as success. It is the
+            # opposite: an audited monitoring session announced a release
+            # through this tool, reached nobody, and moved on believing the
+            # user had been told. Not an exception — there is nothing to
+            # retry — but not a green light either.
+            if not results:
+                payload["note"] = (
+                    "no registered devices — nothing was delivered; tell the "
+                    "user in chat instead."
+                )
+            elif not successful:
+                payload["note"] = (
+                    f"all {len(results)} device(s) rejected the push — nothing "
+                    "was delivered; tell the user in chat instead."
+                )
+            return _ok(payload)
         except Exception as e:
             logger.exception("NotifyDevices failed")
             return _err(f"send failed: {e}")
@@ -1241,38 +1411,86 @@ def create_builtin_tools_server(
     # ------------------------------------------------------------------
     @tool(
         "Monitor",
-        "Spawn a long-running shell command in the background and stream stdout into a buffer. "
-        "Returns a task_id; use TaskOutput to read output and TaskStop to cancel. "
-        "The shell survives the user pressing Stop — a server started here keeps "
-        "running until TaskStop, the task's x button, or the session ending.",
+        _monitor_description(),
         {
             "type": "object",
             "properties": {
                 "command": {"type": "string"},
-                "cwd": {"type": "string", "description": "Optional working directory."},
+                "cwd": {
+                    "type": "string",
+                    "description": (
+                        "Working directory for this command (default: the "
+                        "session's own working directory). Set it instead of "
+                        "prefixing the command with cd."
+                    ),
+                },
+                "wait_seconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": MAX_WAIT_SECONDS,
+                    "description": WAIT_SECONDS_PARAM,
+                },
             },
             "required": ["command"],
         },
     )
     async def monitor(args: dict) -> dict:
+        from app.core.monitor_spawn import (
+            clamp_wait_seconds,
+            monitor_inline_receipt_text,
+            monitor_receipt_text,
+            monitor_still_running_note,
+            settle_inline_monitor_task,
+            wait_for_inline_settle,
+        )
+
         command = (args.get("command") or "").strip()
         if not command:
             return _err("command is required.")
+        wait_seconds = clamp_wait_seconds(args.get("wait_seconds"))
         try:
-            task = await _spawn_background(command, args.get("cwd"), session_id)
+            # Fall back to the SESSION's working directory, the way fluid's
+            # Bash does. Without it the shell inherited the server's cwd and
+            # every git/gh command in an audited worktree session died with
+            # "fatal: not a git repository".
+            task = await _spawn_background(
+                command, args.get("cwd") or cwd, session_id
+            )
             if session_id:
                 from app.core.task_registry import task_registry
                 # OWN-lane admission: without this the shell's terminal frame is
                 # dropped as not-own work and a parked parent never wakes.
                 task_registry.mark_monitor_shell_task(session_id, task.task_id)
-            from app.core.monitor_spawn import monitor_receipt_text
+
+            # A command that settles inside the requested wait comes back HERE,
+            # with its exit code and output: no park, no wake, no fresh turn.
+            if wait_seconds and await wait_for_inline_settle(task, wait_seconds):
+                status, output = settle_inline_monitor_task(
+                    task, command=command, cwd=task.cwd, session_id=session_id
+                )
+                failed = status != "completed"
+                message = monitor_inline_receipt_text(
+                    task.task_id, task.exit_code, output, failed=failed
+                )
+                detail = {
+                    "task_id": task.task_id,
+                    "exit_code": task.exit_code,
+                    "status": status,
+                    "output": output,
+                }
+                if failed:
+                    return _err(message, **detail)
+                return _ok({"message": message, **detail})
 
             # The receipt COMMANDS the park (same wording as the native leg's
             # spawner and the TaskList nudge). Audited sessions read a bare
             # "started, here's your id" as licence to sleep-poll in foreground
             # Bash for a notification already queued for them.
+            message = monitor_receipt_text(task.task_id)
+            if wait_seconds:
+                message += monitor_still_running_note(wait_seconds)
             return _ok({
-                "message": monitor_receipt_text(task.task_id),
+                "message": message,
                 "task_id": task.task_id,
                 "pid": task.process.pid if task.process else None,
                 "started_at": task.started_at,
@@ -1500,7 +1718,12 @@ def create_builtin_tools_server(
             return _err("task_id is required.")
         from app.core.task_registry import task_registry
 
-        record = task_registry.get_task(session_id, tid)
+        # ``durable=True``: the whole point of this call is a parent that was
+        # WOKEN about a finished task, and the wake can land long after the
+        # in-memory record has been evicted with its session. The registry
+        # resolves live → retained snapshot → durable row, so "task not found"
+        # now means genuinely never seen rather than merely no longer resident.
+        record = task_registry.get_task(session_id, tid, durable=True)
         shell = _background_tasks.get(tid)
         if record is None and shell is None:
             return _err("task not found.", task_id=tid)
@@ -1604,11 +1827,31 @@ def create_builtin_tools_server(
         "from AI Shuffle's error log so you can debug what the user just hit. Use "
         "this when the user says something like 'I got an error, check the logs and "
         "fix it'. Each entry has source, level, message, detail (stack trace), url, "
-        "status_code, occurrence_count, and timestamps.",
+        "status_code, occurrence_count, and timestamps.\n"
+        "\n"
+        "An empty result means no ERROR-level record matched — NOT that nothing "
+        "went wrong. Plenty of real failures (provider polls, auth refusals, "
+        "degraded fallbacks) are logged at WARNING. If you are chasing something "
+        "the user saw and this comes back empty, retry with min_level: "
+        "\"WARNING\" before concluding the app is healthy.\n"
+        "\n"
+        "Output is capped server-side: stack traces are clipped and the entry "
+        "list is cut off once the payload gets large. A `truncated` field says "
+        "so — narrow with source / since_minutes / this_session_only rather "
+        "than raising limit.",
         {
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "description": "Max errors to return (default 20, max 200)."},
+                "limit": {"type": "integer", "description": "Max errors to return (default 10, max 50)."},
+                "min_level": {
+                    "type": "string",
+                    "enum": ["ERROR", "WARNING"],
+                    "description": (
+                        "Lowest level to include. ERROR (default) returns "
+                        "ERROR and CRITICAL only; WARNING adds warnings — "
+                        "where silently-degraded behaviour usually lands."
+                    ),
+                },
                 "source": {"type": "string", "description": "Filter by source: frontend, backend, ws, or api."},
                 "this_session_only": {"type": "boolean", "description": "Only errors tied to this chat session."},
                 "since_minutes": {"type": "integer", "description": "Only errors seen within the last N minutes."},
@@ -1620,8 +1863,15 @@ def create_builtin_tools_server(
         try:
             from app.db import error_logs
 
-            limit = max(1, min(int(args.get("limit") or 20), 200))
+            limit = max(1, min(int(args.get("limit") or 10), _APP_ERRORS_MAX_LIMIT))
             source = (args.get("source") or "").strip() or None
+            min_level = (args.get("min_level") or "ERROR").strip().upper()
+            levels = _APP_ERROR_LEVELS.get(min_level)
+            if levels is None:
+                return _err(
+                    f"min_level must be one of "
+                    f"{', '.join(sorted(_APP_ERROR_LEVELS))} (got {min_level!r})."
+                )
             since = None
             since_minutes = args.get("since_minutes")
             if since_minutes:
@@ -1637,8 +1887,27 @@ def create_builtin_tools_server(
                 source=source,
                 session_id=sess,
                 since=since,
+                levels=levels,
             )
-            return _ok({"errors": errors, "count": len(errors)})
+            matched = len(errors)
+            errors, truncated = _cap_app_errors(errors)
+            payload = {
+                "errors": errors,
+                "count": len(errors),
+                "min_level": min_level,
+            }
+            if truncated:
+                payload["truncated"] = truncated
+                payload["matched"] = matched
+            elif min_level == "ERROR" and not errors:
+                # The failure this tool was built to prevent: an agent read
+                # count: 0 as "the app is fine" while the thing it was chasing
+                # sat one level down.
+                payload["note"] = (
+                    "no ERROR-level records matched — this is not proof nothing "
+                    "went wrong; retry with min_level: \"WARNING\"."
+                )
+            return _ok(payload)
         except Exception as e:
             logger.exception("GetAppErrors failed")
             return _err(f"failed to read errors: {e}")

@@ -911,7 +911,8 @@ def generate_environment_details(
     working_dir: str,
     ai_tools_config: Optional[Dict[str, Any]] = None,
     execution_mode: str = "local",
-    worktree_info: Optional[Dict[str, str]] = None
+    worktree_info: Optional[Dict[str, str]] = None,
+    include_volatile: bool = True,
 ) -> str:
     """
     Generate environment details block for custom system prompts.
@@ -923,24 +924,95 @@ def generate_environment_details(
             with their own descriptions — no system prompt injection needed.
         execution_mode: Either "local" or "worktree"
         worktree_info: Dict with branch and base_branch info when in worktree mode
+        include_volatile: Whether to render the facts that change WITHIN a
+            session (today's date, the checked-out branch). False renders the
+            session-stable half only — see :func:`generate_turn_environment_note`
+            for where the other half goes and why.
+
+    Every line here lands in the provider's cached prompt prefix, so a line
+    that changes mid-session re-bills the whole prefix (system + tools +
+    history) on the next turn. What stays:
+
+    * working directory — the model's whole frame of reference for every path
+      it reads or writes, and it only ever changes together with the session's
+      checkout (which invalidates the prefix on its own merits);
+    * is-git / platform / OS / shell — properties of the machine and checkout,
+      fixed for the life of the process;
+    * execution mode — local vs worktree, which moves in lockstep with the
+      working directory above.
+
+    What leaves: today's date and the branch pair. Both change under a session
+    that is otherwise untouched (UTC midnight; a checkout switch), and neither
+    is worth a full prefix miss.
     """
     is_git = _is_git_repo(working_dir)
     os_version = _get_os_version()
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # Build execution mode lines
-    execution_lines = f"\nExecution mode: {execution_mode}"
-    if execution_mode == "worktree" and worktree_info:
-        branch = worktree_info.get("branch", "unknown")
-        base_branch = worktree_info.get("base_branch", "main")
-        execution_lines += f"\nCurrent branch: {branch}\nBase branch: {base_branch}"
+    lines = [
+        f"Working directory: {working_dir}",
+        f"Is directory a git repo: {'Yes' if is_git else 'No'}",
+        f"Platform: {sys.platform}",
+        f"OS Version: {os_version}",
+        "Shell: " + (
+            "cmd.exe (use Windows cmd syntax)" if os.name == "nt"
+            else "/bin/sh-compatible (use POSIX shell syntax)"
+        ),
+    ]
+    if include_volatile:
+        lines.append(f"Today's date: {_today()}")
+    lines.append(f"Execution mode: {execution_mode}")
+    if include_volatile:
+        lines.extend(_worktree_lines(execution_mode, worktree_info))
 
-    return f"""Here is useful information about the environment you are running in:
-<env>
-Working directory: {working_dir}
-Is directory a git repo: {"Yes" if is_git else "No"}
-Platform: {sys.platform}
-OS Version: {os_version}
-Shell: {"cmd.exe (use Windows cmd syntax)" if os.name == "nt" else "/bin/sh-compatible (use POSIX shell syntax)"}
-Today's date: {today}{execution_lines}
-</env>"""
+    body = "\n".join(lines)
+    return (
+        "Here is useful information about the environment you are running in:\n"
+        f"<env>\n{body}\n</env>"
+    )
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _worktree_lines(
+    execution_mode: str, worktree_info: Optional[Dict[str, str]]
+) -> list:
+    """``Current branch`` / ``Base branch``, or nothing outside worktree mode."""
+    if execution_mode != "worktree" or not worktree_info:
+        return []
+    return [
+        f"Current branch: {worktree_info.get('branch', 'unknown')}",
+        f"Base branch: {worktree_info.get('base_branch', 'main')}",
+    ]
+
+
+TURN_ENV_HEADER = "Environment facts that change while a session runs"
+
+
+def generate_turn_environment_note(
+    execution_mode: str = "local",
+    worktree_info: Optional[Dict[str, str]] = None,
+) -> str:
+    """The volatile half of the <env> block, rendered fresh for one turn.
+
+    This rides the turn's user message instead of the system prompt: it sits
+    after every cache breakpoint (system tail, tool-defs tail, last stable
+    history position), so a date rollover or a branch switch costs the tokens
+    of these few lines rather than a re-send of the entire prefix. The model
+    reads the same facts either way — only their position in the request moved.
+
+    Re-rendered per turn rather than once per session, so the newest copy is
+    always current; the header says so, because older turns keep their own
+    copies in history and those can name a branch that has since changed.
+    """
+    lines = [f"Today's date: {_today()}"]
+    lines.extend(_worktree_lines(execution_mode, worktree_info))
+    body = "\n".join(lines)
+    return (
+        "<system-reminder>\n"
+        f"{TURN_ENV_HEADER} (current as of this message — any earlier copy in "
+        "this conversation may be out of date):\n"
+        f"{body}\n"
+        "</system-reminder>"
+    )

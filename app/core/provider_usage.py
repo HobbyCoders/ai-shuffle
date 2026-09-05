@@ -45,9 +45,11 @@ whose ``base_url`` host is ``api.openai.com`` are polled against the dashboard
 credit-grants endpoint the platform console uses
 (``GET https://api.openai.com/v1/dashboard/billing/credit_grants``). This is
 undocumented and 403s for project/service-account keys without billing access;
-a 403 is logged at debug and skipped. Custom OpenAI-compatible gateways are
-never sent to that host. The decrypted key is used only as a Bearer header
-and is NEVER logged.
+a 403 is logged at ERROR (time-de-duplicated, like every other poll failure)
+and skipped — a missing balance with no explanation anywhere an agent can read
+is exactly the silent failure this poller used to produce. Custom
+OpenAI-compatible gateways are never sent to that host. The decrypted key is
+used only as a Bearer header and is NEVER logged.
 
 When no API-key snapshot has a balance, ChatGPT/Codex OAuth rows are tried
 against the same credit-grants URL (Bearer access token + optional
@@ -70,8 +72,21 @@ ever reaches ``raw`` (and, transitively, the DB and any future API response).
 They never include ``Authorization``, ``chatgpt-account-id``, any cookie, or
 any other credential. The decrypted OpenRouter / OpenAI / fal keys are used
 only as Authorization header values and are NEVER logged, printed, or stored
-(not even truncated). Failures are logged at WARNING without ever including
-header or key values.
+(not even truncated). Failures are logged without ever including header or key
+values.
+
+Failure logging (audit R6/2): a poll that could not fetch what it came for is
+logged at **ERROR** via :func:`_log_poll_failure`, not at warning or debug.
+Only ERROR+ reaches the durable ``error_log`` table, which is the only thing
+``GetAppErrors`` can see — so a 403 logged at debug meant an agent asked the
+tool why the balance was missing and was told ``{"errors": [], "count": 0}``.
+A poller repeats every five minutes forever, so the same failure is logged at
+ERROR the first time and on change, then at debug while it persists, with a
+periodic re-assertion (``_POLL_FAILURE_REASSERT_SECONDS``) so a long-standing
+outage stays visible without flooding. Strictly ADDITIVE fetches whose failure
+costs nothing (OpenRouter ``/credits`` on top of ``/key``, the Grok settings
+label, the fal admin-billing probe that ordinary keys are expected to 403)
+stay at debug: they are not poll failures.
 """
 
 from __future__ import annotations
@@ -91,6 +106,55 @@ from app.core import encryption
 from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Poll-failure logging
+# ---------------------------------------------------------------------------
+
+#: How long a still-failing poll stays quiet (debug) before it is re-asserted
+#: at ERROR. One hour: long enough that a permanently-broken key writes ~24
+#: rows a day rather than ~288, short enough that a fresh look at the error log
+#: still shows an outage that started yesterday.
+_POLL_FAILURE_REASSERT_SECONDS = 3600.0
+
+#: key -> (last message, monotonic timestamp of the last ERROR emission).
+_poll_failure_state: Dict[str, Tuple[str, float]] = {}
+
+
+def _log_poll_failure(key: str, message: str, *args: Any) -> None:
+    """Log a provider-poll failure at ERROR, de-duplicated over time.
+
+    ``key`` identifies the failing thing (``"openai-credits:<provider_id>"``),
+    NOT the failure text: a key whose 403 becomes a 500 has changed state and
+    is re-asserted immediately. While the same failure repeats it drops to
+    debug, and it returns to ERROR once
+    :data:`_POLL_FAILURE_REASSERT_SECONDS` have passed.
+
+    Never include a credential in ``message``/``args`` — see the module's S4
+    invariant. Never raises.
+    """
+    try:
+        rendered = message % args if args else message
+    except Exception:  # noqa: BLE001 — bad format string must not break a poll
+        rendered = message
+    now = time.monotonic()
+    previous = _poll_failure_state.get(key)
+    repeat = (
+        previous is not None
+        and previous[0] == rendered
+        and (now - previous[1]) < _POLL_FAILURE_REASSERT_SECONDS
+    )
+    if repeat:
+        logger.debug("%s (unchanged since last report)", rendered)
+        return
+    _poll_failure_state[key] = (rendered, now)
+    logger.error("%s", rendered)
+
+
+def _clear_poll_failure(key: str) -> None:
+    """Forget ``key``'s failure state so the next one is reported immediately."""
+    _poll_failure_state.pop(key, None)
 
 
 def _decrypt_provider_auth_token(provider: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -262,6 +326,9 @@ async def _persist_codex_capture(provider_id: str, headers: Dict[str, str]) -> N
         u = normalize_codex_headers(headers)
         from app.db import database as db
 
+        # Poll recovered: forget the suppressed-failure state so the
+        # next failure is reported at ERROR straight away.
+        _clear_poll_failure(f"codex-capture:{provider_id}")
         await run_sync(
             db.upsert_provider_usage_snapshot,
             provider_id,
@@ -274,7 +341,10 @@ async def _persist_codex_capture(provider_id: str, headers: Dict[str, str]) -> N
         )
     except Exception as e:  # noqa: BLE001 — capture must never break a turn
         # Never log header values (S4) — only the exception's own message.
-        logger.warning("Codex usage capture failed for provider %s: %s", provider_id, e)
+        _log_poll_failure(
+            f"codex-capture:{provider_id}",
+            "Codex usage capture failed for provider %s: %s", provider_id, e,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +453,9 @@ async def _persist_openai_capture(provider_id: str, headers: Dict[str, str]) -> 
         u = normalize_openai_headers(headers)
         from app.db import database as db
 
+        # Poll recovered: forget the suppressed-failure state so the
+        # next failure is reported at ERROR straight away.
+        _clear_poll_failure(f"openai-capture:{provider_id}")
         await run_sync(
             db.upsert_provider_usage_snapshot,
             provider_id,
@@ -395,7 +468,10 @@ async def _persist_openai_capture(provider_id: str, headers: Dict[str, str]) -> 
         )
     except Exception as e:  # noqa: BLE001 — capture must never break a turn
         # Never log header values (S4) — only the exception's own message.
-        logger.warning("OpenAI usage capture failed for provider %s: %s", provider_id, e)
+        _log_poll_failure(
+            f"openai-capture:{provider_id}",
+            "OpenAI usage capture failed for provider %s: %s", provider_id, e,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +553,9 @@ async def _persist_anthropic_capture(provider_id: str, headers: Dict[str, str]) 
         u = normalize_anthropic_headers(headers)
         from app.db import database as db
 
+        # Poll recovered: forget the suppressed-failure state so the
+        # next failure is reported at ERROR straight away.
+        _clear_poll_failure(f"anthropic-capture:{provider_id}")
         await run_sync(
             db.upsert_provider_usage_snapshot,
             provider_id,
@@ -489,7 +568,10 @@ async def _persist_anthropic_capture(provider_id: str, headers: Dict[str, str]) 
         )
     except Exception as e:  # noqa: BLE001 — capture must never break a turn
         # Never log header values (S4) — only the exception's own message.
-        logger.warning("Anthropic usage capture failed for provider %s: %s", provider_id, e)
+        _log_poll_failure(
+            f"anthropic-capture:{provider_id}",
+            "Anthropic usage capture failed for provider %s: %s", provider_id, e,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1213,7 +1295,8 @@ class ProviderUsageMonitor:
                 resp = await client.get(url, headers={"Authorization": f"Bearer {key}"})
 
             if resp.status_code != 200:
-                logger.warning(
+                _log_poll_failure(
+                    f"openrouter-key:{provider_id}",
                     "OpenRouter /key fetch for provider %s failed: HTTP %s",
                     provider_id,
                     resp.status_code,
@@ -1233,6 +1316,10 @@ class ProviderUsageMonitor:
             )
             raw = {k: data.get(k) for k in _OPENROUTER_KEY_FIELDS if k in data}
 
+            # Poll recovered: forget the suppressed-failure state so the
+            # next failure is reported at ERROR straight away.
+            _clear_poll_failure(f"openrouter-poll:{provider_id}")
+            _clear_poll_failure(f"openrouter-key:{provider_id}")
             await run_sync(
                 db.upsert_provider_usage_snapshot,
                 provider_id,
@@ -1245,8 +1332,9 @@ class ProviderUsageMonitor:
             )
         except Exception as e:
             # Never include `key` / the Authorization header value here.
-            logger.warning(
-                "OpenRouter usage poll for provider %s failed: %s", provider_id, e
+            _log_poll_failure(
+                f"openrouter-poll:{provider_id}",
+                "OpenRouter usage poll for provider %s failed: %s", provider_id, e,
             )
 
     async def _merge_account_credits(
@@ -1330,7 +1418,8 @@ class ProviderUsageMonitor:
                 )
 
             if status != 200 or not isinstance(body, dict):
-                logger.warning(
+                _log_poll_failure(
+                    f"grok-billing:{provider_id}",
                     "Grok billing fetch for provider %s failed: HTTP %s",
                     provider_id,
                     status,
@@ -1368,6 +1457,11 @@ class ProviderUsageMonitor:
                     "Grok settings fetch for provider %s failed: %s", provider_id, e
                 )
 
+            # Poll recovered: forget the suppressed-failure state so the
+            # next failure is reported at ERROR straight away.
+            _clear_poll_failure(f"grok-poll:{provider_id}")
+            _clear_poll_failure(f"grok-billing:{provider_id}")
+
             if plan_type == initial_plan:
                 return
             await run_sync(
@@ -1382,8 +1476,9 @@ class ProviderUsageMonitor:
             )
         except Exception as e:
             # Never include the bearer token here.
-            logger.warning(
-                "Grok usage poll for provider %s failed: %s", provider_id, e
+            _log_poll_failure(
+                f"grok-poll:{provider_id}",
+                "Grok usage poll for provider %s failed: %s", provider_id, e,
             )
 
     async def _request_openai_credit_grants(
@@ -1434,6 +1529,10 @@ class ProviderUsageMonitor:
         try:
             credits, raw, status = await self._request_openai_credit_grants(headers)
             if credits:
+                # Poll recovered: forget the suppressed-failure state so the
+                # next failure is reported at ERROR straight away.
+                _clear_poll_failure(f"openai-credits-poll:{provider_id}")
+                _clear_poll_failure(f"openai-credit-grants:{provider_id}")
                 await run_sync(
                     db.upsert_provider_usage_snapshot,
                     provider_id, "openai", None, [], credits, raw,
@@ -1441,10 +1540,37 @@ class ProviderUsageMonitor:
                 )
                 return True
             error = "billing_access_denied" if status in (401, 403) else "unavailable"
-        except httpx.TimeoutException:
+            if status is not None:
+                # 401/403 used to be debug-only ("expected for project keys").
+                # That is exactly the silent failure an agent could not see:
+                # the balance is missing and NOTHING says why. It is an auth
+                # refusal on a poll that was configured to run, so it is an
+                # error — de-duplicated over time like every other one.
+                _log_poll_failure(
+                    f"openai-credit-grants:{provider_id}",
+                    "OpenAI credit_grants for provider %s failed: HTTP %s%s",
+                    provider_id,
+                    status,
+                    (
+                        " (the dashboard endpoint refuses project/service-account "
+                        "keys without billing access)"
+                        if status in (401, 403) else ""
+                    ),
+                )
+        except httpx.TimeoutException as e:
             error = "timeout"
-        except Exception:
+            # Never include the Bearer key here.
+            _log_poll_failure(
+                f"openai-credits-poll:{provider_id}",
+                "OpenAI credits poll for provider %s timed out: %s", provider_id, e,
+            )
+        except Exception as e:
             error = "unavailable"
+            # Never include the Bearer key here.
+            _log_poll_failure(
+                f"openai-credits-poll:{provider_id}",
+                "OpenAI credits poll for provider %s failed: %s", provider_id, e,
+            )
         await self._record_openai_failure(provider_id, error)
         return False
 
@@ -1489,8 +1615,22 @@ class ProviderUsageMonitor:
             account_id = stored.get("codex_account_id")
             if isinstance(account_id, str) and account_id.strip():
                 headers["ChatGPT-Account-Id"] = account_id.strip()
-            return await self._fetch_openai_balance(OPENAI_API_USAGE_PROVIDER_ID, headers)
-        except Exception:
+            stored_balance = await self._fetch_openai_balance(
+                OPENAI_API_USAGE_PROVIDER_ID, headers
+            )
+            if stored_balance:
+                # Poll recovered: forget the suppressed-failure state so the
+                # next failure is reported at ERROR straight away.
+                _clear_poll_failure(f"openai-credits-oauth-poll:{provider_id}")
+            return stored_balance
+        except Exception as e:
+            # Never include the access token here.
+            _log_poll_failure(
+                f"openai-credits-oauth-poll:{provider_id}",
+                "OpenAI credits poll via ChatGPT oauth for provider %s failed: %s",
+                provider_id,
+                e,
+            )
             await self._record_openai_failure(OPENAI_API_USAGE_PROVIDER_ID, "unavailable")
             return False
 
@@ -1566,6 +1706,9 @@ class ProviderUsageMonitor:
 
             if not credits:
                 return
+            # Poll recovered: forget the suppressed-failure state so the
+            # next failure is reported at ERROR straight away.
+            _clear_poll_failure("fal-credits-poll")
             await run_sync(
                 db.upsert_provider_usage_snapshot,
                 FAL_USAGE_PROVIDER_ID,
@@ -1578,7 +1721,7 @@ class ProviderUsageMonitor:
             )
         except Exception as e:
             # Never include the Key credential here.
-            logger.warning("fal.ai credits poll failed: %s", e)
+            _log_poll_failure("fal-credits-poll", "fal.ai credits poll failed: %s", e)
 
 
 provider_usage_monitor = ProviderUsageMonitor()

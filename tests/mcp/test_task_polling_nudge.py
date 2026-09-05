@@ -92,7 +92,7 @@ def test_task_list_stays_quiet_with_no_tasks(mock_db, monkeypatch):
 def test_task_get_nudges_on_a_still_running_agent_task(mock_db, monkeypatch):
     from app.core.task_registry import task_registry
 
-    monkeypatch.setattr(task_registry, "get_task", lambda sid, tid: _running(tid))
+    monkeypatch.setattr(task_registry, "get_task", lambda sid, tid, **_kw: _running(tid))
     body = _body(
         asyncio.run(_builtin_handlers()["TaskGet"].handler({"task_id": "t-1"}))
     )
@@ -107,7 +107,7 @@ def test_task_get_stays_quiet_on_a_finished_task(mock_db, monkeypatch):
     monkeypatch.setattr(
         task_registry,
         "get_task",
-        lambda sid, tid: {"task_id": tid, "status": "completed"},
+        lambda sid, tid, **_kw: {"task_id": tid, "status": "completed"},
     )
     body = _body(
         asyncio.run(_builtin_handlers()["TaskGet"].handler({"task_id": "t-1"}))

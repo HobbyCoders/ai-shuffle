@@ -317,6 +317,7 @@ class _FakeTask:
         self.task_id = task_id
         self.lines = []
         self.exit_code = None
+        self.cwd = None
         self._running = True
 
     def is_running(self):
@@ -334,6 +335,7 @@ def spawner_harness(monkeypatch):
     frames = []
 
     async def _fake_spawn_background(command, cwd, session_id, tool_use_id=None):
+        task.cwd = cwd
         tr.task_registry.start_task(session_id, task.task_id, "shell", command)
         return task
 
@@ -460,3 +462,313 @@ async def test_a_command_with_its_own_bound_gets_no_second_one(
             break
         await asyncio.sleep(0.01)
     assert frames and frames[0]["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# The session's working directory (round-6 audit): Monitor inherited the
+# SERVER's cwd, so `gh pr checks … --watch` died with "fatal: not a git
+# repository" in four audited worktree sessions — a park and a wake each.
+# ---------------------------------------------------------------------------
+
+class _Ctx:
+    """The slice of fluid's ToolCtx the spawner reads."""
+
+    def __init__(self, cwd=None, tool_use_id=None):
+        self.cwd = cwd
+        self.extra = {"tool_use_id": tool_use_id} if tool_use_id else {}
+
+
+@pytest.mark.asyncio
+async def test_monitor_falls_back_to_the_session_cwd(spawner_harness):
+    task, _frames = spawner_harness
+
+    spawn = ms.make_fluid_monitor_spawner("s-spawn")
+    await spawn({"command": "gh pr checks 7 --watch"}, _Ctx(cwd="/work/tree"))
+
+    # Fluid's Bash does `input.get("cwd") or ctx.cwd`; so does Monitor now.
+    assert task.cwd == "/work/tree"
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_cwd_still_wins(spawner_harness):
+    task, _frames = spawner_harness
+
+    spawn = ms.make_fluid_monitor_spawner("s-spawn")
+    await spawn(
+        {"command": "make ci", "cwd": "/elsewhere"}, _Ctx(cwd="/work/tree")
+    )
+
+    assert task.cwd == "/elsewhere"
+
+
+@pytest.mark.asyncio
+async def test_no_session_cwd_leaves_the_spawn_unpinned(spawner_harness):
+    task, _frames = spawner_harness
+
+    spawn = ms.make_fluid_monitor_spawner("s-spawn")
+    await spawn({"command": "make ci"}, None)
+
+    assert task.cwd is None
+
+
+# ---------------------------------------------------------------------------
+# wait_seconds — a short command settles inline instead of costing a park, a
+# wake, a fresh turn and a full prompt re-send.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, 0), ("", 0), ("nonsense", 0), (-5, 0), (0, 0),
+        (7, 7), ("12", 12), (7.9, 7), (10_000, ms.MAX_WAIT_SECONDS),
+    ],
+)
+def test_wait_seconds_is_bounded(value, expected):
+    assert ms.clamp_wait_seconds(value) == expected
+
+
+@pytest.mark.asyncio
+async def test_a_command_that_finishes_in_the_wait_settles_inline(
+    spawner_harness,
+):
+    import asyncio
+
+    task, frames = spawner_harness
+    task._running = False
+    task.exit_code = 0
+    task.lines = ["4 passed in 5.91s"]
+
+    spawn = ms.make_fluid_monitor_spawner("s-spawn")
+    outcome = await spawn(
+        {"command": "pytest tests/core/test_x.py -q", "wait_seconds": 30}, None
+    )
+
+    # The result is right here: the output and the exit code, with no
+    # instruction to end the turn waiting for a completion.
+    assert "4 passed in 5.91s" in outcome.text
+    assert "exit code 0" in outcome.text
+    assert "End the turn now" not in outcome.text
+    # Nothing to park on, and no wake was queued.
+    assert outcome.background_task is None
+    assert not outcome.is_error
+    await asyncio.sleep(0.05)
+    assert frames == []
+
+
+@pytest.mark.asyncio
+async def test_an_inline_failure_is_reported_as_one(spawner_harness):
+    task, _frames = spawner_harness
+    task._running = False
+    task.exit_code = 1
+    task.lines = ["FAILED tests/test_a.py::test_b"]
+
+    spawn = ms.make_fluid_monitor_spawner("s-spawn")
+    outcome = await spawn({"command": "pytest -q", "wait_seconds": 30}, None)
+
+    assert outcome.is_error
+    assert "finished with a failure" in outcome.text
+    assert "FAILED tests/test_a.py::test_b" in outcome.text
+
+
+@pytest.mark.asyncio
+async def test_a_command_still_running_after_the_wait_parks_as_before(
+    spawner_harness, monkeypatch
+):
+    import asyncio
+
+    from app.core.config import settings
+
+    task, frames = spawner_harness
+    monkeypatch.setattr(settings, "monitor_command_timeout_seconds", 0)
+    _jump_clock(monkeypatch)  # the wait window expires on its first reading
+
+    spawn = ms.make_fluid_monitor_spawner("s-spawn")
+    outcome = await spawn({"command": "npm run build", "wait_seconds": 30}, None)
+
+    # The existing receipt wording is untouched; the wait only adds a clause
+    # saying why the model is reading it.
+    assert ms.monitor_receipt_text(task.task_id) in outcome.text
+    assert "still running after the 30s" in outcome.text
+    assert outcome.background_task is not None
+
+    # And the background path is intact: the completion still wakes the parent.
+    task._running = False
+    task.exit_code = 0
+    for _ in range(50):
+        if frames:
+            break
+        await asyncio.sleep(0.01)
+    assert frames and frames[0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_serving_process_ignores_the_wait(spawner_harness, monkeypatch):
+    from app.core.config import settings
+
+    task, _frames = spawner_harness
+    monkeypatch.setattr(settings, "monitor_command_timeout_seconds", 0)
+
+    spawn = ms.make_fluid_monitor_spawner("s-spawn")
+    outcome = await spawn(
+        {"command": "npm run dev", "serves": True, "wait_seconds": 60}, None
+    )
+
+    assert "NOT parked on it" in outcome.text
+    assert "still running after" not in outcome.text
+
+
+def test_the_native_spec_advertises_the_wait():
+    from fluid.tools.builtins import register_builtins
+    from fluid.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+
+    ms.amend_native_monitor_spec(registry)
+
+    spec = registry.get("Monitor")
+    assert spec.input_schema["properties"]["wait_seconds"]["maximum"] == (
+        ms.MAX_WAIT_SECONDS
+    )
+    assert "wait_seconds" in spec.description
+    # Idempotent: a second amendment must not stack the clause.
+    ms.amend_native_monitor_spec(registry)
+    assert registry.get("Monitor").description.count("probably quick") == 1
+
+
+def test_amending_never_adds_monitor_to_a_surface_without_it():
+    from fluid.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    ms.amend_native_monitor_spec(registry)
+
+    assert registry.get("Monitor") is None
+
+
+# ---------------------------------------------------------------------------
+# Status honesty (round-6 audit): the settled status is the OUTCOME the summary
+# shows, not the process's disposition — and the notification says what the
+# task row says.
+# ---------------------------------------------------------------------------
+
+def test_a_swallowed_failure_is_not_a_completion():
+    # `…; gh pr checks 42 || true` exits 0 while its own last word says it
+    # failed. The notification used to carry <status>completed</status> above a
+    # summary that read "failed to run git … EXIT:1".
+    status, summary = _settle(
+        exit_code=0,
+        lines=["failed to run git: not a git repository", "EXIT:1"],
+    )
+
+    assert status == "error"
+    assert "EXIT:1" in summary
+
+
+def test_an_explicit_zero_marker_is_still_a_completion():
+    status, _ = _settle(exit_code=0, lines=["all checks passed", "EXIT:0"])
+    assert status == "completed"
+
+
+def test_the_last_marker_is_the_outcome():
+    # A watcher that retries prints the failed attempt and then the good one.
+    assert _settle(exit_code=0, lines=["EXIT:1", "retrying", "EXIT:0"])[0] == "completed"
+    assert _settle(exit_code=0, lines=["EXIT:0", "EXIT:2"])[0] == "error"
+
+
+def test_a_marker_never_rescues_a_real_failure():
+    assert _settle(exit_code=1, lines=["EXIT:0"])[0] == "error"
+
+
+def test_the_row_is_written_from_the_settle():
+    from app.core import task_registry as tr
+
+    tr.task_registry.start_task("s-row", "t-row", "shell", "watch ci")
+    # The output reader already settled it from the exit code alone.
+    tr.task_registry.complete_task("s-row", "t-row", "completed")
+
+    status, _summary = ms.record_settled_status(
+        "s-row", "t-row", "error", "gh: EXIT:1", serves=False
+    )
+
+    assert status == "error"
+    row = tr.task_registry.get_task("s-row", "t-row")
+    assert row["status"] == "error"
+    assert row["summary"] == "gh: EXIT:1"
+    tr.task_registry.clear_session("s-row")
+
+
+def test_a_stop_that_races_the_settle_wins_both_places():
+    from app.core import task_registry as tr
+
+    tr.task_registry.start_task("s-race", "t-race", "shell", "npm test")
+    # The TaskStop landed while the watcher was settling a clean self-exit.
+    tr.task_registry.complete_task(
+        "s-race", "t-race", "killed",
+        summary=tr.USER_STOP_SUMMARY, reason=tr.USER_STOP_REASON,
+    )
+
+    status, summary = ms.record_settled_status(
+        "s-race", "t-race", "completed", "done", serves=False
+    )
+
+    # The notification no longer says "completed" over a row that says killed.
+    assert status == "killed"
+    assert "Stopped by the user" in summary
+    assert tr.task_registry.get_task("s-race", "t-race")["status"] == "killed"
+    tr.task_registry.clear_session("s-race")
+
+
+@pytest.mark.asyncio
+async def test_the_wake_frame_and_the_row_agree(spawner_harness, monkeypatch):
+    import asyncio
+
+    from app.core import task_registry as tr
+    from app.core.config import settings
+
+    task, frames = spawner_harness
+    monkeypatch.setattr(settings, "monitor_command_timeout_seconds", 0)
+
+    spawn = ms.make_fluid_monitor_spawner("s-spawn")
+    await spawn({"command": "gh pr checks 42 --watch || true"}, None)
+
+    task.lines = ["fatal: not a git repository", "EXIT:1"]
+    task.exit_code = 0
+    task._running = False
+    for _ in range(100):
+        if frames:
+            break
+        await asyncio.sleep(0.01)
+
+    assert frames and frames[0]["status"] == "error"
+    assert tr.task_registry.get_task("s-spawn", task.task_id)["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_fluid_passes_an_inline_settle_through_without_parking(
+    spawner_harness,
+):
+    """End to end through fluid's own Monitor handler: a settled inline result
+    carries no receipt, so nothing is registered as pending and no park
+    accounting starts."""
+    from fluid.tools.builtins.monitor import handler as monitor_handler
+    from fluid.tools.registry import ToolCtx
+
+    task, frames = spawner_harness
+    task._running = False
+    task.exit_code = 0
+    task.lines = ["ok"]
+
+    started = []
+    ctx = ToolCtx(cwd="/work/tree", session_id="s-spawn")
+    ctx.extra["monitor_spawn"] = ms.make_fluid_monitor_spawner("s-spawn")
+    ctx.extra["background_task_started"] = started.append
+
+    outcome = await monitor_handler(
+        {"command": "pytest -q", "wait_seconds": 10}, ctx
+    )
+
+    assert outcome.background_task is None
+    assert started == []
+    assert "ok" in outcome.text
+    # And the cwd fallback survives the real ctx.
+    assert task.cwd == "/work/tree"

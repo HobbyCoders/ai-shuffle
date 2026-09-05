@@ -425,6 +425,81 @@ async def _note_parent(parent_session_id: str, message: str, count: int, reason:
         )
 
 
+async def _deliver_teardown(
+    parent_session_id: str,
+    results: List[Dict[str, Any]],
+    *,
+    message: str,
+    reason: str,
+    summary: str,
+) -> None:
+    """Tell the PARENT — its engine, and its live turn if it has one.
+
+    ``_note_parent`` writes the coalesced line to the session's event log, which
+    is the transcript the user reads. It is not a channel the MODEL has, and the
+    audit caught exactly that gap: an interrupt killed a running worker, the note
+    went into the log, and the parent — having heard nothing — told the user
+    minutes later that the worker was still running.
+
+    Two deliveries close it, both best-effort:
+
+    * the ENGINE is told each killed worker is terminal
+      (``turn_scheduler.retire_task_terminals``, ``wake=False``). fluid drops the
+      ids from its pending set — a worker killed at turn end would otherwise be
+      listed on every later ``SessionParked`` — and records a terminal
+      ``SubagentEvent`` on the parent's session, which is the thing the parent
+      reads back instead of assuming its worker is still working. It schedules
+      no turn, so an interrupt the user just asked for stays stopped.
+    * when a turn is somehow still running (the stop-all control fires mid-turn,
+      unlike the turn-end reap), the same line is STEERED into it so the model
+      hears it at the next tool boundary rather than at the end of the turn.
+
+    Never raises: a teardown that has already killed its workers must settle.
+    """
+    task_ids = [r.get("taskId") for r in results if r.get("taskId")]
+    if not parent_session_id or not task_ids:
+        return
+    frames = [
+        {
+            "task_id": task_id,
+            "status": "killed",
+            "summary": summary,
+            "reason": reason,
+        }
+        for task_id in task_ids
+    ]
+    try:
+        from app.core import turn_scheduler
+
+        await turn_scheduler.retire_task_terminals(parent_session_id, frames)
+    except Exception:  # noqa: BLE001 — teardown must never raise
+        logger.debug(
+            "ProviderAgent supervisor: engine retirement failed for %s",
+            parent_session_id, exc_info=True,
+        )
+    try:
+        from app.core import session_runtime
+        from app.core.turn_scheduler import TASK_STEER_ID_PREFIX
+        from uuid import uuid4
+
+        await session_runtime.try_steer_task_notification(
+            parent_session_id,
+            f"<task-notification>\n{message}\n</task-notification>",
+            notification_id=f"{TASK_STEER_ID_PREFIX}{uuid4().hex}",
+            # No frames/task_ids: the engine retirement above already booked
+            # these terminals, and handing them to the steer registry would make
+            # an undelivered steer enqueue a WAKE turn for work the user just
+            # stopped. The steer here is a courtesy for a live turn, nothing more.
+            frames=[],
+            task_ids=[],
+        )
+    except Exception:  # noqa: BLE001 — teardown must never raise
+        logger.debug(
+            "ProviderAgent supervisor: teardown steer failed for %s",
+            parent_session_id, exc_info=True,
+        )
+
+
 async def _cancel_worker_prompts(record: WorkerRecord) -> None:
     """Sweep this worker's still-pending approval prompts off its PARENT.
 
@@ -559,8 +634,12 @@ async def _teardown(
         len(results), parent_session_id, reason,
     )
     if note:
-        await _note_parent(
-            parent_session_id, note.format(count=len(results)), len(results), reason
+        message = note.format(count=len(results))
+        await _note_parent(parent_session_id, message, len(results), reason)
+        # The note is a transcript row; this is the half the MODEL can read.
+        await _deliver_teardown(
+            parent_session_id, results,
+            message=message, reason=reason, summary=summary,
         )
     return results
 

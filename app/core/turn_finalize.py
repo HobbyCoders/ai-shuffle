@@ -10,7 +10,12 @@ DURABLE write a finished turn owes the session row:
    "parked awaiting unpark" apart from idle (boot reconcile force-clears
    stale markers, since no background work survives a restart).
 
-2. Summary sidecar flush — the ``session_store_summaries`` fold is COALESCED
+2. Branch resync — the session row's branch was written once, at intake, and
+   never again, so an agent that ran ``git checkout -b`` in its own worktree
+   left the row (and the sidebar's PR state) naming a branch it had left.
+   Turn end reads the checkout's real HEAD and corrects the row when it moved.
+
+3. Summary sidecar flush — the ``session_store_summaries`` fold is COALESCED
    (finding B4): while a turn streams, at most one fold per ~2s runs inside
    the append path, so the sidecar is normally a little behind when the turn
    ends and stays behind until the next summary READER flushes it. Folding
@@ -32,8 +37,97 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def resync_session_branch_from_head(session_id: str) -> Optional[Tuple[str, str]]:
+    """Point the session row at the branch its checkout is actually on.
+
+    ``sessions.branch`` was only ever written at intake — the user picks a
+    branch, the app records it — so an agent that ran a plain
+    ``git checkout -b`` inside its own worktree left the row naming a branch it
+    had abandoned. Everything downstream then answered about the wrong branch;
+    the visible one is the sidebar, which kept showing the old merged PR
+    because :func:`app.core.session_pr_state.reconcile_session_pr` looks the PR
+    up by the recorded name. One session did this to itself while shipping the
+    fix for that exact symptom.
+
+    Blocking (one DB read, one ``git`` head read, and writes only on a real
+    change). Returns ``(old, new)`` when it wrote, else ``None``.
+
+    Deliberately narrow:
+
+    - Only a materialized BRANCH checkout. A base checkout's row carries no
+      branch of its own, and a ``git checkout -b`` there is the agent moving
+      the shared base around, not the session changing identity — adopting it
+      would bind the session to a worktree that does not exist and move its cwd
+      out from under it.
+    - Never a detached or unborn HEAD: there is no branch to record, and the
+      previous value is a better answer than none.
+    - Never when another checkout on this runner already claims the new name,
+      which would make the branch ambiguous to the resolver.
+    - The ``checkouts`` row is corrected alongside the session row. It names
+      the same stale branch for the same reason, and leaving it behind would
+      send the next resolution off to materialize a second worktree.
+    """
+    from app.core.git_service import git_service
+    from app.core.project_resolver import resolve_local_checkout
+    from app.db import checkouts as checkouts_db
+    from app.db import database
+
+    session = database.get_session(session_id)
+    if not session:
+        return None
+
+    checkout = resolve_local_checkout(session)
+    if not checkout:
+        return None
+
+    recorded = (checkout.get("branch") or "").strip()
+    path = (checkout.get("path") or "").strip()
+    if not recorded or not path or not os.path.isdir(path):
+        return None
+
+    head = (git_service.get_current_branch(path) or "").strip()
+    if not head or head == "HEAD":
+        return None
+
+    session_branch = (
+        session.get("worktree_branch") or session.get("branch") or ""
+    ).strip()
+    if head == recorded and head == session_branch:
+        return None
+
+    project_id = checkout.get("project_id")
+    runner_id = checkout.get("runner_id")
+    if not project_id or runner_id is None:
+        return None
+
+    existing = checkouts_db.get_checkout(project_id, runner_id, branch=head)
+    if existing and os.path.normcase(
+        os.path.normpath(existing.get("path") or "")
+    ) != os.path.normcase(os.path.normpath(path)):
+        logger.info(
+            "turn_finalize: not resyncing %s to %r — checkout %s already claims it",
+            session_id,
+            head,
+            existing.get("path"),
+        )
+        return None
+
+    if head != recorded:
+        checkouts_db.upsert_checkout(
+            project_id,
+            runner_id,
+            path,
+            branch=head,
+            status=checkout.get("status") or "active",
+        )
+    database.resync_session_branch(session_id, head)
+    return (session_branch or recorded, head)
 
 
 async def persist_turn_end_state(session_id: str) -> None:
@@ -50,6 +144,22 @@ async def persist_turn_end_state(session_id: str) -> None:
         )
     except Exception:
         logger.debug("persisting parked_task_kind failed", exc_info=True)
+
+    # 1a. Settle which branch this session is actually on before anything
+    # reads the row. Awaited rather than fired off, because the PR reconcile
+    # below looks the PR up BY that branch and would otherwise race it; it is
+    # one git head read, and it writes nothing when nothing moved.
+    try:
+        changed = await asyncio.to_thread(resync_session_branch_from_head, session_id)
+        if changed:
+            logger.info(
+                "turn_finalize: session %s moved from branch %r to %r",
+                session_id,
+                changed[0],
+                changed[1],
+            )
+    except Exception:
+        logger.debug("session branch resync failed", exc_info=True)
 
     # 1b. Persist any PR the agent opened/merged this turn so the sidepanel
     # updates without waiting for a GitHub poll. Fire-and-forget: gh must not

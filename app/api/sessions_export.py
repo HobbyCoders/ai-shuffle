@@ -227,6 +227,10 @@ async def export_session(
                 "total_tokens_in": session.get("total_tokens_in"),
                 "total_tokens_out": session.get("total_tokens_out"),
                 "turn_count": session.get("turn_count"),
+                # Model attribution: what it started on AND what it ended on.
+                # A session that switched mid-flight exported only the latter.
+                "first_model": session.get("first_model"),
+                "launched_model": session.get("launched_model"),
             },
             "messages": messages,
             "exported_at": datetime.now().isoformat(),

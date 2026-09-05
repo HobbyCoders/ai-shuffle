@@ -1494,10 +1494,21 @@ class SessionRuntime:
     ) -> None:
         """Close out one steered ``<task-notification>`` fluid just delivered.
 
-        Two effects, both best-effort and neither allowed to disturb the pump:
+        Three effects, all best-effort and none allowed to disturb the pump:
         the frontend card settles (``task.updated``, the same append the wake
-        turn makes for its ``pending_frames``) and the scheduler latches
-        ``terminal_notified`` for the tasks now provably in front of the model.
+        turn makes for its ``pending_frames``), the ENGINE is told the task is
+        terminal, and the scheduler latches ``terminal_notified`` for the tasks
+        now provably in front of the model.
+
+        The engine leg is the one a wake turn gets for free. A wake carries its
+        frames into ``prepare_background_completions`` at turn start, which is
+        what drops their ids from fluid's ``_background_pending``; a steered
+        notification has no turn start of its own, so it submits the very same
+        frames here (``wake=False`` — the model already has the words). Without
+        it fluid kept every mid-turn completion pending and listed it on every
+        later ``SessionParked``, long after the task was dead. The app's own
+        durable park state is untouched: it is the authority, and it already
+        moved on.
         """
         frames = entry.get("frames") or []
         task_ids = entry.get("task_ids") or []
@@ -1513,6 +1524,7 @@ class SessionRuntime:
         try:
             from app.core import turn_scheduler
 
+            await turn_scheduler.retire_task_terminals(self.session_id, frames)
             turn_scheduler.on_task_notification_delivered(self.session_id, task_ids)
         except Exception:  # noqa: BLE001 — bookkeeping never kills a turn
             logger.warning(

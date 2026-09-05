@@ -250,6 +250,60 @@ def kick(session_id: str) -> None:
 
 def _kick_done(task: asyncio.Task) -> None:
     _kick_tasks.discard(task)
+
+
+# How long a freshly-enqueued unpark wake waits before it is kicked.
+#
+# The merge branches below already batch near-simultaneous terminals into ONE
+# wake — but only while that wake is still QUEUED. Kicking it the instant it is
+# enqueued closes that window immediately: the audit watched three tasks killed
+# within 1.3 seconds of each other wake three separate turns, because the first
+# wake had already started running by the time the second terminal arrived and
+# there was nothing left to merge into. Holding the kick for a breath keeps the
+# row mergeable for exactly as long as a burst takes to land. Nothing is
+# delayed but the START of a wake turn, which is never the thing a user waits
+# on; a user message kicks the session on its own path regardless.
+TERMINAL_BATCH_WINDOW_SECONDS = 2.0
+
+# session_id -> the open batch window's timer task (at most one per session).
+_batch_kick_tasks: Dict[str, asyncio.Task] = {}
+
+
+def _kick_after_batch_window(session_id: str) -> None:
+    """Kick ``session_id`` once the terminal-batching window closes.
+
+    A no-op when a window is already open for the session: the terminal that
+    opened it will do the kicking, and this one has just merged into the same
+    wake row. Falls back to an immediate :func:`kick` when the window is
+    disabled or there is no loop to schedule on.
+    """
+    if TERMINAL_BATCH_WINDOW_SECONDS <= 0:
+        kick(session_id)
+        return
+    open_window = _batch_kick_tasks.get(session_id)
+    if open_window is not None and not open_window.done():
+        logger.debug(
+            "turn_scheduler: %s already inside a terminal batch window — the "
+            "wake it merged into is kicked when that window closes", session_id,
+        )
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        kick(session_id)
+        return
+
+    async def _kick_when_closed() -> None:
+        try:
+            await asyncio.sleep(TERMINAL_BATCH_WINDOW_SECONDS)
+        finally:
+            _batch_kick_tasks.pop(session_id, None)
+        kick(session_id)
+
+    task = loop.create_task(_kick_when_closed())
+    _batch_kick_tasks[session_id] = task
+    _kick_tasks.add(task)
+    task.add_done_callback(_kick_done)
     if not task.cancelled():
         task.exception()  # retrieve, so a failed kick never logs as un-awaited
 
@@ -687,6 +741,73 @@ async def _enqueue_context_wake(
 
 
 # ---------------------------------------------------------------------------
+# Engine retirement — drop a finished task from fluid's pending set
+# ---------------------------------------------------------------------------
+
+async def retire_task_terminals(
+    session_id: str, frames: List[Dict[str, Any]]
+) -> bool:
+    """Tell the session's ENGINE that these background tasks are terminal.
+
+    fluid keeps its own ``_background_pending`` set: every task it started for
+    a session stays in it until a ``BackgroundTaskFinished`` is submitted, and
+    every ``SessionParked`` it emits lists whatever is still in there. The app
+    submits those frames in exactly ONE place today —
+    ``harness_adapter.prepare_background_completions``, called at the start of
+    a wake turn with ``options.aih_background_task_completions`` — so a task
+    that came to rest while a turn was RUNNING (delivered as a mid-turn steer)
+    was never retired: the app's own park state moved on, fluid's did not, and
+    the id was listed as "parked on" forever (one audited session was parked on
+    a task twelve hours dead, another listed twenty-one).
+
+    This is that same submission, reachable from every delivery path that does
+    not go through a wake turn: the mid-turn steer receipt, an agent-initiated
+    cancellation that deliberately schedules no wake, and worker teardown.
+    ``wake=False`` throughout, exactly as the unpark path uses it — the app's
+    durable turn queue owns wake admission, so fluid records the terminal and
+    emits its ``SubagentEvent`` without starting a turn of its own.
+
+    Returns True only when a submission actually happened. Never raises: a
+    session with no pooled adapter, a delegated leg (whose CLI keeps its own
+    pending set) or a non-fluid backend simply answers False — the app's park
+    state is authoritative and is untouched either way.
+    """
+    frames = [
+        f for f in (frames or [])
+        if isinstance(f, dict) and f.get("task_id")
+    ]
+    if not session_id or not frames:
+        return False
+    try:
+        from app.core.session_pool import get_session_pool
+
+        state = get_session_pool().peek(session_id)
+    except Exception:  # noqa: BLE001 — bookkeeping never breaks a delivery.
+        logger.debug(
+            "turn_scheduler: could not reach the pool to retire tasks on %s",
+            session_id, exc_info=True,
+        )
+        return False
+    adapter = getattr(state, "adapter", None) if state is not None else None
+    prepare = getattr(adapter, "prepare_background_completions", None)
+    if prepare is None:
+        return False
+    try:
+        await prepare(frames)
+    except Exception:  # noqa: BLE001 — bookkeeping never breaks a delivery.
+        logger.warning(
+            "turn_scheduler: engine retirement failed for %s (tasks=%s)",
+            session_id, [f.get("task_id") for f in frames], exc_info=True,
+        )
+        return False
+    logger.info(
+        "turn_scheduler: retired %d background task(s) in the engine for %s (%s)",
+        len(frames), session_id, [f.get("task_id") for f in frames],
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Mid-turn delivery — steer the notification into the RUNNING turn
 # ---------------------------------------------------------------------------
 #
@@ -836,6 +957,49 @@ async def on_task_notification_stranded(
         )
 
 
+#: Terminal frame statuses that mean the task was STOPPED rather than that it
+#: failed. The wire vocabulary here is fluid's, not the registry's — the adapter
+#: maps a killed shell onto ``cancelled`` on the way out.
+_CANCELLATION_FRAME_STATUSES = frozenset({"killed", "cancelled", "stopped"})
+
+
+async def _retire_without_wake(
+    session_id: str, frame: Dict[str, Any], task_id: str
+) -> None:
+    """Settle a deliberately-cancelled task with no wake turn behind it.
+
+    Three effects, in the order they matter:
+
+    * the ENGINE is told the task is terminal, so fluid drops it from
+      ``_background_pending`` instead of listing a dead id on every later
+      ``SessionParked``;
+    * the wake latch is spent, so no later frame for the same task can enqueue
+      one after the fact;
+    * a running turn — and only a running turn — is handed the line as a steer.
+      It carries no frames, so an undelivered one strands into nothing rather
+      than falling back to the wake this path exists to avoid. At rest there is
+      no delivery at all, which is the whole point: the model asked for this
+      cancellation and does not need to be woken to be told it happened.
+
+    Never raises — the caller's ``except`` covers it either way.
+    """
+    await retire_task_terminals(session_id, [frame])
+    from app.core.task_registry import task_registry
+
+    task_registry.mark_woken(session_id, task_id)
+    prompt = await asyncio.to_thread(_build_task_notification_prompt, [frame])
+    steered = await _try_steer_terminal_notification(
+        session_id, prompt, [], [task_id]
+    )
+    if not steered:
+        _mark_terminal_notified(session_id, [task_id])
+    logger.info(
+        "turn_scheduler: task %s on %s was cancelled deliberately (%s) — "
+        "retired with no wake turn (steered=%s)",
+        task_id, session_id, frame.get("status"), steered,
+    )
+
+
 async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[str]:
     """Idle-reader hook: a background task reached a terminal state between
     turns. Fold the terminal task into ONE consolidated ``source=unpark`` wake.
@@ -905,6 +1069,24 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
             )
             return
         if task_registry.is_own_background_task(session_id, task_id):
+            # ── Deliberate, unattributed cancellation → retire, never wake ──
+            # The model stops its own stale watcher with ``TaskStop``; the
+            # resulting ``cancelled`` terminal used to wake a whole turn whose
+            # entire output was "noted". Nothing in it is news — the summary the
+            # wake would carry literally reads "Stopped deliberately by the app
+            # or by an agent... not a failure". So retire it and stop there: the
+            # ENGINE is still told (or fluid keeps the id in its pending set and
+            # lists it on every later park), and a turn that happens to be
+            # running still gets the line as a steer, but nothing is scheduled.
+            # An ATTRIBUTED kill — shutdown, timeout, rate limit, turn-end reap —
+            # is real news and keeps its wake.
+            if (
+                task_id
+                and str(frame.get("status") or "") in _CANCELLATION_FRAME_STATUSES
+                and task_registry.is_unattributed_cancellation(session_id, task_id)
+            ):
+                await _retire_without_wake(session_id, frame, task_id)
+                return
             # ── OWN lane — rich consolidated source=unpark wake ──
             # A-1 (bug 1): if the CLI owns this completion's at-rest wake (a
             # top-level backgrounded agent resting while the parent is parked),
@@ -965,7 +1147,7 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
                                 "upgraded wake turn %s in place",
                                 session_id, task_id, updated["id"],
                             )
-                            kick(session_id)
+                            _kick_after_batch_window(session_id)
                             return
                         # The guarded UPDATE lost (the wake left the queue) — the
                         # task already woke, so fall through to the A-3 latch below.
@@ -1008,7 +1190,7 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
                             session_id, task_id, frame.get("status"),
                             updated["id"], len(pending),
                         )
-                        kick(session_id)
+                        _kick_after_batch_window(session_id)
                         return
                     # The guarded UPDATE lost (the wake left the queue) — enqueue
                     # fresh (guarded by the A-3 latch below).
@@ -1051,7 +1233,7 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
                 "turn_scheduler: unpark for %s — task %s terminal (%s), wake turn %s",
                 session_id, task_id, frame.get("status"), turn["id"],
             )
-            kick(session_id)
+            _kick_after_batch_window(session_id)
             return
 
         # ── else — NOT the parent's own background work → suppress (#690) ──

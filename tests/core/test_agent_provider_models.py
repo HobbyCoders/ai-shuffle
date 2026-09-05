@@ -583,3 +583,45 @@ def test_disabled_target_provider_drops_only_that_agent(mock_db, monkeypatch):
 
     roster = available_subagents("caller", None)
     assert [t.id for t in roster] == ["good"]
+
+
+# ---------------------------------------------------------------------------
+# Round-6 audit: the anti-polling doctrine sat inside the Task block, so a
+# session with Task disabled read it as advice about a tool it did not have —
+# and spent 26.7 of 45 minutes in blocking Bash sleep-polls.
+# ---------------------------------------------------------------------------
+
+def test_background_doctrine_is_its_own_top_level_block(mock_db):
+    guidance = parent_subagent_guidance("caller", None)
+
+    assert "\n# Background work\n" in guidance
+    background = guidance.split("# Background work", 1)[1]
+    # It governs every producer, not just Task.
+    for producer in ("subagent", "Monitor", "Bash"):
+        assert producer in background
+    assert "end your turn" in background
+    assert "no `wait` polling" in background.lower()
+    # The Task block keeps its own contract and loses the doctrine.
+    delegation = guidance.split("# Background work", 1)[0]
+    assert "Never invent a subagent ID" in delegation
+    assert "do not poll in a loop" not in delegation
+
+
+def test_monitor_is_named_as_the_trigger_for_long_commands(mock_db):
+    background = parent_subagent_guidance("caller", None).split(
+        "# Background work", 1
+    )[1]
+
+    assert "outlast a Bash call" in background
+    assert "test suite" in background
+
+
+def test_ui_changes_are_verified_in_a_browser(mock_db):
+    guidance = parent_subagent_guidance("caller", None)
+
+    assert "# Verifying a UI change" in guidance
+    verification = guidance.split("# Verifying a UI change", 1)[1]
+    assert "frontend/" in verification and ".svelte" in verification
+    assert "browser_resize" in verification and "ToolSearch" in verification
+    # Two sentences, no more.
+    assert verification.strip().count(". ") <= 2

@@ -169,13 +169,19 @@ def get_background_task(task_id: str, session_id: str) -> Optional[Dict[str, Any
     the in-memory registry is empty, so the only remaining truth for a task the
     UI still shows "running" is this row. Returns the columns needed to settle
     it: ``task_id``, ``session_id``, ``kind``, ``tool_use_id``, ``title``,
-    ``status``.
+    ``status``, ``started_at``, ``updated_at``.
+
+    The two timestamps are also what ``TaskRegistry._durable_task`` needs: when
+    nothing survives in memory this row is the only answer ``TaskGet`` can give
+    a parent asking about its own finished worker, and a record with no times on
+    it reads as a task that never ran.
     """
     _ph = ph()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            f"""SELECT task_id, session_id, kind, tool_use_id, title, status
+            f"""SELECT task_id, session_id, kind, tool_use_id, title, status,
+                       started_at, updated_at
                   FROM background_tasks
                  WHERE task_id = {_ph} AND session_id = {_ph}""",
             (task_id, session_id),

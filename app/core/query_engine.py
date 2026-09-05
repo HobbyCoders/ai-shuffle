@@ -131,6 +131,19 @@ _STREAM_DEBUG = bool(
     os.environ.get("STREAM_DEBUG") or os.environ.get("AIHUB_DEBUG_STREAM")
 )
 
+# Marker the host attaches beside ``FLUID_ANSWER_KEY`` when an approval gate is
+# closed by policy rather than by a person. ``FLUID_ANSWER_KEY`` itself has to
+# stay a string the engine reads as approval ("approve"), so the provenance
+# cannot live there — the tool result would otherwise be indistinguishable from
+# one a user clicked through, and the model says so out loud ("the plan is
+# approved"). Its own key can be read by an engine that wants to word the
+# result honestly; an engine that does not know it drops it, which is why this
+# is safe to send today.
+HOST_AUTO_APPROVED_KEY = "_host_auto_approved"
+HOST_AUTO_APPROVED_NOTE = (
+    "ended by host policy (bypassPermissions) — no user approval was collected"
+)
+
 
 def _rate_limit_event_dict(rli: Any, session_id: str) -> Dict[str, Any]:
     """Build the ``rate_limit`` WS frame from an SDK ``RateLimitInfo``.
@@ -251,6 +264,49 @@ def _sync_plan_mode_exited(refs: Dict[str, Any]) -> Optional[str]:
     if restored:
         refs["permission_mode"] = restored
     return restored
+
+
+async def _auto_approve_plan_exit(
+    session_id: str, tool_input: Dict[str, Any], refs: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Close a ``StopPlanning`` gate on policy, and say so.
+
+    ``bypassPermissions`` approves the plan exit without asking anyone — in the
+    audited sessions, about seven milliseconds after the tool call. Nothing
+    else about that moment was honest: a Plan Approval panel (Approve / Keep
+    planning) stayed on the user's screen with nobody coming to answer it, and
+    the model reported "the plan is approved" as though someone had.
+
+    So this does three things the bare ``PermissionResultAllow`` did not:
+
+    1. **Retires the pending plan-approval row.** Every other mode sweeps the
+       corpses just before opening its own gate; the bypass path skipped it and
+       left one looking answerable after the decision had already been made.
+    2. **Marks the answer's provenance.** ``FLUID_ANSWER_KEY`` has to stay a
+       string the engine reads as approval, so the marker rides its own key
+       (:data:`HOST_AUTO_APPROVED_KEY`). An engine that reads it can word the
+       tool result as "ended by host policy — no user approval was collected";
+       one that does not simply drops the key, which is why sending it today is
+       safe.
+    3. **Logs at INFO.** A plan approved with no human in the loop is a fact
+       about the session, not a debug trace.
+
+    Returns the ``updated_input`` for the allow result.
+    """
+    from app.core.user_question_handler import FLUID_ANSWER_KEY
+
+    await permission_handler.supersede_plan_approvals(session_id)
+    logger.info(
+        "[WS] StopPlanning auto-approved by host policy for session %s "
+        "(bypassPermissions) — no user approval was collected",
+        session_id,
+    )
+    _sync_plan_mode_exited(refs)
+    return {
+        **tool_input,
+        FLUID_ANSWER_KEY: "approve",
+        HOST_AUTO_APPROVED_KEY: HOST_AUTO_APPROVED_NOTE,
+    }
 
 
 def _record_task_message(session_id: Optional[str], message: Any) -> None:
@@ -2520,10 +2576,10 @@ async def _stream_to_websocket_impl(
                     # string, so translate allow/deny into approve/keep-planning.
                     if tool_name == "StopPlanning":
                         if _perm_mode == "bypassPermissions":
-                            logger.debug("[WS] StopPlanning auto-approved in bypassPermissions")
-                            _sync_plan_mode_exited(refs)
                             return PermissionResultAllow(
-                                updated_input={**tool_input, FLUID_ANSWER_KEY: "approve"}
+                                updated_input=await _auto_approve_plan_exit(
+                                    _sid, tool_input, refs
+                                )
                             )
                         # A plan gate parked by a turn that died (process
                         # restart, abandoned run) stays ``pending`` for the rest

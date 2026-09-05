@@ -1806,6 +1806,16 @@ async def clear_session(
 async def resume_session(
     request: Request,
     session_id: str,
+    if_busy: str = Query(
+        "queue",
+        pattern="^(queue|conflict)$",
+        description=(
+            "What to do when the session already has an unsettled turn. "
+            "'queue' (default) enqueues the resume behind it; 'conflict' "
+            "restores the old 409 refusal for a caller that must not have a "
+            "resume run later."
+        ),
+    ),
     token: str = Depends(require_auth),
 ):
     """Re-run the last turn from the session head without adding a message.
@@ -1817,6 +1827,19 @@ async def resume_session(
     the request the provider sees is the one that failed, so the prefix cache
     survives.
 
+    **A busy session queues rather than refusing.** This used to 409 with "a
+    turn is already running", and the submission was simply gone: the user
+    pressed Retry, got an error toast, and had to type the request again — while
+    every other mid-turn submission in the app (the chat WebSocket lane) is
+    enqueued durably and steered or drained into the session. A refusal that
+    loses the intent is worse than a resume that lands a few seconds later, so
+    the durable queue is now the default here too. ``if_busy=conflict`` keeps
+    the refusal for a caller that genuinely needs it.
+
+    Duplicate Retry presses do NOT stack: a resume already queued for this
+    session is returned as-is rather than enqueued twice (the anti-duplicate
+    guard the 409 used to provide, without the data loss).
+
     Only fluid sessions can do this. The Claude CLI owns its own transcript and
     has no head node to hand back, so a non-fluid session is refused outright.
     """
@@ -1827,10 +1850,10 @@ async def resume_session(
 
     # ONE atomic read, not separate live/queued checks: a turn flipping
     # queued→running between two reads is invisible to both (the
-    # wait_session_idle race, 2026-08-28), which here would let a duplicate
-    # resume enqueue behind a turn that is actually running.
+    # wait_session_idle race, 2026-08-28), which here would leave the caller
+    # believing the resume starts now when it is really queued.
     busy = await run_sync(turns_db.session_has_unsettled_turns, session_id)
-    if busy:
+    if busy and if_busy == "conflict":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="a turn is already running",
@@ -1842,6 +1865,21 @@ async def resume_session(
             status_code=status.HTTP_409_CONFLICT,
             detail="resume needs a fluid session",
         )
+
+    if busy:
+        # Already one resume waiting? Hand back that turn instead of stacking a
+        # second. A resume carries no prompt, so two of them are the same
+        # request — and re-running the head twice is exactly the duplicate the
+        # old 409 existed to prevent.
+        queued = await run_sync(turns_db.get_queued_turns, session_id)
+        for row in queued or []:
+            if (row or {}).get("source") == "resume":
+                return {
+                    "turn_id": row.get("id"),
+                    "session_id": session_id,
+                    "queued": True,
+                    "duplicate": True,
+                }
 
     payload: dict = {}
     api_user = get_api_user_from_request(request)
@@ -1866,7 +1904,7 @@ async def resume_session(
     # is the whole hand-off, exactly as the worktree submit seam does it.
     await run_sync(turn_claim.notify_turns_changed, session_id)
 
-    return {"turn_id": turn_id, "session_id": session_id}
+    return {"turn_id": turn_id, "session_id": session_id, "queued": bool(busy)}
 
 
 @router.post("/batch-delete", status_code=status.HTTP_200_OK)
