@@ -61,11 +61,29 @@ def test_a_prefixed_openai_id_prices_like_the_bare_one() -> None:
 def test_a_recognized_model_with_no_sourced_rate_reports_no_cost() -> None:
     """Never guess: the row exists so the model is recognized, and the absent
     rate keeps the cost absent rather than fabricated."""
-    for model in ("grok-4.6", "z-ai/glm-5.3-flash", "gpt-6-astra"):
+    for model in ("grok-3", "z-ai/glm-4-32b", "gpt-6-mini"):
         price = resolve_price(model)
         assert price is not None and not price.priced, model
         assert "not sourced" in price.source
         assert estimate_cost(model, _MTOK) is None, model
+
+
+def test_the_audited_models_now_carry_sourced_rates() -> None:
+    """The three families a whole audit round saw priced at $0: sourced from
+    the vendors' pages, short-context tier, source note on every row."""
+    for model, expected in (  # _MTOK is one MTok in and one out
+        ("grok-4.6", 2.00 + 6.00),
+        ("x-ai/grok-4.5", 2.00 + 6.00),
+        ("z-ai/glm-5.3-flash", 0.075 + 0.25),
+        ("glm-5.3", 1.40 + 4.40),
+        ("gpt-6-astra", 10.00 + 50.00),
+    ):
+        price = resolve_price(model)
+        assert price is not None and price.priced, model
+        assert "2026-09-04" in price.source
+        assert estimate_cost(model, _MTOK) == pytest.approx(expected), model
+    # Longest prefix wins: the flash variant is not billed at the 5.3 rate.
+    assert resolve_price("glm-5.3-flash") is not resolve_price("glm-5.3")
 
 
 def test_an_unknown_model_resolves_to_nothing() -> None:
@@ -122,7 +140,7 @@ def test_a_broken_host_resolver_costs_a_price_never_a_turn() -> None:
 
 def test_junk_from_a_host_resolver_is_ignored() -> None:
     for junk in (42, "cheap", [], {"input": "three dollars"}, True):
-        assert estimate_cost("grok-4.6", _MTOK, resolver=lambda _m, j=junk: j) is None
+        assert estimate_cost("grok-3", _MTOK, resolver=lambda _m, j=junk: j) is None
 
 
 def test_junk_usage_values_never_raise() -> None:
@@ -218,7 +236,7 @@ async def test_the_engine_prices_an_unpriced_provider_from_the_host_resolver() -
 
 
 async def test_the_engine_reports_no_cost_when_nobody_can_price_the_model() -> None:
-    done = await _run("z-ai/glm-5.3-flash")
+    done = await _run("z-ai/glm-4-32b")
     assert done.cost_usd is None
 
 

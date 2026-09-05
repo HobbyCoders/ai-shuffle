@@ -13,8 +13,9 @@ only what it alone knows:
 
 Everything else the compiler gathers itself:
 
-* environment block — cwd, platform, OS, date, git state
-                      (``fluid.context.environment``);
+* environment block — cwd, platform, OS, shell, repo-or-not, project
+                      manifests (``fluid.context.environment``); the date and
+                      git state ride each turn as a reminder instead
 * instruction stack — Fluid-native AGENTS.md discovery
                       (``fluid.context.instructions.build_instruction_stack``);
 * skills index      — name+description only; bodies load on demand via the
@@ -282,8 +283,14 @@ def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
                 )
             )
     if inputs.include_env:
+        # The fixed half only. The date and the git state ride each turn as a
+        # system-reminder instead (``NativeLoop._environment_reminder``), so a
+        # new day or a commit no longer rewrites the cached prompt prefix.
         sections.append(
-            PromptSection(kind="environment", text=environment_block(inputs.cwd))
+            PromptSection(
+                kind="environment",
+                text=environment_block(inputs.cwd, include_volatile=False),
+            )
         )
     for block in inputs.extra_blocks:
         if block and block.strip():

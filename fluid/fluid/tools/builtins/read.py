@@ -28,6 +28,7 @@ from fluid.tools.builtins._util import (
     resolve,
     unchanged_read_note,
 )
+from fluid.tools import read_window
 from fluid.tools.fragments import READ_BEFORE_EDIT
 from fluid.tools.registry import (
     ContentWindow,
@@ -167,6 +168,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         outcome = _read_image(path, media_type)
         if not outcome.is_error:
             ctx.read_files.add(str(path))
+            read_window.record_whole(ctx, str(path))
         return outcome
 
     if is_binary(path):
@@ -182,6 +184,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     limit = input.get("limit")
     numbered, more = _read_text(path, offset, limit)
     ctx.read_files.add(str(path))
+    # The lines actually delivered, for Edit's window check: a windowed read
+    # that stopped short owns exactly its window; one that reached the end of
+    # the file owns everything from its offset down.
+    window_len = int(limit) if limit else DEFAULT_LINE_LIMIT
+    read_window.record(ctx, str(path), offset, offset + window_len - 1 if more else None)
 
     # Same path, same window, same bytes on disk → the content is already in
     # the conversation. A write elsewhere moves mtime_ns, so the entry stops

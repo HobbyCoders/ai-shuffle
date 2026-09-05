@@ -138,8 +138,20 @@ class RespondPermission(Op):
 
 @dataclass(kw_only=True)
 class RespondQuestion(Op):
+    """Answer a parked ``QuestionRequest``.
+
+    ``user_answered`` is the host's word that a PERSON produced ``answer`` —
+    clicked the approval, typed the reply — as opposed to a policy (an
+    auto-approve mode, an unattended runner) answering on their behalf. It
+    rides into the tool's ``__input_responses__`` under
+    :data:`fluid.tools.builtins.plan.USER_ANSWERED_KEY`, which is how
+    StopPlanning says "approved by the user" only when one did. Unset means
+    unattributed, never "approved by someone".
+    """
+
     request_id: str
     answer: str
+    user_answered: bool = False
 
 
 @dataclass(kw_only=True)

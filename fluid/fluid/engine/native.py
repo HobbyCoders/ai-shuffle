@@ -139,7 +139,9 @@ from fluid.permissions.engine import (
     plan_mode_tools,
 )
 from fluid.providers.base import ProviderClient, ProviderRequest
+from fluid.context.environment import environment_note
 from fluid.providers.pricing import PricingResolver
+from fluid.tools import read_window
 from fluid.providers.pricing import estimate_cost as estimate_cost_from_table
 from fluid.providers.windows import context_window_for
 from fluid.store.base import SessionMeta, SessionNode, SessionStore, new_id
@@ -225,6 +227,24 @@ def _read_ledger_path(block: ToolUseBlock, ctx: ToolCtx) -> str | None:
         return str(resolve_tool_path(raw, ctx))
     except (OSError, ValueError):
         return None
+
+
+def _read_ledger_window(block: ToolUseBlock) -> tuple[int, int | None] | None:
+    """The line window a replayed Read delivered; None for a Write (whole file).
+
+    Replay cannot know whether an unbounded Read reached the end of the file,
+    so it records an open window from the offset — the lenient reading, which
+    is the right one for evidence this indirect.
+    """
+    if block.name != "Read" or not isinstance(block.input, dict):
+        return None
+    try:
+        offset = max(1, int(block.input.get("offset") or 1))
+        limit = block.input.get("limit")
+        end = offset + int(limit) - 1 if limit else None
+    except (TypeError, ValueError):
+        return (1, None)
+    return (offset, end)
 
 
 # Doom-loop guard texts. The first is the in-context denial under never_ask;
@@ -714,12 +734,14 @@ class NativeLoop(BackgroundLifecycleMixin):
             list(allowed_tools) if allowed_tools is not None else None
         )
         self.disallowed_tools: list[str] = list(disallowed_tools or ())
-        if self.allowed_tools is not None or self.disallowed_tools:
-            # The ToolSearch builtin (and any other registry-reading tool) sees
-            # this session's *view* of the shared registry through this
-            # predicate. The registry itself stays unfiltered — a host app may
-            # share one registry across sessions with different restrictions.
-            self.ctx.extra["tool_filter"] = self._tool_permitted
+        # The ToolSearch builtin (and any other registry-reading tool) sees
+        # this session's *view* of the shared registry through this predicate:
+        # the CE12 surface AND the wired host capabilities. The registry itself
+        # stays unfiltered — a host app may share one registry across sessions
+        # with different restrictions. Stamped on every session, restricted or
+        # not: a host that never wired agent messaging still had SendMessage
+        # turn up in ToolSearch on a leg whose schemas withheld it.
+        self.ctx.extra["tool_filter"] = self._tool_wired
         self.plan_mode = plan_mode
         # The Plan/StopPlanning builtins flip the same flag the request build
         # reads, so plan mode can start and (approval-gated) end mid-session.
@@ -1512,7 +1534,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return []
         return [
             s.to_api() for s in self.registry.deferred_tools()
-            if self._tool_permitted(s.name)
+            if self._tool_wired(s.name)
         ]
 
     def _context_usage_snapshot(
@@ -1535,6 +1557,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             context_window=self.context_window,
             compaction=compaction,
             measured_prompt_tokens=measured_prompt_tokens,
+            mounted_tools=self._mounted_tool_names(),
         )
 
     # ─── Turn lifecycle ──────────────────────────────────────────────────
@@ -1609,6 +1632,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         plan_reminder = self._plan_mode_reminder()
         if plan_reminder is not None:
             content.append(Text(plan_reminder))
+        env_note = await self._environment_reminder()
+        if env_note is not None:
+            content.append(Text(env_note))
         # The node id is fixed before the TurnStart hooks run so TurnStarted
         # can name it; the node itself is only written once they allow the
         # prompt, so a blocked prompt never enters the session.
@@ -1750,16 +1776,41 @@ class NativeLoop(BackgroundLifecycleMixin):
             nodes = await self.store.load_path(sid, head_node_id)
         except Exception:  # a store that cannot replay just re-Reads
             return
-        seen: dict[str, str] = {}  # tool_use_id -> resolved path
+        seen: dict[str, tuple[str, tuple[int, int | None] | None]] = {}
         for node in nodes:
             for block in node.message.content:
                 if isinstance(block, ToolUseBlock):
                     path = _read_ledger_path(block, self.ctx)
                     if path is not None:
-                        seen[block.id] = path
+                        seen[block.id] = (path, _read_ledger_window(block))
                 elif isinstance(block, ToolResultBlock) and block.is_error:
                     seen.pop(block.tool_use_id, None)
-        self.ctx.read_files.update(seen.values())
+        for path, window in seen.values():
+            self.ctx.read_files.add(path)
+            if window is None:
+                read_window.record_whole(self.ctx, path)
+            else:
+                read_window.record(self.ctx, path, *window)
+
+    async def _environment_reminder(self) -> str | None:
+        """The volatile half of the environment block, re-rendered per turn.
+
+        The compiled system prompt carries the FIXED environment facts (cwd,
+        platform, shell, project manifests); the date and the git state change
+        under a session and used to be compiled in with them, so every new day
+        and every commit rewrote the prompt prefix and cost the cache. Only a
+        prompt compiled with an environment section gets the note — a host
+        that injects its own environment, or none, is left alone. Gathering
+        runs git, so it runs off the loop.
+        """
+        sections = self.system_sections.sections if self.system_sections else ()
+        if not any(s.kind == "environment" for s in sections):
+            return None
+        try:
+            return await asyncio.to_thread(environment_note, self.ctx.cwd)
+        except Exception:  # never let a git hiccup block a turn
+            log.debug("environment note failed", exc_info=True)
+            return None
 
     def _deferred_catalog_reminder(self) -> str | None:
         """Announce known-but-unloaded tools, once per tool (name + one-liner).
@@ -1774,7 +1825,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
         specs = [
             s for s in self.registry.deferred_tools()
-            if s.name not in self._deferred_announced and self._tool_permitted(s.name)
+            if s.name not in self._deferred_announced and self._tool_wired(s.name)
         ]
         if not specs:
             return None
@@ -2478,6 +2529,36 @@ class NativeLoop(BackgroundLifecycleMixin):
         ):
             return False
         return not _matches_tool_pattern(name, self.disallowed_tools)
+
+    def _tool_wired(self, name: str) -> bool:
+        """Permitted (:meth:`_tool_permitted`) AND backed by a wired capability.
+
+        The predicate every catalog is read through — the deferred schemas,
+        the deferred-catalog reminder, ToolSearch, the usage accounting — so a
+        ``requires_extra`` tool whose host injection is missing is invisible
+        there too, exactly as :meth:`_tools_api` withholds it from the request.
+        Filtered on permission alone, an audited host that never wired agent
+        messaging still listed SendMessage and ListAgents in ToolSearch and
+        billed them in the context breakdown; models loaded them and every
+        call failed. Plan mode is deliberately not part of this predicate (see
+        :meth:`_tool_available`): a withheld write tool still exists, it is
+        only off the surface until approval.
+        """
+        if not self._tool_permitted(name):
+            return False
+        if self.registry is None:
+            return True
+        spec = self.registry.get(name)
+        return spec is None or self._capability_present(spec)
+
+    def _mounted_tool_names(self) -> frozenset[str] | None:
+        """Every registered name this leg actually serves; None without a registry."""
+        if self.registry is None:
+            return None
+        return frozenset(
+            s.name for s in self.registry.list_tools(loaded_only=False)
+            if self._tool_wired(s.name)
+        )
 
     def _tool_available(self, name: str) -> bool:
         """Permitted, plan-mode-allowed, *and* backed by a wired host capability.
@@ -3287,6 +3368,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         or None if the turn was interrupted while parked on a question.
         """
         answers: dict[str, Any] = {}
+        user_answered = False
         for server_req_id, descriptor in (marker.requests or {}).items():
             request_id = new_id("q")
             fut: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -3321,6 +3403,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                 interrupt_wait.cancel()
                 self._pending_questions.pop(request_id, None)
             answers[server_req_id] = resp.answer
+            user_answered = user_answered or bool(getattr(resp, "user_answered", False))
+        if user_answered:
+            # The host vouched that a person answered: say so where the tool
+            # reads it (StopPlanning words "approved by the user" on it).
+            from fluid.tools.builtins.plan import USER_ANSWERED_KEY
+
+            answers[USER_ANSWERED_KEY] = True
         return answers
 
     async def _await_permission(

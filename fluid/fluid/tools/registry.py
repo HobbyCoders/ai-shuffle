@@ -66,6 +66,9 @@ class ToolCtx:
 
     ``read_files`` is the read-before-write registry: builtins record the files
     they Read here so Edit/Write can enforce read-before-write within a session.
+    ``read_windows`` is its line-level half (see :mod:`fluid.tools.read_window`):
+    the inclusive 1-based spans each Read delivered, so Edit can also ask
+    whether the lines it is replacing were ever in front of the model.
 
     ``read_seen`` and ``grep_seen`` are the repeat-work registries. Read records
     ``(path, offset, limit) -> (mtime_ns, size)`` for every successful text read
@@ -85,6 +88,7 @@ class ToolCtx:
     cwd: str = "."
     session_id: str | None = None
     read_files: set[str] = field(default_factory=set)
+    read_windows: dict[str, list[tuple[int, int | None]]] = field(default_factory=dict)
     read_seen: dict[tuple[str, int | None, int | None], tuple[int, int]] = field(
         default_factory=dict
     )

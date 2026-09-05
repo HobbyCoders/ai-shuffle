@@ -130,4 +130,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         return ToolOutcome(text=_write_failure(path, exc), is_error=True)
     # A freshly written file is known to the session (so a follow-up Edit works).
     ctx.read_files.add(str(path))
+    from fluid.tools import read_window
+
+    read_window.record_whole(ctx, str(path))
     return ToolOutcome(text=f"wrote {len(content)} bytes to {path}")

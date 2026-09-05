@@ -343,9 +343,13 @@ def _first_user_text(message: dict[str, Any]) -> str | None:
     """Text of a stored user message, or None when it is not a user turn."""
     if message.get("role") != "user":
         return None
+    # The engine appends its per-turn reminders (deferred catalog, notes, the
+    # environment note) as further text blocks on the same node; they are not
+    # the user's words and do not belong in a listing.
     parts = [
         b.get("text", "") for b in message.get("content", [])
         if isinstance(b, dict) and b.get("kind") == "text"
+        and not str(b.get("text", "")).lstrip().startswith("<system-reminder>")
     ]
     text = " ".join(p for p in parts if p).strip()
     return text or None

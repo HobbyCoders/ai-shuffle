@@ -74,14 +74,18 @@ def _parse_porcelain2(porcelain: str) -> tuple[dict[str, str], dict[str, int]]:
     return branch, counts
 
 
+def is_git_work_tree(cwd: str) -> bool:
+    """Whether ``cwd`` is inside a git work tree (False when git is missing)."""
+    return _run_git(cwd, "rev-parse", "--is-inside-work-tree") == "true"
+
+
 def git_context(cwd: str) -> str | None:
     """Branch (with upstream/ahead-behind), change counts, recent commits.
 
     Returns ``None`` when ``cwd`` is not inside a git work tree (or git is
     unavailable), so callers can omit the section entirely.
     """
-    inside = _run_git(cwd, "rev-parse", "--is-inside-work-tree")
-    if inside != "true":
+    if not is_git_work_tree(cwd):
         return None
     lines: list[str] = []
     porcelain = _run_git(cwd, "status", "--porcelain=2", "--branch")
@@ -206,11 +210,26 @@ def project_facts(cwd: str) -> str | None:
     return "\n".join(lines) if lines else None
 
 
-def environment_block(cwd: str | os.PathLike[str] = ".") -> str:
+def _today() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+def environment_block(
+    cwd: str | os.PathLike[str] = ".", *, include_volatile: bool = True
+) -> str:
     """The compiled prompt's environment section (always renders).
 
     Facts that cannot be gathered are omitted line-by-line; the block itself is
-    always non-empty (cwd + date at minimum).
+    always non-empty (cwd at minimum).
+
+    ``include_volatile=False`` leaves out the facts that change under a running
+    session — today's date, the branch, the working-tree counts, the recent
+    commits — and keeps the ones fixed for its lifetime (cwd, platform, shell,
+    whether cwd is a repository, the project manifests). The prompt compiler
+    builds the system prompt that way and the engine re-renders the volatile
+    half onto each turn with :func:`environment_note`: compiled in, a new day
+    or a commit rewrote the cached prompt prefix for every session on the
+    host.
     """
     cwd_str = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
     shell = describe_shell()
@@ -220,14 +239,17 @@ def environment_block(cwd: str | os.PathLike[str] = ".") -> str:
         f"Platform: {sys.platform}",
         f"OS: {_os_version()}",
         f"Shell: {shell}",
-        f"Today's date: {datetime.now(UTC).strftime('%Y-%m-%d')}",
     ]
-    git = git_context(cwd_str)
-    if git is not None:
-        lines.append("Git repository: yes")
-        lines.append(git)
+    if include_volatile:
+        lines.append(f"Today's date: {_today()}")
+        git = git_context(cwd_str)
+        in_repo = git is not None
     else:
-        lines.append("Git repository: no")
+        git = None
+        in_repo = is_git_work_tree(cwd_str)
+    lines.append("Git repository: yes" if in_repo else "Git repository: no")
+    if git is not None:
+        lines.append(git)
     facts = project_facts(cwd_str)
     if facts:
         lines.append(facts)
@@ -237,3 +259,26 @@ def environment_block(cwd: str | os.PathLike[str] = ".") -> str:
             "re-check before relying on them)"
         )
     return "\n".join(lines)
+
+
+def environment_note(cwd: str | os.PathLike[str] = ".") -> str:
+    """The volatile environment facts, as a system-reminder for one turn.
+
+    The counterpart of ``environment_block(include_volatile=False)``: today's
+    date and the git state (branch, working-tree counts, recent commits) as
+    they stand when the turn starts. Always renders — the date alone is worth
+    the line — and never raises.
+    """
+    cwd_str = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
+    lines = [f"Today's date: {_today()}"]
+    git = git_context(cwd_str)
+    if git is not None:
+        lines.append(git)
+    body = "\n".join(lines)
+    return (
+        "<system-reminder>\n"
+        "Environment as of this message (the system prompt's environment "
+        "section holds the facts that do not change):\n"
+        f"{body}\n"
+        "</system-reminder>"
+    )

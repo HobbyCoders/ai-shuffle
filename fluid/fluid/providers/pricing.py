@@ -150,22 +150,50 @@ def normalize_model_id(model: str | None) -> str:
 # resolve through ``fluid.providers.anthropic.pricing`` and GPT/o-series ids
 # through ``fluid.providers.openai_responses.pricing``, both of which carry
 # dated, sourced numbers. Adding a duplicate row here would fork them.
+# Sourced 2026-09-04 from the vendors' own pricing pages. Every rate is the
+# SHORT-CONTEXT tier: xAI and OpenAI bill the whole request at roughly double
+# once the prompt reaches their long-context threshold (200k tokens at xAI,
+# the "long context" band at OpenAI), and ``ModelPrice`` carries one tier —
+# so a very long prompt is under-estimated here, never over-estimated. The
+# ``source`` note says so on each row.
+_XAI = "docs.x.ai/docs/models, 2026-09-04; short-context tier (<200k prompt)"
+_ZAI = "docs.z.ai/guides/overview/pricing, 2026-09-04"
+_OPENAI_6 = "developers.openai.com/api/docs/pricing, 2026-09-04; short-context tier"
+
 PRICES: list[tuple[str, ModelPrice]] = [
     # ── xAI, reached through the openai_responses dialect ────────────────
     # Grok ids match no row in the OpenAI table, so these calls priced at
-    # nothing at all. No published rate was available to this repo, so the
-    # rows are deliberately empty: the model is recognized, the price is not.
-    ("grok-4.6", ModelPrice(source="xAI — rate not sourced; host must supply")),
+    # nothing at all until the rows below were sourced. Families the page
+    # does not list (grok-4, grok-3) stay recognized-but-unpriced.
+    ("grok-4.6", ModelPrice(input=2.00, cached_input=0.50, output=6.00, source=_XAI)),
+    ("grok-4.5", ModelPrice(input=2.00, cached_input=0.30, output=6.00, source=_XAI)),
+    ("grok-4.3", ModelPrice(input=1.25, cached_input=0.20, output=2.50, source=_XAI)),
+    ("grok-4.20", ModelPrice(input=1.25, cached_input=0.20, output=2.50, source=_XAI)),
+    ("grok-build", ModelPrice(input=1.00, cached_input=0.20, output=2.00, source=_XAI)),
     ("grok-4", ModelPrice(source="xAI — rate not sourced; host must supply")),
     ("grok-3", ModelPrice(source="xAI — rate not sourced; host must supply")),
     ("grok", ModelPrice(source="xAI — rate not sourced; host must supply")),
-    # ── Z.AI / GLM, reached through OpenRouter ───────────────────────────
-    (
-        "glm-5.3",
-        ModelPrice(source="Z.AI — rate not sourced; host must supply"),
-    ),
+    # ── Z.AI / GLM (direct or through OpenRouter) ─────────────────────────
+    # Longest prefix first: "glm-5.3-flash" must precede "glm-5.3", and the
+    # "-flashx"/"-airx" variants their plain siblings. The 5.3-flash rate is
+    # the page's promotional one (ends 2026-09-09).
+    ("glm-5.3-flash", ModelPrice(input=0.075, cached_input=0.015, output=0.25, source=_ZAI)),
+    ("glm-5.3", ModelPrice(input=1.40, cached_input=0.26, output=4.40, source=_ZAI)),
+    ("glm-5.2", ModelPrice(input=1.40, cached_input=0.26, output=4.40, source=_ZAI)),
+    ("glm-5.1", ModelPrice(input=1.40, cached_input=0.26, output=4.40, source=_ZAI)),
+    ("glm-5", ModelPrice(input=1.00, cached_input=0.20, output=3.20, source=_ZAI)),
+    ("glm-4.7-flashx", ModelPrice(input=0.07, cached_input=0.01, output=0.40, source=_ZAI)),
+    ("glm-4.7-flash", ModelPrice(input=0.0, cached_input=0.0, output=0.0, source=_ZAI + "; free")),
+    ("glm-4.7", ModelPrice(input=0.60, cached_input=0.11, output=2.20, source=_ZAI)),
+    ("glm-4.6", ModelPrice(input=0.60, cached_input=0.11, output=2.20, source=_ZAI)),
+    ("glm-4.5-airx", ModelPrice(input=1.10, cached_input=0.22, output=4.50, source=_ZAI)),
+    ("glm-4.5-air", ModelPrice(input=0.20, cached_input=0.03, output=1.10, source=_ZAI)),
+    ("glm-4.5-flash", ModelPrice(input=0.0, cached_input=0.0, output=0.0, source=_ZAI + "; free")),
+    ("glm-4.5-x", ModelPrice(input=2.20, cached_input=0.45, output=8.90, source=_ZAI)),
+    ("glm-4.5", ModelPrice(input=0.60, cached_input=0.11, output=2.20, source=_ZAI)),
     ("glm", ModelPrice(source="Z.AI — rate not sourced; host must supply")),
     # ── OpenAI ids newer than the openai_responses table ─────────────────
+    ("gpt-6-astra", ModelPrice(input=10.00, cached_input=1.00, output=50.00, source=_OPENAI_6)),
     (
         "gpt-6",
         ModelPrice(source="OpenAI — rate not sourced; host must supply"),

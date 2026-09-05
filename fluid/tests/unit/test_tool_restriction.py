@@ -107,9 +107,10 @@ def test_no_restriction_permits_everything() -> None:
     assert loop.allowed_tools is None and loop.disallowed_tools == []
     for name in ("Read", "Bash", "mcp__anything__at_all"):
         assert loop._tool_permitted(name) is True
-    # An unrestricted session publishes no filter — ToolSearch's view is the
-    # registry itself, exactly as before CE12.
-    assert "tool_filter" not in loop.ctx.extra
+    # An unrestricted session still publishes the capability half of the
+    # predicate — ToolSearch must not list a tool whose host injection is
+    # missing — and that half says yes to every plain builtin.
+    assert loop.ctx.extra["tool_filter"]("Read") is True
 
 
 def test_allowlist_is_exact_or_fnmatch() -> None:

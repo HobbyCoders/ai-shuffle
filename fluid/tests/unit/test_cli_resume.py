@@ -233,7 +233,10 @@ def test_cli_prompt_carries_environment_block_before_extra_blocks(tmp_path) -> N
     kinds = [s.kind for s in compiled.sections]
     assert "environment" in kinds
     assert kinds.index("environment") < kinds.index("extra")
-    assert "Working directory:" in compiled.text and "Today's date:" in compiled.text
+    assert "Working directory:" in compiled.text
+    # The date moved out of the compiled prefix: it rides each turn as a
+    # reminder instead, so a new day no longer invalidates the prompt cache.
+    assert "Today's date:" not in compiled.text
 
 
 # ─── /context, /tools, /skills ───────────────────────────────────────────────

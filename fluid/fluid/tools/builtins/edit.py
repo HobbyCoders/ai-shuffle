@@ -25,6 +25,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from fluid.tools import read_window
 from fluid.tools.builtins._util import read_text_preserving, resolve, write_text_with_newline
 from fluid.tools.fragments import NO_VERIFY_READBACK, READ_BEFORE_EDIT
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
@@ -400,6 +401,73 @@ def _result(path: Path, n: int, note: str) -> ToolOutcome:
     return ToolOutcome(text=f"{note}\n{line}" if note else line)
 
 
+# ─── read-window gate ────────────────────────────────────────────────────────
+# ``ctx.read_files`` proves the file was Read; the windows prove WHICH LINES
+# were. An audited code-mode cell ran ``_ = Read(path, limit=5)`` to unlock the
+# gate and then edited from memory; the edit missed, and the turn went on a
+# diagnosis a real Read would have made unnecessary. So the lines an edit
+# replaces must fall inside a delivered window — where windows are on record
+# at all (a resumed history from before they existed still passes on the
+# file-level ledger alone).
+
+
+def _line_count(text: str) -> int:
+    if not text:
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def _span_at(content: str, idx: int, old: str) -> tuple[int, int]:
+    """Inclusive 1-based line span of ``old`` found at ``idx``."""
+    start = content.count("\n", 0, idx) + 1
+    return start, start + max(_line_count(old) - 1, 0)
+
+
+def _spans_of(content: str, old: str, replace_all: bool) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    idx = content.find(old)
+    while idx != -1:
+        spans.append(_span_at(content, idx, old))
+        if not replace_all:
+            break
+        idx = content.find(old, idx + max(len(old), 1))
+    return spans
+
+
+def _window_rejection(
+    ctx: ToolCtx, path: Path, spans: list[tuple[int, int]]
+) -> ToolOutcome | None:
+    for start, end in spans:
+        if read_window.covers(ctx, str(path), start, end):
+            continue
+        seen = read_window.describe(ctx, str(path))
+        where = f"line {start}" if start == end else f"lines {start}-{end}"
+        offset = max(1, start - 5)
+        limit = end - offset + 6
+        return ToolOutcome(
+            text=(
+                f"edit REJECTED and nothing was written: old_string sits at "
+                f"{where} of {path}, outside the part of the file you have Read "
+                f"this session (lines {seen}). Call "
+                f'Read(file_path="{path}", offset={offset}, limit={limit}) and '
+                "copy old_string out of what it returns, byte-for-byte — an "
+                "old_string recalled from memory or assembled from Grep output "
+                "is how an edit lands on the wrong text. A Read whose result "
+                "you discard does not count as having seen those lines."
+            ),
+            is_error=True,
+        )
+    return None
+
+
+def _shift_windows(
+    ctx: ToolCtx, path: Path, spans: list[tuple[int, int]], new_lines: int
+) -> None:
+    """Keep the windows honest after a write: bottom-most replacement first."""
+    for start, end in sorted(spans, reverse=True):
+        read_window.shift(ctx, str(path), start, end - start + 1, new_lines)
+
+
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     path: Path = resolve(input["file_path"], ctx)
     if str(path) not in ctx.read_files:
@@ -445,11 +513,16 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 text=f"old_string is not unique ({count} matches); pass replace_all or add context",
                 is_error=True,
             )
+        spans = _spans_of(content, old, replace_all)
+        rejected = _window_rejection(ctx, path, spans)
+        if rejected is not None:
+            return rejected
         updated = content.replace(old, new) if replace_all else content.replace(old, new, 1)
         rejected = _syntax_rejection(path, content, updated)
         if rejected is not None:
             return rejected
         write_text_with_newline(path, updated, newline)
+        _shift_windows(ctx, path, spans, _line_count(new))
         return _result(path, count if replace_all else 1, "")
 
     # 2. The model copied Read's ``lineno<TAB>`` display prefix.
@@ -464,6 +537,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 )
             stripped_new = _strip_line_prefixes(new)
             repl = stripped_new if stripped_new is not None else new
+            spans = _spans_of(content, stripped_old, replace_all)
+            rejected = _window_rejection(ctx, path, spans)
+            if rejected is not None:
+                return rejected
             updated = (
                 content.replace(stripped_old, repl)
                 if replace_all
@@ -473,6 +550,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             if rejected is not None:
                 return rejected
             write_text_with_newline(path, updated, newline)
+            _shift_windows(ctx, path, spans, _line_count(repl))
             return _result(path, count if replace_all else 1, _FALLBACK_NOTE)
 
     # 3. Uniform leading-whitespace drift.
@@ -495,6 +573,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             )
         chosen = runs if replace_all else runs[:1]
         span = len(old_lines)
+        spans = [(start + 1, start + span) for start, _, _ in chosen]
+        rejected = _window_rejection(ctx, path, spans)
+        if rejected is not None:
+            return rejected
         for start, prefix, old_has_extra in reversed(chosen):
             file_lines[start:start + span] = _apply_prefix(new_lines, prefix, old_has_extra)
         updated = "\n".join(file_lines)
@@ -502,6 +584,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         if rejected is not None:
             return rejected
         write_text_with_newline(path, updated, newline)
+        _shift_windows(ctx, path, spans, len(new_lines))
         return _result(path, len(chosen), _FALLBACK_NOTE)
 
     # 4. No match — say why.
