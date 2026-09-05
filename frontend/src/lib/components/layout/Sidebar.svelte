@@ -211,6 +211,13 @@
 	// the transcript loads. The cross-device map carries the durable busy
 	// signal (backend runs table), so OR it in for the open session too.
 	const activeStreamingId = $derived($activeSession.isStreaming ? $activeSession.sessionId : null);
+	// Narrow task updates to an identity too: retained terminal tasks are not work,
+	// and ordinary active-session folds must not invalidate the whole row list.
+	const activeBackgroundWorkId = $derived(
+		$activeSession.activeTasks.some((task) => task.status === 'running')
+			? $activeSession.sessionId
+			: null
+	);
 	const streamingMap = $derived($streamingSessions);
 
 	function isStreaming(id: string): boolean {
@@ -415,6 +422,7 @@
 					session: s,
 					status: deriveStatus({
 						streaming: isStreaming(s.id),
+						backgroundWork: !!s.parked_task_kind || activeBackgroundWorkId === s.id,
 						attention: $backgroundPermissions.get(s.id) ?? null,
 						prState: s.pr_state ?? null,
 						openPr: !s.pr_state && !!(branch && prSet?.has(branch)),

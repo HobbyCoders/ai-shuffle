@@ -83,6 +83,7 @@ export function isLiveStatus(status: SessionCardStatus): boolean {
 /**
  * Resolve a card status from the signals the app already tracks:
  * - streaming (activeSession.isStreaming / streamingSessions map)
+ * - backgroundWork (durable parked marker or running tasks for the open session)
  * - attention (backgroundPermissions map entry — the session is parked on one
  *   or more permission/question prompts; `kind` drives WHICH prompt label shows)
  * - prState   (persisted session PR lifecycle: open / merged / closed)
@@ -96,6 +97,7 @@ export function isLiveStatus(status: SessionCardStatus): boolean {
  */
 export function deriveStatus(input: {
 	streaming: boolean;
+	backgroundWork?: boolean;
 	attention: { count: number; kind: 'permission' | 'question' } | null;
 	openPr?: boolean;
 	prState?: 'open' | 'merged' | 'closed' | null;
@@ -104,7 +106,7 @@ export function deriveStatus(input: {
 	if (input.attention && input.attention.count > 0) {
 		return input.attention.kind === 'question' ? 'has_question' : 'needs_permission';
 	}
-	if (input.streaming) return 'working';
+	if (input.streaming || input.backgroundWork) return 'working';
 	if (input.prState === 'open' || (!input.prState && input.openPr)) return 'pr';
 	if (input.prState === 'merged') return 'pr_merged';
 	if (input.isActive) return 'done';

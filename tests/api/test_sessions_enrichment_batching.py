@@ -317,7 +317,7 @@ class TestListEndpointsOffloadTheWholePipeline:
     """Each list endpoint does its DB work in exactly ONE thread hop."""
 
     @pytest.fixture
-    def client(self):
+    def client(self, request):
         with patch("app.api.sessions.database") as mock_db, \
                 patch("app.api.sessions_helpers.database", mock_db), \
                 patch("app.api.sessions_export.database", mock_db), \
@@ -328,6 +328,7 @@ class TestListEndpointsOffloadTheWholePipeline:
                 patch("app.api.sessions_helpers.get_api_user_from_request", return_value=None):
             row = {
                 "id": "s1",
+                "parked_task_kind": getattr(request, "param", None),
                 "created_at": "2026-08-28T10:00:00",
                 "updated_at": "2026-08-28T10:00:00",
             }
@@ -370,3 +371,18 @@ class TestListEndpointsOffloadTheWholePipeline:
             ["fetch_and_enrich_sessions"],
             ["fetch_and_enrich_search_results"],
         ), offloaded
+
+    @pytest.mark.parametrize("client", ["agent", "shell", None], indirect=True)
+    @pytest.mark.parametrize("path", [
+        "/api/v1/sessions",
+        "/api/v1/sessions/paginated",
+        "/api/v1/sessions/cursor",
+        "/api/v1/sessions/search/paginated?q=hello",
+    ])
+    def test_listing_preserves_parked_marker(self, client, path, request):
+        response = client.get(path)
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        rows = data if isinstance(data, list) else data["items"]
+        assert rows[0]["parked_task_kind"] == request.node.callspec.params["client"]

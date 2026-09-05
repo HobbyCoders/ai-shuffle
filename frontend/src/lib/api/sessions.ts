@@ -23,6 +23,8 @@ export interface Session {
 	project_id: string | null;
 	title: string | null;
 	status: string;
+	/** Durable background-work marker, including sessions not open on this device. */
+	parked_task_kind?: string | null;
 	is_active: boolean;
 	api_user_id?: string | null;
 	api_user_name?: string | null;

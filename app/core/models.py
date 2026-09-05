@@ -376,6 +376,7 @@ class Session(SessionBase):
     sdk_session_id: Optional[str] = None
     status: str = "active"
     is_active: bool = False
+    parked_task_kind: Optional[str] = None
     api_user_id: Optional[str] = None
     api_user_name: Optional[str] = None
     total_cost_usd: float = 0.0

@@ -18,6 +18,8 @@ import asyncio
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from app.core.provider.events import (
     AssistantMessage,
     ResultMessage,
@@ -540,3 +542,52 @@ async def test_persist_turn_end_state_clears_marker_when_idle_and_never_raises()
         await persist_turn_end_state("sess-idle")
 
     set_kind.assert_called_once_with("sess-idle", None)
+
+
+@pytest.mark.parametrize("kind", ["agent", "shell", None])
+@pytest.mark.parametrize("api_user_id", [None, "api-owner"])
+async def test_persist_turn_end_state_pushes_marker_after_write(kind, api_user_id):
+    from app.core.sync_engine import sync_engine
+    from app.core.task_registry import task_registry
+    from app.db import database
+
+    work = [{"kind": kind}] if kind else []
+    set_kind = MagicMock(return_value=True)
+
+    writes_at_broadcast = []
+
+    async def broadcast(**kwargs):
+        writes_at_broadcast.append(set_kind.call_count)
+
+    with patch.object(task_registry, "get_active_background_work", return_value=work), \
+         patch.object(database, "set_session_parked_task_kind", new=set_kind), \
+         patch.object(database, "get_session", return_value={"api_user_id": api_user_id}), \
+         patch.object(sync_engine, "broadcast_user_session_updated",
+                      new=AsyncMock(side_effect=broadcast)) as push:
+        await persist_turn_end_state("sess-park")
+
+    set_kind.assert_called_once_with("sess-park", kind)
+    assert writes_at_broadcast == [1]
+    push.assert_awaited_once_with(
+        user_id=api_user_id or "admin",
+        session_id="sess-park",
+        updates={"parked_task_kind": kind},
+    )
+
+
+@pytest.mark.parametrize("write_result", [False, RuntimeError("write failed")])
+async def test_persist_turn_end_state_does_not_push_failed_write(write_result):
+    from app.core.sync_engine import sync_engine
+    from app.core.task_registry import task_registry
+    from app.db import database
+
+    set_kind = MagicMock(return_value=write_result)
+    if isinstance(write_result, Exception):
+        set_kind.side_effect = write_result
+
+    with patch.object(task_registry, "get_active_background_work", return_value=[]), \
+         patch.object(database, "set_session_parked_task_kind", new=set_kind), \
+         patch.object(sync_engine, "broadcast_user_session_updated", new=AsyncMock()) as push:
+        await persist_turn_end_state("sess-idle")
+
+    push.assert_not_awaited()

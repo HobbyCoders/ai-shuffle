@@ -139,9 +139,22 @@ async def persist_turn_end_state(session_id: str) -> None:
 
         work = task_registry.get_active_background_work(session_id)
         kind = (work[0].get("kind") or "agent") if work else None
-        await asyncio.to_thread(
+        updated = await asyncio.to_thread(
             database.set_session_parked_task_kind, session_id, kind
         )
+        if updated:
+            try:
+                from app.core.sync_engine import sync_engine
+
+                session = await asyncio.to_thread(database.get_session, session_id)
+                if session:
+                    await sync_engine.broadcast_user_session_updated(
+                        user_id=session.get("api_user_id") or "admin",
+                        session_id=session_id,
+                        updates={"parked_task_kind": kind},
+                    )
+            except Exception:
+                logger.debug("broadcasting parked_task_kind failed", exc_info=True)
     except Exception:
         logger.debug("persisting parked_task_kind failed", exc_info=True)
 

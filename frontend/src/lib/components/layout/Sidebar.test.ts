@@ -26,7 +26,7 @@ const mocks = vi.hoisted(() => {
 		loadMoreSessions: vi.fn(),
 		projects: store<unknown[]>([]),
 		clusterProjects: store<unknown[]>([]),
-		activeSession: store({ sessionId: null as string | null, isStreaming: false }),
+		activeSession: store({ sessionId: null as string | null, isStreaming: false, activeTasks: [] as { status: string }[] }),
 		streamingSessions: store(new Set<string>()),
 		backgroundPermissions: store(new Map<string, { count: number; kind: 'permission' | 'question' }>()),
 		activeView: store<unknown>(null),
@@ -204,7 +204,7 @@ beforeEach(() => {
 	mocks.sessionsHasMore.set(false);
 	mocks.sessionsLoadingMore.set(false);
 	mocks.loadMoreSessions.mockClear();
-	mocks.activeSession.set({ sessionId: null, isStreaming: false });
+	mocks.activeSession.set({ sessionId: null, isStreaming: false, activeTasks: [] });
 	mocks.streamingSessions.set(new Set());
 	mocks.backgroundPermissions.set(new Map());
 	// Reset the CALL COUNT too: without this the counter accumulates across
@@ -409,7 +409,7 @@ describe('Sidebar session groups', () => {
 		// the SSE replay re-derives it, which flashed an open working session's
 		// card to Done. The cross-device streaming map carries the durable busy
 		// signal and must keep the card Working through the load window.
-		mocks.activeSession.set({ sessionId: 'active', isStreaming: false });
+		mocks.activeSession.set({ sessionId: 'active', isStreaming: false, activeTasks: [] });
 		mocks.streamingSessions.set(new Set(['active']));
 
 		render(Sidebar, { props: sidebarProps });
@@ -496,9 +496,55 @@ describe('Sidebar ordering (must never change silently)', () => {
 	});
 });
 
+describe('Sidebar background work', () => {
+	it.each(['agent', 'shell'])('keeps an unopened parked %s session Working until its marker clears', async (kind) => {
+		const parked = session('parked', 'Parked chat', 'visible-project', true, false, { parked_task_kind: kind });
+		mocks.sessions.set([parked]);
+		render(Sidebar, { props: sidebarProps });
+		expect(cardFrame('Parked chat').textContent).toContain('Working');
+		expect(cardFrame('Parked chat').textContent).not.toContain('Done');
+
+		mocks.sessions.set([{ ...parked, parked_task_kind: null }]);
+		await tick();
+		expect(cardFrame('Parked chat').textContent).toContain('Done');
+		expect(cardFrame('Parked chat').textContent).not.toContain('Working');
+	});
+
+	it('uses live running tasks only for the open session and preserves fold performance', async () => {
+		mocks.activeSession.set({ sessionId: 'active', isStreaming: false, activeTasks: [{ status: 'running' }] });
+		render(Sidebar, { props: sidebarProps });
+		await tick();
+		expect(cardFrame('Active chat').textContent).toContain('Working');
+		expect(cardFrame('Settled chat').textContent).not.toContain('Working');
+		const before = vi.mocked(sessionTimestamp).mock.calls.length;
+		for (let i = 0; i < 5; i++) {
+			mocks.activeSession.set({ sessionId: 'active', isStreaming: false, activeTasks: [{ status: 'running' }] });
+			await tick();
+		}
+		expect(vi.mocked(sessionTimestamp).mock.calls.length).toBe(before);
+
+		mocks.activeSession.set({ sessionId: 'active', isStreaming: false, activeTasks: [{ status: 'completed' }, { status: 'error' }, { status: 'killed' }] });
+		await tick();
+		expect(cardFrame('Active chat').textContent).toContain('Done');
+		expect(cardFrame('Active chat').textContent).not.toContain('Working');
+		expect(vi.mocked(sessionTimestamp).mock.calls.length).toBeGreaterThan(before);
+	});
+
+	it.each([
+		['permission', 'Needs permission'],
+		['question', 'Has question'],
+	] as const)('keeps %s attention ahead of parked work', (kind, label) => {
+		mocks.sessions.set([session('active', 'Active chat', 'visible-project', true, false, { parked_task_kind: 'agent' })]);
+		mocks.backgroundPermissions.set(new Map([['active', { count: 1, kind }]]));
+		render(Sidebar, { props: sidebarProps });
+		expect(cardFrame('Active chat').textContent).toContain(label);
+		expect(cardFrame('Active chat').textContent).not.toContain('Working');
+	});
+});
+
 describe('Sidebar streaming folds (R2)', () => {
 	it('does not rebuild the row list when $activeSession folds mid-stream', async () => {
-		mocks.activeSession.set({ sessionId: 'active', isStreaming: true });
+		mocks.activeSession.set({ sessionId: 'active', isStreaming: true, activeTasks: [] });
 		render(Sidebar, { props: sidebarProps });
 		await tick();
 
@@ -509,7 +555,7 @@ describe('Sidebar streaming folds (R2)', () => {
 		// down a NEW state object with the same streaming identity — the sidebar
 		// used to re-filter, re-map and re-sort the whole list on every one.
 		for (let i = 0; i < 5; i++) {
-			mocks.activeSession.set({ sessionId: 'active', isStreaming: true });
+			mocks.activeSession.set({ sessionId: 'active', isStreaming: true, activeTasks: [] });
 			await tick();
 		}
 		expect(vi.mocked(sessionTimestamp).mock.calls.length).toBe(before);
@@ -522,7 +568,7 @@ describe('Sidebar streaming folds (R2)', () => {
 	});
 
 	it('still shows Working from the cross-device map alone', async () => {
-		mocks.activeSession.set({ sessionId: null, isStreaming: false });
+		mocks.activeSession.set({ sessionId: null, isStreaming: false, activeTasks: [] });
 		mocks.streamingSessions.set(new Set(['settled']));
 
 		render(Sidebar, { props: sidebarProps });

@@ -114,6 +114,21 @@ describe('isRemovedDeviceSession', () => {
 describe('deriveStatus', () => {
 	const base = { streaming: false, attention: null as { count: number; kind: 'permission' | 'question' } | null, isActive: true };
 
+	it('keeps background work ahead of PR and done fallbacks', () => {
+		for (const prState of [null, 'open', 'merged', 'closed'] as const) {
+			expect(deriveStatus({ ...base, backgroundWork: true, prState, openPr: true })).toBe('working');
+		}
+		expect(deriveStatus({ ...base, backgroundWork: false })).toBe('done');
+		expect(deriveStatus({ ...base, backgroundWork: false, prState: 'open' })).toBe('pr');
+		expect(deriveStatus({ ...base, backgroundWork: false, prState: 'merged' })).toBe('pr_merged');
+		expect(deriveStatus({ ...base, backgroundWork: true, isActive: false })).toBe('working');
+	});
+
+	it.each(['permission', 'question'] as const)('keeps %s ahead of background work', (kind) => {
+		expect(deriveStatus({ ...base, backgroundWork: true, attention: { count: 1, kind } }))
+			.toBe(kind === 'question' ? 'has_question' : 'needs_permission');
+	});
+
 	it('shows Working while streaming', () => {
 		expect(deriveStatus({ ...base, streaming: true })).toBe('working');
 	});
