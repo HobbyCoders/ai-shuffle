@@ -94,6 +94,7 @@ def mock_settings():
     """Create mock settings."""
     mock_settings_obj = MagicMock()
     mock_settings_obj.workspace_dir = Path("/test/workspace")
+    mock_settings_obj.effective_workspace_dir = mock_settings_obj.workspace_dir
     return mock_settings_obj
 
 

@@ -236,7 +236,11 @@ export function deriveGitStage(input: GitStageInput): GitStage {
 	if (input.mode === 'chat' || input.mode === 'voice') return 'none';
 	if (!input.hasProject) return 'none';
 	if (input.prState === 'open') return 'pr';
-	if (input.git && !input.git.isRepo) return 'none';
+	if (input.git && !input.git.isRepo) {
+		if (input.prState === 'merged') return 'merged';
+		if (input.prState === 'closed') return 'closed';
+		return 'none';
+	}
 	if (!input.git) {
 		if (input.prState === 'merged') return 'merged';
 		if (input.prState === 'closed') return 'closed';

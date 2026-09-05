@@ -293,6 +293,7 @@ class TestGetProjectPath:
                  patch("app.api.common.get_api_user_from_request", return_value=None):
                 mock_db.get_project.return_value = mock_project_data
                 mock_settings.workspace_dir = workspace_path
+                mock_settings.effective_workspace_dir = workspace_path
 
                 result = get_project_path(mock_request, "test-project-id")
 
@@ -329,6 +330,7 @@ class TestGetProjectPath:
                  patch("app.api.common.get_api_user_from_request", return_value=None):
                 mock_db.get_project.return_value = mock_project_data
                 mock_settings.workspace_dir = workspace_path
+                mock_settings.effective_workspace_dir = workspace_path
 
                 with pytest.raises(HTTPException) as exc_info:
                     get_project_path(mock_request, "test-project-id")
@@ -358,6 +360,7 @@ class TestGetRepoForProject:
                  patch("app.api.github.github_service") as mock_github:
                 mock_db.get_project.return_value = mock_project_data
                 mock_settings.workspace_dir = workspace_path
+                mock_settings.effective_workspace_dir = workspace_path
                 mock_github.get_repo_from_remote.return_value = "owner/repo"
 
                 result = await get_repo_for_project(mock_request, "test-project-id")
@@ -382,6 +385,7 @@ class TestGetRepoForProject:
                  patch("app.api.github.github_service") as mock_github:
                 mock_db.get_project.return_value = mock_project_data
                 mock_settings.workspace_dir = workspace_path
+                mock_settings.effective_workspace_dir = workspace_path
                 mock_github.get_repo_from_remote.return_value = None
 
                 with pytest.raises(HTTPException) as exc_info:

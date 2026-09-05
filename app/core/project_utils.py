@@ -6,7 +6,7 @@ Supports both absolute paths (local mode) and workspace-relative paths (Docker m
 
 Convention:
 - Absolute paths: start with '/' (Unix) or contain ':\\' or ':/' (Windows)
-- Relative paths: resolved against settings.workspace_dir
+- Relative paths: resolved against settings.effective_workspace_dir
 """
 
 import sys
@@ -51,7 +51,7 @@ def get_project_working_dir(project: Union[dict, str]) -> str:
     if is_absolute_project_path(path):
         return path
 
-    return str(settings.workspace_dir / path)
+    return str(settings.effective_workspace_dir / path)
 
 
 def get_project_working_dir_as_path(project: Union[dict, str]) -> Path:
@@ -99,8 +99,8 @@ def get_worktree_working_dir(worktree: dict) -> str:
     if is_absolute_project_path(worktree_path):
         return worktree_path
 
-    # Otherwise resolve against workspace_dir (current behavior)
-    return str(settings.workspace_dir / worktree_path)
+    # Otherwise resolve against the configured workspace
+    return str(settings.effective_workspace_dir / worktree_path)
 
 
 def get_worktree_working_dir_as_path(worktree: dict) -> Path:
@@ -178,4 +178,4 @@ def get_project_parent_dir(project: Union[dict, str]) -> Path:
     if is_absolute_project_path(path):
         return Path(path).parent
 
-    return settings.workspace_dir
+    return settings.effective_workspace_dir

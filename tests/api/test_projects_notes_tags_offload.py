@@ -155,6 +155,7 @@ def sample_note():
 def projects_client(temp_dir):
     mock_settings = MagicMock()
     mock_settings.workspace_dir = temp_dir
+    mock_settings.effective_workspace_dir = temp_dir
     mock_settings.effective_instance_id = "inst-1"
 
     with patch("app.api.projects.database") as mock_db, \

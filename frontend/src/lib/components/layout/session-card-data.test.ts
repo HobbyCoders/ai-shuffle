@@ -267,6 +267,17 @@ describe('deriveGitStage', () => {
 		expect(deriveGitStage({ ...repo, git: { ...clean, isRepo: false } })).toBe('none');
 	});
 
+	it.each(['merged', 'closed'] as const)(
+		'keeps a persisted %s PR visible when this install cannot find the checkout',
+		(prState) => {
+			const sharedSession = { ...repo, prState };
+			expect(deriveGitStage(sharedSession)).toBe(prState);
+			expect(
+				deriveGitStage({ ...sharedSession, git: { ...clean, isRepo: false } })
+			).toBe(prState);
+		}
+	);
+
 	it('lets an open PR own the glyph over a dirty tree', () => {
 		const dirty = { ...clean, hasChanges: true };
 		expect(deriveGitStage({ ...repo, prState: 'open', git: dirty })).toBe('pr');

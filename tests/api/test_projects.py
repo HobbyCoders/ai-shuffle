@@ -44,6 +44,7 @@ def mock_settings(temp_dir):
     """Mock settings with temporary workspace directory."""
     mock_settings_obj = MagicMock()
     mock_settings_obj.workspace_dir = temp_dir
+    mock_settings_obj.effective_workspace_dir = temp_dir
     return mock_settings_obj
 
 

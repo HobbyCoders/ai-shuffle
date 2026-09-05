@@ -49,6 +49,7 @@ def mock_database():
 def mock_settings():
     mock = MagicMock()
     mock.workspace_dir = Path("/test/workspace")
+    mock.effective_workspace_dir = mock.workspace_dir
     return mock
 
 

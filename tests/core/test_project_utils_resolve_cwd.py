@@ -10,6 +10,11 @@ is controlled through the injectable ``is_dir`` predicate — no filesystem, no
 ``Path`` patching.
 """
 
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
 import app.core.project_utils as pu
 from app.core.project_utils import resolve_existing_worktree_cwd
 
@@ -31,6 +36,32 @@ def _exists(*paths):
 
 
 # ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("resolver, project", [
+    (pu.get_project_working_dir, {"path": "ai-shuffle"}),
+    (pu.get_project_working_dir, "ai-shuffle"),
+    (pu.get_worktree_working_dir, {"worktree_path": "ai-shuffle"}),
+])
+def test_relative_path_uses_configured_workspace(monkeypatch, tmp_path, resolver, project):
+    default = tmp_path / "default-workspace"
+    configured = tmp_path / "configured-workspace"
+    monkeypatch.setattr(
+        pu,
+        "settings",
+        SimpleNamespace(workspace_dir=default, effective_workspace_dir=configured),
+    )
+
+    assert Path(resolver(project)) == configured / "ai-shuffle"
+    assert pu.get_project_parent_dir("ai-shuffle") == configured
+
+
+@pytest.mark.parametrize("path", ["/repos/project", "D:/repos/project", r"D:\repos\project"])
+def test_absolute_paths_ignore_workspace(monkeypatch, path):
+    monkeypatch.setattr(pu, "settings", SimpleNamespace())
+
+    assert pu.get_project_working_dir({"path": path}) == path
+    assert pu.get_worktree_working_dir({"worktree_path": path}) == path
+
 
 def test_row_path_wins_when_both_exist():
     result = resolve_existing_worktree_cwd(
