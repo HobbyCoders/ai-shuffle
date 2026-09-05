@@ -28,7 +28,7 @@ The single-reader invariant is STRUCTURAL: a per-session ``asyncio.Lock``
 (:mod:`app.core.idle_reader`), so they can never read the pooled client
 concurrently. There is deliberately NO ``deferred_delivery`` concept.
 
-Nothing calls this module yet — the transport/caller wiring is commits A6/A7.
+All turn sources use this runtime through the turn manager and scheduler.
 """
 
 from __future__ import annotations
@@ -299,6 +299,9 @@ def register_scheduler(hook: Optional[Callable[[str, str, str], Any]]) -> None:
 
 async def _fire_on_turn_settled(session_id: str, turn_id: str, outcome: str) -> None:
     """Fire the registered settlement callback, if any. Never raises."""
+    if outcome in ("completed", "aborted"):
+        from app.core.lifecycle_events import enqueue
+        enqueue(outcome, session_id, turn_id)
     hook = _on_turn_settled
     if hook is None:
         return
@@ -718,6 +721,8 @@ class SessionRuntime:
             # boot-wired executor → get_live_runtime(sid).interrupt(mode)) can
             # reach us. Self-guarded pop in the outer finally.
             _live_runtimes[sid] = self
+            from app.core.lifecycle_events import enqueue
+            enqueue("started", sid, tid)
 
             # A fresh turn re-arms computer-use for the session (clears the
             # halt its previous Stop set) so the new agent can act again.

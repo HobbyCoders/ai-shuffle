@@ -12,14 +12,14 @@ import DOMPurify, { type Config } from 'dompurify';
 // - Allow common HTML from markdown rendering
 // - Allow inline styles (needed for syntax highlighting, media)
 // - Allow data: URIs for base64 images
-// - onclick is allowed in ADD_ATTR but restricted by the afterSanitizeAttributes
-//   hook below to only app-generated buttons (code-copy-btn, image overlays)
+// - Event handlers are never accepted from rendered content. App interactions
+//   use delegated listeners rather than trusting CSS classes as provenance.
 const PURIFY_CONFIG = {
 	ADD_TAGS: ['svg', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'g', 'defs', 'use'],
 	ADD_ATTR: [
 		'viewBox', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin',
 		'd', 'cx', 'cy', 'r', 'x', 'y', 'width', 'height', 'points',
-		'onclick', 'class', 'style', 'title', 'target', 'rel',
+		'class', 'style', 'title', 'target', 'rel',
 		'data-language', 'data-filename', 'data-line-numbers',
 		// Inline media players (<audio>/<video>) + download links — see media.ts
 		'controls', 'controlslist', 'preload', 'playsinline', 'loop', 'muted', 'autoplay', 'download', 'type', 'aria-label'
@@ -28,19 +28,6 @@ const PURIFY_CONFIG = {
 	// Allow blob: and data: URIs for images/media
 	ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|blob|data):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i,
 } satisfies Config;
-
-// Restrict onclick to only app-generated buttons (code copy, image download overlays).
-// Without this, any injected HTML with onclick would execute — e.g., via LLM prompt injection.
-const ALLOWED_ONCLICK_CLASSES = ['code-copy-btn', 'image-overlay-btn', 'image-download-btn'];
-DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-	if (node.hasAttribute('onclick')) {
-		const isAllowed = node.tagName === 'BUTTON' &&
-			ALLOWED_ONCLICK_CLASSES.some(cls => node.classList.contains(cls));
-		if (!isAllowed) {
-			node.removeAttribute('onclick');
-		}
-	}
-});
 
 /**
  * Sanitize HTML string to prevent XSS attacks.

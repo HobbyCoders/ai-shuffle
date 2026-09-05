@@ -251,6 +251,10 @@ Delete a preference.
 
 ## Generated Media
 
+The listing and by-name routes read the shared workspace and return 403 for a
+project-scoped API key. Scoped keys use the `by-path` routes with a path inside
+their own project, worktree or checkout directories.
+
 ### GET /api/generated-images/
 
 List AI-generated images.
@@ -259,17 +263,26 @@ List AI-generated images.
 
 List AI-generated videos.
 
+### GET /api/generated-images/by-path?path=...
+
+Retrieve a generated image by absolute path. Also available for audio and videos.
+
 ## Files
 
 Serve files referenced by sessions (read-only).
 
 ### GET /api/files/
 
-List served files.
+List served files. Unscoped keys only.
 
 ### GET /api/files/{filename}
 
-Retrieve a served file by name.
+Retrieve a served file by name. Unscoped keys only.
+
+### GET /api/files/by-path?path=...
+
+Retrieve a served file by absolute path. This is the route the agent's chat
+download links use, and the only file route a project-scoped key can read.
 
 ## Templates
 

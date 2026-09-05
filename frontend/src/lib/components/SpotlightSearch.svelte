@@ -20,6 +20,9 @@
     onSelectAgent: (id: string) => void;
     onNewChat: () => void;
     onOpenSettings: () => void;
+    onImportSession?: () => void;
+    onManageTags?: () => void;
+    onManageKnowledge?: () => void;
   }
 
   let {
@@ -30,7 +33,10 @@
     onSelectSession,
     onSelectAgent,
     onNewChat,
-    onOpenSettings
+    onOpenSettings,
+    onImportSession,
+    onManageTags,
+    onManageKnowledge
   }: Props = $props();
 
   let searchQuery = $state('');
@@ -53,7 +59,10 @@
   // Quick actions (derived so prop references stay reactive)
   const quickActions = $derived([
     { id: 'new-chat', label: 'New conversation', icon: 'plus', action: onNewChat },
-    { id: 'settings', label: 'Open settings', icon: 'settings', action: onOpenSettings }
+    { id: 'settings', label: 'Open settings', icon: 'settings', action: onOpenSettings },
+    ...(onImportSession ? [{ id: 'import-session', label: 'Import session', icon: 'plus', action: onImportSession }] : []),
+    ...(onManageTags ? [{ id: 'manage-tags', label: 'Manage session tags', icon: 'settings', action: onManageTags }] : []),
+    ...(currentProjectId && onManageKnowledge ? [{ id: 'manage-knowledge', label: 'Manage project knowledge', icon: 'settings', action: onManageKnowledge }] : [])
   ]);
 
   const trimmedQuery = $derived(searchQuery.trim());

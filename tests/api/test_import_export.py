@@ -546,7 +546,7 @@ class TestImportFileUpload:
 
     def test_import_file_wrong_version(self, client, mock_database):
         """Should return 400 for unsupported version."""
-        data = {"version": "2.0", "export_type": "all"}
+        data = {"version": "99.0", "export_type": "all"}
         file_content = json.dumps(data).encode('utf-8')
         files = {"file": ("v2.json", BytesIO(file_content), "application/json")}
 
@@ -771,7 +771,7 @@ class TestImportJsonBody:
         assert response.status_code == 200
         result = response.json()
         assert result["success"] is True
-        assert result["subagents_skipped"] == 1
+        assert result["subagents_skipped"] == 0  # Duplicate legacy projection is ignored
         assert result["profiles_skipped"] == 1
 
     def test_import_json_overwrite_existing(self, client, mock_database):
@@ -797,7 +797,7 @@ class TestImportJsonBody:
         assert response.status_code == 200
         result = response.json()
         assert result["success"] is True
-        assert result["subagents_updated"] == 1
+        assert result["subagents_updated"] == 0  # Duplicate legacy projection is ignored
         assert result["profiles_updated"] == 1
 
     def test_import_json_subagent_db_error(self, client, mock_database):
@@ -1340,15 +1340,8 @@ class TestEdgeCases:
 
         assert response.status_code == 200
 
-        # Verify update_subagent was called with correct args
-        mock_database.update_subagent.assert_called_once_with(
-            subagent_id="existing",
-            name="Updated",
-            description="Updated desc",
-            prompt="Updated prompt",
-            tools=["new-tool"],
-            model="new-model"
-        )
+        # The full config wins: never overwrite it through the lossy projection.
+        mock_database.update_subagent.assert_not_called()
 
         # Verify update_profile was called with correct args
         mock_database.update_profile.assert_called_once_with(

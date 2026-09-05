@@ -1,7 +1,7 @@
 """Guards for the SDK-message → ProviderEvent mirror boundary.
 
 The streaming loops dispatch exclusively on the mirror classes in
-``app/core/provider/events.py``; ``to_provider_event`` (claude_adapter) is the
+``app/core/provider/events.py``; ``to_provider_event`` (sdk_event_translation) is the
 single choke point that converts real claude_agent_sdk messages at every
 consumption boundary (adapter.receive_events(), the headless query() path,
 idle_reader). These tests pin two properties:
@@ -30,7 +30,7 @@ from claude_agent_sdk.types import (
 )
 
 from app.core.provider import events as pe
-from app.core.provider.claude_adapter import to_provider_event
+from app.core.provider.sdk_event_translation import to_provider_event
 
 
 def test_assistant_message_round_trip():

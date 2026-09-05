@@ -752,7 +752,7 @@
 		inputValue = editorRef?.getText() ?? '';
 	}
 
-	// Drag and drop file upload (inline since DragDropOverlay uses alert() for errors)
+	// Drag and drop file upload with errors shown by the composer.
 	let isDragging = $state(false);
 
 	function handleDragEnter(e: DragEvent) {

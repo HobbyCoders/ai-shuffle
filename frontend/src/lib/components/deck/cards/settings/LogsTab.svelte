@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { fade } from 'svelte/transition';
+	import { onMount } from 'svelte';
+	import { activeView } from '$lib/stores/layout.svelte';
 	import { api, fetchAndDownload } from '$lib/api/client';
 	import './settings-shared.css';
 
@@ -31,6 +33,13 @@
 	let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 	let refreshInterval: ReturnType<typeof setInterval> | null = null;
 	let initialLoadDone = $state(false);
+	let pageVisible = $state(true);
+	onMount(() => {
+		const updateVisibility = () => { pageVisible = !document.hidden; };
+		updateVisibility();
+		document.addEventListener('visibilitychange', updateVisibility);
+		return () => document.removeEventListener('visibilitychange', updateVisibility);
+	});
 
 	const LEVEL_ORDER = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'];
 
@@ -110,12 +119,16 @@
 		};
 	});
 
-	// Fetch when filters change
+	// Keep-alive panels remain mounted offscreen. Poll only while Settings and
+	// the browser tab are visible, and refresh immediately on returning.
 	$effect(() => {
 		// Track reactive dependencies
 		selectedLevel;
 		debouncedSearch;
+		if ($activeView?.type !== 'settings' || !pageVisible) return;
 		fetchLogs();
+		refreshInterval = setInterval(() => { void fetchLogs(); }, 10_000);
+		return () => { if (refreshInterval) clearInterval(refreshInterval); };
 	});
 
 	// Auto-scroll to bottom on initial load
@@ -129,16 +142,6 @@
 			});
 			initialLoadDone = true;
 		}
-	});
-
-	// Auto-refresh every 10 seconds
-	$effect(() => {
-		refreshInterval = setInterval(() => {
-			fetchLogs();
-		}, 10_000);
-		return () => {
-			if (refreshInterval) clearInterval(refreshInterval);
-		};
 	});
 
 	let displayedLogs = $derived(

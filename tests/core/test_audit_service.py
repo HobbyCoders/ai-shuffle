@@ -112,6 +112,11 @@ class TestAuditEventType:
 class TestGetClientIp:
     """Test client IP extraction from request."""
 
+    def test_public_client_cannot_spoof_audit_address(self, mock_request):
+        mock_request.client.host = "8.8.4.4"
+        mock_request.headers = {"X-Forwarded-For": "127.0.0.1", "X-Real-IP": "127.0.0.1"}
+        assert get_client_ip(mock_request) == "8.8.4.4"
+
     def test_get_client_ip_from_x_forwarded_for(self, mock_request_with_proxy_headers):
         """Should extract first IP from X-Forwarded-For header."""
         ip = get_client_ip(mock_request_with_proxy_headers)

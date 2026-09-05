@@ -110,6 +110,47 @@ def is_path_served(file_path: Path, workspace: Path) -> bool:
     return any(is_path_safe(file_path, root) for root in _registered_serve_roots())
 
 
+def require_file_access(file_path: Path, workspace: Path, request: Optional[Request]) -> None:
+    """Authorize a served path against the caller's project, including checkouts.
+
+    Unscoped authenticated callers keep the existing served-root behavior.
+    Scoped API users never inherit the global workspace or another project's roots.
+    The caller offloads this synchronous DB/path work with ``run_sync``.
+    """
+    api_user = get_api_user_from_request(request) if request is not None else None
+    project_id = (api_user or {}).get("project_id")
+    if not project_id:
+        allowed = is_path_served(file_path, workspace)
+    else:
+        allowed = False
+        try:
+            project = database.get_project(project_id)
+            if project:
+                roots = [get_project_working_dir_as_path(project)]
+                repo = database.get_git_repository_by_project(project_id)
+                if repo:
+                    roots.extend(
+                        get_worktree_working_dir_as_path(row)
+                        for row in database.get_worktrees_for_repository(repo["id"])
+                    )
+                from app.core import project_resolver
+                from app.db import checkouts, projects_v2
+                origin = project_resolver.origin_for_legacy_project(project)
+                logical = projects_v2.get_project_v2_by_origin(origin)
+                if logical:
+                    roots.extend(
+                        Path(row["path"])
+                        for row in checkouts.list_checkouts(logical["id"])
+                        if row.get("runner_id") in (settings.effective_instance_id, "")
+                        and row.get("path")
+                    )
+                allowed = any(is_path_safe(file_path, root) for root in roots)
+        except Exception:
+            logger.warning("Could not resolve scoped file roots; denying access", exc_info=True)
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Access denied: file is outside workspace")
+
+
 # =============================================================================
 # File Utilities
 # =============================================================================

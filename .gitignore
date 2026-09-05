@@ -81,8 +81,7 @@ frontend/tests/screenshots/
 PLAN.md
 plan.md
 
-# Tools - include compiled output but not node_modules
-!tools/dist/
+# Tools are compiled from source in local setup and image/release builds.
 tools/node_modules/
 /uploads
 

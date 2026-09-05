@@ -10,4 +10,5 @@
 # requirements.txt, best-effort: a failure here disables computer-use but does not
 # block startup.
 mss>=9.0.1  # fast cross-platform screenshots + multi-monitor enumeration
-pynput>=1.7.6  # mouse/keyboard control (Pillow already pulled in transitively)
+pynput>=1.7.6  # mouse/keyboard control
+Pillow>=12.1.1  # screenshot resizing and PNG encoding; not supplied by mss/pynput

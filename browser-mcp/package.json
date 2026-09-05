@@ -11,12 +11,12 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc",
-    "clean": "rm -rf dist",
+    "build": "node scripts/clean.mjs && tsc",
+    "clean": "node scripts/clean.mjs",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublish": "npm run build"
+    "prepack": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

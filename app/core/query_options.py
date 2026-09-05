@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from claude_agent_sdk import ClaudeAgentOptions, AgentDefinition
+from claude_agent_sdk import ClaudeAgentOptions
 
 from app.db import database
 from app.core.config import settings
@@ -40,7 +40,6 @@ from app.core.mcp_config import (  # noqa: F401
 )
 from app.core.agent_config import (  # noqa: F401
     resolve_note_references,
-    resolve_subagent_frontmatter_model,
 )
 from app.core.environment import (  # noqa: F401
     DEFAULT_SECURITY_INSTRUCTIONS,
@@ -597,14 +596,14 @@ def build_options_from_profile(
     hooks: Optional[Dict[str, list]] = None,
     api_user_id: Optional[str] = None,
     session_id: Optional[str] = None,
-) -> tuple[ClaudeAgentOptions, Optional[Dict[str, AgentDefinition]]]:
+) -> tuple[ClaudeAgentOptions, None]:
     """
     Convert a profile to ClaudeAgentOptions with all available options.
 
     Returns:
         Tuple of (ClaudeAgentOptions, agents_dict)
         - ClaudeAgentOptions: SDK options with agents included for Docker/Linux, excluded for Windows
-        - agents_dict: Dict of agent_id -> AgentDefinition, or None if no agents
+        - agents_dict: Always None; agents are dispatched through the harness
 
     Args:
         profile: Profile configuration dict
@@ -891,8 +890,7 @@ def build_options_from_profile(
 
     # SDK AgentDefinitions stay retired (P2c, ruling A6): the CLI's native
     # Task/Agent/Workflow tools are banned on the delegated leg (harness_adapter
-    # passes --disallowed-tools) and ``ClaudeAgentOptions.agents`` is read only
-    # by the retired ClaudeAgentAdapter, so ``agents_dict`` is permanently None.
+    # passes --disallowed-tools), so ``agents_dict`` is permanently None.
     #
     # ``enabled_agents``/``agent_invoke_mode`` are now a CONTEXT-DECLARATION
     # concern (2026-08-17 ruling, superseding A10) — see app.core.agent_context.
@@ -1521,10 +1519,8 @@ def build_options_from_profile(
         # Token budget management (SDK 0.1.51+)
         **({"task_budget": config["task_budget"]} if config.get("task_budget") else {}),
 
-        # Subagents - always pass programmatically so AgentDefinition.tools
-        # whitelist is enforced by the SDK.  Filesystem .claude/agents/ files
-        # are still written on Windows for prompt/description discovery, but
-        # only the programmatic path restricts tool access at runtime.
+        # The harness owns subagent dispatch; SDK-native agent definitions
+        # remain disabled on every platform.
         agents=agents_dict,
 
         # Permission callback - set if callback provided (handles AskUserQuestion in all modes)

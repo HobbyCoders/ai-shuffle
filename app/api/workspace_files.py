@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from app.core.config import settings
 from app.db.async_database import run_sync
 from app.api.auth import require_auth
+from app.api.common import require_file_access
 # The size cap comes from the project upload rather than being restated here:
 # the composer's attach button posts to one endpoint or the other depending on
 # the session's lane, and a file the user can attach in one lane and not the
@@ -88,8 +89,19 @@ def validate_workspace_path(path: str) -> Path:
     return full_path
 
 
+async def authorize_workspace_path(request: Request, full_path: Path) -> None:
+    """Keep a project-scoped API key inside its own project directories.
+
+    validate_workspace_path only stops traversal out of the workspace; a key
+    scoped to one project must not reach the sibling projects that live under
+    the same workspace root. Unscoped callers keep whole-workspace access.
+    """
+    await run_sync(require_file_access, full_path, settings.effective_workspace_dir.resolve(), request)
+
+
 @router.get("/files")
 async def list_workspace_files(
+    request: Request,
     path: str = "",
     show_hidden: bool = False,
     token: str = Depends(require_auth)
@@ -101,6 +113,7 @@ async def list_workspace_files(
         full_path = validate_workspace_path(path)
     else:
         full_path = workspace
+    await authorize_workspace_path(request, full_path)
 
     if not full_path.exists():
         raise HTTPException(
@@ -170,6 +183,7 @@ async def upload_file(
         target_dir = validate_workspace_path(path)
     else:
         target_dir = workspace
+    await authorize_workspace_path(request, target_dir)
 
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -222,11 +236,13 @@ async def upload_file(
 
 @router.get("/files/download")
 async def download_file(
+    request: Request,
     path: str = Query(..., description="Path to file relative to workspace root"),
     token: str = Depends(require_auth)
 ):
     """Download a file from the workspace."""
     full_path = validate_workspace_path(path)
+    await authorize_workspace_path(request, full_path)
 
     if not full_path.exists():
         raise HTTPException(
@@ -249,6 +265,7 @@ async def download_file(
 
 @router.post("/files/folder")
 async def create_folder(
+    request: Request,
     body: CreateFolderRequest,
     path: str = Query(default="", description="Parent directory path"),
     token: str = Depends(require_auth)
@@ -267,6 +284,7 @@ async def create_folder(
         folder_path = validate_workspace_path(f"{path}/{folder_name}")
     else:
         folder_path = validate_workspace_path(folder_name)
+    await authorize_workspace_path(request, folder_path)
 
     if folder_path.exists():
         raise HTTPException(
@@ -292,6 +310,7 @@ async def create_folder(
 
 @router.put("/files/rename")
 async def rename_file_or_folder(
+    request: Request,
     body: RenameRequest,
     path: str = Query(..., description="Path to file or folder to rename"),
     token: str = Depends(require_auth)
@@ -307,6 +326,7 @@ async def rename_file_or_folder(
         )
 
     current_path = validate_workspace_path(path)
+    await authorize_workspace_path(request, current_path)
     if not current_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -338,6 +358,7 @@ async def rename_file_or_folder(
 
 @router.delete("/files")
 async def delete_file_or_folder(
+    request: Request,
     path: str = Query(..., description="Path to file or folder to delete"),
     token: str = Depends(require_auth)
 ):
@@ -345,6 +366,7 @@ async def delete_file_or_folder(
     workspace = settings.effective_workspace_dir.resolve()
 
     target_path = validate_workspace_path(path)
+    await authorize_workspace_path(request, target_path)
     is_reserved = _is_windows_reserved_name(target_path.name)
 
     # For Windows reserved names (NUL, CON, etc.), pathlib resolves them to

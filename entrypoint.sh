@@ -161,6 +161,7 @@ chown -R appuser:appuser /home/appuser/.fluid /home/appuser/.config /home/appuse
 # browser-mcp server attaches to).
 mkdir -p /home/appuser/chrome-profile
 chown -R appuser:appuser /home/appuser/chrome-profile 2>/dev/null || true
+if [ "${START_CHROME:-1}" = "1" ]; then
 echo "Starting Chromium for browser automation (CHROME_CDP=${CHROME_CDP:-1}, port ${CHROME_CDP_PORT:-9221})..."
 # The supervisor loop lives in /usr/local/bin/chrome-supervisor (see
 # docker/chrome-supervisor.sh) — it captures the real Chrome exit status,
@@ -181,6 +182,9 @@ CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-9222}" \
 CHROME_EXECUTABLE="${CHROME_EXECUTABLE:-/usr/bin/google-chrome-stable}" \
     chrome-supervisor > /home/appuser/.config/chrome.log 2>&1 &
 echo "Chrome supervisor started (logs: /home/appuser/.config/chrome.log). Diagnose with: chrome-doctor" 
+else
+    echo "Chromium disabled (START_CHROME=${START_CHROME:-0})"
+fi
 
 # =============================================================================
 # Start Application

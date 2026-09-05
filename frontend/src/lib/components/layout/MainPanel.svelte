@@ -117,7 +117,7 @@
 		'docs': 'Documentation',
 	};
 
-	// Feature pages that use FeaturePageLayout (provide their own header)
+	// Feature pages that provide their own header.
 	// These don't need the generic PageHeader
 	const embeddedViews = new Set([
 		'board', 'build',

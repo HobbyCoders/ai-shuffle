@@ -18,11 +18,11 @@
 
 import {
 	reduce,
+	parseWireEvent,
 	initialState,
 	releaseMessages,
 	sealState,
 	type V2SessionState,
-	type WireEvent,
 } from './reducer';
 import { createSseFeed, type SseFeed } from './sse-feed';
 import type { ActiveSessionState } from '../../active-session';
@@ -748,7 +748,11 @@ export const feedController: FeedController = {
 					if (!caughtUp) armCatchupFallback(generation);
 					return;
 				}
-				const ev = e as WireEvent;
+				const ev = parseWireEvent(e);
+				if (!ev) {
+					console.warn('[feedController] Ignoring malformed session event envelope');
+					return;
+				}
 				// R4 cursor sanity: the server filter is `seq > from_seq`, so a
 				// resumed connection can never legitimately deliver an event at or
 				// below the cursor. If it does, this log is not the one the cached

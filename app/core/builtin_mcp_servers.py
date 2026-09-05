@@ -122,8 +122,13 @@ def get_builtin_servers() -> List[McpServerConfig]:
     """
     Return all built-in/managed MCP server configs.
 
-    Always returned enabled: the browser suite has no setting, and stale
-    ``disabledMcpServers`` entries are stripped by the read path
-    (``_normalize_disabled_servers``).
+    Always returned enabled: the browser suite has no per-server setting, and
+    stale ``disabledMcpServers`` entries are stripped by the read path
+    (``_normalize_disabled_servers``). The one switch is START_CHROME=0, which
+    means no Chromium exists to drive, so the suite is not offered at all.
     """
+    from app.core.config import settings
+
+    if not settings.start_chrome:
+        return []
     return [get_browser_server_config()]

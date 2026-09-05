@@ -17,7 +17,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-import httpx
 
 from app.core import turn_outcome
 from app.db import database
@@ -368,22 +367,42 @@ class AutomationManager:
 
     async def handle_connector_event(self, event_type: str, data: Dict[str, Any]) -> None:
         """Check for automations triggered by connector events and fire them."""
+        # Lifecycle delivery includes automation-owned turns too, for webhook
+        # observers. Do not let those events recursively start more model runs;
+        # intentional automation chaining belongs in explicit action steps.
+        if data.get("automation_id") or data.get("source") in ("automation", "automation_step"):
+            return
         automations = await run_sync(
             database.get_automations_for_event,
             trigger_type="connector_event",
             event_type=event_type,
         )
+        # The trigger is configured against a connector, so it fires only for
+        # sessions a connector is linked to. Every turn on every session emits
+        # lifecycle events now; without this gate an unfiltered trigger would
+        # start a run after each wake, queue and subagent turn app-wide.
+        connector_ids = set(data.get("connector_ids") or [])
+        if data.get("connector_id"):
+            connector_ids.add(data["connector_id"])
+        if not connector_ids:
+            return
         for auto in automations:
-            trigger_config = auto.get("trigger_config", {})
-
-            # Apply optional filter
-            event_filter = trigger_config.get("filter", {})
-            skip = False
-            for fk, fv in event_filter.items():
-                if data.get(fk) != fv:
-                    skip = True
+            triggers = auto.get("triggers") or [{
+                "type": "connector_event", "config": auto.get("trigger_config") or {},
+            }]
+            # Match a single trigger's event, connector and filter together.
+            # Multiple matching triggers still create only one run.
+            matches = False
+            for trigger in triggers:
+                config = trigger.get("config") or {}
+                if trigger.get("type") != "connector_event" or config.get("event_type", event_type) != event_type:
+                    continue
+                if config.get("connector_id") and config["connector_id"] not in connector_ids:
+                    continue
+                if all(data.get(k) == v for k, v in (config.get("filter") or {}).items()):
+                    matches = True
                     break
-            if skip:
+            if not matches:
                 continue
 
             trigger_data = {"trigger": "connector_event", "event_type": event_type, "event": data}

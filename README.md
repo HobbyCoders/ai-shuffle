@@ -185,8 +185,8 @@ would allow it.
 
 ## Prerequisites
 
-- **Python 3.10+**
-- **Node.js 20+** — For building the frontend and the bundled `browser-mcp` server
+- **Python 3.12+**
+- **Node.js 22.12+** — For building the frontend and the bundled `browser-mcp` server
 - **PostgreSQL** — The database backend (provisioned automatically by Docker Compose)
 - **GitHub CLI** — [Download](https://cli.github.com/) (used for PR reviews, issue management, etc.)
 
@@ -231,3 +231,12 @@ AI Shuffle exposes a full REST + WebSocket API. See the [API Reference](docs/con
 ## License
 
 MIT — see [LICENSE](LICENSE)
+
+### Refreshing a native checkout
+
+After `git pull`, run `python run_local.py --update` (or the platform launcher with
+`--update`). This installs the checked-in Fluid harness and locked Node packages,
+then rebuilds the frontend, browser MCP and AI tools. It does not reconfigure the
+database or restart an already running server. Restart the backend after it succeeds.
+Native release archives already contain the frontend; replace the archive to update
+that frontend, then run `--update` to install/build its runtime tools.

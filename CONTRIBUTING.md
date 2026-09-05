@@ -25,8 +25,8 @@ Please be respectful and constructive in all interactions. We're building this t
 
 ### Prerequisites
 
-- **Python 3.11+**
-- **Node.js 20+**
+- **Python 3.12+**
+- **Node.js 22.12+**
 - **Git**
 - **GitHub CLI** — [Download](https://cli.github.com/)
 
@@ -55,7 +55,7 @@ python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # Install dependencies
-pip install -r requirements.txt
+pip install -r requirements.txt ./vendor/fluid
 pip install -r requirements-dev.txt
 # Optional: computer-use (host desktop control), native runs only
 pip install -r requirements-native.txt
@@ -129,7 +129,7 @@ Run all checks locally:
 
 ```bash
 # Python linting
-ruff check app/ main.py run_local.py
+ruff check app/ run_local.py
 
 # Python tests (see Testing below — the suite needs vendor/fluid importable)
 PYTHONPATH=vendor/fluid pytest tests/ -v
@@ -156,11 +156,14 @@ Pre-commit hooks will also run automatically on `git commit`.
 
 ### 1. Ensure CI Passes
 
-All pull requests must pass:
-- **Python**: Ruff linting + pytest (5% minimum coverage)
-- **Frontend**: Type check + tests + build
-- **Tools**: TypeScript build + type check
-- **Security**: pip-audit + npm audit (on PRs)
+Checks run only for the packages changed by a PR, using the existing backend and JavaScript workflows:
+
+- Backend: the isolated API/core/DB/middleware suite, packaging/backup regressions, and pip-audit for public Python dependencies (local editable Fluid excluded).
+- Frontend: type check, tests, build, contract consistency, and npm dependency audit.
+- Tools: a clean TypeScript build and npm dependency audit.
+- Browser MCP: TypeScript build, unit tests, optional isolated browser fixtures, and npm dependency audit.
+
+Local Ruff and pre-commit checks remain part of contributor validation. Coverage reporting is opt-in; CI does not enforce a coverage percentage.
 
 ### 2. PR Description
 
@@ -210,7 +213,7 @@ We use **Ruff** for linting and formatting:
 
 ```bash
 # Check for issues
-ruff check app/ main.py run_local.py
+ruff check app/ run_local.py
 
 # Auto-fix issues
 ruff check --fix app/ main.py run_local.py

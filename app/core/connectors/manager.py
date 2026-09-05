@@ -10,10 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.connectors.base import (
     BaseConnector,
-    ConnectorStatus,
     IncomingMessage,
     OutgoingMessage,
-    PermissionPrompt,
 )
 from app.core.connectors.registry import get_connector_class
 from app.db import database
@@ -28,6 +26,7 @@ class ConnectorManager:
     def __init__(self):
         self._connectors: Dict[str, BaseConnector] = {}
         self._lock = asyncio.Lock()
+        self._event_relay = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -81,8 +80,22 @@ class ConnectorManager:
             except Exception as e:
                 logger.error(f"Failed to start connector {cid}: {e}")
 
+    def start_event_relay(self) -> None:
+        """Listen for lifecycle notifications addressed to this connector owner."""
+        from app.core.config import settings
+        from app.core.connectors.lifecycle_relay import LifecycleRelay
+
+        if self._event_relay is None:
+            self._event_relay = LifecycleRelay(
+                settings.effective_instance_id, self._deliver_relayed_event
+            )
+        self._event_relay.start()
+
     async def shutdown_all(self) -> None:
-        """Stop every running connector."""
+        """Stop every running connector and its lifecycle relay."""
+        if self._event_relay is not None:
+            await self._event_relay.stop()
+            self._event_relay = None
         async with self._lock:
             connector_ids = list(self._connectors.keys())
 
@@ -229,105 +242,19 @@ class ConnectorManager:
         that AI session are notified.  Otherwise every active session for each
         connector is sent the notification.
         """
+        from app.core.config import settings
+        from app.core.connectors.lifecycle_relay import publish
+
         subscribed = await run_sync(database.get_connectors_for_event, event_type)
-        if not subscribed:
-            # Still dispatch to legacy webhooks
-            try:
-                from app.core.webhook_service import dispatch_webhook
-                await dispatch_webhook(event_type, data)
-            except Exception as e:
-                logger.error(f"Legacy webhook dispatch failed: {e}")
-            return
-
-        session_id = data.get("session_id")
-
         for conn_row in subscribed:
-            cid = conn_row["id"]
-            log_id = secrets.token_hex(8)
-
-            async with self._lock:
-                instance = self._connectors.get(cid)
-
-            if not instance:
-                logger.debug(f"Connector {cid} not running — skipping event {event_type}")
-                continue
-
-            try:
-                # Determine which platform chats to notify. Either branch is a
-                # blocking query (the broadcast branch opens its own cursor), so
-                # the whole decision runs off-loop as one hop; exceptions still
-                # land in this ``try``'s handler below.
-                def _load_sessions() -> List[Dict[str, Any]]:
-                    if session_id:
-                        rows = database.get_connector_sessions_for_ai_session(session_id)
-                        # Filter to only sessions belonging to this connector
-                        return [s for s in rows if s.get("connector_id") == cid]
-                    # Broadcast to all active sessions for this connector
-                    # (no dedicated DB helper — query directly)
-                    from app.db.base import get_db, rows_to_list
-                    with get_db() as conn:
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "SELECT * FROM connector_sessions WHERE connector_id = %s AND is_active = TRUE",
-                            (cid,),
-                        )
-                        return rows_to_list(cursor.fetchall())
-
-                sessions = await run_sync(_load_sessions)
-
-                if not sessions:
-                    logger.debug(
-                        f"No connector sessions linked for connector {cid} "
-                        f"event={event_type} session_id={session_id} — skipping"
-                    )
-                    continue
-
-                any_sent = False
-                for sess in sessions:
-                    chat_id = sess.get("platform_chat_id")
-                    if chat_id:
-                        ok = await instance.send_notification(chat_id, event_type, data)
-                        if ok:
-                            any_sent = True
-                        else:
-                            logger.warning(
-                                f"send_notification failed for connector {cid} "
-                                f"chat_id={chat_id} event={event_type}"
-                            )
-
-                status = "delivered" if any_sent else "failed"
-
-                # Both writes are contiguous — one hop for the pair.
-                def _log_delivery() -> None:
-                    database.create_connector_event_log(
-                        log_id=log_id,
-                        connector_id=cid,
-                        event_type=event_type,
-                        direction="outbound",
-                        payload=data,
-                        status=status,
-                        error=None if any_sent else "No messages were delivered to platform",
-                    )
-                    database.update_connector_event_dispatched(cid, success=any_sent)
-
-                await run_sync(_log_delivery)
-
-            except Exception as e:
-                logger.error(f"Event dispatch failed for connector {cid}: {e}")
-
-                def _log_failure(err: str = str(e)) -> None:
-                    database.create_connector_event_log(
-                        log_id=log_id,
-                        connector_id=cid,
-                        event_type=event_type,
-                        direction="outbound",
-                        payload=data,
-                        status="failed",
-                        error=err,
-                    )
-                    database.update_connector_event_dispatched(cid, success=False)
-
-                await run_sync(_log_failure)
+            owner = conn_row.get("runner_id")
+            if owner and owner != settings.effective_instance_id:
+                try:
+                    await run_sync(publish, conn_row["id"], owner, event_type, data)
+                except Exception:
+                    logger.warning("Connector owner relay failed for %s", conn_row["id"], exc_info=True)
+            else:
+                await self._deliver_connector_event(conn_row, event_type, data)
 
         # Also dispatch to legacy webhooks
         try:
@@ -342,6 +269,107 @@ class ConnectorManager:
             await automation_manager.handle_connector_event(event_type, data)
         except Exception as e:
             logger.error(f"Automation event dispatch failed: {e}")
+
+    async def _deliver_relayed_event(self, connector_id: str, event_type: str, data: dict) -> None:
+        """Recheck ownership/subscription; never re-dispatch webhooks or automations."""
+        from app.core.config import settings
+
+        row = await run_sync(database.get_connector, connector_id)
+        if (not row or not row.get("is_active")
+                or row.get("runner_id") != settings.effective_instance_id
+                or event_type not in (row.get("events") or [])):
+            return
+        await self._deliver_connector_event(row, event_type, data)
+
+    async def _deliver_connector_event(self, conn_row: dict, event_type: str, data: dict) -> None:
+        """Deliver to local platform chats linked to the event's session."""
+        session_id = data.get("session_id")
+        cid = conn_row["id"]
+        log_id = secrets.token_hex(8)
+
+        async with self._lock:
+            instance = self._connectors.get(cid)
+
+        if not instance:
+            logger.debug(f"Connector {cid} not running — skipping event {event_type}")
+            return
+
+        try:
+            # Determine which platform chats to notify. Either branch is a
+            # blocking query (the broadcast branch opens its own cursor), so
+            # the whole decision runs off-loop as one hop; exceptions still
+            # land in this ``try``'s handler below.
+            def _load_sessions() -> List[Dict[str, Any]]:
+                if session_id:
+                    rows = database.get_connector_sessions_for_ai_session(session_id)
+                    # Filter to only sessions belonging to this connector
+                    return [s for s in rows if s.get("connector_id") == cid]
+                # Broadcast to all active sessions for this connector
+                # (no dedicated DB helper — query directly)
+                from app.db.base import get_db, rows_to_list
+                with get_db() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT * FROM connector_sessions WHERE connector_id = %s AND is_active = TRUE",
+                        (cid,),
+                    )
+                    return rows_to_list(cursor.fetchall())
+
+            sessions = await run_sync(_load_sessions)
+
+            if not sessions:
+                logger.debug(
+                    f"No connector sessions linked for connector {cid} "
+                    f"event={event_type} session_id={session_id} — skipping"
+                )
+                return
+
+            any_sent = False
+            for sess in sessions:
+                chat_id = sess.get("platform_chat_id")
+                if chat_id:
+                    ok = await instance.send_notification(chat_id, event_type, data)
+                    if ok:
+                        any_sent = True
+                    else:
+                        logger.warning(
+                            f"send_notification failed for connector {cid} "
+                            f"chat_id={chat_id} event={event_type}"
+                        )
+
+            status = "delivered" if any_sent else "failed"
+
+            # Both writes are contiguous — one hop for the pair.
+            def _log_delivery() -> None:
+                database.create_connector_event_log(
+                    log_id=log_id,
+                    connector_id=cid,
+                    event_type=event_type,
+                    direction="outbound",
+                    payload=data,
+                    status=status,
+                    error=None if any_sent else "No messages were delivered to platform",
+                )
+                database.update_connector_event_dispatched(cid, success=any_sent)
+
+            await run_sync(_log_delivery)
+
+        except Exception as e:
+            logger.error(f"Event dispatch failed for connector {cid}: {e}")
+
+            def _log_failure(err: str = str(e)) -> None:
+                database.create_connector_event_log(
+                    log_id=log_id,
+                    connector_id=cid,
+                    event_type=event_type,
+                    direction="outbound",
+                    payload=data,
+                    status="failed",
+                    error=err,
+                )
+                database.update_connector_event_dispatched(cid, success=False)
+
+            await run_sync(_log_failure)
 
     # ------------------------------------------------------------------
     # Connector context for system prompt

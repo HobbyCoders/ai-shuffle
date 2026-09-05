@@ -8,8 +8,8 @@ order: 2
 
 ## Prerequisites
 
-- **Python 3.11+** — Backend runtime
-- **Node.js 18+** — Frontend build tooling
+- **Python 3.12+** — Backend runtime
+- **Node.js 22.12+** — Frontend build tooling
 - **PostgreSQL** — Application database (required). The provided `docker-compose.yml` runs one for you; for a manual install you'll need a reachable PostgreSQL instance.
 - **GitHub CLI** — [Download](https://cli.github.com/) — Used for PR reviews, issue management, etc.
 - **Git** — For project management and worktree features
@@ -26,7 +26,7 @@ cd ai-shuffle
 ### 2. Install Backend Dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt ./vendor/fluid
 # Optional: computer-use (host desktop control), native runs only
 pip install -r requirements-native.txt
 ```
@@ -96,7 +96,7 @@ For production deployments, consider:
 
 ```bash
 git pull
-pip install -r requirements.txt
+pip install -r requirements.txt ./vendor/fluid
 cd frontend && npm install && npm run build && cd ..
 rm -rf app/static && cp -r frontend/build app/static
 python -m app.main
@@ -147,4 +147,13 @@ Recommended rollout for a shared-database cluster:
 Do not upgrade one install and leave a peer on an older commit "for now" — the
 two will not interoperate across a V2 phase boundary. For the engineering
 rationale and phase history, see the internal
-[V2 Core Re-architecture](../../V2_CORE_REARCHITECTURE.md) spec.
+[V2 Core Re-architecture](architecture.md) spec.
+
+### Refreshing a native checkout
+
+After `git pull`, run `python run_local.py --update` (or the platform launcher with
+`--update`). This installs the checked-in Fluid harness and locked Node packages,
+then rebuilds the frontend, browser MCP and AI tools. It does not reconfigure the
+database or restart an already running server. Restart the backend after it succeeds.
+Native release archives already contain the frontend; replace the archive to update
+that frontend, then run `--update` to install/build its runtime tools.

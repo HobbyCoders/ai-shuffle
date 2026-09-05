@@ -3,7 +3,7 @@
 	 * BuildProfileGrid — card-grid presentation of profiles for the Build page.
 	 *
 	 * Header-less by design: the Build page supplies the page heading + sub-nav,
-	 * so this renders only the grid (no FeaturePageLayout). All data + actions are
+	 * so this renders only the grid. All data + actions are
 	 * passed in by ProfileCard, which still owns loading and the editor flow.
 	 *
 	 * Styled with the app's existing theme tokens (matches the Studio-v2 mockup

@@ -79,6 +79,65 @@
 	// Debounce for auto-save
 	let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 	let hasUnsavedChanges = $state(false);
+	let editorGeneration = 0;
+	let editRevision = 0;
+	let navigationRequest = 0;
+	let savePromise: Promise<void> | null = null;
+	let destroyed = false;
+	const DRAFT_KEY = 'ai-shuffle-note-draft';
+
+	function persistDraft() {
+		try {
+			if (!hasUnsavedChanges) sessionStorage.removeItem(DRAFT_KEY);
+			else sessionStorage.setItem(DRAFT_KEY, JSON.stringify({
+				note: editingNote, isCreatingNew, title: editorTitle, content: editorContent,
+				tags: editorTags, pinned: editorPinned
+			}));
+		} catch { /* Storage failures must not interrupt editing. */ }
+	}
+
+	// A draft taken from an existing note is restored only while the server
+	// still holds the version it was taken from. Restoring it over a note that
+	// changed elsewhere would mark the stale body dirty and auto-save it on the
+	// next navigation, discarding the newer content.
+	async function restoreDraft() {
+		let draft: { note?: Note | null; title: string; content: string; tags: string[]; pinned?: boolean };
+		try {
+			const raw = sessionStorage.getItem(DRAFT_KEY);
+			if (!raw) return;
+			draft = JSON.parse(raw);
+		} catch { return; /* Leave corrupt/unavailable storage alone. */ }
+		if (typeof draft?.title !== 'string' || typeof draft.content !== 'string' || !Array.isArray(draft.tags)) return;
+		const generation = editorGeneration;
+		if (draft.note) {
+			let current: Note;
+			try {
+				current = await getNote(draft.note.id);
+			} catch {
+				return;
+			}
+			if (generation !== editorGeneration) return;
+			if (current.updated_at !== draft.note.updated_at) {
+				try { sessionStorage.removeItem(DRAFT_KEY); } catch { /* ignore */ }
+				return;
+			}
+		}
+		editingNote = draft.note ?? null;
+		isCreatingNew = !editingNote;
+		editorTitle = draft.title;
+		editorContent = draft.content;
+		editorTags = draft.tags;
+		editorPinned = !!draft.pinned;
+		hasUnsavedChanges = true;
+		if (editingNote) void loadAttachments(editingNote.id);
+	}
+
+	function protectDraft(event: BeforeUnloadEvent) {
+		if (!hasUnsavedChanges && !saving) return;
+		persistDraft();
+		event.preventDefault();
+		event.returnValue = '';
+	}
 
 	// Save-status label for the editor top bar.
 	const saveLabel = $derived(saving ? 'Saving…' : hasUnsavedChanges ? 'Unsaved' : 'Saved');
@@ -127,8 +186,11 @@
 	async function refreshOpenNote() {
 		if (!editingNote || hasUnsavedChanges || saving) return;
 		const id = editingNote.id;
+		const generation = editorGeneration;
+		const revision = editRevision;
 		try {
 			const fresh = await getNote(id);
+			if (generation !== editorGeneration || revision !== editRevision || hasUnsavedChanges || saving) return;
 			if (fresh.content !== editorContent || fresh.title !== editorTitle) {
 				editingNote = fresh;
 				editorTitle = fresh.title;
@@ -160,10 +222,15 @@
 
 	// Load data on mount
 	onMount(() => {
+		void restoreDraft();
 		loadData();
+		window.addEventListener('beforeunload', protectDraft);
 		window.addEventListener('focus', handleWindowFocus);
 		document.addEventListener('visibilitychange', handleVisibilityChange);
 		return () => {
+			destroyed = true;
+			persistDraft();
+			window.removeEventListener('beforeunload', protectDraft);
 			window.removeEventListener('focus', handleWindowFocus);
 			document.removeEventListener('visibilitychange', handleVisibilityChange);
 			if (saveTimeout) {
@@ -193,8 +260,42 @@
 		return () => clearTimeout(timeout);
 	});
 
-	// Start creating a new note
+	function cancelAutosave() {
+		if (saveTimeout) clearTimeout(saveTimeout);
+		saveTimeout = null;
+	}
+
+	// All editor navigation shares the same save/discard decision. A named note
+	// is flushed before moving on; an untitled or failed draft requires consent.
+	async function changeEditor(action: () => void) {
+		const request = ++navigationRequest;
+		cancelAutosave();
+		if (saving || (hasUnsavedChanges && editorTitle.trim())) await saveNote();
+		if (request !== navigationRequest) return;
+		const apply = () => {
+			cancelAutosave();
+			editorGeneration++;
+			hasUnsavedChanges = false;
+			uploading = false;
+			persistDraft();
+			action();
+		};
+		if (hasUnsavedChanges) {
+			pendingConfirm = {
+				title: 'Discard changes',
+				message: 'You have unsaved changes. Discard them?',
+				confirmLabel: 'Discard', danger: true, action: apply
+			};
+			return;
+		}
+		apply();
+	}
+
 	function startNewNote() {
+		void changeEditor(resetNewNote);
+	}
+
+	function resetNewNote() {
 		isCreatingNew = true;
 		editingNote = null;
 		editorTitle = '';
@@ -209,6 +310,11 @@
 
 	// Open a note for editing
 	function openNote(note: Note) {
+		if (editingNote?.id === note.id) return;
+		void changeEditor(() => selectNote(notes.find((n) => n.id === note.id) ?? note));
+	}
+
+	function selectNote(note: Note) {
 		editingNote = note;
 		isCreatingNew = false;
 		editorTitle = note.title;
@@ -229,27 +335,19 @@
 
 	// Load attachments for a note
 	async function loadAttachments(noteId: string) {
+		const generation = editorGeneration;
 		try {
-			attachments = await getNoteAttachments(noteId);
+			const loaded = await getNoteAttachments(noteId);
+			if (generation === editorGeneration && editingNote?.id === noteId) attachments = loaded;
 		} catch (e) {
 			// Non-fatal: editor still works without the attachment list
-			attachments = [];
+			if (generation === editorGeneration && editingNote?.id === noteId) attachments = [];
 		}
 	}
 
 	// Close editor and go back to list
 	function closeEditor() {
-		if (hasUnsavedChanges) {
-			pendingConfirm = {
-				title: 'Discard changes',
-				message: 'You have unsaved changes. Discard them?',
-				confirmLabel: 'Discard',
-				danger: true,
-				action: doCloseEditor
-			};
-			return;
-		}
-		doCloseEditor();
+		void changeEditor(doCloseEditor);
 	}
 
 	function doCloseEditor() {
@@ -261,47 +359,35 @@
 	}
 
 	// Save the current note (create or update)
-	async function saveNote() {
-		if (!editorTitle.trim()) return;
-
+	function saveNote(): Promise<void> {
+		cancelAutosave();
+		if (savePromise) return savePromise;
+		if (!editorTitle.trim() || (!isCreatingNew && !editingNote)) return Promise.resolve();
+		const generation = editorGeneration;
 		saving = true;
-		try {
-			if (isCreatingNew) {
-				// Create new note and switch to editing mode
-				const newNote = await createNote({
-					title: editorTitle.trim(),
-					content: editorContent,
-					tags: editorTags,
-					is_pinned: editorPinned
-				});
-				// Switch from creating to editing the newly created note
-				isCreatingNew = false;
-				editingNote = newNote;
-			} else if (editingNote) {
-				// Update existing note and stay in editor
-				const updatedNote = await updateNote(editingNote.id, {
-					title: editorTitle.trim(),
-					content: editorContent,
-					tags: editorTags,
-					is_pinned: editorPinned
-				});
-				// Update the editing note reference with latest data
-				editingNote = updatedNote;
+		savePromise = (async () => {
+			try {
+				do {
+					const revision = editRevision;
+					const data = { title: editorTitle.trim(), content: editorContent, tags: [...editorTags], is_pinned: editorPinned };
+					const saved = isCreatingNew ? await createNote(data) : await updateNote(editingNote!.id, data);
+					const idx = notes.findIndex((n) => n.id === saved.id);
+					if (idx >= 0) notes[idx] = saved;
+					else notes = [saved, ...notes];
+					if (generation !== editorGeneration) return;
+					isCreatingNew = false;
+					editingNote = saved;
+					hasUnsavedChanges = revision !== editRevision;
+					persistDraft();
+				} while (hasUnsavedChanges && editorTitle.trim());
+			} catch (e) {
+				error = e instanceof Error ? e.message : 'Failed to save note';
+			} finally {
+				saving = false;
+				savePromise = null;
 			}
-			// Reflect the saved note in the list without a disruptive reload.
-			const saved = editingNote;
-			if (saved) {
-				const idx = notes.findIndex((n) => n.id === saved.id);
-				if (idx >= 0) notes[idx] = saved;
-				else notes = [saved, ...notes];
-			}
-			hasUnsavedChanges = false;
-			// Don't close editor - user stays in edit mode
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to save note';
-		} finally {
-			saving = false;
-		}
+		})();
+		return savePromise;
 	}
 
 	// Delete the current note
@@ -318,10 +404,19 @@
 
 	async function doDelete() {
 		if (!editingNote) return;
+		cancelAutosave();
+		const id = editingNote.id;
+		const generation = editorGeneration;
+		if (savePromise) await savePromise;
 		try {
-			await deleteNote(editingNote.id);
-			editingNote = null;
-			isCreatingNew = false;
+			await deleteNote(id);
+			if (generation === editorGeneration) {
+				editorGeneration++;
+				editingNote = null;
+				isCreatingNew = false;
+				hasUnsavedChanges = false;
+				persistDraft();
+			}
 			loadData();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to delete note';
@@ -383,19 +478,15 @@
 
 	// Mark as having unsaved changes and trigger autosave
 	function markDirty() {
+		editRevision++;
 		hasUnsavedChanges = true;
-
-		// Clear existing timeout
-		if (saveTimeout) {
-			clearTimeout(saveTimeout);
-		}
-
-		// Only autosave if we have a title (required field)
-		if (editorTitle.trim()) {
-			saveTimeout = setTimeout(() => {
-				saveNote();
-			}, 1000); // Autosave after 1 second of inactivity
-		}
+		// Svelte bindings update after input handlers; capture the resulting draft.
+		queueMicrotask(() => {
+			if (destroyed) return;
+			persistDraft();
+			cancelAutosave();
+			if (hasUnsavedChanges && editorTitle.trim()) saveTimeout = setTimeout(() => void saveNote(), 1000);
+		});
 	}
 
 	// Add a tag
@@ -455,30 +546,34 @@
 	}
 
 	async function uploadFiles(files: File[]) {
+		const generation = editorGeneration;
 		const noteId = await ensureNoteSaved();
-		if (!noteId) return;
+		if (!noteId || generation !== editorGeneration) return;
 
 		uploading = true;
 		error = null;
 		try {
 			for (const file of files) {
 				const attachment = await uploadNoteAttachment(noteId, file);
+				if (generation !== editorGeneration) return;
 				attachments = [...attachments, attachment];
 			}
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to upload file';
+			if (generation === editorGeneration) error = e instanceof Error ? e.message : 'Failed to upload file';
 		} finally {
-			uploading = false;
+			if (generation === editorGeneration) uploading = false;
 		}
 	}
 
 	async function removeAttachment(attachment: NoteAttachment) {
 		if (!editingNote) return;
+		const generation = editorGeneration;
 		try {
 			await deleteNoteAttachment(editingNote.id, attachment.id);
+			if (generation !== editorGeneration) return;
 			attachments = attachments.filter(a => a.id !== attachment.id);
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to remove attachment';
+			if (generation === editorGeneration) error = e instanceof Error ? e.message : 'Failed to remove attachment';
 		}
 	}
 

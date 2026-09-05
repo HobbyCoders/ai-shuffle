@@ -92,6 +92,8 @@ async def emit_interaction_requested(
     dict persisted on the row. Never raises.
     """
     try:
+        from app.db import turns
+        turn = await asyncio.to_thread(turns.get_live_turn, session_id)
         await _emit(session_id, _build_event(
             contract.InteractionRequested,
             session_id,
@@ -100,6 +102,12 @@ async def emit_interaction_requested(
             kind=kind,
             request=request or {},
         ))
+        from app.core.lifecycle_events import enqueue
+        event_type = "permission.requested" if kind == "permission" else "input.needed"
+        # Do not forward tool arguments or question answers to notification
+        # recipients; the authenticated interaction UI owns those details.
+        enqueue(event_type, session_id, interaction_id, request_id=request_id,
+                source=(turn or {}).get("source"))
     except Exception:
         logger.warning(
             "[interaction_events] emit requested failed for %s (interaction %s)",

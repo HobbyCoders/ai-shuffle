@@ -14,7 +14,7 @@ Design principles:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Callable, Awaitable, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 from app.core.provider.types import ProviderEvent, SessionOptions
 
@@ -23,7 +23,7 @@ class ProviderAdapter(ABC):
     """Abstract interface for an AI provider backend.
 
     Lifecycle:
-        adapter = ClaudeAgentAdapter()
+        adapter = make_adapter()
         await adapter.connect(options)
         async for event in adapter.stream_query(prompt):
             handle(event)

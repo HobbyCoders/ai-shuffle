@@ -1,13 +1,16 @@
-"""Profile database operations."""
+"""Unified agent database operations.
+
+The profile-named functions and ProfileRow are compatibility names used by
+existing callers and foreign-key columns; all rows live in the agents table.
+"""
 
 from __future__ import annotations
 
 import json
-import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
-from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db.base import get_db, row_to_dict, rows_to_list
 
 
 # ============================================================================
@@ -75,7 +78,8 @@ def update_profile(
     name: Optional[str] = None,
     description: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
-    allow_builtin: bool = False
+    allow_builtin: bool = False,
+    mcp_tools: Optional[List[str]] = None,
 ) -> Optional[ProfileRow]:
     """Update a profile
 
@@ -103,6 +107,10 @@ def update_profile(
     if config is not None:
         updates.append("config = %s")
         values.append(json.dumps(config))
+
+    if mcp_tools is not None:
+        updates.append("mcp_tools = %s")
+        values.append(json.dumps(mcp_tools))
 
     if updates:
         updates.append("updated_at = %s")

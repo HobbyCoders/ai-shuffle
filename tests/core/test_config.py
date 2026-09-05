@@ -18,6 +18,13 @@ from unittest.mock import MagicMock, patch
 import tempfile
 
 
+@pytest.fixture(autouse=True)
+def isolate_data_directory_default(monkeypatch):
+    # Tests of Settings defaults must not inherit the test runner's explicit
+    # disposable DATA_DIR. The already-created app singleton stays isolated.
+    monkeypatch.delenv("DATA_DIR", raising=False)
+
+
 class TestSettingsDefaults:
     """Test default settings values."""
 

@@ -6,9 +6,6 @@ backend. If the fluid import fails the process must fail loudly here rather
 than silently degrading to the legacy Claude Agent SDK adapter — a degraded
 session is far harder to diagnose than a startup error.
 
-:class:`ClaudeAgentAdapter` remains importable and constructible for tests and
-for code that still references it directly; it is simply never selected here.
-
 Wiring: spawn paths construct their adapter via ``make_adapter()`` rather than
 naming a concrete class, so a future backend change stays a one-file edit.
 """

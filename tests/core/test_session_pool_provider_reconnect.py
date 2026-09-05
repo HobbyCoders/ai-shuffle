@@ -2,7 +2,7 @@
 Chunk 4 (respawn on provider change) regression tests.
 
 `session_pool.requires_reconnect` is the LIVE path (its callers are
-query_engine.py / query_background.py); `claude_adapter.requires_reconnect` /
+query_engine.py / query_background.py); `HarnessAdapter.requires_reconnect` /
 `requires_reconnect_sdk` are dead on the live path today but are fixed for
 latent correctness — see docs/MULTI_PROVIDER_PLAN.md R2/R3. These tests target
 the live path primarily, with a light mirror pass over the adapter methods.
@@ -26,7 +26,6 @@ from app.core.session_pool import (
     provider_env_requires_reconnect,
     requires_reconnect,
 )
-from app.core.provider.claude_adapter import ClaudeAgentAdapter
 from app.core.provider.types import SessionOptions
 
 
@@ -256,42 +255,6 @@ class TestPostS3LegSemantics:
         assert provider_env_requires_reconnect(direct, gateway) is True
         # And the reverse direction (gateway → direct).
         assert provider_env_requires_reconnect(gateway, direct) is True
-
-
-# ─── claude_adapter mirror (latent-correctness only, per R2) ────────────────
-
-
-def _connected_adapter(env) -> ClaudeAgentAdapter:
-    adapter = ClaudeAgentAdapter()
-    adapter._connect_options = ClaudeAgentOptions(model="claude-sonnet-4-5", env=env)
-    return adapter
-
-
-def test_adapter_requires_reconnect_sdk_provider_env_delta():
-    adapter = _connected_adapter({"ANTHROPIC_AUTH_TOKEN": "old"})
-    new = ClaudeAgentOptions(model="claude-sonnet-4-5", env={"ANTHROPIC_AUTH_TOKEN": "new"})
-    assert adapter.requires_reconnect_sdk(new) is True
-
-
-def test_adapter_requires_reconnect_sdk_identical_env_no_reconnect():
-    adapter = _connected_adapter({"ANTHROPIC_AUTH_TOKEN": "same"})
-    new = ClaudeAgentOptions(model="claude-sonnet-4-5", env={"ANTHROPIC_AUTH_TOKEN": "same"})
-    assert adapter.requires_reconnect_sdk(new) is False
-
-
-def test_adapter_requires_reconnect_provider_env_delta():
-    adapter = _connected_adapter({"ANTHROPIC_API_KEY": "old"})
-    new_options = SessionOptions(
-        model="claude-sonnet-4-5",
-        env={"ANTHROPIC_API_KEY": "new"},
-    )
-    assert adapter.requires_reconnect(new_options) is True
-
-
-def test_adapter_requires_reconnect_unrelated_env_no_reconnect():
-    adapter = _connected_adapter({"FOO": "1"})
-    new_options = SessionOptions(model="claude-sonnet-4-5", env={"FOO": "2"})
-    assert adapter.requires_reconnect(new_options) is False
 
 
 # ─── PA13 / W-R4: the resolved provider BINDING forces a reconnect ──────────

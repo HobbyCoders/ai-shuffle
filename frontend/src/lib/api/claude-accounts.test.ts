@@ -35,7 +35,7 @@ function okJson(body: unknown) {
 }
 
 function errJson(status: number, body: unknown) {
-	return { ok: false, status, json: () => Promise.resolve(body), text: () => Promise.resolve('') };
+	return new Response(JSON.stringify(body), { status });
 }
 
 describe('Claude accounts API', () => {

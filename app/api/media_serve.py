@@ -27,11 +27,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Set
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from fastapi.responses import FileResponse
 
 from app.core.config import settings
-from app.api.common import is_path_served
+from app.api.common import is_path_served, require_file_access, is_path_safe
+from app.db.async_database import run_sync
 from app.api.auth import require_auth
 
 # Re-exported so importers can keep doing ``from app.api.media_serve import ...``.
@@ -91,6 +92,7 @@ def build_media_module(
     async def by_path(
         path: str = Query(..., description=f"Full path to the {config.noun_lower} file"),
         token: str = Depends(require_auth),
+        request: Request = None,
     ):
         """
         Serve a generated media file by its full path.
@@ -110,11 +112,7 @@ def build_media_module(
 
         # Security check: must be within workspace or a registered project/worktree
         workspace = workspace_dir_getter()
-        if not is_path_served(file_path, workspace):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied: file is outside workspace",
-            )
+        await run_sync(require_file_access, file_path, workspace, request)
 
         # Additional check: must be in a 'generated-<kind>' directory
         if config.directory not in file_path.parts:
@@ -139,7 +137,7 @@ def build_media_module(
         )
 
     @router.get("/{filename}")
-    async def by_filename(filename: str, token: str = Depends(require_auth)):
+    async def by_filename(filename: str, token: str = Depends(require_auth), request: Request = None):
         """
         Serve a generated media file by filename from the default workspace.
 
@@ -170,6 +168,7 @@ def build_media_module(
         # Look in default workspace generated-<kind> directory
         media_dir = workspace_dir_getter() / config.directory
         file_path = media_dir / safe_filename
+        await run_sync(require_file_access, file_path, workspace_dir_getter(), request)
 
         # Check if file exists
         if not file_path.exists() or not file_path.is_file():
@@ -187,19 +186,21 @@ def build_media_module(
         )
 
     @router.get("/")
-    async def list_media(token: str = Depends(require_auth)):
+    async def list_media(token: str = Depends(require_auth), request: Request = None):
         """
         List generated media files from the default workspace location.
         For debugging/admin purposes.
         """
         media_dir = workspace_dir_getter() / config.directory
 
+        await run_sync(require_file_access, media_dir, workspace_dir_getter(), request)
+
         if not media_dir.exists():
             return {config.list_key: []}
 
         items = []
         for f in media_dir.iterdir():
-            if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS:
+            if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS and is_path_safe(f, media_dir):
                 items.append({
                     "filename": f.name,
                     "url": f"{config.prefix}/{f.name}",

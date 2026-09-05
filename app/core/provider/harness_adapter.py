@@ -1,14 +1,13 @@
 """HarnessAdapter — concrete ProviderAdapter backed by the ``fluid`` harness.
 
-This is the app's only provider backend, and the successor to
-:class:`ClaudeAgentAdapter`. It wraps a fluid execution engine (``NativeLoop`` for direct-API providers, or
+This is the app's only provider backend. It wraps a fluid execution engine (``NativeLoop`` for direct-API providers, or
 ``DelegatedLoop`` for the Claude-subscription ``claude`` CLI) and translates the
 fluid ``Event`` stream into the app's provider-agnostic ``ProviderEvent`` types,
 so the rest of AI-Shuffle never sees a fluid type.
 
 ``factory.make_adapter()`` returns it unconditionally for every spawn path.
 
-Design mirrors ClaudeAgentAdapter: connect/disconnect/health/reconnect lifecycle,
+The adapter provides a connect/disconnect/health/reconnect lifecycle,
 send_query/receive_events for streaming, and interrupt/respond/set_* controls.
 
 Provider-kind decision (from SessionOptions):
@@ -908,7 +907,7 @@ class HarnessAdapter(ProviderAdapter):
         return row.get("id") if row else None
 
     async def connect_with_sdk_options(self, sdk_options: Any) -> None:
-        """Compat shim mirroring ClaudeAgentAdapter.connect_with_sdk_options.
+        """Accept SDK-shaped options at the compatibility boundary.
 
         Callers that still build ``ClaudeAgentOptions`` directly (query_engine,
         query_background) can hand them here; the fields fluid can honor are
@@ -1639,7 +1638,7 @@ class HarnessAdapter(ProviderAdapter):
     def requires_reconnect(self, new_options: SessionOptions) -> bool:
         """Model / permission_mode hot-swap (False); structural changes → True.
 
-        Mirrors ClaudeAgentAdapter.requires_reconnect: system_prompt, cwd,
+        Reconnect when immutable options change: system_prompt, cwd,
         mcp_servers, plugins, and tools are fixed at engine-construction time.
         """
         old = self._options

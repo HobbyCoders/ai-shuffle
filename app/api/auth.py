@@ -2,7 +2,6 @@
 Authentication API routes
 """
 
-import ipaddress
 import os
 import hashlib
 import subprocess
@@ -10,7 +9,7 @@ import logging
 import uuid as _uuid
 from pathlib import Path
 from typing import Optional
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import bcrypt
 from fastapi import APIRouter, HTTPException, Response, Request, Depends, status
@@ -28,6 +27,7 @@ from app.core.oauth import direct_oauth
 from app.core.config import settings
 from app.core import encryption
 from app.core import audit_service
+from app.core.request_identity import get_client_ip
 from app.core import auth as _auth_module
 from app.db import database as db
 from app.db.async_database import run_sync
@@ -74,47 +74,6 @@ def _seed_claude_account_safe() -> None:
         seed_from_credentials_file()
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Claude account seed failed (ignored): {e}")
-
-
-# Private/loopback networks whose direct connections we trust as reverse proxies
-_TRUSTED_PROXY_NETWORKS = (
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("fc00::/7"),
-)
-
-
-def _is_trusted_proxy(host: str) -> bool:
-    """Check if the direct client IP belongs to a trusted proxy (private/loopback)."""
-    try:
-        addr = ipaddress.ip_address(host)
-        return any(addr in net for net in _TRUSTED_PROXY_NETWORKS)
-    except (ValueError, TypeError):
-        return False
-
-
-def get_client_ip(request: Request) -> str:
-    """Get the real client IP address, respecting reverse proxy headers
-    only when the direct connection comes from a trusted proxy."""
-    direct_ip = request.client.host if request.client else "unknown"
-
-    # Only trust proxy headers when the immediate connection is from a
-    # private/loopback address (i.e., a known reverse proxy).
-    if direct_ip != "unknown" and _is_trusted_proxy(direct_ip):
-        trusted_headers = settings.trusted_proxy_headers.split(",")
-        for header in trusted_headers:
-            header = header.strip()
-            value = request.headers.get(header)
-            if value:
-                # X-Forwarded-For can contain multiple IPs, take the first (original client)
-                if "," in value:
-                    return value.split(",")[0].strip()
-                return value.strip()
-
-    return direct_ip
 
 
 def check_rate_limit(request: Request, username: Optional[str] = None) -> None:
@@ -432,7 +391,7 @@ async def get_auth_status(request: Request):
 
 
 @router.post("/setup")
-async def setup_admin(request: SetupRequest, response: Response):
+async def setup_admin(request: SetupRequest, response: Response, req: Request = None):
     """First-launch admin creation"""
     if not auth_service.is_setup_required():
         raise HTTPException(
@@ -442,6 +401,7 @@ async def setup_admin(request: SetupRequest, response: Response):
 
     try:
         result = auth_service.setup_admin(request.username, request.password)
+        await run_sync(audit_service.log_admin_setup, req, request.username)
 
         # Mark that onboarding was started via the setup flow so
         # is_onboarding_complete() can distinguish new installs from upgrades
@@ -541,8 +501,16 @@ async def logout(request: Request, response: Response):
         paired_client = await run_sync(get_paired_client_from_token, token, touch=False)
         if paired_client:
             await run_sync(db.clear_paired_client_session, paired_client["id"])
+            await run_sync(audit_service.log_logout, request, paired_client["id"], "paired_client")
         else:
+            valid_session = await run_sync(db.get_auth_session, token)
             auth_service.logout(token)
+            if valid_session:
+                try:
+                    username = await run_sync(auth_service.get_admin_username)
+                    await run_sync(audit_service.log_logout, request, username)
+                except Exception:
+                    logger.warning("Logout audit recording failed", exc_info=True)
         # Purge the rate-limit middleware's short-TTL auth cache so the revoked
         # session isn't classified against its old tier for up to the TTL.
         try:
@@ -580,6 +548,7 @@ async def change_password(
 
     # Verify current password
     if not auth_service.verify_password(password_data.current_password, admin["password_hash"]):
+        await run_sync(audit_service.log_password_change_failed, req, admin["username"], "invalid_current_password")
         client_ip = get_client_ip(req)
         logger.warning(f"Failed password change attempt - wrong current password from IP {client_ip}")
         raise HTTPException(
@@ -589,6 +558,7 @@ async def change_password(
 
     # Check if new password is same as old
     if password_data.current_password == password_data.new_password:
+        await run_sync(audit_service.log_password_change_failed, req, admin["username"], "unchanged_password")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="New password must be different from current password"
@@ -608,6 +578,7 @@ async def change_password(
             )
     except Exception as e:
         logger.error(f"Failed to re-encrypt secrets: {e}")
+        await run_sync(audit_service.log_password_change_failed, req, admin["username"], "re_encryption_failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to re-encrypt secrets. Password not changed."
@@ -620,6 +591,7 @@ async def change_password(
     ).decode('utf-8')
 
     db.update_admin_password(new_password_hash)
+    await run_sync(audit_service.log_password_changed, req, admin["username"])
 
     client_ip = get_client_ip(req)
     logger.info(f"Admin password changed successfully from IP {client_ip}")
@@ -745,7 +717,7 @@ async def claude_login_complete(request: Request, token: str = Depends(require_a
         return await auth_service.complete_claude_oauth_login(auth_code, state)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.exception("Claude complete login error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -813,7 +785,7 @@ async def github_login(request: Request, token: str = Depends(require_admin)):
         return result
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.exception("GitHub login error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -834,7 +806,7 @@ async def github_login_web(request: Request, token: str = Depends(require_admin)
         # first status poll after completion sees the real state.
         _invalidate_github_auth_caches()
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("GitHub web login error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

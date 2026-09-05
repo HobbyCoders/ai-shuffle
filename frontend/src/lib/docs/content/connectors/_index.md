@@ -71,6 +71,12 @@ Each unique conversation (e.g., a Telegram chat, a Discord channel) gets its own
 - The AI remembers context from earlier in the chat
 - Sessions can be viewed and managed in the AI Shuffle UI
 
+## Lifecycle Notifications Across Installs
+
+Each connector runs on its assigned install. When a session runs on another install sharing the same database, its lifecycle notifications are forwarded to the connector owner. Only chats linked to that session receive the notification. Webhooks and automation triggers are dispatched once by the originating install.
+
+Delivery is best effort: an offline owner, disconnected database listener, full notification queue, or process restart can lose notifications. Failed or dropped deliveries are logged; missed notifications are not replayed. Repeated messages are suppressed by event ID within a bounded, 15-minute cache on the receiving install.
+
 ## API Management
 
 All connectors can be managed via the REST API:

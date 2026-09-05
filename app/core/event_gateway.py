@@ -6,11 +6,14 @@ subscribes ONE queue per session — a shared reader that turns each ``max_seq``
 tick into a single DB read plus a single serialization pass, then fans the
 resulting frames out to every client on that session.
 
-Delivery must never depend on this gateway: the SSE route also polls
+Session event delivery must never depend on this gateway: the SSE route also polls
 ``get_max_seq`` on a keepalive timer, so if PostgreSQL is unreachable the
 gateway degrades to "no notifies, warnings logged" and the app keeps working.
 The listener runs on a single dedicated (non-pool) connection in a daemon
 thread, reconnecting with capped exponential backoff on any error.
+
+Typed connector lifecycle messages share this connection. Those messages are
+best effort and have no replay after a listener disconnect.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ class EventGateway:
         self._subscribers: Dict[str, Set[Tuple[object, object]]] = {}
         # All-sessions listeners: fn(session_id) invoked on every notify tick.
         self._global_listeners: List[Callable[[str], None]] = []
+        self._message_listeners: dict[str, list[Callable[[dict], None]]] = {}
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._thread_lock = threading.Lock()
@@ -82,6 +86,26 @@ class EventGateway:
             if fn not in self._global_listeners:
                 self._global_listeners.append(fn)
         self._ensure_listener()
+
+    def add_message_listener(self, message_type: str, fn: Callable[[dict], None]) -> None:
+        """Subscribe to a small typed peer message on the existing DB channel.
+
+        Callbacks run on the gateway thread and must only enqueue bounded work.
+        These messages do not wake session/SSE subscribers.
+        """
+        with self._lock:
+            listeners = self._message_listeners.setdefault(message_type, [])
+            if fn not in listeners:
+                listeners.append(fn)
+        self._ensure_listener()
+
+    def remove_message_listener(self, message_type: str, fn: Callable[[dict], None]) -> None:
+        with self._lock:
+            listeners = self._message_listeners.get(message_type, [])
+            if fn in listeners:
+                listeners.remove(fn)
+            if not listeners:
+                self._message_listeners.pop(message_type, None)
 
     def is_connected(self) -> bool:
         """True while the LISTEN connection is established and being polled.
@@ -208,6 +232,20 @@ class EventGateway:
     def _handle_payload(self, payload: str) -> None:
         try:
             data = json.loads(payload)
+            if not isinstance(data, dict):
+                raise ValueError("Notification payload must be an object")
+            message_type = data.get("type")
+            if message_type is not None:
+                if not isinstance(message_type, str):
+                    raise ValueError("Notification type must be a string")
+                with self._lock:
+                    message_listeners = list(self._message_listeners.get(message_type, []))
+                for listener in message_listeners:
+                    try:
+                        listener(data)
+                    except Exception:
+                        logger.warning("event gateway: typed message listener failed", exc_info=True)
+                return
             session_id = data["session_id"]
             max_seq = int(data["max_seq"])
         except (ValueError, TypeError, KeyError):

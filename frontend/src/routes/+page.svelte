@@ -497,6 +497,9 @@
 		onSelectAgent={handleSpotlightSelectAgent}
 		onNewChat={handleSpotlightNewChat}
 		onOpenSettings={handleSpotlightOpenSettings}
+		onImportSession={() => { showSpotlight = false; showImportModal = true; }}
+		onManageTags={() => { showSpotlight = false; showTagManager = true; }}
+		onManageKnowledge={() => { showSpotlight = false; showKnowledgeModal = true; }}
 	/>
 
 	<!-- Keyboard Shortcuts Modal -->

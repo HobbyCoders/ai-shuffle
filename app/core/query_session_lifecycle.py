@@ -110,8 +110,7 @@ async def interrupt_session(session_id: str) -> bool:
     # underlying interrupt keeps running to completion in the background.
     # Interrupt via the ADAPTER interface: state.client resolves through the
     # legacy-only ``sdk_client`` attribute and raises AttributeError on the
-    # fluid HarnessAdapter. ClaudeAgentAdapter.interrupt() delegates to the
-    # same sdk_client.interrupt(), so flag-off behavior is unchanged.
+    # fluid HarnessAdapter. All active providers implement interrupt().
     interrupt_task = asyncio.create_task(state.adapter.interrupt())
     # Attach the swallow/log done-callback AT CREATION (F8): if the CALLER of
     # this coroutine is cancelled while awaiting the shielded wait below, the

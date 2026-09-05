@@ -6,6 +6,8 @@ const lib = fileURLToPath(new URL('./src/lib', import.meta.url));
 const stubs = fileURLToPath(new URL('./src/lib/test-stubs', import.meta.url));
 
 export default defineConfig({
+	// Keep generated caches local when dependencies are shared by worktrees.
+	cacheDir: '.svelte-kit/vitest-cache',
 	plugins: [svelte({ hot: !process.env.VITEST })],
 	test: {
 		globals: true,

@@ -10,10 +10,12 @@ require authentication via session token.
 """
 
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from fastapi.responses import FileResponse
 
 from app.api.auth import require_auth
+from app.db.async_database import run_sync
+from app.api.common import require_file_access
 
 from app.core.config import settings
 from app.api.common import is_path_safe, is_path_served, format_file_size  # noqa: F401 (is_path_safe re-exported for tests)
@@ -117,7 +119,7 @@ def get_file_icon(filename: str) -> str:
 
 
 @router.get("/by-path")
-async def get_file_by_path(path: str = Query(..., description="Full path to the file"), _token: str = Depends(require_auth)):
+async def get_file_by_path(path: str = Query(..., description="Full path to the file"), _token: str = Depends(require_auth), request: Request = None):
     """
     Serve a file by its full path.
 
@@ -128,11 +130,7 @@ async def get_file_by_path(path: str = Query(..., description="Full path to the 
 
     # Security check: must be within workspace or a registered project/worktree
     workspace = settings.effective_workspace_dir
-    if not is_path_served(file_path, workspace):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: file is outside workspace"
-        )
+    await run_sync(require_file_access, file_path, workspace, request)
 
     # Check file exists
     if not file_path.exists() or not file_path.is_file():
@@ -152,7 +150,7 @@ async def get_file_by_path(path: str = Query(..., description="Full path to the 
 
 
 @router.get("/info")
-async def get_file_info(path: str = Query(..., description="Full path to the file"), _token: str = Depends(require_auth)):
+async def get_file_info(path: str = Query(..., description="Full path to the file"), _token: str = Depends(require_auth), request: Request = None):
     """
     Get metadata about a file without downloading it.
 
@@ -162,11 +160,7 @@ async def get_file_info(path: str = Query(..., description="Full path to the fil
 
     # Security check: must be within workspace or a registered project/worktree
     workspace = settings.effective_workspace_dir
-    if not is_path_served(file_path, workspace):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: file is outside workspace"
-        )
+    await run_sync(require_file_access, file_path, workspace, request)
 
     # Check file exists
     if not file_path.exists() or not file_path.is_file():
@@ -193,7 +187,7 @@ async def get_file_info(path: str = Query(..., description="Full path to the fil
 
 
 @router.get("/{filename}")
-async def get_shared_file(filename: str, _token: str = Depends(require_auth)):
+async def get_shared_file(filename: str, _token: str = Depends(require_auth), request: Request = None):
     """
     Serve a shared file by filename from the root workspace shared-files directory.
 
@@ -216,6 +210,7 @@ async def get_shared_file(filename: str, _token: str = Depends(require_auth)):
     # Only look in root workspace shared-files directory
     shared_files_dir = settings.effective_workspace_dir / "shared-files"
     file_path = shared_files_dir / safe_filename
+    await run_sync(require_file_access, file_path, settings.effective_workspace_dir, request)
 
     # Check if file exists
     if not file_path.exists() or not file_path.is_file():
@@ -235,19 +230,21 @@ async def get_shared_file(filename: str, _token: str = Depends(require_auth)):
 
 
 @router.get("/")
-async def list_shared_files(_token: str = Depends(require_auth)):
+async def list_shared_files(_token: str = Depends(require_auth), request: Request = None):
     """
     List shared files from the default workspace location.
     For debugging/admin purposes.
     """
     shared_files_dir = settings.effective_workspace_dir / "shared-files"
 
+    await run_sync(require_file_access, shared_files_dir, settings.effective_workspace_dir, request)
+
     if not shared_files_dir.exists():
         return {"files": [], "directory": str(shared_files_dir)}
 
     files = []
     for f in shared_files_dir.iterdir():
-        if f.is_file():
+        if f.is_file() and is_path_safe(f, shared_files_dir):
             stat = f.stat()
             files.append({
                 "filename": f.name,

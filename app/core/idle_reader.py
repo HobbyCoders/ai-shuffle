@@ -226,8 +226,8 @@ async def _drain(session_id: str, *, drain_turn_id: Optional[str]) -> None:
         _task_status_events_from_message,
         _task_update_terminal_status,
     )
-    from app.core.provider.claude_adapter import to_provider_event
-    from app.core.session_pool import get_session_pool, is_subprocess_alive
+    from app.core.provider.sdk_event_translation import to_provider_event
+    from app.core.session_pool import get_session_pool
     from app.core.task_registry import task_registry
     from app.core.turn_recorder import (
         record_cli_wake_event,

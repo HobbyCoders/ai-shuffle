@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-AI Hub Local Mode Launcher
+AI Shuffle Local Mode Launcher
 
-Cross-platform launcher script for running AI Hub on your local PC.
+Cross-platform launcher script for running AI Shuffle on your local PC.
 This script handles:
 - Virtual environment setup
 - Dependency installation
@@ -62,7 +62,7 @@ if sys.platform == 'win32' or not sys.stdout.isatty():
 
 
 def print_banner():
-    """Print the AI Hub banner"""
+    """Print the AI Shuffle banner"""
     print(f"""
 {Colors.BLUE}{Colors.BOLD}
     _    ___   _   _ _   _ ____
@@ -87,9 +87,9 @@ def print_status(message: str, status: str = "info"):
 
 
 def check_python_version():
-    """Ensure Python 3.10+ is being used"""
-    if sys.version_info < (3, 10):
-        print_status(f"Python 3.10+ required (you have {sys.version})", "error")
+    """Match the required vendored Fluid runtime."""
+    if sys.version_info < (3, 12):
+        print_status(f"Python 3.12+ required (you have {sys.version})", "error")
         sys.exit(1)
     print_status(f"Python {sys.version_info.major}.{sys.version_info.minor} detected", "success")
 
@@ -106,113 +106,11 @@ def check_prerequisite(name: str, cmd: str, install_hint: str) -> bool:
         return False
 
 
-def install_github_cli() -> bool:
-    """Attempt to automatically install GitHub CLI"""
-    print_status("Attempting to install GitHub CLI...", "info")
-
-    try:
-        if sys.platform == 'darwin':
-            # macOS - try Homebrew
-            if shutil.which("brew"):
-                print_status("Installing via Homebrew...", "info")
-                result = subprocess.run(
-                    ["brew", "install", "gh"],
-                    capture_output=True, text=True
-                )
-                if result.returncode == 0 and shutil.which("gh"):
-                    print_status("GitHub CLI installed via Homebrew", "success")
-                    return True
-
-        elif sys.platform == 'win32':
-            # Windows - try winget, then scoop
-            if shutil.which("winget"):
-                print_status("Installing via winget...", "info")
-                result = subprocess.run(
-                    ["winget", "install", "--id", "GitHub.cli", "--accept-source-agreements", "--accept-package-agreements"],
-                    capture_output=True, text=True
-                )
-                if result.returncode == 0:
-                    print_status("GitHub CLI installed via winget", "success")
-                    print_status("  You may need to restart your terminal for 'gh' to be on PATH", "info")
-                    return True
-            if shutil.which("scoop"):
-                print_status("Installing via Scoop...", "info")
-                result = subprocess.run(
-                    ["scoop", "install", "gh"],
-                    capture_output=True, text=True
-                )
-                if result.returncode == 0:
-                    print_status("GitHub CLI installed via Scoop", "success")
-                    return True
-
-        else:
-            # Linux - try package managers in order of preference
-            if shutil.which("apt-get") and os.geteuid() == 0:
-                # Debian/Ubuntu (with root)
-                print_status("Installing via apt...", "info")
-                subprocess.run(
-                    ["apt-get", "update", "-qq"],
-                    capture_output=True, text=True
-                )
-                result = subprocess.run(
-                    ["apt-get", "install", "-y", "-qq", "gh"],
-                    capture_output=True, text=True
-                )
-                if result.returncode == 0 and shutil.which("gh"):
-                    print_status("GitHub CLI installed via apt", "success")
-                    return True
-
-            if shutil.which("brew"):
-                print_status("Installing via Homebrew...", "info")
-                result = subprocess.run(
-                    ["brew", "install", "gh"],
-                    capture_output=True, text=True
-                )
-                if result.returncode == 0 and shutil.which("gh"):
-                    print_status("GitHub CLI installed via Homebrew", "success")
-                    return True
-
-            if shutil.which("conda"):
-                print_status("Installing via conda-forge...", "info")
-                result = subprocess.run(
-                    ["conda", "install", "-y", "-c", "conda-forge", "gh"],
-                    capture_output=True, text=True
-                )
-                if result.returncode == 0 and shutil.which("gh"):
-                    print_status("GitHub CLI installed via conda", "success")
-                    return True
-
-    except Exception as e:
-        print_status(f"Auto-install failed: {e}", "warning")
-
-    print_status("Could not auto-install GitHub CLI", "warning")
-    print_status("  Please install manually from https://cli.github.com/", "info")
-    return False
-
-
 def check_prerequisites():
-    """Check all prerequisites are installed"""
-    print(f"\n{Colors.BOLD}Checking prerequisites...{Colors.END}")
-
-    all_ok = True
-
-    # Check Node.js (for building frontend)
-    if not check_prerequisite(
-        "Node.js",
-        "node",
-        "https://nodejs.org/ or use your package manager"
-    ):
-        print_status("  Node.js is needed to build the frontend", "info")
-
-    # Check GitHub CLI (used for PR reviews, issue management, etc.)
-    if not shutil.which("gh"):
-        print_status("GitHub CLI not found", "warning")
-        if not install_github_cli():
-            all_ok = False
-    else:
-        print_status(f"GitHub CLI found at {shutil.which('gh')}", "success")
-
-    return all_ok
+    """Report prerequisites without installing software or changing the host."""
+    ok = check_node_version()
+    check_prerequisite("GitHub CLI (optional, for GitHub features)", "gh", "https://cli.github.com/")
+    return ok
 
 
 def get_venv_python() -> Path:
@@ -237,6 +135,13 @@ def setup_venv():
     venv_path = project_root / "venv"
 
     if venv_path.exists() and get_venv_python().exists():
+        result = subprocess.run([
+            str(get_venv_python()), "-c",
+            "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)",
+        ], check=False)
+        if result.returncode:
+            print_status("Existing venv requires Python 3.12+. Recreate it with a supported Python.", "error")
+            return False
         print_status("Virtual environment already exists", "success")
         return True
 
@@ -257,14 +162,19 @@ def install_dependencies():
     project_root = Path(__file__).parent
     requirements = project_root / "requirements.txt"
 
-    if not requirements.exists():
-        print_status("requirements.txt not found", "error")
+    fluid_dir = project_root / "vendor" / "fluid"
+    if not requirements.exists() or not (fluid_dir / "pyproject.toml").exists():
+        print_status("Incomplete installation: requirements.txt and vendor/fluid are required", "error")
         return False
 
     try:
         subprocess.run([
-            str(get_venv_pip()), "install", "-r", str(requirements)
+            str(get_venv_python()), "-m", "pip", "install", "--upgrade", "pip==26.2.1"
         ], check=True)
+        subprocess.run([
+            str(get_venv_python()), "-m", "pip", "install", "-r", str(requirements), str(fluid_dir)
+        ], check=True)
+        subprocess.run([str(get_venv_python()), "-c", "import fluid"], check=True)
         print_status("Dependencies installed", "success")
     except subprocess.CalledProcessError as e:
         print_status(f"Failed to install dependencies: {e}", "error")
@@ -296,12 +206,10 @@ def build_frontend():
     frontend_dir = project_root / "frontend"
     static_dir = project_root / "app" / "static"
 
-    # Check if frontend needs building
-    if static_dir.exists() and (static_dir / "index.html").exists():
-        print_status("Frontend already built", "success")
-        return True
-
     if not frontend_dir.exists():
+        if (static_dir / "index.html").is_file():
+            print_status("Using the pre-built release frontend", "success")
+            return True
         print_status("Frontend directory not found", "error")
         return False
 
@@ -315,7 +223,7 @@ def build_frontend():
 
     try:
         # Install npm dependencies
-        subprocess.run([npm, "install"], cwd=str(frontend_dir), check=True)
+        subprocess.run([npm, "ci"], cwd=str(frontend_dir), check=True)
 
         # Build the frontend
         subprocess.run([npm, "run", "build"], cwd=str(frontend_dir), check=True)
@@ -337,61 +245,42 @@ def build_frontend():
         return False
 
 
-def build_browser_mcp():
-    """Build the bundled browser-mcp STDIO server (browser-automation tools).
-
-    Mirrors build_frontend(): same npm discovery and status printing. The backend
-    spawns ``node browser-mcp/dist/index.js`` per session to drive a local
-    headless Chrome/Edge over CDP, so the package must be compiled once (tsc ->
-    dist/). Skipped when dist/index.js already exists AND is newer than the
-    newest file under browser-mcp/src/ (i.e. nothing changed since last build).
-    """
-    project_root = Path(__file__).parent
-    mcp_dir = project_root / "browser-mcp"
-    dist_entry = mcp_dir / "dist" / "index.js"
-    src_dir = mcp_dir / "src"
-
-    if not mcp_dir.exists():
-        print_status("browser-mcp directory not found - skipping", "warning")
+def check_node_version() -> bool:
+    """Vite 7 supports Node 20.19+ or 22.12+ (and newer even releases)."""
+    node = shutil.which("node")
+    if not node:
+        print_status("Node.js 22.12+ (or 20.19+) is required for setup/update", "error")
         return False
-
-    # Up-to-date check: dist newer than the newest source file → nothing to do.
-    if dist_entry.exists() and src_dir.exists():
-        try:
-            newest_src = max(
-                (p.stat().st_mtime for p in src_dir.rglob("*") if p.is_file()),
-                default=0,
-            )
-            if dist_entry.stat().st_mtime >= newest_src:
-                print_status("browser-mcp already built (up to date)", "info")
-                return True
-        except OSError:
-            pass  # fall through to a rebuild on any stat error
-
-    npm = shutil.which("npm")
-    if not npm:
-        print_status("npm not found - cannot build browser-mcp", "error")
-        print_status("Install Node.js from https://nodejs.org/", "info")
-        return False
-
-    print_status("Building browser-mcp...", "info")
-
     try:
-        # --ignore-scripts: no postinstall browser download (attach-only server).
-        subprocess.run(
-            [npm, "ci", "--ignore-scripts"], cwd=str(mcp_dir), check=True
-        )
-        subprocess.run([npm, "run", "build"], cwd=str(mcp_dir), check=True)
-
-        if dist_entry.exists():
-            print_status("browser-mcp built (dist/index.js)", "success")
+        version = subprocess.check_output([node, "--version"], text=True).strip().lstrip("v")
+        major, minor, *_ = (int(part) for part in version.split("."))
+        supported = (major == 20 and minor >= 19) or (major == 22 and minor >= 12) or major > 22
+        if supported:
             return True
-        print_status("browser-mcp build output not found", "error")
+    except (ValueError, OSError, subprocess.SubprocessError):
+        pass
+    print_status("Node.js 22.12+ (or 20.19+) is required; update Node before setup", "error")
+    return False
+
+
+def build_node_package(name: str) -> bool:
+    """Reinstall the lockfile and rebuild so source AND dependency updates take effect."""
+    package_dir = Path(__file__).parent / name
+    npm = shutil.which("npm")
+    if not npm or not (package_dir / "package-lock.json").is_file():
+        print_status(f"Cannot build {name}: npm and the package lockfile are required", "error")
+        return False
+    try:
+        subprocess.run([npm, "ci", "--ignore-scripts"], cwd=package_dir, check=True)
+        subprocess.run([npm, "run", "build"], cwd=package_dir, check=True)
+        return True
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print_status(f"Failed to build {name}: {exc}", "error")
         return False
 
-    except (subprocess.CalledProcessError, OSError) as e:
-        print_status(f"Failed to build browser-mcp: {e}", "error")
-        return False
+
+def build_browser_mcp():
+    return build_node_package("browser-mcp")
 
 
 def _read_env_file(env_path: Path) -> dict:
@@ -448,7 +337,7 @@ def configure_database():
     postgresql:// string.
     """
     print(f"\n{Colors.BOLD}Database configuration (PostgreSQL){Colors.END}")
-    print_status("AI Hub stores its data in a PostgreSQL database.", "info")
+    print_status("AI Shuffle stores its data in a PostgreSQL database.", "info")
     print_status("Enter the connection details below (press Enter to keep the default).", "info")
 
     project_root = Path(__file__).parent
@@ -564,9 +453,12 @@ def check_claude_auth():
         return False
 
 
-def run_setup():
+def run_setup(*, configure_db: bool = True):
     """Run the full setup process"""
     print(f"\n{Colors.BOLD}Running first-time setup...{Colors.END}\n")
+
+    if not check_node_version():
+        return False
 
     if not setup_venv():
         return False
@@ -574,7 +466,8 @@ def run_setup():
     if not install_dependencies():
         return False
 
-    configure_database()
+    if configure_db:
+        configure_database()
 
     # Browser automation uses the bundled browser-mcp server + a local Chrome or
     # Edge in headless mode, always auto-launched by the backend over CDP. No
@@ -588,12 +481,9 @@ def run_setup():
     )
 
     if not build_frontend():
-        print_status("Frontend build skipped - you can build it later", "warning")
-
-    if not build_browser_mcp():
-        print_status(
-            "browser-mcp build skipped - browser tools unavailable until built", "warning"
-        )
+        return False
+    if not build_browser_mcp() or not build_node_package("tools"):
+        return False
 
     check_claude_auth()
 
@@ -708,9 +598,15 @@ def log_child_exit(env: dict, port: int, exit_code, started_at: str, ended_at: s
     return line
 
 
+def needs_first_run_setup() -> bool:
+    """True when the venv or the built frontend that start_server needs is absent."""
+    static_dir = Path(__file__).parent / "app" / "static"
+    return not get_venv_python().exists() or not (static_dir / "index.html").exists()
+
+
 def start_server(host: str, port: int, open_browser: bool):
-    """Start the AI Hub server"""
-    print(f"\n{Colors.BOLD}Starting AI Hub...{Colors.END}")
+    """Start the AI Shuffle server"""
+    print(f"\n{Colors.BOLD}Starting AI Shuffle...{Colors.END}")
 
     # Set environment variables for local mode
     env = os.environ.copy()
@@ -799,7 +695,7 @@ def run_pairing_command(url: str | None, join_code: str | None, port: int) -> in
 
 def main():
     parser = argparse.ArgumentParser(
-        description="AI Hub Local Mode Launcher",
+        description="AI Shuffle Local Mode Launcher",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -811,7 +707,8 @@ Examples:
   python run_local.py --join CODE     Enroll this configured runner
         """
     )
-    parser.add_argument("--setup", action="store_true", help="Run first-time setup")
+    parser.add_argument("--setup", action="store_true", help="Install dependencies, configure DB and rebuild assets")
+    parser.add_argument("--update", action="store_true", help="Update dependencies and rebuild assets without DB prompts")
     parser.add_argument("--no-browser", action="store_true", help="Don't open browser")
     parser.add_argument("--port", type=int, default=8000, help="Port to run on (default: 8000)")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
@@ -826,13 +723,12 @@ Examples:
     check_python_version()
 
     if args.check:
-        check_prerequisites()
+        ok = check_prerequisites()
         check_claude_auth()
-        sys.exit(0)
+        sys.exit(0 if ok else 1)
 
-    if args.setup:
-        check_prerequisites()
-        if not run_setup():
+    if args.setup or args.update:
+        if not run_setup(configure_db=not args.update):
             sys.exit(1)
         print(f"\n{Colors.BOLD}Ready to start!{Colors.END}")
         print("Run: python run_local.py")
@@ -841,9 +737,22 @@ Examples:
     if args.pair or args.join:
         sys.exit(run_pairing_command(args.pair_url, args.join, args.port))
 
+    # Double-clicking run_local.bat (or ./run_local.sh) on a fresh extract is the
+    # documented first step, so a missing venv or frontend build runs setup here
+    # rather than telling the user to come back with --setup.
+    if needs_first_run_setup():
+        print_status("First run detected: installing dependencies and building the frontend.", "info")
+        if not run_setup(configure_db=True):
+            sys.exit(1)
+
     # Normal startup
     start_server(args.host, args.port, not args.no_browser)
 
 
 if __name__ == "__main__":
+    # Redirected Windows consoles can use a legacy encoding that cannot render
+    # status icons. Logging must never prevent the backend from starting.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     main()

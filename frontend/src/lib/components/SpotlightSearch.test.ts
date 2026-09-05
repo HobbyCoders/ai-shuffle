@@ -85,6 +85,22 @@ afterEach(() => {
 });
 
 describe('SpotlightSearch — groups', () => {
+	it('exposes session import and tag management through quick actions', async () => {
+		const onImportSession = vi.fn(), onManageTags = vi.fn();
+		render(SpotlightSearch, { props: baseProps({ onImportSession, onManageTags }) });
+		await fireEvent.click(screen.getByText('Import session'));
+		expect(onImportSession).toHaveBeenCalledOnce();
+		await fireEvent.click(screen.getByText('Manage session tags'));
+		expect(onManageTags).toHaveBeenCalledOnce();
+	});
+	it('offers knowledge management only with an active project', async () => {
+		const onManageKnowledge = vi.fn();
+		const view = render(SpotlightSearch, { props: baseProps({ onManageKnowledge }) });
+		expect(screen.queryByText('Manage project knowledge')).toBeNull();
+		await view.rerender(baseProps({ onManageKnowledge, currentProjectId: 'project' }));
+		await fireEvent.click(screen.getByText('Manage project knowledge'));
+		expect(onManageKnowledge).toHaveBeenCalledOnce();
+	});
 	it('never renders a Commands group and shows a single Agents group', async () => {
 		render(SpotlightSearch, { props: baseProps() });
 		// Agents are loaded async via api.get('/agents').

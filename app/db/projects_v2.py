@@ -10,9 +10,9 @@ resolves to the same row on every install and across re-runs — the same
 convention the v60 collapse migration uses when it seeds this table from the
 legacy ``projects`` rows.
 
-This module is a PURE DB layer: plain functions over ``get_db()``, PostgreSQL
-SQL that the test pg_shim translates to SQLite. It has no callers yet (Phase 3
-P1 lands the schema + DB layer; later commits wire resolution).
+This module is a synchronous database layer used by project resolution and
+checkout management. Legacy project IDs remain supported at the API boundary;
+these rows identify logical projects and their physical runner checkouts.
 """
 
 from __future__ import annotations

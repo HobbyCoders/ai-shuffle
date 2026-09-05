@@ -65,6 +65,20 @@ curl http://localhost:8000/api/files/report.pdf \
   -o report.pdf
 ```
 
+The by-name and listing routes read the shared workspace, so they answer only
+unscoped keys. A key assigned to a project fetches files through the by-path
+route, and only paths inside that project's directory, worktrees and checkouts
+are served. The download links the agent emits in chat already use this form:
+
+```bash
+curl "http://localhost:8000/api/files/by-path?path=/workspace/projects/demo/report.pdf" \
+  -H "Authorization: Bearer aih_scoped_key" \
+  -o report.pdf
+```
+
+The same rule applies to the generated-media routes below and to the
+`/api/v1/workspace` file browser routes.
+
 ## Generated Media
 
 AI Shuffle can generate images and videos using integrated AI tools. Generated media appears inline in chat messages as download cards rather than in a dedicated gallery. The files are served from the workspace and can also be listed via the API:

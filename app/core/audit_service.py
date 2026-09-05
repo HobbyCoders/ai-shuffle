@@ -6,6 +6,7 @@ import uuid
 import logging
 from typing import Optional, Dict, Any
 
+from app.core.request_identity import get_client_ip
 from fastapi import Request
 
 from app.db import database as db
@@ -28,39 +29,13 @@ class AuditEventType:
     # API key events
     API_KEY_CREATED = "api_key_created"
     API_KEY_DELETED = "api_key_deleted"
+    API_KEY_ROTATED = "api_key_rotated"
     API_KEY_DISABLED = "api_key_disabled"
     API_KEY_ENABLED = "api_key_enabled"
 
     # Admin events
     ADMIN_SETUP = "admin_setup"
     SETTINGS_CHANGED = "settings_changed"
-
-
-def get_client_ip(request: Request) -> str:
-    """
-    Get the real client IP address, respecting reverse proxy headers.
-
-    Args:
-        request: FastAPI Request object
-
-    Returns:
-        Client IP address string
-    """
-    # Check common proxy headers
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        # X-Forwarded-For can contain multiple IPs, take the first
-        return forwarded_for.split(",")[0].strip()
-
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip.strip()
-
-    # Fall back to direct client IP
-    if request.client:
-        return request.client.host
-
-    return "unknown"
 
 
 def get_user_agent(request: Request) -> str:

@@ -24,7 +24,7 @@
 	interface Props {
 		mobile?: boolean;
 		/** When embedded in the Build page, render the header-less rows list
-		 *  instead of the FeaturePageLayout list. The form is unchanged. */
+		 *  while keeping the same editor form. */
 		embedded?: boolean;
 		/** Reports full-canvas detail/editor state so BuildPage can hide its chrome. */
 		onDetailChange?: (detail: boolean) => void;

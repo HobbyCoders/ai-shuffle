@@ -65,7 +65,8 @@ export function redirectToLoginOn401(): void {
  */
 async function extractErrorDetail(response: Response): Promise<string> {
 	try {
-		const json = await response.json();
+		// Preserve the original body for the plain-text fallback below.
+		const json = await response.clone().json();
 		// Slice C: SDK 0.1.81+ structured api_error body — prefer its concrete
 		// fields over generic 429 / 5xx canned strings when present.
 		if (json && typeof json === 'object') {

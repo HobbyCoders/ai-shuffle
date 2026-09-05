@@ -99,7 +99,7 @@
 				turnCount: session.turn_count || data.messages.filter((m: any) => m.role === 'user').length
 			};
 		} catch (e) {
-			parseError = 'Failed to parse JSON file. Please ensure it is a valid AI Hub export.';
+			parseError = 'Failed to parse JSON file. Please ensure it is a valid AI Shuffle export.';
 			console.error('Parse error:', e);
 		}
 	}
@@ -203,7 +203,7 @@
 						</svg>
 						<p class="text-sm text-foreground mb-1">Drop your export file here</p>
 						<p class="text-xs text-muted-foreground">or click to browse</p>
-						<p class="text-xs text-muted-foreground mt-2">Supports AI Hub JSON exports (.json)</p>
+						<p class="text-xs text-muted-foreground mt-2">Supports AI Shuffle JSON exports (.json)</p>
 					</div>
 
 					{#if parseError}

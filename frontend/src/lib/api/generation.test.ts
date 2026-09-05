@@ -164,11 +164,7 @@ describe('AI Generation API', () => {
 		});
 
 		it('should throw ApiError on failure', async () => {
-			fetchMock.mockResolvedValueOnce({
-				ok: false,
-				status: 500,
-				json: () => Promise.resolve({ detail: 'AI generation failed' })
-			});
+			fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'AI generation failed' }), { status: 500 }));
 
 			await expect(generateProfile('test')).rejects.toEqual({
 				detail: 'AI generation failed',
@@ -177,11 +173,7 @@ describe('AI Generation API', () => {
 		});
 
 		it('should throw ApiError on validation error', async () => {
-			fetchMock.mockResolvedValueOnce({
-				ok: false,
-				status: 422,
-				json: () => Promise.resolve({ detail: 'Description too short' })
-			});
+			fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'Description too short' }), { status: 422 }));
 
 			await expect(generateProfile('short')).rejects.toEqual({
 				detail: 'Description too short',
@@ -261,11 +253,7 @@ describe('AI Generation API', () => {
 		});
 
 		it('should throw ApiError on failure', async () => {
-			fetchMock.mockResolvedValueOnce({
-				ok: false,
-				status: 500,
-				json: () => Promise.resolve({ detail: 'AI generation failed' })
-			});
+			fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'AI generation failed' }), { status: 500 }));
 
 			await expect(generateSubagent('test')).rejects.toEqual({
 				detail: 'AI generation failed',
@@ -387,11 +375,7 @@ describe('AI Generation API', () => {
 		});
 
 		it('should handle unauthorized errors', async () => {
-			fetchMock.mockResolvedValueOnce({
-				ok: false,
-				status: 401,
-				json: () => Promise.resolve({ detail: 'Not authenticated' })
-			});
+			fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'Not authenticated' }), { status: 401 }));
 
 			await expect(generateSubagent('test description')).rejects.toEqual({
 				detail: 'Not authenticated',

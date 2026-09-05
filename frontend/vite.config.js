@@ -3,6 +3,8 @@ import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
+	// Worktrees may share installed packages; keep generated caches in this tree.
+	cacheDir: '.svelte-kit/vite-cache',
 	plugins: [tailwindcss(), sveltekit()],
 	build: {
 		// Post-split budget. The primary route no longer carries the feature

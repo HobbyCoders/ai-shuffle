@@ -18,7 +18,7 @@
 #   BACKUP_DIR             where backups are written (default: /data/backups)
 #   BACKUP_RETENTION_DAYS  days to keep (default: 7)
 #   WORKSPACE_DIR          generated media root (default: /workspace)
-#   DATA_DIR              app data root, included in media tar if present (default: /data)
+#   DATA_DIR              app data root, archived separately (default: /data)
 #   FLUID_HOME            active Fluid settings root (default: /fluid)
 #
 # Flags:
@@ -53,10 +53,10 @@ TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 DB_DUMP="${BACKUP_DIR}/ai-shuffle-db-${TIMESTAMP}.dump"
 MEDIA_TAR="${BACKUP_DIR}/ai-shuffle-media-${TIMESTAMP}.tar.gz"
 SETTINGS_TAR="${BACKUP_DIR}/ai-shuffle-settings-${TIMESTAMP}.tar.gz"
+DATA_TAR="${BACKUP_DIR}/ai-shuffle-data-${TIMESTAMP}.tar.gz"
 
 # Generated-media directories to include in the tar, relative to WORKSPACE_DIR.
 # These are where the app writes generated assets (see app/api/generated_*.py).
-MEDIA_SUBDIRS=(generated-images generated-videos generated-audio)
 
 # run: echo the command in dry-run, else execute it.
 run() {
@@ -73,6 +73,25 @@ log "AI Shuffle backup starting (dry-run=${DRY_RUN})"
 log "BACKUP_DIR=${BACKUP_DIR} RETENTION_DAYS=${BACKUP_RETENTION_DAYS}"
 
 run mkdir -p "$BACKUP_DIR"
+case "$BACKUP_RETENTION_DAYS" in
+  ''|*[!0-9]*) echo "BACKUP_RETENTION_DAYS must be a non-negative integer" >&2; exit 2 ;;
+esac
+
+# Exclude the destination from every source tree, including custom destinations
+# beneath a project's generated-media directory or the Fluid settings directory.
+exclude_backup_destination() {
+  BACKUP_EXCLUDES=()
+  if [ "$DRY_RUN" -eq 1 ]; then return 0; fi
+  local source_root backup_root
+  source_root=$(cd "$1" && pwd -P)
+  backup_root=$(cd "$BACKUP_DIR" && pwd -P)
+  if [ "$source_root" = "$backup_root" ]; then
+    echo "BACKUP_DIR must not equal an archive source directory" >&2; exit 2
+  fi
+  case "$backup_root" in
+    "$source_root"/*) BACKUP_EXCLUDES+=("--exclude=./${backup_root#"$source_root"/}") ;;
+  esac
+}
 
 # ---------------------------------------------------------------------------
 # 1) Database dump (pg_dump custom format)
@@ -87,19 +106,26 @@ log "DB dump -> ${DB_DUMP}"
 # ---------------------------------------------------------------------------
 # Collect the media dirs that actually exist under WORKSPACE_DIR. tar with -C so
 # paths in the archive are relative to the workspace root (clean restore).
-TAR_ARGS=()
-for sub in "${MEDIA_SUBDIRS[@]}"; do
-  if [ -d "${WORKSPACE_DIR}/${sub}" ]; then
-    TAR_ARGS+=("$sub")
+if [ -d "$WORKSPACE_DIR" ]; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] Archive generated-images/videos/audio/models recursively under $WORKSPACE_DIR"
+  else
+    exclude_backup_destination "$WORKSPACE_DIR"
+    # Find project-local media too. NUL delimiters preserve whitespace/newlines;
+    # -prune prevents repeated inclusion and find does not follow symlinks.
+    (cd "$WORKSPACE_DIR" && find . -type d \( -name generated-images -o -name generated-videos -o -name generated-audio -o -name generated-models \) -prune -print0) \
+      | tar -czf "$MEDIA_TAR" -C "$WORKSPACE_DIR" "${BACKUP_EXCLUDES[@]}" --null --files-from=-
   fi
-done
-
-if [ "${#TAR_ARGS[@]}" -gt 0 ]; then
-  log "Archiving media dirs: ${TAR_ARGS[*]}"
-  run tar -czf "$MEDIA_TAR" -C "$WORKSPACE_DIR" "${TAR_ARGS[@]}"
   log "Media tar -> ${MEDIA_TAR}"
 else
   log "No generated-media dirs found under ${WORKSPACE_DIR}; skipping media tar"
+fi
+
+# DATA_DIR contains the continual memory store, instance identity and other app
+# state. Exclude the backup destination itself to avoid recursive archives.
+if [ -d "$DATA_DIR" ]; then
+  exclude_backup_destination "$DATA_DIR"
+  run tar -czf "$DATA_TAR" -C "$DATA_DIR" --exclude=./logs "${BACKUP_EXCLUDES[@]}" .
 fi
 
 # ---------------------------------------------------------------------------
@@ -109,7 +135,8 @@ fi
 # intentionally not mounted into the backup sidecar and cannot be changed here.
 if [ -d "$FLUID_HOME" ]; then
   log "Archiving active Fluid settings"
-  run tar -czf "$SETTINGS_TAR" -C "$FLUID_HOME" .
+  exclude_backup_destination "$FLUID_HOME"
+  run tar -czf "$SETTINGS_TAR" -C "$FLUID_HOME" "${BACKUP_EXCLUDES[@]}" .
   log "Settings tar -> ${SETTINGS_TAR}"
 else
   log "No Fluid settings directory found at ${FLUID_HOME}; skipping settings tar"
@@ -126,7 +153,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     "$BACKUP_DIR" "$BACKUP_RETENTION_DAYS"
 else
   find "$BACKUP_DIR" -maxdepth 1 -type f \
-    \( -name 'ai-shuffle-db-*.dump' -o -name 'ai-shuffle-media-*.tar.gz' -o -name 'ai-shuffle-settings-*.tar.gz' \) \
+    \( -name 'ai-shuffle-db-*.dump' -o -name 'ai-shuffle-media-*.tar.gz' -o -name 'ai-shuffle-settings-*.tar.gz' -o -name 'ai-shuffle-data-*.tar.gz' \) \
     -mtime "+${BACKUP_RETENTION_DAYS}" -print -delete
 fi
 

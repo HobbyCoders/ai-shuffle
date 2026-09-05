@@ -65,6 +65,11 @@ data/
 
 # Root node_modules (tools has its own npm install in Dockerfile)
 node_modules/
+tools/node_modules/
+tools/dist/
+browser-mcp/node_modules/
+browser-mcp/dist/
+.live-monitor/
 
 # Claude config
 .claude/

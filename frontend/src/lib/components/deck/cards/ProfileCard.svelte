@@ -2,7 +2,7 @@
 	/**
 	 * ProfileCard - Profile management in a card format
 	 *
-	 * Replaces ProfileModal with two view modes:
+	 * Uses the Studio editor shell with two view modes:
 	 * - List view: Browse, search, and manage profiles
 	 * - Form view: Edit or create profiles with tabbed interface
 	 */
@@ -77,7 +77,7 @@
 	interface Props {
 		mobile?: boolean;
 		/** When embedded in the Build page, render the header-less card grid
-		 *  instead of the FeaturePageLayout list. The editor (form) is unchanged. */
+		 *  while keeping the same editor form. */
 		embedded?: boolean;
 		/** Reports whether the section is in a full-canvas detail/editor state so
 		 *  the Build page can hide its heading + sub-nav while editing. */

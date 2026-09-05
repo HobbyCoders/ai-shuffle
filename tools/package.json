@@ -6,9 +6,9 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
-    "clean": "rm -rf dist",
-    "prepublish": "npm run build"
+    "build": "node scripts/clean.mjs && tsc",
+    "clean": "node scripts/clean.mjs",
+    "prepack": "npm run build"
   },
   "exports": {
     ".": {

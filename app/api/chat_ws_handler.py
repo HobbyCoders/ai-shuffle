@@ -9,31 +9,25 @@ become methods.  Behaviour is identical to the original implementation.
 import asyncio
 import json
 import logging
-import os
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import HTTPException
 from fastapi.websockets import WebSocketState
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from app.core import account_failover
 from app.core.config import settings
-from app.core.connectors.manager import connector_manager
 from app.core.message_resolver import message_resolver, resolve_working_dir
 from app.core.permission_handler import is_plan_approval_text, permission_handler
 from app.core.session_modes import chat_mode_read_permitted, normalize_session_mode
 from app.core.session_title import derive_session_title
-from app.core.streaming_context import StreamingContext
 from app.core.sync_engine import sync_engine
 # W2: the origin socket reuses the SAME bounded-queue + writer-task mechanism
 # the device fan-out uses, rather than a second copy of it. Private only by
 # name — promoting it to a public export belongs to sync_engine's owner.
 from app.core.sync_engine import ConnectionWriter
 from app.core.user_question_handler import user_question_handler
-from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
 from app.db import database
 from app.db.async_database import run_sync
 from app.db.sessions import SessionRow

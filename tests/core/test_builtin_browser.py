@@ -62,6 +62,13 @@ class TestBuiltinShape:
             b = get_browser_server_config()
         assert b.args == ["/custom/browser.js"]
 
+    def test_start_chrome_off_withdraws_the_browser_suite(self, monkeypatch):
+        """START_CHROME=0 means no Chromium exists to drive, so sessions must not
+        be offered mcp__browser__* tools that would only fail to connect."""
+        from app.core.config import settings
+        monkeypatch.setattr(settings, "start_chrome", False)
+        assert get_builtin_servers() == []
+
     def test_get_builtin_servers_contains_only_browser(self):
         names = [s.name for s in get_builtin_servers()]
         assert names == ["browser"]

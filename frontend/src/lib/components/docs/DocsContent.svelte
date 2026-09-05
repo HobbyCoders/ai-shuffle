@@ -33,23 +33,32 @@
 		return `<h${depth} id="${slug}">${text}</h${depth}>`;
 	};
 
-	// Enhanced code blocks with copy button
+	// Enhanced code blocks with copy button. The markup goes through the
+	// sanitizer, which strips every inline handler, so the button carries no
+	// onclick; the click is handled by delegation on the container below.
 	renderer.code = ({ text, lang }: { text: string; lang?: string }) => {
 		const langClass = lang ? ` language-${lang}` : '';
 		const langLabel = lang ? `<span class="code-lang">${lang}</span>` : '';
 		return `<div class="code-block-wrapper">
 			<div class="code-block-header">
 				${langLabel}
-				<button class="code-copy-btn" onclick="
-					const code = this.closest('.code-block-wrapper').querySelector('code').textContent;
-					navigator.clipboard.writeText(code);
-					this.textContent = 'Copied!';
-					setTimeout(() => this.textContent = 'Copy', 1500);
-				">Copy</button>
+				<button type="button" class="code-copy-btn">Copy</button>
 			</div>
 			<pre><code class="${langClass}">${text}</code></pre>
 		</div>`;
 	};
+
+	function handleContentClick(e: MouseEvent) {
+		const target = e.target as HTMLElement | null;
+		const btn = target?.closest?.('.code-copy-btn') as HTMLElement | null;
+		if (!btn) return;
+		e.preventDefault();
+		const code = btn.closest('.code-block-wrapper')?.querySelector('code')?.textContent ?? '';
+		if (!code) return;
+		void navigator.clipboard?.writeText(code).catch(() => {});
+		btn.textContent = 'Copied!';
+		setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+	}
 
 	const renderedHtml = $derived.by(() => {
 		if (!content) return '';
@@ -76,7 +85,8 @@
 	});
 </script>
 
-<div class="docs-content prose" bind:this={contentEl}>
+<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+<div class="docs-content prose" bind:this={contentEl} onclick={handleContentClick}>
 	{@html sanitizeHtml(renderedHtml)}
 </div>
 

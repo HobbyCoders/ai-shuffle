@@ -143,6 +143,11 @@ class Settings(BaseSettings):
     file_log_max_bytes: int = 10 * 1024 * 1024  # 10MB per file
     file_log_backup_count: int = 5
 
+    # START_CHROME=0 tells the container entrypoint not to launch the supervised
+    # Chromium. The app reads the same flag so it neither advertises the browser
+    # tool suite to agents nor starts a native supervisor with no browser behind it.
+    start_chrome: bool = True
+
     # Service info
     service_name: str = "ai-shuffle"
     version: str = "1.2.1"

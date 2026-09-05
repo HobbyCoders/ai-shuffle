@@ -29,7 +29,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
@@ -63,34 +63,19 @@ jobs:
           name: frontend-build
           path: frontend/build/
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Prepare base staging directory
         run: |
-          STAGING="staging/ai-shuffle-${{ env.VERSION }}"
-          mkdir -p "${STAGING}/app/static"
-
-          # Copy Python backend
-          cp -r app/* "${STAGING}/app/"
-
-          # Copy pre-built frontend to static directory
-          cp -r frontend/build/* "${STAGING}/app/static/"
-
-          # Copy core files
-          cp requirements.txt "${STAGING}/"
-          cp requirements-native.txt "${STAGING}/"
-          cp run_local.py "${STAGING}/"
-          cp .env.example "${STAGING}/"
-          cp LICENSE "${STAGING}/"
-
-          # Copy tools if dist exists
-          if [ -d "tools/dist" ]; then
-            mkdir -p "${STAGING}/tools"
-            cp -r tools/dist "${STAGING}/tools/"
-            cp tools/package.json "${STAGING}/tools/" 2>/dev/null || true
-          fi
+          [[ "$VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo 'Invalid release version'; exit 1; }
+          python scripts/stage_release.py "staging/ai-shuffle-${VERSION}"
 
       - name: Create Windows package
         run: |
-          STAGING="staging/ai-shuffle-${{ env.VERSION }}"
+          STAGING="staging/ai-shuffle-${VERSION}"
 
           # Copy Windows launcher
           cp run_local.bat "${STAGING}/"
@@ -103,11 +88,11 @@ jobs:
 
           Before running AI Shuffle, install these dependencies:
 
-          1. **Python 3.10+**: Download from https://python.org/downloads/
+          1. **Python 3.12+**: Download from https://python.org/downloads/
              - During installation, check "Add Python to PATH"
 
-          2. **Node.js 18+**: Download from https://nodejs.org/
-             - Required only for Claude CLI installation
+          2. **Node.js 22.12+**: Download from https://nodejs.org/
+             - Required for bundled browser and AI tools
 
           3. **Claude CLI**: Open Command Prompt or PowerShell and run:
              ```
@@ -148,12 +133,12 @@ jobs:
 
           - **"python is not recognized"**: Reinstall Python with "Add to PATH" checked
           - **"claude is not recognized"**: Reinstall Claude CLI with `npm install -g @anthropic-ai/claude-code`
-          - **Frontend not loading**: Run `python run_local.py --setup` to rebuild
+          - **Frontend not loading**: Run `python run_local.py --update` to refresh dependencies; reinstall the archive to replace its pre-built frontend
 
           ## Notes
 
-          - The frontend is pre-built - you do NOT need Node.js to run the app
-          - Data is stored in the `data/` subdirectory
+          - The frontend is pre-built; Node.js is required to build and run bundled browser and AI tools
+          - Data uses PostgreSQL and the platform-specific app data directory; setup asks for your PostgreSQL connection
           - Virtual environment is created in `venv/` on first run
           INSTALL_EOF
 
@@ -168,7 +153,7 @@ jobs:
 
       - name: Create macOS package
         run: |
-          STAGING="staging/ai-shuffle-${{ env.VERSION }}"
+          STAGING="staging/ai-shuffle-${VERSION}"
 
           # Copy Unix launcher
           cp run_local.sh "${STAGING}/"
@@ -182,13 +167,13 @@ jobs:
 
           Before running AI Shuffle, install these dependencies:
 
-          1. **Python 3.10+**:
+          1. **Python 3.12+**:
              ```bash
-             brew install python@3.11
+             brew install python@3.12
              ```
              Or download from https://python.org/downloads/
 
-          2. **Node.js 18+** (for Claude CLI only):
+          2. **Node.js 22.12+** (for bundled browser and AI tools):
              ```bash
              brew install node
              ```
@@ -239,8 +224,8 @@ jobs:
 
           ## Notes
 
-          - The frontend is pre-built - you do NOT need Node.js to run the app
-          - Data is stored in the `data/` subdirectory
+          - The frontend is pre-built; Node.js is required to build and run bundled browser and AI tools
+          - Data uses PostgreSQL and the platform-specific app data directory; setup asks for your PostgreSQL connection
           - Virtual environment is created in `venv/` on first run
           INSTALL_EOF
 
@@ -254,7 +239,7 @@ jobs:
 
       - name: Create Linux package
         run: |
-          STAGING="staging/ai-shuffle-${{ env.VERSION }}"
+          STAGING="staging/ai-shuffle-${VERSION}"
 
           # run_local.sh already present from macOS step
           chmod +x "${STAGING}/run_local.sh"
@@ -270,12 +255,12 @@ jobs:
           ### Ubuntu/Debian
           ```bash
           sudo apt update
-          sudo apt install python3.11 python3.11-venv python3-pip nodejs npm
+          sudo apt install python3.12 python3.12-venv python3-pip nodejs npm
           ```
 
           ### Fedora
           ```bash
-          sudo dnf install python3.11 nodejs npm
+          sudo dnf install python3.12 nodejs npm
           ```
 
           ### Arch Linux
@@ -356,13 +341,13 @@ jobs:
           ## Troubleshooting
 
           - **Permission denied**: Run `chmod +x run_local.sh`
-          - **python3.11 not found**: Use `python3` instead, or install python3.11
+          - **python3.12 not found**: Use `python3` instead, or install python3.12
           - **venv module not found**: Install python3-venv package
 
           ## Notes
 
-          - The frontend is pre-built - you do NOT need Node.js to run the app
-          - Data is stored in the `data/` subdirectory
+          - The frontend is pre-built; Node.js is required to build and run bundled browser and AI tools
+          - Data uses PostgreSQL and the platform-specific app data directory; setup asks for your PostgreSQL connection
           - Virtual environment is created in `venv/` on first run
           INSTALL_EOF
 
@@ -420,8 +405,8 @@ jobs:
 
             ### Prerequisites
 
-            - **Python 3.10+** - [Download](https://python.org/downloads/)
-            - **Node.js 18+** - [Download](https://nodejs.org/) (for Claude CLI only)
+            - **Python 3.12+** - [Download](https://python.org/downloads/)
+            - **Node.js 22.12+** - [Download](https://nodejs.org/) (for bundled browser and AI tools)
             - **Claude CLI** - `npm install -g @anthropic-ai/claude-code`
             - **Claude Auth** - Run `claude login` once to authenticate
 

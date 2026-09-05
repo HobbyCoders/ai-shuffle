@@ -1,5 +1,5 @@
 """
-PostgreSQL DDL schema — creates all 50 tables, indexes, and FTS infrastructure.
+PostgreSQL bootstrap schema, indexes, and full-text search infrastructure.
 
 This defines the PostgreSQL schema (all tables, indexes, and FTS
 infrastructure) corresponding to ``database.py._create_schema()``

@@ -16,6 +16,40 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import run_local  # noqa: E402  (path insert above must run first)
 
 
+class TestFirstRunSetup:
+    """Double-clicking the launcher on a fresh extract must set itself up."""
+
+    def _main(self, monkeypatch, tmp_path, *, venv_exists: bool, static_exists: bool):
+        calls = []
+        monkeypatch.setattr(sys, "argv", ["run_local.py"])
+        monkeypatch.setattr(run_local, "print_banner", lambda: None)
+        monkeypatch.setattr(run_local, "check_python_version", lambda: None)
+        monkeypatch.setattr(run_local, "get_venv_python", lambda: tmp_path / "venv-python")
+        monkeypatch.setattr(run_local.Path, "is_file", lambda self: True)
+        monkeypatch.setattr(run_local, "run_setup", lambda **kw: calls.append(("setup", kw)) or True)
+        monkeypatch.setattr(run_local, "start_server", lambda *a: calls.append(("start", a)))
+        monkeypatch.setattr(run_local, "needs_first_run_setup", lambda: not (venv_exists and static_exists))
+        run_local.main()
+        return calls
+
+    def test_missing_venv_runs_setup_then_starts(self, monkeypatch, tmp_path):
+        calls = self._main(monkeypatch, tmp_path, venv_exists=False, static_exists=True)
+        assert [name for name, _ in calls] == ["setup", "start"]
+        assert calls[0][1] == {"configure_db": True}
+
+    def test_missing_frontend_build_runs_setup_then_starts(self, monkeypatch, tmp_path):
+        calls = self._main(monkeypatch, tmp_path, venv_exists=True, static_exists=False)
+        assert [name for name, _ in calls] == ["setup", "start"]
+
+    def test_configured_install_starts_directly(self, monkeypatch, tmp_path):
+        calls = self._main(monkeypatch, tmp_path, venv_exists=True, static_exists=True)
+        assert [name for name, _ in calls] == ["start"]
+
+    def test_needs_first_run_setup_checks_venv_and_static(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(run_local, "get_venv_python", lambda: tmp_path / "missing")
+        assert run_local.needs_first_run_setup() is True
+
+
 class TestFormatChildExitLine:
     def test_clean_exit_is_not_flagged_as_unexpected(self):
         line = run_local.format_child_exit_line(0, "2026-07-12T22:00:00+00:00",

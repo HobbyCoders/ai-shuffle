@@ -16,6 +16,7 @@
  */
 
 import type { ChatMessage, SubagentChildMessage, Task, TeammateStatus } from '../../types';
+import type { SessionEvent } from '$lib/contract/events';
 
 // ─── Wire event shape ─────────────────────────────────────────────────────────
 
@@ -24,16 +25,27 @@ import type { ChatMessage, SubagentChildMessage, Task, TeammateStatus } from '..
  * (see app/api/events.py::_wire). `type` discriminates; all other fields are
  * payload/envelope and read per-type below.
  */
-export interface WireEvent {
+export interface WireEvent extends Pick<SessionEvent, 'id' | 'seq'>,
+	Partial<Pick<SessionEvent, 'session_id' | 'created_at' | 'command_id' | 'run_id' | 'turn_id'>> {
+	// Future event names and extension payload fields remain valid. Known
+	// envelope field types come from the generated backend contract above.
 	type: string;
-	id: string;
-	seq: number;
-	session_id?: string;
-	created_at?: string;
-	command_id?: string | null;
-	run_id?: string | null;
-	turn_id?: string | null;
 	[k: string]: unknown;
+}
+
+/** Validate the transport envelope without rejecting newer payload types. */
+export function parseWireEvent(value: unknown): WireEvent | null {
+	if (!value || typeof value !== 'object') return null;
+	const event = value as Record<string, unknown>;
+	if (typeof event.type !== 'string' || typeof event.id !== 'string' ||
+		typeof event.seq !== 'number' || !Number.isSafeInteger(event.seq) || event.seq < 0) return null;
+	for (const key of ['session_id', 'created_at']) {
+		if (event[key] !== undefined && typeof event[key] !== 'string') return null;
+	}
+	for (const key of ['command_id', 'run_id', 'turn_id']) {
+		if (event[key] != null && typeof event[key] !== 'string') return null;
+	}
+	return event as WireEvent;
 }
 
 // ─── State ────────────────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@
 	 * HookForm - Inline form for creating/editing hooks
 	 *
 	 * Renders as plain form fields (no card wrapper or action buttons).
-	 * Parent provides the Save button via FeaturePageLayout footer.
+	 * The parent editor provides the Save button.
 	 * Exposes save() and getIsValid() for parent to call/check via bind:this.
 	 */
 	import { untrack } from 'svelte';

@@ -307,9 +307,9 @@ def _warn_removed_env_vars() -> None:
     note just says so. When explicit POSTGRES_* values are ALSO present the
     import left them untouched and the URL still wins at connect time
     (get_database_url prefers it verbatim); warn that the pieces are shadowed.
-    SESSION_STORE_MODE, PRESERVE_BACKGROUND_ON_INTERRUPT and START_CHROME were
-    removed outright (their enabled behavior is now always-on / their feature
-    retired), so setting them would be silently ignored — say so.
+    SESSION_STORE_MODE and PRESERVE_BACKGROUND_ON_INTERRUPT were removed
+    outright (their enabled behavior is now always-on / their feature retired),
+    so setting them would be silently ignored — say so.
     """
     if settings.database_url and settings.database_url.strip():
         from app.core.config import legacy_database_url_imported
@@ -347,7 +347,7 @@ def _warn_removed_env_vars() -> None:
 
     import os
 
-    for removed in ("SESSION_STORE_MODE", "PRESERVE_BACKGROUND_ON_INTERRUPT", "START_CHROME"):
+    for removed in ("SESSION_STORE_MODE", "PRESERVE_BACKGROUND_ON_INTERRUPT"):
         if os.environ.get(removed):
             logger.warning(
                 "%s is set but no longer read — the flag was removed. "
@@ -365,6 +365,12 @@ def _check_browser_mcp_prereqs() -> None:
     only; it never blocks startup.
     """
     try:
+        if not settings.start_chrome:
+            logger.info(
+                "Browser automation is DISABLED (START_CHROME=0): no Chromium is "
+                "launched and sessions do not receive the 'browser' MCP server."
+            )
+            return
         logger.info(
             "Browser automation is ENABLED (sessions spawn the 'browser' MCP "
             "server, exposing mcp__browser__* tools). Requires a supervised "
@@ -395,6 +401,7 @@ async def start_services() -> None:
     """Phase 5: Start async services (connectors, automations, catalog)."""
     from app.core.connectors.manager import connector_manager
     await connector_manager.start_all()
+    connector_manager.start_event_relay()
 
     from app.core.automation_manager import automation_manager
     await automation_manager.start()
@@ -611,6 +618,8 @@ def install_v2_turns_wiring() -> None:
     from app.core import session_runtime, turn_manager, turn_scheduler
 
     turn_scheduler.install()
+    from app.core import lifecycle_events
+    lifecycle_events.start()
 
     async def _route_interrupt(
         session_id: str, mode: str, turn_id: Optional[str] = None
@@ -684,6 +693,8 @@ async def shutdown_services() -> None:
     """
     global is_shutting_down
     is_shutting_down = True
+    from app.core import lifecycle_events
+    await lifecycle_events.stop()
 
     # Stop the V2 cross-runner claim loop FIRST (rF4): it kicks the scheduler,
     # and a pass racing the pool shutdown below could start new work

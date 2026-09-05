@@ -1,7 +1,7 @@
 # ============================================================================
 # Stage 1: Frontend Builder — builds the SvelteKit static assets
 # ============================================================================
-FROM node:20-slim AS frontend-builder
+FROM node:22-slim AS frontend-builder
 
 WORKDIR /build
 
@@ -18,23 +18,23 @@ RUN npm run build
 # ============================================================================
 # Stage 2: AI Tools — install Node.js deps for AI tools
 # ============================================================================
-FROM node:20-slim AS tools-builder
+FROM node:22-slim AS tools-builder
 
 WORKDIR /tools
 COPY tools/package.json tools/package-lock.json* ./
-RUN npm install --omit=dev --ignore-scripts
+RUN npm ci --ignore-scripts
 COPY tools/ ./
+RUN npm run build && npm prune --omit=dev --ignore-scripts
 
 
 # ============================================================================
 # Stage 3: Browser MCP — build the browser-automation MCP server (TypeScript)
 # ============================================================================
-FROM node:20-slim AS browser-mcp-builder
+FROM node:22-slim AS browser-mcp-builder
 
 WORKDIR /browser-mcp
 # Install deps first (cached unless the lockfile changes). --ignore-scripts skips
-# the package's deprecated `prepublish` (tsc) lifecycle so `npm ci` doesn't do a
-# redundant build here — the real build runs below. playwright-core pulls NO
+# dependency lifecycle scripts; compilation is explicit below — the real build runs below. playwright-core pulls NO
 # bundled browsers (the server drives the supervised Chromium over CDP), which
 # saves ~300MB versus the full `playwright` package.
 COPY browser-mcp/package.json browser-mcp/package-lock.json* ./
@@ -84,7 +84,7 @@ RUN mkdir -p /etc/apt/keyrings \
 RUN mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
        | tee /etc/apt/sources.list.d/nodesource.list \
     && apt-get update && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -118,7 +118,7 @@ RUN groupadd -g 1000 appuser && \
 
 # ── Python dependencies ──
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1 && pip install --no-cache-dir -r requirements.txt
 
 # ── Dev / test dependencies ──
 # The runtime image is also the agent's workbench: it checks out this repo and
@@ -132,11 +132,9 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 # vendor/fluid contains the harness source as a
 # pristine copy of fluid main, committed to this repo and kept current by
 # .github/workflows/vendor-sync.yml, so the build needs no cross-repo
-# credentials. A build without that directory produces an image that cannot
-# serve queries at all (make_adapter imports fluid), so the skip branch below
-# is a loud warning, not a supported configuration.
+# credentials. The image build must fail if the required harness cannot install.
 COPY vendor/ /opt/vendor/
-RUN if [ -f /opt/vendor/fluid/pyproject.toml ]; then         pip install --no-cache-dir /opt/vendor/fluid &&         python -c "import fluid; print('fluid installed')";     else         echo "WARNING: vendor/fluid not present — fluid backend NOT baked in; this image cannot serve queries";     fi
+RUN pip install --no-cache-dir /opt/vendor/fluid && python -c "import fluid"
 
 # ── Backend code ──
 COPY --chown=appuser:appuser app/ ./app/

@@ -24,20 +24,21 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, Callable, Awaitable
+from typing import Optional, Dict, Any, Callable, Awaitable, TYPE_CHECKING
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from app.core.provider.claude_adapter import ClaudeAgentAdapter
+if TYPE_CHECKING:
+    from claude_agent_sdk import ClaudeSDKClient
+
+from app.core.provider.protocol import ProviderAdapter
 from app.core.provider.types import mcp_servers_equivalent
 
 logger = logging.getLogger(__name__)
 
 # Env keys that carry provider identity/config (base URL, auth, model overlays).
 # A change to any of these means the subprocess is talking to a different
-# provider/account and must be respawned — this is the CANONICAL definition
-# (mirrored, not imported, in app.core.provider.claude_adapter to avoid an
-# import cycle: session_pool already imports ClaudeAgentAdapter at module load).
+# provider/account and must be respawned — this is the canonical definition.
 # Deliberately NOT full env-dict equality (benign env churn would force
 # respawns that kill background subagents) and NOT a narrower 3-key tuple
 # (would miss provider config edits) — see docs/MULTI_PROVIDER_PLAN.md R3.
@@ -148,7 +149,7 @@ class SessionState:
     - connect_options: The ClaudeAgentOptions used at connect() time, for detecting
       whether a reconnect is needed when options change between queries.
     """
-    adapter: ClaudeAgentAdapter
+    adapter: ProviderAdapter
     sdk_session_id: Optional[str] = None
     is_connected: bool = False
     is_streaming: bool = False
@@ -204,9 +205,9 @@ class SessionState:
     def client(self) -> Optional["ClaudeSDKClient"]:
         """Backward-compatible access to the underlying SDK client.
 
-        TRANSITIONAL — streaming loops still call state.client.query(),
-        state.client.receive_response(), etc. Will be removed once they
-        migrate to adapter methods.
+        Legacy callers may inspect this optional client. HarnessAdapter has
+        no SDK client, so its callers use the adapter interface and get None
+        here.
         """
         # Fluid adapters have no SDK client; callers must handle None.
         return getattr(self.adapter, "sdk_client", None)
@@ -279,7 +280,7 @@ def mark_subprocess_oom_killable(state: SessionState) -> None:
         pass  # non-Linux, missing /proc, or denied — degrade silently
 
 
-async def graceful_disconnect(adapter: ClaudeAgentAdapter, session_id: str) -> None:
+async def graceful_disconnect(adapter: ProviderAdapter, session_id: str) -> None:
     """Disconnect the provider adapter, giving the subprocess time to flush JSONL writes.
 
     The adapter's disconnect() handles the full grace period logic:

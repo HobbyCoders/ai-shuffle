@@ -27,8 +27,8 @@ Or double-click `run_local.bat`
 ## Prerequisites
 
 ### Required
-- **Python 3.10+** — [Download](https://www.python.org/downloads/)
-- **Node.js 18+** — [Download](https://nodejs.org/) (for building frontend)
+- **Python 3.12+** — [Download](https://www.python.org/downloads/)
+- **Node.js 22.12+** — [Download](https://nodejs.org/) (for building frontend)
 - **PostgreSQL 14+** — [Download](https://www.postgresql.org/download/) (or any reachable Postgres server on your network)
 - **GitHub CLI** — [Download](https://cli.github.com/) (used for PR reviews, issue management, etc.)
 
@@ -61,7 +61,7 @@ source venv/bin/activate
 
 ### 3. Install Dependencies
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt ./vendor/fluid
 # Optional: computer-use (host desktop control), native runs only
 pip install -r requirements-native.txt
 ```
@@ -185,12 +185,11 @@ already owns the port), or `Chrome crash-looped …` (check the app logs).
 > (`docker/chrome-supervisor.sh`); the native supervisor
 > described above is a no-op inside the container.
 
-> **Security note (SSRF / local-network reach).** The agent drives a real browser
-> that can reach `localhost`/loopback services, other RFC1918 private hosts on
-> your network, and cloud metadata endpoints such as `169.254.169.254` (which on
-> some clouds exposes credentials). Egress filtering is not implemented yet. If
-> you run untrusted prompts, isolate the host at the network layer or disable the
-> `browser` built-in server in the MCP admin UI.
+> **Browser network policy:** HTTP request interception refuses cloud metadata,
+> allows private LAN hosts, and permits loopback by default on native installs.
+> This is not a network sandbox: WebSocket upgrades and DNS resolution races
+> are not fully covered. Use host/network isolation when handling untrusted prompts.
+
 
 ## Differences from Docker Mode
 
@@ -271,7 +270,7 @@ npm run dev
 git pull
 
 # Update dependencies
-pip install -r requirements.txt
+pip install -r requirements.txt ./vendor/fluid
 
 # Rebuild frontend
 cd frontend
@@ -292,4 +291,13 @@ rm -rf app/static/_app && cp -r frontend/build/* app/static/
 
 - Check prerequisites: `python run_local.py --check`
 - View logs: Check terminal output
-- Report issues: https://github.com/yourusername/ai-shuffle/issues
+- Report issues: https://github.com/HobbyCoders/ai-shuffle/issues
+
+### Refreshing a native checkout
+
+After `git pull`, run `python run_local.py --update` (or the platform launcher with
+`--update`). This installs the checked-in Fluid harness and locked Node packages,
+then rebuilds the frontend, browser MCP and AI tools. It does not reconfigure the
+database or restart an already running server. Restart the backend after it succeeds.
+Native release archives already contain the frontend; replace the archive to update
+that frontend, then run `--update` to install/build its runtime tools.

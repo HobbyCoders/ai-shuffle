@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * ModelPickerPanel — the T3 Code-style picker body shared by the profile /
-	 * agent editor (`ModelPicker`), the chat composer dock (`OverrideDropdown`)
+	 * agent editor (`ModelPicker`), the chat composer dock (`ControlsDock`)
 	 * and any other popover that needs to choose a model.
 	 *
 	 * Layout mirrors T3's `ModelPickerContent`:

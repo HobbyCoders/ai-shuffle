@@ -89,6 +89,7 @@ def computer_use_available() -> tuple[bool, str]:
     try:
         import mss  # noqa: F401
         import pynput  # noqa: F401
+        from PIL import Image  # noqa: F401
     except Exception:
         return (False, "missing-deps")
 

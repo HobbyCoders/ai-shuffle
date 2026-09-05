@@ -14,12 +14,18 @@ vi.mock('$app/navigation', () => ({
 
 describe('ApiClient', () => {
 	let client: ApiClient;
-	let fetchMock: ReturnType<typeof vi.fn>;
+	let fetchMock: ReturnType<typeof vi.fn<(...args: Parameters<typeof fetch>) => Promise<any>>>;
 
 	beforeEach(() => {
 		client = new ApiClient();
-		fetchMock = vi.fn();
-		global.fetch = fetchMock as unknown as typeof fetch;
+		fetchMock = vi.fn<(...args: Parameters<typeof fetch>) => Promise<any>>();
+		global.fetch = (async (...args: Parameters<typeof fetch>) => {
+			const response = await fetchMock(...args);
+			// Existing lightweight fixtures expose repeatable methods. Real
+			// Responses below exercise actual body-consumption semantics.
+			if (response instanceof Response) return response;
+			return { clone: () => response, ...response };
+		}) as typeof fetch;
 	});
 
 	afterEach(() => {
@@ -169,6 +175,10 @@ describe('ApiClient', () => {
 	});
 
 	describe('error handling', () => {
+		it('preserves a real plain-text response after JSON parsing fails', async () => {
+			fetchMock.mockResolvedValueOnce(new Response('upstream process unavailable', { status: 502 }));
+			await expect(client.get('/error')).rejects.toEqual({ detail: 'upstream process unavailable', status: 502 });
+		});
 		it('should fall back to text body when json parsing fails', async () => {
 			fetchMock.mockResolvedValueOnce({
 				ok: false,

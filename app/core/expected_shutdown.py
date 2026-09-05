@@ -1,6 +1,6 @@
 """Expected-shutdown registry for adapter-initiated subprocess teardown.
 
-When :meth:`ClaudeAgentAdapter.disconnect` tears down the CLI subprocess on an
+When an adapter tears down the CLI subprocess on an
 *intentional* path (options-changed reconnect, rewind, idle/LRU eviction,
 interrupt-escalation eviction), the exit-grace can expire and the subprocess is
 force-terminated. The SDK's still-live message-reader task then sees a non-zero

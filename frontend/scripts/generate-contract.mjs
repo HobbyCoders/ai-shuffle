@@ -57,7 +57,9 @@ async function main() {
       } catch {
         current = null;
       }
-      if (current !== generated) {
+      // Git checks these files out as CRLF on Windows; line endings are not
+      // schema drift. Compare normalized text without rewriting the checkout.
+      if (current?.replace(/\r\n/g, '\n') !== generated.replace(/\r\n/g, '\n')) {
         drift.push(target.out);
       }
     }

@@ -7,9 +7,9 @@
 # Example:
 #   ./tools/restore-db.sh backup-2026-04-10.sql
 
-set -e
+set -euo pipefail
 
-if [ -z "$1" ]; then
+if [ -z "${1:-}" ]; then
     echo "Usage: ./tools/restore-db.sh <backup-file>"
     echo "Example: ./tools/restore-db.sh backup-2026-04-10.sql"
     exit 1
@@ -30,8 +30,10 @@ if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
 fi
 
 echo "Restoring database from ${BACKUP}..."
-# Drop and recreate the database
-docker compose exec -T postgres psql -U ai_shuffle -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" ai_shuffle
-# Restore from backup
-docker compose exec -T postgres psql -U ai_shuffle ai_shuffle < "${BACKUP}"
+# Keep schema replacement and restore in one transaction. A SQL error aborts
+# rather than printing success after a partially restored database.
+{
+    printf 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;\n'
+    cat "${BACKUP}"
+} | docker compose exec -T postgres psql -U ai_shuffle --set=ON_ERROR_STOP=1 --single-transaction --file=- ai_shuffle
 echo "Done. Database restored from ${BACKUP}."

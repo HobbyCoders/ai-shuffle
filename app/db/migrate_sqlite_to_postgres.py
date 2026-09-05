@@ -2,7 +2,8 @@
 SQLite to PostgreSQL data migration tool.
 
 Migrates all data from the SQLite database to PostgreSQL.
-Run after setting up the PostgreSQL database and schema.
+Run after setting up the PostgreSQL database and schema. All imported rows commit
+together; any failure aborts the import. Dry runs inspect SQLite only.
 
 Usage:
     python -m app.db.migrate_sqlite_to_postgres
@@ -20,7 +21,6 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 import json
 import psycopg2
@@ -35,8 +35,7 @@ from app.db.base import parse_database_url
 PHASE_1 = [
     "system_settings",
     "admin",
-    "schema_version",
-    "profiles",  # v71: lands in the `agents` table (see _TABLE_TARGETS)
+    "profiles",  # v71: lands in the `agents` table (see _migrate_table)
     "projects",
     "tags",
     "fal_model_catalog",
@@ -44,7 +43,6 @@ PHASE_1 = [
 ]
 
 PHASE_2 = [
-    "sessions",
     "api_users",
     "notes",
     "templates",
@@ -57,6 +55,8 @@ PHASE_2 = [
     "mobile_devices",
     "webhooks",
     "project_hooks",
+    "worktrees",
+    "sessions",
 ]
 
 PHASE_3 = [
@@ -73,7 +73,6 @@ PHASE_3 = [
     "api_user_credentials",
     "api_user_github_config",
     "user_credential_policies",
-    "worktrees",
     "automation_runs",
     "automation_approvals",
     "connector_event_log",
@@ -186,10 +185,7 @@ def _migrate_table(
                 )
                 folded += 1
             except Exception as exc:
-                pg_conn.rollback()
-                print(f"  ERR  subagents fold ({row.get('id')}): {exc}")
-                return folded
-        pg_conn.commit()
+                raise RuntimeError(f"Subagent migration failed for {row.get('id')}") from exc
         print(f"  OK   subagents: {folded} rows folded into agents")
         return folded
 
@@ -198,23 +194,34 @@ def _migrate_table(
 
     # Check table exists in Postgres
     if not _table_exists_pg(pg_cur, target_table):
-        print(f"  SKIP {target_table} — not present in PostgreSQL "
-              "(run schema creation first)")
-        return 0
+        raise RuntimeError(f"Destination table {target_table!r} is missing; initialize the current schema first")
 
     table_name = target_table
 
-    # Build INSERT ... VALUES template
-    col_list = ", ".join(col_names)
-    placeholders = ", ".join(["%s"] * len(col_names))
-    insert_sql = (
-        f"INSERT INTO {table_name} ({col_list}) "
-        f"VALUES ({placeholders}) "
-        f"ON CONFLICT DO NOTHING"
+    # Match the current destination schema explicitly. SQLite encodes booleans
+    # as integers; psycopg does not implicitly cast integer parameters to BOOL.
+    pg_cur.execute(
+        "SELECT column_name, data_type FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = %s",
+        (table_name,),
     )
-
-    # Convert rows to plain tuples (sqlite3.Row -> tuple)
-    values = [tuple(row) for row in rows]
+    target_types = dict(pg_cur.fetchall())
+    aliases = {"is_favorite": "is_active"} if table_name == "sessions" else {}
+    col_names = [aliases.get(column, column) for column in col_names]
+    unknown = set(col_names) - target_types.keys()
+    if unknown:
+        raise RuntimeError(f"Unsupported legacy columns in {table_name}: {', '.join(sorted(unknown))}")
+    values = []
+    for row in rows:
+        converted = []
+        for column, value in zip(col_names, row):
+            if target_types[column] == "boolean" and value is not None:
+                if value not in (0, 1, False, True):
+                    raise ValueError(f"Invalid boolean in {table_name}.{column}")
+                value = bool(value)
+            converted.append(value)
+        values.append(tuple(converted))
+    col_list = ", ".join('"' + column.replace('"', '""') + '"' for column in col_names)
 
     try:
         # Use execute_values for fast batch insert
@@ -226,12 +233,9 @@ def _migrate_table(
         psycopg2.extras.execute_values(
             pg_cur, insert_values_sql, values, template=template, page_size=500
         )
-        pg_conn.commit()
         print(f"  OK   {table_name}: {len(rows)} rows")
     except Exception as exc:
-        pg_conn.rollback()
-        print(f"  ERR  {table_name}: {exc}")
-        return 0
+        raise RuntimeError(f"Migration failed for table {table_name!r}; no tables were committed") from exc
 
     return len(rows)
 
@@ -247,12 +251,10 @@ def _reset_sequences(pg_conn) -> None:
                 f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
                 f"COALESCE(MAX(id), 0) + 1, false) FROM {table}"
             )
-            pg_conn.commit()
             seq_val = pg_cur.fetchone()[0]
             print(f"  SEQ  {table}.id -> next value {seq_val}")
         except Exception as exc:
-            pg_conn.rollback()
-            print(f"  SEQ ERR {table}: {exc}")
+            raise RuntimeError(f"Could not reset sequence for {table}") from exc
 
 
 def _build_tsvectors(pg_conn) -> None:
@@ -267,11 +269,9 @@ def _build_tsvectors(pg_conn) -> None:
               AND content != ''
         """)
         updated = pg_cur.rowcount
-        pg_conn.commit()
         print(f"  FTS  session_messages: {updated} rows indexed")
     except Exception as exc:
-        pg_conn.rollback()
-        print(f"  FTS ERR session_messages: {exc}")
+        raise RuntimeError("Could not build migrated full-text index") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +305,7 @@ def migrate(
         sys.exit(1)
 
     # Connect to SQLite
-    sqlite_conn = sqlite3.connect(sqlite_path)
+    sqlite_conn = sqlite3.connect(Path(sqlite_path).resolve().as_uri() + "?mode=ro", uri=True)
     sqlite_conn.row_factory = None  # plain tuples
 
     # Connect to PostgreSQL (skip in dry-run if URL not provided)
@@ -325,36 +325,40 @@ def migrate(
             pg_conn.close()
             sqlite_conn.close()
             sys.exit(1)
-    else:
-        # For dry-run we still need a pg connection to check table existence
-        # but if we can't connect, just proceed without table checks
-        try:
-            pg_conn = psycopg2.connect(**parse_database_url(postgres_url))
-        except Exception:
-            pg_conn = None
+    try:
+        # -- Phase 1 -----------------------------------------------------------
+        print("Phase 1: Independent tables")
+        for table in PHASE_1:
+            results[table] = _migrate_table(sqlite_conn, pg_conn, table, dry_run)
 
-    # -- Phase 1 -----------------------------------------------------------
-    print("Phase 1: Independent tables")
-    for table in PHASE_1:
-        results[table] = _migrate_table(sqlite_conn, pg_conn, table, dry_run)
+        # -- Phase 2 -----------------------------------------------------------
+        print("\nPhase 2: Tables with Phase-1 dependencies")
+        for table in PHASE_2:
+            results[table] = _migrate_table(sqlite_conn, pg_conn, table, dry_run)
 
-    # -- Phase 2 -----------------------------------------------------------
-    print("\nPhase 2: Tables with Phase-1 dependencies")
-    for table in PHASE_2:
-        results[table] = _migrate_table(sqlite_conn, pg_conn, table, dry_run)
+        # -- Phase 3 -----------------------------------------------------------
+        print("\nPhase 3: Tables with Phase-2 dependencies")
+        for table in PHASE_3:
+            results[table] = _migrate_table(sqlite_conn, pg_conn, table, dry_run)
 
-    # -- Phase 3 -----------------------------------------------------------
-    print("\nPhase 3: Tables with Phase-2 dependencies")
-    for table in PHASE_3:
-        results[table] = _migrate_table(sqlite_conn, pg_conn, table, dry_run)
+        # -- Post-migration steps (skip in dry-run) ----------------------------
+        if not dry_run and pg_conn:
+            print("\nPost-migration: resetting sequences")
+            _reset_sequences(pg_conn)
 
-    # -- Post-migration steps (skip in dry-run) ----------------------------
-    if not dry_run and pg_conn:
-        print("\nPost-migration: resetting sequences")
-        _reset_sequences(pg_conn)
+            print("\nPost-migration: building tsvector index data")
+            _build_tsvectors(pg_conn)
 
-        print("\nPost-migration: building tsvector index data")
-        _build_tsvectors(pg_conn)
+        if pg_conn:
+            pg_conn.commit()
+    except Exception:
+        if pg_conn:
+            pg_conn.rollback()
+        raise
+    finally:
+        sqlite_conn.close()
+        if pg_conn:
+            pg_conn.close()
 
     # -- Summary -----------------------------------------------------------
     elapsed = time.time() - t0
@@ -375,11 +379,6 @@ def migrate(
     if dry_run:
         print("  (DRY RUN — no data was written)")
     print("=" * 60)
-
-    # Cleanup
-    sqlite_conn.close()
-    if pg_conn:
-        pg_conn.close()
 
     return results
 
@@ -433,12 +432,12 @@ def main() -> None:
         print("ERROR: SQLite path not provided and could not be "
               "auto-detected. Use --sqlite-path.")
         sys.exit(1)
-    if postgres_url is None:
+    if postgres_url is None and not args.dry_run:
         print("ERROR: PostgreSQL URL not provided and the POSTGRES_* "
               "settings are incomplete. Use --postgres-url.")
         sys.exit(1)
 
-    migrate(sqlite_path, postgres_url, dry_run=args.dry_run)
+    migrate(sqlite_path, postgres_url or "", dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

@@ -45,7 +45,7 @@ AI Shuffle is a three-tier application:
 ### Key Patterns
 - **Layout Store** — Central state for sidebar, active view, and navigation
 - **Active Session Store** — Manages current chat session and streaming state
-- **Feature Pages** — Each feature (Settings, Profiles, etc.) is a card component using `FeaturePageLayout`
+- **Feature Pages** — Each feature (Settings, Profiles, etc.) is a card component rendered in the Studio shell
 - **WebSocket** — Real-time chat streaming and message sync
 - **Card Design System** — 2000+ lines of consistent component CSS tokens
 

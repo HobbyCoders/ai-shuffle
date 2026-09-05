@@ -168,7 +168,7 @@ import { syncFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 </script>
 
 <svelte:head>
-	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
 	<meta name="theme-color" content="#0f0f0f" />
 	<meta name="mobile-web-app-capable" content="yes" />
 	<meta name="apple-mobile-web-app-capable" content="yes" />

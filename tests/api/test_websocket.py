@@ -64,41 +64,33 @@ class TestWebSocketRoutesRegistration:
         """Chat WebSocket route should be registered."""
         from app.api.websocket import router
 
-        routes = [(route.path, type(route).__name__) for route in router.routes]
-        ws_routes = [r for r in routes if 'WebSocket' in r[1]]
-        paths = [r[0] for r in ws_routes]
-
-        assert "/api/v1/ws/chat" in paths
+        url = router.url_path_for("chat_websocket").make_absolute_url("http://testserver")
+        assert str(url) == "ws://testserver/api/v1/ws/chat"
 
     def test_session_sync_websocket_route_exists(self):
         """Session sync WebSocket route should be registered."""
         from app.api.websocket import router
 
-        routes = [(route.path, type(route).__name__) for route in router.routes]
-        ws_routes = [r for r in routes if 'WebSocket' in r[1]]
-        paths = [r[0] for r in ws_routes]
-
-        assert "/api/v1/ws/sessions/{session_id}" in paths
+        url = router.url_path_for(
+            "session_sync_websocket", session_id="registration-test"
+        ).make_absolute_url("http://testserver")
+        assert str(url) == "ws://testserver/api/v1/ws/sessions/registration-test"
 
     def test_global_websocket_route_exists(self):
         """Global WebSocket route should be registered."""
         from app.api.websocket import router
 
-        routes = [(route.path, type(route).__name__) for route in router.routes]
-        ws_routes = [r for r in routes if 'WebSocket' in r[1]]
-        paths = [r[0] for r in ws_routes]
-
-        assert "/api/v1/ws/global" in paths
+        url = router.url_path_for("global_sync_websocket").make_absolute_url("http://testserver")
+        assert str(url) == "ws://testserver/api/v1/ws/global"
 
     def test_cli_websocket_route_exists(self):
         """CLI WebSocket route should be registered."""
         from app.api.websocket import router
 
-        routes = [(route.path, type(route).__name__) for route in router.routes]
-        ws_routes = [r for r in routes if 'WebSocket' in r[1]]
-        paths = [r[0] for r in ws_routes]
-
-        assert "/api/v1/ws/cli/{session_id}" in paths
+        url = router.url_path_for(
+            "cli_websocket", session_id="registration-test"
+        ).make_absolute_url("http://testserver")
+        assert str(url) == "ws://testserver/api/v1/ws/cli/registration-test"
 
 
 # =============================================================================

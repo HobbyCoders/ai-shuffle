@@ -319,18 +319,14 @@ class TestRouterRegistration:
     def test_system_router_registered(self):
         """System router should be registered."""
         from app.main import app
-        # Check routes include system endpoints
-        route_paths = [route.path for route in app.routes]
-        assert "/health" in route_paths or any("/health" in str(r.path) for r in app.routes)
+        assert str(app.url_path_for("health_check")) == "/health"
+        assert str(app.url_path_for("api_health_check")) == "/api/v1/health"
 
     def test_auth_router_registered(self):
         """Auth router should be registered."""
         from app.main import app
-        route_paths = [str(route.path) for route in app.routes]
-        # Auth routes should exist
-        has_auth = any("auth" in path or "login" in path for path in route_paths)
-        # May also be under /api/v1/auth
-        assert has_auth or any("/api/v1/" in path for path in route_paths)
+        assert str(app.url_path_for("get_auth_status")) == "/api/v1/auth/status"
+        assert str(app.url_path_for("login")) == "/api/v1/auth/login"
 
     def test_agents_router_registered(self):
         """Agents router should be registered."""

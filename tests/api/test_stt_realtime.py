@@ -165,21 +165,17 @@ def test_capability_unsupported_without_openai_key(capability_env):
 def test_routes_are_mounted_under_settings():
     from app.api.settings import router
 
-    paths = {getattr(route, "path", "") for route in router.routes}
-    assert "/api/v1/settings/transcribe/stream" in paths
-    assert "/api/v1/settings/transcribe/stream/capability" in paths
+    assert str(router.url_path_for("transcribe_stream")) == "/api/v1/settings/transcribe/stream"
+    assert str(router.url_path_for("transcribe_stream_capability")) == "/api/v1/settings/transcribe/stream/capability"
 
 
 def test_websocket_route_is_a_websocket_route():
-    from fastapi.routing import APIWebSocketRoute
-
     from app.api.settings import router
 
-    route = next(
-        r for r in router.routes
-        if getattr(r, "path", "") == "/api/v1/settings/transcribe/stream"
-    )
-    assert isinstance(route, APIWebSocketRoute)
+    # URL reversal traverses included routers and retains the route protocol.
+    # This proves the endpoint is WebSocket even when routes are not flattened.
+    url = router.url_path_for("transcribe_stream").make_absolute_url("http://testserver")
+    assert str(url) == "ws://testserver/api/v1/settings/transcribe/stream"
 
 
 # ---------------------------------------------------------------------------

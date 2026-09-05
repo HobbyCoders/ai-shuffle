@@ -27,6 +27,8 @@ import type { DocEntry, DocCategory } from './types';
 
 // Frontmatter parser: extracts <!-- key: value --> block from top of markdown
 function parseFrontmatter(raw: string): { meta: Record<string, string>; content: string } {
+	// Git checkouts on Windows use CRLF; metadata parsing must match both.
+	raw = raw.replace(/\r\n/g, '\n');
 	const match = raw.match(/^<!--\s*\n((?:\s*[\w-]+:\s*.+\n)+)\s*-->\s*\n/);
 	if (!match) return { meta: {}, content: raw };
 
