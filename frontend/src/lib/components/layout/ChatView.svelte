@@ -20,6 +20,14 @@
 	import { RotateCcw } from 'lucide-svelte';
 	import { classifyChatSurface } from './chat-empty-state';
 
+	interface Props {
+		onBrowserToggle?: () => void;
+		onBrowserPreload?: () => void;
+		browserOpen?: boolean;
+	}
+
+	let { onBrowserToggle, onBrowserPreload, browserOpen = false }: Props = $props();
+
 	// Classify the empty-message surface. While a session's history is being
 	// fetched (boot restore OR an openChat navigation) messages is still [] but
 	// sessionId already points at the target — showing an empty hero then would
@@ -283,7 +291,7 @@
 			{#if voiceCallActive && $activeSession.sessionId}
 				<VoiceCallPanel sessionId={$activeSession.sessionId} compact />
 			{/if}
-			<ChatInput compact={!showEmptyHero} />
+			<ChatInput compact={!showEmptyHero} {onBrowserToggle} {onBrowserPreload} {browserOpen} />
 		</div>
 	{/if}
 

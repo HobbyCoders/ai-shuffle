@@ -40,7 +40,7 @@
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort } from '$lib/constants/model-effort';
 	import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
-	import { Plus, SlidersHorizontal } from 'lucide-svelte';
+	import { Globe, Plus, SlidersHorizontal } from 'lucide-svelte';
 	import {
 		getModelLabel,
 		getDefaultModel,
@@ -62,13 +62,16 @@
 		onAttachClick: () => void;
 		/** The dictate mic and voice-call buttons, rendered left of attach. */
 		voiceActions?: Snippet;
+		onBrowserToggle?: () => void;
+		onBrowserPreload?: () => void;
+		browserOpen?: boolean;
 		/** Keeps the mobile editor expanded while its integrated panel is open. */
 		onSheetOpenChange?: (open: boolean) => void;
 		/** Collapsed / expanding-tap: dock stays in the tree but cannot receive the expand click. */
 		inertToolbar?: boolean;
 	}
 
-	let { isUploading, onAttachClick, voiceActions, onSheetOpenChange, inertToolbar = false }: Props = $props();
+	let { isUploading, onAttachClick, voiceActions, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false }: Props = $props();
 
 	// ── Desktop popovers ──────────────────────────────────────────────
 	// Three anchored popovers, one open at a time: the permission menu, the
@@ -423,6 +426,22 @@
 		<!-- Dictate / voice call, supplied by ChatInput — left of attach. -->
 		{@render voiceActions?.()}
 
+		{#if onBrowserToggle}
+			<button
+				type="button"
+				class="dock-ico browser-toggle-btn"
+				class:active={browserOpen}
+				onclick={onBrowserToggle}
+				onpointerenter={onBrowserPreload}
+				onfocus={onBrowserPreload}
+				aria-label="Toggle live browser view"
+				title="Toggle live browser view"
+				aria-pressed={browserOpen}
+			>
+				<Globe size={14} strokeWidth={1.8} aria-hidden="true" />
+			</button>
+		{/if}
+
 		<!-- Attach stays in the primary action cluster on every viewport, in the
 		     code and chat lanes both. A code-lane upload lands in the project's
 		     or worktree's uploads dir; a chat-lane one lands in the workspace's
@@ -658,6 +677,11 @@
 	.dock-ico:hover:not(:disabled) {
 		background: var(--muted);
 		color: var(--foreground);
+	}
+
+	.dock-ico.browser-toggle-btn.active {
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		color: var(--primary);
 	}
 
 	.dock-ico:disabled {

@@ -58,9 +58,12 @@
 
 	interface Props {
 		compact?: boolean;
+		onBrowserToggle?: () => void;
+		onBrowserPreload?: () => void;
+		browserOpen?: boolean;
 	}
 
-	let { compact = false }: Props = $props();
+	let { compact = false, onBrowserToggle, onBrowserPreload, browserOpen = false }: Props = $props();
 
 	// The lane this composer belongs to. `$activeSession.mode` — not the
 	// sidepanel's `appMode` — is the authority: it is the session's own mode
@@ -992,6 +995,9 @@
 				     are handed to it as a snippet so they stay bound to this
 				     component's recording state and render inside the form. -->
 				<ControlsDock
+					{onBrowserToggle}
+					{onBrowserPreload}
+					{browserOpen}
 					{isUploading}
 					inertToolbar={toolbarPointerBlocked}
 					onAttachClick={triggerFileUpload}

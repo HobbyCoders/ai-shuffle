@@ -58,6 +58,32 @@ const voiceActions = createRawSnippet(() => ({
 }));
 
 describe('ControlsDock split controls', () => {
+	it('hides the browser control without an eligible-session toggle', () => {
+		renderDock({ browserOpen: true });
+		expect(screen.queryByRole('button', { name: 'Toggle live browser view' })).toBeNull();
+	});
+
+	it('forwards toggle and preload events and reflects the owned open state', async () => {
+		const onBrowserToggle = vi.fn();
+		const onBrowserPreload = vi.fn();
+		const { rerender } = renderDock({ onBrowserToggle, onBrowserPreload });
+		const browser = screen.getByRole('button', { name: 'Toggle live browser view' });
+		expect(browser.getAttribute('aria-pressed')).toBe('false');
+		expect(browser.classList.contains('active')).toBe(false);
+		expect(browser.getAttribute('title')).toBe('Toggle live browser view');
+		expect(browser.getAttribute('type')).toBe('button');
+		await fireEvent.pointerEnter(browser);
+		await fireEvent.focus(browser);
+		expect(onBrowserPreload).toHaveBeenCalledTimes(2);
+		expect(onBrowserToggle).not.toHaveBeenCalled();
+		await fireEvent.click(browser);
+		expect(onBrowserToggle).toHaveBeenCalledTimes(1);
+		expect(browser.getAttribute('aria-pressed')).toBe('false');
+		await rerender({ isUploading: false, onAttachClick: vi.fn(), onBrowserToggle, onBrowserPreload, browserOpen: true });
+		expect(browser.getAttribute('aria-pressed')).toBe('true');
+		expect(browser.classList.contains('active')).toBe(true);
+	});
+
 	it('splits the old summary chip into permission, model and effort controls', () => {
 		const { container } = renderDock();
 
@@ -86,8 +112,8 @@ describe('ControlsDock split controls', () => {
 			.toBeTruthy();
 	});
 
-	it('places attach after the voice snippet in the left cluster', () => {
-		const { container } = renderDock({ voiceActions });
+	it('places the Globe between voice actions and attach in the left cluster', () => {
+		const { container } = renderDock({ voiceActions, onBrowserToggle: vi.fn() });
 
 		const left = container.querySelector('.dock-left');
 		const voice = left?.querySelector('[data-testid="voice-snippet"]');
@@ -95,7 +121,12 @@ describe('ControlsDock split controls', () => {
 		expect(voice).toBeInstanceOf(Element);
 		expect(left?.contains(attach)).toBe(true);
 		if (!(voice instanceof Element)) return;
-		expect(voice.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		const browser = screen.getByRole('button', { name: 'Toggle live browser view' });
+		expect(voice.nextElementSibling).toBe(browser);
+		expect(browser.nextElementSibling).toBe(attach);
+		expect(browser.querySelector('svg.lucide-globe')).toBeTruthy();
+		expect(browser.querySelector('svg')?.getAttribute('width')).toBe('14');
+		expect(browser.querySelector('svg')?.getAttribute('stroke-width')).toBe('1.8');
 	});
 
 	it('opens the compact effort popover from the effort tag', async () => {

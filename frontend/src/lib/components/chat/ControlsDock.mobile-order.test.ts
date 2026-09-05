@@ -55,11 +55,12 @@ describe('ControlsDock mobile control order', () => {
 		window.innerWidth = previousWidth;
 	});
 
-	it('places chat settings first on the left, then attach, with usage on the right', () => {
+	it('places chat settings first, then browser immediately before attach, with usage on the right', () => {
 		const { container } = render(ControlsDock, {
 			props: {
 				isUploading: false,
-				onAttachClick: vi.fn()
+				onAttachClick: vi.fn(),
+				onBrowserToggle: vi.fn()
 			}
 		});
 		const dock = container.querySelector('.controls-dock');
@@ -70,6 +71,11 @@ describe('ControlsDock mobile control order', () => {
 		const attach = left?.querySelector('.attach-btn');
 		const contextUsage = mobile?.querySelector('.usage-context-wrapper');
 
+		const browser = screen.getByRole('button', { name: 'Toggle live browser view' });
+		expect(browser.nextElementSibling).toBe(attach);
+		expect(browser.classList.contains('dock-ico')).toBe(true);
+		expect(browser.classList.contains('desktop-only')).toBe(false);
+		expect(left?.contains(browser)).toBe(true);
 		expect(settings).toBeInstanceOf(Element);
 		expect(attach).toBeInstanceOf(Element);
 		expect(contextUsage).toBeInstanceOf(Element);
