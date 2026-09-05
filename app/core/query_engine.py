@@ -2196,7 +2196,6 @@ async def _stream_to_websocket_impl(
 
     # --- Session Pool: Acquire or create SDK client ---
     pool = get_session_pool()
-    existing_state = pool.get(session_id)
     reusing_client = False
     state = None
 
@@ -2271,6 +2270,8 @@ async def _stream_to_websocket_impl(
             }
             return
 
+    # Resolve the pooled state after setup; eviction may run during its awaits.
+    existing_state = pool.get(session_id)
     if existing_state and existing_state.is_connected and is_subprocess_alive(existing_state):
         # Busy-write guard backstop: a client that is mid-turn must NEVER get a
         # second prompt written into its stdin — the CLI dies with "Fatal error

@@ -177,6 +177,36 @@ async def test_chat_gate_refuses_busy_client_and_never_writes_stdin():
     assert state.is_streaming is True
 
 
+async def test_chat_gate_uses_current_pool_entry_after_async_setup():
+    old_state = _fake_state()
+    current_state = _fake_state()
+    pool = _StubPool(old_state)
+    setup_started = asyncio.Event()
+    finish_setup = asyncio.Event()
+
+    async def _refresh_credentials(*args, **kwargs):
+        setup_started.set()
+        await finish_setup.wait()
+
+    with ExitStack() as stack:
+        _chat_patches(stack, pool)
+        qe.direct_oauth.ensure_fresh_credentials.side_effect = _refresh_credentials
+        query = asyncio.create_task(_collect(qe.stream_to_websocket(
+            "hi", "sess-replaced", "claude-code",
+            overrides={"provider_id": "provider-a"},
+        )))
+        try:
+            await asyncio.wait_for(setup_started.wait(), timeout=2)
+            pool.state = current_state
+        finally:
+            finish_setup.set()
+            events = await asyncio.wait_for(query, timeout=2)
+
+    old_state.adapter.send_query.assert_not_awaited()
+    current_state.adapter.send_query.assert_awaited_once()
+    assert any(e.get("type") == "done" for e in events), events
+
+
 async def test_chat_gate_claims_is_streaming_at_decision_point():
     """is_streaming is set BEFORE the first await after the reuse decision
     (previously it was set ~350 lines later, letting two entrants both pass)."""

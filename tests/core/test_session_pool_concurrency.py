@@ -74,6 +74,54 @@ def _isolate_registry_and_reaper():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("removal", ["capacity", "eviction", "explicit"])
+async def test_removed_state_invalidated_before_teardown_suspends(monkeypatch, removal):
+    pool = SessionPool(max_size=1)
+    state = _make_state()
+    pool.put("removed", state)
+    snapshot_started = asyncio.Event()
+    finish_snapshot = asyncio.Event()
+
+    async def _snapshot(*args, **kwargs):
+        snapshot_started.set()
+        await finish_snapshot.wait()
+        return []
+
+    monkeypatch.setattr(sp.asyncio, "to_thread", _snapshot)
+    if removal == "capacity":
+        operation = pool.evict_if_needed()
+    elif removal == "eviction":
+        operation = pool._do_evict("removed", state)
+    else:
+        operation = pool.remove("removed")
+    task = asyncio.create_task(operation)
+    try:
+        await asyncio.wait_for(snapshot_started.wait(), timeout=2)
+        assert pool.peek("removed") is None
+        assert state.is_connected is False
+        assert not pool._eviction_lock.locked()
+        state.adapter.disconnect.assert_not_awaited()
+    finally:
+        finish_snapshot.set()
+        await asyncio.wait_for(task, timeout=2)
+
+    state.adapter.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_remove_dead_invalidates_retained_state():
+    pool = SessionPool()
+    state = _make_state(alive=False)
+    pool.put("dead", state)
+
+    assert await pool.remove_dead("dead") is state
+
+    assert state.is_connected is False
+    assert pool.peek("dead") is None
+    state.adapter.disconnect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_eviction_lock_released_before_slow_teardown():
     """While the evicted session's disconnect is still in flight, the lock must
     already be free and the pool slot already vacated — new-session admission
