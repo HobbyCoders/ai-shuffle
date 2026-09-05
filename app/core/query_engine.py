@@ -2559,6 +2559,7 @@ async def _stream_to_websocket_impl(
                 from app.core.user_question_handler import (
                     FLUID_ANSWER_KEY,
                     FLUID_QUESTION_TOOLS,
+                    HOST_USER_ANSWERED_KEY,
                     QUESTION_TOOLS,
                     fluid_answer_from_envelope,
                     questions_from_tool_input,
@@ -2614,10 +2615,14 @@ async def _stream_to_websocket_impl(
                             # PlanModeControl wrapper; this syncs the APP side
                             # (persisted binding, chip note, permission refs).
                             _sync_plan_mode_exited(refs)
+                        # A person clicked the panel: say so, so the engine
+                        # can credit the user with the approval. The bypass
+                        # path above deliberately does not.
                         return PermissionResultAllow(
                             updated_input={
                                 **tool_input,
                                 FLUID_ANSWER_KEY: "approve" if approved else "keep planning",
+                                **({HOST_USER_ANSWERED_KEY: True} if approved else {}),
                             }
                         )
 
@@ -3019,6 +3024,11 @@ async def _stream_to_websocket_impl(
         has_visible_content = False  # Track if any content was yielded to the frontend
         is_slash_command = not resume and prompt.strip().startswith("/")
         _current_thinking = []  # Accumulate thinking deltas into blocks
+        # The open thinking block's subtype (fluid BlockStart.subtype:
+        # "reasoning_summary" for the provider's own summary, "reasoning" for
+        # the reasoning text). A one-slot holder so the closures below can
+        # update it; None when the provider draws no distinction.
+        _thinking_subtype: List[Optional[str]] = [None]
         _current_text_parts: list = []  # Accumulate asst text between blocks for ordered persistence
 
         # Helper to drain stderr queue and yield plugin messages
@@ -3304,9 +3314,12 @@ async def _stream_to_websocket_impl(
                         # Finalize any accumulated thinking block
                         if _current_thinking:
                             thinking_entry = {"content": "".join(_current_thinking)}
+                            if _thinking_subtype[0]:
+                                thinking_entry["subtype"] = _thinking_subtype[0]
                             thinking_blocks.append(thinking_entry)
                             turn_events.append({"kind": "thinking", "payload": thinking_entry})
                             _current_thinking.clear()
+                            _thinking_subtype[0] = None
                         # Real-time text streaming chunk
                         text = delta["text"]
                         has_visible_content = True
@@ -3318,13 +3331,27 @@ async def _stream_to_websocket_impl(
                             "index": event.get("index", 0)
                         }
                     elif delta_type == "thinking_delta" and delta.get("thinking"):
-                        # Thinking block streaming — accumulate for DB persistence
+                        # Thinking block streaming — accumulate for DB persistence.
+                        # A subtype change (the provider's summary block giving
+                        # way to the reasoning text, or the reverse) closes the
+                        # open block first: the two are different voices and
+                        # persist as separate rows.
+                        subtype = delta.get("subtype") or None
+                        if _current_thinking and subtype != _thinking_subtype[0]:
+                            thinking_entry = {"content": "".join(_current_thinking)}
+                            if _thinking_subtype[0]:
+                                thinking_entry["subtype"] = _thinking_subtype[0]
+                            thinking_blocks.append(thinking_entry)
+                            turn_events.append({"kind": "thinking", "payload": thinking_entry})
+                            _current_thinking.clear()
+                        _thinking_subtype[0] = subtype
                         _current_thinking.append(delta["thinking"])
                         yield {
                             "type": "stream_delta",
                             "delta_type": "thinking",
                             "content": delta["thinking"],
-                            "index": event.get("index", 0)
+                            "index": event.get("index", 0),
+                            **({"subtype": subtype} if subtype else {}),
                         }
                     elif delta_type == "input_json_delta" and delta.get("partial_json"):
                         # Tool input streaming
@@ -4290,9 +4317,12 @@ async def _stream_to_websocket_impl(
         # Finalize any trailing thinking block
         if _current_thinking:
             thinking_entry = {"content": "".join(_current_thinking)}
+            if _thinking_subtype[0]:
+                thinking_entry["subtype"] = _thinking_subtype[0]
             thinking_blocks.append(thinking_entry)
             turn_events.append({"kind": "thinking", "payload": thinking_entry})
             _current_thinking.clear()
+            _thinking_subtype[0] = None
 
         # Final drain of stderr queue after streaming loop completes
         for stderr_msg in await drain_stderr_queue():

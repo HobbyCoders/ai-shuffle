@@ -1240,7 +1240,10 @@ class SessionRuntime:
             "task_ids": list(task_ids or []),
         }
         try:
-            await adapter.steer(prompt, id=notification_id)
+            # A harness notice, not the user: the summary inside it is text a
+            # worker wrote, so it goes out in the notice marker, never the
+            # steering marker that carries the user's authority.
+            await adapter.steer(prompt, id=notification_id, origin="system")
         except NotImplementedError:
             self._task_steers.pop(notification_id, None)
             logger.debug(

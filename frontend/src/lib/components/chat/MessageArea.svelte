@@ -1907,6 +1907,7 @@
 			streaming={message.streaming}
 			thinkingTokens={message.thinkingTokens}
 			profileName={getProfileName(message)}
+			subtype={message.thinkingSubtype}
 		/>
 	{:else if message.type === 'text' || !message.type}
 		{@const isStreamAnchor = !!(message.streaming && messageIndex === lastStreamingMessageIndex)}

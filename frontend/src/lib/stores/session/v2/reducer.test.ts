@@ -807,6 +807,28 @@ describe('assistant deltas', () => {
 		);
 	});
 
+	it("a provider's reasoning summary is its own block, labelled as such", () => {
+		// OpenAI-shaped providers stream a summary of the reasoning (their own
+		// voice) and then the reasoning text; glued into one block the summary
+		// read like the model addressing the user. A subtype change closes the
+		// open block, and the subtype rides the message for the header label.
+		const s = fold([
+			ev('assistant.thinking_delta', { id: 'a', text: 'sum', subtype: 'reasoning_summary' }),
+			ev('assistant.thinking_delta', { id: 'b', text: 'mary', subtype: 'reasoning_summary' }),
+			ev('assistant.thinking_delta', { id: 'c', text: 'the real thing', subtype: 'reasoning' }),
+			ev('assistant.thinking_delta', { id: 'd', text: 'plain' }),
+		]);
+		const thinking = s.messages.filter((m) => m.type === 'thinking');
+		expect(thinking.map((m) => [m.content, m.thinkingSubtype, m.streaming])).toEqual([
+			['summary', 'reasoning_summary', false],
+			['the real thing', 'reasoning', false],
+			['plain', undefined, true],
+		]);
+		// A closed thinking message keeps the label too.
+		const closed = fold([ev('message.assistant', { content: 'x', kind: 'thinking', subtype: 'reasoning_summary' })]);
+		expect(closed.messages[0].thinkingSubtype).toBe('reasoning_summary');
+	});
+
 	it('a mid-block delta boundary is still glued verbatim', () => {
 		const s = fold([
 			ev('assistant.thinking_delta', { id: 'a', text: 'weighing the ' }),

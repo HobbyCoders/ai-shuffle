@@ -87,8 +87,14 @@ class ProviderAdapter(ABC):
         """
         raise NotImplementedError("resume is only supported on fluid sessions")
 
-    async def steer(self, text: str, *, id: Optional[str] = None) -> None:
-        """Hand user text to the RUNNING turn so the model reads it mid-stream.
+    async def steer(
+        self, text: str, *, id: Optional[str] = None, origin: str = "user"
+    ) -> None:
+        """Hand text to the RUNNING turn so the model reads it mid-stream.
+
+        ``origin`` says who is speaking: ``"user"`` (default) is the user's
+        own words; ``"system"`` is a harness notice (a task completion) and
+        must not arrive carrying the user's authority.
 
         ``id`` is a caller-chosen correlation handle echoed back on the
         delivery receipt, which is how a host with a durable queue knows the

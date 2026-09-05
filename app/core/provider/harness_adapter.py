@@ -348,6 +348,11 @@ class HarnessAdapter(ProviderAdapter):
         # Open streaming blocks: index -> block_type, and accumulated delta text.
         self._block_types: Dict[int, str] = {}
         self._block_buffers: Dict[int, list] = {}
+        # Thinking blocks only: fluid's ``BlockStart.subtype`` — "reasoning"
+        # for the reasoning text, "reasoning_summary" for the provider's own
+        # summary of it — so the UI can label the summary as the provider's
+        # voice instead of the model's.
+        self._block_subtypes: Dict[int, Optional[str]] = {}
         # App-side permission callback (ClaudeAgentOptions.can_use_tool). When
         # present, fluid PermissionRequests are bridged to it out-of-band (SDK
         # parity — the loops never see a permission event); when absent they
@@ -528,6 +533,13 @@ class HarnessAdapter(ProviderAdapter):
                     "unavailable on this native leg",
                     fluid_session_id, options.cwd, exc_info=True,
                 )
+            # The wall-clock budget the spawner enforces, declared where fluid's
+            # Monitor prose reads it: the spawn warning then says the command
+            # will be stopped at N seconds and woken with a timeout — the same
+            # thing the receipt says — instead of claiming no wake is coming.
+            monitor_budget = _monitor_budget_seconds()
+            if monitor_budget:
+                native_ctx.extra["monitor_budget_seconds"] = monitor_budget
             # Cross-session recall, wired exactly the way fluid's own
             # config/loader.py does it: the store's optional hooks back the
             # recall builtins (PgFluidStore sweeps fluid_session_nodes +
@@ -716,6 +728,11 @@ class HarnessAdapter(ProviderAdapter):
                 # The session's real tool registry — the name set the T9 prompt
                 # filter is computed from (MCP bridge names included).
                 registry=self._registry,
+                # The capabilities this leg actually wired: a builtin whose
+                # host injection is missing (SendMessage without agent
+                # messaging) leaves the prompt's tool surface the way the
+                # engine drops it from the schemas — one surface, not two.
+                wired=_wired_capabilities(native_ctx),
             )
             self._engine = NativeLoop(
                 provider=provider_client,
@@ -734,6 +751,10 @@ class HarnessAdapter(ProviderAdapter):
                 # get_context_usage() breakdown; None when unresolvable, which
                 # fluid reports as an unknown window instead of guessing.
                 context_window=_native_context_window(kind, options),
+                # Consult rates from the bound provider catalog before the harness fallback table. Catalog-
+                # sourced per-token rates price supported models; retain unknown cost when neither source has a
+                # matching rate.
+                pricing=_catalog_pricing_resolver(options),
                 # Per-session fast mode (v81). Only the OpenAI Responses lane
                 # has a wire-level expedited service in v1 — ``service_tier:
                 # priority``, merged into the request body by fluid's
@@ -1206,8 +1227,17 @@ class HarnessAdapter(ProviderAdapter):
                 pass
         self._turn_floor = floor
 
-    async def steer(self, text: str, *, id: Optional[str] = None) -> None:
+    async def steer(
+        self, text: str, *, id: Optional[str] = None, origin: str = "user"
+    ) -> None:
         """Hand ``text`` to the RUNNING turn as a fluid ``Steer``.
+
+        ``origin`` is who is speaking: ``"user"`` (the default) delivers the
+        text in fluid's steering marker, which carries the user's authority;
+        ``"system"`` delivers a harness notice — a task completion, a watcher
+        firing — in the harness-notice marker, which says it is not the user
+        and asks for nothing. Audited sessions had task notifications, whose
+        summaries are text a sub-agent wrote, arriving in the user's marker.
 
         Both legs accept it and both receipt it with ``SteerDelivered`` (mirrored
         to :class:`SteerDeliveredEvent`), but they deliver differently: the
@@ -1223,7 +1253,7 @@ class HarnessAdapter(ProviderAdapter):
         """
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
-        await self._engine.submit(Steer(text=text, id=id))
+        await self._engine.submit(Steer(text=text, id=id, origin=origin))
 
     async def cancel_steer(self, id: str) -> bool:
         """Ask fluid to drop the pending ``Steer`` submitted under ``id``.
@@ -1514,9 +1544,13 @@ class HarnessAdapter(ProviderAdapter):
         """
         from types import SimpleNamespace
 
-        from app.core.user_question_handler import FLUID_ANSWER_KEY
+        from app.core.user_question_handler import (
+            FLUID_ANSWER_KEY,
+            HOST_USER_ANSWERED_KEY,
+        )
 
         answer = ""
+        user_answered = False
         try:
             can_use_tool = cast(Any, self._can_use_tool)
             result = await can_use_tool(
@@ -1532,6 +1566,9 @@ class HarnessAdapter(ProviderAdapter):
                         answer = ", ".join(str(item) for item in raw)
                     else:
                         answer = str(raw or "")
+                    # Only the app knows whether a person answered or policy
+                    # did; fluid words the StopPlanning result on this.
+                    user_answered = bool(candidate.get(HOST_USER_ANSWERED_KEY))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1539,10 +1576,10 @@ class HarnessAdapter(ProviderAdapter):
                 "[HarnessAdapter] can_use_tool question bridge failed for %s — empty answer",
                 ev.name, exc_info=True,
             )
-        await self._submit_question_answer(ev, answer)
+        await self._submit_question_answer(ev, answer, user_answered=user_answered)
 
     async def _submit_question_answer(
-        self, ev: PermissionRequestEvent, answer: str
+        self, ev: PermissionRequestEvent, answer: str, *, user_answered: bool = False
     ) -> None:
         try:
             request_id = ev.request_id or self._pending_question_id
@@ -1551,7 +1588,9 @@ class HarnessAdapter(ProviderAdapter):
             if self._pending_question_id == request_id:
                 self._pending_question_id = None
             await self._engine.submit(
-                RespondQuestion(request_id=request_id, answer=answer)
+                RespondQuestion(
+                    request_id=request_id, answer=answer, user_answered=user_answered
+                )
             )
         except Exception:
             logger.warning(
@@ -1653,6 +1692,7 @@ class HarnessAdapter(ProviderAdapter):
                 self._engine.plan_mode = mode == "plan"
         if self._options is not None:
             self._options.permission_mode = mode
+        self._refresh_plan_mode_control()
 
     async def get_context_usage(self) -> Optional[Dict[str, Any]]:
         """Context-window usage by category, or None when unavailable.
@@ -1822,6 +1862,10 @@ class HarnessAdapter(ProviderAdapter):
         if cls == "BlockStart":
             self._block_types[event.index] = event.block_type
             self._block_buffers[event.index] = []
+            # Read defensively: the field is new on fluid's BlockStart, and a
+            # persisted event from before it exists has no attribute.
+            subtype = getattr(event, "subtype", None)
+            self._block_subtypes[event.index] = subtype if isinstance(subtype, str) else None
             if not partial:
                 return []
             content_block: Dict[str, Any] = {"type": event.block_type}
@@ -1831,6 +1875,8 @@ class HarnessAdapter(ProviderAdapter):
                 content_block["input"] = {}
             elif event.block_type == "thinking":
                 content_block["thinking"] = ""
+                if self._block_subtypes.get(event.index):
+                    content_block["subtype"] = self._block_subtypes[event.index]
             else:
                 content_block["text"] = ""
             return [
@@ -1856,6 +1902,8 @@ class HarnessAdapter(ProviderAdapter):
                 if cls == "TextDelta"
                 else {"type": "thinking_delta", "thinking": event.text}
             )
+            if cls == "ThinkingDelta" and self._block_subtypes.get(event.index):
+                delta["subtype"] = self._block_subtypes[event.index]
             return [
                 self._stream_event(
                     event,
@@ -1895,6 +1943,7 @@ class HarnessAdapter(ProviderAdapter):
         if cls == "BlockStop":
             block_type = self._block_types.pop(event.index, "text")
             text = "".join(self._block_buffers.pop(event.index, []))
+            self._block_subtypes.pop(event.index, None)
             out: list = []
             if partial:
                 out.append(
@@ -2256,8 +2305,16 @@ class HarnessAdapter(ProviderAdapter):
         codemode: Any = None,
         native: bool = True,
         registry: Any = None,
+        wired: Optional[frozenset] = None,
     ) -> Any:
         """Run the fluid prompt compiler, keeping the labeled sections.
+
+        ``wired`` is the set of host capabilities on the leg's tool context
+        (``ctx.extra`` keys plus the ones NativeLoop wires itself). Given it,
+        a registered tool whose ``requires_extra`` names a missing capability
+        leaves the prompt's tool set and the code-mode catalog, exactly as
+        the engine drops it from the request schemas. None (the delegated
+        leg, tests) keeps the permission-only surface.
 
         Returns fluid's ``CompiledPrompt`` (joined text + one section per
         input: base, instruction files, skills index, agents index,
@@ -2318,6 +2375,8 @@ class HarnessAdapter(ProviderAdapter):
             # ``Task`` is. None is fluid's own "no filter" value, so an
             # unrestricted agent compiles exactly as it did before.
             permitted = _permitted_tool_names(options, registry)
+            if wired is not None:
+                permitted = _wired_tool_names(registry, permitted, wired)
             # ``memories_dir=None``, always: the continual learner's
             # ``# Memory`` snapshot no longer belongs to the system prompt.
             # The store is INSTALL-GLOBAL, so any session's Remember rewrote
@@ -2343,6 +2402,8 @@ class HarnessAdapter(ProviderAdapter):
                 )
             )
             permit = _tool_predicate(options)
+            if wired is not None:
+                permit = _permit_within(permit, permitted)
             index, _ = _agent_context(options, code_mode=code_mode)
             if index and permitted is not None and "Task" not in permitted:
                 # The app's merged agents index is the app's own section (see
@@ -2544,6 +2605,9 @@ class HarnessAdapter(ProviderAdapter):
                     registry,
                     allowed=_tool_allowlist(options),
                     disallowed=list(options.disallowed_tools or ()),
+                    # The same number the ctx declares (see connect): the
+                    # description then names the bound to stay under.
+                    monitor_budget_seconds=_monitor_budget_seconds(),
                 )
             except ImportError:
                 pass  # older vendored fluid without the refinement seam
@@ -2681,7 +2745,40 @@ class HarnessAdapter(ProviderAdapter):
         extra["plan_mode_control"] = PlanModeControl(
             is_active=original.is_active,
             set_active=set_active,
+            auto_approve=self._plan_auto_approve(),
         )
+
+    def _plan_auto_approve(self) -> bool:
+        """Whether StopPlanning's gate closes on policy here (bypassPermissions).
+
+        Only the host knows this. Told, fluid's Plan entry result says the
+        approval is automatic and nobody reviews the plan, so the model does
+        not go on to report "the plan is approved" as if a person had said so
+        — the audited wording under bypass.
+        """
+        return self._came_from_bypass()
+
+    def _refresh_plan_mode_control(self) -> None:
+        """Re-stamp ``auto_approve`` after a permission-mode change.
+
+        The controller is a frozen dataclass read at Plan time, so a chip
+        switch into or out of bypass has to replace it; the wrapped callables
+        are kept as they are.
+        """
+        import dataclasses
+
+        ctx = getattr(self._engine, "ctx", None)
+        extra = getattr(ctx, "extra", None)
+        if not isinstance(extra, dict):
+            return
+        control = extra.get("plan_mode_control")
+        if control is None or not dataclasses.is_dataclass(control):
+            return
+        if not hasattr(control, "auto_approve"):
+            return
+        want = self._plan_auto_approve()
+        if bool(getattr(control, "auto_approve", False)) != want:
+            extra["plan_mode_control"] = dataclasses.replace(control, auto_approve=want)
 
     def _on_plan_mode_changed(self, active: bool) -> Optional[str]:
         """Keep engine policy, session binding, and the UI chip on the same mode.
@@ -4400,6 +4497,110 @@ async def _build_provider_client(
         return AnthropicClient(api_key=creds.api_key), None
     _require_env_credential("ANTHROPIC_API_KEY", kind)
     return AnthropicClient(), None
+
+
+def _catalog_pricing_resolver(options: SessionOptions) -> Optional[Any]:
+    """fluid's ``PricingResolver`` over the bound provider row's catalog.
+
+    The catalog keeps OpenRouter-shaped per-TOKEN prices (``prompt``,
+    ``completion``, ``input_cache_read``, ``input_cache_write`` — see
+    :func:`_openrouter_pricing`); fluid's ``ModelPrice`` wants USD per
+    million, so the rates are scaled here. ``None`` when the row carries no
+    prices at all, which leaves fluid to its own sourced table. A row that
+    prices some models answers only for those; the rest fall through too.
+    """
+    provider_id = (options.extra or {}).get("provider_id")
+    table: Dict[str, Dict[str, Any]] = {}
+    for model_id, raw in _openrouter_pricing(options).items():
+        rates: Dict[str, Any] = {}
+        for src, dst in (
+            ("prompt", "input"),
+            ("completion", "output"),
+            ("input_cache_read", "cached_input"),
+            ("input_cache_write", "cache_write"),
+        ):
+            if src in raw:
+                rates[dst] = raw[src] * 1_000_000
+        if rates:
+            rates["source"] = f"provider catalog {provider_id}"
+            table[model_id.lower()] = rates
+    if not table:
+        return None
+
+    def resolve(model: str) -> Optional[Dict[str, Any]]:
+        key = (model or "").lower()
+        return table.get(key) or table.get(key.partition(":")[0])
+
+    return resolve
+
+
+def _monitor_budget_seconds() -> Optional[int]:
+    """The wall-clock budget ``monitor_spawn`` enforces on a Monitor command.
+
+    ``settings.monitor_command_timeout_seconds`` (0 = no backstop → None).
+    Declared on the tool ctx AND handed to fluid's description refinement so
+    the prose names the number the host actually enforces.
+    """
+    try:
+        from app.core.config import settings
+
+        budget = int(getattr(settings, "monitor_command_timeout_seconds", 0) or 0)
+    except Exception:  # noqa: BLE001 — a settings hiccup must not break connect
+        return None
+    return budget if budget > 0 else None
+
+
+# Capabilities NativeLoop wires onto every native session itself (mirrors
+# fluid.cli.prompt.NATIVE_WIRED_CAPABILITIES); the ctx the app builds does not
+# carry them yet when the prompt is compiled.
+_NATIVE_WIRED_FALLBACK = frozenset({"history_recall", "plan_mode_control", "tool_registry"})
+
+
+def _wired_capabilities(ctx: Any) -> frozenset:
+    """The capability keys this leg's tool context will carry."""
+    try:
+        from fluid.cli.prompt import NATIVE_WIRED_CAPABILITIES as native_wired
+    except Exception:  # noqa: BLE001 — older vendored fluid
+        native_wired = _NATIVE_WIRED_FALLBACK
+    extra = getattr(ctx, "extra", None)
+    keys = frozenset(extra) if isinstance(extra, dict) else frozenset()
+    return keys | frozenset(native_wired)
+
+
+def _wired_tool_names(
+    registry: Any, permitted: Optional[frozenset], wired: frozenset
+) -> Optional[frozenset]:
+    """``permitted`` narrowed to tools whose ``requires_extra`` is all wired.
+
+    A None ``permitted`` (no restriction) starts from every registered name.
+    Without a registry to ask there is nothing to narrow, and the input is
+    returned as is.
+    """
+    if registry is None:
+        return permitted
+    try:
+        specs = list(registry.list_tools(loaded_only=False))
+    except Exception:  # noqa: BLE001 — an unreadable registry must not kill the turn
+        logger.warning(
+            "[HarnessAdapter] could not enumerate tools for the capability filter",
+            exc_info=True,
+        )
+        return permitted
+    return frozenset(
+        spec.name
+        for spec in specs
+        if (permitted is None or spec.name in permitted)
+        and all(key in wired for key in (getattr(spec, "requires_extra", ()) or ()))
+    )
+
+
+def _permit_within(permit: Any, names: Optional[frozenset]) -> Any:
+    """``permit`` AND membership in ``names`` (None names = no narrowing)."""
+    if names is None:
+        return permit
+    if permit is None:
+        return lambda name: name in names
+    return lambda name: name in names and permit(name)
 
 
 def _openrouter_pricing(options: SessionOptions) -> Dict[str, Dict[str, float]]:

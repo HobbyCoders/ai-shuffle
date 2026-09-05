@@ -924,8 +924,9 @@ async def test_task_notification_steer_is_submitted_and_registered(mock_db):
         )
 
     assert accepted is True
+    # System-origin: the notice must not arrive in the user's steering marker.
     adapter.steer.assert_awaited_once_with(
-        "<task-notification/>", id="task-notify:abc",
+        "<task-notification/>", id="task-notify:abc", origin="system",
     )
     assert rt._task_steers["task-notify:abc"] == {
         "frames": frames, "task_ids": ["bg-1"],

@@ -84,6 +84,12 @@ def resolve_answer_envelope(envelope: Any) -> Dict[str, Any]:
 # RespondQuestion. These helpers normalize that shape onto the existing
 # UserQuestion modal payload and extract the answer the engine wants.
 FLUID_ANSWER_KEY = "_fluid_answer"
+# Set truthy beside FLUID_ANSWER_KEY when a PERSON produced the answer (the
+# plan-approval panel was clicked) rather than a policy (bypassPermissions
+# closing the gate). The adapter forwards it as ``RespondQuestion(
+# user_answered=True)``; fluid credits the user in the StopPlanning result
+# only then. Absent means unattributed, which fluid words as such.
+HOST_USER_ANSWERED_KEY = "_host_user_answered"
 FLUID_QUESTION_TOOLS = frozenset({"AskUser", "StopPlanning"})
 QUESTION_TOOLS = frozenset({"AskUserQuestion"}) | FLUID_QUESTION_TOOLS
 

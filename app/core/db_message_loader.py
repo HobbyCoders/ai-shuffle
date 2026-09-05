@@ -155,6 +155,8 @@ def _transform_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "metadata": {
                 **base["metadata"],
                 "model": meta.get("model"),
+                # The provider-summary marker, when the row carries one.
+                **({"subtype": meta["subtype"]} if meta.get("subtype") else {}),
             },
         }
 

@@ -1331,6 +1331,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				content,
 				streaming: false,
 				timestamp: stampTs(event, createdAt) || undefined,
+				...(kind === 'thinking' && str(event.subtype) ? { thinkingSubtype: str(event.subtype) } : {}),
 				...(str(event.uuid) ? { jsonlUuid: str(event.uuid) } : {}),
 				...(str(event.profile_id) ? { profileId: str(event.profile_id) } : {}),
 				...(Object.keys(metadata).length ? { metadata } : {}),
@@ -1347,15 +1348,22 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// Thinking counts too: the provider is answering.
 			state = withRetryAnswered(state);
 			const text = str(event.text);
+			const subtype = str(event.subtype) || undefined;
 			let next = closeOpenText(state);
 			if (next.openThinkingId) {
 				const open = next.messages.find((m) => m.id === next.openThinkingId);
-				return {
-					...next,
-					messages: replaceById(next.messages, next.openThinkingId, {
-						content: joinThinking(open?.content ?? '', text),
-					}),
-				};
+				// The provider's summary and its reasoning text are different
+				// voices: a subtype change closes the open block and opens a
+				// new one rather than gluing the two under one label.
+				if ((open?.thinkingSubtype ?? undefined) === subtype) {
+					return {
+						...next,
+						messages: replaceById(next.messages, next.openThinkingId, {
+							content: joinThinking(open?.content ?? '', text),
+						}),
+					};
+				}
+				next = closeOpenThinking(next);
 			}
 			const id = `thinking-${event.id}`;
 			const msg: ChatMessage = {
@@ -1365,6 +1373,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				content: text,
 				streaming: true,
 				timestamp: createdAt || undefined,
+				...(subtype ? { thinkingSubtype: subtype } : {}),
 				...(next.liveTurnProfileId ? { profileId: next.liveTurnProfileId } : {}),
 			};
 			return { ...appendMessage(next, msg, seq), openThinkingId: id };

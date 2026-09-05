@@ -1213,6 +1213,14 @@ def create_builtin_tools_server(
                 "branch_name": branch,
                 "worktree_path": checkout_path,
                 "status": "active",
+                # Audited sessions edited a file at its old path's worktree
+                # twin and hit the read-before-edit gate as if it were a new
+                # file — which, to the gate, it is.
+                "note": (
+                    "Paths under the worktree root are new paths: the "
+                    "read-before-edit gate re-fires there, so Read a file at "
+                    "its worktree path before the first Edit to it."
+                ),
             })
         except Exception as e:
             logger.exception("EnterWorktree failed")

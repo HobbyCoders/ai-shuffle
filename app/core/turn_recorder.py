@@ -1056,6 +1056,11 @@ class TurnRecorder:
         content = event.get("content") or ""
         if delta_type not in ("text", "thinking", "tool_input") or not content:
             return False
+        if delta_type == "thinking" and event.get("subtype"):
+            # The provider's summary and its reasoning text are different
+            # voices: buffered under their own key so they never coalesce into
+            # one delta, and emitted with the subtype the UI labels on.
+            delta_type = f"thinking/{event['subtype']}"
         if delta_type == "tool_input" and "tool_input" not in self._delta_buffers:
             # Stamp the open block's id at first buffer; a new tool block's
             # stream_block_start flushes this buffer before re-stamping.
@@ -1098,9 +1103,13 @@ class TurnRecorder:
                 continue
             if kind == "text":
                 events.append(self._event(contract.AssistantTextDelta, text=text))
-            elif kind == "thinking":
+            elif kind.startswith("thinking"):
+                subtype = kind.partition("/")[2] or None
                 events.append(
-                    self._event(contract.AssistantThinkingDelta, text=text)
+                    self._event(
+                        contract.AssistantThinkingDelta, text=text,
+                        **({"subtype": subtype} if subtype else {}),
+                    )
                 )
             elif kind == "tool_input":
                 events.append(self._event(

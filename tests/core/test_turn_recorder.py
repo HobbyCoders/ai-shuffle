@@ -1494,3 +1494,32 @@ async def test_record_voice_exchange_survives_side_effect_failure(mock_db, monke
     assert _types() == [
         "turn.started", "message.user", "message.assistant", "turn.completed",
     ]
+
+
+async def test_a_thinking_subtype_boundary_is_a_delta_boundary(mock_db):
+    """The provider's reasoning summary and its reasoning text are different
+    voices: they never coalesce into one thinking delta, and each emitted
+    delta carries the subtype the UI labels on."""
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "stream_delta", "delta_type": "thinking", "content": "sum ",
+        "subtype": "reasoning_summary",
+    })
+    await rec.on_event({
+        "type": "stream_delta", "delta_type": "thinking", "content": "mary",
+        "subtype": "reasoning_summary",
+    })
+    await rec.on_event({
+        "type": "stream_delta", "delta_type": "thinking", "content": "real",
+        "subtype": "reasoning",
+    })
+    await rec.on_event({"type": "stream_delta", "delta_type": "thinking", "content": "plain"})
+    await rec.on_event({"type": "tool_use", "name": "Read", "id": "tu_9", "input": {}})
+    rows = [r for r in _rows() if r["event_type"] == "assistant.thinking_delta"]
+    assert [(r["payload"]["text"], r["payload"].get("subtype")) for r in rows] == [
+        ("sum mary", "reasoning_summary"),
+        ("real", "reasoning"),
+        ("plain", None),
+    ]
+    await rec.close()

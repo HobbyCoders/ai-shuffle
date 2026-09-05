@@ -80,6 +80,10 @@ class MessageAssistant(EventBase):
     type: Literal["message.assistant"] = "message.assistant"
     content: str
     kind: Literal["text", "thinking"] = "text"
+    # Thinking only: "reasoning_summary" when the block is the provider's own
+    # summary of its reasoning rather than the reasoning text (fluid
+    # BlockStart.subtype). None when the provider draws no distinction.
+    subtype: str | None = None
     model: str | None = None
     profile_id: str | None = None
     uuid: str | None = None  # raw jsonl entry uuid (rewind target)
@@ -94,6 +98,7 @@ class AssistantTextDelta(EventBase):
 class AssistantThinkingDelta(EventBase):
     type: Literal["assistant.thinking_delta"] = "assistant.thinking_delta"
     text: str
+    subtype: str | None = None  # see MessageAssistant.subtype
 
 
 class ToolUse(EventBase):

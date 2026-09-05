@@ -28,6 +28,11 @@
 		/** Live estimated thinking-token count, shown as a counter in the header
 		 *  (fed by the CLI's streaming `thinking_tokens` events). */
 		thinkingTokens?: number | null;
+		/** 'reasoning_summary' when this block is the provider's own summary of
+		 *  the model's reasoning (OpenAI Responses / xAI), not the reasoning
+		 *  itself. The header says so: a summary written in the second person
+		 *  read like the model addressing the user. */
+		subtype?: string | null;
 	}
 
 	let {
@@ -35,8 +40,17 @@
 		streaming = false,
 		initialExpanded,
 		profileName = 'Assistant',
-		thinkingTokens = null
+		thinkingTokens = null,
+		subtype = null
 	}: Props = $props();
+
+	const isSummary = $derived(subtype === 'reasoning_summary');
+	const label = $derived(isSummary ? 'Reasoning summary' : 'Thinking');
+	const labelTitle = $derived(
+		isSummary
+			? "The provider's own summary of the model's reasoning, not the reasoning itself"
+			: undefined
+	);
 
 	// Chat preferences (reactive via .current getter)
 	const prefs = $derived(chatPreferences.current);
@@ -177,7 +191,7 @@
 			<path d="M19.967 17.484A4 4 0 0 1 18 18"/>
 		</svg>
 
-		<span class="thinking-label">Thinking</span>
+		<span class="thinking-label" title={labelTitle}>{label}</span>
 		<span class="thinking-who" title={profileName}>{profileName}</span>
 
 		<span class="thinking-right">

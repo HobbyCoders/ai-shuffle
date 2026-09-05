@@ -272,11 +272,16 @@ def _row_for_tool_result(session_id: str, tool_msg: dict, profile_id: Optional[s
 
 
 def _row_for_thinking(session_id: str, tb: dict, profile_id: Optional[str], model: Optional[str]) -> dict:
+    metadata: Dict[str, Any] = {"model": model}
+    # "reasoning_summary" marks the provider's own summary of its reasoning
+    # (OpenAI Responses / xAI); the UI labels it as the provider's voice.
+    if tb.get("subtype"):
+        metadata["subtype"] = tb["subtype"]
     return {
         "session_id": session_id,
         "role": "thinking",
         "content": tb.get("content", ""),
-        "metadata": {"model": model},
+        "metadata": metadata,
         "profile_id": profile_id,
         "jsonl_uuid": tb.get("uuid"),
     }

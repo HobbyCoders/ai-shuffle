@@ -72,8 +72,9 @@ class _Adapter:
         self._refuse = refuse
         self._recallable = recallable
 
-    async def steer(self, text, *, id=None):
+    async def steer(self, text, *, id=None, origin="user"):
         self.calls.append((text, id))
+        self.origins = getattr(self, "origins", []) + [origin]
         if self._refuse is not None:
             raise self._refuse
 

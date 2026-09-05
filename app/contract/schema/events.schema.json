@@ -224,6 +224,18 @@
           "title": "Session Id",
           "type": "string"
         },
+        "subtype": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subtype"
+        },
         "text": {
           "title": "Text",
           "type": "string"
@@ -631,6 +643,18 @@
         "session_id": {
           "title": "Session Id",
           "type": "string"
+        },
+        "subtype": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subtype"
         },
         "timestamp": {
           "anyOf": [
