@@ -11,7 +11,8 @@ export const EFFORT_OPTIONS = [
 	{ value: 'medium', label: 'Medium', description: 'Balanced reasoning' },
 	{ value: 'high', label: 'High', description: 'Thorough reasoning' },
 	{ value: 'xhigh', label: 'XHigh', description: 'Extreme reasoning' },
-	{ value: 'max', label: 'Max', description: 'Maximum reasoning depth' }
+	{ value: 'max', label: 'Max', description: 'Maximum reasoning depth' },
+	{ value: 'ultra', label: 'Ultra', description: 'Reasoning beyond Max' }
 ];
 export const UNKNOWN_EFFORT = 'Reasoning effort capabilities are not known yet. Refresh models in provider settings to try again.';
 export const NO_ADJUSTABLE_EFFORT = 'Adjustable reasoning effort is not available for this model in AI Shuffle.';

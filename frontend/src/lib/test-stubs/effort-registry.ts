@@ -1,7 +1,12 @@
 /** Source-shaped normalized /models entries. Provider evidence is normalized by the backend. */
 export const effortRegistryFixture = {
  models: [{ value: 'opus', label: 'Opus', family: 'opus', effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high', effort_metadata_version: 1 }],
- default: 'opus', legacy_map: {}, providers: [{ id: 'or', name: 'OpenRouter', provider_type: 'openrouter', models: [
+ default: 'opus', legacy_map: {}, providers: [{ id: 'codex', name: 'ChatGPT', provider_type: 'chatgpt', models: [
+  { id: 'gpt-6-astra', label: 'GPT-6 Astra', effort_levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], default_effort: 'medium', effort_metadata_version: 1 },
+  { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', effort_levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], default_effort: 'low', effort_metadata_version: 1 },
+  { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', effort_levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], default_effort: null, effort_metadata_version: 1 },
+  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: null, effort_metadata_version: 1 }
+ ] }, { id: 'or', name: 'OpenRouter', provider_type: 'openrouter', models: [
   { id: 'openai/gpt-6-astra', label: 'GPT-6 Astra', effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: null, effort_metadata_version: 1 },
   { id: 'openai/gpt-5.6-sol', label: 'GPT-5.6 Sol', effort_levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'medium', effort_metadata_version: 1 },
   { id: 'z-ai/glm-5.3-flash', label: 'GLM 5.3 Flash', effort_levels: ['low', 'high', 'max'], default_effort: 'max', effort_metadata_version: 1 },

@@ -163,7 +163,7 @@ def _resolve_thinking_and_effort(
     # "default" or unrecognized: omit, let SDK use its default.
 
     effort = profile_config.get("effort")
-    if effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+    if effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
         result["effort"] = effort
 
     max_thinking_tokens = profile_config.get("max_thinking_tokens")
@@ -251,7 +251,7 @@ def _resolve_env(
 TEXT_GENERATION_MODEL_KEY = "text_generation_model"
 TEXT_GENERATION_EFFORT_KEY = "text_generation_effort"
 
-VALID_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+VALID_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 
 def text_generation_config() -> Dict[str, Any]:

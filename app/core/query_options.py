@@ -595,9 +595,9 @@ def _build_thinking_config(
     # 'default' or unrecognized: omit thinking field, let SDK use its default
 
     # Resolve effort: override takes priority over profile config (independent of thinking)
-    # 'xhigh' is only valid for Opus 4.7+ models
+    # Preserve recognized values here; the adapter validates the selected route and model.
     effort = overrides.get('effort') or session_effort or config.get('effort')
-    if effort and effort in ('none', 'minimal', 'low', 'medium', 'high', 'max', 'xhigh'):
+    if effort and effort in ('none', 'minimal', 'low', 'medium', 'high', 'max', 'xhigh', 'ultra'):
         result['effort'] = effort
         logger.debug(f"Using effort={effort}")
 

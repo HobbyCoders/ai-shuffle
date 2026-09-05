@@ -24,6 +24,53 @@ PROVIDER_ID = "prov-fetch-1"
 RAW_TOKEN = "sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789"
 
 
+def test_codex_refresh_repairs_v1_null_despite_missing_curated_model(
+    authenticated_client, mock_db, monkeypatch,
+):
+    """A partial live repair must tell the client to reload the persisted rows."""
+    _unlock(mock_db)
+    _make_provider(provider_type="chatgpt", base_url="https://chatgpt.com/backend-api")
+    _attach_subscription()
+    mp_api._capability_results.clear()
+    mp_api._capability_locks.clear()
+    specs = [("gpt-6-astra", "medium", True), ("gpt-5.6-sol", "low", True),
+             ("gpt-5.6-terra", "medium", True), ("gpt-5.6-luna", "medium", False)]
+    unknown = {"version": 1, "effort_levels": None, "default_effort": None}
+    curated = [{"id": model, "label": "My " + model, "reasoning_capabilities": dict(unknown)}
+               for model, _, _ in specs]
+    absent = {"id": "curated-missing", "label": "Keep this", "reasoning_capabilities": dict(unknown)}
+    known = {"id": "known-model", "label": "Known", "reasoning_capabilities": {
+        "version": 1, "effort_levels": ["high"], "default_effort": "high"}}
+    curated.extend([absent, known])
+    db.update_model_provider(PROVIDER_ID, models_json=curated, default_model="gpt-5.6-sol")
+    before = db.get_model_provider(PROVIDER_ID)
+    payload = {"models": [{"slug": model, "display_name": "Upstream " + model,
+        "supported_reasoning_levels": [{"effort": value} for value in
+            ["low", "medium", "high", "xhigh", "max"] + (["ultra"] if ultra else [])],
+        "default_reasoning_level": default,
+    } for model, default, ultra in specs] + [{"slug": "known-model"}, {"slug": "uncurated"}]}
+    _install_mock_transport(monkeypatch, lambda request: httpx.Response(200, json=payload))
+    try:
+        response = authenticated_client.post(ROOT + "/refresh-capabilities", json={"provider_ids": [PROVIDER_ID]})
+        assert response.status_code == 200, response.text
+        assert response.json() == {"refreshed": [PROVIDER_ID], "failed": []}
+        after = db.get_model_provider(PROVIDER_ID)
+        assert after["default_model"] == before["default_model"]
+        assert [(m["id"], m["label"]) for m in after["models_json"]] == [
+            (m["id"], m["label"]) for m in before["models_json"]]
+        for entry, (_, default, ultra) in zip(after["models_json"], specs):
+            assert entry["reasoning_capabilities"] == {"version": 1,
+                "effort_levels": ["low", "medium", "high", "xhigh", "max"] + (["ultra"] if ultra else []),
+                "default_effort": default}
+        assert after["models_json"][-2:] == before["models_json"][-2:]
+        # Coalesced refreshes must also report the successful partial repair.
+        assert authenticated_client.post(ROOT + "/refresh-capabilities", json={
+            "provider_ids": [PROVIDER_ID]}).json() == response.json()
+    finally:
+        mp_api._capability_results.clear()
+        mp_api._capability_locks.clear()
+
+
 def _unlock(mock_db):
     encryption.set_encryption_key("test-password", db)
 

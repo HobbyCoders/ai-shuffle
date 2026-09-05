@@ -6,7 +6,51 @@ import { effortRegistryFixture } from '$lib/test-stubs/effort-registry';
 const payload = (id: string, models: object[]) => ({ ...effortRegistryFixture, providers: [{ id, name: id, provider_type: 'openrouter', models }] });
 
 describe('capability migration hydration', () => {
+ it('recovers canonical version-one null levels once without changing known model metadata', async () => {
+  mocks.post.mockClear();
+  let finish!: (result: { refreshed: string[]; failed: string[] }) => void;
+  mocks.post.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+  const live = effortRegistryFixture.providers.find(p => p.id === 'codex')!;
+  const unknown = { version: 1, effort_levels: null, default_effort: null };
+  const broken = live.models.map(model => model.id === 'gpt-5.6-luna' ? model : {
+   ...model, effort_levels: null, default_effort: null, reasoning_capabilities: unknown
+  });
+  mocks.get.mockResolvedValue({ ...effortRegistryFixture, providers: [{ ...live, id: 'v1-null', models: broken }] });
+  expect(await hydrateModelRegistry()).toBe(true);
+  await hydrateModelRegistry();
+  expect(mocks.post).toHaveBeenCalledTimes(1);
+  expect(mocks.post).toHaveBeenCalledWith('/model-providers/refresh-capabilities', { provider_ids: ['v1-null'] }, { signal: expect.any(AbortSignal) });
+  expect(getProviders()[0].models.find(m => m.id === 'gpt-5.6-luna')).toMatchObject(live.models[3]);
+  mocks.get.mockResolvedValue({ ...effortRegistryFixture, providers: [{ ...live, id: 'v1-null' }] });
+  finish({ refreshed: ['v1-null'], failed: [] });
+  await vi.waitFor(() => expect(getProviders()[0].models[0].effort_levels).toContain('ultra'));
+  expect(getProviders()[0].models.find(m => m.id === 'gpt-5.6-sol')?.default_effort).toBe('low');
+  await hydrateModelRegistry();
+  expect(mocks.post).toHaveBeenCalledTimes(1);
+ });
+ it('attempts a still-unknown version-one provider only once per page', async () => {
+  mocks.post.mockClear().mockResolvedValue({ refreshed: ['v1-unknown'], failed: [] });
+  mocks.get.mockResolvedValue(payload('v1-unknown', [{ id: 'model', effort_levels: null, default_effort: null, effort_metadata_version: 1,
+   reasoning_capabilities: { version: 1, effort_levels: null, default_effort: null } }]));
+  const count = mocks.get.mock.calls.length;
+  await hydrateModelRegistry();
+  await vi.waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(count + 2));
+  await hydrateModelRegistry();
+  await hydrateModelRegistry();
+  expect(mocks.post).toHaveBeenCalledTimes(1);
+  expect(getProviders()[0].models[0].effort_levels).toBeNull();
+ });
+ it('does not refresh known version-one capabilities, including empty arrays', async () => {
+  mocks.post.mockClear();
+  mocks.get.mockResolvedValue(payload('v1-known', [
+   { id: 'glm', effort_levels: ['low', 'high', 'max'], default_effort: 'max', effort_metadata_version: 1 },
+   { id: 'unsupported', effort_levels: [], default_effort: null, effort_metadata_version: 1 }
+  ]));
+  await hydrateModelRegistry();
+  expect(mocks.post).not.toHaveBeenCalled();
+ });
  it('makes the initial registry ready without waiting and refreshes each stale provider once', async () => {
+  mocks.post.mockClear();
   let finish!: (result: { refreshed: string[]; failed: string[] }) => void;
   mocks.post.mockReturnValue(new Promise(resolve => { finish = resolve; }));
   mocks.get.mockResolvedValue(payload('stale-once', [{ id: 'model' }]));

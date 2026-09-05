@@ -1427,7 +1427,7 @@ class ApiUserCreate(BaseModel):
     # (connectors resolve it at session creation and each turn). NULL falls
     # back to the profile's legacy config, then the global default.
     model: Optional[str] = None
-    effort: Optional[str] = Field(None, pattern="^(none|minimal|low|medium|high|xhigh|max)$")
+    effort: Optional[str] = Field(None, pattern="^(none|minimal|low|medium|high|xhigh|max|ultra)$")
 
 
 class ApiUserUpdate(BaseModel):
@@ -1439,7 +1439,7 @@ class ApiUserUpdate(BaseModel):
     is_active: Optional[bool] = None
     web_login_allowed: Optional[bool] = None
     model: Optional[str] = None
-    effort: Optional[str] = Field(None, pattern="^(none|minimal|low|medium|high|xhigh|max)$")
+    effort: Optional[str] = Field(None, pattern="^(none|minimal|low|medium|high|xhigh|max|ultra)$")
 
 
 class ApiUserResponse(BaseModel):

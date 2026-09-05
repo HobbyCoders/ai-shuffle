@@ -318,7 +318,7 @@ export interface ProfileConfig {
 	disallowed_tools?: string[];
 	tool_selection_mode?: 'all' | 'none' | 'allow' | 'disallow';  // UI-only: persists the editor dropdown so it round-trips even when the tool list is empty
 	permission_mode?: string;
-	effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';  // Reasoning depth — delegated CLI --effort / native provider effort param; chat can override per-turn
+	effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';  // Reasoning depth — delegated CLI --effort / native provider effort param; chat can override per-turn
 	max_turns?: number;  // Per-turn model-call cap (native legs → fluid max_model_calls_per_turn)
 	include_partial_messages?: boolean;
 	enable_file_checkpointing?: boolean;  // LEGACY (SDK-era): still read by chat rewind gating for old rows; no longer written
@@ -499,7 +499,7 @@ export interface AgentExportData {
 	model: string | null;
 	provider_models?: Record<string, string> | null;
 	permission_mode: string | null;
-	effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;  // harness-honored reasoning depth
+	effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | null;  // harness-honored reasoning depth
 	max_turns?: number | null;  // per-turn model-call cap (native legs)
 	system_prompt_content: string | null;
 	allowed_tools: string[] | null;

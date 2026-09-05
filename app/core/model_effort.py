@@ -2,7 +2,11 @@
 from __future__ import annotations
 from typing import Any, Mapping
 
-EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+OPENROUTER_EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+ANTHROPIC_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+# Ultra is advertised by the native Responses subscription catalog, not gateways.
+RESPONSES_EFFORT_LEVELS = (*OPENROUTER_EFFORT_LEVELS, "ultra")
+EFFORT_LEVELS = RESPONSES_EFFORT_LEVELS
 
 
 def _capability(levels, default=None, mandatory=None):
@@ -11,9 +15,13 @@ def _capability(levels, default=None, mandatory=None):
             levels = None
         else:
             values = [v.get("effort") if isinstance(v, dict) else v for v in levels[:100]]
-            # Invalid declarations are unknown, not evidence of no support.
-            levels = ([v for v in EFFORT_LEVELS if v in values]
-                      if all(isinstance(v, str) and v in EFFORT_LEVELS for v in values) else None)
+            # Future string tokens must not erase recognized support. Malformed
+            # declarations and all-unknown lists are unknown; only [] is explicit
+            # evidence that reasoning effort is unsupported.
+            known = [v for v in EFFORT_LEVELS if v in values]
+            levels = (known if known or not values else None) if all(
+                isinstance(v, str) for v in values
+            ) else None
     if mandatory is True and levels is not None:
         levels = [v for v in levels if v != "none"]
     result = {"version": 1, "effort_levels": levels,
@@ -36,7 +44,7 @@ def sanitize_effort_metadata(entry: Mapping[str, Any], *, provider_type=None, co
             levels = reasoning["supported_efforts"]
             # OpenRouter null explicitly means the entire gateway vocabulary.
             if levels is None:
-                levels = list(EFFORT_LEVELS)
+                levels = list(OPENROUTER_EFFORT_LEVELS)
             cap = _capability(levels, reasoning.get("default_effort"), reasoning.get("mandatory"))
         else:
             cap = _capability([] if complete and provider_type == "openrouter" else None)
@@ -74,7 +82,7 @@ def effort_route(provider: Mapping[str, Any] | None) -> str:
 
 # Exact native API entries, not gateway or subscription inferences.
 # https://platform.claude.com/docs/en/build-with-claude/effort.md
-_ANTHROPIC = {name: _capability(list(EFFORT_LEVELS[2:]), "high") for name in (
+_ANTHROPIC = {name: _capability(list(ANTHROPIC_EFFORT_LEVELS), "high") for name in (
     "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
     "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5")}
 _ANTHROPIC.update({name: _capability(["low", "medium", "high", "max"], "high")
@@ -95,7 +103,7 @@ for _name in ("haiku", "claude-haiku-4-5", "claude-haiku-4-5-20251001"):
 # https://developers.openai.com/api/docs/models/<exact-id>.md
 _OPENAI = {name: _capability(["none", "low", "medium", "high", "xhigh", "max"], "medium")
            for name in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")}
-_OPENAI["gpt-6-astra"] = _capability(list(EFFORT_LEVELS[2:]))
+_OPENAI["gpt-6-astra"] = _capability(["low", "medium", "high", "xhigh", "max"])
 _OPENAI.update({name: _capability(["none", "low", "medium", "high", "xhigh"], "none")
                 for name in ("gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano")})
 _OPENAI["gpt-5.5"] = _capability(["none", "low", "medium", "high", "xhigh"], "medium")
@@ -127,8 +135,10 @@ def effort_capabilities(model: str | None, provider: Mapping[str, Any] | None = 
             cap = _XAI.get(model)
     cap = cap or _capability(None)
     levels = cap["effort_levels"]
-    if route in ("anthropic", "delegated") and levels is not None:
-        levels = [v for v in levels if v not in ("none", "minimal")]
+    allowed = (ANTHROPIC_EFFORT_LEVELS if route in ("anthropic", "delegated") else
+               OPENROUTER_EFFORT_LEVELS if route == "openrouter" else EFFORT_LEVELS)
+    if levels is not None:
+        levels = [v for v in levels if v in allowed]
     default = cap["default_effort"]
     return {"effort_levels": levels, "default_effort": default if levels is not None and default in levels else None,
             "effort_metadata_version": version}
@@ -139,7 +149,9 @@ def normalize_effort(value: Any, model: str | None, provider: Mapping[str, Any] 
     route = route or effort_route(provider)
     if not isinstance(value, str) or value not in EFFORT_LEVELS:
         return None
-    if route in ("anthropic", "delegated") and value in ("none", "minimal"):
+    if route in ("anthropic", "delegated") and value not in ANTHROPIC_EFFORT_LEVELS:
+        return None
+    if value == "ultra" and route != "openai_responses":
         return None
     levels = effort_capabilities(model, provider, route=route)["effort_levels"]
     return value if levels is None or value in levels else None

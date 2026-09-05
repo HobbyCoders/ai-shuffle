@@ -4476,7 +4476,8 @@ async def test_connect_with_sdk_options_projects_the_app_session_id(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_effort_reaches_the_delegated_loop(monkeypatch):
+@pytest.mark.parametrize("requested,expected", [("xhigh", "xhigh"), ("ultra", None)])
+async def test_effort_reaches_the_delegated_loop(monkeypatch, requested, expected):
     """Profile/override effort lands on DelegatedLoop(effort=...) → --effort."""
     import app.core.provider.harness_adapter as ha
 
@@ -4486,9 +4487,9 @@ async def test_effort_reaches_the_delegated_loop(monkeypatch):
     )
 
     await ha.HarnessAdapter().connect(
-        SessionOptions(model="claude-sonnet-5", effort="xhigh")
+        SessionOptions(model="claude-sonnet-5", effort=requested)
     )
-    assert _CapturingLoop.captured["effort"] == "xhigh"
+    assert _CapturingLoop.captured["effort"] == expected
 
 
 @pytest.mark.asyncio
@@ -4498,6 +4499,8 @@ async def test_effort_reaches_the_delegated_loop(monkeypatch):
     ("z-ai/glm-5.3-flash", ["low", "high", "max"], "max", "max"),
     ("explicitly-unsupported", [], "max", None),
     ("unknown-provider-model", None, "max", "max"),
+    ("unknown-provider-model", None, "ultra", None),
+    ("gateway-ultra", ["high", "ultra"], "ultra", None),
 ])
 async def test_effort_reaches_the_native_loop(monkeypatch, tmp_path, model, levels, requested, expected):
     import app.core.provider.harness_adapter as ha
@@ -4514,6 +4517,32 @@ async def test_effort_reaches_the_native_loop(monkeypatch, tmp_path, model, leve
     await ha.HarnessAdapter().connect(
         SessionOptions(model=model, cwd=str(tmp_path), effort=requested, extra={"provider_id": "p"})
     )
+    assert _CapturingLoop.captured["effort"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model,top,expected", [
+    ("gpt-6-astra", "ultra", "ultra"),
+    ("gpt-5.6-sol", "ultra", "ultra"),
+    ("gpt-5.6-terra", "ultra", "ultra"),
+    ("gpt-5.6-luna", "max", None),
+])
+async def test_codex_source_ultra_reaches_native_loop(monkeypatch, tmp_path, model, top, expected):
+    import app.core.provider.harness_adapter as ha
+    from app.api.model_providers import _parse_models_response
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+    monkeypatch.setattr(HarnessAdapter, "_build_store", staticmethod(lambda _o: MemoryStore()))
+    levels = ["low", "medium", "high", "xhigh", "max"] + (["ultra"] if top == "ultra" else [])
+    models = _parse_models_response({"models": [{"slug": model,
+        "supported_reasoning_levels": [{"effort": value} for value in levels],
+        "default_reasoning_level": "low" if model == "gpt-5.6-sol" else "medium",
+    }]}, provider_type="chatgpt")
+    row = {"provider_type": "chatgpt", "auth_mode": "chatgpt", "models_json": models}
+    monkeypatch.setattr(ha, "_lookup_provider_row", lambda _id: row)
+    await ha.HarnessAdapter().connect(SessionOptions(
+        model=model, cwd=str(tmp_path), effort="ultra", extra={"provider_id": "codex"}))
     assert _CapturingLoop.captured["effort"] == expected
 
 

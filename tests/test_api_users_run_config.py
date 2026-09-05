@@ -54,19 +54,25 @@ class TestApiUserRunConfigPersistence:
 
 
 class TestApiUserRunConfigValidation:
+    @pytest.mark.parametrize("value", ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"])
+    def test_create_and_update_accept_shared_efforts(self, value):
+        from app.core.models import ApiUserCreate, ApiUserUpdate
+        assert ApiUserCreate(name="Configured", effort=value).effort == value
+        assert ApiUserUpdate(effort=value).effort == value
+
     def test_create_rejects_bad_effort(self):
         from pydantic import ValidationError
         from app.core.models import ApiUserCreate
 
         with pytest.raises(ValidationError):
-            ApiUserCreate(name="Bad Effort", effort="ultra")
+            ApiUserCreate(name="Bad Effort", effort="future-effort")
 
     def test_update_rejects_bad_effort(self):
         from pydantic import ValidationError
         from app.core.models import ApiUserUpdate
 
         with pytest.raises(ValidationError):
-            ApiUserUpdate(effort="ultra")
+            ApiUserUpdate(effort="future-effort")
 
     def test_update_accepts_valid_effort(self):
         from app.core.models import ApiUserUpdate

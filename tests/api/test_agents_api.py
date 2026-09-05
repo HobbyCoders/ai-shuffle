@@ -1996,7 +1996,8 @@ class TestEdgeCases:
             assert all(c.isalnum() or c == '-' for c in call_kwargs["profile_id"])
 
     @pytest.mark.asyncio
-    async def test_import_profile_with_all_optional_fields(self):
+    @pytest.mark.parametrize("effort", ["xhigh", "ultra"])
+    async def test_import_profile_with_all_optional_fields(self, effort):
         """Importing with all optional fields should populate config correctly."""
         from app.api.agents import import_profile
         from app.core.models import AgentImportRequest, AgentImportData, AIToolsConfig
@@ -2041,7 +2042,7 @@ class TestEdgeCases:
                     app_config_tools=True,
                     env={"FOO": "bar"},
                     # Harness-honored knobs — must round-trip
-                    effort="xhigh",
+                    effort=effort,
                     max_turns=20,
                     # Legacy SDK-era fields — tolerated on import, but ignored
                     # (setting_sources with only old SDK vocab filters to
@@ -2069,7 +2070,7 @@ class TestEdgeCases:
             assert config["app_config_tools"] is True
             assert config["env"] == {"FOO": "bar"}
             # Harness-honored knobs round-trip
-            assert config["effort"] == "xhigh"
+            assert config["effort"] == effort
             assert config["max_turns"] == 20
             # Dead SDK-era fields never reach the stored config
             assert "thinking_mode" not in config

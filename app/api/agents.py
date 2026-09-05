@@ -1167,7 +1167,7 @@ async def import_profile(
             config["provider_models"] = agent_data.provider_models
         # Harness-honored reasoning depth / per-turn cap (also present in pre-A12
         # legacy files, where they round-trip the same way).
-        if agent_data.effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+        if agent_data.effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
             config["effort"] = agent_data.effort
         if isinstance(agent_data.max_turns, int) and agent_data.max_turns > 0:
             config["max_turns"] = agent_data.max_turns

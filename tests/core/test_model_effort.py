@@ -2,7 +2,7 @@
 import asyncio
 from unittest.mock import AsyncMock
 import pytest
-from app.core.model_effort import EFFORT_LEVELS, effort_capabilities, normalize_effort, sanitize_effort_metadata
+from app.core.model_effort import EFFORT_LEVELS, OPENROUTER_EFFORT_LEVELS, effort_capabilities, normalize_effort, sanitize_effort_metadata
 
 # https://openrouter.ai/api/v1/models (public catalog, 2026-09-05)
 OR_FIXTURES = [
@@ -35,7 +35,7 @@ def test_catalog_persist_registry_request(monkeypatch, model, levels, default, m
 @pytest.mark.parametrize("mandatory", [True, False])
 def test_openrouter_null_and_absence(mandatory):
     cap = sanitize_effort_metadata({"reasoning": {"supported_efforts": None, "mandatory": mandatory}}, provider_type="openrouter", complete=True)["reasoning_capabilities"]
-    assert cap["effort_levels"] == [v for v in EFFORT_LEVELS if not mandatory or v != "none"]
+    assert cap["effort_levels"] == [v for v in OPENROUTER_EFFORT_LEVELS if not mandatory or v != "none"]
     assert sanitize_effort_metadata({}, provider_type="openrouter", complete=True)["reasoning_capabilities"]["effort_levels"] == []
     assert sanitize_effort_metadata({"supported_parameters": ["reasoning_effort"]})["reasoning_capabilities"]["effort_levels"] is None
 
@@ -59,7 +59,8 @@ def test_unknown_routes_preserve_explicit_union(route):
     row = {"provider_type": "custom"}
     assert effort_capabilities("gpt-6-astra", row)["effort_levels"] is None
     for value in EFFORT_LEVELS:
-        expected = None if route in ("anthropic", "delegated") and value in ("none", "minimal") else value
+        expected = None if (route in ("anthropic", "delegated") and value in ("none", "minimal")
+                            or value == "ultra" and route != "openai_responses") else value
         assert normalize_effort(value, "gpt-6-astra", row, route=route) == expected
 
 
@@ -89,7 +90,7 @@ def test_native_registry_matches_default_delegated_route(monkeypatch):
     assert models[0]["effort_levels"] == []
     assert models[1]["default_effort"] == "xhigh"
     assert effort_capabilities("claude-mythos-5-1", route="delegated")["effort_levels"] == []
-    assert effort_capabilities("claude-mythos-5-1", route="anthropic")["effort_levels"] == list(EFFORT_LEVELS[2:])
+    assert effort_capabilities("claude-mythos-5-1", route="anthropic")["effort_levels"] == ["low", "medium", "high", "xhigh", "max"]
 
 
 def test_metadata_beats_official_and_legacy_upgrade():
@@ -249,7 +250,7 @@ def test_refresh_requires_authentication():
         response = client.post("/api/v1/model-providers/refresh-capabilities", json={"provider_ids": ["p"]})
     assert response.status_code == 401
 
-@pytest.mark.parametrize("value", ["none", "minimal", "xhigh", "max"])
+@pytest.mark.parametrize("value", ["none", "minimal", "xhigh", "max", "ultra"])
 def test_sibling_option_paths_accept_union(value):
     from app.core.provider.harness_adapter import _valid_effort
     from app.core.generation_options import _resolve_thinking_and_effort, VALID_EFFORTS
@@ -258,3 +259,63 @@ def test_sibling_option_paths_accept_union(value):
     assert value in VALID_EFFORTS
     assert _resolve_thinking_and_effort({"effort": value})["effort"] == value
     assert _build_thinking_config({"effort": value}, "custom")["effort"] == value
+
+# Sanitized Codex catalog shape observed 2026-09-05; subscription capabilities
+# differ from the static native API table (notably Sol's low default).
+@pytest.mark.parametrize("model,default,top", [
+    ("gpt-6-astra", "medium", "ultra"),
+    ("gpt-5.6-sol", "low", "ultra"),
+    ("gpt-5.6-terra", "medium", "ultra"),
+    ("gpt-5.6-luna", "medium", "max"),
+])
+def test_codex_source_metadata_persists_and_reaches_registry(monkeypatch, model, default, top):
+    from app.api.model_providers import _parse_models_response
+    from app.db.model_providers import _normalize_model_capabilities
+    from app.core import model_registry
+    from app.db import database
+    levels = ["low", "medium", "high", "xhigh", "max"] + (["ultra"] if top == "ultra" else [])
+    raw = {"slug": model, "display_name": model, "supported_reasoning_levels": [
+        {"effort": value} for value in levels], "default_reasoning_level": default}
+    entries = _normalize_model_capabilities(_parse_models_response(
+        {"models": [raw]}, provider_type="chatgpt"))
+    row = {"id": "codex", "provider_type": "openai", "auth_mode": "chatgpt", "models_json": entries}
+    monkeypatch.setattr(database, "get_enabled_model_providers", lambda **kw: [row])
+    public = model_registry._providers_payload()[0]["models"][0]
+    assert public["effort_levels"] == levels
+    assert public["default_effort"] == default
+    assert public["effort_metadata_version"] == 1
+    assert normalize_effort("ultra", model, row) == ("ultra" if top == "ultra" else None)
+    # An absent Codex declaration is unknown, never the native API fallback.
+    assert effort_capabilities(model, {**row, "models_json": []})["effort_levels"] is None
+
+
+@pytest.mark.parametrize("levels,expected", [
+    (["low", "future", "ultra"], ["low", "ultra"]),
+    ([{"effort": "high"}, {"effort": "future"}], ["high"]),
+    (["future"], None),
+    (["high", {}], None),
+    (["high", {"effort": []}], None),
+    ([], []),
+])
+def test_future_tokens_preserve_known_levels_but_malformed_is_unknown(levels, expected):
+    cap = sanitize_effort_metadata({"supported_reasoning_levels": levels,
+                                    "default_reasoning_level": "future"})["reasoning_capabilities"]
+    assert cap == {"version": 1, "effort_levels": expected, "default_effort": None}
+
+
+@pytest.mark.parametrize("route", ["openrouter", "anthropic", "delegated"])
+@pytest.mark.parametrize("levels", [None, ["high", "ultra"], ["ultra"]])
+def test_ultra_never_crosses_gateway_or_claude_routes(route, levels):
+    row = {"provider_type": "custom", "models_json": [{"id": "m", "reasoning_capabilities": {
+        "version": 1, "effort_levels": levels, "default_effort": "ultra"}}]}
+    assert normalize_effort("ultra", "m", row, route=route) is None
+    cap = effort_capabilities("m", row, route=route)
+    assert cap["effort_levels"] is None or "ultra" not in cap["effort_levels"]
+    assert cap["default_effort"] is None
+
+
+def test_static_tables_do_not_inherit_codex_ultra():
+    from app.core.model_effort import _OPENAI, _CLI, _ANTHROPIC
+    for table in (_OPENAI, _CLI, _ANTHROPIC):
+        assert all("ultra" not in cap["effort_levels"] for cap in table.values())
+    assert _OPENAI["gpt-6-astra"]["effort_levels"] == ["low", "medium", "high", "xhigh", "max"]

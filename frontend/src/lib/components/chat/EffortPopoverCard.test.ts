@@ -18,12 +18,24 @@ function slider(): HTMLInputElement {
 }
 
 describe('EffortPopoverCard', () => {
-	it('renders seven exact stops and emits literal none and minimal', async () => {
+ it('renders six Codex levels and emits Ultra from the last stop', async () => {
+  const onSelect = vi.fn();
+  const codexOptions = EFFORT_OPTIONS.filter(o => ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(o.value));
+  const view = render(EffortPopoverCard, { props: { options: codexOptions, value: null, defaultValue: 'low', onSelect } });
+  expect(slider().max).toBe('5');
+  expect(slider().value).toBe('0');
+  expect(Array.from(document.querySelectorAll('.stops span'), el => el.textContent)).toEqual(['Low', 'Medium', 'High', 'XHigh', 'Max', 'Ultra']);
+  await fireEvent.input(slider(), { target: { value: '5' } });
+  expect(onSelect).toHaveBeenLastCalledWith('ultra');
+  await view.rerender({ options: codexOptions, value: 'ultra', defaultValue: 'low', onSelect });
+  expect(slider().getAttribute('aria-valuetext')).toBe('Ultra');
+ });
+	it('renders all eight exact stops and emits literal none and minimal', async () => {
 		const onSelect = vi.fn();
 		render(EffortPopoverCard, { props: { options: EFFORT_OPTIONS, value: null, defaultValue: 'max', onSelect } });
-		expect(slider().max).toBe('6');
+		expect(slider().max).toBe('7');
 		expect(slider().value).toBe('6');
-		expect(document.querySelectorAll('.stops span')).toHaveLength(7);
+		expect(document.querySelectorAll('.stops span')).toHaveLength(8);
 		await fireEvent.input(slider(), { target: { value: '0' } });
 		expect(onSelect).toHaveBeenLastCalledWith('none');
 		await fireEvent.input(slider(), { target: { value: '1' } });

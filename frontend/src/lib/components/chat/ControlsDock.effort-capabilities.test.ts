@@ -20,6 +20,42 @@ import { effortRegistryFixture as payload } from '$lib/test-stubs/effort-registr
 const renderDock = () => render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
 
 describe('ControlsDock dynamic effort', () => {
+ it.each(['desktop', 'mobile'])('offers six live Codex levels and no Ultra for sparse GLM on %s', async (surface) => {
+  mocks.get.mockResolvedValue(payload);
+  await hydrateModelRegistry();
+  activeSession.newChat();
+  activeSession.setModelOverride('prov:codex:gpt-5.6-sol');
+  activeSession.setEffortLevelOverride('none');
+  const { container } = renderDock();
+  await tick();
+  expect(get(activeSession).effortLevelOverride).toBe('low');
+  if (surface === 'desktop') {
+   await fireEvent.click(screen.getByRole('button', { name: 'Effort: Low' }));
+   expect(screen.getByRole('slider').getAttribute('max')).toBe('5');
+   expect(Array.from(container.querySelectorAll('.stops span'), el => el.textContent)).toEqual(['Low', 'Medium', 'High', 'XHigh', 'Max', 'Ultra']);
+   await fireEvent.input(screen.getByRole('slider'), { target: { value: '5' } });
+  } else {
+   await fireEvent.click(container.querySelector('.mobile-settings-trigger')!);
+   const choices = container.querySelectorAll<HTMLButtonElement>('.effort-choices button');
+   expect(Array.from(choices, el => el.textContent?.trim())).toEqual(['Low', 'Medium', 'High', 'XHigh', 'Max', 'Ultra']);
+   await fireEvent.click(choices[5]);
+  }
+  expect(get(activeSession).effortLevelOverride).toBe('ultra');
+  for (const id of ['gpt-6-astra', 'gpt-5.6-terra']) {
+   activeSession.setModelOverride(`prov:codex:${id}`);
+   await tick();
+   expect(get(activeSession).effortLevelOverride).toBe('ultra');
+  }
+  activeSession.setModelOverride('prov:or:z-ai/glm-5.3-flash');
+  await tick();
+  expect(get(activeSession).effortLevelOverride).toBe('max');
+  if (surface === 'desktop') {
+   expect(screen.getByRole('slider').getAttribute('max')).toBe('2');
+   expect(Array.from(container.querySelectorAll('.stops span'), el => el.textContent)).toEqual(['Low', 'High', 'Max']);
+  } else {
+   expect(Array.from(container.querySelectorAll('.effort-choices button'), el => el.textContent?.trim())).toEqual(['Low', 'High', 'Max']);
+  }
+ });
  it('preserves XHigh on Astra after metadata hydration', async () => {
   activeSession.newChat();
   activeSession.setModelOverride('prov:or:openai/gpt-6-astra');

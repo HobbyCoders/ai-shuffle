@@ -104,6 +104,14 @@ class TestTextGenerationSettings:
         assert resp.status_code == 400
         assert authenticated_client.get(ENDPOINT).json()["text_generation_model"] == ""
 
+    def test_ultra_roundtrip(self, authenticated_client, mock_db):
+        from app.core.generation_options import text_generation_config
+        response = authenticated_client.put(ENDPOINT, json={"text_generation_effort": "ultra"})
+        assert response.status_code == 200
+        assert response.json()["text_generation_effort"] == "ultra"
+        assert authenticated_client.get(ENDPOINT).json()["text_generation_effort"] == "ultra"
+        assert text_generation_config()["effort"] == "ultra"
+
     def test_refuses_an_unknown_effort(self, authenticated_client, mock_db):
         resp = authenticated_client.put(ENDPOINT, json={"text_generation_effort": "turbo"})
         assert resp.status_code == 400

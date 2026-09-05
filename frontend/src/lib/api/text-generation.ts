@@ -12,7 +12,7 @@ import { api } from './client';
 export interface TextGenerationSettings {
 	/** Raw picker value: a bare id/alias, or `prov:<providerId>:<modelId>`. Empty = registry default. */
 	text_generation_model: string;
-	/** `none` | `minimal` | `low` | `medium` | `high` | `xhigh` | `max`, or empty for the provider's own default. */
+	/** `none` | `minimal` | `low` | `medium` | `high` | `xhigh` | `max` | `ultra`, or empty for the provider's own default. */
 	text_generation_effort: string;
 }
 

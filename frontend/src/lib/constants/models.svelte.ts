@@ -698,7 +698,8 @@ const capabilityRefreshAttempted = new Set<string>();
 /** Initial hydration never waits on capability discovery. Failed providers can be
  * retried by the existing explicit refresh in settings, not every hydration. */
 function refreshStaleCapabilities(providers: RegistryProviderPayload[]) {
-	const providerIds = providers.filter(p => p.models?.some(m => (m.effort_metadata_version ?? 0) < 1)
+	const providerIds = providers.filter(p => p.models?.some(m =>
+		(m.effort_metadata_version ?? 0) < 1 || m.effort_levels == null)
 		&& !capabilityRefreshAttempted.has(p.id)).map(p => p.id);
 	if (!providerIds.length) return;
 	providerIds.forEach(id => capabilityRefreshAttempted.add(id));

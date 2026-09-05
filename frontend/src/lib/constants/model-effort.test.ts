@@ -13,6 +13,21 @@ beforeEach(async () => {
 });
 
 describe('authoritative effort capabilities', () => {
+ it('uses live Codex levels and defaults without adding Ultra to Luna or OpenRouter GLM', () => {
+  for (const id of ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra']) {
+   const caps = resolveModelEffort(`prov:codex:${id}`);
+   expect(caps.options.map(o => o.value)).toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+   expect(reconcileModelEffort('ultra', caps)).toBe('ultra');
+  }
+  const sol = resolveModelEffort('prov:codex:gpt-5.6-sol');
+  expect(sol.defaultValue).toBe('low');
+  expect(reconcileModelEffort('none', sol)).toBe('low');
+  expect(reconcileModelEffort(null, sol)).toBeNull();
+  expect(resolveModelEffort('prov:codex:gpt-6-astra').defaultValue).toBe('medium');
+  expect(levels('prov:codex:gpt-5.6-luna')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+  expect(levels('prov:or:z-ai/glm-5.3-flash')).toEqual(['low', 'high', 'max']);
+  expect(reconcileModelEffort('ultra', capability('z-ai/glm-5.3-flash'))).toBe('max');
+ });
  it('uses exact documented Astra, Sol and sparse GLM levels, not family guesses', () => {
   expect(levels('prov:or:openai/gpt-6-astra')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
   expect(levels('prov:or:openai/gpt-5.6-sol')).toEqual(['none', 'low', 'medium', 'high', 'xhigh', 'max']);

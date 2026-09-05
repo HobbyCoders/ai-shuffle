@@ -967,10 +967,12 @@ async def _refresh_provider_capabilities(provider_id: str) -> bool:
                 elif existing is not None:
                     updated["reasoning_capabilities"] = existing
                 merged.append(updated)
-            if merged != (current.get("models_json") or []):
+            changed = merged != (current.get("models_json") or [])
+            if changed:
                 if db.update_model_provider(provider_id, models_json=merged) is None:
                     return False
-            success = complete
+            # Partial repairs still require clients to rehydrate persisted metadata.
+            success = complete or changed
         except Exception:  # Catalog/auth details may contain secrets; expose ids only.
             logger.debug("Capability refresh failed for provider %s", provider_id)
         finally:
