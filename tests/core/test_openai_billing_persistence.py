@@ -18,7 +18,7 @@ def no_live_browser(monkeypatch):
 
 
 @pytest.fixture
-def provider(authenticated_client):
+def provider(mock_db):
     provider_id = str(uuid.uuid4())
     db.create_model_provider(provider_id, "Billing test", "openai", "https://api.openai.com", auth_token="test-model-key")
     return provider_id

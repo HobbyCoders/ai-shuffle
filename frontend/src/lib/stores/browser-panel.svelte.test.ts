@@ -6,6 +6,7 @@ import { browserPanel, flushWidthPersist } from './browser-panel.svelte';
 beforeEach(() => {
 	localStorage.clear();
 	browserPanel.openPanel();
+	browserPanel.setAutoOpen(true);
 	browserPanel.setWidth(480);
 	// Settle the debounced write so no timer from one test lands in another.
 	flushWidthPersist();
@@ -50,6 +51,30 @@ describe('browserPanel open/close/toggle', () => {
 });
 
 describe('browserPanel autoOpenFor suppression', () => {
+	it('persists auto-open policy independently of manual opening', () => {
+		browserPanel.setAutoOpen(false);
+		browserPanel.closePanel(null);
+		browserPanel.autoOpenFor('fresh');
+		expect(browserPanel.current.open).toBe(false);
+		browserPanel.openPanel();
+		expect(browserPanel.current.open).toBe(true);
+		expect(browserPanel.current.autoOpen).toBe(false);
+	});
+	it('accepts bounded viewport defaults without changing runtime page state', () => {
+		browserPanel.setStatus('live', 'https://example.test');
+		browserPanel.setDefaultViewport({ mode: 'fixed', width: 390, height: 844 });
+		browserPanel.setDefaultViewport({
+			mode: 'fixed',
+			width: 0,
+			height: Infinity,
+		});
+		expect(browserPanel.current.defaultViewport).toEqual({
+			mode: 'fixed',
+			width: 390,
+			height: 844,
+		});
+		expect(browserPanel.current.url).toBe('https://example.test');
+	});
 	it('opens when nothing was closed', () => {
 		browserPanel.closePanel('other'); // suppression is for a different session
 		browserPanel.autoOpenFor('s1');

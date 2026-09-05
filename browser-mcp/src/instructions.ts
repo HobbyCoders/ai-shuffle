@@ -6,6 +6,11 @@
 
 export const SERVER_INSTRUCTIONS = `You control one web page through this browser server. Work in a loop: look, act, then look again only when something changed.
 
+SHARED WORKSPACE
+- browser_status is always available, including during human control, and reports tabs, viewport, busy and pending takeover. Other tools reject with human_control while a viewer owns or requests control. Do not fight the viewer or spin retries; continue other work or ask for control to be returned.
+- browser_wait waits for condition=url with url, condition=text with text, or condition=element with ref or selector. Specify exactly one target. URL/text match=contains (default) or exact; text/element state=visible (default), hidden, attached, or detached. timeout_ms defaults to 5000 and is capped at 15000. A timed-out result is not success. Pending takeover interrupts waits.
+- Human input, navigation, tab changes and viewport changes invalidate screenshots and refs. A stale_screenshot response requires a new browser_screenshot before using coordinates again.
+
 REFS AND SNAPSHOTS
 - browser_snapshot returns the page as a YAML accessibility tree. Actionable elements carry a ref like [ref=e12].
 - To act on an element, pass its ref to browser_act. Refs are the primary way to target things — prefer them over coordinates.

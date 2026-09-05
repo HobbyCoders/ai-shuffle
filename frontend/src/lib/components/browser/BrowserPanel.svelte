@@ -16,9 +16,9 @@
 	 *
 	 * Layout: a right-aligned, left-edge-resizable overlay on wide screens; a
 	 * fullscreen overlay at/under the app's 1080px handheld cutoff. The live-view
-	 * box size is pushed to the page as a CDP viewport so CSS media queries
-	 * (including this app's 1080px mobile cutoff) follow the panel, not the
-	 * headless window's launch size.
+	 * box only affects page geometry when its controlling viewer explicitly
+	 * chooses Fit. Fixed agent viewports remain authoritative through resizes
+	 * and reconnects.
 	 */
 	import {
 		X,
@@ -36,6 +36,7 @@
 		Send,
 		Check,
 		MessageSquare,
+		Keyboard,
 	} from 'lucide-svelte';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
 	import { activeSession } from '$lib/stores/active-session';
@@ -52,6 +53,11 @@
 	} from '$lib/browser-panel/inspect';
 	import type { PageRect } from '$lib/browser-panel/coords';
 	import BrowserLiveView from './BrowserLiveView.svelte';
+	import BrowserWorkspaceToolbar from './BrowserWorkspaceToolbar.svelte';
+	import {
+		ownsControl,
+		type BrowserWorkspaceState,
+	} from '$lib/browser-panel/workspace';
 
 	interface Props {
 		/** Session whose browser page is streamed. */
@@ -69,7 +75,10 @@
 	const inspectMode = $derived(panel.inspectMode);
 	const selectedElement = $derived(panel.selectedElement);
 
-	let latestFrame = $state<{ data: string; metadata: FrameMessageMetadata } | null>(null);
+	let latestFrame = $state<{
+		data: string;
+		metadata: FrameMessageMetadata;
+	} | null>(null);
 
 	// ── Auth token (session cookie), mirroring the chat WS client ──────────
 	function getAuthToken(): string | null {
@@ -105,6 +114,22 @@
 	// isConnected() is not reactive — track OPEN ourselves so the toolbar
 	// enables as soon as the socket is up, not only after a `live` status.
 	let streamOpen = $state(false);
+	let workspace = $state<BrowserWorkspaceState | null>(null);
+	let viewerId = $state<string | null>(null);
+	let commandError = $state('');
+	const humanControl = $derived(streamOpen && ownsControl(workspace, viewerId));
+	let frameIdentity = $state<string | null>(null);
+	let liveView: BrowserLiveView | undefined = $state();
+	let keyboardOpen = $state(false);
+	// CSS viewport metadata, not JPEG dimensions (the stream may be downscaled).
+	const frameMatchesWorkspace = $derived(
+		!!workspace?.available && !!latestFrame &&
+		latestFrame.metadata.runtime_id === workspace.runtime_id &&
+		latestFrame.metadata.tab_id === workspace.active_tab_id &&
+		latestFrame.metadata.deviceWidth === workspace.viewport.width &&
+		latestFrame.metadata.deviceHeight === workspace.viewport.height,
+	);
+	let commandSequence = 0;
 	// Last session we held a frame for. The canvas keeps its last picture across
 	// reconnects and transient status changes; only a genuine session switch
 	// invalidates it (showing another session's page would be wrong).
@@ -121,6 +146,9 @@
 			hoverRect = null;
 			browserPanel.resetPageTracking();
 		}
+		workspace = null;
+		viewerId = null;
+		commandError = '';
 		browserPanel.setStatus('connecting');
 		const c = createBrowserStreamClient({
 			sessionId: sid,
@@ -128,18 +156,39 @@
 			onStatus: (s, u) => browserPanel.setStatus(s, u),
 			onPage: (u, loading) => browserPanel.setPage(u, loading),
 			onFrame: (data, metadata) => {
+				if (!workspace?.available || !workspace.active_tab_id) return;
 				latestFrame = { data, metadata };
 			},
 			onInspectHit: handleInspectHit,
-			onError: (message) => console.warn('[BrowserPanel] stream error:', message),
+			onError: (message) => {
+				commandError = message;
+			},
+			onHello: (id) => {
+				viewerId = id;
+			},
+			onCommandResult: (_id, ok, error) => {
+				if (!ok)
+					commandError =
+						error || 'Command failed. Try again after checking control.';
+			},
+			onWorkspace: (state) => {
+				workspace = state;
+				if (state) {
+					const identity = `${state.runtime_id}:${state.active_tab_id}`;
+					if (frameIdentity !== identity) {
+						latestFrame = null;
+						hoverRect = null;
+						browserPanel.resetPageTracking();
+						frameIdentity = identity;
+					}
+					browserPanel.setPage(
+						state.tabs.find((t) => t.id === state.active_tab_id)?.url ?? null,
+						state.busy,
+					);
+				}
+			},
 			onOpen: () => {
 				streamOpen = true;
-				// Size may have changed while we were disconnected; always
-				// re-announce so the page isn't stuck on the previous viewport.
-				lastViewportW = 0;
-				lastViewportH = 0;
-				const r = panelBodyEl?.getBoundingClientRect();
-				if (r) sendViewportNow(r.width, r.height);
 			},
 			onClose: (wasClean) => {
 				streamOpen = false;
@@ -174,12 +223,34 @@
 		}
 	});
 
+	function sendIdentified(payload: Record<string, unknown>) {
+		if (!workspace?.available || !client) return false;
+		return client.send({
+			...payload,
+			id: `panel-${Date.now()}-${++commandSequence}`,
+			runtime_id: workspace.runtime_id,
+			tab_id: workspace.active_tab_id,
+		});
+	}
+	function workspaceCommand(op: string, args: Record<string, unknown>) {
+		if (!['takeover', 'release'].includes(op) && !humanControl) {
+			commandError = 'Take control before changing the browser.';
+			return;
+		}
+		commandError = '';
+		if (!sendIdentified({ type: 'workspace-command', op, args }))
+			commandError = 'Command not sent. Check the connection and try again.';
+	}
+
 	function sendInput(payload: Record<string, unknown>) {
-		client?.send(payload);
+		if (!humanControl || !(payload.kind === 'text' || payload.kind === 'key'
+			? keyboardEnabled : frameMatchesWorkspace)) return;
+		sendIdentified(payload);
 	}
 
 	function sendInspect(x: number, y: number, mode: 'hover' | 'select') {
-		client?.send({ type: 'inspect', x, y, mode });
+		if (streamOpen && frameMatchesWorkspace)
+			sendIdentified({ type: 'inspect', x, y, mode });
 	}
 
 	// ── Viewport follows the live-view box ──────────────────────────────
@@ -193,14 +264,15 @@
 	let viewportTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function sendViewportNow(width: number, height: number) {
-		const w = Math.round(width);
-		const h = Math.round(height);
+		if (!humanControl || workspace?.viewport.mode !== 'fit') return;
+		const w = Math.min(3840, Math.max(240, Math.round(width)));
+		const h = Math.min(2160, Math.max(240, Math.round(height)));
 		if (w < 200 || h < 200) return;
 		if (w === lastViewportW && h === lastViewportH) return;
 		if (!client?.isConnected()) return;
 		lastViewportW = w;
 		lastViewportH = h;
-		client.send({ type: 'viewport', width: w, height: h });
+		workspaceCommand('viewport', { mode: 'fit', width: w, height: h });
 	}
 
 	function scheduleViewport(width: number, height: number) {
@@ -211,8 +283,20 @@
 		}, 100);
 	}
 
+	// Workspace acknowledgments replace the state object on every command.
+	// Observe stable eligibility/identity, not that object: resetting the last
+	// size on an acknowledgment creates an identical resize-command feedback loop.
+	const fitViewportEnabled = $derived(humanControl && workspace?.viewport.mode === 'fit');
+	const fitViewportTarget = $derived(
+		workspace ? `${workspace.runtime_id}:${workspace.active_tab_id}` : null,
+	);
 	$effect(() => {
 		const el = panelBodyEl;
+		const target = fitViewportTarget;
+		const connection = client;
+		if (!fitViewportEnabled || !target || !connection) return;
+		lastViewportW = 0;
+		lastViewportH = 0;
 		if (!el || typeof ResizeObserver === 'undefined') return;
 		const report = () => {
 			const r = el.getBoundingClientRect();
@@ -284,7 +368,9 @@
 
 	// ── Fullscreen (handheld) detection ────────────────────────────────────
 	function computeFullscreen(): boolean {
-		return typeof window !== 'undefined' && isPanelFullscreenWidth(window.innerWidth);
+		return (
+			typeof window !== 'undefined' && isPanelFullscreenWidth(window.innerWidth)
+		);
 	}
 	let isFullscreen = $state(computeFullscreen());
 	function handleResize() {
@@ -303,12 +389,15 @@
 		// starts shrinking immediately instead of eating leftover stored px.
 		const rendered = panelEl?.getBoundingClientRect().width;
 		const startWidth = rendered && rendered > 0 ? rendered : width;
-		const parentWidth = panelEl?.parentElement?.clientWidth ?? Number.POSITIVE_INFINITY;
+		const parentWidth =
+			panelEl?.parentElement?.clientWidth ?? Number.POSITIVE_INFINITY;
 
 		function onMove(ev: PointerEvent) {
 			// Panel is docked at the right edge → dragging left widens it.
 			// Ceiling is the chat inner panel (`.chat-row`), which stops at the sidebar.
-			browserPanel.setWidth(Math.min(parentWidth, startWidth + (startX - ev.clientX)));
+			browserPanel.setWidth(
+				Math.min(parentWidth, startWidth + (startX - ev.clientX)),
+			);
 		}
 		function onUp() {
 			isResizing = false;
@@ -336,9 +425,15 @@
 		if (addressDraft === null) return;
 		const raw = addressDraft.trim();
 		addressDraft = null;
-		if (!raw || !client?.isConnected()) return;
-		const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw) ? raw : `https://${raw}`;
-		client.send({ type: 'navigate', url: withScheme });
+		if (!raw || !canNavigate || !client?.isConnected()) return;
+		const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)
+			? raw
+			: `https://${raw}`;
+		if (!/^https?:\/\//i.test(withScheme)) {
+			commandError = 'Use an http or https address.';
+			return;
+		}
+		workspaceCommand('navigate', { url: withScheme });
 	}
 
 	function cancelEditing() {
@@ -347,21 +442,31 @@
 
 	function sendCommand(command: string) {
 		if (!client?.isConnected()) return;
-		client.send({ type: 'command', command });
+		workspaceCommand('command', { command });
 	}
 
 	// Toolbar is usable whenever the panel socket is up and Chromium is on.
 	// Gating on `live` left back/forward/reload/address disabled for a visible
 	// page whenever status lagged on connecting/no_page (isConnected() also
 	// wasn't reactive, so a connecting→connecting handshake never re-enabled).
-	const canNavigate = $derived(streamOpen && status !== 'browser_off');
+	const canNavigate = $derived(humanControl && !!workspace?.active_tab_id);
 
 	const displayUrl = $derived(url || 'No page open');
 	/** Address text with the scheme trimmed, like a real browser's omnibox. */
-	const compactUrl = $derived(url ? url.replace(/^https?:\/\//, '') : 'No page open');
+	const compactUrl = $derived(
+		url ? url.replace(/^https?:\/\//, '') : 'No page open',
+	);
 	/** Only genuinely web-openable pages get the open-in-new-tab affordance. */
 	const externalHref = $derived(url && /^https?:\/\//.test(url) ? url : null);
-	const isLive = $derived(status === 'live');
+	const isLive = $derived(
+		streamOpen &&
+			!!workspace?.available &&
+			!!workspace.active_tab_id &&
+			status === 'live',
+	);
+	const keyboardEnabled = $derived(isLive && humanControl && !!latestFrame &&
+		latestFrame.metadata.runtime_id === workspace?.runtime_id &&
+		latestFrame.metadata.tab_id === workspace?.active_tab_id);
 	/** A frame is on the canvas — keep showing it, whatever the socket is doing. */
 	const hasFrame = $derived(latestFrame !== null);
 	/** Short overlay text shown over a stale frame while the stream isn't live. */
@@ -369,7 +474,7 @@
 		{
 			live: '',
 			connecting: 'Reconnecting…',
-			disconnected: 'Reconnecting…',
+			disconnected: 'Reconnecting · last image is stale',
 			no_page: 'No page',
 			browser_off: 'Browser off',
 		}[status],
@@ -390,7 +495,9 @@
 		return () => clearTimeout(t);
 	});
 
-	const chipLabel = $derived(selectedElement ? describeElement(selectedElement) : '');
+	const chipLabel = $derived(
+		selectedElement ? describeElement(selectedElement) : '',
+	);
 </script>
 
 <svelte:window onresize={handleResize} />
@@ -416,6 +523,28 @@
 			</div>
 		{/if}
 
+		<BrowserWorkspaceToolbar
+			{workspace}
+			{viewerId}
+			connected={streamOpen}
+			onCommand={workspaceCommand}
+		/>
+		{#if commandError}<div class="workspace-banner" role="alert">
+				{commandError}<button
+					onclick={() => (commandError = '')}
+					aria-label="Dismiss browser error">×</button
+				>
+			</div>{/if}
+		{#if streamOpen && !workspace?.available}<div
+				class="workspace-banner"
+				role="status"
+			>
+				Browser runtime unavailable. Ask the agent to start the browser.
+			</div>{:else if !streamOpen}<div class="workspace-banner" role="status">
+				Connecting to the browser workspace…{hasFrame
+					? ' Last image is stale.'
+					: ''}
+			</div>{/if}
 		<header class="panel-header">
 			<div class="nav-buttons">
 				<button
@@ -493,6 +622,21 @@
 
 			<div class="header-actions">
 				<button
+					class="tool-btn keyboard-toggle"
+					class:active={keyboardOpen}
+					disabled={!keyboardOpen && (!keyboardEnabled || inspectMode || !liveView)}
+					aria-label={keyboardOpen ? 'Hide keyboard' : 'Show keyboard'}
+					aria-pressed={keyboardOpen}
+					title={keyboardOpen ? 'Hide keyboard' : 'Show keyboard'}
+					onpointerdown={(e) => e.preventDefault()}
+					onclick={() => {
+						if (keyboardOpen) liveView?.dismissKeyboard();
+						else liveView?.openKeyboard();
+					}}
+				>
+					<Keyboard size={16} strokeWidth={1.75} />
+				</button>
+				<button
 					class="tool-btn inspect-toggle"
 					class:active={inspectMode}
 					onclick={toggleInspect}
@@ -515,7 +659,11 @@
 						<ExternalLink size={14} strokeWidth={1.75} />
 					</a>
 				{/if}
-				<button class="tool-btn close-btn" onclick={close} aria-label="Close browser panel">
+				<button
+					class="tool-btn close-btn"
+					onclick={close}
+					aria-label="Close browser panel"
+				>
 					<X size={16} strokeWidth={1.5} />
 				</button>
 			</div>
@@ -526,17 +674,23 @@
 				<!-- The canvas stays mounted across reconnects and target re-attaches:
 				     unmounting it made every transient status blank the preview. -->
 				<div class="live-holder">
-					<BrowserLiveView
-						frame={latestFrame}
-						interactive={isLive}
-						inspecting={inspectMode && isLive}
-						{hoverRect}
-						{selectionRect}
-						onInput={sendInput}
-						onInspect={sendInspect}
-						onHoverLeave={() => (hoverRect = null)}
-						onExitInspect={exitInspect}
-					/>
+					{#key frameIdentity}
+						<BrowserLiveView
+							bind:this={liveView}
+							bind:keyboardOpen
+							{keyboardEnabled}
+							frame={latestFrame}
+							interactive={isLive && frameMatchesWorkspace && (humanControl || inspectMode)}
+							viewport={workspace?.viewport}
+							inspecting={inspectMode && isLive}
+							{hoverRect}
+							{selectionRect}
+							onInput={sendInput}
+							onInspect={sendInspect}
+							onHoverLeave={() => (hoverRect = null)}
+							onExitInspect={exitInspect}
+						/>
+					{/key}
 					{#if showStreamBadge}
 						<div class="stream-badge" role="status">
 							{#if status === 'connecting' || status === 'disconnected'}
@@ -557,15 +711,21 @@
 						     yet (background tab / nothing to draw). Not an error. -->
 						<Loader2 class="spin" size={26} strokeWidth={1.5} />
 						<p class="empty-title">Connected</p>
-						<p class="empty-copy">Waiting for the page to draw its first frame…</p>
+						<p class="empty-copy">
+							Waiting for the page to draw its first frame…
+						</p>
 					{:else if status === 'no_page'}
 						<Globe size={26} strokeWidth={1.5} />
 						<p class="empty-title">No page open yet</p>
-						<p class="empty-copy">The view will appear as soon as the agent opens a page.</p>
+						<p class="empty-copy">
+							Take control, then choose New tab to open the first page.
+						</p>
 					{:else if status === 'browser_off'}
 						<MonitorOff size={26} strokeWidth={1.5} />
 						<p class="empty-title">Browser isn't running</p>
-						<p class="empty-copy">Nothing to show until the agent starts a browser session.</p>
+						<p class="empty-copy">
+							Nothing to show until the agent starts a browser session.
+						</p>
 					{:else}
 						<PlugZap size={26} strokeWidth={1.5} />
 						<p class="empty-title">Disconnected</p>
@@ -576,7 +736,10 @@
 		</div>
 
 		{#if selectedElement}
-			<div class="composer" aria-label="Ask the AI to change the selected element">
+			<div
+				class="composer"
+				aria-label="Ask the AI to change the selected element"
+			>
 				<div class="composer-chip-row">
 					<span class="element-chip" title={selectedElement.selector}>
 						<Crosshair size={12} strokeWidth={2} />
@@ -610,8 +773,7 @@
 						rows="2"
 						placeholder="Describe the change — “make this button bigger and blue”"
 						aria-label="Describe the change for the selected element"
-						onkeydown={onPromptKeydown}
-					></textarea>
+						onkeydown={onPromptKeydown}></textarea>
 					<button
 						type="submit"
 						class="composer-send"
@@ -638,19 +800,45 @@
 		{:else if inspectMode}
 			<footer class="panel-note inspect-note">
 				<Crosshair size={12} strokeWidth={1.75} />
-				<span>Point &amp; prompt — click any element in the preview to select it.</span>
+				<span
+					>Point &amp; prompt — click any element in the preview to select it.</span
+				>
 				<button class="note-exit" onclick={exitInspect}>Done</button>
 			</footer>
 		{:else}
 			<footer class="panel-note">
 				<MousePointer2 size={12} strokeWidth={1.5} />
-				<span>The agent may be controlling this page too.</span>
+				<span
+					>{humanControl
+						? 'You control this page. Return control when you are done.'
+						: 'View only. Take control to interact with the page.'}</span
+				>
 			</footer>
 		{/if}
 	</aside>
 {/if}
 
 <style>
+	.workspace-banner {
+		display: flex;
+		justify-content: space-between;
+		gap: 8px;
+		padding: 8px 10px;
+		font-size: 11px;
+		line-height: 1.5;
+		background: var(--muted);
+		color: var(--foreground);
+		border-bottom: 1px solid var(--border);
+	}
+	.workspace-banner button {
+		border: 0;
+		background: transparent;
+		color: inherit;
+		cursor: pointer;
+	}
+	.workspace-banner button:focus-visible {
+		outline: 2px solid var(--primary);
+	}
 	.browser-panel {
 		position: absolute;
 		inset: 0 0 0 auto;
@@ -714,7 +902,9 @@
 		height: 48px;
 		border-radius: 2px;
 		background: color-mix(in oklch, var(--border) 40%, transparent);
-		transition: background 150ms ease, height 150ms ease;
+		transition:
+			background 150ms ease,
+			height 150ms ease;
 	}
 	.resize-handle:hover .resize-handle-bar {
 		background: color-mix(in oklch, var(--ring) 60%, transparent);
@@ -751,7 +941,10 @@
 		border-radius: calc(var(--radius) - 4px);
 		color: var(--muted-foreground);
 		cursor: pointer;
-		transition: background 150ms ease, color 150ms ease, opacity 150ms ease;
+		transition:
+			background 150ms ease,
+			color 150ms ease,
+			opacity 150ms ease;
 		-webkit-tap-highlight-color: transparent;
 		text-decoration: none;
 	}
@@ -774,12 +967,14 @@
 		animation: dot-pulse 1.4s ease-in-out infinite;
 	}
 
-	/* Point-and-prompt toggle lights up while armed. */
-	.inspect-toggle.active {
+	/* Header toggles report their active state without covering the page. */
+	.inspect-toggle.active,
+	.keyboard-toggle.active {
 		background: color-mix(in oklch, var(--primary) 14%, transparent);
 		color: var(--primary);
 	}
-	.inspect-toggle.active:hover:not(:disabled) {
+	.inspect-toggle.active:hover:not(:disabled),
+	.keyboard-toggle.active:hover:not(:disabled) {
 		background: color-mix(in oklch, var(--primary) 20%, transparent);
 		color: var(--primary);
 	}
@@ -806,7 +1001,9 @@
 		font-family: var(--font-mono, monospace);
 		cursor: text;
 		text-align: left;
-		transition: background 150ms ease, border-color 150ms ease;
+		transition:
+			background 150ms ease,
+			border-color 150ms ease;
 		-webkit-tap-highlight-color: transparent;
 	}
 	.address-display:hover:not(:disabled) {
@@ -1047,7 +1244,9 @@
 		border-radius: 50%;
 		color: var(--muted-foreground);
 		cursor: pointer;
-		transition: background 150ms ease, color 150ms ease;
+		transition:
+			background 150ms ease,
+			color 150ms ease;
 		-webkit-tap-highlight-color: transparent;
 	}
 	.chip-clear:hover {

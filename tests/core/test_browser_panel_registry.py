@@ -87,3 +87,21 @@ async def test_clear_removes_state():
     assert registry.get_target("s-tok") is None
     # A fresh token is minted after clear (not the old one).
     assert registry.verify_token("s-tok", "old") is False
+
+
+def test_unicode_wrong_token_is_rejected_without_type_error():
+    registry.issue_token("unicode-token")
+    try:
+        assert not registry.verify_token("unicode-token", "wrong-🔒")
+    finally:
+        registry.clear("unicode-token")
+
+
+async def test_clear_closes_workspace_broker():
+    from app.core import browser_control
+    broker = browser_control.get("registry-broker")
+    await broker.register("runtime")
+    registry.clear("registry-broker")
+    await asyncio.sleep(0)
+    assert broker.closed and broker.timer.done()
+    assert "registry-broker" not in browser_control._brokers

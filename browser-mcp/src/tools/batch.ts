@@ -127,6 +127,7 @@ export async function runBatch(
 
     let res: McpToolResult;
     try {
+      session.agentAdmission?.();
       // Direct call — the batch itself already holds the runExclusive turn.
       res = await tool.run(session, normalizedInput);
     } catch (err) {

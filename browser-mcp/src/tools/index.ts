@@ -7,6 +7,8 @@
 
 import type { Session } from "../session.js";
 import {
+  statusSchema,
+  waitSchema,
   navigateSchema,
   snapshotSchema,
   actSchema,
@@ -35,7 +37,8 @@ import { runTabs, type TabsInput } from "./tabs.js";
 import { runResize, type ResizeInput } from "./resize.js";
 import { runUpload, type UploadInput } from "./upload.js";
 import { runBatch, type BatchInput, type BatchTool } from "./batch.js";
-import type { McpToolResult } from "./result.js";
+import { jsonResult, type McpToolResult } from "./result.js";
+import { runWait, type WaitInput } from "./wait.js";
 
 export interface ToolDefinition {
   name: string;
@@ -45,6 +48,10 @@ export interface ToolDefinition {
 }
 
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
+  { name: "browser_status", description: "Current shared browser tabs, viewport, busy state and agent/human control. Available during human control; never creates a page.", inputSchema: statusSchema,
+    run: async session => jsonResult(session.workspaceStatus?.() ?? { available: true, control: { owner: "agent", viewer_id: null, pending_viewer_id: null }, busy: session.busy, ...(await session.workspaceMetadata()) }) },
+  { name: "browser_wait", description: "Bounded wait for URL, text, or ref/selector element state (visible, hidden, attached, detached). Default 5s, maximum 15s; interrupted by human takeover.", inputSchema: waitSchema,
+    run: (session, input) => runWait(session, input as unknown as WaitInput) },
   {
     name: "browser_navigate",
     description:

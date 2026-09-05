@@ -9,7 +9,7 @@
  * cost tokens without adding model-visible detail.
  */
 
-import type { Session } from "../session.js";
+import { raceWithTimeout, type Session } from "../session.js";
 import { text, errorResult, type McpToolResult } from "./result.js";
 
 /** Longest edge (CSS px) beyond which a capture is downscaled before encoding. */
@@ -59,14 +59,15 @@ export async function runScreenshot(session: Session, input: ScreenshotInput): P
 
   const page = await session.ensurePage();
 
-  const pageDims = await page.evaluate(() => ({
+  session.invalidateScreenshot();
+  const pageDims = await raceWithTimeout(page.evaluate(() => ({
     scrollW: document.documentElement.scrollWidth,
     scrollH: document.documentElement.scrollHeight,
     innerW: window.innerWidth,
     innerH: window.innerHeight,
     scrollX: window.scrollX,
     scrollY: window.scrollY,
-  }));
+  })), 5000, "screenshot dimensions timed out");
 
   let clip: Clip | undefined;
   let fullPage = false;
@@ -108,6 +109,7 @@ export async function runScreenshot(session: Session, input: ScreenshotInput): P
   }
 
   const buffer = await page.screenshot({
+    timeout: 10000,
     type: "jpeg",
     quality: JPEG_QUALITY,
     scale: "css",
@@ -124,7 +126,7 @@ export async function runScreenshot(session: Session, input: ScreenshotInput): P
     try {
       // NOTE: fully self-contained — page.evaluate serializes only this
       // function, so it cannot reference helpers from this module.
-      const shrunk = await page.evaluate(
+      const shrunk = await raceWithTimeout(page.evaluate(
         async ([jpegB64, tw, th, q]: [string, number, number, number]) => {
           const binary = atob(jpegB64);
           const bytes = new Uint8Array(binary.length);
@@ -152,7 +154,7 @@ export async function runScreenshot(session: Session, input: ScreenshotInput): P
           Math.max(1, Math.round(height * factor)),
           JPEG_QUALITY,
         ] as [string, number, number, number],
-      );
+      ), 5000, "screenshot encoding timed out");
       session.setLastScreenshot({ scale: factor, offsetX, offsetY });
       return {
         content: [
@@ -165,9 +167,6 @@ export async function runScreenshot(session: Session, input: ScreenshotInput): P
     }
   }
 
-  // Store the document-space mapping (scale 1: native CSS pixels are 1:1).
-  session.setLastScreenshot({ scale: 1, offsetX, offsetY });
-
   if (data.length > MAX_BASE64_LEN) {
     return {
       content: [
@@ -179,6 +178,7 @@ export async function runScreenshot(session: Session, input: ScreenshotInput): P
     };
   }
 
+  session.setLastScreenshot({ scale: 1, offsetX, offsetY });
   return {
     content: [
       { type: "image", data, mimeType: "image/jpeg" },

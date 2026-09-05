@@ -16,16 +16,18 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { BrowserManager, BROWSER_RESTARTING, BrowserRestartingError } from "./browser.js";
-import { Session } from "./session.js";
+import { Session, raceWithTimeout } from "./session.js";
 import { SERVER_INSTRUCTIONS } from "./instructions.js";
 import { TOOL_DEFINITIONS, TOOL_MAP } from "./tools/index.js";
 import { normalizeOptionalInput, validateInput } from "./schemas.js";
 import { errorResult } from "./tools/result.js";
 import { reportCurrentTarget } from "./panel.js";
+import { startWorkspaceBridge } from "./workspace-bridge.js";
 
 async function main(): Promise<void> {
   const manager = new BrowserManager();
   const session = new Session(manager);
+  const bridge = startWorkspaceBridge(session);
 
   // Log the effective SSRF egress policy to stderr (stdout is the MCP channel).
   process.stderr.write(`[browser-mcp] ssrf policy: ${manager.ssrfPolicySummary()}\n`);
@@ -59,7 +61,8 @@ async function main(): Promise<void> {
       // Serialize every tool execution for this session: the low-level Server
       // dispatches handlers without awaiting the previous one, so overlapping
       // calls would otherwise race on shared page/session state.
-      return await session.runExclusive(() => def.run(session, args));
+      if (def.name === "browser_status") return await def.run(session, args);
+      return await session.runAgentExclusive(() => def.run(session, args));
     } catch (err) {
       if (err instanceof BrowserRestartingError) {
         return errorResult(BROWSER_RESTARTING);
@@ -75,10 +78,11 @@ async function main(): Promise<void> {
   const shutdown = async (code = 0): Promise<void> => {
     if (cleaningUp) return;
     cleaningUp = true;
+    await bridge?.shutdown();
     // Best-effort: let the panel know no target is being driven anymore.
     reportCurrentTarget(null);
     try {
-      await manager.cleanup();
+      await raceWithTimeout(manager.cleanup(), 3000, "browser cleanup timed out").catch(() => {});
     } finally {
       process.exit(code);
     }

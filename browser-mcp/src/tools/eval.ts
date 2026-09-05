@@ -137,6 +137,7 @@ export async function runEval(session: Session, input: { code: string }): Promis
 
   let outcome: EvalOutcome;
   try {
+    session.invalidateScreenshot();
     outcome = await session.evaluate(evalInPage, input.code);
   } catch (err) {
     // Evaluation could not even complete (page closed, navigation, CSP, …).

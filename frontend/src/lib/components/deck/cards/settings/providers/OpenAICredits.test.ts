@@ -1,8 +1,10 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/svelte';
 import OpenAICredits from './OpenAICredits.svelte';
+import { tick } from 'svelte';
 import type { ModelProvider } from '$lib/api/model-providers';
 import * as billing from '$lib/api/openai-billing';
+import { createBrowserStreamClient } from '$lib/browser-panel/stream-client';
 const mocks = vi.hoisted(() => ({ connect: vi.fn(), destroy: vi.fn(), send: vi.fn() }));
 vi.mock('$lib/api/openai-billing', () => ({ getOpenAIBillingStatus: vi.fn(), connectOpenAIBilling: vi.fn(), confirmOpenAIBilling: vi.fn(), cancelOpenAIBilling: vi.fn(), disconnectOpenAIBilling: vi.fn() }));
 vi.mock('$lib/browser-panel/stream-client', () => ({ createBrowserStreamClient: vi.fn(() => mocks) }));
@@ -20,14 +22,118 @@ beforeEach(() => {
  vi.mocked(billing.confirmOpenAIBilling).mockResolvedValue({ ...ready, status: 'connected' });
  vi.mocked(billing.disconnectOpenAIBilling).mockResolvedValue(initial);
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 async function start() {
  const view = render(OpenAICredits, { provider });
  await fireEvent.click(await screen.findByRole('button', { name: 'Sign in for credits' }));
  await screen.findByRole('button', { name: 'Confirm organization' });
  return view;
 }
+describe('credit sign-in keyboard control', () => {
+ beforeEach(() => {
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1; });
+  vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ close: vi.fn() }));
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+  vi.spyOn(HTMLCanvasElement.prototype, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 300, height: 500 } as DOMRect);
+ });
+ async function live() {
+  await start();
+  const config = vi.mocked(createBrowserStreamClient).mock.calls.at(-1)![0];
+  expect((screen.getByRole('button', { name: 'Show keyboard' }) as HTMLButtonElement).disabled).toBe(true);
+  config.onStatus('live', null);
+  await tick();
+  expect((screen.getByRole('button', { name: 'Show keyboard' }) as HTMLButtonElement).disabled).toBe(true);
+  config.onFrame('AA==', { deviceWidth: 300, deviceHeight: 500 });
+  await tick(); await Promise.resolve();
+  return { config, input: screen.getByRole('textbox', { name: 'Type in the remote browser' }) as HTMLTextAreaElement, surface: screen.getByRole('application') };
+ }
+ function tap(surface: HTMLElement, pointerType: string) {
+  for (const type of ['pointerdown', 'pointerup']) {
+   const event = new Event(type, { bubbles: true, cancelable: true });
+   Object.assign(event, { pointerType, pointerId: 1, clientX: 50, clientY: 60 });
+   surface.dispatchEvent(event);
+  }
+ }
+ it.each(['touch', 'mouse'])('opens only explicitly, forwards text and preserves %s page-tap focus until Hide', async pointerType => {
+  const { input, surface } = await live();
+  const show = screen.getByRole('button', { name: 'Show keyboard' });
+  expect(show.closest('header')).not.toBeNull();
+  expect(surface.contains(show)).toBe(false);
+  expect(show.getAttribute('aria-pressed')).toBe('false');
+  expect(document.activeElement).not.toBe(input);
+  tap(surface, pointerType);
+  expect(document.activeElement).not.toBe(input);
+  expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'input', kind: 'mouse', event: 'down' }));
+  await fireEvent.click(show);
+  expect(document.activeElement).toBe(input);
+  const hide = screen.getByRole('button', { name: 'Hide keyboard' });
+  expect(hide.getAttribute('aria-pressed')).toBe('true');
+  tap(surface, pointerType);
+  expect(document.activeElement).toBe(input);
+  mocks.send.mockClear();
+  input.value = 'person@example.com';
+  await fireEvent.input(input, { data: 'person@example.com', inputType: 'insertText' });
+  expect(mocks.send).toHaveBeenCalledExactlyOnceWith({ type: 'input', kind: 'text', text: 'person@example.com' });
+  const down = new Event('pointerdown', { bubbles: true, cancelable: true });
+  hide.dispatchEvent(down);
+  expect(down.defaultPrevented).toBe(true);
+  expect(document.activeElement).toBe(input);
+  await fireEvent.click(hide);
+  expect(document.activeElement).not.toBe(input);
+  expect(screen.getByRole('button', { name: 'Show keyboard' }).getAttribute('aria-pressed')).toBe('false');
+  tap(surface, pointerType);
+  expect(document.activeElement).not.toBe(input);
+ });
+ it.each(['connecting', 'disconnected', 'browser_off', 'no_page'] as const)('dismisses and disables on %s without reopening on recovery', async status => {
+  const { config, input } = await live();
+  await fireEvent.click(screen.getByRole('button', { name: 'Show keyboard' }));
+  config.onStatus(status, null); await tick();
+  expect(document.activeElement).not.toBe(input);
+  expect(input.disabled).toBe(true);
+  expect((screen.getByRole('button', { name: 'Show keyboard' }) as HTMLButtonElement).disabled).toBe(true);
+  mocks.send.mockClear();
+  await fireEvent.input(input, { data: 'blocked', inputType: 'insertText' });
+  expect(mocks.send).not.toHaveBeenCalled();
+  config.onStatus('live', null); await tick();
+  expect(input.disabled).toBe(false);
+  expect(document.activeElement).not.toBe(input);
+ });
+ it('dismisses while confirmation is busy and stays closed after failure', async () => {
+  const { input } = await live();
+  let reject!: (error: Error) => void;
+  vi.mocked(billing.confirmOpenAIBilling).mockReturnValue(new Promise((_, fail) => { reject = fail; }));
+  vi.mocked(billing.getOpenAIBillingStatus).mockResolvedValue(ready);
+  await fireEvent.click(screen.getByRole('button', { name: 'Show keyboard' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm organization' }));
+  expect(document.activeElement).not.toBe(input);
+  expect(input.disabled).toBe(true);
+  expect((screen.getByRole('button', { name: 'Show keyboard' }) as HTMLButtonElement).disabled).toBe(true);
+  reject(new Error('failed')); await tick(); await tick();
+  expect(input.disabled).toBe(false);
+  expect(document.activeElement).not.toBe(input);
+ });
+ it('dismisses and disables when polling loses the owned flow', async () => {
+  const { input } = await live();
+  await fireEvent.click(screen.getByRole('button', { name: 'Show keyboard' }));
+  vi.mocked(billing.getOpenAIBillingStatus).mockResolvedValue(initial);
+  await waitFor(() => expect(screen.queryByRole('textbox')).toBeNull(), { timeout: 3000 });
+  expect(document.activeElement).not.toBe(input);
+  expect((screen.getByRole('button', { name: 'Show keyboard' }) as HTMLButtonElement).disabled).toBe(true);
+ });
+});
 describe('OpenAI credit sign-in', () => {
+ it('resends the viewport after the login handshake reaches live', async () => {
+  await start();
+  const config = vi.mocked(createBrowserStreamClient).mock.calls.at(-1)![0];
+  expect(config.providerId).toBe('p1');
+  expect(config.sessionId).toBeUndefined();
+  const bounds = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600 } as DOMRect);
+  try {
+   mocks.send.mockClear();
+   config.onStatus('live', null);
+   expect(mocks.send).toHaveBeenCalledWith({ type: 'viewport', width: 800, height: 600 });
+  } finally { bounds.mockRestore(); }
+ });
  it.each(['connected', 'other_installation', 'reconnect_required', 'unavailable'] as const)('shows the saved balance and millisecond timestamp for %s', async status => {
   const fetchedAt = Date.UTC(2026, 8, 5, 12, 30);
   vi.mocked(billing.getOpenAIBillingStatus).mockResolvedValue({ ...ready, status, credits: { balance_remaining: 20.9104824 }, fetched_at: fetchedAt });

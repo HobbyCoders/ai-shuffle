@@ -1,3 +1,7 @@
+import {
+	isBrowserWorkspaceState,
+	type BrowserWorkspaceState,
+} from './workspace';
 /**
  * Browser screencast WebSocket client.
  *
@@ -31,13 +35,11 @@ const PROBE_TIMEOUT_MS = 3_000;
 // ─── Protocol types ──────────────────────────────────────────────────────────
 
 export type StreamStatus =
-	| 'no_page'
-	| 'connecting'
-	| 'live'
-	| 'disconnected'
-	| 'browser_off';
+	'no_page' | 'connecting' | 'live' | 'disconnected' | 'browser_off';
 
 export interface FrameMessageMetadata {
+	runtime_id?: string;
+	tab_id?: string;
 	deviceWidth: number;
 	deviceHeight: number;
 	pageScaleFactor?: number;
@@ -72,6 +74,9 @@ export interface BrowserStreamConfig {
 	onError?: (message: string) => void;
 	/** The socket opened. */
 	onOpen?: () => void;
+	onHello?: (viewerId: string) => void;
+	onWorkspace?: (state: BrowserWorkspaceState | null) => void;
+	onCommandResult?: (id: string, ok: boolean, error?: string) => void;
 	/** The socket closed (clean or not). */
 	onClose?: (wasClean: boolean) => void;
 }
@@ -105,13 +110,43 @@ function buildUrl(sessionId: string | undefined, token: string | null, providerI
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
-export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserStreamClient {
+export function createBrowserStreamClient(
+	config: BrowserStreamConfig,
+): BrowserStreamClient {
 	let ws: WebSocket | null = null;
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	let reconnectAttempts = 0;
 	let intentionalDisconnect = false;
 	let destroyed = false;
+	let accessDenied = false;
+	let stopped = false;
 	let lastMessageAt = 0;
+	// A provider endpoint is a login-only legacy stream, never a workspace.
+	if (config.providerId && config.sessionId)
+		throw new Error('Choose a browser session or provider, not both');
+	const providerLogin = Boolean(config.providerId);
+	let protocolReady = false;
+	let workspace: BrowserWorkspaceState | null = null;
+	const pending = new Map<string, ReturnType<typeof setTimeout>>();
+	function settle(id: string, ok: boolean, error?: string) {
+		const timer = pending.get(id);
+		if (!timer) return;
+		clearTimeout(timer);
+		pending.delete(id);
+		config.onCommandResult?.(id, ok, error);
+	}
+	function reset() {
+		protocolReady = false;
+		workspace = null;
+		config.onWorkspace?.(null);
+		for (const id of pending.keys())
+			settle(
+				id,
+				false,
+				'Connection changed. Command outcome unknown; it was not replayed.',
+			);
+	}
+
 	let probeTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function clearProbe() {
@@ -128,10 +163,16 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 	// ── Connect ──────────────────────────────────────────────────────────
 
 	function connect() {
-		if (destroyed) return;
-		if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+		if (destroyed || accessDenied) return;
+		if (
+			ws &&
+			(ws.readyState === WebSocket.OPEN ||
+				ws.readyState === WebSocket.CONNECTING)
+		)
+			return;
 
 		intentionalDisconnect = false;
+		stopped = false;
 		const url = buildUrl(config.sessionId, config.getAuthToken(), config.providerId);
 		ws = new WebSocket(url);
 
@@ -146,12 +187,16 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 			// Ignore stale close events from a superseded socket instance.
 			if (event.target !== ws && ws !== null) return;
 
+			reset();
 			const wasClean = intentionalDisconnect;
 			config.onClose?.(wasClean);
 
-			if (event.code === 4001) {
+			if ([4001, 4003, 4401, 4403, 1008].includes(event.code)) {
 				// Auth failure — no reconnect.
-				console.warn('[BrowserStream] auth failed (4001)');
+				accessDenied = true;
+				config.onError?.(
+					'Access denied. Reopen the panel after signing in with access to this session.',
+				);
 			} else if (intentionalDisconnect) {
 				intentionalDisconnect = false;
 			} else {
@@ -163,7 +208,9 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 			console.warn('[BrowserStream] socket error:', error);
 		};
 
+		const socket = ws;
 		ws.onmessage = (event) => {
+			if (socket !== ws) return;
 			// Traffic of ANY kind proves the socket is alive: cancel a pending probe.
 			lastMessageAt = Date.now();
 			clearProbe();
@@ -179,34 +226,104 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 	}
 
 	function handleMessage(msg: Record<string, unknown>) {
+		if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
+		if (msg.type === 'hello') {
+			const valid = providerLogin
+				? msg.protocol === 1
+				: msg.protocol === 2 && typeof msg.viewer_id === 'string' && Boolean(msg.viewer_id.trim());
+			if (!valid) {
+				reset();
+				return;
+			}
+			protocolReady = true;
+			if (!providerLogin) config.onHello?.(msg.viewer_id as string);
+			return;
+		}
+		// Login streams cannot deliver workspace state, inspection, or workspace URLs.
+		if (providerLogin && !['status', 'page', 'frame', 'error', 'ping'].includes(String(msg.type))) return;
+		if (['workspace', 'frame', 'inspect-hit'].includes(String(msg.type)) && !protocolReady) return;
 		switch (msg.type) {
-			case 'hello':
-				// Protocol handshake — nothing to do beyond noting we're talking.
+			case 'workspace': {
+				const next = msg.state;
+				if (!isBrowserWorkspaceState(next)) break;
+				if (
+					workspace?.runtime_id === next.runtime_id &&
+					workspace.revision > next.revision
+				)
+					break;
+				if (workspace && workspace.runtime_id !== next.runtime_id) {
+					for (const id of pending.keys())
+						settle(
+							id,
+							false,
+							'Browser runtime replaced. Command was not replayed.',
+						);
+				}
+				if (!next.available)
+					for (const id of pending.keys())
+						settle(
+							id,
+							false,
+							'Browser runtime unavailable. Command outcome unknown; it was not replayed.',
+						);
+				workspace = next;
+				config.onWorkspace?.(next);
+				break;
+			}
+			case 'command-result':
+				if (typeof msg.id === 'string')
+					settle(
+						msg.id,
+						msg.ok === true,
+						typeof msg.error === 'string' ? msg.error : undefined,
+					);
 				break;
 			case 'status':
 				config.onStatus(
 					(msg.state as StreamStatus) ?? 'disconnected',
-					typeof msg.url === 'string' ? msg.url : null,
+					!providerLogin && typeof msg.url === 'string' ? msg.url : null,
 				);
 				break;
 			case 'page':
 				config.onPage?.(
-					typeof msg.url === 'string' ? msg.url : null,
+					!providerLogin && typeof msg.url === 'string' ? msg.url : null,
 					msg.loading === true,
 				);
 				break;
 			case 'frame':
+				const meta = (msg.metadata ?? {}) as FrameMessageMetadata;
+				if (
+					(meta.runtime_id && meta.runtime_id !== workspace?.runtime_id) ||
+					(meta.tab_id && meta.tab_id !== workspace?.active_tab_id)
+				)
+					break;
 				if (typeof msg.data === 'string') {
-					config.onFrame(msg.data, (msg.metadata ?? {}) as FrameMessageMetadata);
+					config.onFrame(
+						msg.data,
+						(msg.metadata ?? {}) as FrameMessageMetadata,
+					);
 				}
 				break;
 			case 'inspect-hit':
+				if (
+					(msg.runtime_id && msg.runtime_id !== workspace?.runtime_id) ||
+					(msg.tab_id && msg.tab_id !== workspace?.active_tab_id)
+				)
+					break;
 				if (msg.mode === 'hover' || msg.mode === 'select') {
 					config.onInspectHit?.(msg.mode, msg.element ?? null);
 				}
 				break;
 			case 'error':
-				config.onError?.(typeof msg.message === 'string' ? msg.message : 'Stream error');
+				if (typeof msg.id === 'string')
+					settle(
+						msg.id,
+						false,
+						typeof msg.message === 'string' ? msg.message : 'Command failed.',
+					);
+				config.onError?.(
+					typeof msg.message === 'string' ? msg.message : 'Stream error',
+				);
 				break;
 			case 'ping':
 				send({ type: 'pong' });
@@ -220,21 +337,28 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 	// ── Reconnect (exponential backoff + jitter) ───────────────────────────
 
 	function scheduleReconnect() {
-		if (destroyed) return;
+		if (destroyed || accessDenied) return;
 		if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
 			console.warn('[BrowserStream] max reconnect attempts reached');
 			return;
 		}
 		if (reconnectTimer) clearTimeout(reconnectTimer);
-		const baseDelay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY_MS);
+		const baseDelay = Math.min(
+			1000 * Math.pow(2, reconnectAttempts),
+			MAX_RECONNECT_DELAY_MS,
+		);
 		const jitter = Math.random() * 1000;
 		reconnectAttempts++;
 		reconnectTimer = setTimeout(() => connect(), baseDelay + jitter);
 	}
 
 	function forceReconnectIfNeeded(reason: string) {
-		if (destroyed) return;
-		if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+		if (destroyed || accessDenied || stopped) return;
+		if (
+			!ws ||
+			ws.readyState === WebSocket.CLOSED ||
+			ws.readyState === WebSocket.CLOSING
+		) {
 			reconnectAttempts = 0;
 			connect();
 			return;
@@ -272,6 +396,8 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 	// ── Disconnect / Send ──────────────────────────────────────────────────
 
 	function disconnect() {
+		stopped = true;
+		reset();
 		if (reconnectTimer) {
 			clearTimeout(reconnectTimer);
 			reconnectTimer = null;
@@ -290,10 +416,63 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 
 	function send(data: unknown): boolean {
 		if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+		let pendingId: string | null = null;
 		try {
+			const payload = data as Record<string, unknown>;
+			if (providerLogin) {
+				if (!payload || !['pong', 'input', 'command', 'viewport'].includes(String(payload.type))) return false;
+				if (payload.type !== 'pong' && !protocolReady) return false;
+				ws.send(JSON.stringify(data));
+				return true;
+			}
+			if (
+				!payload ||
+				!['pong', 'workspace-command', 'input', 'inspect'].includes(
+					String(payload.type),
+				)
+			)
+				return false;
+			if (
+				['workspace-command', 'input', 'inspect'].includes(String(payload.type))
+			) {
+				if (
+					!protocolReady ||
+					!workspace?.available ||
+					payload.runtime_id !== workspace.runtime_id ||
+					payload.tab_id !== workspace.active_tab_id
+				)
+					return false;
+				if (
+					typeof payload.id !== 'string' ||
+					!payload.id ||
+					pending.has(payload.id) ||
+					pending.size >= 128
+				)
+					return false;
+				if (payload.type !== 'inspect') {
+					const id = payload.id;
+					pendingId = id;
+					pending.set(
+						id,
+						setTimeout(
+							() =>
+								settle(
+									id,
+									false,
+									'Command timed out. Outcome unknown; it was not replayed.',
+								),
+							30_000,
+						),
+					);
+				}
+			}
 			ws.send(JSON.stringify(data));
 			return true;
 		} catch (e) {
+			if (pendingId !== null) {
+				clearTimeout(pending.get(pendingId));
+				pending.delete(pendingId);
+			}
 			console.warn('[BrowserStream] failed to send:', e);
 			return false;
 		}
@@ -321,6 +500,10 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 	}
 
 	setupReviveListeners();
+	const healthTimer = setInterval(
+		() => forceReconnectIfNeeded('heartbeat missing'),
+		15_000,
+	);
 
 	// ── Public API ───────────────────────────────────────────────────────
 
@@ -331,6 +514,7 @@ export function createBrowserStreamClient(config: BrowserStreamConfig): BrowserS
 		isConnected: () => ws !== null && ws.readyState === WebSocket.OPEN,
 		destroy() {
 			destroyed = true;
+			clearInterval(healthTimer);
 			disconnect();
 			if (visibilityHandler && typeof document !== 'undefined') {
 				document.removeEventListener('visibilitychange', visibilityHandler);

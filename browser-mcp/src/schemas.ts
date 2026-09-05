@@ -39,6 +39,21 @@ export const ACT_KINDS = [
   "drag",
 ] as const;
 
+export const statusSchema: JsonSchema = { type: "object", properties: {}, additionalProperties: false };
+export const waitSchema: JsonSchema = {
+  type: "object", additionalProperties: false, required: ["condition"],
+  properties: {
+    condition: { type: "string", enum: ["url", "text", "element"] },
+    url: { type: "string", description: "URL to match (contains by default)." },
+    text: { type: "string", description: "Text of an element to wait for." },
+    ref: { type: "string", description: "Current snapshot ref, alternative to selector." },
+    selector: { type: "string", description: "CSS/Playwright locator selector." },
+    state: { type: "string", enum: ["visible", "hidden", "attached", "detached"] },
+    match: { type: "string", enum: ["contains", "exact"] },
+    timeout_ms: { type: "integer", minimum: 0, maximum: 15000 },
+  },
+};
+
 export const navigateSchema: JsonSchema = {
   type: "object",
   properties: {
@@ -297,6 +312,8 @@ export const batchSchema: JsonSchema = {
 };
 
 export const TOOL_SCHEMAS = {
+  browser_status: statusSchema,
+  browser_wait: waitSchema,
   browser_navigate: navigateSchema,
   browser_snapshot: snapshotSchema,
   browser_act: actSchema,

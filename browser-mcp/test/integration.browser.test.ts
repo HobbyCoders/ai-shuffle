@@ -34,6 +34,10 @@ import { runBatch } from "../src/tools/batch.js";
 import { TOOL_MAP } from "../src/tools/index.js";
 import type { McpToolResult } from "../src/tools/result.js";
 import { WATCH_KEY } from "../src/dommutation.js";
+import { BrowserWorkspace } from "../src/workspace.js";
+import { runWait } from "../src/tools/wait.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const NET_BODY_MARKER = "net-body-marker-12345";
 
@@ -200,6 +204,43 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       }
     }
   });
+
+  it("applies the workspace viewport before first navigation, new tabs and CDP recovery", async () => {
+    const viewportManager = new BrowserManager({ endpoint: cdpEndpoint });
+    const viewportSession = new Session(viewportManager);
+    const ws = new BrowserWorkspace(viewportSession);
+    const assertViewport = async (width: number, height: number, mode = "fixed") => {
+      await ws.refresh();
+      expect(ws.state().viewport).toEqual({ mode, width, height });
+      const page = await viewportSession.ensurePage();
+      expect(await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight })))
+        .toEqual({ width, height });
+      return page;
+    };
+    try {
+      // No browser_resize: the persistent context otherwise uses Chromium's
+      // native window dimensions, not the workspace's 1280x800 default.
+      expect(JSON.parse(firstText(await runNavigate(viewportSession, { url: fixtureUrl }))).ok).toBe(true);
+      const first = await assertViewport(1280, 800);
+      await viewportSession.setViewport(913, 617);
+      viewportSession.viewportMode = "fit";
+      await viewportSession.createTab();
+      const second = await assertViewport(913, 617, "fit");
+      expect(second.context()).toBe(first.context());
+      await second.close();
+      await first.close();
+      await runNavigate(viewportSession, { url: fixtureUrl });
+      const recreated = await assertViewport(913, 617, "fit");
+      // Browser.close over CDP detaches this client, leaving Chromium alive.
+      await recreated.context().browser()!.close();
+      expect(viewportSession.hasPage()).toBe(false);
+      expect(JSON.parse(firstText(await runNavigate(viewportSession, { url: fixtureUrl }))).ok).toBe(true);
+      await assertViewport(913, 617, "fit");
+    } finally {
+      ws.stop();
+      await viewportManager.cleanup();
+    }
+  }, 30000);
 
   it("navigate returns url/title and an interactive snapshot with refs", async () => {
     const res = await runNavigate(session, { url: fixtureUrl });
@@ -634,4 +675,99 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await guarded.cleanup().catch(() => {});
     }
   });
+  it("shared workspace: real tabs, viewport, CDP input, stale coordinates, waits and returned control", async () => {
+    const ws = new BrowserWorkspace(session);
+    let n = 0;
+    const send = (op: string, args = {}, tab_id: string | null = session.currentTabId() ?? null) => ws.receive({
+      id: `fixture-${++n}`, runtime_id: ws.runtimeId, viewer_id: "fixture-viewer", tab_id, op, args, expires_at: Date.now() + 30000,
+    });
+    try {
+      expect((await send("takeover", {}, null)).ok).toBe(true);
+      await expect(session.runAgentExclusive(() => runTabs(session,{op:"create"}))).rejects.toThrow("human_control");
+      expect((await send("tabs",{action:"create",url:httpUrl},null)).ok).toBe(true);
+      const created = session.currentTabId()!;
+      expect((await send("viewport",{mode:"fit",width:375,height:812})).ok).toBe(true);
+      await ws.refresh();
+      expect(ws.state()).toMatchObject({active_tab_id:created,viewport:{mode:"fit",width:375,height:812}});
+      expect(ws.state().target_id).toBeTruthy();
+      const page = await session.ensurePage();
+      await page.setContent('<input id="entry"><button id="button">ready</button>');
+      await page.locator("#entry").focus();
+      expect((await send("input",{method:"Input.insertText",params:{text:"shared hello"}})).ok).toBe(true);
+      expect(await page.locator("#entry").inputValue()).toBe("shared hello");
+      session.setLastScreenshot({scale:1,offsetX:0,offsetY:0});
+      expect((await send("viewport",{mode:"fixed",width:1280,height:800})).ok).toBe(true);
+      await expect(session.toViewportPoint([10,10])).rejects.toThrow("stale_screenshot");
+      expect((await send("release",{},null)).ok).toBe(true);
+      for (const input of [{condition:"url",url:httpUrl,match:"exact"}, {condition:"text",text:"ready"}, {condition:"element",selector:"#entry",state:"attached"}] as const) {
+        const result = await session.runAgentExclusive(() => runWait(session,input));
+        expect(JSON.parse(firstText(result)).matched).toBe(true);
+      }
+      const snap = await session.snapshot({filter:"interactive"});
+      expect(snap.refs.length).toBeGreaterThan(0);
+      expect(JSON.parse(firstText(await runWait(session,{condition:"element",ref:snap.refs[0],state:"visible"}))).matched).toBe(true);
+      await session.runAgentExclusive(() => runResize(session,{preset:"tablet"}));
+      await ws.refresh(); expect(ws.state().viewport).toEqual({mode:"fixed",width:768,height:1024});
+      expect((await send("takeover",{},null)).ok).toBe(true);
+      expect((await send("navigate",{url:httpUrl},"stale-tab")).ok).toBe(false);
+      expect((await send("command",{command:"reload"})).ok).toBe(true);
+      expect((await send("tabs",{action:"close",tab_id:created})).ok).toBe(true);
+      await ws.refresh(); expect(ws.state().active_tab_id).not.toBe(created);
+      expect((await send("release",{},null)).ok).toBe(true);
+    } finally {
+      ws.stop();
+      session.agentAdmission = undefined; session.onWorkspaceChange = undefined; session.workspaceStatus = undefined;
+    }
+  }, 30000);
+
+  it("STDIO MCP runtime authenticates bridge, reports target, and exposes status during human takeover", async () => {
+    const reports: any[] = []; const paths: string[] = []; const queue: any[] = [];
+    let runtime = "";
+    const broker = createHttpServer(async (req,res) => {
+      let raw = ""; for await (const part of req) raw += part;
+      const body = JSON.parse(raw); paths.push(req.url!);
+      if (body.token !== "fixture-token" || body.session_id !== "fixture-session") {res.writeHead(403);res.end();return;}
+      res.setHeader("content-type","application/json");
+      if (req.url?.endsWith("/control/register")) {runtime=body.runtime_id;res.end(JSON.stringify({ok:true}));}
+      else if (req.url?.endsWith("/control/poll")) res.end(JSON.stringify({commands:queue.splice(0,16)}));
+      else if (req.url?.endsWith("/control/report")) {reports.push(body);res.writeHead(204);res.end();}
+      else {res.writeHead(404);res.end();}
+    });
+    await new Promise<void>(resolve => broker.listen(0,"127.0.0.1",resolve));
+    const address = broker.address() as {port:number};
+    const transport = new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL("../dist/index.js",import.meta.url))],env:{
+      PATH:process.env.PATH ?? "", CHROME_CDP_PORT:new URL(cdpEndpoint).port,
+      BROWSER_SSRF_ALLOW:"127.0.0.0/8,::1/128", AIS_SESSION_ID:"fixture-session", AIS_PANEL_TOKEN:"fixture-token",
+      AIS_PANEL_REGISTER_URL:`http://127.0.0.1:${address.port}/api/v1/browser/panel/register`,
+    },stderr:"pipe"});
+    const client = new Client({name:"workspace-fixture",version:"1"});
+    const until = async (predicate:()=>boolean) => {
+      const deadline = Date.now()+7000;
+      while (!predicate()) {if(Date.now()>deadline) throw new Error("fixture condition timeout");await delay(25);}
+    };
+    try {
+      await client.connect(transport);
+      const tools = await client.listTools();
+      expect(tools.tools.some(t=>t.name==="browser_wait")).toBe(true);
+      const nav = await client.callTool({name:"browser_navigate",arguments:{url:httpUrl}});
+      expect(nav.isError).not.toBe(true);
+      await until(()=>reports.some(r=>r.state.target_id && r.state.tabs.some((t:any)=>t.url===httpUrl)));
+      const state = reports.at(-1).state;
+      expect(runtime).toBeTruthy(); expect(state.runtime_id).toBe(runtime);
+      queue.push({id:"human-take",runtime_id:runtime,tab_id:null,viewer_id:"human",op:"takeover",args:{},expires_at:Date.now()+30000});
+      await until(()=>reports.some(r=>r.results.some((x:any)=>x.id==="human-take" && x.ok)));
+      const status = await client.callTool({name:"browser_status",arguments:{}});
+      expect(JSON.parse((status.content as any[])[0].text).control.owner).toBe("human");
+      const denied = await client.callTool({name:"browser_resize",arguments:{preset:"mobile"}});
+      expect(denied.isError).toBe(true); expect((denied.content as any[])[0].text).toContain("human_control");
+      queue.push({id:"human-release",runtime_id:runtime,tab_id:null,viewer_id:"human",op:"release",args:{},expires_at:Date.now()+30000});
+      await until(()=>reports.some(r=>r.results.some((x:any)=>x.id==="human-release" && x.ok)));
+      const waited = await client.callTool({name:"browser_wait",arguments:{condition:"url",url:httpUrl,match:"exact",timeout_ms:1000}});
+      expect(JSON.parse((waited.content as any[])[0].text).matched).toBe(true);
+      expect(paths.every(path=>path.includes("/control/"))).toBe(true); // no legacy report race
+    } finally {
+      await client.close(); broker.closeAllConnections(); await new Promise<void>(resolve=>broker.close(()=>resolve()));
+    }
+  },30000);
+
 });

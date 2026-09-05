@@ -78,7 +78,7 @@ def verify_token(session_id: str, token: Optional[str]) -> bool:
         rec = _records.get(session_id)
         if rec is None or rec.token is None or token is None:
             return False
-        return secrets.compare_digest(rec.token, token)
+        return secrets.compare_digest(rec.token.encode("utf-8"), token.encode("utf-8"))
 
 
 def register(
@@ -124,3 +124,5 @@ def clear(session_id: str) -> None:
     """Drop all state for a session."""
     with _lock:
         _records.pop(session_id, None)
+    from app.core import browser_control
+    browser_control.clear(session_id)

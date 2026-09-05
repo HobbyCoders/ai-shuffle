@@ -45,6 +45,11 @@
 		frame: FramePayload | null;
 		/** Whether input is accepted (true only while the stream is live). */
 		interactive?: boolean;
+		/** Keyboard ownership is independent of the coordinate/frame gate. */
+		keyboardEnabled?: boolean;
+		keyboardOpen?: boolean;
+		/** Authoritative CSS viewport; JPEG pixel dimensions may be smaller. */
+		viewport?: { width: number; height: number };
 		/** Point-and-prompt mode: hit-test instead of forwarding pointer input. */
 		inspecting?: boolean;
 		/** Hover-highlight rect in page CSS pixels (inspect mode). */
@@ -63,7 +68,10 @@
 
 	let {
 		frame,
-		interactive = true,
+		interactive: inputEnabled = true,
+		keyboardEnabled = inputEnabled,
+		keyboardOpen = $bindable(false),
+		viewport,
 		inspecting = false,
 		hoverRect = null,
 		selectionRect = null,
@@ -78,11 +86,22 @@
 	let focused = $state(false);
 
 	let currentBitmap: ImageBitmap | null = null;
-	let currentMeta: FrameMetadata | null = null;
+	let currentMeta = $state.raw<FrameMetadata | null>(null);
+	// Wait for the matching bitmap to finish decoding too: receiving metadata
+	// alone does not mean the picture under the pointer has changed yet.
+	const waitingForFrame = $derived(!!viewport && (
+		currentMeta?.deviceWidth !== viewport.width ||
+		currentMeta?.deviceHeight !== viewport.height ||
+		frame?.metadata.deviceWidth !== viewport.width ||
+		frame?.metadata.deviceHeight !== viewport.height
+	));
+	const interactive = $derived(inputEnabled && !waitingForFrame);
 
 	// ── Frame decode + paint (rAF-coalesced) ──────────────────────────────
 	let pendingFrame: FramePayload | null = null;
 	let drawScheduled = false;
+	let disposed = false;
+	let drawGeneration = 0;
 
 	function base64ToBlob(b64: string, type = 'image/jpeg'): Blob {
 		const bin = atob(b64);
@@ -94,11 +113,16 @@
 	async function runDraw() {
 		drawScheduled = false;
 		const f = pendingFrame;
+		const generation = drawGeneration;
 		pendingFrame = null;
-		if (!f || !canvasEl) return;
+		if (!f || !canvasEl || disposed) return;
 		try {
 			const bmp = await createImageBitmap(base64ToBlob(f.data));
-			if (!metaIsDrawable(f.metadata)) {
+			if (
+				disposed ||
+				generation !== drawGeneration ||
+				!metaIsDrawable(f.metadata)
+			) {
 				// Unusable geometry: drop the new bitmap and keep the last good
 				// picture on screen rather than swapping in something unpaintable.
 				bmp.close?.();
@@ -114,10 +138,12 @@
 	}
 
 	function scheduleDraw(f: FramePayload) {
+		drawGeneration++;
 		pendingFrame = f;
 		if (drawScheduled) return;
 		drawScheduled = true;
-		if (typeof requestAnimationFrame !== 'undefined') requestAnimationFrame(runDraw);
+		if (typeof requestAnimationFrame !== 'undefined')
+			requestAnimationFrame(runDraw);
 		else runDraw();
 	}
 
@@ -191,7 +217,8 @@
 
 		const ctx = canvasEl.getContext('2d');
 		if (!ctx) return;
-		const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+		const dpr =
+			typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
 		const bw = Math.round(rect.width * dpr);
 		const bh = Math.round(rect.height * dpr);
 		if (canvasEl.width !== bw) canvasEl.width = bw;
@@ -199,10 +226,19 @@
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		ctx.clearRect(0, 0, rect.width, rect.height);
 		ctx.imageSmoothingQuality = 'high';
-		ctx.drawImage(bitmap, off.x, off.y, meta.deviceWidth * scale, meta.deviceHeight * scale);
+		ctx.drawImage(
+			bitmap,
+			off.x,
+			off.y,
+			meta.deviceWidth * scale,
+			meta.deviceHeight * scale,
+		);
+		canvasEl.dataset.viewportWidth = String(meta.deviceWidth);
+		canvasEl.dataset.viewportHeight = String(meta.deviceHeight);
 
 		if (inspecting) {
-			if (selectionRect) drawHighlight(ctx, selectionRect, scale, off, 'selection');
+			if (selectionRect)
+				drawHighlight(ctx, selectionRect, scale, off, 'selection');
 			if (hoverRect) drawHighlight(ctx, hoverRect, scale, off, 'hover');
 		} else if (selectionRect) {
 			// Selection stays visible outside inspect mode so the composer's
@@ -240,6 +276,9 @@
 	});
 
 	onDestroy(() => {
+		disposed = true;
+		pendingMove = null;
+		pendingFrame = null;
 		currentBitmap?.close?.();
 		currentBitmap = null;
 	});
@@ -247,7 +286,7 @@
 	// A native editable is required to summon iOS/Android keyboards. Its value is
 	// only a transient IME buffer; committed text goes directly to the remote page.
 	let keyboardEl: HTMLTextAreaElement | undefined = $state();
-	let keyboardOpen = $state(false);
+	// Focus reports bridge activation, not native OS keyboard visibility.
 	let composing = false;
 	let compositionCommit: string | null = null;
 	let compositionTimer: ReturnType<typeof setTimeout> | undefined;
@@ -259,13 +298,13 @@
 		clearTimeout(compositionTimer);
 	}
 
-	function openKeyboard() {
-		if (!interactive || inspecting) return;
+	export function openKeyboard() {
+		if (!keyboardEnabled || inspecting) return;
 		// Must stay in the original user gesture, not a promise/effect/rAF.
 		keyboardEl?.focus({ preventScroll: true });
 	}
 
-	function dismissKeyboard() {
+	export function dismissKeyboard() {
 		keyboardEl?.blur();
 		keyboardOpen = false;
 		clearBridge();
@@ -274,20 +313,25 @@
 	$effect(() => {
 		if (!interactive || inspecting) {
 			touch = null;
-			dismissKeyboard();
+			pendingMove = null;
+			trailingHover = null;
 		}
 	});
-	onDestroy(() => clearTimeout(compositionTimer));
+	$effect(() => {
+		if (!keyboardEnabled || inspecting) dismissKeyboard();
+	});
+	onDestroy(dismissKeyboard);
 
 	function commitText(text: string) {
-		if (!interactive || inspecting || !keyboardOpen) return;
+		if (!keyboardEnabled || inspecting || !keyboardOpen) return;
 		// Bound each socket message without separating a UTF-16 surrogate pair.
 		const maxTextUnits = 16384;
 		for (let start = 0; start < text.length;) {
 			let end = Math.min(start + maxTextUnits, text.length);
 			const last = text.charCodeAt(end - 1);
 			const next = text.charCodeAt(end);
-			if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end--;
+			if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff)
+				end--;
 			onInput({ type: 'input', kind: 'text', text: text.slice(start, end) });
 			start = end;
 		}
@@ -302,7 +346,9 @@
 		// that trailing commit, but never swallow the next deliberate keystroke.
 		compositionCommit = e.data;
 		clearTimeout(compositionTimer);
-		compositionTimer = setTimeout(() => { compositionCommit = null; }, 0);
+		compositionTimer = setTimeout(() => {
+			compositionCommit = null;
+		}, 0);
 	}
 
 	function bridgeInput(event: Event) {
@@ -316,15 +362,24 @@
 	}
 
 	function bridgeKeyPair(key: string, code: string, keyCode: number) {
-		if (!interactive || inspecting || !keyboardOpen) return;
+		if (!keyboardEnabled || inspecting || !keyboardOpen) return;
 		for (const event of ['down', 'up']) {
-			onInput({ type: 'input', kind: 'key', event, key, code, keyCode, text: '', modifiers: 0 });
+			onInput({
+				type: 'input',
+				kind: 'key',
+				event,
+				key,
+				code,
+				keyCode,
+				text: '',
+				modifiers: 0,
+			});
 		}
 	}
 
 	function bridgeBeforeInput(e: InputEvent) {
 		e.stopPropagation();
-		if (!interactive || inspecting || !keyboardOpen) {
+		if (!keyboardEnabled || inspecting || !keyboardOpen) {
 			e.preventDefault();
 			clearBridge();
 			return;
@@ -334,17 +389,40 @@
 		if (e.inputType.startsWith('delete')) {
 			e.preventDefault();
 			const forward = e.inputType.endsWith('Forward');
-			bridgeKeyPair(forward ? 'Delete' : 'Backspace', forward ? 'Delete' : 'Backspace', forward ? 46 : 8);
-		} else if (e.inputType === 'insertLineBreak' || e.inputType === 'insertParagraph') {
+			bridgeKeyPair(
+				forward ? 'Delete' : 'Backspace',
+				forward ? 'Delete' : 'Backspace',
+				forward ? 46 : 8,
+			);
+		} else if (
+			e.inputType === 'insertLineBreak' ||
+			e.inputType === 'insertParagraph'
+		) {
 			e.preventDefault();
 			bridgeKeyPair('Enter', 'Enter', 13);
 		}
 	}
 
-	const bridgeKeys = new Set(['Tab', 'Enter', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown']);
+	const bridgeKeys = new Set([
+		'Tab',
+		'Enter',
+		'Backspace',
+		'Delete',
+		'ArrowLeft',
+		'ArrowRight',
+		'ArrowUp',
+		'ArrowDown',
+		'Home',
+		'End',
+		'PageUp',
+		'PageDown',
+	]);
 	function bridgeKey(e: KeyboardEvent, event: 'down' | 'up') {
 		e.stopPropagation();
-		if (!interactive || inspecting) { e.preventDefault(); return; }
+		if (!keyboardEnabled || inspecting || !keyboardOpen) {
+			e.preventDefault();
+			return;
+		}
 		if (composing || e.isComposing || e.keyCode === 229) return;
 		compositionCommit = null;
 		if (e.key === 'Escape') {
@@ -366,7 +444,12 @@
 
 	function pagePoint(e: { clientX: number; clientY: number }) {
 		if (!canvasEl || !currentMeta) return null;
-		return canvasToPage(e.clientX, e.clientY, canvasEl.getBoundingClientRect(), currentMeta);
+		return canvasToPage(
+			e.clientX,
+			e.clientY,
+			canvasEl.getBoundingClientRect(),
+			currentMeta,
+		);
 	}
 
 	function sendMouse(
@@ -374,7 +457,7 @@
 		e: PointerEvent | WheelEvent,
 		extra: Record<string, unknown> = {},
 	) {
-		if (!interactive) return;
+		if (!interactive || disposed) return;
 		const p = pagePoint(e);
 		if (!p) return;
 		onInput({
@@ -398,7 +481,10 @@
 	let trailingHover: { clientX: number; clientY: number } | null = null;
 	let trailingHoverTimer: ReturnType<typeof setTimeout> | null = null;
 
-	function sendInspect(e: { clientX: number; clientY: number }, mode: 'hover' | 'select') {
+	function sendInspect(
+		e: { clientX: number; clientY: number },
+		mode: 'hover' | 'select',
+	) {
 		if (!interactive || !onInspect) return;
 		if (mode === 'hover') {
 			const now = Date.now();
@@ -407,12 +493,15 @@
 				// highlight settles under a stopped cursor instead of lagging.
 				trailingHover = { clientX: e.clientX, clientY: e.clientY };
 				if (trailingHoverTimer === null) {
-					trailingHoverTimer = setTimeout(() => {
-						trailingHoverTimer = null;
-						const t = trailingHover;
-						trailingHover = null;
-						if (t) sendInspect(t, 'hover');
-					}, HOVER_THROTTLE_MS - (now - lastHoverSent));
+					trailingHoverTimer = setTimeout(
+						() => {
+							trailingHoverTimer = null;
+							const t = trailingHover;
+							trailingHover = null;
+							if (t) sendInspect(t, 'hover');
+						},
+						HOVER_THROTTLE_MS - (now - lastHoverSent),
+					);
 				}
 				return;
 			}
@@ -480,7 +569,7 @@
 		sendMouse('move', e);
 		sendMouse('down', e, { clickCount: 1 });
 		sendMouse('up', e, { clickCount: 1 });
-		if (pagePoint(e)) openKeyboard();
+		// Remote taps never summon/refocus the native keyboard.
 	}
 
 	// ── Pointer handlers ───────────────────────────────────────────────────
@@ -498,7 +587,7 @@
 
 	function onPointerMove(e: PointerEvent) {
 		if (e.target !== wrapperEl && e.target !== canvasEl) return;
-		if (!interactive) return;
+		if (!interactive || disposed) return;
 		if (e.pointerType === 'touch') {
 			onTouchMove(e);
 			return;
@@ -510,14 +599,18 @@
 		pendingMove = e;
 		if (moveScheduled) return;
 		moveScheduled = true;
-		if (typeof requestAnimationFrame !== 'undefined') requestAnimationFrame(flushMove);
+		if (typeof requestAnimationFrame !== 'undefined')
+			requestAnimationFrame(flushMove);
 		else flushMove();
 	}
 
 	function onPointerDown(e: PointerEvent) {
 		if (e.target !== wrapperEl && e.target !== canvasEl) return;
-		if (e.pointerType !== 'touch') wrapperEl?.focus();
-		if (!interactive) return;
+		// Cancel native focus transfer even while a resize blocks coordinates.
+		// Never refocus here: native IME Hide may leave this textarea focused.
+		if (keyboardOpen && document.activeElement === keyboardEl) e.preventDefault();
+		else if (interactive && e.pointerType !== 'touch') wrapperEl?.focus();
+		if (!interactive || disposed) return;
 		e.preventDefault();
 		if (e.pointerType === 'touch') {
 			onTouchDown(e);
@@ -529,7 +622,7 @@
 
 	function onPointerUp(e: PointerEvent) {
 		if (e.target !== wrapperEl && e.target !== canvasEl) return;
-		if (!interactive) return;
+		if (!interactive || disposed) return;
 		if (e.pointerType === 'touch') {
 			onTouchUp(e);
 			return;
@@ -553,7 +646,7 @@
 	}
 
 	function onWheel(e: WheelEvent) {
-		if (!interactive) return;
+		if (!interactive || disposed) return;
 		e.preventDefault();
 		// Inspect mode still scrolls — deeper content must stay reachable.
 		sendMouse('wheel', e, { deltaX: e.deltaX, deltaY: e.deltaY });
@@ -634,32 +727,31 @@
 		class="keyboard-bridge"
 		aria-label="Type in the remote browser"
 		tabindex="-1"
-		disabled={!interactive || inspecting}
+		disabled={!keyboardEnabled || inspecting}
 		autocomplete="off"
 		{...{ autocorrect: 'off' }}
 		autocapitalize="off"
 		spellcheck={false}
 		rows="1"
 		onfocus={() => (keyboardOpen = true)}
-		onblur={() => { keyboardOpen = false; clearBridge(); }}
+		onblur={() => {
+			keyboardOpen = false;
+			clearBridge();
+		}}
 		onbeforeinput={bridgeBeforeInput}
 		oninput={bridgeInput}
-		oncompositionstart={() => { composing = true; compositionCommit = null; }}
+		oncompositionstart={() => {
+			composing = true;
+			compositionCommit = null;
+		}}
 		oncompositionend={bridgeCompositionEnd}
 		onkeydown={(e) => bridgeKey(e, 'down')}
-		onkeyup={(e) => bridgeKey(e, 'up')}
-	></textarea>
-	<button
-		type="button"
-		class="keyboard-toggle"
-		disabled={!interactive || inspecting}
-		aria-label={keyboardOpen ? 'Dismiss keyboard' : 'Open keyboard'}
-		aria-pressed={keyboardOpen}
-		onpointerdown={(e) => { e.stopPropagation(); e.preventDefault(); }}
-		onclick={() => { if (keyboardOpen) dismissKeyboard(); else openKeyboard(); }}
-	>{keyboardOpen ? 'Dismiss keyboard' : 'Keyboard'}</button>
+		onkeyup={(e) => bridgeKey(e, 'up')}></textarea>
 
-	{#if interactive && inspecting}
+
+	{#if waitingForFrame}
+		<div class="focus-hint" role="status">Waiting for an updated frame…</div>
+	{:else if interactive && inspecting}
 		<div class="focus-hint inspect-hint">Click an element to select it</div>
 	{:else if interactive && !focused && !keyboardOpen}
 		<div class="focus-hint">Click to interact</div>
@@ -680,35 +772,13 @@
 		pointer-events: none;
 	}
 
-	.keyboard-toggle {
-		position: absolute;
-		top: 8px;
-		right: 8px;
-		min-height: 44px;
-		padding: 8px 12px;
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		background: var(--popover);
-		color: var(--foreground);
-		font: inherit;
-		font-size: 12px;
-		cursor: pointer;
-	}
-	.keyboard-toggle:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.keyboard-toggle:disabled { opacity: 0.5; cursor: default; }
-
 	.live-wrapper {
 		position: relative;
 		flex: 1;
 		min-height: 0;
 		display: flex;
 		outline: none;
-		background:
-			repeating-conic-gradient(
-					color-mix(in oklch, var(--muted) 40%, transparent) 0% 25%,
-					transparent 0% 50%
-				)
-				50% / 20px 20px;
+		background: var(--muted);
 		touch-action: none;
 		cursor: default;
 		overflow: hidden;
@@ -736,7 +806,8 @@
 	/* Visible focus affordance: a ring around the whole live surface while it holds
 	   keyboard focus, so the user knows their keystrokes are being routed here. */
 	.live-wrapper.focused {
-		box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--ring) 80%, transparent);
+		box-shadow: inset 0 0 0 2px
+			color-mix(in oklch, var(--ring) 80%, transparent);
 	}
 
 	.live-wrapper:focus-visible {

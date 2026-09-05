@@ -2,11 +2,14 @@
  * Browser Panel Store — state for the live browser screencast side panel.
  *
  * Mirrors the layout store pattern (Svelte 5 runes + the createSubscribers shim
- * for `$storeName` auto-subscription in .svelte files). Only the panel WIDTH is
- * persisted to localStorage; `open`/`status`/`url` are runtime-only, and
+ * for `$storeName` auto-subscription in .svelte files). Width, auto-open policy,
+ * and the viewport default sync through the browser_panel server preference; `open`/`status`/`url` are runtime-only, and
  * `userClosedForSession` is a per-runtime suppression flag so an auto-open never
  * fights a user who deliberately closed the panel for the session they're in.
  */
+import { compatible } from '$lib/services/preference-values';
+import type { BrowserViewport } from '$lib/browser-panel/workspace';
+import { validViewport } from '$lib/browser-panel/workspace';
 import { preferenceSync } from '$lib/services/preferences';
 import { browser } from '$app/environment';
 import { untrack } from 'svelte';
@@ -19,13 +22,11 @@ import type { SelectedElement } from '$lib/browser-panel/inspect';
 
 /** Server-reported stream state (see the browser WS protocol contract). */
 export type BrowserStatus =
-	| 'no_page'
-	| 'connecting'
-	| 'live'
-	| 'disconnected'
-	| 'browser_off';
+	'no_page' | 'connecting' | 'live' | 'disconnected' | 'browser_off';
 
 interface BrowserPanelState {
+	autoOpen: boolean;
+	defaultViewport: BrowserViewport;
 	/** Whether the panel is docked open. */
 	open: boolean;
 	/** Panel width in px (user-resizable, persisted, clamped). */
@@ -62,6 +63,12 @@ interface BrowserPanelState {
 const STORAGE_KEY = 'ai-shuffle-browser-panel';
 const DEFAULT_WIDTH = 480;
 const MIN_WIDTH = 320;
+const defaults = {
+	width: DEFAULT_WIDTH,
+	autoOpen: true,
+	defaultViewport: { mode: 'fixed' as const, width: 1280, height: 800 },
+};
+let preference: Record<string, unknown> = { ...defaults };
 
 // ============================================
 // Persistence (width only)
@@ -81,7 +88,9 @@ function loadPersistedWidth(): number {
 		const raw = localStorage.getItem(STORAGE_KEY);
 		if (!raw) return DEFAULT_WIDTH;
 		const parsed = JSON.parse(raw) as { width?: number };
-		return typeof parsed.width === 'number' ? clampWidth(parsed.width) : DEFAULT_WIDTH;
+		return typeof parsed.width === 'number'
+			? clampWidth(parsed.width)
+			: DEFAULT_WIDTH;
 	} catch {
 		return DEFAULT_WIDTH;
 	}
@@ -108,7 +117,13 @@ let pendingWidth: number | null = null;
 
 function persistWidth(width: number) {
 	if (!browser) return;
-	preferenceSync.save('browser_panel', { width });
+	preference = {
+		...preference,
+		width,
+		autoOpen: _state.autoOpen,
+		defaultViewport: _state.defaultViewport,
+	};
+	preferenceSync.save('browser_panel', preference);
 	pendingWidth = width;
 	if (persistTimer !== null) return;
 	persistTimer = setTimeout(() => {
@@ -133,16 +148,36 @@ export function flushWidthPersist() {
 }
 
 preferenceSync.register('browser_panel', {
-	read: () => ({ width: _state.width }),
+	read: () => ({
+		...preference,
+		width: _state.width,
+		autoOpen: _state.autoOpen,
+		defaultViewport: _state.defaultViewport,
+	}),
 	apply(value) {
 		if (persistTimer !== null) clearTimeout(persistTimer);
 		persistTimer = null;
 		pendingWidth = null;
-		const width = value && typeof value === 'object' && 'width' in value && typeof value.width === 'number'
-			? clampWidth(value.width) : DEFAULT_WIDTH;
-		_update((state) => ({ ...state, width }));
+		const width =
+			value &&
+			typeof value === 'object' &&
+			'width' in value &&
+			typeof value.width === 'number'
+				? clampWidth(value.width)
+				: DEFAULT_WIDTH;
+		const parsed = compatible(defaults, value);
+		preference = { ...parsed };
+		const defaultViewport = validViewport(parsed.defaultViewport)
+			? parsed.defaultViewport
+			: defaults.defaultViewport;
+		_update((state) => ({
+			...state,
+			width,
+			autoOpen: parsed.autoOpen,
+			defaultViewport,
+		}));
 		writeWidth(width);
-	}
+	},
 });
 
 // A resize finished right before a navigation must not be lost to the debounce.
@@ -156,6 +191,8 @@ if (browser && typeof window !== 'undefined') {
 
 let _state = $state<BrowserPanelState>({
 	open: false,
+	autoOpen: true,
+	defaultViewport: { ...defaults.defaultViewport },
 	width: loadPersistedWidth(),
 	status: 'disconnected',
 	url: null,
@@ -170,12 +207,13 @@ let _state = $state<BrowserPanelState>({
 // Subscribe shim (centralized via store-utils)
 // ============================================
 
-const { subscribe, notifySubscribers, createDerived } = createSubscribers<BrowserPanelState>(
-	() => _state,
-	(v) => {
-		_state = v;
-	},
-);
+const { subscribe, notifySubscribers, createDerived } =
+	createSubscribers<BrowserPanelState>(
+		() => _state,
+		(v) => {
+			_state = v;
+		},
+	);
 
 function _update(fn: (s: BrowserPanelState) => BrowserPanelState) {
 	_state = fn(untrack(() => _state));
@@ -192,6 +230,18 @@ export const browserPanel = {
 	},
 
 	subscribe,
+	setAutoOpen(autoOpen: boolean) {
+		_update((s) => ({ ...s, autoOpen }));
+		persistWidth(_state.width);
+	},
+	setDefaultViewport(viewport: BrowserViewport) {
+		if (!validViewport(viewport)) return;
+		_update((s) => ({
+			...s,
+			defaultViewport: { ...s.defaultViewport, ...viewport },
+		}));
+		persistWidth(_state.width);
+	},
 
 	/** Open the panel and lift any close-suppression (the user wants it visible). */
 	openPanel() {
@@ -256,7 +306,7 @@ export const browserPanel = {
 			status,
 			// Registry-metadata URLs only fill the gap before CDP tracking kicks
 			// in; once live page events have spoken they are authoritative.
-			url: s.pageTracked ? s.url : (url === undefined ? s.url : url),
+			url: s.pageTracked ? s.url : url === undefined ? s.url : url,
 		}));
 	},
 
@@ -288,7 +338,7 @@ export const browserPanel = {
 	 */
 	autoOpenFor(sessionId: string | null) {
 		_update((s) => {
-			if (s.open) return s;
+			if (s.open || !s.autoOpen) return s;
 			if (sessionId !== null && s.userClosedForSession === sessionId) return s;
 			return { ...s, open: true };
 		});

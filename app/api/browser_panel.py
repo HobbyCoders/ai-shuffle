@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from contextlib import suppress
 from typing import Optional
 
@@ -42,8 +43,8 @@ from app.api.sessions_helpers import (
 )
 from app.api.ws_auth import authenticate_websocket
 from app.api.ws_utils import safe_ws_send
+from app.core import browser_control, browser_stream
 from app.core import browser_panel_registry as registry
-from app.core import browser_stream
 from app.db import database
 from app.db.async_database import run_sync
 
@@ -97,8 +98,54 @@ async def register_panel(body: PanelRegisterRequest) -> Response:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Invalid panel token"
         )
+    if browser_control.get(body.session_id).runtime_id is not None:
+        raise HTTPException(409, "Workspace runtime owns this session")
     registry.register(body.session_id, body.target_id, body.tab_id, body.url)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/api/v1/browser/panel/control/{operation}", include_in_schema=False)
+async def workspace_control(operation: str, request: Request):
+    if operation not in ("register", "poll", "report"):
+        raise HTTPException(404)
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > browser_control.MAX_BODY:
+            raise HTTPException(413, "Workspace payload too large")
+    try:
+        body = json.loads(raw)
+        if not isinstance(body, dict):
+            raise ValueError()
+        session_id = browser_control.identifier(body.get("session_id"))
+        runtime_id = browser_control.identifier(body.get("runtime_id"))
+        token = body.get("token")
+        if not isinstance(token, str) or len(token) > 256:
+            raise ValueError()
+        browser_control.finite(body)
+    except (ValueError, TypeError, RecursionError):
+        raise HTTPException(422, "Invalid workspace payload")
+    if not registry.verify_token(session_id, token):
+        raise HTTPException(403, "Invalid panel token")
+    broker = browser_control.get(session_id)
+    try:
+        if operation == "register":
+            await broker.register(runtime_id)
+            return {"ok": True}
+        broker.check(runtime_id)
+        if operation == "poll":
+            return {"commands": await broker.poll(runtime_id)}
+        await broker.report(runtime_id, body.get("state"), body.get("results", []))
+        return Response(status_code=204)
+    except browser_control.ControlError as exc:
+        code = 409 if operation in ("register", "poll") else 422
+        try:
+            broker.check(runtime_id)
+        except browser_control.ControlError:
+            code = 409
+        raise HTTPException(code, str(exc))
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(422, "Invalid workspace payload")
 
 
 @router.get("/api/v1/sessions/{session_id}/browser/panel")
@@ -160,18 +207,35 @@ async def browser_panel_websocket(
 
 
 async def serve_browser_panel(
-    websocket: WebSocket, session_id: str, *, login_only: bool = False,
+    websocket: WebSocket,
+    session_id: str,
+    *,
+    login_only: bool = False,
 ) -> None:
     # Handshake: hello, then the initial status (sent directly — no viewer
     # sender is running yet, so there is no concurrent writer to race).
-    await safe_ws_send(websocket, {"type": "hello", "protocol": 1})
+    viewer_id = None if login_only else str(uuid.uuid4())
+    if login_only:
+        await safe_ws_send(websocket, {"type": "hello", "protocol": 1})
+    else:
+        await safe_ws_send(
+            websocket,
+            {
+                "type": "hello",
+                "protocol": 2,
+                "viewer_id": viewer_id,
+                "capabilities": ["workspace-control"],
+            },
+        )
     initial = await _initial_status(session_id)
     if login_only:
         initial["url"] = None
     await safe_ws_send(websocket, initial)
 
     if login_only:
-        hub, viewer = await browser_stream.attach_viewer(session_id, websocket, redact_urls=True)
+        hub, viewer = await browser_stream.attach_viewer(
+            session_id, websocket, redact_urls=True
+        )
     else:
         hub, viewer = await browser_stream.attach_viewer(session_id, websocket)
     # Toolbar state for a hub that already existed (mid-navigation reconnect):
@@ -182,6 +246,10 @@ async def serve_browser_panel(
         await hub.send_to_viewer(
             viewer, {"type": "page", "url": hub.page_url, "loading": hub.page_loading}
         )
+    broker = None if login_only else browser_control.get(session_id)
+    if broker is not None:
+        broker.viewers[viewer_id] = lambda message: hub.send_to_viewer(viewer, message)
+        await broker.send(viewer_id, {"type": "workspace", "state": broker.state})
     ping_task = asyncio.create_task(_panel_ping(hub, viewer))
 
     try:
@@ -192,7 +260,10 @@ async def serve_browser_panel(
                 break
 
             try:
+                if len(raw.encode("utf-8")) > 32768:
+                    raise ValueError("payload too large")
                 data = json.loads(raw)
+                browser_control.finite(data)
                 if not isinstance(data, dict):
                     raise ValueError("payload not an object")
             except Exception:
@@ -202,10 +273,10 @@ async def serve_browser_panel(
             mtype = data.get("type")
             if mtype == "pong":
                 continue
-            if login_only and mtype not in ("input", "command", "viewport"):
-                await websocket.close(code=4400, reason="Protocol violation")
-                break
-            if mtype in ("input", "navigate", "command", "viewport"):
+            if login_only:
+                if mtype not in ("input", "command", "viewport"):
+                    await websocket.close(code=4400, reason="Protocol violation")
+                    break
                 try:
                     cdp_cmd = browser_stream.translate_input(
                         data, bounds=hub.last_bounds()
@@ -213,22 +284,74 @@ async def serve_browser_panel(
                 except Exception:
                     await websocket.close(code=4400, reason="Protocol violation")
                     break
-                if (
-                    mtype == "navigate"
-                    and cdp_cmd is not None
-                    and await hub.ensure_target(cdp_cmd["params"]["url"])
-                ):
-                    continue
                 if cdp_cmd is not None:
                     await hub.dispatch_input(cdp_cmd)
                 continue
-            if mtype == "inspect":
+            if mtype in (
+                "workspace-command",
+                "input",
+                "navigate",
+                "command",
+                "viewport",
+                "inspect",
+            ):
                 try:
-                    inspect = browser_stream.parse_inspect(data)
-                except Exception:
-                    await websocket.close(code=4400, reason="Protocol violation")
-                    break
-                await hub.dispatch_inspect(viewer, inspect)
+                    broker.identity(data)
+                    if mtype == "inspect":
+                        target = registry.get_target(session_id)
+                        if (
+                            target is None
+                            or target.target_id != broker.state["target_id"]
+                            or getattr(hub, "_attached_target_id", None)
+                            != target.target_id
+                        ):
+                            raise browser_control.ControlError(
+                                "Stale inspection target"
+                            )
+                        inspect = browser_stream.parse_inspect(data)
+                        await hub.dispatch_inspect(viewer, inspect)
+                    else:
+                        command = dict(data)
+                        internal = mtype == "input"
+                        if internal:
+                            normalized = browser_stream.translate_input(
+                                data, bounds=hub.last_bounds()
+                            )
+                            if normalized is None:
+                                raise browser_control.ControlError("Invalid input")
+                            command.update(op="input", args=normalized)
+                        elif mtype != "workspace-command":
+                            keys = {
+                                "navigate": ("url",),
+                                "command": ("command",),
+                                "viewport": ("mode", "width", "height"),
+                            }[mtype]
+                            command.update(
+                                op=mtype, args={key: data.get(key) for key in keys}
+                            )
+                        await broker.submit(viewer_id, command, internal=internal)
+                except (ValueError, TypeError, KeyError) as exc:
+                    message = str(exc)[:2048]
+                    command_id = data.get("id")
+                    if isinstance(command_id, str) and len(command_id) <= 128:
+                        await hub.send_to_viewer(
+                            viewer,
+                            {
+                                "type": "command-result",
+                                "id": command_id,
+                                "ok": False,
+                                "error": message,
+                            },
+                        )
+                    else:
+                        await hub.send_to_viewer(
+                            viewer,
+                            {
+                                "type": "error",
+                                "message": message,
+                                "code": "workspace-command-rejected",
+                            },
+                        )
                 continue
 
             # Anything else is a protocol violation.
@@ -243,4 +366,6 @@ async def serve_browser_panel(
         ping_task.cancel()
         with suppress(asyncio.CancelledError):
             await ping_task
+        if broker is not None:
+            await broker.detach(viewer_id)
         await browser_stream.detach_viewer(session_id, viewer)

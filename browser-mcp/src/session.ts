@@ -12,7 +12,7 @@
  * refs (they only resolve against the page they were snapshotted from).
  */
 
-import type { Page, Locator, ConsoleMessage, Response } from "playwright-core";
+import type { Page, Locator, ConsoleMessage, Response, CDPSession } from "playwright-core";
 import { BrowserManager, BrowserRestartingError } from "./browser.js";
 import { RefRegistry, STALE_REF_REMEDY, isRefToken } from "./refs.js";
 import {
@@ -96,6 +96,50 @@ interface PageEntry {
 }
 
 export class Session {
+  busy = false;
+  onWorkspaceChange?: () => void;
+  agentAdmission?: () => void;
+  private screenshotValid = false;
+  private readonly cdpSessions = new WeakMap<Page, Promise<CDPSession>>();
+  viewportMode: "fit" | "fixed" = "fixed";
+  private desiredViewport = { width: 1280, height: 800 };
+  workspaceStatus?: () => Record<string, unknown>;
+
+  runAgentExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    try { this.agentAdmission?.(); } catch (err) { return Promise.reject(err); }
+    return this.runExclusive(async () => { this.agentAdmission?.(); return fn(); });
+  }
+
+  async currentCDP(): Promise<CDPSession> {
+    const page = this.requirePage();
+    let pending = this.cdpSessions.get(page);
+    if (!pending) {
+      pending = raceWithTimeout(page.context().newCDPSession(page), 5000, "CDP session timed out");
+      this.cdpSessions.set(page, pending);
+      pending.catch(() => this.cdpSessions.delete(page));
+    }
+    return pending;
+  }
+
+  async workspaceMetadata() {
+    const id = this.currentTabId();
+    const page = this.currentEntry()?.page;
+    const tabs = await this.listTabs();
+    let target: string | null = null;
+    if (page) {
+      try {
+        const cdp = await this.currentCDP();
+        const result = await raceWithTimeout(cdp.send("Target.getTargetInfo"), 2000, "target timeout");
+        target = result.targetInfo.targetId;
+      } catch { /* disconnected */ }
+    }
+    return { active_tab_id: id ?? null, target_id: target,
+      tabs: tabs.slice(0, 128).map(t => ({ ...t, url: t.url.slice(0, 1024), title: t.title.slice(0, 256) })),
+      viewport: { mode: this.viewportMode, ...(page?.viewportSize() ?? this.desiredViewport) } };
+  }
+
+  invalidateScreenshot(): void { this.screenshotValid = false; }
+
   private readonly pages = new Map<string, PageEntry>();
   private currentId?: string;
   private tabSeq = 0;
@@ -129,7 +173,12 @@ export class Session {
    * itself already executing inside a runExclusive turn.
    */
   runExclusive<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.tail.then(fn, fn);
+    const execute = async () => {
+      this.busy = true;
+      this.onWorkspaceChange?.();
+      try { return await fn(); } finally { this.busy = false; this.onWorkspaceChange?.(); }
+    };
+    const run = this.tail.then(execute, execute);
     this.tail = run.then(
       () => undefined,
       () => undefined,
@@ -153,7 +202,17 @@ export class Session {
    * Register a freshly acquired page: install its console/network listeners
    * (once) and its close handler, then store it. Returns the new entry.
    */
-  private trackPage(page: Page): PageEntry {
+  private async trackPage(page: Page): Promise<PageEntry> {
+    // Persistent CDP contexts have no default viewport override. Apply ours
+    // before exposing the tab/target, including on first use and reconnect.
+    const viewport = this.currentEntry()?.page.viewportSize() ?? this.desiredViewport;
+    try {
+      await raceWithTimeout(page.setViewportSize(viewport), 5000, "initial viewport timed out");
+    } catch (error) {
+      await page.close().catch(() => {});
+      throw error;
+    }
+    this.desiredViewport = { ...viewport };
     this.tabSeq += 1;
     const id = `tab${this.tabSeq}`;
     const entry: PageEntry = {
@@ -188,8 +247,16 @@ export class Session {
       }
     });
 
+    page.on("framenavigated", frame => {
+      if (frame === page.mainFrame()) {
+        if (this.currentId === id) this.notifyNavigation();
+        else this.onWorkspaceChange?.();
+      }
+    });
+    page.on("domcontentloaded", () => this.onWorkspaceChange?.());
     page.on("close", () => {
       this.pages.delete(id);
+      this.onWorkspaceChange?.();
       if (this.currentId === id) {
         // Fall back to any surviving page; refs from the closed page are void.
         const next = this.pages.keys().next();
@@ -209,7 +276,7 @@ export class Session {
     const entry = this.currentEntry();
     if (entry) return entry.page;
     const page = await this.manager.newPage();
-    const fresh = this.trackPage(page);
+    const fresh = await this.trackPage(page);
     this.currentId = fresh.id;
     // A freshly acquired page (first use, or after a disconnect/crash) is a
     // blank document: refs handed out against a previous page must not resolve
@@ -235,6 +302,8 @@ export class Session {
   /** Refs are void after a committed navigation (or a current-page switch). */
   notifyNavigation(): void {
     this.refs.invalidateForNavigation();
+    this.invalidateScreenshot();
+    this.onWorkspaceChange?.();
   }
 
   /** Resolve a ref to a Locator, rejecting refs we never handed out. */
@@ -261,7 +330,7 @@ export class Session {
 
     let rawYaml: string;
     try {
-      rawYaml = await scope.ariaSnapshot({ mode: "ai", boxes: true });
+      rawYaml = await scope.ariaSnapshot({ mode: "ai", boxes: true, timeout: 5000 });
     } catch (err) {
       if (scopeRef) throw new StaleRefError(scopeRef);
       throw err;
@@ -299,11 +368,14 @@ export class Session {
   }
 
   async currentTitle(): Promise<string> {
-    return this.requirePage().title();
+    return raceWithTimeout(this.requirePage().title(), 5000, "title timed out");
   }
 
   async setViewport(width: number, height: number): Promise<void> {
-    await this.requirePage().setViewportSize({ width, height });
+    await raceWithTimeout(this.requirePage().setViewportSize({ width, height }), 5000, "viewport timed out; outcome unknown, do not replay");
+    this.desiredViewport = { width, height };
+    this.viewportMode = "fixed";
+    this.notifyNavigation();
   }
 
   // ---- console / network buffers (current page) -----------------------------
@@ -335,29 +407,21 @@ export class Session {
   }
 
   async listTabs(): Promise<TabInfo[]> {
-    const out: TabInfo[] = [];
-    for (const entry of this.pages.values()) {
-      if (entry.page.isClosed()) continue;
+    return Promise.all([...this.pages.values()].filter(entry => !entry.page.isClosed()).map(async entry => {
       let title = "";
-      try {
-        title = await entry.page.title();
-      } catch {
-        /* page mid-navigation; leave blank */
-      }
-      out.push({
-        id: entry.id,
-        url: entry.page.url(),
-        title,
-        current: entry.id === this.currentId,
-      });
-    }
-    return out;
+      try { title = await raceWithTimeout(entry.page.title(), 1000, "title timeout"); }
+      catch { /* page mid-navigation; leave blank */ }
+      return { id: entry.id, url: entry.page.url(), title, current: entry.id === this.currentId };
+    }));
   }
 
   /** Open a new page, make it current, and invalidate refs from the old page. */
   async createTab(): Promise<string> {
+    if (this.pages.size >= 128) {
+      throw new Error("browser tab limit reached (128); close a tab before creating another");
+    }
     const page = await this.manager.newPage();
-    const entry = this.trackPage(page);
+    const entry = await this.trackPage(page);
     this.currentId = entry.id;
     this.notifyNavigation();
     return entry.id;
@@ -412,9 +476,10 @@ export class Session {
    * the robust path for every screenshot kind including full_page.
    */
   async toViewportPoint(coordinate: [number, number]): Promise<[number, number]> {
+    if (!this.screenshotValid) throw new Error("stale_screenshot: capture a new browser_screenshot before coordinate actions");
     const [docX, docY] = this.screenshotToPage(coordinate);
     const page = this.requirePage();
-    const scroll = await page.evaluate(
+    const scroll = await raceWithTimeout(page.evaluate(
       ([dx, dy]) => {
         const offView =
           dx < window.scrollX ||
@@ -429,11 +494,12 @@ export class Session {
         return { x: window.scrollX, y: window.scrollY };
       },
       [docX, docY] as [number, number],
-    );
+    ), 5000, "coordinate conversion timed out");
     return [docX - scroll.x, docY - scroll.y];
   }
 
   setLastScreenshot(mapping: { scale: number; offsetX: number; offsetY: number }): void {
+    this.screenshotValid = true;
     this.lastScreenshot = {
       scale: mapping.scale > 0 ? mapping.scale : 1,
       offsetX: mapping.offsetX,
@@ -449,7 +515,7 @@ export class Session {
   async beginWatch(): Promise<void> {
     const page = this.requirePage();
     try {
-      await page.evaluate(installMutationWatcher, WATCH_KEY);
+      await raceWithTimeout(page.evaluate(installMutationWatcher, WATCH_KEY), 5000, "mutation watcher timed out");
     } catch {
       /* watcher is best-effort */
     }
@@ -466,7 +532,7 @@ export class Session {
     if (!entry) return;
     const page = entry.page;
     try {
-      await page.evaluate((key) => {
+      await raceWithTimeout(page.evaluate((key) => {
         const w = window as unknown as Record<string, unknown>;
         const st = w[key] as { observer?: MutationObserver } | undefined;
         if (st && st.observer) {
@@ -477,7 +543,7 @@ export class Session {
           }
         }
         delete w[key];
-      }, WATCH_KEY);
+      }, WATCH_KEY), 5000, "mutation cleanup timed out");
     } catch {
       /* best-effort teardown */
     }
@@ -493,11 +559,11 @@ export class Session {
     const before = urlBefore ?? page.url();
     let stats: MutationStats;
     try {
-      stats = await page.evaluate(collectMutationStats, [WATCH_KEY, QUIET_MS, QUIET_CAP_MS] as [
+      stats = await raceWithTimeout(page.evaluate(collectMutationStats, [WATCH_KEY, QUIET_MS, QUIET_CAP_MS] as [
         string,
         number,
         number,
-      ]);
+      ]), 5000, "mutation settle timed out");
     } catch {
       // Page navigated/destroyed mid-settle — treat as a navigation-class change.
       stats = {

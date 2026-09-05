@@ -36,13 +36,13 @@ Architecture (the decision record):
   The entry point is installed at ``/opt/browser-mcp/dist/index.js`` in the Docker
   image (PR A3); ``BROWSER_MCP_ENTRY`` overrides it for local/dev checkouts.
 
-SECURITY NOTE (SSRF / local-network reach): the spawned server drives a real browser
-that can currently reach loopback (127.0.0.1/localhost), RFC1918 private hosts on the
-same network, and cloud metadata endpoints (e.g. 169.254.169.254, which on some
-clouds exposes credentials). Egress filtering is NOT implemented yet — the SSRF guard
-(Playwright request interception blocking metadata + loopback, RFC1918 configurable)
-lands in PR A6. Until then, operators who run untrusted prompts should isolate the
-host at the network layer.
+SECURITY NOTE (SSRF / local-network reach): browser-mcp intercepts HTTP(S) requests
+and checks resolved addresses against its SSRF policy. Cloud metadata is always
+blocked; private LAN addresses are allowed, and this app enables loopback for local
+development unless the operator disables it. BROWSER_SSRF_BLOCK/ALLOW configure the
+policy. Request interception is not a complete network sandbox: WebSocket coverage
+and independent Chromium DNS resolution remain limitations. Separate session pages
+also share the persistent context's cookies; page ownership is not profile isolation.
 """
 
 import logging

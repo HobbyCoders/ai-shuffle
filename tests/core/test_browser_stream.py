@@ -38,8 +38,16 @@ class TestTranslateInput:
 
     def test_mouse_down_up(self):
         down = browser_stream.translate_input(
-            {"type": "input", "kind": "mouse", "event": "down", "x": 1, "y": 2,
-             "button": "right", "clickCount": 2, "modifiers": 4}
+            {
+                "type": "input",
+                "kind": "mouse",
+                "event": "down",
+                "x": 1,
+                "y": 2,
+                "button": "right",
+                "clickCount": 2,
+                "modifiers": 4,
+            }
         )
         assert down["params"]["type"] == "mousePressed"
         assert down["params"]["button"] == "right"
@@ -53,8 +61,15 @@ class TestTranslateInput:
 
     def test_mouse_wheel_carries_deltas(self):
         cmd = browser_stream.translate_input(
-            {"type": "input", "kind": "mouse", "event": "wheel", "x": 5, "y": 6,
-             "deltaX": 3, "deltaY": -7}
+            {
+                "type": "input",
+                "kind": "mouse",
+                "event": "wheel",
+                "x": 5,
+                "y": 6,
+                "deltaX": 3,
+                "deltaY": -7,
+            }
         )
         assert cmd["params"]["type"] == "mouseWheel"
         assert cmd["params"]["deltaX"] == 3.0
@@ -70,8 +85,16 @@ class TestTranslateInput:
 
     def test_key_down_sets_text_and_vk(self):
         cmd = browser_stream.translate_input(
-            {"type": "input", "kind": "key", "event": "down", "key": "a",
-             "code": "KeyA", "keyCode": 65, "text": "a", "modifiers": 0}
+            {
+                "type": "input",
+                "kind": "key",
+                "event": "down",
+                "key": "a",
+                "code": "KeyA",
+                "keyCode": 65,
+                "text": "a",
+                "modifiers": 0,
+            }
         )
         assert cmd == {
             "method": "Input.dispatchKeyEvent",
@@ -87,30 +110,53 @@ class TestTranslateInput:
 
     def test_key_up_omits_text(self):
         cmd = browser_stream.translate_input(
-            {"type": "input", "kind": "key", "event": "up", "key": "a",
-             "code": "KeyA", "keyCode": 65, "text": "a"}
+            {
+                "type": "input",
+                "kind": "key",
+                "event": "up",
+                "key": "a",
+                "code": "KeyA",
+                "keyCode": 65,
+                "text": "a",
+            }
         )
         assert cmd["params"]["type"] == "keyUp"
         assert "text" not in cmd["params"]
 
     def test_key_enter_special_cased_to_cr(self):
         cmd = browser_stream.translate_input(
-            {"type": "input", "kind": "key", "event": "down", "key": "Enter",
-             "code": "Enter", "keyCode": 13, "text": ""}
+            {
+                "type": "input",
+                "kind": "key",
+                "event": "down",
+                "key": "Enter",
+                "code": "Enter",
+                "keyCode": 13,
+                "text": "",
+            }
         )
         assert cmd["params"]["text"] == "\r"
 
-    @pytest.mark.parametrize("text", ["hello", "密碼", "👩🏽‍💻", "e\u0301", "x" * 16_384])
+    @pytest.mark.parametrize(
+        "text", ["hello", "密碼", "👩🏽‍💻", "e\u0301", "x" * 16_384]
+    )
     def test_committed_text_maps_to_insert_text(self, text):
         assert browser_stream.translate_input(
-            {"type": "input", "kind": "text", "text": text,
-             "method": "Runtime.evaluate", "params": {"expression": "ignored"}}
+            {
+                "type": "input",
+                "kind": "text",
+                "text": text,
+                "method": "Runtime.evaluate",
+                "params": {"expression": "ignored"},
+            }
         ) == {"method": "Input.insertText", "params": {"text": text}}
 
     @pytest.mark.parametrize("text", [None, "", 123, True, [], {}, "x" * 16_385])
     def test_invalid_committed_text_rejected_without_echo(self, text):
         with pytest.raises(ValueError, match="text input must contain") as exc:
-            browser_stream.translate_input({"type": "input", "kind": "text", "text": text})
+            browser_stream.translate_input(
+                {"type": "input", "kind": "text", "text": text}
+            )
         assert str(exc.value) == "text input must contain 1 to 16384 characters"
 
     def test_missing_committed_text_rejected(self):
@@ -129,24 +175,32 @@ class TestTranslateInput:
 
     def test_unknown_type_rejected(self):
         with pytest.raises(Exception):
-            browser_stream.translate_input({"type": "evil", "method": "Runtime.evaluate"})
+            browser_stream.translate_input(
+                {"type": "evil", "method": "Runtime.evaluate"}
+            )
 
     def test_unknown_input_kind_rejected(self):
         with pytest.raises(Exception):
-            browser_stream.translate_input({"type": "input", "kind": "touch", "x": 1, "y": 1})
+            browser_stream.translate_input(
+                {"type": "input", "kind": "touch", "x": 1, "y": 1}
+            )
 
     def test_command_reload_and_stop_map_to_page_commands(self):
-        assert browser_stream.translate_input({"type": "command", "command": "reload"}) == {
+        assert browser_stream.translate_input(
+            {"type": "command", "command": "reload"}
+        ) == {
             "method": "Page.reload",
             "params": {"ignoreCache": False},
         }
-        assert browser_stream.translate_input({"type": "command", "command": "stop"}) == {
-            "method": "Page.stopLoading"
-        }
+        assert browser_stream.translate_input(
+            {"type": "command", "command": "stop"}
+        ) == {"method": "Page.stopLoading"}
 
     def test_command_back_forward_probe_history_first(self):
         for command, offset in (("back", -1), ("forward", 1)):
-            cmd = browser_stream.translate_input({"type": "command", "command": command})
+            cmd = browser_stream.translate_input(
+                {"type": "command", "command": command}
+            )
             assert cmd["method"] == "Page.getNavigationHistory"
             assert cmd["__history_offset__"] == offset
 
@@ -207,7 +261,9 @@ class TestPageEventTracking:
         assert not hub.page_loading
         # Unchanged URL is a no-op.
         assert not hub._handle_page_event(
-            _page_event("Page.frameNavigated", frame={"frameId": "f1", "url": "https://a/"})
+            _page_event(
+                "Page.frameNavigated", frame={"frameId": "f1", "url": "https://a/"}
+            )
         )
 
     def test_subframe_navigation_does_not_change_url(self):
@@ -216,23 +272,33 @@ class TestPageEventTracking:
         assert not hub._handle_page_event(
             _page_event(
                 "Page.frameNavigated",
-                frame={"frameId": "sub", "url": "https://iframe.example/", "parentId": "f1"},
+                frame={
+                    "frameId": "sub",
+                    "url": "https://iframe.example/",
+                    "parentId": "f1",
+                },
             )
         )
         assert hub.page_url == "https://a/"
 
     def test_started_and_stopped_loading_flip_the_flag(self):
         hub = browser_stream.BrowserStreamHub("x")
-        assert hub._handle_page_event(_page_event("Page.frameStartedLoading", frameId="f1"))
+        assert hub._handle_page_event(
+            _page_event("Page.frameStartedLoading", frameId="f1")
+        )
         assert hub.page_loading
-        assert hub._handle_page_event(_page_event("Page.frameStoppedLoading", frameId="f1"))
+        assert hub._handle_page_event(
+            _page_event("Page.frameStoppedLoading", frameId="f1")
+        )
         assert not hub.page_loading
 
     def test_navigated_within_document_updates_url_only(self):
         hub = browser_stream.BrowserStreamHub("x")
         hub.page_url = "https://a/"
         assert hub._handle_page_event(
-            _page_event("Page.navigatedWithinDocument", frameId="f1", url="https://a/#sec2")
+            _page_event(
+                "Page.navigatedWithinDocument", frameId="f1", url="https://a/#sec2"
+            )
         )
         assert hub.page_url == "https://a/#sec2"
         assert not hub.page_loading
@@ -249,80 +315,46 @@ async def _hub_with_fake_upstream(monkeypatch, sid="hub-cmd"):
     monkeypatch.setattr(browser_stream, "_open_upstream", opener)
     ws = FakeViewerWS()
     hub, viewer = await browser_stream.attach_viewer(sid, ws)
-    await _wait_for(lambda: any(m["method"] == "Page.startScreencast" for m in fake.sent))
+    await _wait_for(
+        lambda: any(m["method"] == "Page.startScreencast" for m in fake.sent)
+    )
     return hub, viewer, fake
 
 
 class TestToolbarCommands:
-    async def test_reload_goes_straight_upstream(self, monkeypatch):
+    @pytest.mark.parametrize("name", ["reload", "back", "forward", "stop"])
+    async def test_toolbar_never_mutates_stream_cdp(self, monkeypatch, name):
         hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
-        await hub.dispatch_input(
-            browser_stream.translate_input({"type": "command", "command": "reload"})
-        )
-        reloads = [m for m in fake.sent if m["method"] == "Page.reload"]
-        assert reloads and reloads[0]["params"] == {"ignoreCache": False}
-        await browser_stream.detach_viewer("hub-cmd", viewer)
-
-    async def test_back_walks_history(self, monkeypatch):
-        hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
-        # Seed the attachment-time probe reply: index 1 of 3 entries.
-        probe_id = next(
-            m["id"] for m in fake.sent if m["method"] == "Page.getNavigationHistory"
-        )
-        await hub._complete_history_jump(
-            probe_id,
-            {
-                "currentIndex": 1,
-                "entries": [
-                    {"id": 11, "url": "http://start/"},
-                    {"id": 22, "url": "https://ex/one"},
-                    {"id": 33, "url": "https://ex/two"},
-                ],
-            },
-        )
-        await hub.dispatch_input(
-            browser_stream.translate_input({"type": "command", "command": "back"})
-        )
-
-        # The back command probed again; answer it to complete the jump.
-        probes = [m for m in fake.sent if m["method"] == "Page.getNavigationHistory"]
-        assert len(probes) >= 2
-        await hub._complete_history_jump(
-            probes[-1]["id"],
-            {
-                "currentIndex": 1,
-                "entries": [
-                    {"id": 11, "url": "http://start/"},
-                    {"id": 22, "url": "https://ex/one"},
-                    {"id": 33, "url": "https://ex/two"},
-                ],
-            },
-        )
-        jumps = [m for m in fake.sent if m["method"] == "Page.navigateToHistoryEntry"]
-        assert jumps and jumps[-1]["params"] == {"entryId": 11}
-        await browser_stream.detach_viewer("hub-cmd", viewer)
-
-    async def test_forward_at_end_of_history_is_a_noop(self, monkeypatch):
-        hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
-        await hub.dispatch_input(
-            browser_stream.translate_input({"type": "command", "command": "forward"})
-        )
-        probes = [m for m in fake.sent if m["method"] == "Page.getNavigationHistory"]
-        await hub._complete_history_jump(
-            probes[-1]["id"], {"currentIndex": 0, "entries": [{"id": 11, "url": "u"}]}
-        )
-        assert not any(m["method"] == "Page.navigateToHistoryEntry" for m in fake.sent)
-        await browser_stream.detach_viewer("hub-cmd", viewer)
+        try:
+            with pytest.raises(ValueError, match="workspace runtime"):
+                await hub.dispatch_input(
+                    browser_stream.translate_input({"type": "command", "command": name})
+                )
+            assert not any(
+                m["method"]
+                in ("Page.reload", "Page.navigateToHistoryEntry", "Page.stopLoading")
+                for m in fake.sent
+            )
+            with pytest.raises(ValueError, match="workspace runtime"):
+                await hub.ensure_target("https://example.test")
+        finally:
+            await browser_stream.detach_viewer("hub-cmd", viewer)
 
     async def test_page_events_broadcast_to_viewers(self, monkeypatch):
         hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
-        fake._incoming.put_nowait(json.dumps(_page_event(
-            "Page.frameNavigated",
-            frame={"frameId": "f1", "url": "https://next/", "parentId": None},
-        )))
+        fake._incoming.put_nowait(
+            json.dumps(
+                _page_event(
+                    "Page.frameNavigated",
+                    frame={"frameId": "f1", "url": "https://next/", "parentId": None},
+                )
+            )
+        )
         # The per-viewer sender task may drain the queue before we look, so
         # assert on what landed on the socket.
-        await _wait_for(lambda: any(m.get("type") == "page" for m in viewer.websocket.sent))
+        await _wait_for(
+            lambda: any(m.get("type") == "page" for m in viewer.websocket.sent)
+        )
         msg = next(m for m in viewer.websocket.sent if m.get("type") == "page")
         assert msg["url"] == "https://next/"
         assert msg["loading"] is False
@@ -341,7 +373,9 @@ class TestInspect:
 
     def test_parse_inspect_rejects_bad_mode_and_coords(self):
         with pytest.raises(Exception):
-            browser_stream.parse_inspect({"type": "inspect", "x": 1, "y": 2, "mode": "drag"})
+            browser_stream.parse_inspect(
+                {"type": "inspect", "x": 1, "y": 2, "mode": "drag"}
+            )
         with pytest.raises(Exception):
             browser_stream.parse_inspect({"type": "inspect", "x": 1, "mode": "hover"})
         with pytest.raises(Exception):
@@ -354,7 +388,9 @@ class TestInspect:
             )
 
     def test_build_expression_substitutes_and_clamps(self):
-        expr = browser_stream.build_inspect_expression(9999, -5, detail=True, bounds=(800, 600))
+        expr = browser_stream.build_inspect_expression(
+            9999, -5, detail=True, bounds=(800, 600)
+        )
         assert "document.elementFromPoint(800.0, 0.0)" in expr
         assert "__X__" not in expr and "__Y__" not in expr and "__DETAIL__" not in expr
         assert "if (true)" in expr
@@ -384,10 +420,14 @@ class TestInspect:
         assert "document.elementFromPoint(10.0, 20.0)" in ev["params"]["expression"]
 
         descriptor = {"selector": "#cta", "tag": "button", "classes": ["btn"]}
-        fake._incoming.put_nowait(json.dumps({
-            "id": ev["id"],
-            "result": {"result": {"type": "object", "value": descriptor}},
-        }))
+        fake._incoming.put_nowait(
+            json.dumps(
+                {
+                    "id": ev["id"],
+                    "result": {"result": {"type": "object", "value": descriptor}},
+                }
+            )
+        )
         await _wait_for(
             lambda: any(m.get("type") == "inspect-hit" for m in viewer.websocket.sent)
         )
@@ -403,10 +443,16 @@ class TestInspect:
         )
         await hub.dispatch_inspect(viewer, inspect)
         ev = next(m for m in fake.sent if m["method"] == "Runtime.evaluate")
-        fake._incoming.put_nowait(json.dumps({
-            "id": ev["id"],
-            "result": {"result": {"type": "object", "subtype": "null", "value": None}},
-        }))
+        fake._incoming.put_nowait(
+            json.dumps(
+                {
+                    "id": ev["id"],
+                    "result": {
+                        "result": {"type": "object", "subtype": "null", "value": None}
+                    },
+                }
+            )
+        )
         await _wait_for(
             lambda: any(m.get("type") == "inspect-hit" for m in viewer.websocket.sent)
         )
@@ -456,10 +502,18 @@ class FakeUpstream:
         self.closed = True
 
     def feed_frame(self, data, metadata, session_id="cast-1"):
-        self._incoming.put_nowait(json.dumps({
-            "method": "Page.screencastFrame",
-            "params": {"sessionId": session_id, "data": data, "metadata": metadata},
-        }))
+        self._incoming.put_nowait(
+            json.dumps(
+                {
+                    "method": "Page.screencastFrame",
+                    "params": {
+                        "sessionId": session_id,
+                        "data": data,
+                        "metadata": metadata,
+                    },
+                }
+            )
+        )
 
     def feed_close(self):
         self._incoming.put_nowait(_CLOSE)
@@ -504,13 +558,282 @@ async def _wait_for(cond, timeout=2.0):
 @pytest.fixture(autouse=True)
 def _reset_hubs():
     for sid in (
-        "hub-start", "hub-ack", "hub-stable", "hub-reattach", "hub-death",
-        "hub-cmd", "hub-probe", "hub-retry",
+        "hub-start",
+        "hub-ack",
+        "hub-stable",
+        "hub-reattach",
+        "hub-death",
+        "hub-cmd",
+        "hub-probe",
+        "hub-retry",
     ):
         registry.clear(sid)
     browser_stream._hubs.clear()
     yield
     browser_stream._hubs.clear()
+
+
+@pytest.mark.parametrize("order", [("frame", "page"), ("page", "frame")])
+def test_page_and_frame_coalesce_independently(order):
+    hub = browser_stream.BrowserStreamHub("coalesce")
+    viewer = browser_stream._Viewer(FakeViewerWS())
+    hub.viewers.add(viewer)
+    for n in range(20):
+        for kind in order:
+            if kind == "frame":
+                hub._fan_out_frame(f"frame-{n}", {})
+            else:
+                hub.page_url = f"https://page/{n}"
+                hub._broadcast_page()
+        assert viewer.queue.qsize() <= 2
+    messages = [viewer.queue.get_nowait() for _ in range(viewer.queue.qsize())]
+    assert {m["type"] for m in messages} == {"page", "frame"}
+    assert next(m for m in messages if m["type"] == "frame")["data"] == "frame-19"
+    assert next(m for m in messages if m["type"] == "page")["url"] == "https://page/19"
+
+
+async def test_late_viewer_replays_shared_latest_frame():
+    hub = browser_stream.BrowserStreamHub("late-frame")
+    first = browser_stream._Viewer(FakeViewerWS())
+    hub.viewers.add(first)
+    hub._fan_out_frame("old", {})
+    hub._fan_out_frame("latest", {"deviceWidth": 800})
+    frame = first.queue.get_nowait()
+    late = await hub.add_viewer(FakeViewerWS())
+    try:
+        assert late.queue.get_nowait() is frame
+        # Requeue so the real sender is exercised too.
+        late.queue.put_nowait(frame)
+        await _wait_for(lambda: bool(late.websocket.sent))
+        assert late.websocket.sent == [frame]
+    finally:
+        await hub.stop()
+
+
+@pytest.mark.parametrize("change", ["runtime", "tab", "target", "clear"])
+async def test_cached_frame_not_replayed_after_identity_change(monkeypatch, change):
+    from types import SimpleNamespace
+
+    sid = "cache-identity"
+    broker = SimpleNamespace(
+        runtime_id="runtime", state={"active_tab_id": "tab"}, close=lambda: None
+    )
+    monkeypatch.setitem(browser_stream.browser_control._brokers, sid, broker)
+    registry.register(sid, "target", "tab", "https://page/")
+    hub = browser_stream.BrowserStreamHub(sid)
+    hub._attached_target_id = "target"
+    hub._frame_identity = {"runtime_id": "runtime", "tab_id": "tab"}
+    hub._fan_out_frame("old", {})
+    if change == "runtime":
+        broker.runtime_id = "new-runtime"
+    elif change == "tab":
+        broker.state["active_tab_id"] = "new-tab"
+    elif change == "target":
+        registry.register(sid, "new-target", "tab", "https://page/")
+    else:
+        registry.clear(sid)
+    viewer = await hub.add_viewer(FakeViewerWS())
+    try:
+        assert viewer.queue.empty()
+        hub._fan_out_frame("stale", {})
+        assert viewer.queue.empty()
+    finally:
+        await hub.stop()
+        registry.clear(sid)
+
+
+async def test_slow_viewer_keeps_latest_page_and_frame_without_delaying_acks(
+    monkeypatch,
+):
+    hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
+    try:
+        # Declare live before blocking the sender, so this isolates the frame
+        # pump from the existing synchronous status broadcasts.
+        probe = next(m for m in fake.sent if m["method"] == "Page.getNavigationHistory")
+        fake._incoming.put_nowait(json.dumps({"id": probe["id"], "result": {}}))
+        await _wait_for(
+            lambda: any(m.get("state") == "live" for m in viewer.websocket.sent)
+        )
+        await viewer.send_lock.acquire()
+        try:
+            for n in range(12):
+                fake.feed_frame(f"frame-{n}", {}, session_id=n)
+                fake._incoming.put_nowait(
+                    json.dumps(
+                        _page_event(
+                            "Page.navigatedWithinDocument",
+                            url=f"https://page/{n}",
+                        )
+                    )
+                )
+            await _wait_for(
+                lambda: (
+                    sum(m["method"] == "Page.screencastFrameAck" for m in fake.sent)
+                    == 12
+                )
+            )
+            await _wait_for(lambda: hub.page_url == "https://page/11")
+            assert viewer.queue.qsize() <= 2
+            assert not any(m["type"] == "frame" for m in viewer.websocket.sent)
+        finally:
+            viewer.send_lock.release()
+        await _wait_for(
+            lambda: any(m.get("data") == "frame-11" for m in viewer.websocket.sent)
+        )
+        await _wait_for(
+            lambda: any(
+                m.get("url") == "https://page/11" for m in viewer.websocket.sent
+            )
+        )
+        assert [
+            m["params"]["sessionId"]
+            for m in fake.sent
+            if m["method"] == "Page.screencastFrameAck"
+        ] == list(range(12))
+    finally:
+        await browser_stream.detach_viewer("hub-cmd", viewer)
+
+
+async def test_cache_survives_url_update_but_not_upstream_teardown(monkeypatch):
+    hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
+    fake.feed_frame("static", {"deviceWidth": 800, "deviceHeight": 600})
+    await _wait_for(
+        lambda: any(m.get("data") == "static" for m in viewer.websocket.sent)
+    )
+    registry.register("hub-cmd", "t-cmd", None, "https://new-url/")
+    late = await hub.add_viewer(FakeViewerWS())
+    try:
+        await _wait_for(
+            lambda: any(m.get("data") == "static" for m in late.websocket.sent)
+        )
+        await hub.stop()
+        assert hub._last_frame is None
+        assert hub.last_bounds() is None
+        after = await hub.add_viewer(FakeViewerWS())
+        assert after.queue.empty()
+    finally:
+        await hub.stop()
+        browser_stream._hubs.pop("hub-cmd", None)
+
+
+async def test_frame_waiting_on_send_lock_is_dropped_after_target_switch(monkeypatch):
+    hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
+    await viewer.send_lock.acquire()
+    try:
+        hub._fan_out_frame("old", {})
+        await _wait_for(lambda: viewer.queue.empty())
+        registry.register("hub-cmd", "replacement", None, "https://new/")
+    finally:
+        viewer.send_lock.release()
+    try:
+        # Direct send exercises the same under-lock validation deterministically.
+        old = hub._last_frame
+        if old is not None:
+            await hub.send_to_viewer(viewer, old)
+        assert not any(m.get("data") == "old" for m in viewer.websocket.sent)
+    finally:
+        await browser_stream.detach_viewer("hub-cmd", viewer)
+
+
+@pytest.mark.parametrize("change", ["runtime", "tab", "target", "clear"])
+async def test_frame_identity_rechecked_after_waiting_for_send_lock(
+    monkeypatch, change
+):
+    from types import SimpleNamespace
+
+    sid = "send-lock-identity"
+    broker = SimpleNamespace(
+        runtime_id="runtime", state={"active_tab_id": "tab"}, close=lambda: None
+    )
+    monkeypatch.setitem(browser_stream.browser_control._brokers, sid, broker)
+    registry.register(sid, "target", "tab", "https://page/")
+    hub = browser_stream.BrowserStreamHub(sid)
+    hub._attached_target_id = "target"
+    hub._frame_identity = {"runtime_id": "runtime", "tab_id": "tab"}
+    viewer = browser_stream._Viewer(FakeViewerWS())
+    hub._fan_out_frame("old", {})
+    frame = hub._last_frame
+    entered = asyncio.Event()
+
+    async def send():
+        entered.set()
+        return await hub.send_to_viewer(viewer, frame)
+
+    await viewer.send_lock.acquire()
+    sender = asyncio.create_task(send())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert not sender.done()
+        if change == "runtime":
+            broker.runtime_id = "new-runtime"
+        elif change == "tab":
+            broker.state["active_tab_id"] = "new-tab"
+        elif change == "target":
+            registry.register(sid, "new-target", "tab", "https://page/")
+        else:
+            registry.clear(sid)
+    finally:
+        viewer.send_lock.release()
+    try:
+        assert await asyncio.wait_for(sender, timeout=1)
+        assert viewer.websocket.sent == []
+    finally:
+        await hub.stop()
+        registry.clear(sid)
+
+
+async def test_stop_during_registry_change_teardown_does_not_reattach(monkeypatch):
+    sid = "stop-during-teardown"
+    cancelling_recv = asyncio.Event()
+    recv_finished = asyncio.Event()
+    release_recv = asyncio.Event()
+
+    class SlowCleanupUpstream(FakeUpstream):
+        async def recv(self):
+            try:
+                return await super().recv()
+            finally:
+                cancelling_recv.set()
+                try:
+                    await release_recv.wait()
+                finally:
+                    recv_finished.set()
+
+    fake = SlowCleanupUpstream()
+    opened = []
+
+    async def opener(uri):
+        opened.append(uri)
+        return fake
+
+    monkeypatch.setattr(browser_stream, "_open_upstream", opener)
+    registry.register(sid, "old-target", None, "https://old/")
+    hub, viewer = await browser_stream.attach_viewer(sid, FakeViewerWS())
+    await _wait_for(lambda: "Page.startScreencast" in fake.methods())
+    registry.register(sid, "new-target", None, "https://new/")
+    await asyncio.wait_for(cancelling_recv.wait(), timeout=1)
+    running = hub._task
+    stop = asyncio.create_task(hub.stop())
+    try:
+        done, _ = await asyncio.wait({stop}, timeout=1)
+        assert done, "stop swallowed cancellation during attachment cleanup"
+        await stop
+        assert running.done()
+        assert recv_finished.is_set()
+        assert fake.closed
+        assert fake.methods().count("Page.stopScreencast") == 1
+        assert len(opened) == 1
+        assert hub._upstream is None
+        assert hub._attached_target_id is None
+        assert hub._last_frame is None
+        assert viewer.sender_task is None
+    finally:
+        release_recv.set()
+        if not running.done():
+            running.cancel()
+        await stop
+        browser_stream._hubs.pop(sid, None)
+        registry.clear(sid)
 
 
 def test_fan_out_latest_frame_wins():
@@ -547,8 +870,11 @@ async def test_hub_starts_screencast_and_stops_on_last_viewer(monkeypatch):
     assert "Page.enable" in fake.methods()
     sc = next(m for m in fake.sent if m["method"] == "Page.startScreencast")
     assert sc["params"] == {
-        "format": "jpeg", "quality": 60, "maxWidth": 1440,
-        "maxHeight": 1440, "everyNthFrame": 1,
+        "format": "jpeg",
+        "quality": 60,
+        "maxWidth": 1440,
+        "maxHeight": 1440,
+        "everyNthFrame": 1,
     }
 
     fake.feed_frame("AAAA", {"deviceWidth": 800, "deviceHeight": 600}, session_id="s9")
@@ -648,7 +974,9 @@ async def test_same_target_updates_do_not_restart_live_screencast(monkeypatch):
     registry.register(sid, "target-1", "tab-1", "http://a/")
     registry.register(sid, "target-1", "tab-1", "http://b/")
     await _wait_for(
-        lambda: any(m.get("state") == "live" and m.get("url") == "http://b/" for m in ws.sent)
+        lambda: any(
+            m.get("state") == "live" and m.get("url") == "http://b/" for m in ws.sent
+        )
     )
     await asyncio.sleep(0.02)
     assert len(fakes) == 1
@@ -683,8 +1011,7 @@ async def test_upstream_death_exhausts_retries_then_no_page(monkeypatch):
     fake.feed_close()  # upstream dies; retry budget: one failed re-open
     await _wait_for(
         lambda: any(
-            f.get("type") == "status" and f.get("state") == "no_page"
-            for f in ws.sent
+            f.get("type") == "status" and f.get("state") == "no_page" for f in ws.sent
         )
     )
     assert opens >= 2  # the retry actually happened before giving up
@@ -721,13 +1048,18 @@ async def test_upstream_death_reattaches_without_registry_change(monkeypatch):
     )
 
     # The re-attached target answers the probe -> live again, no frame needed.
-    probe = next(
-        m for m in fakes[1].sent if m["method"] == "Page.getNavigationHistory"
+    probe = next(m for m in fakes[1].sent if m["method"] == "Page.getNavigationHistory")
+    fakes[1]._incoming.put_nowait(
+        json.dumps(
+            {
+                "id": probe["id"],
+                "result": {
+                    "currentIndex": 0,
+                    "entries": [{"id": 1, "url": "http://a/"}],
+                },
+            }
+        )
     )
-    fakes[1]._incoming.put_nowait(json.dumps({
-        "id": probe["id"],
-        "result": {"currentIndex": 0, "entries": [{"id": 1, "url": "http://a/"}]},
-    }))
     await _wait_for(
         lambda: any(
             f.get("type") == "status" and f.get("state") == "live" for f in ws.sent
@@ -754,13 +1086,17 @@ async def test_probe_reply_declares_live_without_any_frame(monkeypatch):
     await _wait_for(lambda: "Page.getNavigationHistory" in fake.methods())
     probe = next(m for m in fake.sent if m["method"] == "Page.getNavigationHistory")
 
-    fake._incoming.put_nowait(json.dumps({
-        "id": probe["id"],
-        "result": {
-            "currentIndex": 0,
-            "entries": [{"id": 1, "url": "http://p/actual"}],
-        },
-    }))
+    fake._incoming.put_nowait(
+        json.dumps(
+            {
+                "id": probe["id"],
+                "result": {
+                    "currentIndex": 0,
+                    "entries": [{"id": 1, "url": "http://p/actual"}],
+                },
+            }
+        )
+    )
     await _wait_for(
         lambda: any(
             f.get("type") == "status" and f.get("state") == "live" for f in ws.sent
@@ -769,3 +1105,44 @@ async def test_probe_reply_declares_live_without_any_frame(monkeypatch):
     # No frame was ever fed — live came from the probe round-trip alone.
     assert not any(f.get("type") == "frame" for f in ws.sent)
     await browser_stream.detach_viewer(sid, viewer)
+
+
+class TestWorkspaceFrameIdentity:
+    async def test_stale_frames_and_inspect_results_are_dropped(self):
+        from app.core import browser_control as control
+
+        hub = browser_stream.BrowserStreamHub("frame-identity")
+        socket = FakeViewerWS()
+        viewer = browser_stream._Viewer(socket)
+        hub.viewers.add(viewer)
+        broker = control.get("frame-identity")
+        await broker.register("runtime")
+        broker.state["active_tab_id"] = "tab"
+        hub._frame_identity = dict(runtime_id="runtime", tab_id="tab")
+        hub._fan_out_frame("jpeg", {"deviceWidth": 900})
+        frame = viewer.queue.get_nowait()
+        assert frame["metadata"]["runtime_id"] == "runtime"
+        assert frame["metadata"]["tab_id"] == "tab"
+        hub._pending_inspects[10] = (viewer, "select", dict(hub._frame_identity))
+        broker.state["active_tab_id"] = "new-tab"
+        hub._fan_out_frame("stale", {})
+        assert viewer.queue.empty()
+        await hub._complete_inspect(10, {"value": {"tag": "button"}})
+        assert not socket.sent
+        registry.clear("frame-identity")
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("x", float("nan")),
+            ("y", float("inf")),
+            ("clickCount", 4),
+            ("modifiers", 16),
+            ("deltaY", 100001),
+        ],
+    )
+    def test_input_bounds(self, field, value):
+        message = dict(type="input", kind="mouse", event="wheel", x=0, y=0)
+        message[field] = value
+        with pytest.raises(ValueError):
+            browser_stream.translate_input(message)

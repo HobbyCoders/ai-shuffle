@@ -4,10 +4,9 @@ One :class:`BrowserStreamHub` per session, created on the first viewer and torn
 down after the last one leaves. The hub opens a single upstream CDP WebSocket to
 the supervised Chromium page published in ``browser_panel_registry`` and drives
 ``Page.startScreencast``; each JPEG frame is fanned out to every connected
-viewer through a per-viewer latest-frame-wins queue. Client input (mouse / key /
-navigate / inspect / viewport) is translated — never forwarded raw — into CDP
-``Input.*`` / ``Page.navigate`` / ``Runtime.evaluate`` /
-``Emulation.setDeviceMetricsOverride`` commands on the same upstream socket.
+viewer through a per-viewer latest-frame-wins queue. Pure input translation is
+used by the session-owned workspace broker; this hub never mutates a page.
+Read-only point inspection may use the attached CDP socket after identity checks.
 
 State machine (per hub, run by :meth:`BrowserStreamHub._run`):
   * no target registered            -> broadcast ``no_page``, wait for change
@@ -32,8 +31,8 @@ import websockets
 from fastapi import WebSocket
 from pydantic import BaseModel
 
-from app.core import native_chrome
 from app.api.ws_utils import WSPayloadEncodeError, safe_ws_send
+from app.core import browser_control, native_chrome
 from app.core import browser_panel_registry as registry
 
 logger = logging.getLogger(__name__)
@@ -135,6 +134,13 @@ def _translate_mouse(m: _MouseInput, bounds: Optional[Tuple[int, int]]) -> dict:
     if m.button not in _VALID_MOUSE_BUTTONS:
         raise ValueError(f"invalid mouse button: {m.button!r}")
 
+    browser_control.finite({"x": m.x, "y": m.y, "deltaX": m.deltaX, "deltaY": m.deltaY})
+    if (
+        not 0 <= m.clickCount <= 3
+        or not 0 <= m.modifiers <= 15
+        or any(abs(v) > 100000 for v in (m.x, m.y, m.deltaX, m.deltaY))
+    ):
+        raise ValueError("Invalid mouse input bounds")
     x, y = float(m.x), float(m.y)
     if bounds is not None:
         w, h = bounds
@@ -156,6 +162,12 @@ def _translate_mouse(m: _MouseInput, bounds: Optional[Tuple[int, int]]) -> dict:
 
 
 def _translate_key(k: _KeyInput) -> dict:
+    if (
+        not 0 <= k.modifiers <= 15
+        or not 0 <= k.keyCode <= 65535
+        or any(len(v) > 256 for v in (k.key, k.code, k.text))
+    ):
+        raise ValueError("Invalid key input bounds")
     if k.event not in ("down", "up"):
         raise ValueError(f"invalid key event: {k.event!r}")
 
@@ -231,7 +243,9 @@ def _translate_viewport(msg: dict) -> dict:
     }
 
 
-def translate_input(msg: dict, bounds: Optional[Tuple[int, int]] = None) -> Optional[dict]:
+def translate_input(
+    msg: dict, bounds: Optional[Tuple[int, int]] = None
+) -> Optional[dict]:
     """Translate one client message into a CDP command dict (or None).
 
     Pure and side-effect free. ``bounds`` is the last frame's
@@ -239,6 +253,11 @@ def translate_input(msg: dict, bounds: Optional[Tuple[int, int]] = None) -> Opti
     ``ValueError``/``ValidationError`` on any invalid or unknown message — the
     caller treats that as a protocol violation.
     """
+    if msg.get("type") == "input" and msg.get("kind") == "text":
+        text = msg.get("text")
+        if not isinstance(text, str) or not 0 < len(text) <= 16_384:
+            raise ValueError("text input must contain 1 to 16384 characters")
+    browser_control.finite(msg)
     mtype = msg.get("type")
     if mtype == "navigate":
         return _translate_navigate(msg)
@@ -329,9 +348,7 @@ def parse_inspect(msg: dict) -> InspectInput:
     inspect = InspectInput(**msg)
     if inspect.mode not in _VALID_INSPECT_MODES:
         raise ValueError(f"invalid inspect mode: {inspect.mode!r}")
-    if not (
-        _is_finite(inspect.x) and _is_finite(inspect.y)
-    ):
+    if not (_is_finite(inspect.x) and _is_finite(inspect.y)):
         raise ValueError("inspect coordinates must be finite")
     return inspect
 
@@ -349,8 +366,7 @@ def build_inspect_expression(
         x = min(max(x, 0.0), float(w))
         y = min(max(y, 0.0), float(h))
     return (
-        _INSPECT_JS_TEMPLATE
-        .replace("__X__", json.dumps(float(x)))
+        _INSPECT_JS_TEMPLATE.replace("__X__", json.dumps(float(x)))
         .replace("__Y__", json.dumps(float(y)))
         .replace("__DETAIL__", "true" if detail else "false")
     )
@@ -390,7 +406,8 @@ class _RegistryChanged(Exception):
 class _Viewer:
     """One connected panel WebSocket.
 
-    Frames arrive on ``queue`` (maxsize 1, drop-oldest) and are drained by a
+    Frames and page state coalesce separately on ``queue`` (at most two
+    messages, latest of each type) and are drained by a
     dedicated sender task. ``send_lock`` serialises every write to the socket so
     the frame sender, status broadcasts and pings never interleave.
     """
@@ -400,9 +417,29 @@ class _Viewer:
     def __init__(self, websocket: WebSocket, *, redact_urls: bool = False) -> None:
         self.websocket = websocket
         self.redact_urls = redact_urls
-        self.queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=2)
         self.sender_task: Optional[asyncio.Task] = None
         self.send_lock = asyncio.Lock()
+
+    def enqueue(self, msg: dict) -> None:
+        """Replace only the same message type, without awaiting a slow socket."""
+        retained = []
+        while not self.queue.empty():
+            pending = self.queue.get_nowait()
+            if pending["type"] != msg["type"]:
+                retained.append(pending)
+        for pending in retained:
+            self.queue.put_nowait(pending)
+        self.queue.put_nowait(msg)
+
+    def discard_frame(self) -> None:
+        retained = []
+        while not self.queue.empty():
+            pending = self.queue.get_nowait()
+            if pending["type"] != "frame":
+                retained.append(pending)
+        for pending in retained:
+            self.queue.put_nowait(pending)
 
 
 # ---------------------------------------------------------------------------
@@ -416,11 +453,15 @@ class BrowserStreamHub:
         self._upstream = None
         self._upstream_msg_id = 0
         self._last_metadata: Optional[dict] = None
+        self._last_frame: Optional[dict] = None
+        self._last_frame_key = None
+        self._attached_target_id = None
+        self._frame_identity = {}
         # Toolbar state tracked from CDP page events, mirrored to viewers as
         # ``page`` messages. msg-id -> history offset awaiting its reply.
         self._pending_jumps: Dict[int, int] = {}
         # msg-id -> (viewer, mode) awaiting a Runtime.evaluate hit-test reply.
-        self._pending_inspects: Dict[int, Tuple["_Viewer", str]] = {}
+        self._pending_inspects: Dict[int, Tuple["_Viewer", str, dict]] = {}
         self.page_url: Optional[str] = None
         self.page_loading: bool = False
         # Monotonic time the current/last upstream attach opened, for the
@@ -433,6 +474,7 @@ class BrowserStreamHub:
             self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
+        self._clear_frame()
         if self._task is not None:
             self._task.cancel()
             with suppress(asyncio.CancelledError):
@@ -446,9 +488,16 @@ class BrowserStreamHub:
         return len(self.viewers)
 
     # -- viewers -------------------------------------------------------------
-    async def add_viewer(self, websocket: WebSocket, *, redact_urls: bool = False) -> _Viewer:
+    async def add_viewer(
+        self, websocket: WebSocket, *, redact_urls: bool = False
+    ) -> _Viewer:
         viewer = _Viewer(websocket, redact_urls=redact_urls)
         self.viewers.add(viewer)
+        if self._last_frame is not None:
+            if self._last_frame_key == self._current_frame_key():
+                viewer.enqueue(self._last_frame)
+            else:
+                self._clear_frame()
         viewer.sender_task = asyncio.create_task(self._viewer_sender(viewer))
         return viewer
 
@@ -478,6 +527,11 @@ class BrowserStreamHub:
         if viewer.redact_urls and "url" in msg:
             msg = {**msg, "url": None}
         async with viewer.send_lock:
+            if msg.get("type") == "frame":
+                if self._last_frame_key != self._current_frame_key():
+                    self._clear_frame()
+                if msg is not self._last_frame:
+                    return True
             try:
                 await safe_ws_send(viewer.websocket, msg)
                 return True
@@ -495,12 +549,7 @@ class BrowserStreamHub:
         """Fan out toolbar page state (url + loading), latest-wins, never blocks."""
         msg = {"type": "page", "url": self.page_url, "loading": self.page_loading}
         for viewer in list(self.viewers):
-            q = viewer.queue
-            if q.full():
-                with suppress(asyncio.QueueEmpty):
-                    q.get_nowait()
-            with suppress(asyncio.QueueFull):
-                q.put_nowait(msg)
+            viewer.enqueue(msg)
 
     def _handle_page_event(self, msg: dict) -> bool:
         """Update tracked page state from a CDP event. True if state changed."""
@@ -533,16 +582,59 @@ class BrowserStreamHub:
                 return True
         return False
 
+    def _current_frame_key(self) -> tuple:
+        """Identity only: URL/loading changes must not invalidate a static frame."""
+        target = registry.get_target(self.session_id)
+        broker = browser_control._brokers.get(self.session_id)
+        return (
+            target.target_id if target else None,
+            target.tab_id if target else None,
+            broker.runtime_id if broker else None,
+            broker.state["active_tab_id"] if broker else None,
+            self._attached_target_id,
+            self._frame_identity.get("runtime_id"),
+            self._frame_identity.get("tab_id"),
+        )
+
+    def _clear_frame(self) -> None:
+        self._last_frame = None
+        self._last_frame_key = None
+        self._last_metadata = None
+        for viewer in self.viewers:
+            viewer.discard_frame()
+
     def _fan_out_frame(self, data: str, metadata: dict) -> None:
-        """Enqueue a frame to every viewer, latest-frame-wins. Never blocks."""
-        msg = {"type": "frame", "data": data, "metadata": metadata}
+        """Enqueue one shared frame to every viewer, latest-wins. Never blocks."""
+        broker = browser_control._brokers.get(self.session_id)
+        target = registry.get_target(self.session_id)
+        if self._frame_identity and (
+            not broker
+            or broker.runtime_id != self._frame_identity["runtime_id"]
+            or broker.state["active_tab_id"] != self._frame_identity["tab_id"]
+        ):
+            self._clear_frame()
+            return
+        if self._attached_target_id is not None and (
+            target is None
+            or target.target_id != self._attached_target_id
+            or (
+                self._frame_identity and target.tab_id != self._frame_identity["tab_id"]
+            )
+        ):
+            self._clear_frame()
+            return
+        if not data:
+            return
+        msg = {
+            "type": "frame",
+            "data": data,
+            "metadata": {**metadata, **self._frame_identity},
+        }
+        self._last_frame = msg
+        self._last_frame_key = self._current_frame_key()
+        self._last_metadata = metadata
         for viewer in list(self.viewers):
-            q = viewer.queue
-            if q.full():
-                with suppress(asyncio.QueueEmpty):
-                    q.get_nowait()
-            with suppress(asyncio.QueueFull):
-                q.put_nowait(msg)
+            viewer.enqueue(msg)
 
     # -- input dispatch ------------------------------------------------------
     def last_bounds(self) -> Optional[Tuple[int, int]]:
@@ -556,40 +648,11 @@ class BrowserStreamHub:
         return None
 
     async def ensure_target(self, url: str) -> bool:
-        """Open a CDP tab at ``url`` if this hub has no attached page.
-
-        Returns True if a new tab was created (Chrome already navigated;
-        the caller should not also send ``Page.navigate``). False if a page
-        is already attached — caller should navigate as usual.
-        """
-        if self._upstream is not None:
-            return False
-        created = await native_chrome.create_page(url)
-        if not created:
-            return False
-        registry.register(
-            self.session_id,
-            created.get("id"),
-            None,
-            created.get("url") or url,
-        )
-        return True
+        """Viewing must never create a second page authority."""
+        raise ValueError("Browser mutations require the session workspace runtime")
 
     async def dispatch_input(self, cdp_cmd: dict) -> None:
-        ws = self._upstream
-        if ws is None:
-            return
-        offset = cdp_cmd.pop("__history_offset__", None)
-        if not await self._send_upstream(
-            ws,
-            cdp_cmd["method"],
-            cdp_cmd.get("params"),
-            response=offset is not None,
-        ):
-            return
-        if offset is not None:
-            # The pump loop pairs the reply (same id) back to this jump.
-            self._pending_jumps[self._upstream_msg_id] = int(offset)
+        raise ValueError("Browser mutations require the session workspace runtime")
 
     async def dispatch_inspect(self, viewer: "_Viewer", inspect: InspectInput) -> None:
         """Run one point-and-prompt hit-test for ``viewer``.
@@ -619,14 +682,27 @@ class BrowserStreamHub:
             response=True,
         ):
             return
-        self._pending_inspects[self._upstream_msg_id] = (viewer, inspect.mode)
+        if len(self._pending_inspects) >= 128:
+            self._pending_inspects.pop(next(iter(self._pending_inspects)))
+        self._pending_inspects[self._upstream_msg_id] = (
+            viewer,
+            inspect.mode,
+            dict(self._frame_identity),
+        )
 
     async def _complete_inspect(self, msg_id: int, reply: dict) -> None:
         """Answer the viewer that asked for the hit-test (if still connected)."""
         pending = self._pending_inspects.pop(msg_id, None)
         if pending is None:
             return
-        viewer, mode = pending
+        viewer, mode, identity = pending
+        broker = browser_control._brokers.get(self.session_id)
+        if identity and (
+            not broker
+            or broker.runtime_id != identity["runtime_id"]
+            or broker.state["active_tab_id"] != identity["tab_id"]
+        ):
+            return
         if viewer not in self.viewers:
             return
         value = reply.get("result", {}).get("value")
@@ -654,12 +730,7 @@ class BrowserStreamHub:
                 self.page_url = current_url
                 self._broadcast_page()
             return
-        if self._upstream is not None and 0 <= index + offset < len(entries):
-            await self._send_upstream(
-                self._upstream,
-                "Page.navigateToHistoryEntry",
-                {"entryId": entries[index + offset]["id"]},
-            )
+        # Nonzero history offsets are never dispatched by the viewing hub.
 
     async def _send_upstream(
         self, ws, method: str, params: Optional[dict] = None, *, response: bool = False
@@ -714,8 +785,7 @@ class BrowserStreamHub:
                         failures += 1
                     current = registry.get_target(self.session_id)
                     same_target = (
-                        current is not None
-                        and current.target_id == target.target_id
+                        current is not None and current.target_id == target.target_id
                     )
                     if same_target and failures <= len(_REATTACH_DELAYS):
                         delay = _REATTACH_DELAYS[failures - 1]
@@ -746,10 +816,18 @@ class BrowserStreamHub:
             f"ws://127.0.0.1:{native_chrome._cdp_port()}"
             f"/devtools/page/{target.target_id}"
         )
+        self._clear_frame()
         self._attach_opened_at = None
         ws = await _open_upstream(uri)
         self._attach_opened_at = time.monotonic()
         self._upstream = ws
+        self._attached_target_id = target.target_id
+        broker = browser_control._brokers.get(self.session_id)
+        self._frame_identity = (
+            {"runtime_id": broker.runtime_id, "tab_id": target.tab_id}
+            if broker and broker.runtime_id
+            else {}
+        )
         self._upstream_msg_id = 0
         self._pending_jumps.clear()
         self._pending_inspects.clear()
@@ -784,7 +862,9 @@ class BrowserStreamHub:
                     method = msg.get("method")
                     if "id" in msg and msg["id"] in self._pending_jumps:
                         is_attach_probe = self._pending_jumps.get(msg["id"]) == 0
-                        await self._complete_history_jump(msg["id"], msg.get("result", {}))
+                        await self._complete_history_jump(
+                            msg["id"], msg.get("result", {})
+                        )
                         if is_attach_probe and not live:
                             # The target answered the attach-time probe, so the
                             # attachment is healthy — declare live NOW instead
@@ -818,7 +898,6 @@ class BrowserStreamHub:
                     if method == "Page.screencastFrame":
                         params = msg.get("params", {})
                         metadata = params.get("metadata", {})
-                        self._last_metadata = metadata
                         # Enqueue to all viewers (non-blocking), THEN ack — acks
                         # must never wait on a slow viewer.
                         self._fan_out_frame(params.get("data", ""), metadata)
@@ -838,7 +917,14 @@ class BrowserStreamHub:
                     # require an upstream teardown.  Keep the canvas-producing
                     # screencast alive, publish the fresh URL, and arm the next
                     # change waiter.  Only attachment identity changes reattach.
-                    if current is not None and current.target_id == target.target_id:
+                    active_broker = browser_control._brokers.get(self.session_id)
+                    active_runtime = active_broker.runtime_id if active_broker else None
+                    if (
+                        current is not None
+                        and current.target_id == target.target_id
+                        and active_runtime == self._frame_identity.get("runtime_id")
+                        and current.tab_id == target.tab_id
+                    ):
                         target = current
                         await self._broadcast_status(
                             "live" if live else "connecting", current.url
@@ -849,19 +935,22 @@ class BrowserStreamHub:
                         continue
                     raise _RegistryChanged()
         finally:
-            if change_task is not None:
-                change_task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await change_task
-            if recv_task is not None:
-                recv_task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await recv_task
-            with suppress(Exception):
-                await self._send_upstream(ws, "Page.stopScreencast")
-            with suppress(Exception):
-                await ws.close()
-            self._upstream = None
+            self._clear_frame()
+            children = [task for task in (change_task, recv_task) if task is not None]
+            for task in children:
+                task.cancel()
+            try:
+                # Collect child cancellation without swallowing cancellation of
+                # this hub task during a registry-change teardown. Otherwise
+                # _run can reattach while stop() waits for it forever.
+                await asyncio.gather(*children, return_exceptions=True)
+            finally:
+                with suppress(Exception):
+                    await self._send_upstream(ws, "Page.stopScreencast")
+                with suppress(Exception):
+                    await ws.close()
+                self._upstream = None
+                self._attached_target_id = None
 
 
 # ---------------------------------------------------------------------------
@@ -872,7 +961,10 @@ _hubs_lock = asyncio.Lock()
 
 
 async def attach_viewer(
-    session_id: str, websocket: WebSocket, *, redact_urls: bool = False,
+    session_id: str,
+    websocket: WebSocket,
+    *,
+    redact_urls: bool = False,
 ) -> Tuple[BrowserStreamHub, _Viewer]:
     async with _hubs_lock:
         hub = _hubs.get(session_id)

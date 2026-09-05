@@ -1,0 +1,84 @@
+name: CI Browser Workspace
+
+on:
+  pull_request:
+    paths:
+      - 'app/api/browser_panel.py'
+      - 'app/api/openai_billing.py'
+      - 'app/core/openai_billing_browser.py'
+      - 'app/api/ws_auth.py'
+      - 'app/core/browser*.py'
+      - 'app/core/native_chrome.py'
+      - 'app/core/mcp_config.py'
+      - 'app/core/builtin_mcp_servers.py'
+      - 'browser-mcp/**'
+      - 'frontend/src/lib/browser-panel/**'
+      - 'frontend/src/lib/components/browser/**'
+      - 'frontend/src/lib/stores/browser-panel*'
+      - 'frontend/tests/*browser-workspace*'
+      - 'frontend/tests/BrowserWorkspaceParent.svelte'
+      - 'frontend/tests/verify-provider-login.mjs'
+      - 'frontend/src/lib/components/deck/cards/settings/providers/OpenAICredits.svelte'
+      - 'frontend/package*.json'
+      - 'tests/test_browser_workspace_integration.py'
+      - 'requirements*.txt'
+      - '.github/workflows/ci-browser-workspace.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-browser-workspace-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workspace:
+    name: Real browser workspace
+    timeout-minutes: 10
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      contents: read
+    env:
+      TESTING: '1'
+      ALLOW_REAL_PG: '0'
+      RUN_BROWSER_WORKSPACE_INTEGRATION: '1'
+      RUN_BROWSER_WORKSPACE_UI: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            browser-mcp/package-lock.json
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          pip install -r requirements.txt -r requirements-dev.txt
+          pip install -e ./vendor/fluid
+      - name: Install and build browser dependencies
+        run: |
+          npm ci --prefix frontend
+          npm ci --ignore-scripts --prefix browser-mcp
+          npm run build --prefix browser-mcp
+      - name: Install isolated Chromium
+        working-directory: browser-mcp
+        run: |
+          npx --no-install playwright-core install --with-deps chromium
+          node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "CHROMIUM_PATH=" + require("playwright-core").chromium.executablePath() + "\n")'
+      - name: Verify shared browser and rendered desktop/mobile UI
+        run: python -m pytest tests/test_browser_workspace_integration.py -o addopts="" -q -s --timeout=240
+      - name: Upload browser verification screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-workspace-screenshots
+          path: |
+            /tmp/browser-workspace-live-*.png
+            /tmp/browser-workspace-*.png
+            /tmp/provider-login-*.png
+          if-no-files-found: ignore
+          retention-days: 7

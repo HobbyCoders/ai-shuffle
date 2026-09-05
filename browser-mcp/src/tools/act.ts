@@ -75,6 +75,7 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
   } catch (err) {
     // Action never settled: tear the mutation watcher down here so its
     // MutationObserver + window[WATCH_KEY] accumulator don't leak.
+    session.invalidateScreenshot();
     await session.disposeWatch();
     const msg = err instanceof Error ? err.message : String(err);
     // Already a clean stale_ref (e.g. a ref we never handed out) — surface it.
@@ -89,6 +90,7 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     return errorResult(msg);
   }
 
+  session.invalidateScreenshot();
   const settle = await session.settle(urlBefore);
   const snapshotStale = settle.urlChanged || settle.domMutated === "major";
 

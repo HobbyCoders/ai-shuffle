@@ -22,6 +22,9 @@
  let bound = $derived(status ? status.status === 'connected' || Boolean(status.organization_id && status.status !== 'ready') : Boolean(provider.openai_billing_org_id));
  let reconnecting = $state(false);
  let browserElement = $state<HTMLDivElement>();
+ let liveView = $state<BrowserLiveView>();
+ let keyboardOpen = $state(false);
+ let keyboardEnabled = $derived(open && Boolean(ownedFlow && frame) && streamStatus === 'live' && !busy);
  function sendViewport() {
   if (!browserElement) return;
   const { width, height } = browserElement.getBoundingClientRect();
@@ -51,7 +54,7 @@
    providerId: provider.id,
    getAuthToken: () => document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('session='))?.slice(8) ?? null,
    onOpen: sendViewport,
-   onStatus: state => { streamStatus = state; },
+   onStatus: state => { streamStatus = state; if (state === 'live') sendViewport(); },
    onFrame: (data, metadata) => { frame = { data, metadata }; },
    onError: () => { error = 'The browser connection was interrupted. Close this dialog and try signing in again.'; }
   });
@@ -165,12 +168,21 @@
 <dialog bind:this={dialog} oncancel={event => { event.preventDefault(); void close(); }} aria-labelledby="credits-title-{provider.id}">
  {#if open}
  <div class="dialog-content">
-  <header><h2 id="credits-title-{provider.id}">Sign in for OpenAI credits</h2><button class="ed-btn" disabled={busy} onclick={close}>Close</button></header>
+  <header>
+   <h2 id="credits-title-{provider.id}">Sign in for OpenAI credits</h2>
+   <div class="actions">
+    <button class="ed-btn" disabled={!keyboardOpen && (!keyboardEnabled || !liveView)} aria-pressed={keyboardOpen}
+     onpointerdown={event => event.preventDefault()}
+     onclick={() => { if (keyboardOpen) liveView?.dismissKeyboard(); else liveView?.openKeyboard(); }}
+    >{keyboardOpen ? 'Hide keyboard' : 'Show keyboard'}</button>
+    <button class="ed-btn" disabled={busy} onclick={close}>Close</button>
+   </div>
+  </header>
   <p class="muted">This uses the app’s shared browser profile. Existing sign-ins may appear here. Complete sign-in and any verification in the browser below, then confirm the organization you want to track.</p>
   <p class="muted">Closing cancels an unconfirmed connection. Disconnecting credit tracking does not sign out of the shared browser.</p>
   {#if ownedFlow}
    <div class="browser" bind:this={browserElement}>
-    {#if frame}<BrowserLiveView {frame} interactive={streamStatus === 'live' && !busy} onInput={payload => stream?.send({ type: 'input', ...payload })} />
+    {#if frame}<BrowserLiveView bind:this={liveView} bind:keyboardOpen {keyboardEnabled} {frame} interactive={keyboardEnabled} onInput={payload => stream?.send({ type: 'input', ...payload })} />
     {:else}<p class="browser-message" role="status">{streamStatus === 'browser_off' ? 'The app’s browser is not running. Start it in Settings → Browser.' : 'Connecting to the sign-in browser…'}</p>{/if}
    </div>
    {#if streamStatus === 'disconnected'}<p role="status" class="muted">Reconnecting to the browser…</p>{/if}

@@ -51,6 +51,8 @@ async function buildPayload(
 
 /** Monotonic counter: only the newest in-flight report is allowed to complete. */
 let generation = 0;
+let legacyDisabled = false;
+export function disableLegacyReports(): void { legacyDisabled = true; generation++; }
 
 async function run(page: Page | null, tabId: string | undefined, gen: number): Promise<void> {
   const sessionId = process.env.AIS_SESSION_ID;
@@ -98,6 +100,7 @@ async function run(page: Page | null, tabId: string | undefined, gen: number): P
  * set.
  */
 export function reportCurrentTarget(page: Page | null, tabId?: string): void {
+  if (legacyDisabled) return;
   const gen = ++generation;
   run(page, tabId, gen).catch((err) => {
     console.error(
