@@ -122,3 +122,4 @@ scripts/unraid-lab/lab_manifest.jsonl
 .stub-upstream-ca/
 stub-requests.jsonl
 /.fluid
+/.live-monitor
