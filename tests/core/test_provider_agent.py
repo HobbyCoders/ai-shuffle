@@ -574,11 +574,13 @@ class TestDispatchWorker:
         original = database.get_session
         monkeypatch.setattr(database, "get_session", lambda sid: {
             **original(sid), "mode": "voice", "effort": "high",
+            "permission_mode": "bypassPermissions",
             "context_window": 200000, "fast": False,
         })
         _dispatch()
         overrides = dispatch_env.tm.submitted[0]["overrides"]
         assert overrides["effort"] == "high"
+        assert overrides["permission_mode"] == "bypassPermissions"
         assert overrides["context_window"] == 200000
         assert overrides["fast"] is False
 

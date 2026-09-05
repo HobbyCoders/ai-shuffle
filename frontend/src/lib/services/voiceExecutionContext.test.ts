@@ -1,9 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 const update = vi.hoisted(() => vi.fn(async (_owner: string, _context: unknown) => ({})));
 vi.mock('$lib/api/voice', () => ({ updateVoiceContext: update }));
-import { persistVoiceContext } from './voiceExecutionContext';
+import { persistVoiceContext, voiceContextFor } from './voiceExecutionContext';
+import type { ActiveSessionState } from '$lib/stores/active-session';
 
 describe('voice execution context', () => {
+	it('does not replace inherited agent permissions with default', () => {
+		const state = { permissionModeOverride: null } as ActiveSessionState;
+		expect(voiceContextFor(state).permission_mode).toBeUndefined();
+		expect(JSON.stringify(voiceContextFor(state))).not.toContain('permission_mode');
+		state.permissionModeOverride = 'bypassPermissions';
+		expect(voiceContextFor(state).permission_mode).toBe('bypassPermissions');
+		state.permissionModeOverride = 'default';
+		expect(voiceContextFor(state).permission_mode).toBe('default');
+	});
 	it('deduplicates identical settings', async () => {
 		const before = update.mock.calls.length;
 		const first = persistVoiceContext('dedupe', { permission_mode: 'default' });

@@ -1367,7 +1367,7 @@ class VoiceBridge:
         return {"ok": not outcome.is_error, "result": outcome.text}
 
     async def _tool_web_fetch(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Run WebFetch only after its normal session-owned approval gate.
+        """Apply the live voice permission mode before running canonical WebFetch.
 
         The Fluid handler remains the sole networking implementation, preserving
         its HTTPS upgrade, SSRF refusal, redirect policy, result cap and fencing.
@@ -1381,27 +1381,34 @@ class VoiceBridge:
         url = (args.get("url") or "").strip()
         if not url:
             return {"ok": False, "error": "WebFetch needs a URL."}
-        profile_id = await self._caller_profile_id()
-        if not profile_id:
-            return {"ok": False, "error": "Voice session has no profile for WebFetch approval."}
+        from app.core.provider_agent import _caller_permission_mode
 
-        async def _no_broadcast(_: Dict[str, Any]) -> None:
-            # The voice approval poller announces the durable request aloud.
-            return None
+        row = await run_sync(database.get_session, self.session_id)
+        if not row:
+            return {"ok": False, "error": "Voice session no longer exists."}
+        permission_mode = await run_sync(_caller_permission_mode, row)
+        if permission_mode != "bypassPermissions":
+            profile_id = row.get("profile_id")
+            if not profile_id:
+                return {"ok": False, "error": "Voice session has no profile for WebFetch approval."}
 
-        self._ensure_approval_poller()
-        decision = await permission_handler.request_permission(
-            request_id=f"voice-webfetch-{uuid.uuid4()}",
-            session_id=self.session_id,
-            profile_id=profile_id,
-            tool_name="WebFetch",
-            tool_input=dict(args),
-            broadcast_func=_no_broadcast,
-            display_name="WebFetch",
-            description=f"Fetch {url}",
-        )
-        if not isinstance(decision, PermissionResultAllow):
-            return {"ok": False, "error": "WebFetch was not approved."}
+            async def _no_broadcast(_: Dict[str, Any]) -> None:
+                # The voice approval poller announces the durable request aloud.
+                return None
+
+            self._ensure_approval_poller()
+            decision = await permission_handler.request_permission(
+                request_id=f"voice-webfetch-{uuid.uuid4()}",
+                session_id=self.session_id,
+                profile_id=profile_id,
+                tool_name="WebFetch",
+                tool_input=dict(args),
+                broadcast_func=_no_broadcast,
+                display_name="WebFetch",
+                description=f"Fetch {url}",
+            )
+            if not isinstance(decision, PermissionResultAllow):
+                return {"ok": False, "error": "WebFetch was not approved."}
         outcome = await fetch_handler(dict(args), ToolCtx(session_id=self.session_id))
         return {"ok": not outcome.is_error, "result": outcome.text}
 
@@ -1724,12 +1731,24 @@ class VoiceBridge:
                         "proceeding accordingly."
                     ),
                 }
+            pending = await run_sync(
+                permission_handler.get_pending_requests, self.session_id,
+            )
             return {
                 "ok": False,
                 "request_id": request_id,
-                "error": (
-                    f"No pending approval with id {request_id} — it may have "
-                    "expired or been withdrawn."
+                "error": f"Approval {request_id} was not resolved: {result['error']}",
+                "pending_requests": [
+                    {"request_id": request.get("request_id"),
+                     "description": _approval_summary(request)}
+                    for request in pending or []
+                ],
+                "note": (
+                    "Do not infer that a token expired. Use only the exact request "
+                    "id supplied by the current approval prompt. If a different "
+                    "request is pending, explain it and ask the user to confirm "
+                    "that request before answering it. If none is pending, do not "
+                    "claim approval or repeat the task automatically."
                 ),
             }
 

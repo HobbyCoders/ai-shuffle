@@ -2114,6 +2114,79 @@ async def test_web_result_is_saved_once_with_sources(mock_db, fake_sockets, monk
     assert "web-1" in json.dumps(events, default=str)
 
 
+@pytest.mark.parametrize("binding", ["session", "profile"])
+async def test_web_fetch_honors_live_bypass_binding(mock_db, fake_sockets, monkeypatch, binding):
+    from app.db import database
+    from app.core.permission_handler import permission_handler
+    from fluid.tools.builtins import web
+    from fluid.tools.registry import ToolOutcome
+
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    row = database.get_session(SID)
+    row["permission_mode"] = "bypassPermissions" if binding == "session" else None
+    monkeypatch.setattr(database, "get_session", lambda _: row)
+    monkeypatch.setattr(database, "get_profile", lambda _: {
+        "config": {"permission_mode": "bypassPermissions"}
+    })
+
+    async def unexpected(**kwargs):
+        raise AssertionError("bypass must not create an approval")
+
+    fetched = []
+
+    async def fetch(args, ctx):
+        fetched.append((args, ctx.session_id))
+        return ToolOutcome(text="source")
+
+    monkeypatch.setattr(permission_handler, "request_permission", unexpected)
+    monkeypatch.setattr(web, "fetch_handler", fetch)
+    assert await bridge._tool_web_fetch({"url": "https://example.com"}) == {
+        "ok": True, "result": "source"
+    }
+    assert fetched == [({"url": "https://example.com"}, SID)]
+    assert permission_handler.get_pending_requests(SID) == []
+
+
+async def test_web_fetch_spoken_approval_resolves_real_pending_request(mock_db, fake_sockets, monkeypatch):
+    from app.core.permission_handler import permission_handler
+    from fluid.tools.builtins import web
+    from fluid.tools.registry import ToolOutcome
+
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    announced = asyncio.Event()
+    monkeypatch.setattr(vb, "APPROVAL_POLL_SECONDS", 0.01)
+
+    async def inject(text):
+        if text.startswith(vb.APPROVAL_PREFIX):
+            announced.set()
+
+    async def fetch(args, ctx):
+        return ToolOutcome(text="approved source")
+
+    monkeypatch.setattr(bridge, "_inject", inject)
+    monkeypatch.setattr(web, "fetch_handler", fetch)
+    task = asyncio.create_task(bridge._tool_web_fetch({"url": "https://example.com"}))
+    try:
+        await asyncio.wait_for(announced.wait(), 5)
+        pending = permission_handler.get_pending_requests(SID)
+        assert len(pending) == 1
+        request_id = pending[0]["request_id"]
+        wrong = await bridge._tool_respond_approval({"request_id": "not-the-id", "decision": "allow"})
+        assert wrong["ok"] is False
+        assert "expired" not in wrong["error"]
+        assert wrong["pending_requests"][0]["request_id"] == request_id
+        assert not task.done()
+        result = await bridge._tool_respond_approval({"request_id": request_id, "decision": "allow"})
+        assert result["ok"] is True
+        assert await asyncio.wait_for(task, 5) == {"ok": True, "result": "approved source"}
+        assert permission_handler.get_pending_requests(SID) == []
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_web_fetch_does_not_bypass_voice_approval(mock_db, fake_sockets, monkeypatch):
     from app.core.permission_handler import permission_handler
     from claude_agent_sdk.types import PermissionResultDeny
