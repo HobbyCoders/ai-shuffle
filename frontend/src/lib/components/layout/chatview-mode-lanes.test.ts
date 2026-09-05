@@ -78,6 +78,26 @@ describe('ChatView — the composer gate', () => {
 	});
 });
 
+describe('ChatView — keyboard-surface hero layout', () => {
+	it('leaves invitation typography to WorkspaceSelector when the keyboard opens', () => {
+		const workspace = stripComments(src('WorkspaceSelector.svelte'));
+		expect(workspace).toMatch(/\.hero-heading\s*\{[^}]*font-size:\s*2rem;/);
+		expect(workspace).toMatch(/\.picker-name\s*\{[^}]*font-size:\s*1\.75rem;/);
+		const keyboardRules = codeOnly.match(/[^{}]*\.keyboard-surface[^{}]*\{[^{}]*\}/g) ?? [];
+		expect(keyboardRules.length).toBeGreaterThan(0);
+		expect(keyboardRules.join('\n')).not.toMatch(/font(?:-size)?\s*:/);
+	});
+
+	it('keeps compact spacing, logo hiding and the model-panel escape hatch', () => {
+		expect(codeOnly).toMatch(/class:keyboard-surface=\{surfaceHeight > 0 && surfaceHeight <= 420\}/);
+		expect(codeOnly).toMatch(/\.short-surface \.empty-hero-content\s*\{\s*--workspace-hero-padding: 12px 16px;/);
+		expect(codeOnly).toMatch(/\.short-surface \.empty-hero-content :global\(\.logo-mark\)\s*\{\s*display: none;/);
+		expect(codeOnly).toMatch(/\.keyboard-surface \.empty-hero-content\s*\{\s*--workspace-hero-padding: 4px 16px;/);
+		expect(codeOnly).toMatch(/\.keyboard-surface \.empty-bottom-spacer\s*\{\s*flex: 0;/);
+		expect(codeOnly).toMatch(/\.keyboard-surface:has\(:global\(\.controls-panel\.models\)\) \.empty-hero\s*\{\s*display: none;/);
+	});
+});
+
 describe('VoiceModeHero — the only action on its surface', () => {
 	const hero = src('VoiceModeHero.svelte');
 

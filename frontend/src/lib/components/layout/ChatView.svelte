@@ -486,8 +486,6 @@
 		.short-surface .empty-hero-content { --workspace-hero-padding: 12px 16px; }
 		.short-surface .empty-hero-content :global(.logo-mark) { display: none; }
 		.keyboard-surface .empty-hero-content { --workspace-hero-padding: 4px 16px; }
-		.keyboard-surface .empty-hero-content :global(.hero-heading) { font-size: 1.25rem; }
-		.keyboard-surface .empty-hero-content :global(.picker-name) { font-size: 1.25rem; }
 		.keyboard-surface .empty-bottom-spacer { flex: 0; }
 		.keyboard-surface:has(:global(.controls-panel.models)) .empty-hero { display: none; }
 	}
