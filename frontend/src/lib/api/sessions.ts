@@ -25,6 +25,8 @@ export interface Session {
 	status: string;
 	/** Durable background-work marker, including sessions not open on this device. */
 	parked_task_kind?: string | null;
+	/** Running durable tasks, including non-park-gating Monitor commands. */
+	has_running_tasks?: boolean;
 	is_active: boolean;
 	api_user_id?: string | null;
 	api_user_name?: string | null;

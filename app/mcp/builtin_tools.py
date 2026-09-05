@@ -449,6 +449,8 @@ async def _settle_reaped_shell(session_id: str, task_id: str) -> None:
         if row is None or row.get("status") in TERMINAL_STATUSES:
             return
         await asyncio.to_thread(mark_background_task_killed, task_id, session_id)
+        from app.core.task_persistence import broadcast_running_task_presence
+        await broadcast_running_task_presence([session_id])
         if task_registry.mark_chipped(session_id, task_id, "terminal"):
             await record_task_settle_frame(
                 session_id, task_id, "killed",

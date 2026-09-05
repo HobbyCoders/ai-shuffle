@@ -1,4 +1,4 @@
-"""Durable background-task snapshot writer (Phase 1, WRITE-ONLY).
+"""Durable background-task snapshot writer and shared sidebar presence.
 
 ``task_registry`` is in-memory and rebuilt empty on every restart — which is
 exactly why a whole class of lifecycle incidents (stranded parked sessions,
@@ -6,8 +6,8 @@ silent kills, forever-spinning cards) has been invisible after the fact.
 This module mirrors every registry transition into the durable
 ``background_tasks`` table (v55) WITHOUT changing any behavior:
 
-- WRITE-ONLY: no reader flips anywhere in Phase 1. The rows are a durable
-  trail (plus boot reconcile's stale-row sweep), nothing more yet.
+- SHARED PRESENCE: committed batches publish sidebar task presence. This
+  does not change registry, Monitor parking, pool, or task lifecycle semantics.
 - FIRE-AND-FORGET: ``enqueue_task_snapshot`` is sync, never raises, never
   blocks — the registry hot path (called inside streaming loops) must not
   gain a DB write. Snapshots land in a COALESCING queue (latest snapshot per
@@ -127,13 +127,13 @@ async def _drain_once() -> None:
 async def _drain_body() -> None:
     """Write every queued snapshot (latest-wins already applied by the dict)."""
     global _outage_logged
-    from app.db import database
+    from app.db.background_tasks import upsert_background_tasks
 
     while _pending:
-        key = next(iter(_pending))
-        snapshot = _pending.pop(key)
+        snapshots = list(_pending.values())
+        _pending.clear()
         try:
-            await asyncio.to_thread(database.upsert_background_task, snapshot)
+            await asyncio.to_thread(upsert_background_tasks, snapshots)
             if _outage_logged:
                 _outage_logged = False
                 logger.info("task persistence recovered — durable writes resumed")
@@ -145,6 +145,28 @@ async def _drain_body() -> None:
                     "until the database recovers (logged once per outage)",
                     exc_info=True,
                 )
+            continue
+        await broadcast_running_task_presence([s["session_id"] for s in snapshots])
+
+
+async def broadcast_running_task_presence(session_ids: list[str]) -> None:
+    """Publish committed shared truth, never interrupt persistence or settlement."""
+    from app.db.background_tasks import get_running_task_presence
+    from app.core.sync_engine import sync_engine
+
+    try:
+        presence = await asyncio.to_thread(get_running_task_presence, session_ids)
+    except Exception:
+        logger.warning("Background-task presence lookup failed", exc_info=True)
+        return
+    for session_id, row in presence.items():
+        try:
+            await sync_engine.broadcast_user_session_updated(
+                user_id=row["api_user_id"] or "admin", session_id=session_id,
+                updates={"has_running_tasks": row["has_running_tasks"]},
+            )
+        except Exception:
+            logger.warning("Background-task presence broadcast failed", exc_info=True)
 
 
 async def flush() -> None:

@@ -12,8 +12,8 @@ in-memory registry is empty after a restart:
   (``get_background_task`` / ``mark_background_task_killed``) to settle a task
   the UI still shows "running" when nothing survives in memory.
 
-The general hot-path read cutover (flipping the live views to this table) is
-still a later phase.
+Sidebar list/search reads and user-scoped updates use shared running-task
+presence. The general live-view read cutover is still a later phase.
 """
 
 from __future__ import annotations
@@ -41,10 +41,17 @@ def upsert_background_task(snapshot: Dict[str, Any]) -> None:
     install's instance id — several installs share one Postgres and each
     mirrors only its own registry.
     """
+    upsert_background_tasks([snapshot])
+
+
+def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
+    """Persist a coalesced batch in one transaction."""
+    if not snapshots:
+        return
     _ph = ph()
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(
+        cursor.executemany(
             f"""INSERT INTO background_tasks (
                     task_id, session_id, instance_id, kind, is_sdk_background,
                     tool_use_id, title, status, terminal_notified,
@@ -60,7 +67,7 @@ def upsert_background_task(snapshot: Dict[str, Any]) -> None:
                     terminal_notified = EXCLUDED.terminal_notified,
                     started_at = EXCLUDED.started_at,
                     updated_at = EXCLUDED.updated_at""",
-            (
+            [(
                 snapshot.get("task_id"),
                 snapshot.get("session_id"),
                 settings.effective_instance_id,
@@ -72,8 +79,35 @@ def upsert_background_task(snapshot: Dict[str, Any]) -> None:
                 bool(snapshot.get("terminal_notified")),
                 snapshot.get("started_at"),
                 snapshot.get("updated_at"),
-            ),
+            ) for snapshot in snapshots],
         )
+
+
+def get_running_task_presence(session_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Shared durable presence and DB owner, including sessions with no work.
+
+    No instance filter: a peer's work is just as visible as this install's.
+    Only running rows count; retained terminal history never pins the sidebar.
+    """
+    ids = list(dict.fromkeys(session_ids))
+    if not ids:
+        return {}
+    _ph = ph()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""SELECT s.id, s.api_user_id,
+                       EXISTS (SELECT 1 FROM background_tasks b
+                               WHERE b.session_id = s.id AND b.status = 'running')
+                           AS has_running_tasks
+                  FROM sessions s WHERE s.id IN ({', '.join([_ph] * len(ids))})""",
+            ids,
+        )
+        return {
+            row["id"]: {"api_user_id": row["api_user_id"],
+                        "has_running_tasks": bool(row["has_running_tasks"])}
+            for row in rows_to_list(cursor.fetchall())
+        }
 
 
 def mark_stale_background_tasks_killed() -> List[Dict[str, Any]]:

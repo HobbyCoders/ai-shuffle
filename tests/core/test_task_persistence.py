@@ -151,7 +151,8 @@ async def test_write_failure_never_raises_and_logs_once(mock_db, monkeypatch, ca
     outage, and recovery logs + resumes writing."""
 
     calls = {"n": 0}
-    real = database.upsert_background_task
+    from app.db import background_tasks
+    real = background_tasks.upsert_background_tasks
 
     def _flaky(snapshot):
         calls["n"] += 1
@@ -159,7 +160,7 @@ async def test_write_failure_never_raises_and_logs_once(mock_db, monkeypatch, ca
             raise RuntimeError("db down")
         return real(snapshot)
 
-    monkeypatch.setattr(database, "upsert_background_task", _flaky)
+    monkeypatch.setattr(background_tasks, "upsert_background_tasks", _flaky)
 
     sid = "tpers-outage"
     with caplog.at_level(logging.WARNING, logger="app.core.task_persistence"):
@@ -257,3 +258,194 @@ async def test_terminal_notified_persisted_when_a_wake_delivers_a_completion(moc
     row = _rows(mock_db, sid)[0]
     assert row["status"] == "completed"
     assert row["terminal_notified"]
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_monitor_spawn_and_exit_publish_shared_presence(mock_db, monkeypatch, exit_code):
+    from unittest.mock import AsyncMock
+    from app.api.sessions_helpers import enrich_sessions_with_tags
+    from app.core.models import Session
+    from app.core.sync_engine import sync_engine
+    from app.mcp import builtin_tools as bt
+
+    sid = "tpres-real-monitor"
+    database.create_session(sid, None)
+    exited = asyncio.Event()
+
+    class Stdout:
+        async def readline(self):
+            await exited.wait()
+            return b""
+
+    class Process:
+        pid = 999
+        stdout = Stdout()
+        returncode = None
+
+        async def wait(self):
+            return exit_code
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=Process()))
+    broadcast = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", broadcast)
+    task = await bt._spawn_background("test monitor", None, sid)
+    try:
+        await tp.flush()
+        assert task_registry.get_active_background_work(sid) == []
+        row = enrich_sessions_with_tags([database.get_session(sid)])[0]
+        assert Session(**row).model_dump()["has_running_tasks"] is True
+        assert row["parked_task_kind"] is None
+        broadcast.assert_awaited_with(
+            user_id="admin", session_id=sid, updates={"has_running_tasks": True},
+        )
+        exited.set()
+        await task._reader_task
+        await tp.flush()
+        row = enrich_sessions_with_tags([database.get_session(sid)])[0]
+        assert Session(**row).model_dump()["has_running_tasks"] is False
+        broadcast.assert_awaited_with(
+            user_id="admin", session_id=sid, updates={"has_running_tasks": False},
+        )
+    finally:
+        exited.set()
+        await task._reader_task
+        bt._background_tasks.pop(task.task_id, None)
+
+
+@pytest.mark.parametrize("owner", [None, "owner-a"])
+async def test_shared_monitor_presence_list_search_and_last_completion(mock_db, monkeypatch, owner):
+    from unittest.mock import AsyncMock
+    from app.api.sessions_helpers import enrich_sessions_with_tags, enrich_search_results_with_tags
+    from app.core.sync_engine import sync_engine
+    from app.db.background_tasks import get_running_task_presence
+
+    sid = "tpres-monitor"
+    if owner is not None:
+        database.create_api_user(owner, "A", "test-owner-a")
+    database.create_session(sid, None, api_user_id=owner)
+    broadcast = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", broadcast)
+    # Unmarked, non-SDK shell: no park marker or wake eligibility required.
+    task_registry.start_task(sid, "shell", "shell", "Monitor server")
+    task_registry.start_task(sid, "second", "shell", "second server")
+    await tp.flush()
+    assert database.get_session(sid).get("parked_task_kind") is None
+    for enrich in (enrich_sessions_with_tags, enrich_search_results_with_tags):
+        assert enrich([database.get_session(sid)])[0]["has_running_tasks"] is True
+    assert broadcast.call_args.kwargs == {
+        "user_id": owner or "admin", "session_id": sid,
+        "updates": {"has_running_tasks": True},
+    }
+    task_registry.complete_task(sid, "shell", "completed")
+    await tp.flush()
+    assert get_running_task_presence([sid])[sid]["has_running_tasks"] is True
+    assert broadcast.call_args.kwargs["updates"] == {"has_running_tasks": True}
+    task_registry.complete_task(sid, "second", "completed")
+    await tp.flush()
+    assert len(_rows(mock_db, sid)) == 2  # retained terminal rows do not count
+    assert enrich_sessions_with_tags([database.get_session(sid)])[0]["has_running_tasks"] is False
+    assert broadcast.call_args.kwargs["updates"] == {"has_running_tasks": False}
+
+async def test_presence_batch_owners_peer_and_broadcast_failure(mock_db, monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.core.sync_engine import sync_engine
+    from app.db.background_tasks import get_running_task_presence
+
+    for sid, owner in (("tpres-a", "owner-a"), ("tpres-b", "owner-b")):
+        database.create_api_user(owner, owner, "test-" + owner)
+        database.create_session(sid, None, api_user_id=owner)
+        task_registry.start_task(sid, sid, "shell", "server")
+    broadcast = AsyncMock(side_effect=[RuntimeError("offline"), None])
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", broadcast)
+    await tp.flush()
+    assert broadcast.await_count == 2  # one owner's failure does not stop others
+    assert {c.kwargs["user_id"] for c in broadcast.call_args_list} == {"owner-a", "owner-b"}
+    mock_db.execute("UPDATE background_tasks SET instance_id = 'peer' WHERE session_id = 'tpres-b'")
+    mock_db.commit()
+    task_registry.reset_all()
+    traced = []
+    mock_db.set_trace_callback(traced.append)
+    try:
+        presence = get_running_task_presence(["tpres-a", "tpres-b", "tpres-a", "missing"])
+        assert get_running_task_presence([]) == {}
+    finally:
+        mock_db.set_trace_callback(None)
+    assert len([s for s in traced if s.lstrip().upper().startswith("SELECT")]) == 1
+    assert presence["tpres-b"] == {"api_user_id": "owner-b", "has_running_tasks": True}
+    assert "missing" not in presence
+    broadcast.side_effect = None
+    from app.core.startup_reconcile import reconcile_from_durable_truth
+    await reconcile_from_durable_truth()
+    assert get_running_task_presence(["tpres-a", "tpres-b"]) == {
+        "tpres-a": {"api_user_id": "owner-a", "has_running_tasks": False},
+        "tpres-b": {"api_user_id": "owner-b", "has_running_tasks": True},
+    }
+
+
+async def test_failed_batch_never_broadcasts_uncommitted_presence(mock_db, monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+    from app.core.sync_engine import sync_engine
+    from app.db import background_tasks
+
+    sid = "tpres-failed"
+    database.create_api_user("owner", "Owner", "test-owner")
+    database.create_session(sid, None, api_user_id="owner")
+    broadcast = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", broadcast)
+    real = background_tasks.upsert_background_tasks
+    monkeypatch.setattr(background_tasks, "upsert_background_tasks", Mock(side_effect=RuntimeError("down")))
+    task_registry.start_task(sid, "t", "shell", "server")
+    await tp.flush()
+    broadcast.assert_not_awaited()
+    assert _rows(mock_db, sid) == []
+    monkeypatch.setattr(background_tasks, "upsert_background_tasks", real)
+    task_registry.complete_task(sid, "t", "completed")
+    await tp.flush()
+    assert broadcast.call_args.kwargs["updates"] == {"has_running_tasks": False}
+
+
+@pytest.mark.parametrize("settler", ["stop", "reap"])
+async def test_direct_durable_settle_publishes_presence(mock_db, monkeypatch, settler):
+    from unittest.mock import AsyncMock
+    from app.core.sync_engine import sync_engine
+    from app.core import turn_recorder
+    from app.core.query_session_lifecycle import _durable_force_settle
+    from app.mcp.builtin_tools import _settle_reaped_shell
+
+    sid = "tpres-settle"
+    database.create_api_user("owner", "Owner", "test-owner")
+    database.create_session(sid, None, api_user_id="owner")
+    task_registry.start_task(sid, "t", "shell", "server")
+    await tp.flush()
+    task_registry.reset_all()
+    broadcast = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", broadcast)
+    monkeypatch.setattr(turn_recorder, "record_task_settle_frame", AsyncMock())
+    settle = _durable_force_settle if settler == "stop" else _settle_reaped_shell
+    await settle(sid, "t")
+    assert _rows(mock_db, sid)[0]["status"] == "killed"
+    broadcast.assert_awaited_once_with(
+        user_id="owner", session_id=sid, updates={"has_running_tasks": False},
+    )
+
+
+async def test_coalesced_batch_one_write_and_presence_read_failure_recovers(mock_db, monkeypatch):
+    from unittest.mock import Mock
+    from app.db import background_tasks
+
+    write = Mock(wraps=background_tasks.upsert_background_tasks)
+    read = Mock(side_effect=RuntimeError("presence unavailable"))
+    monkeypatch.setattr(background_tasks, "upsert_background_tasks", write)
+    monkeypatch.setattr(background_tasks, "get_running_task_presence", read)
+    for i in range(10):
+        task_registry.start_task("batch", str(i), "shell", "server")
+    task_registry.complete_task("batch", "0", "completed")
+    await tp.flush()
+    write.assert_called_once()
+    assert len(write.call_args.args[0]) == 10
+    read.assert_called_once()
+    assert len(_rows(mock_db, "batch")) == 10
+    # A broken presence lookup must not kill the consumer or subsequent writes.
+    task_registry.complete_task("batch", "1", "completed")
+    await tp.flush()
+    assert write.call_count == 2
+    assert {r["task_id"]: r["status"] for r in _rows(mock_db, "batch")}["1"] == "completed"

@@ -138,6 +138,9 @@ async def _mark_stale_background_task_rows() -> int:
     if not rows:
         return 0
 
+    from app.core.task_persistence import broadcast_running_task_presence
+    await broadcast_running_task_presence([_row_value(row, "session_id", 1) for row in rows])
+
     summary = "Background task lost in a server restart"
     for row in rows:
         session_id = _row_value(row, "session_id", 1)
@@ -226,6 +229,8 @@ async def settle_stale_background_task_rows(
             await asyncio.to_thread(
                 mark_background_task_killed, task_id, session_id
             )
+            from app.core.task_persistence import broadcast_running_task_presence
+            await broadcast_running_task_presence([session_id])
             if task_registry.mark_chipped(session_id, task_id, "terminal"):
                 await record_task_settle_frame(
                     session_id, task_id, "killed",
@@ -385,6 +390,8 @@ async def _force_stalled_park(
             continue
         try:
             await asyncio.to_thread(mark_background_task_killed, task_id, session_id)
+            from app.core.task_persistence import broadcast_running_task_presence
+            await broadcast_running_task_presence([session_id])
             if task_registry.get_task(session_id, task_id) is not None:
                 task_registry.complete_task(
                     session_id, task_id, "killed",

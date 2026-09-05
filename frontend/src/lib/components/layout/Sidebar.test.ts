@@ -497,6 +497,55 @@ describe('Sidebar ordering (must never change silently)', () => {
 });
 
 describe('Sidebar background work', () => {
+	it('keeps a non-parked Monitor row Working through selection, switching away, and list reload', async () => {
+		const monitor = session('monitor', 'Monitor chat', 'visible-project', true, false, {
+			has_running_tasks: true, parked_task_kind: null,
+		});
+		const other = session('other', 'Other chat', 'visible-project', true);
+		mocks.sessions.set([monitor, other]);
+		const select = (sessionId: string) => mocks.activeSession.set({ sessionId, isStreaming: false, activeTasks: [] });
+		render(Sidebar, { props: { ...sidebarProps, onOpenSession: select } });
+		expect(cardFrame('Monitor chat').textContent).toContain('Working');
+		await fireEvent.click(screen.getByText('Monitor chat'));
+		expect(mocks.activeSession.current.sessionId).toBe('monitor');
+		expect(cardFrame('Monitor chat').textContent).toContain('Working');
+		await fireEvent.click(screen.getByText('Other chat'));
+		expect(mocks.activeSession.current.sessionId).toBe('other');
+		expect(cardFrame('Monitor chat').textContent).toContain('Working');
+		mocks.sessions.set([{ ...monitor }, { ...other }]);
+		await tick();
+		expect(cardFrame('Monitor chat').textContent).toContain('Working');
+		expect(cardFrame('Other chat').textContent).toContain('Done');
+	});
+
+	it('tracks concurrent Monitor sessions independently and shows Done when each completes', async () => {
+		const first = session('first', 'First monitor', 'visible-project', true, false, { has_running_tasks: true, parked_task_kind: null });
+		const second = session('second', 'Second monitor', 'visible-project', true, false, { has_running_tasks: true, parked_task_kind: null });
+		mocks.sessions.set([first, second]);
+		render(Sidebar, { props: sidebarProps });
+		expect(cardFrame('First monitor').textContent).toContain('Working');
+		expect(cardFrame('Second monitor').textContent).toContain('Working');
+		mocks.sessions.set([{ ...first, has_running_tasks: false }, second]);
+		await tick();
+		expect(cardFrame('First monitor').textContent).toContain('Done');
+		expect(cardFrame('Second monitor').textContent).toContain('Working');
+		mocks.sessions.set([{ ...first, has_running_tasks: false }, { ...second, has_running_tasks: false }]);
+		await tick();
+		expect(cardFrame('Second monitor').textContent).toContain('Done');
+		expect(screen.queryByText('Working')).toBeNull();
+	});
+
+	it.each(['permission', 'question'] as const)('prioritizes %s attention over durable Monitor work', async (kind) => {
+		mocks.sessions.set([session('monitor', 'Monitor chat', 'visible-project', true, false, { has_running_tasks: true, parked_task_kind: null })]);
+		mocks.backgroundPermissions.set(new Map([['monitor', { count: 1, kind }]]));
+		render(Sidebar, { props: sidebarProps });
+		expect(cardFrame('Monitor chat').textContent).not.toContain('Working');
+		expect(cardFrame('Monitor chat').textContent).toContain(kind === 'permission' ? 'Needs permission' : 'Has question');
+		mocks.backgroundPermissions.set(new Map());
+		await tick();
+		expect(cardFrame('Monitor chat').textContent).toContain('Working');
+	});
+
 	it.each(['agent', 'shell'])('keeps an unopened parked %s session Working until its marker clears', async (kind) => {
 		const parked = session('parked', 'Parked chat', 'visible-project', true, false, { parked_task_kind: kind });
 		mocks.sessions.set([parked]);

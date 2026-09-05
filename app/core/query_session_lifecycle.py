@@ -199,6 +199,8 @@ async def _durable_force_settle(session_id: str, task_id: str) -> Optional[dict]
         emit_status = status if is_terminal else "killed"
         if not is_terminal:
             await asyncio.to_thread(mark_background_task_killed, task_id, session_id)
+            from app.core.task_persistence import broadcast_running_task_presence
+            await broadcast_running_task_presence([session_id])
         await record_task_settle_frame(
             session_id, task_id, emit_status,
             "Background task stopped (stale)",

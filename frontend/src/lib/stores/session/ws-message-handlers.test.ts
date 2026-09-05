@@ -1620,6 +1620,38 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe.each(['session_updated', 'user_session_updated'])('%s handler (running tasks)', (type) => {
+		it.each([true, false])('patches has_running_tasks=%s without a list reload', async (hasRunningTasks) => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+
+				const updates = { has_running_tasks: hasRunningTasks };
+				handlers.handleMessage(type === 'session_updated' ? {
+					event_type: type,
+					session_id: 'session-1',
+					data: { updates },
+				} : {
+					type,
+					session_id: 'session-1',
+					updates,
+				});
+
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', {
+					has_running_tasks: hasRunningTasks,
+				});
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+				expect(deps.appLoadApiUserSessions).not.toHaveBeenCalled();
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+				expect(deps.appLoadApiUserSessions).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+	});
+
 	describe('user_session_updated handler (hidden flip)', () => {
 		// The voice attach backfill hides a wake-word "command" session after
 		// the row already existed visibly (create→attach window). The flip is

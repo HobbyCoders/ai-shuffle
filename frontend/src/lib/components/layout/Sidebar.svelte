@@ -422,7 +422,7 @@
 					session: s,
 					status: deriveStatus({
 						streaming: isStreaming(s.id),
-						backgroundWork: !!s.parked_task_kind || activeBackgroundWorkId === s.id,
+						backgroundWork: !!s.has_running_tasks || !!s.parked_task_kind || activeBackgroundWorkId === s.id,
 						attention: $backgroundPermissions.get(s.id) ?? null,
 						prState: s.pr_state ?? null,
 						openPr: !s.pr_state && !!(branch && prSet?.has(branch)),

@@ -913,6 +913,10 @@ async def get_session(
     if response is not None:
         _set_message_pagination_headers(response, message_pagination)
 
+    from app.db.background_tasks import get_running_task_presence
+    presence = await run_sync(get_running_task_presence, [session["id"]])
+    session["has_running_tasks"] = presence.get(session["id"], {}).get("has_running_tasks", False)
+
     session["messages"] = messages
     session["tags"] = await run_sync(database.get_session_tags, session_id)
     session["has_forks"] = await run_sync(database.session_has_forks, session_id)

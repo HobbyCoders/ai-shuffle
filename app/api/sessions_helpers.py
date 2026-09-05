@@ -16,6 +16,7 @@ from app.db import database
 from app.db.async_database import run_sync
 from app.db.api_users import get_api_users_by_ids
 from app.db.tags import get_tags_for_sessions
+from app.db.background_tasks import get_running_task_presence
 from app.db.sessions import get_fork_info_for_sessions
 from app.db.projects import get_projects_by_ids
 from app.db.projects_v2 import (
@@ -761,10 +762,12 @@ def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
 
     # Batch: fork info for all sessions (2 queries instead of N)
     fork_info_by_session = get_fork_info_for_sessions(session_ids)
+    presence = get_running_task_presence(session_ids)
 
     for session in sessions:
         sid = session["id"]
         session["tags"] = tags_by_session.get(sid, [])
+        session["has_running_tasks"] = presence.get(sid, {}).get("has_running_tasks", False)
         fork_info = fork_info_by_session.get(sid)
         session["has_forks"] = fork_info["has_forks"] if fork_info else False
         if session.get("api_user_id"):
@@ -791,10 +794,12 @@ def enrich_search_results_with_tags(results: list) -> list:
 
     # Batch: fork info for all results (2 queries instead of N)
     fork_info_by_session = get_fork_info_for_sessions(session_ids)
+    presence = get_running_task_presence(session_ids)
 
     for result in results:
         sid = result["id"]
         result["tags"] = tags_by_session.get(sid, [])
+        result["has_running_tasks"] = presence.get(sid, {}).get("has_running_tasks", False)
         fork_info = fork_info_by_session.get(sid)
         result["has_forks"] = fork_info["has_forks"] if fork_info else False
 
