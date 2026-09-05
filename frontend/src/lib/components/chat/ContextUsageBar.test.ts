@@ -191,6 +191,47 @@ describe('ContextUsageBar — pill', () => {
 });
 
 describe('ContextUsageBar — provider refresh status', () => {
+	it.each(
+		(['stale', 'unavailable', 'never_fetched'] as const).flatMap((status) =>
+			([null, 'timeout', 'unavailable'] as const).flatMap((lastErrorKind) =>
+				[false, true].map((cached) => ({ status, lastErrorKind, cached }))
+			)
+		)
+	)('omits refresh narration for $status / $lastErrorKind (cached: $cached)', async ({ status, lastErrorKind, cached }) => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status,
+				last_error_kind: lastErrorKind,
+				...(cached ? { credits: { balance_remaining: 12.34 },
+					windows: [{ type: 'five_hour', utilization: 42, resets_at: future() }] } : {}) },
+		] });
+		const { container, getByRole } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.provider-status')).toBeNull();
+		expect(container.textContent).not.toMatch(/Last known|Refresh pending|Refresh timed out|Usage unavailable/);
+		expect(container.querySelector('.provider-billing-link')).toBeNull();
+		if (cached) {
+			expect(container.textContent).toContain('$12.34 left');
+			expect(container.textContent).toContain('42%');
+			expect(container.textContent).toMatch(/resets in/);
+		} else {
+			expect(container.textContent).toContain('No usage data yet');
+			expect(container.textContent).not.toContain('$0.00');
+		}
+		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
+		expect(container.querySelector('.provider-status')).toBeNull();
+		if (cached) expect(container.textContent).toContain('$12.34 left');
+	});
+
+	it.each(['stale', 'unavailable', 'never_fetched'] as const)('preserves sign-in guidance for %s credentials', async (status) => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'subscription', provider_type: 'chatgpt', status, last_error_kind: 'missing_credentials' },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.provider-status')?.textContent).toBe('Sign in to view usage');
+		expect(container.textContent).not.toContain('Last known usage');
+	});
+
 	it.each(['unavailable', 'stale'] as const)('links to Platform billing when OpenAI billing is %s', async (status) => {
 		rateLimit.applySnapshot({ windows: [], available: false, providers: [
 			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status,
@@ -201,13 +242,11 @@ describe('ContextUsageBar — provider refresh status', () => {
 		await openPopover(container);
 		// Keep long guidance in the wrapping prose class, not just an account label.
 		const guidance = container.querySelector('.provider-status');
-		expect(guidance?.textContent).toBe(status === 'stale'
-			? 'Last known usage · This credential cannot read OpenAI Platform billing'
-			: 'This credential cannot read OpenAI Platform billing');
+		expect(guidance?.textContent).toBe('This credential cannot read OpenAI Platform billing');
+		expect(container.textContent).not.toContain('Last known usage');
 		expect(container.textContent).not.toContain('Sign in');
 		expect(container.textContent).not.toContain('$0.00');
 		if (status === 'stale') {
-			expect(container.textContent).toContain('Last known usage · This credential cannot read OpenAI Platform billing');
 			expect(container.textContent).toContain('$12.34 left');
 		}
 		const link = getByRole('link', { name: 'View balance in OpenAI Platform billing' });
@@ -247,7 +286,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		expect(container.querySelector('.provider-billing-link')).toBeNull();
 	});
 
-	it('keeps stale API balances and explains unavailable billing without inventing zero', async () => {
+	it('keeps stale API balances and actionable billing errors without refresh narration', async () => {
 		rateLimit.applySnapshot({ windows: [], available: false, providers: [
 			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status: 'stale', last_error_kind: 'timeout', credits: { balance_remaining: 12.34 }, fetched_at: 123 },
 			{ provider_id: 'other', provider_type: 'openai', provider_name: 'Other API', status: 'unavailable', last_error_kind: 'billing_access_denied' },
@@ -255,7 +294,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.textContent).toContain('$12.34');
-		expect(container.textContent).toContain('Last known usage · Refresh timed out');
+		expect(container.textContent).not.toMatch(/Last known usage|Refresh timed out/);
 		expect(container.textContent).toContain('This credential cannot read OpenAI Platform billing');
 		expect(container.textContent).not.toContain('$0.00');
 	});

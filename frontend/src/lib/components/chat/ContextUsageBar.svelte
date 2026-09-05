@@ -402,14 +402,15 @@
 	}
 
 	function providerStatusText(pb: ProviderUsageBucket): string | null {
+		if (pb.status !== 'stale' && pb.status !== 'unavailable' && pb.status !== 'never_fetched') return null;
+		// Keep credential problems actionable without narrating background refreshes.
 		const isOpenAI = pb.providerType?.toLowerCase() === 'openai';
-		const reason = pb.lastErrorKind === 'billing_access_denied'
-			? isOpenAI ? 'This credential cannot read OpenAI Platform billing' : 'Billing access required'
-			: pb.lastErrorKind === 'missing_credentials'
-				? isOpenAI ? 'OpenAI API credential required' : 'Sign in to view usage'
-				: pb.lastErrorKind === 'timeout' ? 'Refresh timed out' : 'Usage unavailable';
-		if (pb.status === 'stale') return `Last known usage · ${pb.lastErrorKind ? reason : 'Refresh pending'}`;
-		if (pb.status === 'unavailable' || pb.status === 'never_fetched') return reason;
+		if (pb.lastErrorKind === 'billing_access_denied') {
+			return isOpenAI ? 'This credential cannot read OpenAI Platform billing' : 'Billing access required';
+		}
+		if (pb.lastErrorKind === 'missing_credentials') {
+			return isOpenAI ? 'OpenAI API credential required' : 'Sign in to view usage';
+		}
 		return null;
 	}
 
