@@ -371,6 +371,10 @@ async def get_auth_status(request: Request):
         "authenticated": is_admin_authenticated or is_paired_authenticated,
         "is_admin": is_admin_authenticated,
         "paired_client": is_paired_authenticated,
+        "preference_identity": {
+            "user_type": "admin",
+            "user_id": auth_service.get_admin_username() or "admin",
+        } if is_admin_authenticated or is_paired_authenticated else None,
         "setup_required": auth_service.is_setup_required(),
         "claude_authenticated": claude_authenticated,
         # PA10 (docs/PROVIDER_AGNOSTIC_PLAN.md): "does this install have ANY

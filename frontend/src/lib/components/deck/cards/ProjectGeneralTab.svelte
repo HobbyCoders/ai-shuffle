@@ -10,6 +10,7 @@
 	 * - Read-only project ID
 	 * - Group assignment with select + plus/delete buttons + new group input
 	 */
+	import { untrack } from 'svelte';
 	import { appData, projects } from '$lib/stores/app-data.svelte';
 	import { groups as groupsStore } from '$lib/stores/groups.svelte';
 	import { FolderGit2, Check, Plus, Trash2, Loader2 } from 'lucide-svelte';
@@ -43,12 +44,21 @@
 	let creatingGroup = $state(false);
 	let newGroupName = $state('');
 
-	// Sync edit fields when project changes
+	let previousProject: typeof project;
+	let remoteChange = $state('');
 	$effect(() => {
-		if (project) {
-			editName = project.name;
-			editPath = project.path;
-		}
+		const fresh = project;
+		untrack(() => {
+			const previous = previousProject;
+			const nameClean = !nameLoading && editName === (previous?.name ?? '');
+			const pathClean = !pathLoading && editPath === (previous?.path ?? '');
+			if (fresh) {
+				if (!previous || nameClean) editName = fresh.name;
+				if (!previous || pathClean) editPath = fresh.path;
+				if (previous && ((!nameClean && fresh.name !== previous.name) || (!pathClean && fresh.path !== previous.path))) remoteChange = 'This project changed elsewhere. Your unsaved fields are kept here.';
+			} else if (previous) remoteChange = 'This project was deleted elsewhere. Your unsaved fields are kept below.';
+			previousProject = fresh;
+		});
 	});
 
 	async function handleSaveName() {
@@ -118,6 +128,11 @@
 	}
 </script>
 
+{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
+{#if !project && remoteChange}
+	<label class="block p-4">Unsaved name<input class="inp" bind:value={editName} /></label>
+	<label class="block p-4">Unsaved path<input class="inp" bind:value={editPath} /></label>
+{/if}
 {#if project}
 	<div class="ptab">
 		<div class="set-group">

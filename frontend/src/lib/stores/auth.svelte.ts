@@ -86,7 +86,8 @@ export const auth = {
 	},
 
 	async logout() {
-		_update(s => ({ ...s, loading: true, error: null }));
+		// Retire authenticated sync work before dispatching the logout request.
+		_update(s => ({ ...s, status: s.status ? { ...s.status, authenticated: false } : null, loading: false, error: null }));
 		try {
 			await apiLogout();
 			const status = await getAuthStatus();

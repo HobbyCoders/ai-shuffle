@@ -1,3 +1,5 @@
+import { compatible } from '$lib/services/preference-values';
+import { preferenceSync } from '$lib/services/preferences';
 /**
  * Git Action Preferences Store
  *
@@ -10,7 +12,6 @@
  */
 
 import { browser } from '$app/environment';
-import { getPreference, setPreference } from '$lib/api/client';
 import { createSubscribers } from './store-utils';
 
 // ============================================
@@ -80,15 +81,11 @@ function mergePreferences(parsed: Partial<GitActionPreferences> | null | undefin
 
 const STORAGE_KEY = 'ai-shuffle-git-action-preferences';
 const SERVER_PREFERENCE_KEY = 'git_action_settings';
-const SERVER_SYNC_DEBOUNCE_MS = 500;
 
 // ============================================
 // Server sync state (module-level mutable)
 // ============================================
 
-let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
-let hasSyncedFromServer = false;
-let pendingState: GitActionPreferences | null = null;
 
 // ============================================
 // Persistence helpers
@@ -130,87 +127,22 @@ function saveToLocalStorage(prefs: GitActionPreferences): void {
 /**
  * Load preferences from server
  */
-async function loadFromServer(): Promise<GitActionPreferences | null> {
-	try {
-		const response = await getPreference<GitActionPreferences>(SERVER_PREFERENCE_KEY);
-		return response?.value as GitActionPreferences || null;
-	} catch (e) {
-		console.error('[GitActionPreferences] Failed to load from server:', e);
-		return null;
-	}
-}
+
 
 /**
  * Save preferences to server (debounced)
  */
 function saveToServer(prefs: GitActionPreferences): void {
-	if (!browser) return;
-
-	// Track pending state for flush on unload / debounced localStorage write.
-	pendingState = prefs;
-
-	if (serverSyncTimer) {
-		clearTimeout(serverSyncTimer);
-	}
-
-	serverSyncTimer = setTimeout(async () => {
-		serverSyncTimer = null;
-		// Persist the local copy on the debounced tick (the typing hot path relies
-		// on this instead of a synchronous per-keystroke write).
-		saveToLocalStorage(prefs);
-
-		// Don't write to server until initial sync is complete.
-		if (!hasSyncedFromServer) return;
-
-		try {
-			await setPreference(SERVER_PREFERENCE_KEY, prefs);
-			pendingState = null;
-		} catch (e) {
-			console.error('[GitActionPreferences] Failed to save to server:', e);
-		}
-	}, SERVER_SYNC_DEBOUNCE_MS);
+ preferenceSync.save(SERVER_PREFERENCE_KEY, prefs);
 }
 
 /**
  * Flush pending save immediately (for beforeunload)
  */
-function flushPendingSave(): void {
-	if (!pendingState || !browser) return;
 
-	if (serverSyncTimer) {
-		clearTimeout(serverSyncTimer);
-		serverSyncTimer = null;
-	}
-
-	// Always persist the local copy first so a quick tab close can't lose the
-	// debounced-but-not-yet-written localStorage update from the typing path.
-	saveToLocalStorage(pendingState);
-
-	// Only push to the server once the initial sync has completed (mirrors
-	// saveToServer) so we never clobber unseen server data on a fast close.
-	if (hasSyncedFromServer) {
-		const data = JSON.stringify({
-			key: SERVER_PREFERENCE_KEY,
-			value: pendingState
-		});
-		navigator.sendBeacon(
-			'/api/v1/preferences/' + SERVER_PREFERENCE_KEY,
-			new Blob([data], { type: 'application/json' })
-		);
-	}
-	pendingState = null;
-}
 
 // Register beforeunload handler (guarded against HMR duplicate registration)
-if (browser && !(window as any).__gitActionPrefs_listeners) {
-	(window as any).__gitActionPrefs_listeners = true;
-	window.addEventListener('beforeunload', flushPendingSave);
-	document.addEventListener('visibilitychange', () => {
-		if (document.visibilityState === 'hidden') {
-			flushPendingSave();
-		}
-	});
-}
+// Persistence lifecycle is owned by live-sync, not module-level unload listeners.
 
 // ============================================
 // Reactive State
@@ -271,37 +203,7 @@ function getValue<K extends keyof GitActionPreferences>(key: K): GitActionPrefer
  * Sync preferences from server (call after authentication)
  */
 async function syncFromServer(): Promise<void> {
-	if (!browser) return;
-
-	const serverState = await loadFromServer();
-	const localState = _state;
-
-	// Invariant: never clobber local state while an un-flushed local edit exists.
-	// A pending debounced save means local state is strictly newer than the
-	// server's and will be pushed by that save, so skip the overwrite entirely
-	// (this also races out a resolution that lands mid-typing).
-	const hasPendingEdit = serverSyncTimer !== null || pendingState !== null;
-
-	if (serverState && !hasPendingEdit) {
-		const merged = mergePreferences(serverState);
-
-		// Both sides are built via the same spread + sanitize (canonical key
-		// order) path, so a single whole-object compare is exact.
-		if (JSON.stringify(merged) !== JSON.stringify(localState)) {
-			saveToLocalStorage(merged);
-			_state = merged;
-			_notifySubscribers();
-		}
-	}
-
-	hasSyncedFromServer = true;
-
-	// If no server data and we have non-default local data, push to server.
-	if (!serverState) {
-		if (JSON.stringify(localState) !== JSON.stringify(DEFAULT_PREFERENCES)) {
-			saveToServer(localState);
-		}
-	}
+ await preferenceSync.refresh(SERVER_PREFERENCE_KEY);
 }
 
 /**
@@ -336,3 +238,11 @@ export const gitActionPreferences = {
 	setMergeMethod: (value: MergeMethod) => updatePreference('mergeMethod', value),
 	setCleanupAfterMerge: (value: boolean) => updatePreference('cleanupAfterMerge', value),
 };
+preferenceSync.register(SERVER_PREFERENCE_KEY, {
+ read: () => _state,
+ apply(value) {
+  _state = mergePreferences(compatible(DEFAULT_PREFERENCES, value));
+  saveToLocalStorage(_state);
+  _notifySubscribers();
+ }
+});

@@ -365,3 +365,12 @@ def update_connector_session_ai_session(
             "UPDATE connector_sessions SET session_id = %s, updated_at = %s WHERE id = %s",
             (ai_session_id, now, session_id)
         )
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+_install_resource_sync(
+    globals(), 'connectors',
+    'create_connector update_connector update_connector_status delete_connector claim_connector_runner update_connector_event_dispatched create_connector_event_log create_connector_session update_connector_session_ai_session',
+    scope='admin',
+)

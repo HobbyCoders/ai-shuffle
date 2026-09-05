@@ -464,7 +464,7 @@ class SyncEngine:
     """
 
     def __init__(self):
-        # session_id -> set of DeviceConnection
+        # session_id -> {registration_id -> DeviceConnection}
         self._connections: Dict[str, Dict[str, DeviceConnection]] = {}
         # Lock for thread-safe connection management
         self._lock = asyncio.Lock()
@@ -486,17 +486,17 @@ class SyncEngine:
             if session_id not in self._connections:
                 self._connections[session_id] = {}
 
-            # Retire the existing connection for this device if any. aclose()
-            # cancels AND awaits the old writer task (no leak) and closes its
-            # socket detached, so a zombie peer can't stall registration. The
-            # socket is only closed when it is genuinely a different one — a
-            # re-register of the SAME live socket (watch_session on an open
-            # tab) must not hang up on the user.
-            old_conn = self._connections[session_id].pop(device_id, None)
-            if old_conn is not None:
-                await old_conn.writer.aclose(
-                    close_socket=old_conn.websocket is not websocket
-                )
+            devices = self._connections[session_id]
+            for existing in devices.values():
+                if existing.device_id == device_id and existing.websocket is websocket:
+                    return existing
+            # Persistent device IDs are shared by tabs, not unique to sockets.
+            # Match the user registry: retain the device ID on the connection
+            # and use a private registration key for sibling sockets.
+            from uuid import uuid4
+            registration_id = device_id if device_id not in devices else uuid4().hex
+            while registration_id in devices:
+                registration_id = uuid4().hex
 
             connection = DeviceConnection(
                 device_id=device_id,
@@ -507,10 +507,10 @@ class SyncEngine:
             # it prunes itself from this registry instead of lingering as a
             # zombie entry that every later broadcast has to rediscover.
             connection.writer.set_on_dead(
-                lambda: self._reap_device(device_id, session_id, connection)
+                lambda: self._reap_device(registration_id, session_id, connection)
             )
             connection.writer.start()
-            self._connections[session_id][device_id] = connection
+            self._connections[session_id][registration_id] = connection
 
             # Tell the SDK pool this session is being watched, so its tiered
             # idle policy doesn't treat it as abandoned. No-raise / no-op before
@@ -543,25 +543,21 @@ class SyncEngine:
         Args:
             device_id: The device ID to unregister
             session_id: The session ID to unregister from
-            websocket: Optional - if provided, only unregister if the current connection
-                      uses this exact websocket. This prevents race conditions where
-                      a new connection is established before cleanup of the old one.
+            websocket: Only remove the registration using this exact socket.
+                      Without it, only an unambiguous device registration is removed.
+                      This keeps stale cleanup from evicting a sibling or reconnect.
         """
         writer: Optional[ConnectionWriter] = None
         async with self._lock:
             devices = self._connections.get(session_id)
             if devices is not None:
-                conn = devices.get(device_id)
-                if conn is not None:
-                    # If websocket is provided, only unregister if it matches
-                    if websocket is not None and conn.websocket is not websocket:
-                        logger.debug(
-                            "Device %s has new connection, skipping unregister for old websocket",
-                            device_id,
-                        )
-                        return
-
-                    del devices[device_id]
+                matches = [(key, conn) for key, conn in devices.items()
+                           if conn.device_id == device_id
+                           and (websocket is None or conn.websocket is websocket)]
+                # Without a socket, only an unambiguous registration is safe.
+                if len(matches) == 1:
+                    key, conn = matches[0]
+                    del devices[key]
                     writer = conn.writer
                     logger.info(
                         "Device %s unregistered from session %s", device_id, session_id
@@ -583,7 +579,7 @@ class SyncEngine:
         """Get list of device IDs watching a session"""
         if session_id not in self._connections:
             return []
-        return list(self._connections[session_id].keys())
+        return list(dict.fromkeys(conn.device_id for conn in self._connections[session_id].values()))
 
     def get_device_count(self, session_id: str) -> int:
         """Get number of devices watching a session"""
@@ -592,9 +588,10 @@ class SyncEngine:
     def is_device_watching_session(self, device_id: str, session_id: str) -> bool:
         """Check if a specific device is already watching a session.
 
-        Used to prevent the same device from opening the same session in multiple tabs.
+        Multiple sockets can share the same persistent device ID.
         """
-        return device_id in self._connections.get(session_id, {})
+        return any(conn.device_id == device_id
+                   for conn in self._connections.get(session_id, {}).values())
 
     async def sweep_stale_maps(self) -> int:
         """Sweep orphaned session locks.
@@ -732,7 +729,7 @@ class SyncEngine:
                 return
 
             # Get connections to broadcast to
-            connections = list(devices.values())
+            connections = list(devices.items())
         logger.debug(
             "Broadcasting %s to %d devices for session %s",
             event.event_type, len(connections), session_id,
@@ -756,14 +753,14 @@ class SyncEngine:
         # Send to all devices except the excluded one. No awaits in this loop —
         # a producer stall here is exactly the W2 bug.
         failed_devices = []
-        for conn in connections:
+        for registration_id, conn in connections:
             if exclude_device_id and conn.device_id == exclude_device_id:
                 logger.debug("Skipping source device %s", conn.device_id)
                 continue
 
             logger.debug("Queueing %s for device %s", event.event_type, conn.device_id)
             if not conn.send_text(event_text, coalesce_key):
-                failed_devices.append(conn.device_id)
+                failed_devices.append((registration_id, conn))
 
         # Clean up connections the writer refused (dead / overflowed). Their
         # sockets are already being closed detached by the writer.
@@ -771,8 +768,9 @@ class SyncEngine:
             async with self._lock:
                 devices = self._connections.get(session_id)
                 if devices is not None:
-                    for device_id in failed_devices:
-                        devices.pop(device_id, None)
+                    for registration_id, conn in failed_devices:
+                        if devices.get(registration_id) is conn:
+                            del devices[registration_id]
                     if not devices:
                         self._connections.pop(session_id, None)
 
@@ -905,14 +903,15 @@ class SyncEngine:
             if user_id not in self._user_connections:
                 self._user_connections[user_id] = {}
 
-            # Note: If device already registered, it's the same websocket being re-registered
-            # Just overwrite the entry - no need to close
-
-            # A re-register for the same device replaces the entry; retire the
-            # old writer so its task doesn't leak.
-            old_conn = self._user_connections[user_id].pop(device_id, None)
-            if old_conn is not None and old_conn.websocket is not websocket:
-                await old_conn.writer.aclose()
+            devices = self._user_connections[user_id]
+            for existing in devices.values():
+                if existing.device_id == device_id and existing.websocket is websocket:
+                    return existing
+            # A device ID is shared by browser tabs; it is not a socket ID.
+            from uuid import uuid4
+            registration_id = device_id if device_id not in devices else uuid4().hex
+            while registration_id in devices:
+                registration_id = uuid4().hex
 
             connection = UserDeviceConnection(
                 device_id=device_id,
@@ -920,10 +919,10 @@ class SyncEngine:
                 websocket=websocket
             )
             connection.writer.set_on_dead(
-                lambda: self._reap_user_device(user_id, device_id, connection)
+                lambda: self._reap_user_device(user_id, registration_id, connection)
             )
             connection.writer.start()
-            self._user_connections[user_id][device_id] = connection
+            self._user_connections[user_id][registration_id] = connection
 
             logger.debug("User device registered: user=%s device=%s", user_id, device_id)
             return connection
@@ -955,21 +954,14 @@ class SyncEngine:
         async with self._user_lock:
             devices = self._user_connections.get(user_id)
             if devices is not None:
-                conn = devices.get(device_id)
-                if conn is not None:
-                    # If websocket is provided, only unregister if it matches
-                    if websocket is not None and conn.websocket is not websocket:
-                        logger.debug(
-                            "User device %s has new connection, skipping unregister",
-                            device_id,
-                        )
-                        return
-
-                    del devices[device_id]
+                matches = [(key, conn) for key, conn in devices.items()
+                           if conn.device_id == device_id
+                           and (websocket is None or conn.websocket is websocket)]
+                # Without a socket, only an unambiguous registration is safe.
+                if len(matches) == 1:
+                    key, conn = matches[0]
+                    del devices[key]
                     writer = conn.writer
-                    logger.debug(
-                        "User device unregistered: user=%s device=%s", user_id, device_id
-                    )
 
                 # Clean up empty user entries
                 if not devices:
@@ -1005,7 +997,7 @@ class SyncEngine:
             # Snapshot: list of (device_id, connection) pairs
             targets = [
                 (did, conn) for did, conn in user_devices.items()
-                if did != source_device_id
+                if conn.device_id != source_device_id
             ]
 
         if not targets:
@@ -1041,6 +1033,30 @@ class SyncEngine:
         awaits (W2), so a half-open device can never stall the caller — which on
         several of these paths is the turn pump.
         """
+        from app.core.global_events import global_events
+        if message.get("type") in {
+            "user_session_created", "user_session_updated", "user_session_deleted",
+            "user_session_cleared", "notification",
+        }:
+            # Legacy user IDs are not role-qualified. Session ownership is
+            # authoritative; NotificationOwner carries explicit caller metadata.
+            audience = getattr(user_id, "user_type", None)
+            owner_id = user_id
+            session_id = message.get("session_id")
+            # A notification's referenced session need not belong to its
+            # recipient (e.g. an admin alert about an API user's session).
+            # Only explicit recipient metadata can scope that payload.
+            if audience not in {"admin", "api_user"} and session_id:
+                try:
+                    from app.db import database
+                    from app.db.async_database import run_sync
+                    session = await run_sync(database.get_session, session_id)
+                    if session is not None and "api_user_id" in session:
+                        owner_id = session["api_user_id"]
+                        audience = "admin" if owner_id is None else "api_user"
+                except Exception:
+                    logger.debug("Global lifecycle owner lookup failed", exc_info=True)
+            global_events.lifecycle(owner_id, message, user_type=audience)
         # Snapshot connections under lock, then release before fan-out
         async with self._user_lock:
             user_devices = self._user_connections.get(user_id, {})
@@ -1048,7 +1064,7 @@ class SyncEngine:
                 return
             targets = [
                 (did, conn) for did, conn in user_devices.items()
-                if did != source_device_id
+                if conn.device_id != source_device_id
             ]
 
         if not targets:
@@ -1369,6 +1385,8 @@ class SyncEngine:
         pending" once per connected device). Safe to call more than once, and
         safe to call with nothing connected.
         """
+        from app.core.global_events import global_events
+        await global_events.shutdown()
         writers: List[ConnectionWriter] = []
         async with self._lock:
             for devices in self._connections.values():

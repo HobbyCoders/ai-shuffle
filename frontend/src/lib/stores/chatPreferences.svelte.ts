@@ -1,3 +1,5 @@
+import { compatible } from '$lib/services/preference-values';
+import { preferenceSync } from '$lib/services/preferences';
 /**
  * Chat Preferences Store
  *
@@ -10,7 +12,6 @@
  */
 
 import { browser } from '$app/environment';
-import { getPreference, setPreference } from '$lib/api/client';
 import { createSubscribers } from './store-utils';
 
 // ============================================
@@ -61,15 +62,11 @@ const DEFAULT_PREFERENCES: ChatPreferences = {
 
 const STORAGE_KEY = 'ai-shuffle-chat-preferences';
 const SERVER_PREFERENCE_KEY = 'chat_behavior';
-const SERVER_SYNC_DEBOUNCE_MS = 500;
 
 // ============================================
 // Server sync state (module-level mutable)
 // ============================================
 
-let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
-let hasSyncedFromServer = false;
-let pendingState: ChatPreferences | null = null;
 
 // ============================================
 // Persistence helpers
@@ -111,79 +108,22 @@ function saveToLocalStorage(prefs: ChatPreferences): void {
 /**
  * Load preferences from server
  */
-async function loadFromServer(): Promise<ChatPreferences | null> {
-	try {
-		const response = await getPreference<ChatPreferences>(SERVER_PREFERENCE_KEY);
-		return response?.value as ChatPreferences || null;
-	} catch (e) {
-		console.error('[ChatPreferences] Failed to load from server:', e);
-		return null;
-	}
-}
+
 
 /**
  * Save preferences to server (debounced)
  */
 function saveToServer(prefs: ChatPreferences): void {
-	if (!browser) return;
-
-	// Track pending state for flush on unload
-	pendingState = prefs;
-
-	// Don't write to server until initial sync is complete
-	// This prevents localStorage data from overwriting newer server data
-	if (!hasSyncedFromServer) {
-		return;
-	}
-
-	if (serverSyncTimer) {
-		clearTimeout(serverSyncTimer);
-	}
-
-	serverSyncTimer = setTimeout(async () => {
-		try {
-			await setPreference(SERVER_PREFERENCE_KEY, prefs);
-			pendingState = null;
-		} catch (e) {
-			console.error('[ChatPreferences] Failed to save to server:', e);
-		}
-		serverSyncTimer = null;
-	}, SERVER_SYNC_DEBOUNCE_MS);
+ preferenceSync.save(SERVER_PREFERENCE_KEY, prefs);
 }
 
 /**
  * Flush pending save immediately (for beforeunload)
  */
-function flushPendingSave(): void {
-	if (!pendingState || !hasSyncedFromServer || !browser) return;
 
-	if (serverSyncTimer) {
-		clearTimeout(serverSyncTimer);
-		serverSyncTimer = null;
-	}
-
-	// Use sendBeacon for reliable delivery during page unload
-	const data = JSON.stringify({
-		key: SERVER_PREFERENCE_KEY,
-		value: pendingState
-	});
-	navigator.sendBeacon(
-		'/api/v1/preferences/' + SERVER_PREFERENCE_KEY,
-		new Blob([data], { type: 'application/json' })
-	);
-	pendingState = null;
-}
 
 // Register beforeunload handler (guarded against HMR duplicate registration)
-if (browser && !(window as any).__chatPrefs_listeners) {
-	(window as any).__chatPrefs_listeners = true;
-	window.addEventListener('beforeunload', flushPendingSave);
-	document.addEventListener('visibilitychange', () => {
-		if (document.visibilityState === 'hidden') {
-			flushPendingSave();
-		}
-	});
-}
+// Persistence lifecycle is owned by live-sync, not module-level unload listeners.
 
 // ============================================
 // Reactive State
@@ -247,44 +187,7 @@ function getValue<K extends keyof ChatPreferences>(key: K): ChatPreferences[K] {
  * If server is empty but local has data, push local to server (migration)
  */
 async function syncFromServer(): Promise<void> {
-	if (!browser) return;
-
-	const serverState = await loadFromServer();
-	const localState = _state;
-
-	if (serverState) {
-		// Server has data - it's the source of truth
-		// Merge with defaults to handle new preference keys
-		const merged = { ...DEFAULT_PREFERENCES, ...serverState };
-
-		// Check if server differs from local
-		const isDifferent = Object.keys(merged).some(
-			key => merged[key as keyof ChatPreferences] !== localState[key as keyof ChatPreferences]
-		);
-
-		if (isDifferent) {
-			// Update localStorage
-			saveToLocalStorage(merged);
-			// Update store
-			_state = merged;
-			_notifySubscribers();
-		}
-	} else {
-		// No server data - push local data to server (migration)
-	}
-
-	// Mark sync as complete - now server writes are allowed
-	hasSyncedFromServer = true;
-
-	// If there was no server data and we have non-default local data, save it
-	if (!serverState) {
-		const hasNonDefaults = Object.keys(localState).some(
-			key => localState[key as keyof ChatPreferences] !== DEFAULT_PREFERENCES[key as keyof ChatPreferences]
-		);
-		if (hasNonDefaults) {
-			saveToServer(localState);
-		}
-	}
+ await preferenceSync.refresh(SERVER_PREFERENCE_KEY);
 }
 
 /**
@@ -324,3 +227,11 @@ export const chatPreferences = {
 	setShowMessageTimestamps: (value: boolean) => updatePreference('showMessageTimestamps', value),
 	setCompactMessageView: (value: boolean) => updatePreference('compactMessageView', value),
 };
+preferenceSync.register(SERVER_PREFERENCE_KEY, {
+ read: () => _state,
+ apply(value) {
+  _state = compatible(DEFAULT_PREFERENCES, value);
+  saveToLocalStorage(_state);
+  _notifySubscribers();
+ }
+});

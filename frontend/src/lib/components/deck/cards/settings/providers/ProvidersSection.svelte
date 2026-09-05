@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * ProvidersSection — the "Providers" settings tab (Chunk 4 build-out).
 	 *
@@ -128,6 +129,14 @@
 				// Leave the row on its defaults — a failed read must not block the
 				// rest of the providers surface.
 			});
+	});
+	watchResources(['settings'], async () => {
+		const before = JSON.stringify([textGenModel, textGenEffort]);
+		const settings = await loadTextGenerationSettings();
+		if (!textGenSaving && before === JSON.stringify([textGenModel, textGenEffort])) {
+			textGenModel = settings.text_generation_model;
+			textGenEffort = settings.text_generation_effort;
+		}
 	});
 </script>
 

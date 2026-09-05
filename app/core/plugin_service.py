@@ -1154,3 +1154,8 @@ def _parse_plugin_hook_file(hook_file: Path, plugin: "PluginInfo") -> Optional[D
     Parse a plugin hook markdown file and extract metadata.
     """
     return _hooks_mod._parse_plugin_hook_file(hook_file, plugin)
+
+
+from app.core.resource_sync import install_service_mutations as _install_resource_sync
+
+_install_resource_sync(PluginService, 'plugins', 'add_marketplace remove_marketplace sync_marketplace sync_all_marketplaces install_plugin install_plugins_batch uninstall_plugin enable_plugin disable_plugin install_plugin_to_project uninstall_project_plugin enable_project_plugin disable_project_plugin update_plugin update_all_plugins save_auto_update_settings')

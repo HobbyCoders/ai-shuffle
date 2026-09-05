@@ -97,7 +97,33 @@
 		SubagentStop: 'Fires when a subagent completes',
 		Notification: 'Fires when Claude sends a notification'
 	};
+	let remoteChange = $state('');
+	function snapshot() { return JSON.stringify([name, scopeProjectId, event, hookType, command, timeout, url, secret, toolMatcher, messageTemplate, enabled]); }
+	let baseline = snapshot();
+	export function refreshRemote(fresh: Hook | undefined, saving = false): boolean {
+		if (saving || snapshot() !== baseline) {
+			remoteChange = fresh ? 'This hook changed elsewhere. Your unsaved changes are kept here.' : 'This hook was deleted elsewhere. Copy your unsaved changes before leaving.';
+			return false;
+		}
+		if (!fresh) return true;
+		name = fresh.name;
+		scopeProjectId = fresh.project_id ?? null;
+		event = fresh.event;
+		hookType = fresh.hook_type;
+		command = fresh.command || '';
+		timeout = fresh.timeout || 30000;
+		url = fresh.url || '';
+		secret = fresh.secret || '';
+		toolMatcher = fresh.tool_matcher || '';
+		messageTemplate = fresh.message_template || '';
+		enabled = fresh.enabled;
+		baseline = snapshot();
+		remoteChange = '';
+		return true;
+	}
 </script>
+
+{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 
 <!-- Trigger -->
 <div class="set-group">

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * RateLimitManager - Admin component for managing rate limit configurations
 	 *
@@ -49,8 +50,8 @@
 	// Queue status
 	let queueInfo = $state<{ queue_size: number; max_size: number; process_time_estimate: number } | null>(null);
 
-	async function loadData() {
-		loading = true;
+	async function loadData(quiet = false) {
+		if (!quiet) loading = true;
 		error = '';
 		try {
 			const [configsRes, queueRes] = await Promise.all([
@@ -160,8 +161,9 @@
 			priority: config.priority,
 			is_unlimited: config.is_unlimited
 		};
+		remoteBaseline = remoteSnapshot();
+		remoteChange = '';
 	}
-
 	function resetForm() {
 		formData = {
 			target_type: 'default',
@@ -195,7 +197,25 @@
 	onMount(() => {
 		loadData();
 	});
+	let remoteChange = $state('');
+	let remoteBaseline = '';
+	function remoteSnapshot() { return JSON.stringify([formData]); }
+	watchResources(['settings', 'agents', 'projects'], async () => {
+		const selected = editingConfig;
+		const before = remoteSnapshot();
+		await loadData(true);
+		if (!selected || editingConfig !== selected) return;
+		const fresh = configs.find((item) => item.id === selected.id);
+		if (false || before !== remoteSnapshot() || remoteSnapshot() !== remoteBaseline) {
+			remoteChange = fresh ? 'This item changed elsewhere. Your unsaved fields are kept here.' : 'This item was deleted elsewhere. Copy your unsaved fields before leaving.';
+			return;
+		}
+		if (fresh) startEdit(fresh);
+		else { editingConfig = null; remoteChange = 'This item was deleted elsewhere.'; }
+	});
 </script>
+
+{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 
 <div class="rate-limit-manager">
 	<div class="header">

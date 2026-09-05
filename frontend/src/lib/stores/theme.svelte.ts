@@ -1,3 +1,4 @@
+import { preferenceSync } from '$lib/services/preferences';
 /**
  * Theme store for dark/light mode management and theme presets
  *
@@ -20,7 +21,6 @@ import {
 	type ThemePreset,
 	type ThemeStyles
 } from '$lib/themes/presets';
-import { getPreference, setPreference } from '$lib/api/client';
 import { createSubscribers } from './store-utils';
 
 type Theme = 'light' | 'dark' | 'system';
@@ -37,8 +37,6 @@ const DIRTY_FLAG_KEY = 'ai-shuffle-theme-dirty';
 const SERVER_PREFERENCE_KEY = 'theme';
 
 // Server sync state
-let hasSyncedFromServer = false;
-let pendingThemeState: { preference: Theme; presetId: string | null } | null = null;
 
 // Server preference structure
 interface ServerThemePreference {
@@ -50,72 +48,16 @@ interface ServerThemePreference {
 // Helper functions (unchanged from original)
 // ============================================================================
 
-async function loadFromServer(): Promise<ServerThemePreference | null> {
-	try {
-		const response = await getPreference<ServerThemePreference>(SERVER_PREFERENCE_KEY);
-		return (response?.value as ServerThemePreference) || null;
-	} catch (e) {
-		console.error('[Theme] Failed to load from server:', e);
-		return null;
-	}
-}
-
-function markDirty() {
-	if (browser) localStorage.setItem(DIRTY_FLAG_KEY, 'true');
-}
-
 function clearDirty() {
 	if (browser) localStorage.removeItem(DIRTY_FLAG_KEY);
 }
 
-function isDirty(): boolean {
-	if (!browser) return false;
-	return localStorage.getItem(DIRTY_FLAG_KEY) === 'true';
-}
-
 function saveToServer(preference: Theme, presetId: string | null) {
-	if (!browser) return;
-
-	pendingThemeState = { preference, presetId };
-	markDirty();
-
-	if (!hasSyncedFromServer) return;
-
-	(async () => {
-		try {
-			await setPreference(SERVER_PREFERENCE_KEY, { preference, presetId });
-			clearDirty();
-			pendingThemeState = null;
-		} catch (e) {
-			console.error('[Theme] Failed to save to server:', e);
-		}
-	})();
-}
-
-function flushPendingThemeSave() {
-	if (!pendingThemeState || !hasSyncedFromServer || !browser) return;
-
-	const data = JSON.stringify({
-		key: SERVER_PREFERENCE_KEY,
-		value: pendingThemeState
-	});
-	navigator.sendBeacon(
-		'/api/v1/preferences/' + SERVER_PREFERENCE_KEY,
-		new Blob([data], { type: 'application/json' })
-	);
-	pendingThemeState = null;
+ preferenceSync.save(SERVER_PREFERENCE_KEY, { preference, presetId });
 }
 
 // Register beforeunload handler (guarded against HMR duplicate registration)
-if (browser && !(window as any).__theme_listeners) {
-	(window as any).__theme_listeners = true;
-	window.addEventListener('beforeunload', flushPendingThemeSave);
-	document.addEventListener('visibilitychange', () => {
-		if (document.visibilityState === 'hidden') {
-			flushPendingThemeSave();
-		}
-	});
-}
+// Persistence lifecycle is owned by live-sync, not module-level unload listeners.
 
 function getSystemTheme(): 'light' | 'dark' {
 	if (!browser) return 'dark';
@@ -400,44 +342,8 @@ export const theme = {
 	 * Server is the source of truth UNLESS local has unsaved changes (dirty flag).
 	 */
 	async syncFromServer() {
-		if (!browser) return;
-
-		const serverState = await loadFromServer();
-		const localState = _state;
-		const localIsDirty = isDirty();
-
-		if (localIsDirty) {
-			hasSyncedFromServer = true;
-			saveToServer(localState.preference, localState.presetId);
-			return;
-		}
-
-		if (serverState) {
-			const { preference, presetId } = serverState;
-
-			if (preference !== localState.preference || presetId !== localState.presetId) {
-				localStorage.setItem(STORAGE_KEY, preference);
-				if (presetId) {
-					localStorage.setItem(PRESET_STORAGE_KEY, presetId);
-				} else {
-					localStorage.removeItem(PRESET_STORAGE_KEY);
-				}
-
-				const resolved = resolveTheme(preference);
-				applyTheme(resolved);
-				const preset = presetId ? getPresetById(presetId) : null;
-				applyPresetStyles(preset ?? null, resolved);
-				_state = { preference, resolved, presetId };
-				_notifySubscribers();
-			}
-		}
-
-		hasSyncedFromServer = true;
-
-		if (!serverState && (localState.preference !== 'system' || localState.presetId)) {
-			saveToServer(localState.preference, localState.presetId);
-		}
-	}
+ await preferenceSync.refresh(SERVER_PREFERENCE_KEY);
+}
 };
 
 // ============================================================================
@@ -449,3 +355,18 @@ export const currentPresetId = createDerived(() => _state.presetId);
 
 // Re-export theme presets for use in UI
 export { themePresets };
+preferenceSync.register(SERVER_PREFERENCE_KEY, {
+ read: () => ({ preference: _state.preference, presetId: _state.presetId }),
+ apply(value) {
+  const raw = value as Partial<ServerThemePreference> | undefined;
+  const preference = raw && ['system', 'dark', 'light'].includes(raw.preference!) ? raw.preference! : 'system';
+  const presetId = typeof raw?.presetId === 'string' ? raw.presetId : null;
+  const resolved = resolveTheme(preference);
+  if (browser) {
+   localStorage.setItem(STORAGE_KEY, preference);
+   if (presetId) localStorage.setItem(PRESET_STORAGE_KEY, presetId); else localStorage.removeItem(PRESET_STORAGE_KEY);
+   clearDirty(); applyTheme(resolved); applyPresetStyles(presetId ? getPresetById(presetId) ?? null : null, resolved);
+  }
+  _state = { preference, presetId, resolved }; _notifySubscribers();
+ }
+});

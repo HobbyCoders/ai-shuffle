@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * AIToolsSettings — Complete AI tools configuration panel
 	 *
@@ -75,20 +76,25 @@
 		return () => unsubCatalog();
 	});
 
+	let savedSettings: Record<string, unknown> = {};
 	async function loadSettings() {
+		const before = { ...modelSelections, ...settingValues };
+		const wasLoaded = loaded;
 		try {
 			const settings = await api.get<Record<string, unknown>>('/settings/integrations');
 
 			// Model selections from backend
 			const defaults = getDefaultModelSelections();
 			for (const [key, defaultVal] of Object.entries(defaults)) {
-				modelSelections[key] = (settings[key] as string) || defaultVal;
+				const fresh = (settings[key] as string) || defaultVal;
+				if (!wasLoaded || (modelSelections[key] === before[key] && before[key] === savedSettings[key])) modelSelections[key] = fresh;
+				savedSettings[key] = fresh;
 			}
 			// Trigger reactivity
 			modelSelections = { ...modelSelections };
 
 			// Per-model setting values
-			settingValues = {
+			const freshValues = {
 				image_aspect_ratio: (settings.image_aspect_ratio as string) || '',
 				image_resolution: (settings.image_resolution as string) || '',
 				video_aspect_ratio: (settings.video_aspect_ratio as string) || '',
@@ -99,6 +105,10 @@
 				tts_output_format: (settings.tts_output_format as string) || 'wav',
 			};
 
+			for (const [key, fresh] of Object.entries(freshValues)) {
+				if (!wasLoaded || (settingValues[key] === before[key] && before[key] === savedSettings[key])) settingValues[key] = fresh;
+				savedSettings[key] = fresh;
+			}
 			loaded = true;
 		} catch (e) {
 			console.error('Failed to load AI settings:', e);
@@ -141,6 +151,7 @@
 			}
 		}
 	}
+	watchResources(['settings'], () => loadSettings());
 </script>
 
 <div class="ai-tools-settings">

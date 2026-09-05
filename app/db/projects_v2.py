@@ -156,3 +156,12 @@ def list_projects_v2() -> List[Dict[str, Any]]:
         cursor.execute("SELECT * FROM projects_v2 ORDER BY created_at DESC, id ASC")
         rows = cursor.fetchall()
     return _rows(rows)
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+_install_resource_sync(
+    globals(), 'projects',
+    'upsert_project',
+    scope='shared',
+)

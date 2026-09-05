@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * MediaToolsSection — the "Media & tools" settings group (Chunk 8, plan §1.5).
 	 *
@@ -124,6 +125,7 @@
 
 	// ----- Manage media models drawer (fold of the old AI-models tab, ruling D5) -----
 	let manageMediaOpen = $state(false);
+	watchResources(['settings'], () => loadKeyStatus());
 </script>
 
 <!-- Media & tools -->

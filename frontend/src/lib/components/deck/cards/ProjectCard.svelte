@@ -91,7 +91,11 @@
 	}
 
 	// Get selected project
-	const selectedProject = $derived($projects.find((p) => p.id === selectedProjectId));
+	// Keep the mounted detail shell after deletion so child drafts remain recoverable.
+	let retainedProject = $state<(typeof $projects)[number] | undefined>();
+	const liveProject = $derived($projects.find((p) => p.id === selectedProjectId));
+	$effect(() => { if (liveProject) retainedProject = liveProject; });
+	const selectedProject = $derived(liveProject ?? (retainedProject?.id === selectedProjectId ? retainedProject : undefined));
 
 	// Filtered projects
 	const filteredProjects = $derived.by(() => {
@@ -149,6 +153,7 @@
 <svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
 {#if viewMode === 'detail' && selectedProject}
+	{#if !liveProject}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">This project was deleted elsewhere. Any unsaved fields remain available below until you leave.</p>{/if}
 	<!-- ─────────────────────────── DETAIL ─────────────────────────── -->
 	<div class="pc">
 		<div class="pc-scroll">

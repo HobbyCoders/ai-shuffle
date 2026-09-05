@@ -98,13 +98,15 @@ async def set_preference(
     request: Request,
     key: str,
     body: PreferenceValue,
+    only_if_missing: bool = False,
     token: str = Depends(require_auth)
 ) -> PreferenceResponse:
     """Set a preference value"""
     user_type, user_id = get_user_identity(request)
 
     result = await run_sync(
-        database.set_user_preference, user_type, user_id, key, body.value
+        database.set_user_preference, user_type, user_id, key, body.value,
+        only_if_missing=only_if_missing
     )
     return PreferenceResponse(
         key=result["key"],
@@ -118,6 +120,7 @@ async def set_preference_post(
     request: Request,
     key: str,
     body: PreferenceValue,
+    only_if_missing: bool = False,
     token: str = Depends(require_auth)
 ) -> PreferenceResponse:
     """Set a preference value via POST.
@@ -129,7 +132,8 @@ async def set_preference_post(
     user_type, user_id = get_user_identity(request)
 
     result = await run_sync(
-        database.set_user_preference, user_type, user_id, key, body.value
+        database.set_user_preference, user_type, user_id, key, body.value,
+        only_if_missing=only_if_missing
     )
     return PreferenceResponse(
         key=result["key"],

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * ProjectAgentsTab - Agent list tab for project detail view
 	 *
@@ -91,6 +92,7 @@
 			deleteLoading = false;
 		}
 	}
+	watchResources(["agents", "projects"], () => projectId ? projectAgents.loadAgents(projectId) : undefined);
 </script>
 
 <svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />

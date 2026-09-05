@@ -10,12 +10,6 @@
 	import { auth, isAuthenticated, setupRequired, claudeAuthenticated, onboardingComplete } from '$lib/stores/auth.svelte';
 	import { theme } from '$lib/stores/theme.svelte';
 	import { pwa } from '$lib/stores/pwa.svelte';
-	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
-	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
-	import { files } from '$lib/stores/files.svelte';
-	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
-	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
-import { syncFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 	import { ensureModelRegistryHydrated } from '$lib/constants/models';
 	import { onDestroy } from 'svelte';
 	import type { Snippet } from 'svelte';
@@ -24,6 +18,8 @@ import { syncFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { installGlobalErrorHandlers } from '$lib/services/error-reporter';
 	import { bindVisualViewport } from '$lib/utils/visual-viewport';
+ import { startLiveSync } from '$lib/services/live-sync';
+ let teardownLiveSync: (() => void) | undefined;
 
 	let { children }: { children: Snippet } = $props();
 
@@ -101,6 +97,7 @@ import { syncFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 
 		// Initialize theme on mount (applies from localStorage immediately to prevent flash)
 		theme.init();
+		teardownLiveSync = startLiveSync();
 
 		// Initialize PWA features
 		pwa.init();
@@ -117,13 +114,6 @@ import { syncFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 				// Sync all settings from server (database is source of truth)
 				// These run in parallel for faster startup
 				await Promise.all([
-					chatPreferences.load(),
-					hotkeyPreferences.syncFromServer(),
-					theme.syncFromServer(),
-					files.syncFromServer(),
-					gitActionPreferences.syncFromServer(),
-					timezonePreference.syncFromServer(),
-					syncFavoriteModels(),
 					ensureModelRegistryHydrated(),
 					// Seed the notification bell from persisted history.
 					notify.loadHistory()
@@ -158,6 +148,7 @@ import { syncFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 	});
 
 	onDestroy(() => {
+ teardownLiveSync?.();
 		stopAuthPoll();
 		document.removeEventListener('visibilitychange', handleAuthVisibility);
 		teardownErrorHandlers?.();

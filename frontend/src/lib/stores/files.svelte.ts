@@ -1,3 +1,4 @@
+import { preferenceSync } from '$lib/services/preferences';
 /**
  * Files Store - State management for the Files workspace
  *
@@ -13,7 +14,6 @@
  */
 
 import { browser } from '$app/environment';
-import { getPreference, setPreference } from '$lib/api/client';
 import { createSubscribers } from './store-utils';
 
 // ============================================================================
@@ -54,15 +54,11 @@ interface FilesState {
 
 const STORAGE_KEY = 'files_state';
 const SERVER_PREFERENCE_KEY = 'files_preferences';
-const SERVER_SYNC_DEBOUNCE_MS = 500;
 
 // ============================================================================
 // Module-level mutable state (timers, flags)
 // ============================================================================
 
-let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
-let hasSyncedFromServer = false;
-let pendingPrefs: FilesPreferences | null = null;
 
 // ============================================================================
 // Server preferences type (subset of FilesState)
@@ -82,75 +78,22 @@ interface FilesPreferences {
 /**
  * Load file preferences from server
  */
-async function loadFromServer(): Promise<FilesPreferences | null> {
-	try {
-		const response = await getPreference<FilesPreferences>(SERVER_PREFERENCE_KEY);
-		return (response?.value as FilesPreferences) || null;
-	} catch (e) {
-		console.error('[Files] Failed to load preferences from server:', e);
-		return null;
-	}
-}
+
 
 /**
  * Save file preferences to server (debounced)
  */
 function saveToServer(prefs: FilesPreferences) {
-	if (!browser) return;
-
-	pendingPrefs = prefs;
-
-	if (!hasSyncedFromServer) {
-		return;
-	}
-
-	if (serverSyncTimer) {
-		clearTimeout(serverSyncTimer);
-	}
-
-	serverSyncTimer = setTimeout(async () => {
-		try {
-			await setPreference(SERVER_PREFERENCE_KEY, prefs);
-			pendingPrefs = null;
-		} catch (e) {
-			console.error('[Files] Failed to save preferences to server:', e);
-		}
-		serverSyncTimer = null;
-	}, SERVER_SYNC_DEBOUNCE_MS);
+ preferenceSync.save(SERVER_PREFERENCE_KEY, prefs);
 }
 
 /**
  * Flush pending save on unload using sendBeacon
  */
-function flushPendingFilesSave() {
-	if (!pendingPrefs || !hasSyncedFromServer || !browser) return;
 
-	if (serverSyncTimer) {
-		clearTimeout(serverSyncTimer);
-		serverSyncTimer = null;
-	}
-
-	const data = JSON.stringify({
-		key: SERVER_PREFERENCE_KEY,
-		value: pendingPrefs,
-	});
-	window.navigator.sendBeacon(
-		'/api/v1/preferences/' + SERVER_PREFERENCE_KEY,
-		new Blob([data], { type: 'application/json' })
-	);
-	pendingPrefs = null;
-}
 
 // Register beforeunload + visibilitychange handlers (guarded against HMR duplicate registration)
-if (browser && !(window as any).__files_listeners) {
-	(window as any).__files_listeners = true;
-	window.addEventListener('beforeunload', flushPendingFilesSave);
-	document.addEventListener('visibilitychange', () => {
-		if (document.visibilityState === 'hidden') {
-			flushPendingFilesSave();
-		}
-	});
-}
+// Persistence lifecycle is owned by live-sync, not module-level unload listeners.
 
 function loadFromStorage(): Partial<FilesState> | null {
 	if (!browser) return null;
@@ -569,43 +512,8 @@ export const files = {
 	 * Server is the source of truth for UI preferences
 	 */
 	async syncFromServer(): Promise<void> {
-		if (!browser) return;
-
-		const serverPrefs = await loadFromServer();
-
-		if (serverPrefs) {
-			// Server has preferences - update local state
-			const needsUpdate =
-				serverPrefs.viewMode !== _state.viewMode ||
-				serverPrefs.sortBy !== _state.sortBy ||
-				serverPrefs.sortAsc !== _state.sortAsc ||
-				serverPrefs.showHidden !== _state.showHidden;
-
-			if (needsUpdate) {
-				// Update localStorage
-				localStorage.setItem(STORAGE_KEY, JSON.stringify(serverPrefs));
-
-				// Update store
-				_update((s) => ({
-					...s,
-					...serverPrefs,
-				}));
-			}
-		}
-
-		hasSyncedFromServer = true;
-
-		// If no server data, save current local preferences to server
-		if (!serverPrefs) {
-			const prefs: FilesPreferences = {
-				viewMode: _state.viewMode,
-				sortBy: _state.sortBy,
-				sortAsc: _state.sortAsc,
-				showHidden: _state.showHidden,
-			};
-			saveToServer(prefs);
-		}
-	},
+ await preferenceSync.refresh(SERVER_PREFERENCE_KEY);
+},
 
 	// ========================================================================
 	// Reset
@@ -674,4 +582,20 @@ export const sortedFiles = createDerived(() => {
 	});
 
 	return sorted;
+});
+preferenceSync.register(SERVER_PREFERENCE_KEY, {
+ read: () => ({ viewMode: _state.viewMode, sortBy: _state.sortBy, sortAsc: _state.sortAsc, showHidden: _state.showHidden }),
+ apply(value) {
+  const raw = (value ?? {}) as Partial<FilesPreferences>;
+  const prefs: FilesPreferences = {
+   viewMode: raw.viewMode === 'grid' ? 'grid' : 'list',
+   sortBy: raw.sortBy && ['name', 'size', 'modified', 'type'].includes(raw.sortBy) ? raw.sortBy : 'name',
+   sortAsc: typeof raw.sortAsc === 'boolean' ? raw.sortAsc : true,
+   showHidden: typeof raw.showHidden === 'boolean' ? raw.showHidden : false
+  };
+  const changedHidden = prefs.showHidden !== _state.showHidden;
+  _update(s => ({ ...s, ...prefs }));
+  if (browser) localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+  if (changedHidden && _state.currentPath) void files.loadFiles();
+ }
 });

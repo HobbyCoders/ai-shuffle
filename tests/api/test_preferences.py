@@ -409,7 +409,7 @@ class TestSetPreference:
         assert result.updated_at == "2024-01-02T00:00:00"
         mock_database.set_user_preference.assert_called_once_with(
             "api_user", "test-api-user-id", "openTabs",
-            ["session-1", "session-2", "session-3"]
+            ["session-1", "session-2", "session-3"], only_if_missing=False
         )
 
     @pytest.mark.asyncio
@@ -588,7 +588,7 @@ class TestSetPreference:
                     )
 
         mock_database.set_user_preference.assert_called_once_with(
-            "admin", "superadmin", "adminSetting", "secret"
+            "admin", "superadmin", "adminSetting", "secret", only_if_missing=False
         )
 
     @pytest.mark.asyncio
@@ -801,7 +801,7 @@ class TestSetPreferencePost:
         assert result.updated_at == "2024-01-02T00:00:00"
         mock_database.set_user_preference.assert_called_once_with(
             "api_user", "test-api-user-id", "theme_settings",
-            {"preset": "dark", "customColors": []}
+            {"preset": "dark", "customColors": []}, only_if_missing=False
         )
 
     @pytest.mark.asyncio
@@ -863,7 +863,7 @@ class TestSetPreferencePost:
                     )
 
         mock_database.set_user_preference.assert_called_once_with(
-            "admin", "admin_user", "admin_setting", "value"
+            "admin", "admin_user", "admin_setting", "value", only_if_missing=False
         )
 
     @pytest.mark.asyncio

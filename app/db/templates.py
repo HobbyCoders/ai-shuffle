@@ -177,3 +177,12 @@ def set_template_builtin(template_id: str, is_builtin: bool) -> bool:
             (is_builtin, datetime.now(timezone.utc).isoformat(), template_id)
         )
         return cursor.rowcount > 0
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+_install_resource_sync(
+    globals(), 'templates',
+    'create_template update_template delete_template set_template_builtin',
+    scope='shared',
+)

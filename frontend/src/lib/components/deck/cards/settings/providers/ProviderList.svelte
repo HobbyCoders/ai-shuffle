@@ -29,7 +29,7 @@
 	 * confirms, and the `providers` store calls (which re-hydrate the model
 	 * registry — landmine L4).
 	 */
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { X } from 'lucide-svelte';
 	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
 	import { claudeAuthenticated, claudeTokenValid } from '$lib/stores/auth.svelte';
@@ -109,6 +109,7 @@
 	// One panel at a time. Any armed confirm or open inline form belongs to the
 	// panel that was showing, so switching rows drops it.
 	function toggleExpand(key: string) {
+		expandedRows = [];
 		expandedKey = expandedKey === key ? null : key;
 		confirmDeleteClaude = false;
 		confirmDeleteKey = false;
@@ -145,6 +146,21 @@
 		return 'custom';
 	}
 
+	let expandedRows = $state<ModelProvider[]>([]);
+	$effect(() => {
+		const key = expandedKey;
+		const live = s.providers;
+		untrack(() => {
+			if (!key) { expandedRows = []; return; }
+			// Keep the expanded bucket's row identities until collapse, including a
+			// remotely deleted row whose child may hold a write-only token.
+			const kind = key.split(':')[0].replace('-key', '') as SubKind;
+			const relevant = live.filter((row) => classifyProvider(row) === kind);
+			const retained = expandedRows.filter((row) => classifyProvider(row) === kind);
+			expandedRows = retained.map((row) => relevant.find((fresh) => fresh.id === row.id) ?? row)
+				.concat(relevant.filter((row) => !retained.some((old) => old.id === row.id)));
+		});
+	});
 	const byKind = $derived.by(() => {
 		const buckets: Record<SubKind, ModelProvider[]> = {
 			chatgpt: [],
@@ -155,6 +171,11 @@
 			custom: []
 		};
 		for (const p of s.providers) buckets[classifyProvider(p)].push(p);
+		if (expandedRows.length) {
+			const kind = classifyProvider(expandedRows[0]);
+			buckets[kind] = expandedRows.map((row) => s.providers.find((fresh) => fresh.id === row.id) ?? row)
+				.concat(buckets[kind].filter((row) => !expandedRows.some((old) => old.id === row.id)));
+		}
 		return buckets;
 	});
 
@@ -264,6 +285,8 @@
 		confirmDeleteId = null;
 	}
 	async function confirmDelete(id: string) {
+		expandedRows = [];
+		expandedKey = null;
 		confirmDeleteId = null;
 		await providers.deleteProvider(id);
 	}
@@ -410,6 +433,9 @@
 	<div class="prov-empty">Loading providers…</div>
 {/if}
 
+{#if expandedRows.some((row) => !s.providers.some((fresh) => fresh.id === row.id))}
+	<p class="prov-note" role="status">This provider was removed elsewhere. Your open settings and any typed token remain here until you close the row.</p>
+{/if}
 <div class="prov-list">
 	<!-- 1. Claude subscription (native auth, no toggle). -->
 	<ProviderRow

@@ -324,16 +324,80 @@ async def test_unregister_with_mismatched_websocket_keeps_the_new_writer(engine)
 
 
 @pytest.mark.asyncio
-async def test_reregistering_a_device_retires_the_old_writer(engine):
-    first = await engine.register_device("dev-1", "sess-1", _HealthyWebSocket())
-    old_task = first.writer._task
+async def test_session_sibling_sockets_are_idempotent_ordered_and_cleanup_is_scoped(engine):
+    first_ws, second_ws = _HealthyWebSocket(), _HealthyWebSocket()
+    first = await engine.register_device("dev-1", "sess-1", first_ws)
+    second = await engine.register_device("dev-1", "sess-1", second_ws)
+    assert await engine.register_device("dev-1", "sess-1", first_ws) is first
+    assert await engine.register_device("dev-1", "sess-1", second_ws) is second
+    assert engine.get_device_count("sess-1") == 2
+    assert engine.get_connected_devices("sess-1") == ["dev-1"]
+    first_ws.close.assert_not_called()
+    second_ws.close.assert_not_called()
 
-    second = await engine.register_device("dev-1", "sess-1", _HealthyWebSocket())
+    # Ambiguous legacy cleanup cannot remove either tab.
+    await engine.unregister_device("dev-1", "sess-1")
+    assert engine.get_device_count("sess-1") == 2
+    for i in range(3):
+        await engine.broadcast_event(SyncEvent(
+            event_type="stream_frame", session_id="sess-1", data={"i": i}))
+    assert await _until(lambda: len(first_ws.sent) == len(second_ws.sent) == 3)
+    assert [json.loads(t)["data"]["i"] for t in first_ws.sent] == [0, 1, 2]
+    assert first_ws.sent == second_ws.sent
 
-    assert old_task.done()
-    assert first.writer.alive is False
-    assert second.writer.alive is True
-    assert engine._connections["sess-1"]["dev-1"] is second
+    first_task = first.writer._task
+    await engine.unregister_device("dev-1", "sess-1", first_ws)
+    assert first_task.done()
+    assert second.writer.alive
+    assert engine.is_device_watching_session("dev-1", "sess-1")
+    assert engine.get_connected_devices("sess-1") == ["dev-1"]
+    # Late cleanup and writer callbacks from the removed socket are harmless.
+    await engine.unregister_device("dev-1", "sess-1", first_ws)
+    await engine._reap_device("dev-1", "sess-1", first)
+    await engine.broadcast_event(SyncEvent(
+        event_type="stream_frame", session_id="sess-1", data={"i": 3}))
+    assert await _until(lambda: len(second_ws.sent) == 4)
+    assert len(first_ws.sent) == 3
+
+
+@pytest.mark.asyncio
+async def test_session_stale_cleanup_cannot_evict_reused_registration_key(engine):
+    stale_ws, replacement_ws = _HealthyWebSocket(), _HealthyWebSocket()
+    stale = await engine.register_device("dev-1", "sess-1", stale_ws)
+    await engine.unregister_device("dev-1", "sess-1", stale_ws)
+    replacement = await engine.register_device("dev-1", "sess-1", replacement_ws)
+    await engine.unregister_device("dev-1", "sess-1", stale_ws)
+    await engine._reap_device("dev-1", "sess-1", stale)
+    assert engine._connections["sess-1"]["dev-1"] is replacement
+    assert replacement.writer.alive
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_first", [True, False])
+async def test_session_failed_sibling_is_pruned_without_evicting_healthy_socket(engine, bad_first):
+    healthy, bad = _HealthyWebSocket(), _ExplodingWebSocket()
+    for ws in ([bad, healthy] if bad_first else [healthy, bad]):
+        await engine.register_device("dev-1", "sess-1", ws)
+    await engine.broadcast_event(SyncEvent(
+        event_type="stream_frame", session_id="sess-1", data={"i": 0}))
+    assert await _until(lambda: engine.get_device_count("sess-1") == 1)
+    assert await _until(lambda: len(healthy.sent) == 1)
+    assert engine.get_connected_devices("sess-1") == ["dev-1"]
+    assert engine.is_device_watching_session("dev-1", "sess-1")
+
+
+@pytest.mark.asyncio
+async def test_session_exclusion_uses_persistent_device_not_registration_key(engine):
+    tabs = [_HealthyWebSocket(), _HealthyWebSocket()]
+    for ws in tabs:
+        await engine.register_device("dev-1", "sess-1", ws)
+    other = _HealthyWebSocket()
+    await engine.register_device("dev-2", "sess-1", other)
+    await engine.broadcast_event(SyncEvent(
+        event_type="stream_frame", session_id="sess-1", data={}),
+        exclude_device_id="dev-1")
+    assert await _until(lambda: len(other.sent) == 1)
+    assert all(ws.sent == [] for ws in tabs)
 
 
 @pytest.mark.asyncio

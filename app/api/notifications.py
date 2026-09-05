@@ -60,7 +60,10 @@ def current_user_id(request: Request, _token: str = Depends(require_auth)) -> st
     funnel (keyed on the same user_id) hydrate for the same caller here.
     """
     api_user = get_api_user_from_request(request)
-    return api_user["id"] if api_user else "admin"
+    return notifications_db.NotificationOwner(
+        api_user["id"] if api_user else "admin",
+        "api_user" if api_user else "admin",
+    )
 
 
 # =============================================================================

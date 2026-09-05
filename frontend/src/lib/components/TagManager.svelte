@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	import type { Tag } from '$lib/api/client';
 	import { getTags, createTag, updateTag, deleteTag } from '$lib/api/client';
 
@@ -29,8 +30,8 @@
 	let confirmDelete = $state<string | null>(null);
 
 	// Load tags on mount
-	async function loadTags() {
-		loading = true;
+	async function loadTags(quiet = false) {
+		if (!quiet) loading = true;
 		error = '';
 		try {
 			tags = await getTags();
@@ -69,6 +70,7 @@
 		if (!editingTag || !editName.trim()) return;
 
 		try {
+			savingEdit = true;
 			const updated = await updateTag(editingTag.id, {
 				name: editName.trim(),
 				color: editColor
@@ -78,7 +80,7 @@
 			ontagsupdated?.(tags);
 		} catch (err: any) {
 			error = err.detail || 'Failed to update tag';
-		}
+		} finally { savingEdit = false; }
 	}
 
 	// Cancel editing
@@ -102,6 +104,24 @@
 
 	// Initialize
 	loadTags();
+	let remoteChange = $state('');
+	let savingEdit = false;
+	watchResources(['tags'], async () => {
+		const selected = editingTag;
+		const before = JSON.stringify([editName, editColor]);
+		await loadTags(true);
+		if (!selected || editingTag !== selected) return;
+		const fresh = tags.find((tag) => tag.id === selected.id);
+		if (savingEdit || before !== JSON.stringify([editName, editColor]) || editName !== selected.name || editColor !== selected.color) {
+			if (!fresh) tags = [...tags, selected];
+			if (!fresh || fresh.name !== selected.name || fresh.color !== selected.color) remoteChange = fresh
+				? 'This tag changed elsewhere. Your unsaved name and color are kept here.'
+				: 'This tag was deleted elsewhere. Copy your unsaved name before leaving.';
+			return;
+		}
+		if (fresh) startEdit(fresh);
+		else { cancelEdit(); remoteChange = 'This tag was deleted elsewhere.'; }
+	});
 </script>
 
 <div class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs">
@@ -121,6 +141,7 @@
 		</div>
 
 		<!-- Content -->
+		{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 		<div class="flex-1 overflow-y-auto p-5 space-y-5">
 			{#if error}
 				<div class="p-3 rounded-lg bg-destructive/10 text-destructive text-sm">

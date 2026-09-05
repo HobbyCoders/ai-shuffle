@@ -33,6 +33,15 @@ DEFAULT_LIMIT = 100
 MAX_LIMIT = 200
 
 
+class NotificationOwner(str):
+    """Legacy storage key with an explicit authenticated event audience."""
+
+    def __new__(cls, user_id: str, user_type: str):
+        value = super().__new__(cls, user_id)
+        value.user_type = user_type
+        return value
+
+
 def normalize_surface(surface: Optional[str]) -> str:
     """Return the two-surface wire value without rewriting historical rows.
 
@@ -251,3 +260,12 @@ def clear_all(user_id: Optional[str]) -> int:
             (user_id,),
         )
         return cursor.rowcount
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+_install_resource_sync(
+    globals(), 'notifications',
+    'create_notification mark_read mark_all_read dismiss clear_all',
+    scope='notification',
+)

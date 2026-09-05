@@ -1,3 +1,4 @@
+import { preferenceSync } from '$lib/services/preferences';
 /**
  * Session mode — which lane of the sidepanel the user is looking at.
  *
@@ -22,6 +23,7 @@
  */
 
 import { browser } from '$app/environment';
+import { untrack } from 'svelte';
 import { createSubscribers } from './store-utils';
 
 export type SessionMode = 'code' | 'chat' | 'voice';
@@ -57,6 +59,8 @@ function getStoredMode(): SessionMode {
 }
 
 let _mode = $state<SessionMode>(getStoredMode());
+let _defaultMode = untrack(() => _mode);
+let followingDefault = true;
 
 const { subscribe, notifySubscribers: _notifySubscribers, createDerived } =
 	createSubscribers<SessionMode>(
@@ -72,11 +76,13 @@ export const appMode = {
 	subscribe,
 
 	/** Switch the sidepanel to `mode`. Unknown values fall back to 'code'. */
-	set(mode: SessionMode) {
+	set(mode: SessionMode, persist = true) {
 		const next = normalizeSessionMode(mode);
+ followingDefault = persist;
+ if (persist) { _defaultMode = next; preferenceSync.save('session_mode', next); }
 		if (next === _mode) return;
 
-		if (browser) {
+		if (browser && persist) {
 			try {
 				localStorage.setItem(STORAGE_KEY, next);
 			} catch {
@@ -99,3 +105,7 @@ export const appMode = {
 
 /** `$sessionMode` in a component yields the current SessionMode. */
 export const sessionMode = createDerived(() => _mode);
+preferenceSync.register('session_mode', {
+ read: () => _defaultMode,
+ apply(value) { _defaultMode = normalizeSessionMode(value); if (followingDefault || value === undefined) _mode = _defaultMode; if (browser) localStorage.setItem(STORAGE_KEY, _defaultMode); _notifySubscribers(); }
+});

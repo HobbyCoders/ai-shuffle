@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import NotesCard from './NotesCard.svelte';
+import { resourceSync } from '$lib/services/resource-sync';
 import { createNote, getNote, getNotes, updateNote } from '$lib/api/client';
 
 vi.mock('$lib/api/client', () => ({
@@ -26,9 +27,74 @@ beforeEach(() => {
 	vi.mocked(createNote).mockImplementation(async data => ({ ...note('created'), ...data }));
 	vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); sessionStorage.clear(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); resourceSync.clear(); vi.useRealTimers(); sessionStorage.clear(); vi.unstubAllGlobals(); });
 
 describe('Notes draft persistence', () => {
+	describe('mounted resource refresh', () => {
+		it('refreshes both the list and a clean selected editor without replacing its textarea', async () => {
+			render(NotesCard);
+			await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+			await waitFor(() => expect(body().value).toBe('content A'));
+			const textarea = body();
+			const fresh = { ...note('A'), title: 'Renamed remotely', content: 'Remote body', tags: ['remote'], is_pinned: true };
+			vi.mocked(getNotes).mockResolvedValue([fresh]);
+			vi.mocked(getNote).mockResolvedValue(fresh);
+			resourceSync.invalidate(['notes']);
+			await waitFor(() => expect(title().value).toBe('Renamed remotely'));
+			expect(body()).toBe(textarea);
+			expect(body().value).toBe('Remote body');
+			expect(screen.queryByRole('button', { name: /Note B content B/ })).toBeNull();
+			expect(updateNote).not.toHaveBeenCalled();
+		});
+
+		it('keeps a debounced edit and reports a remote change', async () => {
+			render(NotesCard);
+			await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+			await fireEvent.input(body(), { target: { value: 'Unsaved here' } });
+			vi.mocked(getNote).mockResolvedValue({ ...note('A'), content: 'Changed elsewhere' });
+			resourceSync.invalidate(['notes']);
+			await screen.findByText('This note changed elsewhere. Your unsaved text is kept here.');
+			expect(body().value).toBe('Unsaved here');
+		});
+
+		it('keeps a remotely deleted dirty note recoverable as a new draft', async () => {
+			render(NotesCard);
+			await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+			await fireEvent.input(body(), { target: { value: 'Recover me' } });
+			vi.mocked(getNotes).mockResolvedValue([]);
+			vi.mocked(getNote).mockRejectedValue({ status: 404 });
+			resourceSync.invalidate(['notes']);
+			await screen.findByText('This note was deleted elsewhere. Your text is kept as a new draft.');
+			expect(body().value).toBe('Recover me');
+			expect(JSON.parse(sessionStorage.getItem('ai-shuffle-note-draft')!).content).toBe('Recover me');
+			expect(updateNote).not.toHaveBeenCalled();
+		});
+
+		it('closes a clean deleted note, but not one merely absent from a filtered list', async () => {
+			render(NotesCard);
+			await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+			vi.mocked(getNotes).mockResolvedValue([]);
+			resourceSync.invalidate(['notes']);
+			await waitFor(() => expect(getNotes).toHaveBeenCalledTimes(2));
+			expect(body().value).toBe('content A');
+			vi.mocked(getNote).mockRejectedValue({ status: 404 });
+			resourceSync.invalidate(['notes']);
+			await screen.findByText('This note was deleted elsewhere.');
+			expect(screen.queryByPlaceholderText(/Write your note/)).toBeNull();
+		});
+
+		it('unsubscribes when the panel leaves the DOM', async () => {
+			const view = render(NotesCard);
+			await screen.findByRole('button', { name: /Note A content A/ });
+			await view.unmount();
+			vi.mocked(getNotes).mockClear();
+			vi.useFakeTimers();
+			resourceSync.invalidate(['notes']);
+			await vi.advanceTimersByTimeAsync(200);
+			expect(getNotes).not.toHaveBeenCalled();
+		});
+	});
+
 	it('asks before New note discards an untitled draft; cancel keeps it', async () => {
 		render(NotesCard);
 		await fireEvent.click(newNote());

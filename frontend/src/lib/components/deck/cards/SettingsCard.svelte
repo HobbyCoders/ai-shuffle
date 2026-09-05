@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * SettingsCard - Redesigned Modern Settings UI
 	 *
@@ -10,6 +11,7 @@
 	 * - System: System prompt (admin)
 	 */
 	import { onMount } from 'svelte';
+	import { providers } from '$lib/stores/providers.svelte';
 	import './card-design-system.css';
 	import { auth, isAdmin } from '$lib/stores/auth.svelte';
 	import { api } from '$lib/api/client';
@@ -155,8 +157,8 @@
 		]);
 	}
 
-	async function loadData() {
-		loading = true;
+	async function loadData(quiet = false) {
+		if (!quiet) loading = true;
 		error = '';
 		try {
 			const [profilesRes, projectsRes] = await Promise.all([
@@ -180,18 +182,27 @@
 		}
 	}
 
-	async function loadWorkspaceConfig() {
+	async function loadWorkspaceConfig(quiet = false) {
+		const before = workspacePath;
+		const clean = !savingWorkspace && workspacePath === (workspaceConfig?.workspace_path ?? '');
 		try {
-			workspaceConfig = await getWorkspaceConfig();
-			workspacePath = workspaceConfig.workspace_path;
+			const fresh = await getWorkspaceConfig();
+			if (!quiet || (clean && !savingWorkspace && before === workspacePath)) {
+				workspaceConfig = fresh;
+				workspacePath = fresh.workspace_path;
+			} else if (workspaceConfig?.workspace_path !== fresh.workspace_path) {
+				remoteChange = 'Workspace settings changed elsewhere. Your unsaved path is kept here.';
+			}
 		} catch (e) {
 			console.error('Failed to load workspace config:', e);
 		}
 	}
 
 	// Security Instructions functions
-	async function loadSecurityInstructions() {
-		loadingSecurityInstructions = true;
+	async function loadSecurityInstructions(quiet = false) {
+		const before = securityInstructions;
+		const clean = !savingSecurityInstructions && securityInstructions === originalSecurityInstructions;
+		if (!quiet) loadingSecurityInstructions = true;
 		securityInstructionsError = '';
 		try {
 			const response = await api.get<{
@@ -199,6 +210,10 @@
 				default: string;
 				is_customized: boolean;
 			}>('/settings/security-instructions');
+			if (quiet && (!clean || savingSecurityInstructions || before !== securityInstructions)) {
+				if (response.current !== originalSecurityInstructions) remoteChange = 'Security instructions changed elsewhere. Your unsaved instructions are kept here.';
+				return;
+			}
 			securityInstructions = response.current;
 			defaultSecurityInstructions = response.default;
 			originalSecurityInstructions = response.current;
@@ -345,7 +360,16 @@
 		}
 	}
 
+	let remoteChange = $state('');
+	watchResources(['settings', 'agents', 'projects'], async () => {
+		await Promise.all([
+			loadData(true), loadAuthStatus(), loadWorkspaceConfig(true),
+			...($isAdmin ? [loadSecurityInstructions(true), providers.refreshAll(), providers.refreshProviders()] : [])
+		]);
+	});
 </script>
+
+{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 
 <!-- Define settings content as a local snippet to avoid duplication -->
 {#snippet settingsContent()}

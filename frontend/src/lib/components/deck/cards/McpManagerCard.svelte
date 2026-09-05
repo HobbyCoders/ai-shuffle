@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * McpManagerCard - MCP Server management card for The Deck
 	 *
@@ -96,8 +97,9 @@
 		formHeaderPairs = Object.entries(server.headers || {}).map(([key, value]) => ({ key, value }));
 		formErrors = [];
 		viewMode = 'form';
+		remoteBaseline = remoteSnapshot();
+		remoteChange = '';
 	}
-
 	function backToList() {
 		viewMode = 'list';
 		resetForm();
@@ -163,7 +165,27 @@
 		await mcp.loadGlobalServers();
 	}
 
+	let remoteChange = $state('');
+	let remoteBaseline = '';
+	function remoteSnapshot() { return JSON.stringify([formName, formType, formCommand, formArgsText, formUrl, formDescription, formEnvPairs, formHeaderPairs]); }
+	watchResources(['mcp'], async () => {
+		const selected = editingServer;
+		const snapshot = remoteSnapshot();
+		await mcp.loadGlobalServers();
+		if (!selected || editingServer !== selected) return;
+		const fresh = $globalMcpServers.find((item) => item.name === selected.name && item.scope === selected.scope);
+		if ($mcpLoading || snapshot !== remoteSnapshot() || remoteSnapshot() !== remoteBaseline) {
+			if (!fresh || JSON.stringify(fresh) !== JSON.stringify(selected)) remoteChange = fresh
+				? 'This item changed elsewhere. Your unsaved changes are kept here.'
+				: 'This item was deleted elsewhere. Copy your unsaved changes before leaving.';
+			return;
+		}
+		if (fresh) openEditForm(fresh);
+		else { viewMode = 'list'; editingServer = null; remoteChange = 'This item was deleted elsewhere.'; }
+	});
 </script>
+
+{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 
 {#if viewMode === 'list'}
 	<!-- ═══ LIST (Build page) ═══ -->

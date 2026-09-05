@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * ProjectMcpTab - MCP server visibility tab for project detail view
 	 *
@@ -155,6 +156,18 @@
 			default: return type;
 		}
 	}
+	let remoteForm: McpServerForm | undefined = $state();
+	watchResources(['mcp'], async () => {
+		const selected = editingMcpServer;
+		const id = projectId;
+		await mcp.loadProjectServers(id);
+		if (id !== projectId || !selected || editingMcpServer !== selected || !showMcpServerForm) return;
+		const fresh = Object.values($projectMcpServers).flat().find((server) => server.name === selected.name && server.scope === selected.scope);
+		if (remoteForm?.canRefreshRemote(!fresh)) {
+			if (fresh) editingMcpServer = fresh;
+			else { showMcpServerForm = false; editingMcpServer = null; }
+		}
+	});
 </script>
 
 <svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
@@ -288,7 +301,7 @@
 	{/if}
 
 	<!-- MCP Server Form Modal -->
-	<McpServerForm
+	<McpServerForm bind:this={remoteForm}
 		show={showMcpServerForm}
 		server={editingMcpServer}
 		scope={mcpSelectedScope}

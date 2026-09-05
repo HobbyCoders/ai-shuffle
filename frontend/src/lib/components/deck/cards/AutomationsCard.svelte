@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * AutomationsCard - Scheduled and event-driven AI task management
 	 *
@@ -173,8 +174,8 @@
 		loadData();
 	});
 
-	async function loadData() {
-		loading = true;
+	async function loadData(quiet = false) {
+		if (!quiet) loading = true;
 		error = '';
 		try {
 			const [automationsData, approvalsData, profilesData, projectsData, connectorsData, connectorTypesData] = await Promise.all([
@@ -256,19 +257,20 @@
 		formError = '';
 		testResult = null;
 		currentView = 'edit';
+		remoteBaseline = remoteSnapshot();
+		remoteChange = '';
 	}
-
-	async function openDetail(automation: Automation) {
+	async function openDetail(automation: Automation, quiet = false) {
 		selectedAutomation = automation;
 		currentView = 'detail';
 		runsLoading = true;
-		expandedRunIds = new Set();
-		detailStats = null;
+		if (!quiet) { expandedRunIds = new Set(); detailStats = null; }
 		try {
 			const [runsData, statsData] = await Promise.all([
 				getAutomationRuns(automation.id),
 				getAutomationStats(automation.id)
 			]);
+			if (selectedAutomation?.id !== automation.id || currentView !== 'detail') return;
 			runs = runsData;
 			detailStats = statsData;
 		} catch (e: any) {
@@ -508,7 +510,32 @@
 		if (ms < 1000) return `${ms}ms`;
 		return `${(ms / 1000).toFixed(1)}s`;
 	}
+	let remoteChange = $state('');
+	let remoteBaseline = '';
+	function remoteSnapshot() { return JSON.stringify([formName, formDescription, formTriggers, formPrompt, formProfileId, formProjectId, formOutputType, formOutputConfig, formMaxCostPerRun, formMaxCostPerDay, formMaxCostTotal, formMaxRunsPerDay, formMaxTurns, formTimeoutSeconds, formRequiresApproval, formActionSteps]); }
+	watchResources(['automations'], async () => {
+		const selected = selectedAutomation;
+		const snapshot = remoteSnapshot();
+		await loadData(true);
+		if (!selected || selectedAutomation !== selected) return;
+		const fresh = automations.find((item) => item.id === selected.id);
+		if (currentView === 'detail') {
+			if (fresh) await openDetail(fresh, true);
+			else { currentView = 'list'; selectedAutomation = null; remoteChange = 'This automation was deleted elsewhere.'; }
+			return;
+		}
+		if (formSaving || snapshot !== remoteSnapshot() || remoteSnapshot() !== remoteBaseline) {
+			if (!fresh || JSON.stringify(fresh) !== JSON.stringify(selected)) remoteChange = fresh
+				? 'This item changed elsewhere. Your unsaved changes are kept here.'
+				: 'This item was deleted elsewhere. Copy your unsaved changes before leaving.';
+			return;
+		}
+		if (fresh) openEdit(fresh);
+		else { currentView = 'list'; selectedAutomation = null; remoteChange = 'This item was deleted elsewhere.'; }
+	});
 </script>
+
+{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 
 {#snippet automationsMainContent()}
 	<!-- Test result -->

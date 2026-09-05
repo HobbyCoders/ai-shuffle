@@ -1187,7 +1187,7 @@ class ChatWebSocketHandler:
         if session_id != self.current_session_id:
             # Unregister from old session if any
             if self.current_session_id:
-                await sync_engine.unregister_device(self.device_id, self.current_session_id)
+                await sync_engine.unregister_device(self.device_id, self.current_session_id, self.websocket)
 
             # Register to new session
             await sync_engine.register_device(self.device_id, session_id, self.websocket)
@@ -1577,26 +1577,9 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "session_not_found", "session_id": session_id})
             return
 
-        # Check if THIS DEVICE already has this session open in another tab
-        # This prevents duplicate tabs with the same session on the same device
-        # But allows DIFFERENT devices to view the same session simultaneously
-        # Also allows the SAME WebSocket to re-load its own session (e.g.,
-        # when user clicks a session that was already opened via tabs_sync)
-        if sync_engine.is_device_watching_session(self.device_id, session_id):
-            existing_conn = sync_engine._connections.get(session_id, {}).get(self.device_id)
-            if existing_conn and existing_conn.websocket is not self.websocket:
-                # Different WebSocket = different tab trying to open same session
-                await self.send_json({
-                    "type": "session_already_open",
-                    "session_id": session_id,
-                    "message": "This session is already open in another tab on this device."
-                })
-                return
-            # Same WebSocket re-loading — proceed normally
-
         # Unregister from old session if switching
         if self.current_session_id and self.current_session_id != session_id:
-            await sync_engine.unregister_device(self.device_id, self.current_session_id)
+            await sync_engine.unregister_device(self.device_id, self.current_session_id, self.websocket)
 
         # Register to new session
         await sync_engine.register_device(self.device_id, session_id, self.websocket)
@@ -1745,20 +1728,10 @@ class ChatWebSocketHandler:
     # ------------------------------------------------------------------
 
     async def handle_watch_session(self, data: dict) -> None:
-        """Handle 'watch_session' — register this device for sync broadcasts.
+        """Register this socket for sync broadcasts and restore its queue.
 
-        Ported verbatim from the live closure (websocket.py, watch_session
-        branch). The frontend sends this on EVERY session switch
-        (session-switcher.ts), so the contract here — including the
-        dead-vs-live duplicate-socket asymmetry — is load-bearing:
-
-        * old socket DEAD  -> replace it (page-refresh recovery)
-        * old socket ALIVE -> skip re-registration (duplicate tab sharing the
-          same device_id; re-registering would evict the live tab and cause a
-          reconnect loop) but STILL bind current_session_id.
-
-        Note the asymmetry vs load_session: load_session REJECTS a duplicate
-        live socket with `session_already_open`; watch_session silently skips.
+        Tabs may share a persistent device ID; registration is socket-specific
+        and re-watching on the same socket is idempotent.
         """
         session_id = data.get("session_id")
         logger.debug(f"[watch_session] device={self.device_id} session_id={session_id}")
@@ -1772,34 +1745,9 @@ class ChatWebSocketHandler:
         if self.websocket is None:
             return
 
-        # Check if this device_id is already registered from a different
-        # WebSocket (e.g., another browser tab sharing localStorage device_id,
-        # or the same device reconnecting after a page refresh).
-        if sync_engine.is_device_watching_session(self.device_id, session_id):
-            existing_conn = sync_engine._connections.get(session_id, {}).get(self.device_id)
-            if existing_conn and existing_conn.websocket is not self.websocket:
-                # Check if the old WS is still alive. If it's dead/closing,
-                # this is a reconnection (e.g., page refresh) — let the new
-                # WS take over. If it's alive, this is likely a duplicate tab
-                # sharing the same device_id — skip to avoid a reconnect loop.
-                old_ws_alive = existing_conn.websocket.client_state == WebSocketState.CONNECTED
-                if old_ws_alive:
-                    logger.debug(
-                        f"Device {self.device_id} already watching session {session_id} "
-                        f"from another live WS, skipping"
-                    )
-                    self.current_session_id = session_id
-                    return
-                else:
-                    logger.debug(
-                        f"Device {self.device_id} reconnecting "
-                        f"(old WS state={existing_conn.websocket.client_state}), replacing"
-                    )
-            # Same WebSocket re-watching — proceed normally
-
         # Unregister from old session if switching
         if self.current_session_id and self.current_session_id != session_id:
-            await sync_engine.unregister_device(self.device_id, self.current_session_id)
+            await sync_engine.unregister_device(self.device_id, self.current_session_id, self.websocket)
 
         await sync_engine.register_device(self.device_id, session_id, self.websocket)
         self.current_session_id = session_id
@@ -1840,7 +1788,7 @@ class ChatWebSocketHandler:
         """Handle 'close_session' message type."""
         old_session_id = self.current_session_id
         if old_session_id:
-            await sync_engine.unregister_device(self.device_id, old_session_id)
+            await sync_engine.unregister_device(self.device_id, old_session_id, self.websocket)
             # Broadcast to other devices that this session was closed
             await sync_engine.broadcast_session_closed(
                 session_id=old_session_id,

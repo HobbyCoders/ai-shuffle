@@ -1,3 +1,4 @@
+import { preferenceSync } from '$lib/services/preferences';
 /**
  * Favorite ("pinned") models — shared across every model picker surface
  * (profile/agent editor, chat composer dock, mobile controls sheet) and
@@ -14,15 +15,10 @@
  */
 
 import { browser } from '$app/environment';
-import { getPreference, setPreference } from '$lib/api/client';
 
 const STORAGE_KEY = 'aihub.pinnedModels';
 const SERVER_PREFERENCE_KEY = 'model_favorites';
-const SERVER_SYNC_DEBOUNCE_MS = 500;
 
-let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
-let hasSyncedFromServer = false;
-let pendingState: string[] | null = null;
 
 function load(): string[] {
 	if (!browser) return [];
@@ -47,41 +43,11 @@ function persist() {
 }
 
 function saveToServer(value: string[]): void {
-	if (!browser || !hasSyncedFromServer) return;
-	pendingState = value;
-	if (serverSyncTimer) clearTimeout(serverSyncTimer);
-	serverSyncTimer = setTimeout(async () => {
-		try {
-			await setPreference(SERVER_PREFERENCE_KEY, pendingState);
-			pendingState = null;
-		} catch {
-			// Keep pendingState so the unload flush can retry via sendBeacon.
-		}
-	}, SERVER_SYNC_DEBOUNCE_MS);
-}
-
-function flushPendingSave(): void {
-	if (!browser || !pendingState || !hasSyncedFromServer) return;
-	if (serverSyncTimer) {
-		clearTimeout(serverSyncTimer);
-		serverSyncTimer = null;
-	}
-	const data = JSON.stringify({ key: SERVER_PREFERENCE_KEY, value: pendingState });
-	navigator.sendBeacon(
-		'/api/v1/preferences/' + SERVER_PREFERENCE_KEY,
-		new Blob([data], { type: 'application/json' })
-	);
-	pendingState = null;
+ preferenceSync.save(SERVER_PREFERENCE_KEY, value);
 }
 
 // Guard against HMR duplicate registration
-if (browser && !(window as any).__favModels_listeners) {
-	(window as any).__favModels_listeners = true;
-	window.addEventListener('beforeunload', flushPendingSave);
-	document.addEventListener('visibilitychange', () => {
-		if (document.visibilityState === 'hidden') flushPendingSave();
-	});
-}
+// Persistence lifecycle is owned by live-sync, not module-level unload listeners.
 
 /** Current favorites in pin order (reactive). */
 export function getFavoriteModels(): readonly string[] {
@@ -112,21 +78,9 @@ export function reloadFavoriteModels(): void {
  * the first successful sync).
  */
 export async function syncFavoriteModels(): Promise<void> {
-	if (!browser || hasSyncedFromServer) return;
-	let serverValue: unknown = null;
-	try {
-		const response = await getPreference<unknown>(SERVER_PREFERENCE_KEY);
-		serverValue = response?.value ?? null;
-	} catch {
-		return; // Offline / auth not ready yet — layout retries on next launch.
-	}
-	hasSyncedFromServer = true;
-	if (Array.isArray(serverValue)) {
-		const serverList = serverValue.filter((v): v is string => typeof v === 'string');
-		favorites = serverList;
-		persist();
-	} else {
-		const local = load();
-		if (local.length > 0) saveToServer(local);
-	}
+ await preferenceSync.refresh(SERVER_PREFERENCE_KEY);
 }
+preferenceSync.register(SERVER_PREFERENCE_KEY, {
+ read: () => favorites,
+ apply(value) { favorites = Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []; persist(); }
+});

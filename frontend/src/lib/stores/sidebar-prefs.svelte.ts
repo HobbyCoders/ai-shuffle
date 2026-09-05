@@ -1,3 +1,4 @@
+import { preferenceSync } from '$lib/services/preferences';
 /**
  * Sidebar preferences — the customizable Workspace nav.
  *
@@ -151,6 +152,7 @@ const { subscribe, notifySubscribers, createDerived } = createSubscribers<Worksp
 );
 
 function commit(next: WorkspacePrefs) {
+ preferenceSync.save('sidebar_workspace', next);
 	_prefs = next;
 	write(next);
 	notifySubscribers();
@@ -251,3 +253,7 @@ export function orderedWorkspaceItems<T extends { id: WorkspaceItemId }>(
 		.map((id) => byId.get(id))
 		.filter((item): item is T => item !== undefined);
 }
+preferenceSync.register('sidebar_workspace', {
+ read: () => _prefs,
+ apply(value) { _prefs = normalizeWorkspacePrefs(value); write(_prefs); notifySubscribers(); }
+});

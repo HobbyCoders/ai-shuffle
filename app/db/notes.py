@@ -404,3 +404,12 @@ def delete_note_attachment(attachment_id: str) -> bool:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM note_attachments WHERE id = %s", (attachment_id,))
         return cursor.rowcount > 0
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+_install_resource_sync(
+    globals(), 'notes',
+    'create_note update_note delete_note bulk_update_note_file_paths create_note_attachment set_note_attachment_data delete_note_attachment',
+    scope='shared',
+)

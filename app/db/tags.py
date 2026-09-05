@@ -213,3 +213,12 @@ def get_sessions_by_tag(tag_id: str, limit: int = 50, offset: int = 0) -> list[d
             (tag_id, limit, offset)
         )
         return rows_to_list(cursor.fetchall())
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+_install_resource_sync(
+    globals(), 'tags',
+    'create_tag update_tag delete_tag add_session_tag remove_session_tag set_session_tags',
+    scope='shared',
+)

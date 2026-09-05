@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * HooksCard - Hook management card for The Deck
 	 *
@@ -142,6 +143,17 @@
 		await hooks.deleteHook(hookId);
 	}
 
+	watchResources(['hooks', 'plugins'], async () => {
+		const selected = selectedHook;
+		if ($selectedProject) await hooks.loadAll($selectedProject);
+		else await hooks.loadAppHooks();
+		if (!selected || selectedHook !== selected || currentView !== 'edit') return;
+		const fresh = $projectHooks.find((hook) => hook.id === selected.id);
+		if (formRef?.refreshRemote(fresh, formSaving)) {
+			if (fresh) selectedHook = fresh;
+			else backToList();
+		}
+	});
 </script>
 
 <!-- ═══════════════════ LIST (Build page) ═══════════════════ -->

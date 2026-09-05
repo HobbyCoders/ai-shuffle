@@ -1,0 +1,80 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+const m = vi.hoisted(() => ({ listener: undefined as undefined | ((s: any)=>void), start:vi.fn(),stop:vi.fn(),reconnect:vi.fn(),refresh:vi.fn(),invalidate:vi.fn(),clear:vi.fn(),handle:vi.fn(),unsubscribe:vi.fn(),check:vi.fn().mockResolvedValue(undefined),loadProjects:vi.fn(),loadClusterProjects:vi.fn(),loadSessions:vi.fn() }));
+vi.mock('$lib/stores/auth.svelte',()=>({auth:{subscribe:(fn:(s:any)=>void)=>{m.listener=fn;return m.unsubscribe;},checkAuth:m.check}}));
+vi.mock('./preferences',()=>({preferenceSync:{start:m.start,stop:m.stop,reconnect:m.reconnect,refresh:m.refresh,register:vi.fn()}}));
+vi.mock('./resource-sync',()=>({resourceSync:{subscribe:vi.fn(()=>vi.fn()),invalidate:m.invalidate,clear:m.clear}}));
+vi.mock('$lib/stores/active-session',()=>({handleGlobalUserEvent:m.handle,activeSession:{current:{sessionId:null}}}));
+vi.mock('$lib/stores/app-data.svelte',()=>({appData:{loadProjects:m.loadProjects,loadClusterProjects:m.loadClusterProjects,loadSessions:m.loadSessions}}));
+vi.mock('$lib/stores/notifications',()=>({notify:{}}));
+vi.mock('$lib/stores/session/v2/feed-controller',()=>({feedController:{invalidate:vi.fn()}}));
+vi.mock('$lib/stores/theme.svelte',()=>({}));
+vi.mock('$lib/stores/timezonePreference.svelte',()=>({}));
+vi.mock('$lib/stores/chatPreferences.svelte',()=>({}));
+vi.mock('$lib/stores/hotkeyPreferences.svelte',()=>({}));
+vi.mock('$lib/stores/gitActionPreferences.svelte',()=>({}));
+vi.mock('$lib/stores/modelFavorites.svelte',()=>({}));
+vi.mock('$lib/stores/files.svelte',()=>({}));
+vi.mock('$lib/stores/groups.svelte',()=>({}));
+vi.mock('$lib/stores/layout.svelte',()=>({}));
+vi.mock('$lib/stores/sidebar-prefs.svelte',()=>({}));
+vi.mock('$lib/stores/sessionMode.svelte',()=>({}));
+vi.mock('$lib/stores/browser-panel.svelte',()=>({}));
+vi.mock('./notificationSound',()=>({}));
+import { startLiveSync } from './live-sync';
+import { resourceSync } from './resource-sync';
+class Socket {
+ static OPEN=1;static CLOSED=3;static all:Socket[]=[];readyState=0;
+ onopen?:()=>void;onmessage?:(event:{data:string})=>void;onclose?:(event:{code:number})=>void;onerror?:()=>void;
+ constructor(public url:string){Socket.all.push(this);}
+ send=vi.fn();close=vi.fn(()=>{this.readyState=3;this.onclose?.({code:1000});});
+ emit(data:unknown){this.onmessage?.({data:JSON.stringify(data)});}
+}
+let stop:()=>void;
+function account(username:string|null) {m.listener?.({loading:false,status:{authenticated:!!username,username,preference_identity:username ? {user_type:'admin',user_id:username} : null}});}
+beforeEach(()=>{vi.useFakeTimers();vi.clearAllMocks();Socket.all=[];localStorage.clear();vi.stubGlobal('WebSocket',Socket);});
+afterEach(()=>{stop?.();vi.useRealTimers();vi.unstubAllGlobals();});
+describe('root authenticated live-sync lifecycle',()=>{
+ it('opens a cookie-auth global socket outside chat and refetches on every sync_ready',()=>{
+  stop=startLiveSync();account('alice');const socket=Socket.all[0];
+  expect(socket.url).toContain('/api/v1/ws/global?device_id=');expect(socket.url).not.toContain('token=');
+  socket.emit({type:'sync_ready'});socket.emit({type:'sync_ready'});
+  expect(m.reconnect).toHaveBeenCalledTimes(3);expect(m.invalidate).toHaveBeenCalledTimes(2);
+  socket.emit({type:'preferences_changed',keys:['theme','theme',17]});expect(m.refresh).toHaveBeenCalledTimes(1);
+  socket.emit({type:'resources_changed',resources:['notes',null]});expect(m.invalidate).toHaveBeenLastCalledWith(['notes']);
+ });
+ it('ignores loading auth polls and isolates account changes; late messages cannot update the next user',()=>{
+  localStorage.setItem('ai-shuffle-preferences-owner','admin:alice');stop=startLiveSync();account('bob');
+  expect(m.start).toHaveBeenCalledWith(true,'admin:bob');const old=Socket.all[0];
+  m.listener?.({loading:true});expect(old.close).not.toHaveBeenCalled();
+  account(null);expect(old.close).toHaveBeenCalled();expect(m.stop).toHaveBeenLastCalledWith(true);
+  m.refresh.mockClear();old.emit({type:'preferences_changed',keys:['theme']});expect(m.refresh).not.toHaveBeenCalled();
+  account('carol');expect(Socket.all).toHaveLength(2);expect(m.start).toHaveBeenLastCalledWith(true,'admin:carol');
+ });
+ it('refreshes session project assignments when a project is changed or removed',async()=>{
+  stop=startLiveSync();account('alice');
+  const subscription=vi.mocked(resourceSync.subscribe).mock.calls.filter(([names])=>names.includes('projects')).at(-1);
+  await subscription?.[1]();
+  expect(m.loadProjects).toHaveBeenCalledOnce();expect(m.loadSessions).toHaveBeenCalledOnce();
+ });
+ it('uses stable server identities for renamed devices and separates roles with equal IDs',()=>{
+  stop=startLiveSync();account('alice');m.start.mockClear();
+  m.listener?.({loading:false,status:{authenticated:true,username:'Phone',preference_identity:{user_type:'admin',user_id:'alice'}}});
+  expect(m.start).not.toHaveBeenCalled();
+  m.listener?.({loading:false,status:{authenticated:true,username:'alice',preference_identity:{user_type:'api_user',user_id:'alice'}}});
+  expect(m.start).toHaveBeenCalledWith(true,'api_user:alice');
+ });
+ it('resynchronizes on return from suspension even when the socket still looks open',()=>{
+  stop=startLiveSync();account('alice');m.reconnect.mockClear();m.invalidate.mockClear();
+  Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(m.reconnect).toHaveBeenCalledOnce();expect(m.invalidate).toHaveBeenCalledOnce();
+  stop();m.reconnect.mockClear();
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(m.reconnect).not.toHaveBeenCalled();
+ });
+ it('reconnects after close, but teardown removes retries and stale callbacks',async()=>{
+  stop=startLiveSync();account('alice');Socket.all[0].close();await vi.advanceTimersByTimeAsync(1000);
+  expect(Socket.all).toHaveLength(2);Socket.all[1].close();stop();await vi.advanceTimersByTimeAsync(30000);
+  expect(Socket.all).toHaveLength(2);expect(m.unsubscribe).toHaveBeenCalled();
+ });
+});

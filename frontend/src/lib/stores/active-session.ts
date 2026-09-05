@@ -17,6 +17,7 @@
  */
 
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest, Profile } from '$lib/api/client';
+import { acceptUserEvent } from '$lib/services/user-event-dedupe';
 import type { SessionAttention } from './session/ws-message-handlers';
 import type { SdkContextUsage } from '$lib/api/sessions';
 import { notifySessionComplete, notifyWaitingForResponse } from '$lib/services/notifications';
@@ -468,7 +469,7 @@ const wsConn: WsConnection = createWsConnection({
 	getAuthToken,
 	getDeviceId: getOrCreateDeviceId,
 	onMessage: (data) => {
-		handleMessage(data);
+		if (acceptUserEvent(data, 'chat')) handleMessage(data);
 	},
 	onConnected: () => {
 		console.debug(`[ActiveSession] onConnected: sessionId=${_state.sessionId}, isStreaming=${_state.isStreaming}, hasMessages=${_state.messages.length > 0}`);
@@ -593,6 +594,10 @@ function disconnect() {
 }
 
 // ─── WebSocket Message Handler (extracted to session/ws-message-handlers.ts) ─
+
+export function handleGlobalUserEvent(data: Record<string, unknown>) {
+ if (acceptUserEvent(data, 'global')) handleMessage(data);
+}
 
 const { handleMessage } = createMessageHandlers({
 	update: _update,

@@ -225,3 +225,12 @@ def update_hook_triggered(hook_id: str, success: bool) -> None:
                 "UPDATE project_hooks SET last_triggered_at = %s, failure_count = failure_count + 1 WHERE id = %s",
                 (now, hook_id)
             )
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+_install_resource_sync(
+    globals(), 'hooks',
+    'create_hook update_hook delete_hook update_hook_triggered',
+    scope='admin',
+)

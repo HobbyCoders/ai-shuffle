@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * BuildPluginList — header-less Plugins surface for the Build page.
 	 *
@@ -217,6 +218,15 @@
 			return `${Math.floor(h / 24)}d ago`;
 		} catch { return 'Unknown'; }
 	}
+	watchResources(['plugins'], async () => {
+		const selected = $selectedPlugin;
+		await plugins.loadAll();
+		if (selected && activeTab === 'details' && $selectedPlugin === selected) {
+			const exists = [...plugins.current.installed, ...plugins.current.available].some((plugin) => plugin.id === selected.id);
+			if (exists) await plugins.selectPlugin(selected.id);
+			else { plugins.clearSelectedPlugin(); activeTab = previousTab; }
+		}
+	});
 </script>
 
 <svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />

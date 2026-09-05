@@ -335,3 +335,12 @@ def delete_profile_permission_rules(profile_id: str) -> int:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM permission_rules WHERE profile_id = %s", (profile_id,))
         return cursor.rowcount
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+_install_resource_sync(
+    globals(), 'agents',
+    'create_subagent update_subagent delete_subagent set_subagent_builtin revert_subagent_to_defaults add_permission_rule delete_permission_rule delete_profile_permission_rules',
+    scope='shared',
+)

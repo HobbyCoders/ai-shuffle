@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * NotesCard - Global notes for ideas, bugs, planning
 	 *
@@ -158,8 +159,8 @@
 	}
 
 	// Load notes and tags
-	async function loadData() {
-		loading = true;
+	async function loadData(quiet = false) {
+		if (!quiet) loading = true;
 		error = null;
 
 		try {
@@ -191,7 +192,7 @@
 		try {
 			const fresh = await getNote(id);
 			if (generation !== editorGeneration || revision !== editRevision || hasUnsavedChanges || saving) return;
-			if (fresh.content !== editorContent || fresh.title !== editorTitle) {
+			if (JSON.stringify(fresh) !== JSON.stringify(editingNote)) {
 				editingNote = fresh;
 				editorTitle = fresh.title;
 				editorContent = fresh.content;
@@ -735,7 +736,46 @@
 				return match;
 			});
 	}
+	let remoteChange = $state('');
+	watchResources(['notes'], async () => {
+		const selected = editingNote;
+		const revision = editRevision;
+		await loadData(true);
+		if (!selected || editingNote?.id !== selected.id) return;
+		try {
+			const fresh = await getNote(selected.id);
+			if (editingNote?.id !== selected.id) return;
+			if (hasUnsavedChanges || saving || saveTimeout || savePromise || revision !== editRevision) {
+				if (JSON.stringify(fresh) !== JSON.stringify(selected)) remoteChange = 'This note changed elsewhere. Your unsaved text is kept here.';
+				return;
+			}
+			editingNote = fresh;
+			editorTitle = fresh.title;
+			editorContent = fresh.content;
+			editorTags = [...fresh.tags];
+			editorPinned = fresh.is_pinned;
+			remoteChange = '';
+			await loadAttachments(fresh.id);
+		} catch (e: any) {
+			if (editingNote?.id !== selected.id || (e.status !== 404 && e.status_code !== 404)) return;
+			if (hasUnsavedChanges || saving || saveTimeout || savePromise || revision !== editRevision) {
+				cancelAutosave();
+				// Convert the recovered buffer to a new note rather than PUT a deleted id.
+				editingNote = null;
+				isCreatingNew = true;
+				persistDraft();
+				remoteChange = 'This note was deleted elsewhere. Your text is kept as a new draft.';
+			} else {
+				editingNote = null;
+				editorTitle = '';
+				editorContent = '';
+				remoteChange = 'This note was deleted elsewhere.';
+			}
+		}
+	});
 </script>
+
+{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 
 {#snippet noteItem(note: Note)}
 	<button class="ns-item" class:on={editingNote?.id === note.id} onclick={() => openNote(note)}>

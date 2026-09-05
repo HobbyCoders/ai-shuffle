@@ -1,3 +1,5 @@
+import { compatible } from '$lib/services/preference-values';
+import { preferenceSync } from '$lib/services/preferences';
 /**
  * Hotkey Preferences Store
  *
@@ -10,7 +12,6 @@
  */
 
 import { browser } from '$app/environment';
-import { getPreference, setPreference } from '$lib/api/client';
 import { createSubscribers } from './store-utils';
 
 // ============================================
@@ -62,15 +63,11 @@ const DEFAULT_PREFERENCES: HotkeyPreferences = {
 
 const STORAGE_KEY = 'ai-shuffle-hotkey-preferences';
 const SERVER_PREFERENCE_KEY = 'hotkey_settings';
-const SERVER_SYNC_DEBOUNCE_MS = 500;
 
 // ============================================
 // Server sync state (module-level mutable)
 // ============================================
 
-let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
-let hasSyncedFromServer = false;
-let pendingState: HotkeyPreferences | null = null;
 
 // ============================================
 // Persistence helpers
@@ -120,79 +117,22 @@ function saveToLocalStorage(prefs: HotkeyPreferences): void {
 /**
  * Load preferences from server
  */
-async function loadFromServer(): Promise<HotkeyPreferences | null> {
-	try {
-		const response = await getPreference<HotkeyPreferences>(SERVER_PREFERENCE_KEY);
-		return response?.value as HotkeyPreferences || null;
-	} catch (e) {
-		console.error('[HotkeyPreferences] Failed to load from server:', e);
-		return null;
-	}
-}
+
 
 /**
  * Save preferences to server (debounced)
  */
 function saveToServer(prefs: HotkeyPreferences): void {
-	if (!browser) return;
-
-	// Track pending state for flush on unload
-	pendingState = prefs;
-
-	// Don't write to server until initial sync is complete
-	// This prevents localStorage data from overwriting newer server data
-	if (!hasSyncedFromServer) {
-		return;
-	}
-
-	if (serverSyncTimer) {
-		clearTimeout(serverSyncTimer);
-	}
-
-	serverSyncTimer = setTimeout(async () => {
-		try {
-			await setPreference(SERVER_PREFERENCE_KEY, prefs);
-			pendingState = null;
-		} catch (e) {
-			console.error('[HotkeyPreferences] Failed to save to server:', e);
-		}
-		serverSyncTimer = null;
-	}, SERVER_SYNC_DEBOUNCE_MS);
+ preferenceSync.save(SERVER_PREFERENCE_KEY, prefs);
 }
 
 /**
  * Flush pending save immediately (for beforeunload)
  */
-function flushPendingSave(): void {
-	if (!pendingState || !hasSyncedFromServer || !browser) return;
 
-	if (serverSyncTimer) {
-		clearTimeout(serverSyncTimer);
-		serverSyncTimer = null;
-	}
-
-	// Use sendBeacon for reliable delivery during page unload
-	const data = JSON.stringify({
-		key: SERVER_PREFERENCE_KEY,
-		value: pendingState
-	});
-	navigator.sendBeacon(
-		'/api/v1/preferences/' + SERVER_PREFERENCE_KEY,
-		new Blob([data], { type: 'application/json' })
-	);
-	pendingState = null;
-}
 
 // Register beforeunload handler (guarded against HMR duplicate registration)
-if (browser && !(window as any).__hotkeyPrefs_listeners) {
-	(window as any).__hotkeyPrefs_listeners = true;
-	window.addEventListener('beforeunload', flushPendingSave);
-	document.addEventListener('visibilitychange', () => {
-		if (document.visibilityState === 'hidden') {
-			flushPendingSave();
-		}
-	});
-}
+// Persistence lifecycle is owned by live-sync, not module-level unload listeners.
 
 // ============================================
 // Reactive State
@@ -256,60 +196,7 @@ function getValue<K extends keyof HotkeyPreferences>(key: K): HotkeyPreferences[
  * If server is empty but local has data, push local to server (migration)
  */
 async function syncFromServer(): Promise<void> {
-	if (!browser) return;
-
-	const serverState = await loadFromServer();
-	const localState = _state;
-
-	if (serverState) {
-		// Server has data - it's the source of truth
-		// Merge with defaults to handle new preference keys
-		const merged: HotkeyPreferences = {
-			...DEFAULT_PREFERENCES,
-			...serverState,
-			globalSttHotkey: {
-				...DEFAULT_HOTKEY,
-				...(serverState.globalSttHotkey || {})
-			}
-		};
-
-		// Check if server differs from local
-		const isDifferent =
-			merged.globalSttEnabled !== localState.globalSttEnabled ||
-			merged.voiceSoundCues !== localState.voiceSoundCues ||
-			merged.globalSttHotkey.key !== localState.globalSttHotkey.key ||
-			merged.globalSttHotkey.cmdOrCtrl !== localState.globalSttHotkey.cmdOrCtrl ||
-			merged.globalSttHotkey.shift !== localState.globalSttHotkey.shift ||
-			merged.globalSttHotkey.alt !== localState.globalSttHotkey.alt;
-
-		if (isDifferent) {
-			// Update localStorage
-			saveToLocalStorage(merged);
-			// Update store
-			_state = merged;
-			_notifySubscribers();
-		}
-	} else {
-		// No server data - push local data to server (migration)
-	}
-
-	// Mark sync as complete - now server writes are allowed
-	hasSyncedFromServer = true;
-
-	// If there was no server data and we have non-default local data, save it
-	if (!serverState) {
-		const hasNonDefaults =
-			localState.globalSttEnabled !== DEFAULT_PREFERENCES.globalSttEnabled ||
-			localState.voiceSoundCues !== DEFAULT_PREFERENCES.voiceSoundCues ||
-			localState.globalSttHotkey.key !== DEFAULT_HOTKEY.key ||
-			localState.globalSttHotkey.cmdOrCtrl !== DEFAULT_HOTKEY.cmdOrCtrl ||
-			localState.globalSttHotkey.shift !== DEFAULT_HOTKEY.shift ||
-			localState.globalSttHotkey.alt !== DEFAULT_HOTKEY.alt;
-
-		if (hasNonDefaults) {
-			saveToServer(localState);
-		}
-	}
+ await preferenceSync.refresh(SERVER_PREFERENCE_KEY);
 }
 
 /**
@@ -342,3 +229,11 @@ export const hotkeyPreferences = {
 	setGlobalSttHotkey: (value: HotkeyConfig) => updatePreference('globalSttHotkey', value),
 	setVoiceSoundCues: (value: boolean) => updatePreference('voiceSoundCues', value),
 };
+preferenceSync.register(SERVER_PREFERENCE_KEY, {
+ read: () => _state,
+ apply(value) {
+  _state = compatible(DEFAULT_PREFERENCES, value);
+  saveToLocalStorage(_state);
+  _notifySubscribers();
+ }
+});

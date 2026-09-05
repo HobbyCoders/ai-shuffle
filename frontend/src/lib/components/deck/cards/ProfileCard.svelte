@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * ProfileCard - Profile management in a card format
 	 *
@@ -125,8 +126,8 @@
 		loadData();
 	});
 
-	async function loadData() {
-		loading = true;
+	async function loadData(quiet = false) {
+		if (!quiet) loading = true;
 		try {
 			const [subagentsResult, surfaceResult, templatesResult] = await Promise.all([
 				api.get<Subagent[]>('/agents').catch((err) => {
@@ -518,6 +519,7 @@
 	}
 
 	async function writeProfile() {
+		const writtenSnapshot = formSnapshot();
 		const data = buildProfilePayload();
 		if (editingProfile) {
 			await tabsStore.updateProfile(data.id, {
@@ -538,6 +540,7 @@
 				updated_at: ''
 			};
 		}
+		if (writtenSnapshot === formSnapshot()) lastPersisted = writtenSnapshot;
 	}
 
 	function schedulePersist() {
@@ -730,7 +733,33 @@
 	function deleteGroup(category: string, name: string) {
 		groupsStore.deleteGroup(category as any, name);
 	}
+	let remoteChange = $state('');
+	watchResources(['agents', 'templates', 'settings', 'mcp', 'plugins'], async () => {
+		const selected = editingProfile;
+		const snapshot = formSnapshot();
+		await Promise.all([loadData(true), tabsStore.loadProfiles()]);
+		if (!selected || editingProfile?.id !== selected.id || viewMode !== 'form') return;
+		const fresh = profiles.find((profile) => profile.id === selected.id);
+		if (saveTimer || saveInFlight || persistDirty || formSnapshot() !== lastPersisted || snapshot !== formSnapshot()) {
+			if (!fresh || JSON.stringify(fresh) !== JSON.stringify(selected)) {
+				remoteChange = fresh ? 'This agent changed elsewhere. Your unsaved changes are kept here.' : 'This agent was deleted elsewhere. Copy your unsaved changes before leaving.';
+			}
+			return;
+		}
+		if (fresh) {
+			const tab = activeTab;
+			openEditForm(fresh);
+			activeTab = tab;
+			remoteChange = '';
+		} else {
+			viewMode = 'list';
+			editingProfile = null;
+			remoteChange = 'This agent was deleted elsewhere.';
+		}
+	});
 </script>
+
+{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 
 
 <!-- Shared hidden file input (used by both the embedded grid and the list view) -->

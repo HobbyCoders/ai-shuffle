@@ -137,7 +137,7 @@ async def session_sync_websocket(
 
     finally:
         # Unregister device
-        await sync_engine.unregister_device(device_id, session_id)
+        await sync_engine.unregister_device(device_id, session_id, websocket=websocket)
 
         # Check if this was the last device and cleanup if needed
         remaining_devices = sync_engine.get_device_count(session_id)
@@ -158,79 +158,34 @@ async def session_sync_websocket(
 async def global_sync_websocket(
     websocket: WebSocket,
     device_id: str = Query(..., description="Unique device identifier"),
-    token: str = Query(..., description="Authentication token")
+    token: str | None = Query(None, description="Authentication token"),
 ):
-    """
-    Global WebSocket for receiving updates across all sessions.
+    from app.core.auth import auth_service
+    from app.core.global_events import global_events
 
-    Useful for:
-    - Updating session list when new sessions are created
-    - Getting notified when any watched session changes
-    - Global notifications
-
-    This is lighter weight than per-session WebSockets when you just need
-    to know that something changed (then fetch details via REST).
-    """
-    # Authenticate before accepting
-    auth_ok, _api_user = await authenticate_websocket(websocket, token)
+    auth_ok, api_user = await authenticate_websocket(websocket, token)
+    await websocket.accept()
     if not auth_ok:
-        # Must accept before closing with a reason code
-        await websocket.accept()
         await websocket.close(code=4001, reason="Authentication failed")
         return
-
-    await websocket.accept()
-    logger.debug(f"Global WebSocket connected: device={device_id}")
-
-    # Track sessions this device is interested in
-    watched_sessions: set = set()
-
+    user_type = "api_user" if api_user else "admin"
+    user_id = api_user["id"] if api_user else (
+        await run_sync(auth_service.get_admin_username) or "admin"
+    )
+    socket_id = global_events.register(websocket, user_type, user_id)
     try:
-        ping_task = asyncio.create_task(ping_loop(websocket, device_id))
-
-        try:
-            while True:
-                try:
-                    data = await asyncio.wait_for(
-                        websocket.receive_json(),
-                        timeout=60.0
-                    )
-
-                    msg_type = data.get("type")
-
-                    if msg_type == "watch":
-                        # Start watching a session
-                        session_id = data.get("session_id")
-                        if session_id:
-                            watched_sessions.add(session_id)
-                            await websocket.send_json({
-                                "event_type": "watching",
-                                "session_id": session_id
-                            })
-
-                    elif msg_type == "unwatch":
-                        # Stop watching a session
-                        session_id = data.get("session_id")
-                        if session_id:
-                            watched_sessions.discard(session_id)
-
-                    elif msg_type == "pong":
-                        pass
-
-                except asyncio.TimeoutError:
-                    if websocket.client_state != WebSocketState.CONNECTED:
-                        break
-                    continue
-
-        finally:
-            ping_task.cancel()
+        while True:
             try:
-                await ping_task
-            except asyncio.CancelledError:
-                pass
-
+                message = await asyncio.wait_for(websocket.receive_json(), timeout=30)
+                if message.get("type") == "ping":
+                    connection = global_events.connections.get(socket_id)
+                    if connection is None or not connection[3].enqueue('{"type":"pong"}'):
+                        break
+            except asyncio.TimeoutError:
+                connection = global_events.connections.get(socket_id)
+                if connection is None or not connection[3].enqueue('{"type":"ping"}'):
+                    break
     except WebSocketDisconnect:
-        logger.debug(f"Global WebSocket disconnected: device={device_id}")
-
-    except Exception as e:
-        logger.error(f"Global WebSocket error for device={device_id}: {e}")
+        pass
+    finally:
+        await global_events.unregister(socket_id)

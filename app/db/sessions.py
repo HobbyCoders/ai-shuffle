@@ -2570,3 +2570,12 @@ def update_message_content(
             return row
 
     return None
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+_install_resource_sync(
+    globals(), 'sessions',
+    'create_session create_session_with_stats update_session set_session_run_binding adopt_session adopt_session_follow unpin_session pin_session_placement set_session_project set_session_branch resync_session_branch update_session_pr_state set_session_parked_task_kind set_working_set_ref delete_session set_session_active set_session_hidden clear_session_conversation delete_session_message delete_orphan_user_turn discard_orphan_first_turn delete_session_messages_after delete_session_messages_after_jsonl_uuid',
+    scope='session',
+)

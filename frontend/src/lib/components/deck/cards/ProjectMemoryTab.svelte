@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * ProjectMemoryTab - AGENTS.md memory file management tab
 	 *
@@ -211,7 +212,26 @@
 		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
 		return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 	}
+	let remoteChange = $state('');
+	watchResources(['projects'], async () => {
+		const id = projectId;
+		const location = editingLocation;
+		const before = editContent;
+		await projectMemory.loadFiles(id);
+		if (id !== projectId || !location || editingLocation !== location) return;
+		const fresh = $allMemoryFiles.find((file) => file.location === location);
+		if (isDirty || $memorySaving || before !== editContent) {
+			if (!fresh?.exists || fresh.content !== before) remoteChange = fresh?.exists
+				? 'This memory file changed elsewhere. Your unsaved text is kept here.'
+				: 'This memory file was deleted elsewhere. Your unsaved text is kept here.';
+			return;
+		}
+		if (fresh?.exists) { editContent = fresh.content; remoteChange = ''; }
+		else { cancelEdit(); remoteChange = 'This memory file was deleted elsewhere.'; }
+	});
 </script>
+
+{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 
 <div class="ptab">
 	{#if $memoryLoading}

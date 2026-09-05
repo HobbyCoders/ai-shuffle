@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * ApiUserManager - Manage API users for external integrations and connectors.
 	 *
@@ -191,8 +192,9 @@
 		formModel = user.model || '';
 		formEffort = user.effort || '';
 		showCreateForm = true;
+		remoteBaseline = remoteSnapshot();
+		remoteChange = '';
 	}
-
 	function resetForm() {
 		showCreateForm = false;
 		editingUser = null;
@@ -325,7 +327,25 @@
 		await loadData();
 		loading = false;
 	});
+	let remoteChange = $state('');
+	let remoteBaseline = '';
+	function remoteSnapshot() { return JSON.stringify([formName, formDescription, formProjectId, formProfileIds, formWebLoginAllowed, formIsActive, formModel, formEffort]); }
+	watchResources(['settings', 'agents', 'projects'], async () => {
+		const selected = editingUser;
+		const before = remoteSnapshot();
+		await loadData();
+		if (!selected || editingUser !== selected) return;
+		const fresh = apiUsers.find((item) => item.id === selected.id);
+		if (saving || before !== remoteSnapshot() || remoteSnapshot() !== remoteBaseline) {
+			remoteChange = fresh ? 'This item changed elsewhere. Your unsaved fields are kept here.' : 'This item was deleted elsewhere. Copy your unsaved fields before leaving.';
+			return;
+		}
+		if (fresh) startEdit(fresh);
+		else { editingUser = null; remoteChange = 'This item was deleted elsewhere.'; }
+	});
 </script>
+
+{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 
 <div class="space-y-4">
 	{#if loading}

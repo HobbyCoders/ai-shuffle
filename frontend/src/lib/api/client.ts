@@ -290,6 +290,7 @@ export async function fetchAndDownload(path: string, fallbackFilename: string): 
 export interface AuthStatus {
 	authenticated: boolean;
 	is_admin: boolean;
+	preference_identity?: { user_type: 'admin' | 'api_user'; user_id: string } | null;
 	setup_required: boolean;
 	claude_authenticated: boolean;
 	/** True only when the Claude OAuth token is present AND not expired.

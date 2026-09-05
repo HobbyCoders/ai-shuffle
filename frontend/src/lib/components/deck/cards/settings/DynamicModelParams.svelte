@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * DynamicModelParams — Schema-driven parameter controls for any fal.ai model
 	 *
@@ -45,6 +46,7 @@
 			if (endpointId === id) {
 				schema = s;
 				values = stored;
+				savedSnapshot = JSON.stringify(stored);
 				loadedFor = id;
 				loading = false;
 			}
@@ -54,16 +56,24 @@
 	let fields = $derived(modelSchemaStore.configurableFields(schema));
 
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
+	let saving = 0;
+	let revision = 0;
+	let savedSnapshot = '';
+	let remoteChange = $state('');
 
 	function onchange(name: string, value: unknown) {
+		revision++;
 		values = { ...values, [name]: value };
 		if (saveTimer) clearTimeout(saveTimer);
 		saveTimer = setTimeout(() => {
+			saveTimer = null;
+			const snapshot = JSON.stringify(values);
+			saving++;
 			api
 				.patch('/settings/integrations/model-params', { key: persistKey, params: values })
-				.catch(() => {
-					/* non-critical: persistence retried on next change */
-				});
+				.then(() => { if (JSON.stringify(values) === snapshot) savedSnapshot = snapshot; })
+				.catch(() => { /* Leave the changed buffer intact for the next edit. */ })
+				.finally(() => { saving--; });
 		}, 350);
 	}
 
@@ -80,12 +90,29 @@
 	function hasRange(field: ParamField): boolean {
 		return field.minimum !== null && field.maximum !== null;
 	}
+	watchResources(['settings'], async () => {
+		const id = endpointId;
+		const key = persistKey;
+		const before = revision;
+		const { params = {} } = await api.get<{ params: Record<string, unknown> }>(
+			`/settings/integrations/model-params?key=${encodeURIComponent(key)}`
+		);
+		if (id !== endpointId || key !== persistKey) return;
+		if (saving || saveTimer || before !== revision || JSON.stringify(values) !== savedSnapshot) {
+			if (JSON.stringify(params) !== savedSnapshot) remoteChange = 'Model options changed elsewhere. Your unsaved options are kept here.';
+			return;
+		}
+		values = params;
+		savedSnapshot = JSON.stringify(params);
+		remoteChange = '';
+	});
 </script>
 
 {#if loading && !schema}
 	<div class="dyn-loading">Loading model options…</div>
 {:else if fields.length > 0}
 	<div class="dyn-params">
+		{#if remoteChange}<p role="status">{remoteChange}</p>{/if}
 		<span class="dyn-title">Model parameters</span>
 		{#each fields as field (field.name)}
 			<div class="setting-group">

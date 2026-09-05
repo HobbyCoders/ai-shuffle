@@ -179,3 +179,12 @@ def set_profile_builtin(profile_id: str, is_builtin: bool) -> bool:
             (is_builtin, datetime.now(timezone.utc).isoformat(), profile_id)
         )
         return cursor.rowcount > 0
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+_install_resource_sync(
+    globals(), 'agents',
+    'create_profile update_profile delete_profile set_profile_builtin',
+    scope='shared',
+)

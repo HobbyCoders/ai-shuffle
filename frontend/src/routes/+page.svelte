@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * Main Page - Sidebar + Main Panel AI Workspace
 	 *
@@ -126,7 +127,7 @@
 		// sidepanel is not showing; without this the session opens in the main
 		// panel while the list beside it does not contain it. Unknown/absent
 		// `mode` normalizes to 'code', which is what every pre-modes row is.
-		appMode.set(normalizeSessionMode(session?.mode));
+		appMode.set(normalizeSessionMode(session?.mode), false);
 
 		const openChat = () => {
 			activeSession.switchSession(sessionId, sessionProjectId, worktreeInfo, sessionTitle, sessionProjectV2Id);
@@ -252,7 +253,7 @@
 		// handleOpenSession does for a click). Only on the branches that actually
 		// OPEN it: where the layout's explicit New Chat wins below, the lane the
 		// user last chose is the one that compose belongs in.
-		const followRestoredLane = () => { if (restoredMode) appMode.set(restoredMode); };
+		const followRestoredLane = () => { if (restoredMode) appMode.set(restoredMode, false); };
 
 		if (!$activeView) {
 			// No persisted layout view — open the restored session or a new chat
@@ -459,6 +460,7 @@
 		await loadAllTags();
 		await appData.loadSessions($sessionsTagFilter);
 	}
+	watchResources(["tags"], () => loadAllTags());
 </script>
 
 <svelte:head>

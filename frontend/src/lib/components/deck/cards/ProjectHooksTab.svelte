@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * ProjectHooksTab - Hook list tab for project detail view
 	 *
@@ -129,6 +130,7 @@
 		($projectHooks.length > 3 && activeTab === 'custom') ||
 		($pluginHooks.length > 3 && activeTab === 'plugins')
 	);
+	watchResources(["hooks", "plugins"], () => projectId ? hooks.loadAll(projectId) : undefined);
 </script>
 
 <svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />

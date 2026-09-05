@@ -20,6 +20,8 @@
  * SSR-safe: every entry point guards `typeof window`.
  */
 
+import { preferenceSync } from '$lib/services/preferences';
+
 type SoundKind = 'complete' | 'question' | 'permission';
 
 interface Note {
@@ -79,7 +81,13 @@ class NotificationSound {
 		return this.enabled;
 	}
 
+	applyEnabled(value: unknown): void {
+		this.enabled = typeof value === 'boolean' ? value : true;
+		try { localStorage.setItem(STORAGE_KEY, String(this.enabled)); } catch { /* Cache only. */ }
+	}
+
 	setEnabled(value: boolean): void {
+		preferenceSync.save('notification_sound', value);
 		this.enabled = value;
 		try {
 			localStorage.setItem(STORAGE_KEY, String(value));
@@ -224,3 +232,7 @@ class NotificationSound {
 // ── Singleton export ──────────────────────────────────────────────────────────
 
 export const notificationSound = new NotificationSound();
+preferenceSync.register('notification_sound', {
+	read: () => notificationSound.isEnabled(),
+	apply: (value) => notificationSound.applyEnabled(value)
+});

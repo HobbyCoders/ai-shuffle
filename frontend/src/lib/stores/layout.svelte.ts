@@ -1,3 +1,4 @@
+import { preferenceSync } from '$lib/services/preferences';
 /**
  * Layout Store - Manages the sidebar + main panel layout state
  *
@@ -54,9 +55,9 @@ interface LayoutState {
 // ============================================
 
 const STORAGE_KEY = 'ai-shuffle-layout';
-const DEFAULT_SIDEBAR_WIDTH = 390;
-const MIN_SIDEBAR_WIDTH = 240;
-const MAX_SIDEBAR_WIDTH = 600;
+const DEFAULT_SIDEBAR_WIDTH = 256;
+const MIN_SIDEBAR_WIDTH = 220;
+const MAX_SIDEBAR_WIDTH = 400;
 
 // ============================================
 // Persistence
@@ -89,7 +90,7 @@ function persistState(state: LayoutState) {
 		localStorage.setItem(
 			STORAGE_KEY,
 			JSON.stringify({
-				sidebarCollapsed: state.sidebarCollapsed,
+				sidebarCollapsed: savedSidebarCollapsed,
 				activeView: persistedView,
 				sidebarWidth: state.sidebarWidth
 			})
@@ -109,7 +110,7 @@ let _state = $state<LayoutState>({
 	sidebarCollapsed: persisted?.sidebarCollapsed ?? false,
 	activeView: persisted?.activeView ?? null,
 	sidebarOverlay: false,
-	sidebarWidth: persisted?.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH
+	sidebarWidth: (browser && Number(localStorage.getItem('sidebar-width'))) || persisted?.sidebarWidth || DEFAULT_SIDEBAR_WIDTH
 });
 
 // ============================================
@@ -124,11 +125,17 @@ const { subscribe, notifySubscribers, createDerived } =
 
 function _notifyAndPersist() {
 	persistState(_state);
+ if (browser) localStorage.removeItem('sidebar-width');
 	notifySubscribers();
 }
 
+let savedSidebarCollapsed = untrack(() => _state.sidebarCollapsed);
 function _update(fn: (s: LayoutState) => LayoutState) {
-	_state = fn(untrack(() => _state));
+ const before = untrack(() => _state);
+ _state = fn(before);
+ if (!_state.sidebarOverlay && !before.sidebarOverlay && _state.sidebarCollapsed !== before.sidebarCollapsed) savedSidebarCollapsed = _state.sidebarCollapsed;
+ if ((!_state.sidebarOverlay && !before.sidebarOverlay && _state.sidebarCollapsed !== before.sidebarCollapsed) || _state.sidebarWidth !== before.sidebarWidth)
+  preferenceSync.save('layout', { sidebarCollapsed: savedSidebarCollapsed, sidebarWidth: _state.sidebarWidth });
 	_notifyAndPersist();
 }
 
@@ -204,7 +211,7 @@ export const layout = {
 
 	/** Set overlay mode (for responsive behavior) */
 	setSidebarOverlay(overlay: boolean) {
-		_update((s) => ({ ...s, sidebarOverlay: overlay }));
+		_update((s) => ({ ...s, sidebarOverlay: overlay, sidebarCollapsed: overlay ? true : savedSidebarCollapsed }));
 	},
 
 	/** Get current state snapshot */
@@ -231,3 +238,14 @@ export const layout = {
 export const sidebarCollapsed = createDerived(() => _state.sidebarCollapsed);
 export const activeView = createDerived(() => _state.activeView);
 export const sidebarOverlay = createDerived(() => _state.sidebarOverlay);
+preferenceSync.register('layout', {
+ read: () => ({ sidebarCollapsed: savedSidebarCollapsed, sidebarWidth: _state.sidebarWidth }),
+ apply(value) {
+  const raw = (value ?? {}) as Partial<LayoutState>;
+  savedSidebarCollapsed = typeof raw.sidebarCollapsed === 'boolean' ? raw.sidebarCollapsed : false;
+  const sidebarWidth = typeof raw.sidebarWidth === 'number' && Number.isFinite(raw.sidebarWidth)
+   ? Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, raw.sidebarWidth)) : DEFAULT_SIDEBAR_WIDTH;
+  _state = { ..._state, sidebarWidth, sidebarCollapsed: _state.sidebarOverlay ? _state.sidebarCollapsed : savedSidebarCollapsed };
+  _notifyAndPersist();
+ }
+});

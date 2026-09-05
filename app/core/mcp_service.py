@@ -828,3 +828,8 @@ def clear_mcp_service_cache():
     global _mcp_services
     with _mcp_services_lock:
         _mcp_services = {}
+
+
+from app.core.resource_sync import install_service_mutations as _install_resource_sync
+
+_install_resource_sync(McpService, 'mcp', 'add_server update_server remove_server set_server_enabled set_project_server_enabled add_project_installed_server remove_project_installed_server')

@@ -44,29 +44,13 @@
 	let isMobile = $state(false);
 
 	// --- resizable sidebar ---------------------------------------------------
-	const WIDTH_KEY = 'sidebar-width';
 	const WIDTH_MIN = 220;
 	const WIDTH_MAX = 400;
 	const WIDTH_DEFAULT = 256;
-
-	function loadWidth(): number {
-		if (typeof localStorage === 'undefined') return WIDTH_DEFAULT;
-		const stored = Number(localStorage.getItem(WIDTH_KEY));
-		return Number.isFinite(stored) && stored >= WIDTH_MIN && stored <= WIDTH_MAX
-			? stored
-			: WIDTH_DEFAULT;
-	}
-
-	let sidebarWidth = $state(loadWidth());
+	let sidebarWidth = $state(layout.current.sidebarWidth);
 	let resizing = $state(false);
-
-	function persistWidth() {
-		try {
-			localStorage.setItem(WIDTH_KEY, String(sidebarWidth));
-		} catch {
-			// Storage blocked — the width still holds for this session.
-		}
-	}
+	$effect(() => { if (!resizing) sidebarWidth = $layout.sidebarWidth; });
+	function persistWidth() { layout.setSidebarWidth(sidebarWidth); }
 
 	function startResize(e: PointerEvent) {
 		e.preventDefault();
@@ -101,6 +85,7 @@
 	// by the `max-width: 1080px` media queries in the headers.
 	function checkMobile() {
 		isMobile = isPanelFullscreenWidth(window.innerWidth);
+ layout.setSidebarOverlay(isMobile);
 	}
 
 	onMount(() => {

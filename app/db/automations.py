@@ -532,3 +532,12 @@ def update_automation_approval(approval_id: str, status: str, decided_by: Option
             (status, decided_by, now, approval_id)
         )
     return get_automation_approval(approval_id)
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+_install_resource_sync(
+    globals(), 'automations',
+    'create_automation update_automation delete_automation record_automation_run_success claim_automation_fire create_automation_run update_automation_run create_automation_approval update_automation_approval',
+    scope='admin',
+)

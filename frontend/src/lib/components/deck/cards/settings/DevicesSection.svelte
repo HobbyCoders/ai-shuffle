@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * DevicesSection — the cluster registry panel.
 	 *
@@ -62,8 +63,12 @@
 		load();
 	});
 
-	async function load() {
-		loading = true;
+	async function load(quiet = false) {
+		const selected = installs.find((install) => install.id === editingId);
+		const nameBefore = editName;
+		const before = advertiseInput;
+		const clean = !savingAdvertise && advertiseInput === (advertise?.override || '');
+		if (!quiet) loading = true;
 		error = '';
 		try {
 			const [resp, sec, adv] = await Promise.all([
@@ -72,10 +77,20 @@
 				getAdvertiseStatus()
 			]);
 			installs = resp.installs;
+			if (quiet && selected && editingId === selected.id) {
+				const fresh = installs.find((install) => install.id === selected.id);
+				if (!savingId && editName === nameBefore && editName === selected.device_name) {
+					if (fresh) editName = fresh.device_name;
+					else editingId = null;
+				} else if (!fresh) {
+					installs = [...installs, selected];
+					error = 'This device was removed elsewhere. Copy your unsaved name before leaving.';
+				} else if (fresh.device_name !== selected.device_name) error = 'This device changed elsewhere. Your unsaved name is kept here.';
+			}
 			selfId = resp.self_instance_id;
 			secret = sec;
 			advertise = adv;
-			advertiseInput = adv.override || '';
+			if (!quiet || (clean && !savingAdvertise && advertiseInput === before)) advertiseInput = adv.override || '';
 		} catch (e: unknown) {
 			error = getErrorMessage(e, 'Failed to load devices');
 		} finally {
@@ -216,6 +231,7 @@
 		if (day < 30) return `${day}d ago`;
 		return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 	}
+	watchResources(['settings'], () => load(true));
 </script>
 
 <div class="set-group">

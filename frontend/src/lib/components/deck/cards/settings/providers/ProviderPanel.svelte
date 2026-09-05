@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * ProviderPanel — the body of an expanded provider row.
 	 *
@@ -347,7 +348,29 @@
 			modelsSaving = false;
 		}
 	}
+	let remoteChange = $state('');
+	$effect(() => {
+		const fresh = provider;
+		untrack(() => {
+			if (!fresh || dirty || savingSettings) {
+				if (dirty) remoteChange = fresh ? 'This provider changed elsewhere. Your unsaved settings and token are kept here.' : 'This provider was removed elsewhere. Your unsaved settings and token are kept here.';
+				return;
+			}
+			name = fresh.name;
+			baseUrl = fresh.base_url;
+			apiDialect = fresh.api_dialect === 'openai' ? 'openai' : 'anthropic';
+			contextWindow = fresh.context_window != null ? String(fresh.context_window) : '';
+			maxOutputTokens = fresh.max_output_tokens != null ? String(fresh.max_output_tokens) : '';
+			baseline = { name, baseUrl, dialect: apiDialect, contextWindow: fresh.context_window ?? null, maxOutputTokens: fresh.max_output_tokens ?? null };
+			remoteChange = '';
+		});
+	});
+	watchResources(['settings'], async () => {
+		if (!modelsSaving) await loadModels();
+	});
 </script>
+
+{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 
 <!-- 1. Action row — same two buttons on every row. -->
 <div class="prov-actrow">

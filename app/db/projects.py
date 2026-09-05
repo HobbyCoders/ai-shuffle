@@ -228,3 +228,12 @@ def delete_project(project_id: str) -> bool:
         # Then delete the project
         cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
         return cursor.rowcount > 0
+
+
+from app.core.resource_sync import install_database_mutations as _install_resource_sync
+
+_install_resource_sync(
+    globals(), 'projects',
+    'create_project update_project delete_project set_project_link_group',
+    scope='shared',
+)

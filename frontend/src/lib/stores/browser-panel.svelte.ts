@@ -7,6 +7,7 @@
  * `userClosedForSession` is a per-runtime suppression flag so an auto-open never
  * fights a user who deliberately closed the panel for the session they're in.
  */
+import { preferenceSync } from '$lib/services/preferences';
 import { browser } from '$app/environment';
 import { untrack } from 'svelte';
 import { createSubscribers } from './store-utils';
@@ -107,6 +108,7 @@ let pendingWidth: number | null = null;
 
 function persistWidth(width: number) {
 	if (!browser) return;
+	preferenceSync.save('browser_panel', { width });
 	pendingWidth = width;
 	if (persistTimer !== null) return;
 	persistTimer = setTimeout(() => {
@@ -129,6 +131,19 @@ export function flushWidthPersist() {
 		pendingWidth = null;
 	}
 }
+
+preferenceSync.register('browser_panel', {
+	read: () => ({ width: _state.width }),
+	apply(value) {
+		if (persistTimer !== null) clearTimeout(persistTimer);
+		persistTimer = null;
+		pendingWidth = null;
+		const width = value && typeof value === 'object' && 'width' in value && typeof value.width === 'number'
+			? clampWidth(value.width) : DEFAULT_WIDTH;
+		_update((state) => ({ ...state, width }));
+		writeWidth(width);
+	}
+});
 
 // A resize finished right before a navigation must not be lost to the debounce.
 if (browser && typeof window !== 'undefined') {

@@ -55,23 +55,47 @@ def get_user_preference(user_type: str, user_id: str, key: str) -> Optional[User
         return None
 
 
-def set_user_preference(user_type: str, user_id: str, key: str, value: Any) -> UserPreferenceRow:
+def set_user_preference(user_type: str, user_id: str, key: str, value: Any, only_if_missing: bool = False) -> UserPreferenceRow:
     """Set a user preference (upsert)"""
     with get_db() as conn:
         cursor = conn.cursor()
         now = datetime.now(timezone.utc).isoformat()
         value_json = json.dumps(value)
 
-        cursor.execute(
-            """INSERT INTO user_preferences (user_type, user_id, key, value, updated_at)
-               VALUES (%s, %s, %s, %s, %s)
-               ON CONFLICT(user_type, user_id, key) DO UPDATE SET
-                   value = excluded.value,
-                   updated_at = excluded.updated_at""",
-            (user_type, user_id, key, value_json, now)
-        )
+        if only_if_missing:
+            cursor.execute(
+                """INSERT INTO user_preferences (user_type, user_id, key, value, updated_at)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT(user_type, user_id, key) DO NOTHING""",
+                (user_type, user_id, key, value_json, now),
+            )
+            inserted = cursor.rowcount > 0
+            cursor.execute(
+                "SELECT * FROM user_preferences WHERE user_type = %s AND user_id = %s AND key = %s",
+                (user_type, user_id, key),
+            )
+            result = row_to_dict(cursor.fetchone())
+            if isinstance(result["value"], str):
+                try:
+                    result["value"] = json.loads(result["value"])
+                except (ValueError, TypeError):
+                    pass
+        else:
+            result = None
+            inserted = True
+            cursor.execute(
+                """INSERT INTO user_preferences (user_type, user_id, key, value, updated_at)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT(user_type, user_id, key) DO UPDATE SET
+                       value = excluded.value,
+                       updated_at = excluded.updated_at""",
+                (user_type, user_id, key, value_json, now)
+            )
 
-        return {
+    if inserted:
+        from app.core.global_events import global_events
+        global_events.preference_changed(user_type, user_id, key)
+    return result or {
             "user_type": user_type,
             "user_id": user_id,
             "key": key,
@@ -88,7 +112,11 @@ def delete_user_preference(user_type: str, user_id: str, key: str) -> bool:
             "DELETE FROM user_preferences WHERE user_type = %s AND user_id = %s AND key = %s",
             (user_type, user_id, key)
         )
-        return cursor.rowcount > 0
+        deleted = cursor.rowcount > 0
+    if deleted:
+        from app.core.global_events import global_events
+        global_events.preference_changed(user_type, user_id, key)
+    return deleted
 
 
 def get_all_user_preferences(user_type: str, user_id: str) -> List[UserPreferenceRow]:

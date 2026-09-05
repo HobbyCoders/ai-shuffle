@@ -10,9 +10,8 @@ tests/api/test_ws_closure_characterization.py (section H):
 
 * happy path: sync_engine registration + current_session_id binding,
 * queued-message restore frame (``sync``/``queue_updated``) only when nonempty,
-* the dead-vs-live duplicate-socket ASYMMETRY: a DEAD old socket is replaced
-  (page-refresh recovery); a LIVE old socket skips re-registration (duplicate
-  tab) but still binds current_session_id,
+* sibling sockets sharing a device ID each register and restore their queue;
+  re-watching the same socket is idempotent in the sync engine,
 * (V2 A7: the headless websocket=None watcher-guard test was removed with
   headless_query_runner.py; the guard itself remains in the class.)
 
@@ -186,6 +185,38 @@ def _queue_frames(ws):
 WATCH = {"type": "watch_session", "session_id": "sess-1"}
 
 
+async def test_same_principal_and_device_session_sockets_both_receive_events():
+    """Exercise real registration through the chat handler, not only mocks."""
+    from app.core.sync_engine import SyncEngine, SyncEvent
+
+    engine = SyncEngine()
+    with _HandlerHarness() as h, patch.object(cwh, "sync_engine", engine):
+        first, second = h.make_handler(), h.make_handler()
+        try:
+            await first.handle_watch_session(dict(WATCH))
+            await second.handle_watch_session(dict(WATCH))
+            await engine.broadcast_event(SyncEvent(
+                event_type="session_updated", session_id="sess-1", data={"title": "shared"}))
+            async def delivered(ws, count):
+                async with asyncio.timeout(2):
+                    while len(ws.sent) < count:
+                        await asyncio.sleep(0.001)
+            await delivered(first.websocket, 1)
+            await delivered(second.websocket, 1)
+            assert first.websocket.sent == second.websocket.sent
+
+            # Switching the first tab only detaches its own old-session socket.
+            await first.handle_watch_session({"session_id": "sess-2"})
+            assert engine.get_device_count("sess-1") == 1
+            await engine.broadcast_event(SyncEvent(
+                event_type="session_updated", session_id="sess-1", data={"title": "remaining"}))
+            await delivered(second.websocket, 2)
+            assert len(first.websocket.sent) == 1
+        finally:
+            await engine.shutdown()
+
+
+
 # ═══ A1. watch_session — happy path ════════════════════════════════════════════
 
 
@@ -294,7 +325,7 @@ async def test_watch_session_switch_unregisters_old_session():
         await handler.handle_watch_session(dict(WATCH))
 
     h.sync.unregister_device.assert_awaited_once()
-    assert h.sync.unregister_device.await_args.args == ("dev-1", "sess-old")
+    assert h.sync.unregister_device.await_args.args == ("dev-1", "sess-old", h.ws)
     h.sync.register_device.assert_awaited_once()
     assert handler.current_session_id == "sess-1"
 
@@ -311,14 +342,11 @@ async def test_watch_session_rewatch_same_session_does_not_unregister():
     h.sync.register_device.assert_awaited_once()
 
 
-# ═══ A2. watch_session — the pinned dead-vs-live duplicate asymmetry ═══════════
+# ═══ A2. watch_session — sibling sockets sharing a device ID ════════════════
 
 
-async def test_watch_session_duplicate_live_ws_skips_reregistration():
-    """Oracle: same device_id watching from another LIVE socket (duplicate
-    tab): the watch is skipped (no re-register — re-registering would evict
-    the live tab and cause a reconnect loop) but the session is still bound
-    as current."""
+async def test_watch_session_duplicate_live_ws_registers_its_own_socket():
+    """A sibling tab registers its own socket without evicting the live one."""
     with _HandlerHarness() as h:
         h.sync.is_device_watching_session.return_value = True
         other_ws = SimpleNamespace(client_state=WebSocketState.CONNECTED)
@@ -329,17 +357,14 @@ async def test_watch_session_duplicate_live_ws_skips_reregistration():
         await handler.handle_watch_session(dict(WATCH))
         await handler.handle_get_pending_permissions({})
 
-    h.sync.register_device.assert_not_awaited()
-    # the skip path binds current_session_id BEFORE returning (closure parity)
+    h.sync.register_device.assert_awaited_once_with("dev-1", "sess-1", h.ws)
     assert handler.current_session_id == "sess-1"
     pend = _frames(h.ws, "pending_permissions")
     assert pend and pend[0]["session_id"] == "sess-1"
 
 
-async def test_watch_session_duplicate_live_ws_skips_queue_restore():
-    """The live-duplicate skip path returns BEFORE the queue restore — the
-    other (live) tab already has the queue; sending it here would go to the
-    wrong socket's UI state."""
+async def test_watch_session_duplicate_live_ws_restores_its_queue():
+    """Each sibling tab needs its own queue hydration."""
     with _HandlerHarness() as h:
         h.sync.is_device_watching_session.return_value = True
         other_ws = SimpleNamespace(client_state=WebSocketState.CONNECTED)
@@ -349,8 +374,8 @@ async def test_watch_session_duplicate_live_ws_skips_queue_restore():
         h.queue_view.return_value = [{"id": "q1", "content": "later"}]
         await h.make_handler().handle_watch_session(dict(WATCH))
 
-    assert _queue_frames(h.ws) == []
-    h.queue_view.assert_not_called()
+    assert _queue_frames(h.ws)
+    h.queue_view.assert_called_once_with("sess-1")
 
 
 async def test_watch_session_dead_old_ws_is_replaced():

@@ -8,6 +8,7 @@
 	 * - Environment variables editor
 	 * - Headers editor (for sse/http)
 	 */
+	import { untrack } from 'svelte';
 	import type { McpServerInfo, McpServerType, McpScope } from '$lib/api/mcp';
 	import { validateMcpServerConfig } from '$lib/api/mcp';
 
@@ -56,6 +57,14 @@
 
 	// Validation
 	let errors = $state<string[]>([]);
+	let remoteChange = $state('');
+	let baseline = '';
+	function snapshot() { return JSON.stringify([name, type, command, argsText, url, description, selectedScope, envPairs, headerPairs]); }
+	export function canRefreshRemote(deleted = false): boolean {
+		if (!loading && snapshot() === baseline) return true;
+		remoteChange = deleted ? 'This server was deleted elsewhere. Copy your unsaved changes before leaving.' : 'This server changed elsewhere. Your unsaved changes are kept here.';
+		return false;
+	}
 
 	// Determine if editing
 	let isEditing = $derived(!!server);
@@ -86,6 +95,8 @@
 				selectedScope = 'local';
 			}
 			errors = [];
+			baseline = untrack(snapshot);
+			remoteChange = '';
 		}
 	});
 
@@ -158,6 +169,7 @@
 
 		<!-- Modal -->
 		<div class="relative w-full max-w-lg bg-card border border-border rounded-xl shadow-xl max-h-[90vh] flex flex-col">
+			{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 			<!-- Header -->
 			<div class="flex items-center justify-between px-6 py-4 border-b border-border">
 				<h2 class="text-lg font-semibold text-foreground">

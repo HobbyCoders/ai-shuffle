@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * ConnectorManager - Manage external connectors (Telegram, Discord, WhatsApp, Webhook, Slack, LINE, Signal, iMessage)
 	 *
@@ -304,8 +305,8 @@
 		if (pollInterval) clearInterval(pollInterval);
 	});
 
-	async function loadData() {
-		loading = true;
+	async function loadData(quiet = false) {
+		if (!quiet) loading = true;
 		error = '';
 		try {
 			const [connectorsData, typesData, eventsData, apiUsersData] = await Promise.all([
@@ -533,8 +534,9 @@
 			initPrefix(String(connector.config.command_prefix ?? ''));
 		}
 		view = 'edit';
+		remoteBaseline = remoteSnapshot();
+		remoteChange = '';
 	}
-
 	function cancelForm() {
 		view = 'list';
 		selectedType = null;
@@ -565,7 +567,27 @@
 	}
 
 
+	let remoteChange = $state('');
+	let remoteBaseline = '';
+	function remoteSnapshot() { return JSON.stringify([formName, formApiUserId, formConfig, formEvents, [...selectedGuildIds], [...selectedChannelIds], prefixMode, customPrefix]); }
+	watchResources(['connectors'], async () => {
+		const selected = editingConnector;
+		const snapshot = remoteSnapshot();
+		await loadData(true);
+		if (!selected || editingConnector !== selected) return;
+		const fresh = connectors.find((item) => item.id === selected.id);
+		if (formSaving || snapshot !== remoteSnapshot() || remoteSnapshot() !== remoteBaseline) {
+			if (!fresh || JSON.stringify(fresh) !== JSON.stringify(selected)) remoteChange = fresh
+				? 'This item changed elsewhere. Your unsaved changes are kept here.'
+				: 'This item was deleted elsewhere. Copy your unsaved changes before leaving.';
+			return;
+		}
+		if (fresh) startEdit(fresh);
+		else { cancelForm(); remoteChange = 'This item was deleted elsewhere.'; }
+	});
 </script>
+
+{#if remoteChange}<p role="status" style="flex: none; height: auto;" class="px-4 py-2 text-sm text-muted-foreground">{remoteChange}</p>{/if}
 
 <div class="connector-manager">
 	{#if loading}

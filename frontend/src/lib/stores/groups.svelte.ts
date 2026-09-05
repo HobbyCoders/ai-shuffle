@@ -1,3 +1,5 @@
+import { preferenceSync } from '$lib/services/preferences';
+import { compatible } from '$lib/services/preference-values';
 /**
  * Groups Store - User-defined grouping for projects, profiles, and subagents
  *
@@ -86,102 +88,23 @@ function saveToLocalStorage(state: GroupsState) {
 /**
  * Load groups from backend API
  */
-async function loadFromBackend(): Promise<GroupsState | null> {
-	if (!browser) return null;
 
-	try {
-		const response = await fetch(`/api/v1/preferences/${API_PREFERENCE_KEY}`, {
-			credentials: 'include'
-		});
-
-		if (response.ok) {
-			const data = await response.json();
-			if (data && data.value) {
-				// Merge with defaults to ensure all fields exist
-				return {
-					projects: { ...defaultState.projects, ...data.value.projects },
-					profiles: { ...defaultState.profiles, ...data.value.profiles },
-					subagents: { ...defaultState.subagents, ...data.value.subagents }
-				};
-			}
-		} else if (response.status === 404) {
-			// No groups saved yet, that's fine
-			return null;
-		}
-	} catch (e) {
-		console.error('[Groups] Failed to load from backend:', e);
-	}
-
-	return null;
-}
 
 /**
  * Save groups to backend API (debounced)
  */
-let saveTimeout: ReturnType<typeof setTimeout> | null = null;
-let pendingState: GroupsState | null = null;
 
 /**
  * Immediately flush any pending save to backend (sync, for beforeunload)
  */
-function flushPendingGroupsSave() {
-	if (!pendingState) return;
 
-	// Cancel the debounce timer
-	if (saveTimeout) {
-		clearTimeout(saveTimeout);
-		saveTimeout = null;
-	}
-
-	// Use sendBeacon for reliable delivery during page unload
-	// sendBeacon is designed for this use case and won't be cancelled
-	const data = JSON.stringify({ key: API_PREFERENCE_KEY, value: pendingState });
-	navigator.sendBeacon(`/api/v1/preferences/${API_PREFERENCE_KEY}`, new Blob([data], { type: 'application/json' }));
-
-	pendingState = null;
-}
 
 // Register beforeunload handler to flush pending saves when browser closes
 // (guarded against HMR duplicate registration)
-if (browser && !(window as any).__groups_listeners) {
-	(window as any).__groups_listeners = true;
-	window.addEventListener('beforeunload', flushPendingGroupsSave);
-	// Also handle visibility change (tab switch, minimize) - more reliable on mobile
-	document.addEventListener('visibilitychange', () => {
-		if (document.visibilityState === 'hidden') {
-			flushPendingGroupsSave();
-		}
-	});
-}
+// Persistence lifecycle is owned by live-sync, not module-level unload listeners.
 
 async function saveToBackend(state: GroupsState) {
-	if (!browser) return;
-
-	// Store the pending state
-	pendingState = state;
-
-	// Debounce saves to avoid excessive API calls
-	if (saveTimeout) {
-		clearTimeout(saveTimeout);
-	}
-
-	saveTimeout = setTimeout(async () => {
-		if (!pendingState) return;
-
-		try {
-			await fetch(`/api/v1/preferences/${API_PREFERENCE_KEY}`, {
-				method: 'PUT',
-				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
-				body: JSON.stringify({ key: API_PREFERENCE_KEY, value: pendingState })
-			});
-		} catch (e) {
-			console.error('[Groups] Failed to save to backend:', e);
-		}
-
-		pendingState = null;
-		saveTimeout = null;
-	}, 500); // 500ms debounce
+ preferenceSync.save(API_PREFERENCE_KEY, state);
 }
 
 // ─── Reactive State ──────────────────────────────────────────────────────────
@@ -189,7 +112,6 @@ async function saveToBackend(state: GroupsState) {
 let _state = $state<GroupsState>(loadFromLocalStorage());
 
 // Track if we've loaded from backend
-let backendLoaded = false;
 
 // ─── Subscribe Shim (centralized via store-utils) ───────────────────────────
 
@@ -203,9 +125,7 @@ function _notifySubscribers() {
 	// Auto-save to localStorage + debounced backend on every state change
 	if (browser) {
 		saveToLocalStorage(_state);
-		if (backendLoaded) {
-			saveToBackend(_state);
-		}
+		saveToBackend(_state);
 	}
 
 	notifySubscribers();
@@ -221,40 +141,6 @@ function _set(value: GroupsState) {
 	_notifySubscribers();
 }
 
-// ─── Async Backend Initialization ────────────────────────────────────────────
-
-if (browser) {
-	loadFromBackend().then(async (backendState) => {
-		if (backendState) {
-			// Backend has data, use it (more authoritative)
-			_state = backendState;
-			saveToLocalStorage(backendState);
-			backendLoaded = true;
-			// Notify subscribers of the backend-loaded state
-			notifySubscribers();
-		} else {
-			// No backend data, sync localStorage to backend
-			if (_state.projects.groups.length > 0 ||
-				_state.profiles.groups.length > 0 ||
-				_state.subagents.groups.length > 0) {
-				// Wait for the save to complete before marking as loaded
-				// This prevents race conditions where changes might be lost
-				try {
-					await fetch(`/api/v1/preferences/${API_PREFERENCE_KEY}`, {
-						method: 'PUT',
-						headers: { 'Content-Type': 'application/json' },
-						credentials: 'include',
-						body: JSON.stringify({ key: API_PREFERENCE_KEY, value: _state })
-					});
-				} catch (e) {
-					console.error('[Groups] Failed to sync initial state to backend:', e);
-				}
-			}
-			backendLoaded = true;
-		}
-	});
-}
-
 // ─── Exported Store ──────────────────────────────────────────────────────────
 
 export const groups = {
@@ -266,12 +152,8 @@ export const groups = {
 	 * Force reload from backend
 	 */
 	async reload() {
-		const backendState = await loadFromBackend();
-		if (backendState) {
-			_set(backendState);
-			saveToLocalStorage(backendState);
-		}
-	},
+ await preferenceSync.refresh(API_PREFERENCE_KEY);
+},
 
 	/**
 	 * Create a new group for an entity type
@@ -487,4 +369,16 @@ export function organizeByGroups<T extends { id: string }>(
 
 	return { grouped, ungrouped, groupOrder: entity.groups };
 }
+
+preferenceSync.register(API_PREFERENCE_KEY, {
+ read: () => _state,
+ apply(value) {
+  _state = compatible(defaultState, value);
+  for (const key of ['projects', 'profiles', 'subagents'] as const) {
+   _state[key].groups = _state[key].groups.filter(g => g && typeof g.name === 'string').map(g => ({ ...g, collapsed: !!g.collapsed }));
+   _state[key].assignments = Object.fromEntries(Object.entries(_state[key].assignments).filter(([, v]) => typeof v === 'string'));
+  }
+  saveToLocalStorage(_state); notifySubscribers();
+ }
+});
 
