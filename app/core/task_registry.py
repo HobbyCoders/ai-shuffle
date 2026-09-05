@@ -1233,9 +1233,12 @@ class TaskRegistry:
         """
         if session_id in self._unpark_pending:
             return True
+        # Nested task results go to their owning agent, not this session.
+        # Match on_task_terminal's OWN lane: only parent-owned completions can
+        # produce a parent delivery receipt. Active nested work still blocks
+        # through get_active until its owner and the nested work finish.
         ids = (self._sdk_background_tasks.get(session_id, set())
-               | self._monitor_shell_tasks.get(session_id, set())
-               | self._subagent_background_tasks.get(session_id, set()))
+               | self._monitor_shell_tasks.get(session_id, set()))
         ids = ids | {
             task_id for task_id, record in self._tasks.get(session_id, {}).items()
             if record.get("tool_use_id") in self._background_launches.get(session_id, set())

@@ -340,6 +340,146 @@ async def test_bounded_bookkeeping():
         assert not cs._tasks
 
 
+@pytest.mark.asyncio
+async def test_nested_completion_does_not_require_parent_delivery(mock_db):
+    from app.core.task_registry import task_registry as registry
+    from app.core import turn_scheduler as scheduler
+
+    registry.clear_session("s")
+    try:
+        registry.mark_background_launch("s", "owner-launch")
+        registry.start_task("s", "owner-task", "agent", "Owner", tool_use_id="owner-launch")
+        registry.mark_subagent_background_launch("s", "nested-launch")
+        registry.start_task("s", "nested-task", "shell", "Nested", tool_use_id="nested-launch")
+        registry.mark_subagent_background_task("s", "nested-task")
+        registry.complete_task("s", "nested-task", "completed", notify=False)
+        with patch.object(scheduler, "_enqueue_context_wake", AsyncMock()) as enqueue:
+            await scheduler.on_task_terminal("s", {
+                "task_id": "nested-task", "status": "completed", "summary": "Nested work finished",
+            })
+            enqueue.assert_not_awaited()
+        assert registry.has_pending_composer_work("s")
+        registry.complete_task("s", "owner-task", "completed", notify=False)
+        assert registry.has_pending_composer_work("s")
+        scheduler.on_task_notification_delivered("s", ["owner-task"])
+        assert not registry.get_active("s")
+        assert not registry.has_pending_composer_work("s")
+    finally:
+        registry.clear_session("s")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_kind", ["agent", "sdk", "monitor"])
+async def test_final_unpark_generates_after_nested_owner_receipt(mock_db, owner_kind):
+    from app.core import session_runtime, turn_scheduler as scheduler
+    from app.core.sync_engine import sync_engine
+    from app.core.task_registry import task_registry as registry
+    from app.db import sessions, settings, turns
+
+    sessions.create_session("s", "default", api_user_id="owner", mode="code")
+    settings.set_user_preference("api_user", "owner", "chat_behavior", {"suggestNextResponse": True})
+    registry.clear_session("s")
+    previous_hook = session_runtime._on_turn_settled
+    previous_broadcaster = session_runtime._broadcaster
+    session_runtime.register_scheduler(scheduler.on_turn_settled)
+    session_runtime.register_broadcaster(AsyncMock())
+
+    async def pump(**kwargs):
+        generate.assert_not_awaited()
+        assert not registry.has_pending_composer_work("s")
+        yield {"type": "stream_delta", "delta_type": "text", "content": "All requested work is finished."}
+        yield {"type": "done", "metadata": {"stop_reason": "end_turn"}}
+
+    try:
+        registry.start_task("s", "owner-task", "agent" if owner_kind != "monitor" else "shell", "Owner", tool_use_id="owner-launch")
+        if owner_kind == "agent":
+            registry.mark_background_launch("s", "owner-launch")
+        elif owner_kind == "sdk":
+            registry.mark_sdk_background_task("s", "owner-task")
+        else:
+            registry.mark_monitor_shell_task("s", "owner-task")
+        registry.start_task("s", "nested-task", "shell", "Nested")
+        registry.mark_subagent_background_task("s", "nested-task")
+        with (
+            patch("app.api.generation.generate_with_claude", AsyncMock(return_value="Which edge case should we test next?")) as generate,
+            patch("app.core.query_engine._stream_to_websocket_impl", pump),
+            patch.object(sync_engine, "broadcast_event", AsyncMock()) as broadcast,
+        ):
+            parked = turns.enqueue_turn("s", "user", prompt="Start work")
+            assert turns.start_turn(parked["id"], None, "runner") is not None
+            assert turns.park_turn(parked["id"]) is not None
+            # The SQLite shim gives NOW() only second precision; avoid a tie
+            # whose random UUID ordering can make the earlier turn look latest.
+            mock_db.execute("UPDATE turns SET created_at = '2000-01-01' WHERE id = ?", (parked["id"],))
+            await scheduler.on_turn_settled("s", parked["id"], "parked")
+            assert not cs._tasks
+            generate.assert_not_awaited()
+
+            registry.complete_task("s", "nested-task", "completed", notify=False)
+            await scheduler.on_task_terminal("s", {"task_id": "nested-task", "status": "completed"})
+            assert not turns.get_queued_turns("s")
+            assert not cs._tasks
+            generate.assert_not_awaited()
+            registry.complete_task("s", "owner-task", "completed", notify=False)
+            assert registry.has_pending_composer_work("s")
+            wake = turns.enqueue_turn("s", "unpark", prompt="Background work finished.", payload={
+                "api_user_id": "owner", "task_ids": ["owner-task"],
+                "pending_frames": [{"task_id": "owner-task", "status": "completed", "summary": "Owner finished"}],
+            })
+            assert await session_runtime.SessionRuntime(wake).execute() == "completed"
+            await asyncio.gather(*cs._tasks.values())
+            assert turns.get_latest_turn("s")["id"] == wake["id"], turns.get_latest_turn("s")
+            assert cs._final_answer("s", wake["id"]) == "All requested work is finished."
+            assert await cs._eligible("s", wake["id"])
+            generate.assert_awaited_once()
+            assert "All requested work is finished." in generate.call_args.args[0]
+            suggestions = [call.args[0].data for call in broadcast.await_args_list
+                           if call.args[0].data.get("type") == "composer_suggestion"]
+            assert suggestions == [{
+                "type": "composer_suggestion", "session_id": "s", "turn_id": wake["id"],
+                "suggestion": "Which edge case should we test next?",
+            }]
+            assert turns.get_turn(wake["id"])["state"] == "completed"
+            assert not registry.has_pending_composer_work("s")
+    finally:
+        if cs._tasks:
+            await asyncio.gather(*cs._tasks.values())
+        session_runtime.register_scheduler(previous_hook)
+        session_runtime.register_broadcaster(previous_broadcaster)
+        registry.clear_session("s")
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("own_lane", [None, "sdk", "monitor"])
+async def test_nested_active_and_dual_marked_receipt_gates(mock_db, own_lane):
+    from app.core import turn_scheduler as scheduler
+    from app.core.task_registry import task_registry as registry
+    from app.db import sessions, settings
+
+    sessions.create_session("s", "default", api_user_id="owner", mode="code")
+    settings.set_user_preference("api_user", "owner", "chat_behavior", {"suggestNextResponse": True})
+    turn = _settled_turn("s")
+    registry.clear_session("s")
+    try:
+        registry.start_task("s", "nested", "shell", "Nested work")
+        registry.mark_subagent_background_task("s", "nested")
+        if own_lane == "sdk":
+            registry.mark_sdk_background_task("s", "nested")
+        elif own_lane == "monitor":
+            registry.mark_monitor_shell_task("s", "nested")
+        assert await cs._eligible("s", turn["id"]) is False
+        registry.complete_task("s", "nested", "completed", notify=False)
+        assert registry.has_pending_composer_work("s") is (own_lane is not None)
+        assert await cs._eligible("s", turn["id"]) is (own_lane is None)
+        if own_lane is not None:
+            registry.mark_woken("s", "nested")
+            registry.mark_terminal_notified("s", "nested")
+            assert not await cs._eligible("s", turn["id"])
+            scheduler.on_task_notification_delivered("s", ["nested"])
+            assert await cs._eligible("s", turn["id"])
+    finally:
+        registry.clear_session("s")
+
+
 SENSITIVE = "SENSITIVE_PROMPT_PROVIDER_CREDENTIAL_SENTINEL"
 
 
