@@ -599,6 +599,7 @@
 	}
 
 	.execution-mode-bar.sheet-mode {
+		display: contents;
 		z-index: auto;
 		width: 100%;
 		align-items: stretch;
@@ -606,6 +607,7 @@
 	}
 
 	.sheet-mode .mode-bar-row {
+		display: contents;
 		width: 100%;
 		flex-direction: column;
 		align-items: stretch;
@@ -617,6 +619,7 @@
 	}
 
 	.sheet-mode .branch-wt-row {
+		grid-column: 1 / -1;
 		display: flex;
 		align-items: center;
 		gap: 8px;
@@ -639,25 +642,25 @@
 	.sheet-mode .mode-trigger,
 	.sheet-mode .branch-trigger {
 		width: 100%;
-		height: 40px;
+		height: 44px;
 		padding: 0 12px;
 		gap: 8px;
 		border: 1px solid var(--border-subtle);
-		border-radius: 12px;
-		background: color-mix(in oklch, var(--muted) 55%, var(--card));
-		font-size: 0.86rem;
+		border-radius: var(--composer-control-radius, 12px);
+		background: var(--composer-control-bg, color-mix(in oklch, var(--muted) 55%, var(--card)));
+		font-size: 0.8rem;
 	}
 
 	.sheet-mode .wt-chip {
 		width: auto;
 		flex: 0 0 auto;
-		height: 40px;
+		height: 44px;
 		padding: 0 12px;
 		gap: 8px;
 		border: 1px solid var(--border-subtle);
-		border-radius: 12px;
-		background: color-mix(in oklch, var(--muted) 55%, var(--card));
-		font-size: 0.86rem;
+		border-radius: var(--composer-control-radius, 12px);
+		background: var(--composer-control-bg, color-mix(in oklch, var(--muted) 55%, var(--card)));
+		font-size: 0.8rem;
 	}
 
 	.sheet-mode .mode-trigger-label,
@@ -673,7 +676,9 @@
 		width: 100%;
 		min-width: 0;
 		max-width: none;
-		max-height: 45dvh;
+		max-height: min(180px, calc(var(--app-viewport-height, 100dvh) * 0.28));
+		touch-action: pan-y;
+		overscroll-behavior: contain;
 		margin-top: 6px;
 	}
 

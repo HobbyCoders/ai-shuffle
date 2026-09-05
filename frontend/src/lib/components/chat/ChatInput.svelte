@@ -831,6 +831,7 @@
 	class="chat-input-wrapper"
 	class:mobile-collapsed={mobileCollapsed}
 	class:mobile-toolbar-blocked={toolbarPointerBlocked}
+	class:mobile-controls-open={mobileControlsOpen}
 	onfocusout={scheduleMobileComposerReconciliation}
 	role="region"
 	aria-label="Chat input with file drop"
@@ -1212,7 +1213,8 @@
 		}
 
 		.chat-island {
-			border-radius: 16px;
+			border-radius: 20px;
+			background: var(--popover);
 			transition:
 				border-radius 180ms ease,
 				border-color 180ms ease;
@@ -1226,6 +1228,15 @@
 		.input-area {
 			min-height: 56px;
 			padding: 10px 10px 4px 12px;
+			background: var(--card);
+			border-radius: 20px 20px 0 0;
+		}
+
+
+		/* Leave room for the integrated panel while a draft grows above the
+		   software keyboard. The editor keeps its own text scrolling. */
+		.mobile-controls-open .textarea-wrapper :global(.tiptap-editor) {
+			max-height: min(150px, calc(var(--app-viewport-height, 100dvh) * 0.15));
 		}
 
 		/* Thumb-sized primary action. */
@@ -1253,6 +1264,10 @@
 			pointer-events: none;
 		}
 
+		.mobile-collapsed :global(.mobile-composer-controls) {
+			display: none;
+		}
+
 		/* Expanding on pointerdown reflows this row under the still-down finger.
 		   Keep it un-hittable until that pointer's click has been delivered. */
 		.mobile-toolbar-blocked :global(.controls-dock) {
@@ -1260,6 +1275,7 @@
 		}
 
 		.mobile-collapsed .input-area {
+			border-radius: 14px;
 			min-width: 0;
 			min-height: 48px;
 			align-items: center;

@@ -1,8 +1,13 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
+import '../../test-stubs/composer-dom';
 
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterAll(() => vi.unstubAllGlobals());
+vi.hoisted(() => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }));
+});
 
 function props(overrides: Record<string, unknown> = {}) {
 	return {
@@ -53,138 +58,126 @@ function props(overrides: Record<string, unknown> = {}) {
 	};
 }
 
-describe('MobileComposerControlsSheet', () => {
-	it('portals one dialog to body and groups secondary composer controls', () => {
-		render(MobileComposerControlsSheet, { props: props() });
-
-		const dialog = screen.getByRole('dialog', { name: /chat controls/i });
-		expect(dialog.parentElement).toBe(document.body.querySelector('.sheet-layer'));
-		expect(screen.getByText('Chat setup')).toBeTruthy();
-		expect(screen.getByRole('button', { name: /reasoning effort/i })).toBeTruthy();
-		expect(screen.getByRole('button', { name: /tool access/i })).toBeTruthy();
-		// Computer use is agent configuration now: no control for it here.
-		expect(screen.queryByRole('switch', { name: /computer control/i })).toBeNull();
+describe('integrated mobile composer controls', () => {
+	it('renders in place without a modal, backdrop, scroll lock, or focus theft', async () => {
+		const editor = document.createElement('textarea');
+		document.body.append(editor);
+		editor.focus();
+		const { container } = render(MobileComposerControlsSheet, { props: props() });
+		await Promise.resolve();
+		expect(container.contains(screen.getByRole('region', { name: 'Chat controls' }))).toBe(true);
+		expect(screen.queryByRole('dialog')).toBeNull();
+		expect(document.body.style.overflow).not.toBe('hidden');
+		expect(document.activeElement).toBe(editor);
+		expect(screen.queryByText('Close toolbar')).toBeNull();
+		editor.remove();
 	});
 
-	it('drops chat setup and tool access outside the code lane', () => {
-		// A chat/voice composer has no project to configure and a fixed web-only
-		// tool surface, so both sections go rather than sit empty under a heading.
+	it('hides the handle completely when closed and keeps controls inert', () => {
+		const { container } = render(MobileComposerControlsSheet, { props: props({ open: false }) });
+		expect(container.querySelector('.panel-handle')).toBeNull();
+		expect((container.querySelector('.panel-reveal') as HTMLElement).inert).toBe(true);
+		expect(screen.queryByRole('button', { name: 'High' })).toBeNull();
+	});
+
+	it('has no visible handle when open and guards the expanding tap', () => {
+		const { container } = render(MobileComposerControlsSheet, { props: props({ inertToolbar: true }) });
+		expect(container.querySelector('.panel-handle')).toBeNull();
+		expect((container.querySelector('.panel-reveal') as HTMLElement).inert).toBe(true);
+	});
+	it('shows applicable session context directly without a setup page or native selects', () => {
+		const { container } = render(MobileComposerControlsSheet, { props: props() });
+		expect(screen.getByRole('toolbar', { name: 'Session context' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: /^Agent:/ })).toBeTruthy();
+		expect(screen.queryByRole('button', { name: 'Chat setup' })).toBeNull();
+		expect(container.querySelector('select')).toBeNull();
+	});
+
+	it('drops setup and tool access outside the code lane', () => {
 		render(MobileComposerControlsSheet, { props: props({ showCodeControls: false }) });
-
-		expect(screen.queryByText('Chat setup')).toBeNull();
-		expect(screen.queryByRole('button', { name: /tool access/i })).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Chat setup' })).toBeNull();
+		expect(screen.queryByRole('group', { name: 'Tool access' })).toBeNull();
 		expect(screen.getByRole('button', { name: /model: sonnet/i })).toBeTruthy();
-		expect(screen.getByRole('button', { name: /reasoning effort/i })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'High' })).toBeTruthy();
 	});
 
-	it('opens the model subpage, filters models, and applies a selection', async () => {
+	it('uses the shared searchable model picker and returns to the controls after selection', async () => {
 		const onModelSelect = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({ onModelSelect }) });
-
 		await fireEvent.click(screen.getByRole('button', { name: /model: sonnet/i }));
-		expect(screen.getByRole('dialog', { name: /choose model/i })).toBeTruthy();
-
-		await fireEvent.input(screen.getByRole('textbox', { name: /search models/i }), {
-			target: { value: 'opus' }
-		});
+		expect(screen.getByRole('region', { name: 'Choose model' })).toBeTruthy();
+		expect(document.querySelector('[data-model-picker-panel]')).toBeTruthy();
+		await fireEvent.input(screen.getByRole('textbox', { name: /search models/i }), { target: { value: 'opus' } });
 		expect(screen.queryByRole('option', { name: /sonnet/i })).toBeNull();
 		await fireEvent.click(screen.getByRole('option', { name: /opus/i }));
 		expect(onModelSelect).toHaveBeenCalledWith('opus');
+		expect(screen.getByRole('region', { name: 'Chat controls' })).toBeTruthy();
+		await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: /model: sonnet/i })));
 	});
 
-	it('does not focus model search when the model subpage opens', async () => {
-		render(MobileComposerControlsSheet, { props: props() });
-
-		await fireEvent.click(screen.getByRole('button', { name: /model: sonnet/i }));
-		const dialog = screen.getByRole('dialog', { name: /choose model/i });
-		await waitFor(() => expect(document.activeElement).toBe(dialog));
-		expect(screen.getByRole('textbox', { name: /search models/i })).not.toBe(
-			document.activeElement
-		);
-	});
-
-	it('reuses the shared picker and exposes its fixed context choice', async () => {
+	it('does not summon the keyboard when the picker opens and preserves context selection', async () => {
 		const onContextChoiceSelect = vi.fn();
-		render(MobileComposerControlsSheet, {
-			props: props({ onContextChoiceSelect })
-		});
-
+		render(MobileComposerControlsSheet, { props: props({ onContextChoiceSelect }) });
 		await fireEvent.click(screen.getByRole('button', { name: /model: sonnet/i }));
-
-		expect(document.querySelector('[data-model-picker-panel]')).toBeTruthy();
-		expect(screen.getByRole('radiogroup', { name: /context window/i })).toBeTruthy();
-		expect(screen.getByRole('radio', { name: /1m.*extended/i }).getAttribute('aria-checked')).toBe(
-			'true'
-		);
+		await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('region', { name: 'Choose model' })));
+		expect(screen.getByRole('radio', { name: /1m.*extended/i }).getAttribute('aria-checked')).toBe('true');
 		await fireEvent.click(screen.getByRole('radio', { name: /200k.*normal/i }));
 		expect(onContextChoiceSelect).toHaveBeenCalledWith('standard');
 	});
 
-	it('applies effort and access changes without closing the sheet', async () => {
-		const onEffortSelect = vi.fn();
-		const onPermissionSelect = vi.fn();
-		render(MobileComposerControlsSheet, {
-			props: props({ onEffortSelect, onPermissionSelect })
-		});
-
-		await fireEvent.click(screen.getByRole('button', { name: /reasoning effort/i }));
-		await fireEvent.click(screen.getByRole('option', { name: /high/i }));
-		await fireEvent.click(screen.getByRole('button', { name: /tool access/i }));
-		await fireEvent.click(screen.getByRole('option', { name: /auto.*model decides/i }));
-
+	it('applies effort and access directly without an expanding menu or closing the panel', async () => {
+		const onEffortSelect = vi.fn(), onPermissionSelect = vi.fn(), onClose = vi.fn();
+		render(MobileComposerControlsSheet, { props: props({ onEffortSelect, onPermissionSelect, onClose }) });
+		await fireEvent.click(screen.getByRole('button', { name: 'High' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Auto: Model decides per tool call' }));
 		expect(onEffortSelect).toHaveBeenCalledWith('high');
 		expect(onPermissionSelect).toHaveBeenCalledWith('auto');
-		expect(screen.getByRole('dialog')).toBeTruthy();
+		expect(onClose).not.toHaveBeenCalled();
+		expect(screen.queryByRole('listbox')).toBeNull();
 	});
 
-	it('uses compact dropdowns for reasoning and has no attach or explicit close action', () => {
-		render(MobileComposerControlsSheet, { props: props() });
-
-		expect(screen.getByRole('button', { name: /reasoning effort/i })).toBeTruthy();
-		expect(screen.queryByRole('slider', { name: /reasoning effort/i })).toBeNull();
-		expect(screen.queryByRole('button', { name: /attach/i })).toBeNull();
-		expect(document.querySelector('.sheet-header [aria-label="Close chat controls"]')).toBeNull();
-		expect(screen.queryByRole('button', { name: /done/i })).toBeNull();
-	});
-
-	it('shows the fast-mode checkbox when the model supports it', () => {
-		render(MobileComposerControlsSheet, { props: props({ fastSupported: true, fastEnabled: true }) });
-
-		const toggle = screen.getByRole('checkbox', { name: /fast mode/i }) as HTMLInputElement;
-		expect(toggle.checked).toBe(true);
-		expect(screen.getByText(/clears the prompt cache/i)).toBeTruthy();
-	});
-
-	it('hides the fast-mode checkbox for a model without the tier', () => {
-		render(MobileComposerControlsSheet, { props: props({ fastSupported: false }) });
-
-		expect(screen.queryByRole('checkbox', { name: /fast mode/i })).toBeNull();
-	});
-
-	it('flips fast mode without closing the sheet', async () => {
-		const onToggleFast = vi.fn();
-		const onClose = vi.fn();
-		render(MobileComposerControlsSheet, {
-			props: props({ fastSupported: true, fastEnabled: false, onToggleFast, onClose })
-		});
-
-		await fireEvent.click(screen.getByRole('checkbox', { name: /fast mode/i }));
-
+	it('exposes supported fast mode as a switch with its cost/cache explanation', async () => {
+		const onToggleFast = vi.fn(), onClose = vi.fn();
+		render(MobileComposerControlsSheet, { props: props({ fastSupported: true, fastEnabled: true, onToggleFast, onClose }) });
+		const toggle = screen.getByRole('switch', { name: 'Fast mode' });
+		expect(toggle.getAttribute('aria-checked')).toBe('true');
+		expect(document.getElementById(toggle.getAttribute('aria-describedby')!)?.textContent).toMatch(/price.*prompt cache/i);
+		await fireEvent.click(toggle);
 		expect(onToggleFast).toHaveBeenCalledTimes(1);
 		expect(onClose).not.toHaveBeenCalled();
-		expect(screen.getByRole('dialog')).toBeTruthy();
 	});
 
-	it('uses Escape to go back from models before dismissing the sheet', async () => {
+	it('hides fast mode for unsupported models', () => {
+		render(MobileComposerControlsSheet, { props: props() });
+		expect(screen.queryByRole('switch', { name: 'Fast mode' })).toBeNull();
+	});
+
+	it('scopes Escape to the panel, goes back first, then requests closure', async () => {
 		const onClose = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({ onClose }) });
-
 		await fireEvent.click(screen.getByRole('button', { name: /model: sonnet/i }));
 		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(screen.getByRole('region', { name: 'Choose model' })).toBeTruthy();
+		await fireEvent.keyDown(screen.getByRole('region', { name: 'Choose model' }), { key: 'Escape' });
 		expect(onClose).not.toHaveBeenCalled();
-		expect(screen.getByRole('button', { name: /reasoning effort/i })).toBeTruthy();
-
-		await fireEvent.keyDown(window, { key: 'Escape' });
+		const model = screen.getByRole('button', { name: /model: sonnet/i });
+		model.focus();
+		await fireEvent.keyDown(model, { key: 'Escape' });
 		expect(onClose).toHaveBeenCalledTimes(1);
+		expect(document.activeElement).toBe(model);
 	});
+
+	it('does not trap Tab or consume Escape already handled by a child', async () => {
+		const onClose = vi.fn();
+		render(MobileComposerControlsSheet, { props: props({ onClose }) });
+		const handle = screen.getByRole('region', { name: 'Chat controls' });
+		const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+		await fireEvent(handle, tab);
+		expect(tab.defaultPrevented).toBe(false);
+		const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+		escape.preventDefault();
+		await fireEvent(handle, escape);
+		expect(onClose).not.toHaveBeenCalled();
+	});
+
 });

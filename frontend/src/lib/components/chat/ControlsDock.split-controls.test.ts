@@ -5,6 +5,7 @@ import { get } from 'svelte/store';
 import { activeSession } from '$lib/stores/active-session';
 import { appMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
 import ControlsDock from './ControlsDock.svelte';
+import '../../test-stubs/composer-dom';
 import { getUsageLimits } from '$lib/api/client';
 
 vi.hoisted(() => {

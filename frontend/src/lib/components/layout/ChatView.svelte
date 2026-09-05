@@ -64,6 +64,7 @@
 
 	// Keep the editor mounted through call transitions so drafts and file chips survive.
 	const showComposer = true;
+	let surfaceHeight = $state(0);
 
 	// VM23 (user directive, 2026-08-15): while a call is live, worker permission
 	// requests are the VOICE agent's to relay — it reads them out and answers via
@@ -192,7 +193,7 @@
 	});
 </script>
 
-<div class="chat-view" class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}>
+<div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined} class:short-surface={surfaceHeight > 0 && surfaceHeight <= 680} class:keyboard-surface={surfaceHeight > 0 && surfaceHeight <= 420} class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}>
 	{#if showEmptyHero}
 		<!-- Empty state hero: workspace selector / cleared hint. The ChatInput is
 		     NOT rendered here — it lives in the always-mounted .input-slot below so
@@ -449,6 +450,38 @@
 		align-items: center;
 		width: 100%;
 		max-width: 768px;
+	}
+
+	@media (max-width: 1080px) {
+		/* Keep the hero out of the scrolling hierarchy: project popups must
+		   float over the composer, with scrolling confined to their own list. */
+		.empty-hero {
+			min-height: 0;
+			padding-top: 0;
+			overflow: visible;
+		}
+
+		.empty-hero-content {
+			flex-shrink: 0;
+		}
+
+		.chat-view .input-slot.empty-input-layout {
+			margin-top: 0;
+		}
+
+		.empty-hero:has(:global(.picker-dropdown)) { z-index: 40; }
+		.chat-view:has(:global(.mobile-controls-open)) .empty-hero-content { --workspace-hero-padding: 4px 16px; }
+		.chat-view:has(:global(.mobile-controls-open)) .empty-hero-content :global(.logo-mark) { display: none; }
+
+		/* Compact the invitation, rather than turning it into a scroll pane,
+		   when the keyboard or expanded dock leaves little vertical room. */
+		.short-surface .empty-hero-content { --workspace-hero-padding: 12px 16px; }
+		.short-surface .empty-hero-content :global(.logo-mark) { display: none; }
+		.keyboard-surface .empty-hero-content { --workspace-hero-padding: 4px 16px; }
+		.keyboard-surface .empty-hero-content :global(.hero-heading) { font-size: 1.25rem; }
+		.keyboard-surface .empty-hero-content :global(.picker-name) { font-size: 1.25rem; }
+		.keyboard-surface .empty-bottom-spacer { flex: 0; }
+		.keyboard-surface:has(:global(.controls-panel.models)) .empty-hero { display: none; }
 	}
 
 	/* Voice lane, unbound: no composer and therefore no bottom spacer to balance

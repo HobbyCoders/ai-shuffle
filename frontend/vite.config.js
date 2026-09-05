@@ -59,7 +59,11 @@ export default defineConfig({
 		proxy: {
 			'/api': {
 				target: 'http://localhost:8000',
-				changeOrigin: true,
+				// Chat and transcription use same-origin WebSockets, including LAN previews.
+				ws: true,
+				// Preserve the browser-facing Host so the backend can validate Origin
+				// against it. Rewriting Host to localhost breaks CSRF on LAN logins.
+				changeOrigin: false,
 				secure: false,
 				cookieDomainRewrite: {
 					'*': ''

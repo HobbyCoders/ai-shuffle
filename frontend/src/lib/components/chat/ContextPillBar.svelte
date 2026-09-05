@@ -377,9 +377,10 @@
 	.context-pill-bar.sheet-mode {
 		z-index: auto;
 		width: 100%;
-		flex-direction: column;
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
 		align-items: stretch;
-		gap: 8px;
+		gap: 6px;
 		margin: 0;
 	}
 
@@ -410,6 +411,7 @@
 	}
 
 	.sheet-mode .branch-wt-row {
+		grid-column: 1 / -1;
 		display: flex;
 		align-items: center;
 		gap: 8px;
@@ -439,13 +441,13 @@
 	}
 
 	.sheet-mode .ctx-chip {
-		height: 40px;
+		height: 44px;
 		padding: 0 12px;
 		gap: 8px;
 		border: 1px solid var(--border-subtle);
-		border-radius: 12px;
-		background: color-mix(in oklch, var(--muted) 55%, var(--card));
-		font-size: 0.86rem;
+		border-radius: var(--composer-control-radius, 12px);
+		background: var(--composer-control-bg, color-mix(in oklch, var(--muted) 55%, var(--card)));
+		font-size: 0.8rem;
 	}
 
 	.sheet-mode .runner-dropdown {
@@ -453,6 +455,8 @@
 		width: 100%;
 		max-width: none;
 		margin-top: 6px;
+		max-height: 180px;
+		touch-action: pan-y;
 	}
 
 	.runner-dropdown {

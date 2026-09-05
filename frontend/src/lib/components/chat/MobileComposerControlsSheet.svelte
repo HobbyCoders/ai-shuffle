@@ -1,35 +1,24 @@
 <script lang="ts">
 	import { tick } from 'svelte';
-	import {
-		ArrowLeft,
-		Check,
-		ChevronDown,
-		ChevronRight,
-		SlidersHorizontal
-	} from 'lucide-svelte';
+	import { attachPanelDismiss } from './mobile-panel-gesture';
+	import { ArrowLeft, ChevronRight, Zap } from 'lucide-svelte';
 	import ContextPillBar from './ContextPillBar.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import type { PickerGroup } from '$lib/constants/model-picker';
 	import type { ContextWindowChoice } from '$lib/constants/model-context';
 
-	interface ControlOption {
-		value: string;
-		label: string;
-		description: string;
-	}
-
+	interface ControlOption { value: string; label: string; description: string; }
 	interface ModelOption extends ControlOption {
 		group: string;
 		groupKey: string;
 		groupSubtext: string | null;
 	}
-
 	interface Props {
 		open: boolean;
 		onClose: () => void;
+		panelId?: string;
+		inertToolbar?: boolean;
 		modelOptions: ModelOption[];
-		/** Provider groups backing the horizontal rail (T3-style picker). When
-		 *  omitted the rail is derived from the options without brand glyphs. */
 		modelGroups?: PickerGroup[];
 		modelValue: string;
 		modelLabel: string;
@@ -40,681 +29,202 @@
 		effortOptions: ControlOption[];
 		effortValue: string | null;
 		onEffortSelect: (value: string) => void;
-		/** Whether the picked model carries the fast service tier. */
 		fastSupported?: boolean;
 		fastEnabled?: boolean;
 		onToggleFast?: () => void;
-		/** Code and voice share project setup and tool access; chat omits them. */
 		showCodeControls?: boolean;
 		permissionOptions: ControlOption[];
 		permissionValue: string | null;
 		onPermissionSelect: (value: string) => void;
 	}
-
 	let {
-		open,
-		onClose,
-		modelOptions,
-		modelGroups,
-		modelValue,
-		modelLabel,
-		modelNotice,
-		onModelSelect,
-		contextChoice,
-		onContextChoiceSelect,
-		effortOptions,
-		effortValue,
-		onEffortSelect,
-		fastSupported = false,
-		fastEnabled = false,
-		onToggleFast,
-		showCodeControls = true,
-		permissionOptions,
-		permissionValue,
-		onPermissionSelect
+		open, onClose, panelId = 'mobile-composer-panel', inertToolbar = false,
+		modelOptions, modelGroups, modelValue, modelLabel, modelNotice, onModelSelect,
+		contextChoice, onContextChoiceSelect, effortOptions, effortValue, onEffortSelect,
+		fastSupported = false, fastEnabled = false, onToggleFast, showCodeControls = true,
+		permissionOptions, permissionValue, onPermissionSelect
 	}: Props = $props();
 
-	type SheetPage = 'overview' | 'models';
-	type SheetMenu = 'effort' | 'permission' | null;
-	let page = $state<SheetPage>('overview');
-	let openMenu = $state<SheetMenu>(null);
-	let sheetRef = $state<HTMLElement | null>(null);
-	let dragging = $state(false);
+	let page = $state<'overview' | 'models'>('overview');
+	let panelRef = $state<HTMLElement | null>(null);
+	let modelButtonRef = $state<HTMLButtonElement | null>(null);
+	let panelHeight = $state(0);
 	let dragOffset = $state(0);
-	let dragStartY = 0;
-	let dragStartedAt = 0;
+	let dragging = $state(false);
+	let cancelGesture: (() => void) | undefined;
 
-	// ModelPickerPanel owns the catalog interaction everywhere. This fallback only
-	// supplies neutral group metadata for isolated callers/tests that omit groups.
 	const railGroups = $derived.by<PickerGroup[]>(() => {
-		if (modelGroups && modelGroups.length > 0) return modelGroups;
-		const seen = new Map<string, PickerGroup>();
+		if (modelGroups?.length) return modelGroups;
+		const groups = new Map<string, PickerGroup>();
 		for (const option of modelOptions) {
-			if (!seen.has(option.groupKey)) {
-				seen.set(option.groupKey, {
-					key: option.groupKey,
-					name: option.group,
-					subtext: option.groupSubtext,
-					glyph: 'custom',
-					isApi: false
-				});
-			}
+			if (!groups.has(option.groupKey)) groups.set(option.groupKey, {
+				key: option.groupKey, name: option.group, subtext: option.groupSubtext,
+				glyph: 'custom', isApi: false
+			});
 		}
-		return [...seen.values()];
+		return [...groups.values()];
 	});
+	const permissionDescription = $derived(permissionOptions.find(o => o.value === permissionValue)?.description);
+	const permissionLabel = $derived(permissionOptions.find(o => o.value === permissionValue)?.label ?? 'Ask');
 
-	const effortLabel = $derived(
-		effortValue
-			? (effortOptions.find((option) => option.value === effortValue)?.label ?? 'Effort')
-			: 'Auto'
-	);
-	const permissionLabel = $derived(
-		permissionOptions.find((option) => option.value === permissionValue)?.label ?? 'Ask'
-	);
-
-	function toggleMenu(menu: Exclude<SheetMenu, null>) {
-		openMenu = openMenu === menu ? null : menu;
-	}
-
-	function closeSheet() {
-		page = 'overview';
-		openMenu = null;
-		dragging = false;
-		dragOffset = 0;
-		onClose();
-	}
-
-	async function openModels() {
-		openMenu = null;
-		page = 'models';
+	function closePanel() { onClose(); }
+	async function openPage(next: 'models') {
+		page = next;
 		await tick();
-		// Keep focus on the dialog so opening the picker does not summon a
-		// software keyboard or immediately route typing into model search.
-		sheetRef?.focus();
+		panelRef?.focus({ preventScroll: true });
 	}
-
+	async function back() {
+		page = 'overview';
+		await tick();
+		modelButtonRef?.focus({ preventScroll: true });
+	}
 	function handleKeydown(event: KeyboardEvent) {
-		if (!open) return;
-		if (event.key === 'Escape') {
-			event.preventDefault();
-			if (page === 'models') {
-				page = 'overview';
-			} else {
-				closeSheet();
-			}
-			return;
-		}
-
-		if (event.key === 'Tab' && sheetRef) {
-			const focusable = [...sheetRef.querySelectorAll<HTMLElement>(
-				'button:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex="-1"])'
-			)].filter((element) => !element.hasAttribute('hidden'));
-			if (focusable.length === 0) return;
-			const first = focusable[0];
-			const last = focusable[focusable.length - 1];
-			if (event.shiftKey && document.activeElement === first) {
-				event.preventDefault();
-				last?.focus();
-			} else if (!event.shiftKey && document.activeElement === last) {
-				event.preventDefault();
-				first?.focus();
-			}
-		}
+		if (event.defaultPrevented || event.key !== 'Escape' || !open) return;
+		event.preventDefault();
+		event.stopPropagation();
+		if (page !== 'overview') void back(); else closePanel();
 	}
-
-	function handleDragStart(event: PointerEvent) {
-		if (event.button !== 0) return;
-		dragging = true;
-		dragStartY = event.clientY;
-		dragStartedAt = performance.now();
-		dragOffset = 0;
-		(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+	function panelGestures(node: HTMLElement) {
+		const action = attachPanelDismiss(node, {
+			enabled: () => open && !inertToolbar,
+			height: () => panelHeight,
+			onDrag: (offset, active) => { dragOffset = offset; dragging = active; },
+			onDismiss: closePanel
+		});
+		cancelGesture = action.cancel;
+		return action;
 	}
-
-	function handleDragMove(event: PointerEvent) {
-		if (!dragging) return;
-		dragOffset = Math.max(0, event.clientY - dragStartY);
-	}
-
-	function handleDragEnd(event: PointerEvent) {
-		if (!dragging) return;
-		const elapsed = Math.max(performance.now() - dragStartedAt, 1);
-		const velocity = dragOffset / elapsed;
-		const closeThreshold = Math.min(96, (sheetRef?.offsetHeight ?? 480) * 0.18);
-		dragging = false;
-		if ((event.currentTarget as HTMLElement).hasPointerCapture(event.pointerId)) {
-			(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
-		}
-		if (dragOffset >= closeThreshold || velocity > 0.75) {
-			closeSheet();
-		} else {
+	$effect(() => {
+		if (!open) {
+			cancelGesture?.();
+			page = 'overview';
+			dragging = false;
 			dragOffset = 0;
 		}
-	}
-
-	function handleDragCancel() {
-		dragging = false;
-		dragOffset = 0;
-	}
-
-	function portal(node: HTMLElement) {
-		document.body.appendChild(node);
-		return {
-			destroy() {
-				node.remove();
-			}
-		};
-	}
-
-	$effect(() => {
-		if (!open) return;
-		const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-		const previousOverflow = document.body.style.overflow;
-		document.body.style.overflow = 'hidden';
-		tick().then(() => sheetRef?.focus());
-		return () => {
-			document.body.style.overflow = previousOverflow;
-			previousFocus?.focus();
-		};
 	});
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
-
-{#if open}
-	<div use:portal class="sheet-layer" data-composer-owned-overlay="true" role="presentation">
-		<button class="sheet-backdrop" type="button" aria-label="Close chat controls" onclick={closeSheet}></button>
-
-		<div
-			bind:this={sheetRef}
-			class="mobile-sheet"
-			class:dragging
-			style:transform={dragOffset > 0 ? `translateY(${dragOffset}px)` : undefined}
-			role="dialog"
-			aria-modal="true"
-			aria-labelledby="mobile-controls-title"
+<!-- Escape bubbles from panel controls; this group adds no tab stop. -->
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<div class="mobile-composer-controls" onkeydown={handleKeydown} role="group" aria-label="Composer controls">
+	<div
+		class="panel-reveal"
+		class:dragging
+		style:height={`${Math.max(0, (open ? panelHeight : 0) - dragOffset)}px`}
+		inert={!open || inertToolbar}
+		aria-hidden={!open}
+	>
+		<section
+			id={panelId}
+			bind:this={panelRef}
+			use:panelGestures
+			bind:clientHeight={panelHeight}
+			class="controls-panel"
+			class:models={page === 'models'}
+			aria-label={page === 'models' ? 'Choose model' : 'Chat controls'}
 			tabindex="-1"
 		>
-			<div
-				class="sheet-grabber"
-				role="presentation"
-				onpointerdown={handleDragStart}
-				onpointermove={handleDragMove}
-				onpointerup={handleDragEnd}
-				onpointercancel={handleDragCancel}
-			><span></span></div>
-
-			<header class="sheet-header">
-				{#if page === 'models'}
-					<button
-						type="button"
-						class="header-button"
-						aria-label="Back to chat controls"
-						onclick={() => (page = 'overview')}
-					>
-						<ArrowLeft size={20} strokeWidth={1.8} />
-					</button>
+			{#if page === 'overview'}
+				<button bind:this={modelButtonRef} type="button" class="model-control" onclick={() => openPage('models')} aria-label="Model: {modelLabel}">
+					<span class="control-label">Model</span><strong>{modelLabel}</strong><ChevronRight size={16} aria-hidden="true" />
+				</button>
+				{#if modelNotice}<p class="model-notice">{modelNotice}</p>{/if}
+				{#if showCodeControls && open}
+					<ContextPillBar sheetMode />
 				{/if}
-				<div class="header-copy">
-					<h2 id="mobile-controls-title">{page === 'models' ? 'Choose model' : 'Chat controls'}</h2>
-					<p>{page === 'models' ? 'Switch the model for this chat' : 'Settings for the next message'}</p>
+				<div class="quick-setting" role="group" aria-label="Reasoning effort">
+					<div class="setting-label"><span>Reasoning effort</span><small>{effortValue ? '' : 'Auto'}</small></div>
+					<div class="effort-choices">
+						{#each effortOptions as option (option.value)}
+							<button type="button" class="quick-choice" aria-pressed={option.value === effortValue}
+								title={option.description} onclick={() => onEffortSelect(option.value)}>{option.label}</button>
+						{/each}
+					</div>
 				</div>
-			</header>
-
-			{#if page === 'models'}
-				<div class="mobile-model-picker">
-					<ModelPickerPanel
-						groups={railGroups}
-						options={modelOptions}
-						value={modelValue}
-						onSelect={onModelSelect}
-						notice={modelNotice}
-						{contextChoice}
-						{onContextChoiceSelect}
-						onRequestClose={() => (page = 'overview')}
-					/>
-				</div>
+				{#if showCodeControls}
+					<div class="quick-setting" role="group" aria-label="Tool access">
+						<div class="setting-label"><span>Tool access</span></div>
+						<div class="access-choices">
+							{#each permissionOptions as option (option.value)}
+								<button type="button" class="quick-choice" aria-pressed={option.value === permissionValue}
+									aria-label={`${option.label}: ${option.description}`} title={option.description}
+									onclick={() => onPermissionSelect(option.value)}>{option.label}</button>
+							{/each}
+						</div>
+						<p class="setting-description" aria-live="polite">{permissionLabel} · {permissionDescription}</p>
+					</div>
+				{/if}
+				{#if fastSupported}
+					<div class="fast-row">
+						<div class="fast-copy"><span><Zap size={14} aria-hidden="true" />Fast mode</span><small id={`${panelId}-fast-help`}>Higher price; switching clears the prompt cache.</small></div>
+						<button type="button" class="fast-switch" role="switch" aria-label="Fast mode" aria-describedby={`${panelId}-fast-help`} aria-checked={fastEnabled} onclick={() => onToggleFast?.()}><span></span></button>
+					</div>
+				{/if}
 			{:else}
-				<div class="sheet-scroll overview-scroll">
-					{#if showCodeControls}
-						<section class="control-section">
-							<div class="section-label"><SlidersHorizontal size={16} strokeWidth={1.8} /><span>Chat setup</span></div>
-							<ContextPillBar sheetMode />
-						</section>
-					{/if}
-
-					<section class="control-section">
-						<button
-							type="button"
-							class="compact-select"
-							onclick={openModels}
-							aria-label="Model: {modelLabel}"
-						>
-							<span class="compact-k">Model</span>
-							<span class="compact-v">{modelLabel}</span>
-							<ChevronRight size={16} strokeWidth={1.8} />
-						</button>
-
-						<div class="compact-field">
-							<button
-								type="button"
-								class="compact-select"
-								class:open={openMenu === 'effort'}
-								onclick={() => toggleMenu('effort')}
-								aria-haspopup="listbox"
-								aria-expanded={openMenu === 'effort'}
-								aria-label="Reasoning effort: {effortLabel}"
-							>
-								<span class="compact-k">Effort</span>
-								<span class="compact-v">{effortLabel}</span>
-								<ChevronDown size={16} strokeWidth={1.8} />
-							</button>
-							{#if openMenu === 'effort'}
-								<div class="compact-menu" role="listbox" aria-label="Reasoning effort">
-									{#each effortOptions as option (option.value)}
-										<button
-											type="button"
-											class="choice-row"
-											class:selected={option.value === effortValue}
-											role="option"
-											aria-selected={option.value === effortValue}
-											onclick={() => {
-												onEffortSelect(option.value);
-												openMenu = null;
-											}}
-										>
-											<span class="choice-copy">
-												<span class="choice-title">{option.label}</span>
-												<span class="choice-description">{option.description}</span>
-											</span>
-											{#if option.value === effortValue}<Check size={16} strokeWidth={2.2} />{/if}
-										</button>
-									{/each}
-								</div>
-							{/if}
-						</div>
-
-						{#if showCodeControls}
-						<div class="compact-field">
-							<button
-								type="button"
-								class="compact-select"
-								class:open={openMenu === 'permission'}
-								onclick={() => toggleMenu('permission')}
-								aria-haspopup="listbox"
-								aria-expanded={openMenu === 'permission'}
-								aria-label="Tool access: {permissionLabel}"
-							>
-								<span class="compact-k">Tool access</span>
-								<span class="compact-v">{permissionLabel}</span>
-								<ChevronDown size={16} strokeWidth={1.8} />
-							</button>
-							{#if openMenu === 'permission'}
-								<div class="compact-menu" role="listbox" aria-label="Tool access">
-									{#each permissionOptions as option (option.value)}
-										<button
-											type="button"
-											class="choice-row"
-											class:selected={option.value === permissionValue}
-											role="option"
-											aria-selected={option.value === permissionValue}
-											onclick={() => {
-												onPermissionSelect(option.value);
-												openMenu = null;
-											}}
-										>
-											<span class="choice-copy">
-												<span class="choice-title">{option.label}</span>
-												<span class="choice-description">{option.description}</span>
-											</span>
-											{#if option.value === permissionValue}<Check size={16} strokeWidth={2.2} />{/if}
-										</button>
-									{/each}
-								</div>
-							{/if}
-						</div>
-						{/if}
-
-						{#if fastSupported}
-							<label class="fast-check">
-								<input
-									type="checkbox"
-									checked={fastEnabled}
-									onchange={() => onToggleFast?.()}
-								/>
-								<span class="fast-copy">
-									<strong>Fast mode</strong>
-									<small>Faster output at a higher price. Switching clears the prompt cache.</small>
-								</span>
-							</label>
-						{/if}
-					</section>
+				<header class="panel-header">
+					<button type="button" class="back-button" aria-label="Back to chat controls" onclick={back}><ArrowLeft size={18} aria-hidden="true" /></button>
+					<h2>Choose model</h2>
+				</header>
+				<div class="mobile-model-picker">
+					<ModelPickerPanel groups={railGroups} options={modelOptions} value={modelValue}
+						onSelect={(value) => { onModelSelect(value); void back(); }} notice={modelNotice}
+						{contextChoice} {onContextChoiceSelect} onRequestClose={back} />
 				</div>
 			{/if}
-		</div>
+		</section>
 	</div>
-{/if}
+</div>
 
 <style>
-	.sheet-layer {
-		position: fixed;
-		inset: 0;
-		z-index: 100;
-		display: flex;
-		align-items: flex-end;
-		justify-content: center;
-		padding: 0;
+	.mobile-composer-controls { display: none; }
+	@media (max-width: 1080px) {
+		.mobile-composer-controls { display: block; min-width: 0; }
 	}
-
-	.sheet-backdrop {
-		position: absolute;
-		inset: 0;
-		border: 0;
-		background: color-mix(in oklch, #000 52%, transparent);
-		backdrop-filter: blur(3px);
-		-webkit-backdrop-filter: blur(3px);
-		animation: backdrop-in 180ms ease-out;
+	.panel-reveal { overflow: hidden; transition: height 280ms cubic-bezier(0.22, 1, 0.36, 1); border-radius: 0 0 20px 20px; background: var(--popover); }
+	.panel-reveal[aria-hidden='false'] { box-shadow: inset 0 1px 0 var(--border); }
+	.panel-reveal.dragging { transition: none; }
+	.controls-panel {
+		--mobile-panel-limit: min(calc(var(--app-viewport-height, 100dvh) * 0.48), max(72px, calc(var(--app-viewport-height, 100dvh) - 420px)), 390px);
+		--composer-control-bg: var(--card);
+		--composer-control-radius: 10px;
+		display: flex; flex-direction: column; gap: 14px; padding: 10px 14px 14px;
+		max-height: var(--mobile-panel-limit); overflow-y: auto; overscroll-behavior: contain;
+		-webkit-overflow-scrolling: touch; touch-action: pan-y; color: var(--foreground); outline: none;
 	}
-
-	.mobile-sheet {
-		position: relative;
-		width: 100%;
-		max-width: 42rem;
-		max-height: min(82dvh, 48rem);
-		display: flex;
-		flex-direction: column;
-		background: color-mix(in oklch, var(--card) 96%, var(--background));
-		border: 1px solid var(--border);
-		border-bottom: 0;
-		border-radius: 24px 24px 0 0;
-		box-shadow: 0 -18px 60px color-mix(in oklch, #000 24%, transparent);
-		outline: none;
-		overflow: hidden;
-		animation: sheet-in 240ms cubic-bezier(0.16, 1, 0.3, 1);
+	.controls-panel > :global(*) { flex-shrink: 0; }
+	.model-control { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 40px; border: 0; border-bottom: 1px solid var(--border-subtle); border-radius: 0; padding: 0 2px 8px; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
+	.model-control strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.83rem; font-weight: 600; text-align: right; }
+	.control-label, .setting-label { font-size: 0.72rem; font-weight: 500; line-height: 1.4; color: var(--muted-foreground); }
+	.setting-label { display: flex; justify-content: space-between; align-items: center; margin: 0 2px 6px; }
+	.setting-label small { font: inherit; }
+	.effort-choices, .access-choices { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 2px; padding: 3px; border: 1px solid var(--border-subtle); border-radius: 11px; background: var(--card); }
+	.quick-choice { min-width: 0; min-height: 44px; padding: 4px 2px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-foreground); font: inherit; font-size: 0.7rem; line-height: 1.25; cursor: pointer; transition: background 140ms ease, color 140ms ease; }
+	.quick-choice[aria-pressed='true'] { background: color-mix(in oklch, var(--primary) 11%, var(--card)); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 30%, transparent); color: var(--primary); font-weight: 600; }
+	.setting-description { min-height: 2.6em; margin: 6px 2px 0; font-size: 0.68rem; line-height: 1.3; color: var(--muted-foreground); }
+	.fast-row { display: flex; align-items: center; gap: 12px; padding: 0 2px; flex-shrink: 0; }
+	.fast-copy { flex: 1; min-width: 0; }
+	.fast-copy > span { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; font-weight: 600; }
+	.fast-copy small { display: block; margin-top: 3px; color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.35; }
+	.fast-switch { display: flex; align-items: center; width: 48px; height: 44px; padding: 0 4px; flex-shrink: 0; border: 0; border-radius: 10px; background: transparent; cursor: pointer; }
+	.fast-switch > span { position: relative; width: 40px; height: 24px; border-radius: 999px; background: var(--muted-foreground); transition: background 160ms ease; }
+	.fast-switch > span::after { content: ''; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; background: var(--card); border-radius: 50%; transition: transform 160ms ease; }
+	.fast-switch[aria-checked='true'] > span { background: var(--primary); }
+	.fast-switch[aria-checked='true'] > span::after { transform: translateX(16px); background: var(--primary-foreground); }
+	.panel-header { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+	.panel-header h2 { margin: 0; font-size: 0.85rem; font-weight: 600; }
+	.back-button { width: 44px; height: 44px; display: grid; place-items: center; border: 0; border-radius: 12px; background: var(--muted); color: inherit; cursor: pointer; }
+	.controls-panel.models {
+		--mobile-panel-limit: min(390px, max(160px, calc(var(--chat-surface-height, var(--app-viewport-height, 100dvh)) - 168px)));
+		height: var(--mobile-panel-limit); gap: 8px;
 	}
-
-	.mobile-sheet.dragging {
-		transition: none;
-		user-select: none;
-	}
-
-	.sheet-grabber {
-		height: 24px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		flex-shrink: 0;
-		cursor: grab;
-		touch-action: none;
-	}
-
-	.sheet-grabber:active {
-		cursor: grabbing;
-	}
-
-	.sheet-grabber span {
-		width: 36px;
-		height: 4px;
-		border-radius: 999px;
-		background: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
-	}
-
-	.sheet-header {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		min-height: 48px;
-		padding: 2px 16px 10px;
-		border-bottom: 1px solid var(--border-subtle);
-		flex-shrink: 0;
-	}
-
-	.header-copy {
-		min-width: 0;
-		flex: 1;
-	}
-
-	.header-copy h2 {
-		margin: 0;
-		font-size: 1rem;
-		font-weight: 650;
-		letter-spacing: -0.01em;
-		color: var(--foreground);
-		line-height: 1.25;
-	}
-
-	.header-copy p {
-		margin: 2px 0 0;
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		line-height: 1.35;
-	}
-
-	.header-button {
-		width: 40px;
-		height: 40px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		flex-shrink: 0;
-		padding: 0;
-		border: 0;
-		border-radius: 50%;
-		background: var(--muted);
-		color: var(--foreground);
-		cursor: pointer;
-	}
-
-	.sheet-scroll {
-		min-height: 0;
-		overflow-y: auto;
-		overscroll-behavior: contain;
-		-webkit-overflow-scrolling: touch;
-	}
-
-	.overview-scroll {
-		padding: 10px 14px calc(16px + env(safe-area-inset-bottom, 0px));
-	}
-
-	.control-section + .control-section {
-		margin-top: 12px;
-	}
-
-	.compact-select,
-	.compact-menu {
-		background: color-mix(in oklch, var(--muted) 55%, var(--card));
-		border: 1px solid var(--border-subtle);
-		border-radius: 12px;
-		box-shadow: 0 1px 0 color-mix(in oklch, var(--foreground) 4%, transparent);
-	}
-
-	.section-label {
-		display: flex;
-		align-items: center;
-		gap: 7px;
-		min-height: 20px;
-		margin: 0 3px 8px;
-		color: var(--muted-foreground);
-		font-size: 0.76rem;
-		font-weight: 600;
-		line-height: 1;
-	}
-
-	.section-label :global(svg) {
-		width: 16px;
-		height: 16px;
-		flex: 0 0 16px;
-		color: var(--subtle-foreground);
-	}
-
-	.compact-field {
-		margin-top: 8px;
-	}
-
-	.compact-select {
-		width: 100%;
-		height: 40px;
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 0 12px;
-		color: var(--foreground);
-		cursor: pointer;
-		text-align: left;
-	}
-
-	.compact-select.open {
-		box-shadow: inset 0 0 0 1px var(--border-strong);
-	}
-
-	.compact-k {
-		font-size: 0.75rem;
-		font-weight: 600;
-		color: var(--muted-foreground);
-		flex-shrink: 0;
-	}
-
-	.compact-v {
-		min-width: 0;
-		flex: 1;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		text-align: right;
-		font-size: 0.86rem;
-		font-weight: 600;
-	}
-
-	.compact-select :global(svg) {
-		flex-shrink: 0;
-		color: var(--muted-foreground);
-	}
-
-	.compact-menu {
-		margin-top: 6px;
-		overflow: hidden;
-	}
-
-	.fast-check {
-		display: flex;
-		align-items: flex-start;
-		gap: 10px;
-		margin-top: 10px;
-		padding: 4px 2px;
-		cursor: pointer;
-	}
-
-	.fast-check input {
-		width: 16px;
-		height: 16px;
-		margin-top: 3px;
-		flex-shrink: 0;
-		accent-color: var(--primary);
-	}
-
-	.fast-copy {
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 1px;
-	}
-
-	.fast-copy strong {
-		font-size: 0.86rem;
-		font-weight: 600;
-	}
-
-	.fast-copy small {
-		font-size: 0.72rem;
-		color: var(--muted-foreground);
-		line-height: 1.35;
-	}
-
-	.choice-copy {
-		min-width: 0;
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-	}
-
-	.choice-description {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font-size: 0.74rem;
-		color: var(--muted-foreground);
-	}
-
-	.choice-row {
-		width: 100%;
-		min-height: 44px;
-		display: flex;
-		align-items: center;
-		gap: 11px;
-		padding: 8px 12px;
-		border: 0;
-		border-bottom: 1px solid var(--border-subtle);
-		background: transparent;
-		color: var(--foreground);
-		text-align: left;
-		cursor: pointer;
-	}
-
-	.choice-row:last-child {
-		border-bottom: 0;
-	}
-
-	.choice-row.selected {
-		background: color-mix(in oklch, var(--primary) 7%, transparent);
-		color: var(--primary);
-	}
-
-	.choice-title {
-		min-width: 0;
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		font-size: 0.86rem;
-		font-weight: 600;
-		color: var(--foreground);
-	}
-
-	/* The exact shared picker used by desktop fills the model subpage. Its own
-	   list scrolls while search, provider rail, and context selector stay fixed. */
-	.mobile-model-picker {
-		flex: 1;
-		min-height: 0;
-		padding-bottom: env(safe-area-inset-bottom, 0px);
-		--mpp-width: 100%;
-		--mpp-height: 100%;
-	}
-
-	.choice-row:active,
-	.header-button:active {
-		transform: scale(0.985);
-	}
-
-	@keyframes backdrop-in {
-		from { opacity: 0; }
-		to { opacity: 1; }
-	}
-
-	@keyframes sheet-in {
-		from { transform: translateY(100%); }
-		to { transform: translateY(0); }
-	}
-
-	@media (min-width: 1081px) {
-		.sheet-layer {
-			display: none;
-		}
-	}
-
+	/* A keyboard may leave less space than the search + context footer need.
+	   Keep a usable list, and let this picker panel scroll to expose its footer. */
+	.controls-panel.models > .mobile-model-picker { flex: 1 0 210px; min-height: 210px; --mpp-width: 100%; --mpp-height: 100%; }
+	.mobile-model-picker :global(.mpp-list), .mobile-model-picker :global(.mpp-rail) { touch-action: pan-y; -webkit-overflow-scrolling: touch; }
+	.model-notice { margin: 0; color: var(--warning); font-size: 0.72rem; }
+	button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+	button:active { filter: brightness(1.1); }
 	@media (prefers-reduced-motion: reduce) {
-		.sheet-backdrop,
-		.mobile-sheet {
-			animation: none;
-		}
+		.panel-reveal, .quick-choice, .fast-switch > span, .fast-switch > span::after { transition: none; }
 	}
 </style>

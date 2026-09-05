@@ -1,6 +1,7 @@
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import ControlsDock from './ControlsDock.svelte';
+import '../../test-stubs/composer-dom';
 
 vi.hoisted(() => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
@@ -26,6 +27,34 @@ afterEach(() => cleanup());
 afterAll(() => vi.unstubAllGlobals());
 
 describe('ControlsDock mobile control order', () => {
+	it('toggles closed from settings even when the panel is scrolled and clears it on desktop', async () => {
+		const onSheetOpenChange = vi.fn();
+		const { container } = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn(), onSheetOpenChange } });
+		const trigger = container.querySelector('.mobile-settings-trigger')!;
+		await fireEvent.click(trigger);
+		expect(trigger.getAttribute('aria-expanded')).toBe('true');
+		const panel = container.querySelector('.controls-panel') as HTMLElement;
+		panel.scrollTop = 160;
+		(trigger as HTMLElement).focus();
+		await fireEvent.click(trigger);
+		expect(trigger.getAttribute('aria-expanded')).toBe('false');
+		expect(screen.queryByRole('button', { name: 'Collapse chat controls' })).toBeNull();
+		expect(document.activeElement).toBe(trigger);
+		await fireEvent.click(trigger);
+		expect(onSheetOpenChange).toHaveBeenLastCalledWith(true);
+		panel.focus();
+		await fireEvent.keyDown(panel, { key: 'Escape' });
+		expect(document.activeElement).toBe(trigger);
+		expect(trigger.getAttribute('aria-expanded')).toBe('false');
+		await fireEvent.click(trigger);
+		const previousWidth = window.innerWidth;
+		window.innerWidth = 1200;
+		await fireEvent.resize(window);
+		expect(trigger.getAttribute('aria-expanded')).toBe('false');
+		expect(onSheetOpenChange).toHaveBeenLastCalledWith(false);
+		window.innerWidth = previousWidth;
+	});
+
 	it('places chat settings first on the left, then attach, with usage on the right', () => {
 		const { container } = render(ControlsDock, {
 			props: {

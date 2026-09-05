@@ -270,11 +270,11 @@
 
 	.sheet-mode .pill {
 		width: 100%;
-		height: 40px;
+		height: 44px;
 		padding: 0 12px;
 		border-color: var(--border-subtle);
-		border-radius: 12px;
-		background: color-mix(in oklch, var(--muted) 55%, var(--card));
+		border-radius: var(--composer-control-radius, 12px);
+		background: var(--composer-control-bg, color-mix(in oklch, var(--muted) 55%, var(--card)));
 	}
 
 	.sheet-mode .project-name,
@@ -294,7 +294,9 @@
 		width: 100%;
 		min-width: 0;
 		max-width: none;
-		max-height: 45dvh;
+		max-height: min(180px, calc(var(--app-viewport-height, 100dvh) * 0.28));
+		touch-action: pan-y;
+		overscroll-behavior: contain;
 		margin-top: 6px;
 	}
 

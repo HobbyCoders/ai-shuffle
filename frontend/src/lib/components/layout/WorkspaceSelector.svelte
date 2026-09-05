@@ -28,6 +28,68 @@
 	let showDropdown = $state(false);
 	let dropdownRef = $state<HTMLDivElement | null>(null);
 	let groupedSelector = $state<ReturnType<typeof GroupedSelector> | null>(null);
+	const pickerId = $props.id();
+
+	// On phones use the top layer so neither the chat surface nor the keyboard
+	// can clip this popup. Desktop keeps its existing anchored dropdown.
+	function mobilePopup(node: HTMLDivElement) {
+		const viewport = window.visualViewport;
+		let topLayer = false;
+		function position() {
+			if (window.innerWidth > 1080) {
+				if (topLayer) node.hidePopover();
+				topLayer = false;
+				node.removeAttribute('popover');
+				node.classList.remove('mobile-popup');
+				for (const property of ['--selector-scroll-height', '--picker-left', '--picker-top']) node.style.removeProperty(property);
+				return;
+			}
+			node.classList.add('mobile-popup');
+			if (!topLayer && typeof node.showPopover === 'function') {
+				node.setAttribute('popover', 'manual');
+				node.showPopover();
+				topLayer = true;
+			}
+			const anchor = dropdownRef?.getBoundingClientRect();
+			if (!anchor) return;
+			const edge = 12;
+			const viewTop = viewport?.offsetTop ?? 0;
+			const viewBottom = viewTop + (viewport?.height ?? window.innerHeight);
+			const below = viewBottom - anchor.bottom - edge - 8;
+			const above = anchor.top - viewTop - edge - 8;
+			const upwards = below < 180 && above > below;
+			const available = upwards ? above : below;
+			// Header, divider, footer and padding use at most 100px; only the
+			// shared list scrolls. Recompute as the visual viewport changes.
+			node.style.setProperty('--selector-scroll-height', `${Math.min(320, Math.max(44, available - 100))}px`);
+			const rect = node.getBoundingClientRect();
+			const left = Math.max(edge, Math.min(window.innerWidth - rect.width - edge, anchor.left + (anchor.width - rect.width) / 2));
+			const top = Math.max(viewTop + edge, Math.min(viewBottom - rect.height - edge, upwards ? anchor.top - rect.height - 8 : anchor.bottom + 8));
+			node.style.setProperty('--picker-left', `${left}px`);
+			node.style.setProperty('--picker-top', `${top}px`);
+		}
+		const observer = new ResizeObserver(position);
+		observer.observe(node);
+		const hero = dropdownRef?.closest('.empty-hero');
+		if (hero) observer.observe(hero);
+		window.addEventListener('resize', position);
+		viewport?.addEventListener('resize', position);
+		viewport?.addEventListener('scroll', position);
+		position();
+		return { destroy() {
+			observer.disconnect();
+			window.removeEventListener('resize', position);
+			viewport?.removeEventListener('resize', position);
+			viewport?.removeEventListener('scroll', position);
+		} };
+	}
+
+	function closeOnEscape(event: KeyboardEvent) {
+		if (event.key !== 'Escape' || !showDropdown) return;
+		event.preventDefault();
+		showDropdown = false;
+		dropdownRef?.querySelector('button')?.focus({ preventScroll: true });
+	}
 
 	// Add project modal state
 	let showAddModal = $state(false);
@@ -74,7 +136,7 @@
 	}
 </script>
 
-<svelte:window onclick={handleClickOutside} />
+<svelte:window onclick={handleClickOutside} onkeydown={closeOnEscape} />
 
 <div class="workspace-selector">
 	<!-- Logo / Icon -->
@@ -92,7 +154,10 @@
 	<!-- Workspace Picker -->
 	<div class="picker-container" bind:this={dropdownRef}>
 		<button
+			type="button"
 			class="picker-trigger"
+			aria-expanded={showDropdown}
+			aria-controls={pickerId}
 			onclick={toggleDropdown}
 		>
 			<span class="picker-name">{selectedProjectName}</span>
@@ -104,7 +169,7 @@
 		</button>
 
 		{#if showDropdown}
-			<div class="picker-dropdown">
+			<div id={pickerId} class="picker-dropdown" use:mobilePopup>
 				<GroupedSelector
 					bind:this={groupedSelector}
 					items={pickerItems}
@@ -144,7 +209,7 @@
 		flex-direction: column;
 		align-items: center;
 		gap: 4px;
-		padding: 2rem;
+		padding: var(--workspace-hero-padding, 2rem);
 		user-select: none;
 	}
 
@@ -244,6 +309,18 @@
 	}
 
 	/* Reduced motion */
+	.picker-dropdown:global(.mobile-popup) {
+		position: fixed;
+		inset: auto;
+		top: var(--picker-top);
+		left: var(--picker-left);
+		width: min(320px, calc(100vw - 24px));
+		min-width: 0;
+		margin: 0;
+		transform: none;
+		animation: none;
+	}
+
 	@media (prefers-reduced-motion: reduce) {
 		.picker-dropdown {
 			animation: none;

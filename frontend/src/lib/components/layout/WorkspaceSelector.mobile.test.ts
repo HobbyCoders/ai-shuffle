@@ -1,0 +1,68 @@
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import WorkspaceSelector from './WorkspaceSelector.svelte';
+import '../../test-stubs/composer-dom';
+
+vi.hoisted(() => vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) })));
+vi.mock('$lib/components/AddProjectModal.svelte', () => ({ default: () => {} }));
+vi.mock('$lib/stores/layout.svelte', () => ({ layout: { openFeaturePage: vi.fn() } }));
+vi.mock('$lib/stores/app-data.svelte', async () => {
+	const { readable } = await import('svelte/store');
+	return {
+		appData: { loadClusterProjects: vi.fn() },
+		projects: readable(Array.from({ length: 40 }, (_, i) => ({ id: `p${i + 1}`, name: `Project ${i + 1}` }))),
+		clusterProjects: readable([]), profiles: readable([{ id: 'agent' }])
+	};
+});
+
+const originalWidth = window.innerWidth;
+const originalHeight = window.innerHeight;
+beforeEach(() => {
+	window.innerWidth = 390;
+	window.innerHeight = 600;
+	vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+		const popup = this.classList.contains('picker-dropdown');
+		return { x: 35, y: popup ? 0 : 430, left: 35, right: 355, top: popup ? 0 : 430, bottom: popup ? 300 : 470, width: 320, height: popup ? 300 : 40, toJSON() {} };
+	});
+});
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterAll(() => { window.innerWidth = originalWidth; window.innerHeight = originalHeight; vi.unstubAllGlobals(); });
+
+describe('mobile workspace popup', () => {
+	it('keeps a long catalog selectable and closes after selecting its final project', async () => {
+		const onSelectProject = vi.fn();
+		render(WorkspaceSelector, { selectedProject: null, onSelectProject });
+		const trigger = screen.getByRole('button', { name: 'your project' });
+		await fireEvent.click(trigger);
+		await fireEvent.click(screen.getByRole('button', { name: 'Project 40' }));
+		expect(onSelectProject).toHaveBeenCalledWith('p40', null);
+		expect(trigger.getAttribute('aria-expanded')).toBe('false');
+		expect(screen.queryByText('Select your workspace')).toBeNull();
+	});
+
+	it('fits the popup inside a short viewport and restores desktop positioning on resize', async () => {
+		const { container } = render(WorkspaceSelector, { selectedProject: null, onSelectProject: vi.fn() });
+		await fireEvent.click(screen.getByRole('button', { name: 'your project' }));
+		const popup = container.querySelector('.picker-dropdown') as HTMLElement;
+		const top = parseFloat(popup.style.getPropertyValue('--picker-top'));
+		expect(top).toBeGreaterThanOrEqual(12);
+		expect(top + 300).toBeLessThanOrEqual(588);
+		expect(parseFloat(popup.style.getPropertyValue('--selector-scroll-height'))).toBeGreaterThan(0);
+		window.innerWidth = 1280;
+		await fireEvent.resize(window);
+		expect(popup.classList.contains('mobile-popup')).toBe(false);
+		expect(popup.style.getPropertyValue('--selector-scroll-height')).toBe('');
+		expect(popup.hasAttribute('popover')).toBe(false);
+	});
+
+	it('dismisses with Escape and restores focus to the project trigger', async () => {
+		render(WorkspaceSelector, { selectedProject: null, onSelectProject: vi.fn() });
+		const trigger = screen.getByRole('button', { name: 'your project' });
+		await fireEvent.click(trigger);
+		screen.getByRole('button', { name: 'Project 1' }).focus();
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(document.activeElement).toBe(trigger);
+		expect(trigger.getAttribute('aria-expanded')).toBe('false');
+		expect(screen.queryByText('Select your workspace')).toBeNull();
+	});
+});

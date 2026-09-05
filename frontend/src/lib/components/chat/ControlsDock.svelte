@@ -61,7 +61,7 @@
 		onAttachClick: () => void;
 		/** The dictate mic and voice-call buttons, rendered left of attach. */
 		voiceActions?: Snippet;
-		/** Lets ChatInput keep its compact mobile surface expanded while the sheet is open. */
+		/** Keeps the mobile editor expanded while its integrated panel is open. */
 		onSheetOpenChange?: (open: boolean) => void;
 		/** Collapsed / expanding-tap: dock stays in the tree but cannot receive the expand click. */
 		inertToolbar?: boolean;
@@ -133,7 +133,12 @@
 	});
 
 	let mobileSheetOpen = $state(false);
+	const mobilePanelId = $props.id();
 	function setMobileSheetOpen(open: boolean) {
+		closePopover();
+		if (!open && document.activeElement?.closest('.mobile-composer-controls')) {
+			dockRef?.querySelector<HTMLButtonElement>('.mobile-settings-trigger')?.focus({ preventScroll: true });
+		}
 		mobileSheetOpen = open;
 		onSheetOpenChange?.(open);
 	}
@@ -338,6 +343,10 @@
 	);
 </script>
 
+<svelte:window onresize={() => {
+	if (window.innerWidth > 1080 && mobileSheetOpen) setMobileSheetOpen(false);
+}} />
+
 <div
 	class="controls-dock"
 	bind:this={dockRef}
@@ -350,10 +359,10 @@
 			type="button"
 			class="dock-ico composer-mobile-only mobile-settings-trigger"
 			class:warn={rerouted}
-			onclick={() => setMobileSheetOpen(true)}
-			aria-haspopup="dialog"
+			onclick={() => setMobileSheetOpen(!mobileSheetOpen)}
+			aria-controls={mobilePanelId}
 			aria-expanded={mobileSheetOpen}
-			aria-label={`Open chat controls. Current model: ${modelButtonLabel}`}
+			aria-label={`${mobileSheetOpen ? 'Close' : 'Open'} chat controls. Current model: ${modelButtonLabel}`}
 		>
 			<SlidersHorizontal size={14} strokeWidth={1.8} aria-hidden="true" />
 		</button>
@@ -527,6 +536,8 @@
 
 <MobileComposerControlsSheet
 	open={mobileSheetOpen}
+	panelId={mobilePanelId}
+	{inertToolbar}
 	onClose={() => setMobileSheetOpen(false)}
 	{modelOptions}
 	modelGroups={modelCatalog.groups}
@@ -841,6 +852,9 @@
 		.controls-dock {
 			gap: 3px;
 			padding: 5px 6px 7px;
+			background: var(--card);
+			border-radius: 0 0 20px 20px;
+			box-shadow: 0 6px 10px -8px color-mix(in oklch, var(--foreground) 20%, transparent);
 		}
 
 		.desktop-controls {

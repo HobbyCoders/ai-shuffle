@@ -126,23 +126,27 @@
 	.selector-wrapper.sheet-mode {
 		position: relative;
 		width: 100%;
-		flex-shrink: 1;
+		flex-shrink: 0;
+	}
+
+	.selector-wrapper.sheet-mode:has(.selector-dropdown) {
+		grid-column: 1 / -1;
 	}
 
 	.sheet-mode .context-selector-btn {
 		width: 100%;
-		height: 40px;
+		height: 44px;
 		padding: 0 12px;
 		border-color: var(--border-subtle);
-		border-radius: 12px;
-		background: color-mix(in oklch, var(--muted) 55%, var(--card));
+		border-radius: var(--composer-control-radius, 12px);
+		background: var(--composer-control-bg, color-mix(in oklch, var(--muted) 55%, var(--card)));
 	}
 
 	.sheet-mode .selector-text {
 		flex: 1;
 		max-width: none;
 		text-align: left;
-		font-size: 0.86rem;
+		font-size: 0.8rem;
 		font-weight: 600;
 	}
 
@@ -151,8 +155,16 @@
 		width: 100%;
 		min-width: 0;
 		max-width: none;
-		max-height: 45dvh;
+		/* The shared list owns touch scrolling. A second clipped scrollbar
+		   around it made the lower agents unreachable on phones. */
+		max-height: none;
+		overflow: visible;
+		--selector-scroll-height: min(180px, calc(var(--app-viewport-height, 100dvh) * 0.24));
 		margin-top: 6px;
+	}
+
+	.sheet-mode :global(.menu-item) {
+		min-height: 44px;
 	}
 
 	/* The agent chip is the first item in the composer's context row. It shares

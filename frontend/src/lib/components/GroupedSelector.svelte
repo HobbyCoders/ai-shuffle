@@ -332,9 +332,11 @@
 
 	/* Scroll area */
 	.panel-scroll {
-		max-height: min(40vh, 320px);
+		max-height: var(--selector-scroll-height, min(40vh, 320px));
 		overflow-y: auto;
 		overscroll-behavior: contain;
+		touch-action: pan-y;
+		-webkit-overflow-scrolling: touch;
 	}
 
 	.panel-scroll::-webkit-scrollbar {
