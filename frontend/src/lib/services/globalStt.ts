@@ -357,7 +357,7 @@ function pushLiveText(state: GlobalSttState): void {
  * Try the live path. Returns false when this setup can only do batch, so the
  * caller falls through without the user seeing a failure.
  */
-async function startLiveRecording(): Promise<boolean> {
+async function startLiveRecording(myRun: number): Promise<boolean> {
 	let capability;
 	try {
 		capability = await fetchSttCapability();
@@ -366,6 +366,7 @@ async function startLiveRecording(): Promise<boolean> {
 		sttAcceptsCompressed = false;
 		return false;
 	}
+	if (!isCurrentRun(myRun)) return true;
 
 	// Recorded before the early return: the batch path below reads it, and an
 	// unsupported model is exactly the case that falls through to batch.
@@ -384,12 +385,13 @@ async function startLiveRecording(): Promise<boolean> {
 	}));
 
 	try {
-		streamSession = await startSttStream({
+		const session = await startSttStream({
 			// Note there is no onReady handler: the socket being open says nothing
 			// about the microphone. Flipping to "listening" there told the user to
 			// start talking a few hundred milliseconds before anything could hear
 			// them, which is exactly the clipped-first-words complaint.
 			onCapture: () => {
+				if (!isCurrentRun(myRun)) return;
 				globalSttState.update((s) => ({
 					...s,
 					isPreparing: false,
@@ -400,26 +402,22 @@ async function startLiveRecording(): Promise<boolean> {
 				noSpeechTimer = setTimeout(autoStop, NO_SPEECH_AUTO_STOP_MS);
 			},
 			onClosed: () => {
+				if (!isCurrentRun(myRun)) return;
 				// The socket died on its own. Guard on streamSession rather than
 				// isRecording: stopLiveRecording nulls it synchronously, so the
 				// normal stop path cannot recurse through here.
 				if (streamSession) void stopLiveRecording('dropped');
 			},
-			onDelta: (text) => {
+			onTranscript: (text) => {
+				if (!isCurrentRun(myRun)) return;
 				globalSttState.update((s) => {
-					const next = { ...s, partial: text };
-					pushLiveText(next);
-					return next;
-				});
-			},
-			onFinal: (text) => {
-				globalSttState.update((s) => {
-					const next = { ...s, partial: '', segments: [...s.segments, text] };
+					const next = { ...s, partial: text, segments: [] };
 					pushLiveText(next);
 					return next;
 				});
 			},
 			onSpeech: (active) => {
+				if (!isCurrentRun(myRun)) return;
 				globalSttState.update((s) => ({ ...s, speechActive: active }));
 				// Server VAD is the authority on "are they still talking" — far
 				// better than an RMS threshold, so the live path defers to it.
@@ -430,9 +428,11 @@ async function startLiveRecording(): Promise<boolean> {
 				}
 			},
 			onAudio: (level, bands) => {
+				if (!isCurrentRun(myRun)) return;
 				globalSttAudio.set({ level, bands: Array.from(bands) });
 			},
 			onError: (message, fatal) => {
+				if (!isCurrentRun(myRun)) return;
 				if (fatal) {
 					globalSttState.update((s) => ({ ...s, error: message }));
 				} else {
@@ -440,8 +440,11 @@ async function startLiveRecording(): Promise<boolean> {
 				}
 			}
 		});
+		if (!isCurrentRun(myRun)) session.abort();
+		else streamSession = session;
 		return true;
 	} catch (error) {
+		if (!isCurrentRun(myRun)) return true;
 		streamSession = null;
 
 		if (error instanceof SttUnsupportedError) {
@@ -498,7 +501,6 @@ async function stopLiveRecording(reason: 'user' | 'dropped' = 'user'): Promise<v
 			// settles it. Routing it through outputText as well would insert the
 			// whole transcript a second time.
 			liveSink.onText(text);
-			liveSink.onCommit();
 			globalSttState.update((s) => ({ ...s, lastTranscription: text }));
 		} else if (text) {
 			await outputText(text, myRun);
@@ -561,7 +563,7 @@ async function startRecording(): Promise<void> {
 	recordingStartTime = Date.now();
 
 	// Live first; batch is the fallback for models that can't stream.
-	if (await startLiveRecording()) {
+	if (await startLiveRecording(myRun)) {
 		return;
 	}
 	if (!isCurrentRun(myRun)) return;

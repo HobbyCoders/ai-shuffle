@@ -80,10 +80,10 @@
 			toggleVoiceInput(onTranscription);
 			return;
 		}
-		toggleVoiceInput(onTranscription, {
+		toggleVoiceInput(onTranscription, onLiveText ? {
 			onText: (text) => onLiveText?.(text),
 			onCommit: () => onLiveCommit?.()
-		});
+		} : undefined);
 	}
 
 	function onCancel(event: MouseEvent) {

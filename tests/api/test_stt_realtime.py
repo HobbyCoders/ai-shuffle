@@ -77,6 +77,19 @@ def test_language_is_optional_and_omitted_when_absent():
     assert with_lang["session"]["audio"]["input"]["transcription"]["language"] == "de"
 
 
+def test_live_model_uses_languages_and_low_delay():
+    config = _session_update_ga("gpt-live-transcribe", "en")["session"]["audio"]["input"]["transcription"]
+    assert config == {"model": "gpt-live-transcribe", "languages": ["en"], "delay": "low"}
+
+
+def test_live_model_is_available_explicitly_without_changing_configured_model(capability_env):
+    capability_env["model"] = "openai/gpt-live-transcribe"
+    result = _resolve_capability()
+    assert result["supported"] is True
+    assert result["partials"] is True
+    assert result["model"] == "openai/gpt-live-transcribe"
+
+
 def test_turn_detection_is_copied_not_shared():
     """Each payload gets its own dict — a caller mutating one must not reach
     through to the module-level default and reconfigure every later session."""
@@ -240,12 +253,14 @@ class _FakeUpstream:
     for the iterator to finish will wait out the full ceiling.
     """
 
-    def __init__(self, transcript="hello world", answer_commit=True):
+    def __init__(self, transcript="hello world", answer_commit=True, audio_events=(), delayed_tail=False):
         import asyncio
 
         self.sent = []
         self.transcript = transcript
         self.answer_commit = answer_commit
+        self.audio_events = audio_events
+        self.delayed_tail = delayed_tail
         self._queue = asyncio.Queue()
         self.entered = False
 
@@ -259,7 +274,13 @@ class _FakeUpstream:
     async def send(self, data):
         self.sent.append(data)
         message = json.loads(data)
+        if message.get("type") == "input_audio_buffer.append":
+            for event in self.audio_events:
+                await self._queue.put(json.dumps(event))
         if message.get("type") == "input_audio_buffer.commit" and self.answer_commit:
+            if self.delayed_tail:
+                for item_id, previous in (("item_1", None), ("item_2", "item_1")):
+                    await self._queue.put(json.dumps({"type": "input_audio_buffer.committed", "item_id": item_id, "previous_item_id": previous}))
             await self._queue.put(
                 json.dumps(
                     {
@@ -269,6 +290,14 @@ class _FakeUpstream:
                     }
                 )
             )
+            if self.delayed_tail:
+                import asyncio
+
+                async def send_tail():
+                    await asyncio.sleep(0.5)
+                    await self._queue.put(json.dumps({"type": "conversation.item.input_audio_transcription.completed", "item_id": "item_2", "transcript": "last words"}))
+
+                asyncio.create_task(send_tail())
 
     def __aiter__(self):
         return self
@@ -284,7 +313,10 @@ def stream_client(monkeypatch, capability_env):
 
     import websockets.asyncio.client as ws_client
 
-    from app.main import app
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(stt_realtime.stt_stream_router, prefix="/api/v1/settings")
 
     created = {}
 
@@ -328,6 +360,36 @@ def test_stream_forwards_tail_transcript_and_closes(stream_client):
     assert "input_audio_buffer.append" in kinds
     # stop must flush, or the last utterance is never transcribed at all.
     assert "input_audio_buffer.commit" in kinds
+
+
+def test_stream_forwards_interim_words_before_stop_with_turn_identity(stream_client):
+    client, created = stream_client
+    created["kwargs"] = {"audio_events": [
+        {"type": "input_audio_buffer.speech_started", "item_id": "item_1"},
+        {"type": "conversation.item.input_audio_transcription.delta", "item_id": "item_1", "delta": "hello"},
+    ]}
+    with client.websocket_connect("/api/v1/settings/transcribe/stream") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_bytes(b"\x00\x01" * 512)
+        assert ws.receive_json() == {"type": "item_started", "item_id": "item_1"}
+        assert ws.receive_json()["type"] == "speech_started"
+        assert ws.receive_json() == {"type": "delta", "item_id": "item_1", "text": "hello"}
+        ws.send_text(json.dumps({"type": "stop"}))
+        assert ws.receive_json()["type"] == "final"
+        assert ws.receive_json()["type"] == "closed"
+
+
+def test_drain_waits_for_known_pending_turn_past_settle_window(stream_client):
+    client, created = stream_client
+    created["kwargs"] = {"delayed_tail": True}
+    with client.websocket_connect("/api/v1/settings/transcribe/stream") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_text(json.dumps({"type": "stop"}))
+        assert ws.receive_json()["item_id"] == "item_1"
+        assert ws.receive_json()["previous_item_id"] == "item_1"
+        assert ws.receive_json()["text"] == "hello world"
+        assert ws.receive_json()["text"] == "last words"
+        assert ws.receive_json()["type"] == "closed"
 
 
 def test_stream_stop_does_not_wait_out_the_drain_ceiling(stream_client):

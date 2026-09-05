@@ -9,6 +9,7 @@
 	 */
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { createChatEditor, setEditorPlaceholder, type Editor } from './tiptap/editorConfig';
+	import { createLiveDictation } from './tiptap/liveDictation';
 	import type { FileChipAttributes } from './tiptap/FileChipNode';
 	import { serializeToMessage, isEditorEmpty, findActiveAtMention, getSlashCommand } from './tiptap/serialization';
 
@@ -33,6 +34,7 @@
 	let editorElement = $state<HTMLDivElement | null>(null);
 	let editor = $state<Editor | null>(null);
 	let isFocused = $state(false);
+	let liveDictation: ReturnType<typeof createLiveDictation> | null = null;
 
 	// Store reference for cleanup to handle edge cases where editorElement might change
 	let boundElement: HTMLDivElement | null = null;
@@ -66,6 +68,8 @@
 				}
 			});
 
+			liveDictation = createLiveDictation(editor);
+
 			// Add keydown handler to the editor element
 			boundElement.addEventListener('keydown', handleEditorKeyDown);
 		}
@@ -75,6 +79,7 @@
 		if (boundElement) {
 			boundElement.removeEventListener('keydown', handleEditorKeyDown);
 		}
+		liveDictation?.destroy();
 		editor?.destroy();
 	});
 
@@ -262,61 +267,14 @@
 		editor.chain().focus().insertContent(text).run();
 	}
 
-	// ── Live dictation ────────────────────────────────────────────────────
-	// The span the current dictation owns. While it is open, every update
-	// REPLACES that span rather than appending, so a transcript that revises
-	// itself mid-sentence ("recognise" -> "recognize") does not stutter text
-	// into the document.
-	let dictationFrom: number | null = null;
-	let dictationTo: number | null = null;
-
-	/**
-	 * Write the running dictation into the document at the caret.
-	 *
-	 * Call repeatedly with the full text so far; it is idempotent in the sense
-	 * that only the difference reaches the document. Finish with
-	 * `commitDictation()` to release the span so the next dictation starts a new
-	 * one instead of overwriting this one.
-	 */
+	/** Apply the running transcript while preserving manual edits and selection. */
 	export function streamText(text: string) {
-		if (!editor) return;
-
-		if (dictationFrom === null) {
-			// Anchor at the caret, and give a mid-sentence dictation a leading
-			// space so it does not weld onto the word already there.
-			const at = editor.state.selection.from;
-			const charBefore = editor.state.doc.textBetween(Math.max(0, at - 1), at);
-			const needsSpace = charBefore !== '' && !/\s$/.test(charBefore);
-			if (needsSpace) {
-				editor.chain().focus().insertContentAt(at, ' ').run();
-			}
-			dictationFrom = editor.state.selection.from;
-			dictationTo = dictationFrom;
-		}
-
-		const from = dictationFrom;
-		const to = dictationTo ?? dictationFrom;
-
-		if (!text) {
-			if (to > from) editor.chain().focus().deleteRange({ from, to }).run();
-			dictationTo = from;
-			return;
-		}
-
-		editor
-			.chain()
-			.focus()
-			.insertContentAt({ from, to }, text, { updateSelection: true })
-			.run();
-		// Read the real end back rather than assuming from + text.length: the
-		// schema decides how the string maps onto document positions.
-		dictationTo = editor.state.selection.to;
+		liveDictation?.write(text);
 	}
 
-	/** Freeze the current dictation span; the next `streamText` starts fresh. */
+	/** Release transcript ownership before starting another dictation. */
 	export function commitDictation() {
-		dictationFrom = null;
-		dictationTo = null;
+		liveDictation?.commit();
 	}
 </script>
 

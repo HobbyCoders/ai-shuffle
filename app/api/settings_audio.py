@@ -182,6 +182,14 @@ TTS_MODELS = {
 }
 
 STT_MODELS = {
+    "openai/gpt-live-transcribe": {
+        "name": "GPT Live Transcribe",
+        "description": "Live dictation — text appears while you speak",
+        "price_display": "~$0.017/min",
+        "provider": "openai",
+        "supports_diarization": False,
+        "realtime_only": True,
+    },
     "fal-ai/whisper": {
         "name": "Whisper (Large v3)",
         "description": "Speech transcription and translation, 99+ languages, speaker diarization",
@@ -937,6 +945,11 @@ async def transcribe_audio(
         return stt_model, fal_key, openai_key
 
     stt_model, fal_key, openai_key = await run_sync(_load_stt)
+    if STT_MODELS.get(stt_model, {}).get("realtime_only"):
+        raise HTTPException(
+            status_code=400,
+            detail="GPT Live Transcribe requires live microphone streaming. Check the live connection or select a file transcription model in Audio settings.",
+        )
     provider = _model_provider(stt_model, STT_MODELS.get(stt_model))
 
     if provider == "openai":

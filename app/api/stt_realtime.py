@@ -69,6 +69,7 @@ SAMPLE_RATE = 24000
 # ``.delta`` events mid-utterance - whisper-1 does not (it only answers once per
 # VAD segment), and the UI shows a different affordance for it.
 REALTIME_STT_MODELS: Dict[str, Dict[str, Any]] = {
+    "openai/gpt-live-transcribe": {"name": "gpt-live-transcribe", "partials": True},
     "openai/gpt-4o-transcribe": {"name": "gpt-4o-transcribe", "partials": True},
     "openai/gpt-4o-mini-transcribe": {"name": "gpt-4o-mini-transcribe", "partials": True},
     "openai/whisper-1": {"name": "whisper-1", "partials": False},
@@ -188,7 +189,12 @@ def _session_update_ga(model_name: str, language: Optional[str]) -> Dict[str, An
     """The GA realtime session shape (nested ``audio.input``)."""
     transcription: Dict[str, Any] = {"model": model_name}
     if language:
-        transcription["language"] = language
+        if model_name == "gpt-live-transcribe":
+            transcription["languages"] = [language]
+        else:
+            transcription["language"] = language
+    if model_name == "gpt-live-transcribe":
+        transcription["delay"] = "low"
     return {
         "type": "session.update",
         "session": {
@@ -334,6 +340,7 @@ async def transcribe_stream(
     # upstream read loop cannot end on its own (OpenAI holds the socket open
     # after a commit), so this is what tells the drain it is done.
     tail_ready = asyncio.Event()
+    pending_items: set[str] = set()
 
     async with upstream:
         try:
@@ -441,7 +448,16 @@ async def transcribe_stream(
 
                 kind = event.get("type") or ""
 
-                if kind == "conversation.item.input_audio_transcription.delta":
+                if kind == "input_audio_buffer.committed":
+                    if event.get("item_id"):
+                        pending_items.add(event["item_id"])
+                    await _send_client(websocket, {
+                        "type": "item_started",
+                        "item_id": event.get("item_id"),
+                        "previous_item_id": event.get("previous_item_id"),
+                    })
+
+                elif kind == "conversation.item.input_audio_transcription.delta":
                     delta = event.get("delta") or ""
                     if delta:
                         await _send_client(
@@ -454,6 +470,7 @@ async def transcribe_stream(
                         )
 
                 elif kind == "conversation.item.input_audio_transcription.completed":
+                    pending_items.discard(event.get("item_id"))
                     await _send_client(
                         websocket,
                         {
@@ -466,6 +483,7 @@ async def transcribe_stream(
                         tail_ready.set()
 
                 elif kind == "conversation.item.input_audio_transcription.failed":
+                    pending_items.discard(event.get("item_id"))
                     detail = (
                         (event.get("error") or {}).get("message")
                         or "Transcription failed."
@@ -478,6 +496,9 @@ async def transcribe_stream(
                         tail_ready.set()
 
                 elif kind == "input_audio_buffer.speech_started":
+                    await _send_client(websocket, {
+                        "type": "item_started", "item_id": event.get("item_id"),
+                    })
                     await _send_client(websocket, {"type": "speech_started"})
 
                 elif kind == "input_audio_buffer.speech_stopped":
@@ -486,8 +507,6 @@ async def transcribe_stream(
                 elif kind in (
                     "session.updated",
                     "transcription_session.updated",
-                    "session.created",
-                    "transcription_session.created",
                 ):
                     state["configured"] = True
 
@@ -496,7 +515,7 @@ async def transcribe_stream(
                     # A rejected session.update before any ack is the shape
                     # mismatch the ladder exists for: try the other revision once
                     # and keep the failure off the user's screen.
-                    if not state["configured"] and not state["escalated"]:
+                    if not state["configured"] and not state["escalated"] and model_name != "gpt-live-transcribe":
                         state["escalated"] = True
                         logger.info(
                             "STT stream: GA session shape rejected (%s) - "
@@ -513,8 +532,10 @@ async def transcribe_stream(
                     logger.warning("STT stream: upstream error: %s", detail)
                     await _send_client(
                         websocket,
-                        {"type": "error", "message": detail, "fatal": False},
+                        {"type": "error", "message": detail, "fatal": not state["configured"]},
                     )
+                    if not state["configured"]:
+                        return
                     # A failed session will never produce the transcript the
                     # drain is waiting for — release it rather than time out.
                     if state["stopping"]:
@@ -559,7 +580,7 @@ async def transcribe_stream(
                         try:
                             await asyncio.wait_for(
                                 tail_ready.wait(),
-                                timeout=min(TAIL_SETTLE_SECONDS, remaining),
+                                timeout=remaining if pending_items else min(TAIL_SETTLE_SECONDS, remaining),
                             )
                         except asyncio.TimeoutError:
                             break

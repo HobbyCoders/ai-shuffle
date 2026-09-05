@@ -17,6 +17,7 @@
  */
 
 import { browser } from '$app/environment';
+import { SttTranscript } from './sttTranscript';
 
 // ============================================================================
 // Types
@@ -36,6 +37,8 @@ export interface SttCapability {
 }
 
 export interface SttStreamHandlers {
+	/** Full reconciled dictation, including all settled and in-flight turns. */
+	onTranscript?: (text: string) => void;
 	/** The proxy has an upstream session open. This is NOT the moment recording
 	 *  starts — the microphone has not been touched yet. Use `onCapture`. */
 	onReady?: (info: { model: string; modelName: string; partials: boolean }) => void;
@@ -233,18 +236,11 @@ export async function startSttStream(
 		);
 	}
 
-	const segments: string[] = [];
+	const transcript = new SttTranscript();
 	let pending = '';
 	let closed = false;
 	let fatalError: string | null = null;
 
-	// Set once stop() has asked the backend to flush. While it is true, the next
-	// `final` is the tail transcript the caller is waiting for.
-	let stopping = false;
-	let resolveTail: (() => void) | null = null;
-	const tailFinal = new Promise<void>((resolve) => {
-		resolveTail = resolve;
-	});
 
 	let stream: MediaStream | null = null;
 	let audioContext: AudioContext | null = null;
@@ -325,6 +321,12 @@ export async function startSttStream(
 			}
 
 			switch (message.type) {
+				case 'item_started':
+					transcript.start(
+						typeof message.item_id === 'string' ? message.item_id : undefined,
+						message.previous_item_id === null ? null : typeof message.previous_item_id === 'string' ? message.previous_item_id : undefined
+					);
+					break;
 				case 'ready':
 					if (!settled) {
 						settled = true;
@@ -339,22 +341,22 @@ export async function startSttStream(
 
 				case 'delta':
 					pending += String(message.text ?? '');
+					transcript.delta(String(message.text ?? ''), typeof message.item_id === 'string' ? message.item_id : undefined);
+					handlers.onTranscript?.(transcript.getText());
 					handlers.onDelta?.(pending);
 					break;
 
 				case 'final': {
 					const text = String(message.text ?? '').trim();
 					pending = '';
+					transcript.final(text, typeof message.item_id === 'string' ? message.item_id : undefined);
+					handlers.onTranscript?.(transcript.getText());
 					if (text) {
-						segments.push(text);
 						handlers.onFinal?.(text);
 					} else {
 						// An empty final still clears the partial the UI is showing.
 						handlers.onDelta?.('');
 					}
-					// The tail has landed — stop() can return without waiting for
-					// the socket to close.
-					if (stopping) resolveTail?.();
 					break;
 				}
 
@@ -561,12 +563,9 @@ export async function startSttStream(
 
 	// ── Control ───────────────────────────────────────────────────────────
 
-	// `pending` is included deliberately. It is the segment the user has been
-	// watching arrive in the overlay, and if the tail `final` misses the drain
-	// window, dropping it would silently discard words they already read.
-	// A `final` clears `pending` before pushing, so nothing is double-counted.
-	const getText = () =>
-		[...segments, pending].join(' ').replace(/\s+/g, ' ').trim();
+	// Keep provisional words if the final misses the bounded drain window.
+	// Each final replaces its item by identity, so it never doubles the text.
+	const getText = () => transcript.getText();
 
 	return {
 		getText,
@@ -576,7 +575,6 @@ export async function startSttStream(
 
 			// Silence the microphone first so the tail commit covers exactly what
 			// was spoken, then let the backend drain the last segment.
-			stopping = true;
 			teardownAudio();
 
 			if (socket && socket.readyState === WebSocket.OPEN) {
@@ -585,11 +583,9 @@ export async function startSttStream(
 				} catch {
 					/* socket already going away */
 				}
-				// Return on the tail transcript rather than on the socket close.
-				// The close is a slower signal, and waiting for it made every
-				// stop feel like a hang even though the text had already arrived.
+				// The proxy drains every in-flight turn. The first final may belong
+				// to an earlier turn, so closing on it would drop the tail words.
 				await Promise.race([
-					tailFinal,
 					closedPromise,
 					new Promise<void>((resolve) => setTimeout(resolve, DRAIN_TIMEOUT_MS))
 				]);

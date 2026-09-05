@@ -1167,6 +1167,18 @@ export const FAL_STT_MODELS: STTModel[] = [
 
 export const OPENAI_STT_MODELS: STTModel[] = [
 	{
+		id: 'openai/gpt-live-transcribe',
+		name: 'gpt-live-transcribe',
+		displayName: 'GPT Live Transcribe',
+		provider: 'openai',
+		description: 'Live dictation — text appears while you speak',
+		capabilities: { realtime: true, diarization: false, translation: false, timestamps: false, punctuation: true },
+		inputFormats: ['pcm'],
+		languages: ['Multilingual'],
+		maxFileSizeMB: 0, // Streaming only; no file-upload endpoint.
+		pricePerMinute: 0.017
+	},
+	{
 		id: 'openai/gpt-4o-transcribe',
 		name: 'gpt-4o-transcribe',
 		displayName: 'GPT-4o Transcribe',
