@@ -597,7 +597,7 @@ def _build_thinking_config(
     # Resolve effort: override takes priority over profile config (independent of thinking)
     # 'xhigh' is only valid for Opus 4.7+ models
     effort = overrides.get('effort') or session_effort or config.get('effort')
-    if effort and effort in ('low', 'medium', 'high', 'max', 'xhigh'):
+    if effort and effort in ('none', 'minimal', 'low', 'medium', 'high', 'max', 'xhigh'):
         result['effort'] = effort
         logger.debug(f"Using effort={effort}")
 

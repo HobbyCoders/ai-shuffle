@@ -106,8 +106,10 @@ class TestLiveCatalogs:
         body = resp.json()
         assert body["source"] == "upstream"
         assert body["models"] == [
-            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"},
-            {"id": "gpt-5.6-terra", "label": "gpt-5.6-terra"},
+            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol",
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
+            {"id": "gpt-5.6-terra", "label": "gpt-5.6-terra",
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
         ]
         assert captured["url"].startswith(
             "https://chatgpt.com/backend-api/codex/models"
@@ -140,11 +142,23 @@ class TestLiveCatalogs:
                     "slug": "gpt-6-astra",
                     "display_name": "GPT-6-Astra",
                     "context_window": 272000,
+                    # Source-shaped object entries; the advertised values, not
+                    # the slug, determine the available efforts and default.
+                    "supported_reasoning_levels": [
+                        {"effort": "high", "description": "More reasoning"},
+                        {"effort": "low", "description": "Less reasoning"},
+                    ],
+                    "default_reasoning_level": "low",
                     "visibility": ["codex"],
                 },
                 {
                     "slug": "gpt-5.6-sol",
                     "display_name": "GPT-5.6-Sol",
+                    "supported_reasoning_levels": [
+                        {"effort": "medium", "description": "Balanced reasoning"},
+                        {"effort": "xhigh", "description": "Extra reasoning"},
+                    ],
+                    "default_reasoning_level": "xhigh",
                     "visibility": ["codex"],
                 },
                 {
@@ -166,9 +180,19 @@ class TestLiveCatalogs:
             {
                 "id": "gpt-6-astra",
                 "label": "GPT-6-Astra",
+                "reasoning_capabilities": {
+                    "version": 1, "effort_levels": ["low", "high"],
+                    "default_effort": "low",
+                },
                 "context_window": 272000,
             },
-            {"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol"},
+            {
+                "id": "gpt-5.6-sol", "label": "GPT-5.6-Sol",
+                "reasoning_capabilities": {
+                    "version": 1, "effort_levels": ["medium", "xhigh"],
+                    "default_effort": "xhigh",
+                },
+            },
         ]
 
     def test_chatgpt_without_tokens_returns_409(
@@ -218,7 +242,8 @@ class TestLiveCatalogs:
         resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
         assert resp.status_code == 200, resp.text
         assert resp.json()["models"] == [
-            {"id": "gpt-5.6-sol", "label": "gpt-5.6-sol"},
+            {"id": "gpt-5.6-sol", "label": "gpt-5.6-sol",
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
         ]
         assert calls["n"] == 2
 
@@ -247,8 +272,12 @@ class TestLiveCatalogs:
         body = resp.json()
         assert body["source"] == "upstream"
         assert body["models"] == [
-            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"},
-            {"id": "gpt-5.7", "label": "gpt-5.7"},
+            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol",
+             "reasoning_capabilities": {"version": 1,
+                 "effort_levels": ["none", "low", "medium", "high", "xhigh", "max"],
+                 "default_effort": "medium"}},
+            {"id": "gpt-5.7", "label": "gpt-5.7",
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
         ]
         assert captured["url"] == "https://api.openai.com/v1/models"
         row = db.get_model_provider(PROVIDER_ID)
@@ -328,8 +357,10 @@ class TestUpstreamPath:
         body = resp.json()
         assert body["source"] == "upstream"
         assert body["models"] == [
-            {"id": "openai/gpt-5.6", "label": "GPT-5.6"},
-            {"id": "meta-llama/llama-3.1", "label": "meta-llama/llama-3.1"},
+            {"id": "openai/gpt-5.6", "label": "GPT-5.6",
+             "reasoning_capabilities": {"version": 1, "effort_levels": [], "default_effort": None}},
+            {"id": "meta-llama/llama-3.1", "label": "meta-llama/llama-3.1",
+             "reasoning_capabilities": {"version": 1, "effort_levels": [], "default_effort": None}},
         ]
 
     def test_openrouter_strips_author_prefix_from_names(
@@ -349,8 +380,10 @@ class TestUpstreamPath:
         resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
         assert resp.status_code == 200, resp.text
         assert resp.json()["models"] == [
-            {"id": "anthropic/claude-fable-5.1", "label": "Claude Fable 5.1"},
-            {"id": "z-ai/glm-5.3-flash", "label": "GLM 5.3 Flash"},
+            {"id": "anthropic/claude-fable-5.1", "label": "Claude Fable 5.1",
+             "reasoning_capabilities": {"version": 1, "effort_levels": [], "default_effort": None}},
+            {"id": "z-ai/glm-5.3-flash", "label": "GLM 5.3 Flash",
+             "reasoning_capabilities": {"version": 1, "effort_levels": [], "default_effort": None}},
         ]
 
     def test_bare_list_shape(self, authenticated_client, mock_db, monkeypatch):
@@ -369,7 +402,8 @@ class TestUpstreamPath:
         body = resp.json()
         assert body["source"] == "upstream"
         assert body["models"] == [
-            {"id": "a", "label": "Model A"},
+            {"id": "a", "label": "Model A",
+             "reasoning_capabilities": {"version": 1, "effort_levels": [], "default_effort": None}},
             {"id": "bare-string-id", "label": "bare-string-id"},
         ]
 
@@ -442,7 +476,8 @@ class TestHelperParsing:
         out = mp_api._parse_models_response({"data": [
             {"label": "no id"}, {"id": "keep", "label": "Keep"}, 42,
         ]})
-        assert out == [{"id": "keep", "label": "Keep"}]
+        assert out == [{"id": "keep", "label": "Keep",
+         "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}}]
 
     def test_parse_strips_openrouter_author_prefix(self):
         out = mp_api._parse_models_response(
@@ -463,7 +498,8 @@ class TestHelperParsing:
             {"data": [{"id": "x", "name": "Anthropic: Claude Fable 5.1"}]},
             provider_type="custom",
         )
-        assert out == [{"id": "x", "label": "Anthropic: Claude Fable 5.1"}]
+        assert out == [{"id": "x", "label": "Anthropic: Claude Fable 5.1",
+         "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}}]
 
     def test_parse_carries_through_upstream_context_length(self):
         """OpenRouter-shaped windows survive normalization as ``context_window``.
@@ -475,9 +511,12 @@ class TestHelperParsing:
             {"id": "c", "label": "C"},
         ]})
         assert out == [
-            {"id": "a", "label": "A", "context_window": 128000},
-            {"id": "b", "label": "B", "context_window": 1000000},
-            {"id": "c", "label": "C"},
+            {"id": "a", "label": "A", "context_window": 128000,
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
+            {"id": "b", "label": "B", "context_window": 1000000,
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
+            {"id": "c", "label": "C",
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
         ]
 
     def test_parse_prefers_top_provider_context_length(self):
@@ -486,7 +525,8 @@ class TestHelperParsing:
             {"id": "a", "label": "A", "context_length": 128000,
              "top_provider": {"context_length": 64000}},
         ]})
-        assert out == [{"id": "a", "label": "A", "context_window": 64000}]
+        assert out == [{"id": "a", "label": "A", "context_window": 64000,
+         "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}}]
 
     def test_parse_preserves_only_pricing_needed_for_cost_projection(self):
         out = mp_api._parse_models_response({"data": [{
@@ -502,6 +542,7 @@ class TestHelperParsing:
         assert out == [{
             "id": "x-ai/grok-4.6",
             "label": "Grok 4.6",
+            "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None},
             "pricing": {
                 "prompt": "0.000001",
                 "completion": "0.000002",
@@ -516,9 +557,12 @@ class TestHelperParsing:
             {"id": "c", "label": "C", "context_length": None},
         ]})
         assert out == [
-            {"id": "a", "label": "A"},
-            {"id": "b", "label": "B"},
-            {"id": "c", "label": "C"},
+            {"id": "a", "label": "A",
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
+            {"id": "b", "label": "B",
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
+            {"id": "c", "label": "C",
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
         ]
 
     def test_parse_non_list_returns_empty(self):
@@ -531,8 +575,10 @@ class TestHelperParsing:
             {"id": "gpt-5.7", "name": "GPT-5.7"},
         ]})
         assert out == [
-            {"id": "gpt-5.6-sol", "label": "gpt-5.6-sol"},
-            {"id": "gpt-5.7", "label": "GPT-5.7"},
+            {"id": "gpt-5.6-sol", "label": "gpt-5.6-sol",
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
+            {"id": "gpt-5.7", "label": "GPT-5.7",
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
         ]
 
     def test_parse_codex_slug_display_name_and_context_window(self):
@@ -549,9 +595,11 @@ class TestHelperParsing:
             {
                 "id": "gpt-6-astra",
                 "label": "GPT-6-Astra",
+                "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None},
                 "context_window": 272000,
             },
-            {"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol"},
+            {"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol",
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
         ]
 
     def test_codex_visible_payload_drops_hide(self):

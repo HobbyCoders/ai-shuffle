@@ -20,7 +20,8 @@ vi.mock('$lib/stores/notifications', () => ({ notify: vi.fn() }));
 import ProviderPanel from './ProviderPanel.svelte';
 import OpenRouterKeyFlow from './flows/OpenRouterKeyFlow.svelte';
 
-const raw = { supported_parameters: [], supported_reasoning_levels: [], default_reasoning_level: null };
+const raw = { supported_parameters: [], supported_reasoning_levels: [], default_reasoning_level: null,
+ reasoning_capabilities: { version: 1 as const, effort_levels: [], default_effort: null, mandatory: true } };
 const stale = { supported_parameters: ['reasoning'], supported_reasoning_levels: ['high'], default_reasoning_level: 'high' };
 const entry = (id: string, metadata: Partial<ProviderModelEntry> = raw): ProviderModelEntry => ({ id, label: id, ...metadata });
 const provider = (models: ProviderModelEntry[]): ModelProvider => ({
@@ -36,7 +37,14 @@ const saved = () => mocks.patch.mock.calls.at(-1)![1].models;
 afterEach(cleanup);
 beforeEach(() => { vi.clearAllMocks(); mocks.patch.mockResolvedValue({}); mocks.refresh.mockResolvedValue(undefined); });
 
-describe('provider raw reasoning metadata round trips', () => {
+describe('provider reasoning metadata round trips', () => {
+ it('preserves normalized saved evidence when a refresh only returns stale raw fields', async () => {
+  const canonical = { version: 1 as const, effort_levels: ['low', 'high', 'max'], default_effort: 'max' };
+  mocks.post.mockResolvedValue({ source: 'upstream', models: [entry('keep', stale), entry('toggle')] });
+  render(ProviderPanel, { kind: 'key', provider: provider([entry('keep', { reasoning_capabilities: canonical })]) });
+  await toggle('toggle');
+  expect(saved()[0].reasoning_capabilities).toEqual(canonical);
+ });
  it('fetches through the API and keeps raw empty arrays/null when OpenRouter selection is saved', async () => {
   mocks.post.mockImplementation((url: string) => Promise.resolve(url.endsWith('/fetch-models')
    ? { source: 'upstream', models: [{ ...entry('fresh'), effort_levels: ['max'], default_effort: 'max' }] }

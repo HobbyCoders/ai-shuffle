@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { EFFORT_OPTIONS, modelEffortOptions, resolveModelEffort, reconcileModelEffort } from '$lib/constants/model-effort';
 	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * ApiUserManager - Manage API users for external integrations and connectors.
@@ -73,14 +74,10 @@
 	let formError = $state('');
 
 	// Same levels the chat composer offers.
-	const effortLevels = [
+	const effortLevels = $derived([
 		{ value: '', label: 'Default', description: 'Use the agent default' },
-		{ value: 'low', label: 'Low', description: 'Quick, minimal reasoning' },
-		{ value: 'medium', label: 'Medium', description: 'Balanced reasoning' },
-		{ value: 'high', label: 'High', description: 'Thorough reasoning' },
-		{ value: 'xhigh', label: 'XHigh', description: 'Extreme reasoning' },
-		{ value: 'max', label: 'Max', description: 'Maximum reasoning depth' }
-	];
+		...(formModel ? modelEffortOptions(formModel, formEffort) : EFFORT_OPTIONS)
+	]);
 
 	async function loadData() {
 		try {
@@ -484,7 +481,10 @@
 								value={formModel}
 								allowEmpty
 								emptyLabel="Agent default"
-								onSelect={(value) => (formModel = value)}
+								onSelect={(value) => {
+								formModel = value;
+								if (value) formEffort = reconcileModelEffort(formEffort || null, resolveModelEffort(value)) ?? '';
+							}}
 							/>
 							<p class="text-xs text-muted-foreground mt-1">Preconfigured for every connector session of this user</p>
 						</div>

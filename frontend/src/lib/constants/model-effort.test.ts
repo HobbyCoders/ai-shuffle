@@ -1,48 +1,69 @@
-import { describe, it, expect, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ get: vi.fn() }));
-vi.mock('$lib/api/client', () => ({ api: { get: mocks.get } }));
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
+vi.mock('$lib/api/client', () => ({ api: mocks }));
 import { hydrateModelRegistry } from './models';
-import { resolveEffortModel, resolveModelEffort, reconcileModelEffort } from './model-effort';
+import { resolveEffortModel, resolveModelEffort, reconcileModelEffort, modelEffortOptions, UNKNOWN_EFFORT, NO_ADJUSTABLE_EFFORT } from './model-effort';
+import { effortRegistryFixture } from '$lib/test-stubs/effort-registry';
 const levels = (model: string) => resolveModelEffort(model).options.map(o => o.value);
+const capability = (id: string) => resolveModelEffort(`prov:or:${id}`);
 
-describe('model effort capabilities', () => {
- it('preserves saved effort before registry hydration', () => {
-  expect(reconcileModelEffort('xhigh', resolveModelEffort('prov:or:z-ai/glm-5.3-flash'))).toBe('xhigh');
+beforeEach(async () => {
+ mocks.get.mockResolvedValue(effortRegistryFixture);
+ await hydrateModelRegistry();
+});
+
+describe('authoritative effort capabilities', () => {
+ it('uses exact documented Astra, Sol and sparse GLM levels, not family guesses', () => {
+  expect(levels('prov:or:openai/gpt-6-astra')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+  expect(levels('prov:or:openai/gpt-5.6-sol')).toEqual(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+  expect(levels('prov:or:z-ai/glm-5.3-flash')).toEqual(['low', 'high', 'max']);
+  expect(capability('gpt-6-astra-custom').known).toBe(false);
  });
- it('uses conservative, model-dependent fallback for old payloads', async () => {
-  mocks.get.mockResolvedValue({ models: [
-   { value: 'sonnet', label: 'Sonnet', family: 'sonnet' },
-   { value: 'opus', label: 'Opus', family: 'opus' }
-  ], default: 'sonnet', legacy_map: {}, providers: [] });
+ it('distinguishes unknown and unsupported and preserves unknown pins', () => {
+  expect(capability('unknown').explanation).toBe(UNKNOWN_EFFORT);
+  expect(capability('unsupported').explanation).toBe(NO_ADJUSTABLE_EFFORT);
+  expect(reconcileModelEffort('xhigh', capability('unknown'))).toBe('xhigh');
+  expect(reconcileModelEffort('xhigh', capability('missing'))).toBe('xhigh');
+  expect(reconcileModelEffort('xhigh', capability('unsupported'))).toBeNull();
+ });
+ it('reconciles model switches to declared defaults without confusing literal none with omission', () => {
+  expect(reconcileModelEffort('xhigh', capability('z-ai/glm-5.3-flash'))).toBe('max');
+  expect(reconcileModelEffort('minimal', capability('openai/gpt-5.6-sol'))).toBe('medium');
+  expect(reconcileModelEffort('none', capability('openai/gpt-5.6-sol'))).toBe('none');
+  expect(reconcileModelEffort(null, capability('openai/gpt-5.6-sol'))).toBeNull();
+  expect(reconcileModelEffort('low', capability('single'))).toBe('high');
+ });
+ it('accepts seven options and backend mandatory filtering without synthesizing none', () => {
+  expect(levels('seven')).toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+  expect(levels('mandatory')).toEqual(['low', 'high']);
+  expect(reconcileModelEffort('none', capability('mandatory'))).toBe('high');
+ });
+ it('preserves unknown settings pins but does not advertise OpenAI-only levels for native models', () => {
+  expect(modelEffortOptions('prov:or:unknown', 'minimal').map(o => o.value)).toEqual(['minimal']);
+  expect(modelEffortOptions('opus', null).map(o => o.value)).not.toContain('none');
+  expect(modelEffortOptions('opus', null).map(o => o.value)).not.toContain('minimal');
+ });
+ it('treats absent and null metadata as unknown', async () => {
+  mocks.post.mockResolvedValue({ refreshed: [], failed: ['old'] });
+  mocks.get.mockResolvedValue({ ...effortRegistryFixture, providers: [{ id: 'old', models: [
+   { id: 'absent' }, { id: 'stale', effort_levels: null }
+  ] }] });
   await hydrateModelRegistry();
-  expect(levels('sonnet')).toEqual(['low', 'medium', 'high']);
-  expect(levels('opus')).toEqual(['low', 'medium', 'high', 'max']);
-  for (const model of ['haiku', 'fable', 'unknown', 'prov:or:z-ai/glm-5.3-flash']) expect(levels(model)).toEqual([]);
-  for (const provider of ['or', 'openai', 'responses']) {
-   const model = `prov:${provider}:openai/gpt-6-astra`;
-   expect(levels(model)).toEqual([]);
-   expect(reconcileModelEffort('xhigh', resolveModelEffort(model))).toBeNull();
+  for (const id of ['absent', 'stale']) {
+   const caps = resolveModelEffort(`prov:old:${id}`);
+   expect(caps.known).toBe(false);
+   expect(reconcileModelEffort('none', caps)).toBe('none');
   }
  });
- it('honors effective metadata, explicit empty arrays and supported defaults after hydration', async () => {
+ it('sources native fallback from explicit registry entries and respects declared unknown', async () => {
   mocks.get.mockResolvedValue({ models: [
-   { value: 'opus', label: 'Opus', family: 'opus', effort_levels: ['low', 'high', 'xhigh'], default_effort: 'xhigh' }
-  ], default: 'opus', legacy_map: {}, providers: [{ id: 'or', name: 'OpenRouter', provider_type: 'openrouter',
-   models: [
-    { id: 'glm', label: 'GLM', effort_levels: [] },
-    { id: 'reasoner', label: 'Reasoner', effort_levels: ['low', 'medium', 'high'], default_effort: 'medium' },
-    { id: 'single', label: 'Single', effort_levels: ['low'], default_effort: 'max' },
-    { id: 'invalid', label: 'Invalid', effort_levels: ['unknown'] }
-   ] }] });
+   { value: 'sonnet', label: 'Sonnet', family: 'sonnet' },
+   { value: 'opus', label: 'Opus', family: 'opus', effort_levels: null, default_effort: null }
+  ], default: 'sonnet', providers: [] });
   await hydrateModelRegistry();
-  expect(levels('opus')).toEqual(['low', 'high', 'xhigh']);
-  expect(levels('reasoner')).toEqual(['low', 'medium', 'high']);
-  expect(reconcileModelEffort('max', resolveModelEffort('opus'))).toBe('xhigh');
-  expect(reconcileModelEffort('xhigh', resolveModelEffort('prov:or:glm'))).toBeNull();
-  expect(reconcileModelEffort('xhigh', resolveModelEffort('prov:or:reasoner'))).toBe('medium');
-  expect(reconcileModelEffort(null, resolveModelEffort('prov:or:reasoner'))).toBeNull();
-  expect(reconcileModelEffort('high', resolveModelEffort('prov:or:single'))).toBe('low');
-  expect(levels('prov:or:invalid')).toEqual([]);
+  expect(levels('sonnet')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+  expect(resolveModelEffort('opus').known).toBe(false);
+  expect(reconcileModelEffort('max', resolveModelEffort('opus'))).toBe('max');
  });
  it('resolves inherited defaults, provider routing and current native reroutes, not stale live turns', () => {
   expect(resolveEffortModel(null, null, null, null)).toBe('opus');

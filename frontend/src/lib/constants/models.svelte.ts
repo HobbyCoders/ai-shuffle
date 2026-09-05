@@ -17,6 +17,7 @@
  */
 
 import { api } from '$lib/api/client';
+import type { ReasoningCapabilities } from '$lib/api/model-providers';
 
 export type ModelFamily = 'haiku' | 'sonnet' | 'opus' | 'fable';
 
@@ -33,7 +34,9 @@ export interface ModelOption {
 	 * opt-in toggle — the old `[1m]` suffix mechanism is retired.
 	 */
 	context_window?: number;
-	effort_levels?: string[];
+	effort_levels?: string[] | null;
+	effort_metadata_version?: number;
+	reasoning_capabilities?: ReasoningCapabilities;
 	default_effort?: string | null;
 }
 
@@ -51,10 +54,10 @@ const LEGACY_1M_SUFFIX = '[1m]';
 // ---------------------------------------------------------------------------
 
 const STATIC_MODELS: readonly ModelOption[] = [
-	{ value: 'haiku', label: 'Haiku', family: 'haiku', context_window: 200_000 },
-	{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 },
-	{ value: 'opus', label: 'Opus', family: 'opus', context_window: 1_000_000 },
-	{ value: 'fable', label: 'Fable', family: 'fable', context_window: 1_000_000 }
+	{ value: 'haiku', label: 'Haiku', family: 'haiku', context_window: 200_000, effort_levels: [], default_effort: null, effort_metadata_version: 1 },
+	{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high', effort_metadata_version: 1 },
+	{ value: 'opus', label: 'Opus', family: 'opus', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high', effort_metadata_version: 1 },
+	{ value: 'fable', label: 'Fable', family: 'fable', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high', effort_metadata_version: 1 }
 ] as const;
 
 const STATIC_DEFAULT = 'sonnet';
@@ -180,7 +183,9 @@ export interface ProviderModel {
 	 */
 	context_window?: number | null;
 	/** Effective levels accepted by this route; [] means no adjustable effort. */
-	effort_levels?: string[];
+	effort_levels?: string[] | null;
+	effort_metadata_version?: number;
+	reasoning_capabilities?: ReasoningCapabilities;
 	default_effort?: string | null;
 }
 
@@ -587,7 +592,9 @@ interface RegistryModelPayload {
 	label: string;
 	family: ModelFamily;
 	context_window?: number;
-	effort_levels?: string[];
+	effort_levels?: string[] | null;
+	effort_metadata_version?: number;
+	reasoning_capabilities?: ReasoningCapabilities;
 	default_effort?: string | null;
 }
 
@@ -616,7 +623,10 @@ interface RegistryPayload {
 }
 
 function mapPayloadModel(m: RegistryModelPayload): ModelOption {
-	return { value: m.value, label: m.label, family: m.family, context_window: m.context_window,
+	return { ...STATIC_MODELS.find(baseline => baseline.value === m.value),
+		value: m.value, label: m.label, family: m.family, context_window: m.context_window,
+		...(m.effort_metadata_version !== undefined ? { effort_metadata_version: m.effort_metadata_version } : {}),
+		...(m.reasoning_capabilities !== undefined ? { reasoning_capabilities: m.reasoning_capabilities } : {}),
 		...(m.effort_levels !== undefined ? { effort_levels: m.effort_levels } : {}),
 		...(m.default_effort !== undefined ? { default_effort: m.default_effort } : {}) };
 }
@@ -632,7 +642,17 @@ function mapPayloadProvider(p: RegistryProviderPayload): ProviderEntry {
 		id: p.id,
 		name: p.name,
 		provider_type: p.provider_type,
-		models: p.models ?? [],
+		models: (p.models ?? []).map(model => {
+			const saved = _registry.providers.find(entry => entry.id === p.id)?.models.find(entry => entry.id === model.id);
+			const savedVersion = saved?.effort_metadata_version ?? 0;
+			const incomingVersion = model.effort_metadata_version ?? 0;
+			// Null/absent levels are unknown; an explicit [] is fresh known evidence.
+			return saved && (savedVersion > incomingVersion ||
+				(savedVersion === incomingVersion && Array.isArray(saved.effort_levels) && model.effort_levels == null))
+				? { ...model, effort_levels: saved.effort_levels, default_effort: saved.default_effort,
+					effort_metadata_version: saved.effort_metadata_version, reasoning_capabilities: saved.reasoning_capabilities }
+				: model;
+		}),
 		default_model: p.default_model ?? null,
 		auth_kind: p.auth_kind ?? (p.provider_type === 'chatgpt' || p.provider_type === 'grok' ? 'subscription' : 'api'),
 		plan_type: p.plan_type ?? null
@@ -673,7 +693,34 @@ function warnOnDrift(hydrated: ModelOption[], baseline: readonly ModelOption[]):
  * empty payload or a failed fetch — the caller uses that to decide whether to
  * retry (see `ensureModelRegistryHydrated`).
  */
+const capabilityRefreshAttempted = new Set<string>();
+
+/** Initial hydration never waits on capability discovery. Failed providers can be
+ * retried by the existing explicit refresh in settings, not every hydration. */
+function refreshStaleCapabilities(providers: RegistryProviderPayload[]) {
+	const providerIds = providers.filter(p => p.models?.some(m => (m.effort_metadata_version ?? 0) < 1)
+		&& !capabilityRefreshAttempted.has(p.id)).map(p => p.id);
+	if (!providerIds.length) return;
+	providerIds.forEach(id => capabilityRefreshAttempted.add(id));
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), 15_000);
+	const batches: string[][] = [];
+	for (let i = 0; i < providerIds.length; i += 100) batches.push(providerIds.slice(i, i + 100));
+	void Promise.all(batches.map(ids => Promise.resolve().then(() =>
+		api.post<{ refreshed: string[]; failed: string[] }>('/model-providers/refresh-capabilities', {
+			provider_ids: ids
+		}, { signal: controller.signal })
+	).catch(() => null))).then(results => {
+		if (results.some(result => result?.refreshed?.length)) return hydrateRegistry(false);
+	}).catch(() => { /* Keep the initial registry and saved effort pins. */ })
+		.finally(() => clearTimeout(timeout));
+}
+
 export async function hydrateModelRegistry(): Promise<boolean> {
+	return hydrateRegistry(true);
+}
+
+async function hydrateRegistry(refreshCapabilities: boolean): Promise<boolean> {
 	try {
 		const payload = await api.get<RegistryPayload>('/models');
 		if (!payload || !Array.isArray(payload.models) || payload.models.length === 0) {
@@ -692,6 +739,7 @@ export async function hydrateModelRegistry(): Promise<boolean> {
 			: [];
 		_registry.claude = mapPayloadClaude(payload.claude);
 		_registry.hydrated = true;
+		if (refreshCapabilities) refreshStaleCapabilities(payload.providers ?? []);
 		return true;
 	} catch (e) {
 		console.error('[model-registry] hydrate failed, keeping static fallback', e);

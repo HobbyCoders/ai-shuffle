@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { modelEffortOptions, resolveModelEffort, reconcileModelEffort } from '$lib/constants/model-effort';
 	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * ProvidersSection — the "Providers" settings tab (Chunk 4 build-out).
@@ -72,18 +73,14 @@
 	// titles, commit messages, PR descriptions, branch names, agent
 	// generation). It lives here rather than on an agent because generation
 	// never runs inside a session.
-	const EFFORT_OPTIONS = [
-		{ value: '', label: 'Provider default' },
-		{ value: 'low', label: 'Low' },
-		{ value: 'medium', label: 'Medium' },
-		{ value: 'high', label: 'High' },
-		{ value: 'xhigh', label: 'XHigh' },
-		{ value: 'max', label: 'Max' }
-	];
-
 	let textGenModel = $state('');
 	let textGenEffort = $state('');
 	let textGenSaving = $state(false);
+
+	const EFFORT_OPTIONS = $derived([
+		{ value: '', label: 'Provider default', description: 'Use the default effort' },
+		...modelEffortOptions(textGenModel, textGenEffort)
+	]);
 	// An unset setting resolves to the registry default at call time; show that
 	// same model so the row never reads as "nothing selected".
 	const textGenValue = $derived(textGenModel || getDefaultModel());
@@ -184,7 +181,8 @@
 					id="text-generation-model"
 					value={textGenValue}
 					allowCustom={false}
-					onSelect={(value) => saveTextGeneration({ text_generation_model: value })}
+					onSelect={(value) => saveTextGeneration({ text_generation_model: value,
+						text_generation_effort: reconcileModelEffort(textGenEffort || null, resolveModelEffort(value)) ?? '' })}
 				/>
 			</div>
 			<select

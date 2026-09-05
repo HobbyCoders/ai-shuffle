@@ -187,7 +187,7 @@ def create_model_provider(
                 base_url,
                 api_dialect,
                 auth_token,
-                json.dumps(models if models is not None else []),
+                json.dumps(_normalize_model_capabilities(models if models is not None else [])),
                 default_model,
                 small_fast_model,
                 json.dumps(extra_env if extra_env is not None else {}),
@@ -271,6 +271,24 @@ def count_configured_model_providers() -> int:
         return int(row["n"]) if row else 0
 
 
+def _normalize_model_capabilities(models):
+    """Whitelist canonical capability data on every catalog write, including legacy imports."""
+    from app.core.model_effort import sanitize_effort_metadata
+    if isinstance(models, str):
+        models = json.loads(models)
+    if not isinstance(models, list):
+        return models
+    normalized = []
+    for entry in models:
+        if isinstance(entry, dict):
+            metadata = sanitize_effort_metadata(entry)
+            capability = metadata.get("reasoning_capabilities", {})
+            if "reasoning_capabilities" in entry or capability.get("effort_levels") is not None:
+                entry = {**entry, **metadata}
+        normalized.append(entry)
+    return normalized
+
+
 def update_model_provider(provider_id: str, **kwargs: Any) -> Optional[ModelProviderRow]:
     """Partially update a provider by id and return the fresh row.
 
@@ -279,6 +297,8 @@ def update_model_provider(provider_id: str, **kwargs: Any) -> Optional[ModelProv
     metadata-only edit leaves the stored token intact. JSON columns accept
     either a serialized string or a Python list/dict.
     """
+    if "models_json" in kwargs:
+        kwargs["models_json"] = _normalize_model_capabilities(kwargs["models_json"])
     updates: List[str] = []
     values: List[Any] = []
     for column in _UPDATABLE_COLUMNS:

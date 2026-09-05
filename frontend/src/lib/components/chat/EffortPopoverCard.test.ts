@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import EffortPopoverCard from './EffortPopoverCard.svelte';
+import { EFFORT_OPTIONS, UNKNOWN_EFFORT } from '$lib/constants/model-effort';
 
 afterEach(() => cleanup());
 
@@ -17,6 +18,23 @@ function slider(): HTMLInputElement {
 }
 
 describe('EffortPopoverCard', () => {
+	it('renders seven exact stops and emits literal none and minimal', async () => {
+		const onSelect = vi.fn();
+		render(EffortPopoverCard, { props: { options: EFFORT_OPTIONS, value: null, defaultValue: 'max', onSelect } });
+		expect(slider().max).toBe('6');
+		expect(slider().value).toBe('6');
+		expect(document.querySelectorAll('.stops span')).toHaveLength(7);
+		await fireEvent.input(slider(), { target: { value: '0' } });
+		expect(onSelect).toHaveBeenLastCalledWith('none');
+		await fireEvent.input(slider(), { target: { value: '1' } });
+		expect(onSelect).toHaveBeenLastCalledWith('minimal');
+	});
+	it('explains unknown capabilities without calling them unsupported', () => {
+		render(EffortPopoverCard, { props: { options: [], value: 'minimal', known: false, explanation: UNKNOWN_EFFORT, onSelect: vi.fn() } });
+		expect(screen.getByText(UNKNOWN_EFFORT)).toBeTruthy();
+		expect(screen.queryByText('Not adjustable')).toBeNull();
+		expect(screen.queryByRole('slider')).toBeNull();
+	});
 	it('explains no adjustable effort without hiding fast mode', async () => {
 		const onToggleFast = vi.fn();
 		render(EffortPopoverCard, { props: { options: [], value: null, onSelect: vi.fn(), fastSupported: true, onToggleFast } });
@@ -78,7 +96,7 @@ describe('EffortPopoverCard', () => {
 		const onSelect = vi.fn();
 		render(EffortPopoverCard, { props: { options, value: null, onSelect } });
 
-		// The thumb rests on the middle stop; dragging there pins it.
+		// Choosing a stop pins it even when no effort was previously selected.
 		await fireEvent.input(slider(), { target: { value: '2' } });
 		expect(onSelect).toHaveBeenCalledWith('high');
 	});

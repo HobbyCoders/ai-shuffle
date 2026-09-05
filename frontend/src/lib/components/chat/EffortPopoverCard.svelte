@@ -11,7 +11,7 @@
 	 *
 	 * `value === null` means no level is pinned for the chat — the model runs at
 	 * its own default. The slider still needs a resting position, so the thumb
-	 * sits on the middle stop without any stop reading as selected; the first
+	 * sits on the declared default (or first stop) without selecting it; the first
 	 * drag pins a level.
 	 */
 	import { Zap } from 'lucide-svelte';
@@ -25,6 +25,9 @@
 
 	interface Props {
 		options: ControlOption[];
+		explanation?: string;
+		known?: boolean;
+		defaultValue?: string | null;
 		value: string | null;
 		onSelect: (value: string) => void;
 		/** Whether the picked model carries the fast service tier. */
@@ -35,6 +38,9 @@
 
 	let {
 		options,
+		explanation = NO_ADJUSTABLE_EFFORT,
+		known = true,
+		defaultValue = null,
 		value,
 		onSelect,
 		fastSupported = false,
@@ -45,9 +51,9 @@
 	const pinnedIndex = $derived(options.findIndex((option) => option.value === value));
 	const pinned = $derived(pinnedIndex >= 0);
 	const maxIndex = $derived(Math.max(options.length - 1, 0));
-	const index = $derived(pinned ? pinnedIndex : Math.floor(maxIndex / 2));
+	const index = $derived(pinned ? pinnedIndex : Math.max(0, options.findIndex(option => option.value === defaultValue)));
 	const current = $derived(options[index]);
-	const currentLabel = $derived(!options.length ? 'Not adjustable' : pinned ? (current?.label ?? 'Effort') : 'Auto');
+	const currentLabel = $derived(!known ? (value ?? 'Unknown') : !options.length ? 'Not adjustable' : pinned ? (current?.label ?? 'Effort') : 'Auto');
 	const progress = $derived(maxIndex > 0 ? (index / maxIndex) * 100 : 0);
 
 	function handleInput(event: Event) {
@@ -80,7 +86,7 @@
 	</div>
 
 	{#if options.length === 0}
-		<p class="effort-explanation">{NO_ADJUSTABLE_EFFORT}</p>
+		<p class="effort-explanation">{explanation}</p>
 	{:else if options.length === 1}
 		<button type="button" class="single-effort" aria-pressed={pinned}
 			onclick={() => onSelect(options[0].value)}>{options[0].label}</button>

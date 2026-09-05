@@ -342,7 +342,7 @@
 	// own default); access always names the effective mode (it defaults to
 	// 'default' → Ask, never blank).
 	const effortLabel = $derived(
-		!effortLevels.length ? 'Not adjustable' : effortValue ? (effortLevels.find((m) => m.value === effortValue)?.label ?? 'Auto') : 'Auto'
+		!effortCapability.known ? (effortValue ?? 'Unknown') : !effortLevels.length ? 'Not adjustable' : effortValue ? (effortLevels.find((m) => m.value === effortValue)?.label ?? 'Auto') : 'Auto'
 	);
 	const permissionLabel = $derived(
 		permissionModes.find((m) => m.value === permissionValue)?.label ?? 'Ask'
@@ -544,6 +544,9 @@
 				>
 					<EffortPopoverCard
 						options={effortLevels}
+						known={effortCapability.known}
+						explanation={effortCapability.explanation}
+						defaultValue={effortCapability.defaultValue}
 						value={effortValue}
 						onSelect={(v) => activeSession.setEffortLevelOverride(v)}
 						{fastSupported}
@@ -573,6 +576,8 @@
 	contextChoice={$activeSession.contextWindowChoice}
 	onContextChoiceSelect={(choice) => activeSession.setContextWindowChoice(choice)}
 	effortOptions={effortLevels}
+	effortExplanation={effortCapability.explanation}
+	effortKnown={effortCapability.known}
 	{effortValue}
 	onEffortSelect={(value) => activeSession.setEffortLevelOverride(value)}
 	{fastSupported}

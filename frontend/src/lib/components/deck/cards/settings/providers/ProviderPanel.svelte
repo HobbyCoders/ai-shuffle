@@ -31,6 +31,7 @@
 	import {
 		updateModelProvider,
 		copyReasoningMetadata,
+		mergeReasoningMetadata,
 		type ModelProvider,
 		type ProviderModelEntry
 	} from '$lib/api/model-providers';
@@ -302,8 +303,7 @@
 				checked: hasCurated ? curatedIds.has(m.id) : res.source === 'preset',
 				context_window: storedWindows.get(m.id) ?? m.context_window,
 				pricing: storedPricing.get(m.id) ?? m.pricing,
-				...copyReasoningMetadata(storedModels.get(m.id)),
-				...copyReasoningMetadata(m)
+				...mergeReasoningMetadata(storedModels.get(m.id), m)
 			}));
 
 			results = [...extras, ...catalogRows];

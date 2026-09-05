@@ -17,6 +17,7 @@ are exposed directly. This chunk has NO write path for the token blobs — they
 are populated by the (later) device-code enrollment flow + refresh worker.
 """
 
+import asyncio
 import logging
 import time
 import uuid
@@ -26,7 +27,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from app.api.auth import require_admin
+from app.api.auth import require_admin, require_auth
 from app.api.settings_crypto import mask_api_key
 from app.core import (
     codex_oauth,
@@ -463,7 +464,16 @@ def _parse_models_response(
         from app.core.model_effort import sanitize_effort_metadata
 
         if isinstance(entry, dict):
-            model.update(sanitize_effort_metadata(entry))
+            metadata = sanitize_effort_metadata(entry, provider_type=provider_type, complete=True)
+            if provider_type != "openrouter" and not sanitize_effort_metadata(entry):
+                from app.core.model_effort import effort_capabilities
+                official = effort_capabilities(model_id, {"provider_type": provider_type})
+                if official["effort_levels"] is not None:
+                    metadata = {"reasoning_capabilities": {
+                        "version": 1, "effort_levels": official["effort_levels"],
+                        "default_effort": official["default_effort"],
+                    }}
+            model.update(metadata)
         models.append(model)
         if len(models) >= _FETCH_MODELS_CAP:
             break
@@ -899,6 +909,90 @@ async def toggle_provider(provider_id: str, token: str = Depends(require_admin))
 
     full_row = _row_with_token_flags(provider_id)
     return _public_provider(full_row)
+
+
+class RefreshCapabilitiesRequest(BaseModel):
+    provider_ids: List[str]
+
+    @field_validator("provider_ids")
+    @classmethod
+    def bounded_ids(cls, value):
+        if len(value) > 100 or any(not item or len(item) > 200 for item in value):
+            raise ValueError("Supply at most 100 provider ids")
+        return list(dict.fromkeys(value))
+
+
+# Coalesce overlapping hydration requests and throttle retrying stale failures.
+# Bounded by existing enabled provider ids, not arbitrary caller input.
+_capability_locks: Dict[str, asyncio.Lock] = {}
+_capability_results: Dict[str, Tuple[float, bool]] = {}
+_CAPABILITY_COOLDOWN = 60.0
+_capability_semaphore = asyncio.Semaphore(4)
+
+
+async def _refresh_provider_capabilities(provider_id: str) -> bool:
+    row = db.get_model_provider(provider_id)
+    if not row or not row.get("enabled"):
+        return False
+    lock = _capability_locks.setdefault(provider_id, asyncio.Lock())
+    async with lock:
+        prior = _capability_results.get(provider_id)
+        if prior and time.monotonic() - prior[0] < _CAPABILITY_COOLDOWN:
+            return prior[1]
+        success = False
+        try:
+            # Reuse the existing catalog/auth clients, without altering curation.
+            async with _capability_semaphore:
+                response = await asyncio.wait_for(fetch_models(provider_id, token=""), timeout=_FETCH_TIMEOUT + 5)
+            fresh = {m["id"]: m for m in response.models}
+            # Re-read after network I/O: preserve edits made while awaiting upstream.
+            current = db.get_model_provider(provider_id)
+            if not current or not current.get("enabled"):
+                return False
+            from app.core.model_effort import sanitize_effort_metadata
+            merged = []
+            complete = True
+            for entry in current.get("models_json") or []:
+                if isinstance(entry, str):
+                    entry = {"id": entry, "label": entry}
+                updated = dict(entry)
+                incoming = fresh.get(entry.get("id"), {}).get("reasoning_capabilities")
+                existing = sanitize_effort_metadata(entry).get("reasoning_capabilities")
+                if incoming is None:
+                    complete = False
+                # An incomplete/unknown declaration must never erase known support.
+                if incoming is not None and (incoming.get("effort_levels") is not None
+                                             or not existing or existing.get("effort_levels") is None):
+                    updated["reasoning_capabilities"] = incoming
+                elif existing is not None:
+                    updated["reasoning_capabilities"] = existing
+                merged.append(updated)
+            if merged != (current.get("models_json") or []):
+                if db.update_model_provider(provider_id, models_json=merged) is None:
+                    return False
+            success = complete
+        except Exception:  # Catalog/auth details may contain secrets; expose ids only.
+            logger.debug("Capability refresh failed for provider %s", provider_id)
+        finally:
+            _capability_results[provider_id] = (time.monotonic(), success)
+        return success
+
+
+@router.post("/refresh-capabilities")
+async def refresh_capabilities(body: RefreshCapabilitiesRequest, token: str = Depends(require_auth)):
+    refreshed, failed = [], []
+    # Small concurrency bound across one batch; per-provider locks dedupe batches.
+    semaphore = asyncio.Semaphore(4)
+
+    async def refresh(provider_id):
+        async with semaphore:
+            return await _refresh_provider_capabilities(provider_id)
+
+    ids = list(dict.fromkeys(body.provider_ids))
+    results = await asyncio.gather(*(refresh(provider_id) for provider_id in ids))
+    for provider_id, success in zip(ids, results):
+        (refreshed if success else failed).append(provider_id)
+    return {"refreshed": refreshed, "failed": failed}
 
 
 @router.post("/{provider_id}/fetch-models", response_model=FetchModelsResponse)

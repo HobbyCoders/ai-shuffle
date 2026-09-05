@@ -164,7 +164,7 @@ def test_registry_payload_shape():
     models = payload["models"]
     assert isinstance(models, list)
     assert "supports_1m" not in models[0]
-    assert {"value", "label", "family", "context_window", "effort_levels", "default_effort"} == set(models[0])
+    assert {"value", "label", "family", "context_window", "effort_levels", "default_effort", "effort_metadata_version"} == set(models[0])
     # Claude windows travel to the frontend so the context meter is right.
     by_value = {entry["value"]: entry for entry in models}
     assert by_value["sonnet"]["context_window"] == 1_000_000
@@ -258,7 +258,8 @@ class TestRegistryPayloadProviders:
             provider_type="openrouter",
             base_url="https://openrouter.ai/api",
             auth_token="enc:tok-blob",
-            models=[{"id": "openai/gpt-5.6", "label": "GPT-5.6", "supported_parameters": ["reasoning_effort"]}],
+            models=[{"id": "openai/gpt-5.6", "label": "GPT-5.6",
+                     "reasoning": {"supported_efforts": ["low", "medium", "high"]}}],
             default_model="openai/gpt-5.6",
             enabled=True,
         )
@@ -289,6 +290,7 @@ class TestRegistryPayloadProviders:
                 "max_output_tokens": None,
                 "effort_levels": ["low", "medium", "high"],
                 "default_effort": None,
+                "effort_metadata_version": 1,
             }],
             "default_model": "openai/gpt-5.6",
         }
@@ -333,10 +335,12 @@ class TestRegistryPayloadProviders:
         assert entry["models"] == [
             {"id": "model-a", "label": "Model A",
              "context_window": 200000, "max_output_tokens": 8192,
-             "effort_levels": [], "default_effort": None},
+             "effort_levels": None, "default_effort": None,
+             "effort_metadata_version": 0},
             {"id": "model-b", "label": "Model B",
              "context_window": 200000, "max_output_tokens": 8192,
-             "effort_levels": [], "default_effort": None},
+             "effort_levels": None, "default_effort": None,
+             "effort_metadata_version": 0},
         ]
 
     def test_chatgpt_row_is_subscription_and_carries_its_plan_type(self, mock_db):

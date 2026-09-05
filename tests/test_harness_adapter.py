@@ -4492,8 +4492,14 @@ async def test_effort_reaches_the_delegated_loop(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model,expected", [("gpt-5.6-sol", "high"), ("gpt-4o", None), ("z-ai/glm-5", None)])
-async def test_effort_reaches_the_native_loop(monkeypatch, tmp_path, model, expected):
+@pytest.mark.parametrize("model,levels,requested,expected", [
+    ("gpt-6-astra", ["low", "medium", "high", "xhigh", "max"], "max", "max"),
+    ("gpt-5.6-sol", ["none", "low", "medium", "high", "xhigh", "max"], "none", "none"),
+    ("z-ai/glm-5.3-flash", ["low", "high", "max"], "max", "max"),
+    ("explicitly-unsupported", [], "max", None),
+    ("unknown-provider-model", None, "max", "max"),
+])
+async def test_effort_reaches_the_native_loop(monkeypatch, tmp_path, model, levels, requested, expected):
     import app.core.provider.harness_adapter as ha
 
     monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
@@ -4502,8 +4508,11 @@ async def test_effort_reaches_the_native_loop(monkeypatch, tmp_path, model, expe
         HarnessAdapter, "_build_store", staticmethod(lambda _o: MemoryStore())
     )
 
+    row = {"provider_type": "openrouter", "models_json": [{"id": model,
+        "reasoning_capabilities": {"version": 1, "effort_levels": levels, "default_effort": None}}]}
+    monkeypatch.setattr(ha, "_lookup_provider_row", lambda _id: row)
     await ha.HarnessAdapter().connect(
-        SessionOptions(model=model, cwd=str(tmp_path), effort="max")
+        SessionOptions(model=model, cwd=str(tmp_path), effort=requested, extra={"provider_id": "p"})
     )
     assert _CapturingLoop.captured["effort"] == expected
 

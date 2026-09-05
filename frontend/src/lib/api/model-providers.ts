@@ -15,6 +15,14 @@
 
 import { api } from './client';
 
+/** Normalized provider evidence; null levels mean unknown, [] means unsupported. */
+export interface ReasoningCapabilities {
+	version: 1;
+	effort_levels: string[] | null;
+	default_effort: string | null;
+	mandatory?: boolean;
+}
+
 /** One curated model offered by a gateway. */
 export interface ProviderModelEntry {
 	id: string;
@@ -33,20 +41,35 @@ export interface ProviderModelEntry {
 	 * row's single shared window.
 	 */
 	context_window?: number | null;
+	reasoning_capabilities?: ReasoningCapabilities;
 	supported_parameters?: string[];
 	supported_reasoning_levels?: string[];
 	default_reasoning_level?: string | null;
 }
 
-/** Copy only upstream evidence. Computed /api/models effort fields are never saved.
+/** Copy canonical evidence and legacy raw metadata. Computed registry fields are never saved.
  * Undefined means absent; null defaults and empty arrays are explicit metadata.
  */
 export function copyReasoningMetadata(model?: Partial<ProviderModelEntry>) {
 	return {
+		...(model?.reasoning_capabilities !== undefined ? { reasoning_capabilities: model.reasoning_capabilities } : {}),
 		...(model?.supported_parameters !== undefined ? { supported_parameters: model.supported_parameters } : {}),
 		...(model?.supported_reasoning_levels !== undefined ? { supported_reasoning_levels: model.supported_reasoning_levels } : {}),
 		...(model?.default_reasoning_level !== undefined ? { default_reasoning_level: model.default_reasoning_level } : {})
 	};
+}
+
+/** Prefer fresh evidence without downgrading a normalized saved catalog. */
+export function mergeReasoningMetadata(stored?: Partial<ProviderModelEntry>, fresh?: Partial<ProviderModelEntry>) {
+	const merged = { ...copyReasoningMetadata(stored), ...copyReasoningMetadata(fresh) };
+	const saved = stored?.reasoning_capabilities;
+	const incoming = fresh?.reasoning_capabilities;
+	// Unknown evidence cannot erase known support (including known unsupported []).
+	if (saved && (saved.version > (incoming?.version ?? 0) ||
+		(saved.version === incoming?.version && Array.isArray(saved.effort_levels) && incoming.effort_levels == null))) {
+		merged.reasoning_capabilities = saved;
+	}
+	return merged;
 }
 
 /** Public (token-free) representation of a `model_providers` row. */

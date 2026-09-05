@@ -28,6 +28,8 @@
 		contextChoice: ContextWindowChoice;
 		onContextChoiceSelect: (choice: ContextWindowChoice) => void;
 		effortOptions: ControlOption[];
+		effortExplanation?: string;
+		effortKnown?: boolean;
 		effortValue: string | null;
 		onEffortSelect: (value: string) => void;
 		fastSupported?: boolean;
@@ -42,6 +44,7 @@
 		open, onClose, panelId = 'mobile-composer-panel', inertToolbar = false,
 		modelOptions, modelGroups, modelValue, modelLabel, modelNotice, onModelSelect,
 		contextChoice, onContextChoiceSelect, effortOptions, effortValue, onEffortSelect,
+		effortExplanation = NO_ADJUSTABLE_EFFORT, effortKnown = true,
 		fastSupported = false, fastEnabled = false, onToggleFast, showCodeControls = true,
 		permissionOptions, permissionValue, onPermissionSelect
 	}: Props = $props();
@@ -191,11 +194,11 @@
 					<ContextPillBar sheetMode />
 				{/if}
 				<div class="quick-setting" role="group" aria-label="Reasoning effort">
-					<div class="setting-label"><span>Reasoning effort</span><small>{!effortOptions.length ? 'Not adjustable' : effortValue ? '' : 'Auto'}</small></div>
+					<div class="setting-label"><span>Reasoning effort</span><small>{!effortKnown ? (effortValue ?? 'Unknown') : !effortOptions.length ? 'Not adjustable' : effortValue ? '' : 'Auto'}</small></div>
 					{#if !effortOptions.length}
-						<p class="setting-description">{NO_ADJUSTABLE_EFFORT}</p>
+						<p class="setting-description">{effortExplanation}</p>
 					{:else}
-					<div class="effort-choices" style={`grid-template-columns: repeat(${effortOptions.length}, minmax(0, 1fr))`}>
+					<div class="effort-choices" style={`grid-template-columns: repeat(${Math.min(effortOptions.length, 4)}, minmax(0, 1fr))`}>
 						{#each effortOptions as option (option.value)}
 							<button type="button" class="quick-choice" aria-pressed={option.value === effortValue}
 								title={option.description} onclick={() => onEffortSelect(option.value)}>{option.label}</button>

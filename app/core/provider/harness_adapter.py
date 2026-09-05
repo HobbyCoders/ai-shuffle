@@ -3084,7 +3084,7 @@ def _normalize_mcp_config_for_fluid(name: str, config: Any) -> Optional[Dict[str
     return config
 
 
-_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
+_EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
 
 
 def _fluid_setting_sources(options: Any) -> Optional[tuple]:

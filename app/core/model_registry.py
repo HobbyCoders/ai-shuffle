@@ -427,7 +427,7 @@ def registry_payload() -> Dict[str, object]:
                 "label": m.label,
                 "family": m.family,
                 "context_window": m.context_window,
-                **effort_capabilities(m.value),
+                **effort_capabilities(m.value, route="delegated"),
             }
             for m in MODELS
         ],
