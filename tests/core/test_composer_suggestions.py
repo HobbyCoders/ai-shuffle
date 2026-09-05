@@ -1,5 +1,6 @@
 """Ephemeral composer hints: durable final text and asynchronous race gates."""
 import asyncio
+import logging
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -90,18 +91,19 @@ async def test_generation_contract_and_dedup():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("checks", [[False], [True, False], [True, True, False]])
-async def test_state_rechecks(checks):
+async def test_state_rechecks(checks, caplog):
     with patch.object(cs, "_eligible", AsyncMock(side_effect=checks)), \
          patch.object(cs, "_final_answer", return_value="Done."), \
          patch.object(cs, "_publish", AsyncMock()) as publish, \
          patch("app.api.generation.generate_with_claude", AsyncMock(return_value="What next?")):
         await cs._run("s", "t")
         publish.assert_not_awaited()
+    assert not caplog.records
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [RuntimeError("offline"), TimeoutError()])
-async def test_failures_quiet(failure):
+async def test_failures_do_not_propagate(failure):
     with patch.object(cs, "_eligible", AsyncMock(return_value=True)), \
          patch.object(cs, "_final_answer", return_value="Done."), \
          patch.object(cs, "_publish", AsyncMock()) as publish, \
@@ -111,7 +113,7 @@ async def test_failures_quiet(failure):
 
 
 @pytest.mark.asyncio
-async def test_outer_timeout():
+async def test_outer_timeout(caplog):
     async def slow(*args, **kwargs):
         await asyncio.Event().wait()
     with patch.object(cs, "TIMEOUT_SECONDS", 0.01), \
@@ -121,6 +123,10 @@ async def test_outer_timeout():
          patch("app.api.generation.generate_with_claude", slow):
         await cs._run("s", "t")
         publish.assert_not_awaited()
+    record, = caplog.records
+    assert (record.stage, record.reason, record.exception_type) == (
+        "generation", "timeout", "TimeoutError",
+    )
 
 
 @pytest.mark.asyncio
@@ -332,3 +338,118 @@ async def test_bounded_bookkeeping():
             await asyncio.gather(*cs._tasks.values())
         assert len(cs._seen) == 3
         assert not cs._tasks
+
+
+SENSITIVE = "SENSITIVE_PROMPT_PROVIDER_CREDENTIAL_SENTINEL"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage,reason", [
+    ("eligibility", "internal_failure"),
+    ("final_answer", "internal_failure"),
+    ("prompt", "internal_failure"),
+    ("generation", "provider_failure"),
+    ("validation", "internal_failure"),
+    ("publish", "publish_failure"),
+])
+async def test_safe_failure_diagnostics(stage, reason, caplog):
+    with patch.object(cs, "_eligible", AsyncMock(return_value=True)) as eligible, \
+         patch.object(cs, "_final_answer", return_value=SENSITIVE) as answer, \
+         patch.object(cs, "_prompt", return_value=SENSITIVE) as prompt, \
+         patch.object(cs, "_validation_reason", return_value=None) as validate, \
+         patch.object(cs, "_publish", AsyncMock()) as publish, \
+         patch("app.api.generation.generate_with_claude", AsyncMock(return_value=SENSITIVE)) as generate:
+        targets = {"eligibility": eligible, "final_answer": answer, "prompt": prompt,
+                   "generation": generate, "validation": validate, "publish": publish}
+        targets[stage].side_effect = RuntimeError(SENSITIVE)
+        cs.schedule_suggestion("s", "t")
+        tasks = list(cs._tasks.values())
+        assert await asyncio.gather(*tasks) == [None]
+        assert not cs._tasks
+    record, = caplog.records
+    assert record.levelno == logging.WARNING
+    assert (record.session_id, record.turn_id, record.stage, record.reason,
+            record.exception_type) == ("s", "t", stage, reason, "RuntimeError")
+    assert not record.exc_info and not record.stack_info
+    assert SENSITIVE not in repr(record.__dict__)
+    assert f"stage={stage}" in record.getMessage()
+    assert f"reason={reason}" in record.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_shared_generation_timeout(caplog):
+    from fastapi import HTTPException
+    with patch.object(cs, "_eligible", AsyncMock(return_value=True)), \
+         patch.object(cs, "_final_answer", return_value=SENSITIVE), \
+         patch("app.api.generation.generate_with_claude", AsyncMock(
+             side_effect=HTTPException(status_code=504, detail=SENSITIVE))):
+        await cs._run("s", "t")
+    record, = caplog.records
+    assert (record.stage, record.reason) == ("generation", "timeout")
+    assert SENSITIVE not in repr(record.__dict__)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value,reason", [
+    ({"text": SENSITIVE}, "invalid_type"),
+    (SENSITIVE * 10, "too_long"),
+    (SENSITIVE + "\nsecond line", "unsafe_characters"),
+    ("<" + SENSITIVE + ">", "unsafe_characters"),
+    ('"' + SENSITIVE + '"', "invalid_format"),
+    ("", None), ("  \n ", None),
+])
+async def test_rejection_diagnostics(value, reason, caplog):
+    from app.core.error_log_handler import ErrorLogDBHandler
+    # Exercise the real diagnostic sink without writing any real session data.
+    handler = ErrorLogDBHandler()
+    with patch.object(cs, "_eligible", AsyncMock(return_value=True)), \
+         patch.object(cs, "_final_answer", return_value=SENSITIVE), \
+         patch.object(cs, "_publish", AsyncMock()) as publish, \
+         patch("app.api.generation.generate_with_claude", AsyncMock(return_value=value)), \
+         patch("app.db.error_logs.record_error") as persist, \
+         patch("app.core.error_log_handler._capture_level", return_value=logging.WARNING):
+        cs.logger.addHandler(handler)
+        try:
+            await cs._run("s", "t")
+        finally:
+            cs.logger.removeHandler(handler)
+        publish.assert_not_awaited()
+        if reason is None:
+            assert not caplog.records
+            persist.assert_not_called()
+        else:
+            record, = caplog.records
+            assert (record.stage, record.reason) == ("validation", reason)
+            assert SENSITIVE not in repr(record.__dict__)
+            persist.assert_called_once()
+            saved = persist.call_args.kwargs
+            assert saved["session_id"] == "s"
+            assert saved["level"] == "WARNING"
+            assert saved["detail"] is None
+            assert "turn_id=t stage=validation" in saved["message"]
+            assert f"reason={reason}" in saved["message"]
+            assert SENSITIVE not in repr(saved)
+
+
+@pytest.mark.asyncio
+async def test_absent_final_answer_is_quiet(caplog):
+    with patch.object(cs, "_eligible", AsyncMock(return_value=True)), \
+         patch.object(cs, "_final_answer", return_value=""), \
+         patch("app.api.generation.generate_with_claude", AsyncMock()) as generate:
+        await cs._run("s", "t")
+        generate.assert_not_awaited()
+    assert not caplog.records
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["eligibility", "generation", "publish"])
+async def test_cancellation_propagates_without_warning(stage, caplog):
+    with patch.object(cs, "_eligible", AsyncMock(return_value=True)) as eligible, \
+         patch.object(cs, "_final_answer", return_value="Done."), \
+         patch.object(cs, "_publish", AsyncMock()) as publish, \
+         patch("app.api.generation.generate_with_claude", AsyncMock(return_value="What next?")) as generate:
+        targets = {"eligibility": eligible, "generation": generate, "publish": publish}
+        targets[stage].side_effect = asyncio.CancelledError(SENSITIVE)
+        with pytest.raises(asyncio.CancelledError):
+            await cs._run("s", "t")
+    assert not caplog.records

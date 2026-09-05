@@ -145,17 +145,39 @@ def _prompt(answer: str) -> str:
     )
 
 
-def _validate(value) -> str:
+def _validation_reason(value) -> str | None:
+    # Empty text is the model's explicitly permitted "no safe reply" outcome.
+    # Reasons are constants: never stringify rejected provider output.
     if not isinstance(value, str):
-        return ""
+        return "invalid_type"
     text = value.strip()
-    if not text or len(text) > MAX_OUTPUT_CHARS:
-        return ""
+    if len(text) > MAX_OUTPUT_CHARS:
+        return "too_long"
     if any(ord(c) < 32 for c in text) or any(c in text for c in ("`", "<", ">")):
-        return ""
+        return "unsafe_characters"
     if text.startswith(("{", "[", '"', "- ", "* ", "User:", "Assistant:")):
-        return ""
-    return text
+        return "invalid_format"
+    return None
+
+
+def _validate(value) -> str:
+    return "" if _validation_reason(value) else value.strip()
+
+
+def _diagnose(session_id: str, turn_id: str, stage: str, reason: str,
+              exception: Exception | None = None) -> None:
+    # The durable error handler preserves session_id, but not arbitrary extras.
+    # Repeat safe fields in the message so GetAppErrors can inspect them too.
+    # Do not attach the exception, its message, traceback, or provider payload.
+    exception_type = type(exception).__name__[:80] if exception else "none"
+    context = {"session_id": session_id, "turn_id": turn_id, "stage": stage,
+               "reason": reason, "exception_type": exception_type}
+    logger.warning(
+        "Composer suggestion skipped: session_id=%s turn_id=%s stage=%s "
+        "reason=%s exception_type=%s",
+        session_id, turn_id, stage, reason, exception_type,
+        extra=context, exc_info=False,
+    )
 
 
 def schedule_suggestion(session_id: str, turn_id: str) -> None:
@@ -172,21 +194,48 @@ def schedule_suggestion(session_id: str, turn_id: str) -> None:
 
 
 async def _run(session_id: str, turn_id: str) -> None:
+    stage = "eligibility"
     try:
         async with asyncio.timeout(TIMEOUT_SECONDS):
             if not await _eligible(session_id, turn_id):
                 return
+            stage = "final_answer"
             answer = await asyncio.to_thread(_final_answer, session_id, turn_id)
+            stage = "eligibility"
             if not answer or not await _eligible(session_id, turn_id):
                 return
             from app.api.generation import generate_with_claude
 
-            text = _validate(await generate_with_claude(
-                _prompt(answer), timeout_seconds=TIMEOUT_SECONDS,
-            ))
+            stage = "prompt"
+            prompt = _prompt(answer)
+            stage = "generation"
+            value = await generate_with_claude(
+                prompt, timeout_seconds=TIMEOUT_SECONDS,
+            )
+            stage = "validation"
+            reason = _validation_reason(value)
+            if reason:
+                _diagnose(session_id, turn_id, stage, reason)
+                return
+            text = _validate(value)
+            stage = "eligibility"
             if text and await _eligible(session_id, turn_id):
+                stage = "publish"
                 await _publish(session_id, turn_id, text)
-    except Exception:
-        # Generation is optional. Never turn a provider outage into a failed
-        # user turn, and do not log prompt content or provider credentials.
-        logger.debug("Composer suggestion skipped", exc_info=False)
+    except Exception as exc:
+        # CancelledError is a BaseException and deliberately propagates.
+        # Shared generation translates its own timeout into HTTP 504.
+        from fastapi import HTTPException
+
+        if isinstance(exc, TimeoutError) or (
+            stage == "generation" and isinstance(exc, HTTPException)
+            and exc.status_code == 504
+        ):
+            reason = "timeout"
+        elif stage == "generation":
+            reason = "provider_failure"
+        elif stage == "publish":
+            reason = "publish_failure"
+        else:
+            reason = "internal_failure"
+        _diagnose(session_id, turn_id, stage, reason, exc)
