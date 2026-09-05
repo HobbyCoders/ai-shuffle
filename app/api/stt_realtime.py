@@ -97,12 +97,6 @@ MAX_FRAME_BYTES = 256 * 1024
 # actually settled, which is normally a few hundred milliseconds.
 DRAIN_TIMEOUT_SECONDS = 6.0
 
-# After a transcript arrives during the drain, how long to keep listening for
-# another one. A stop sends its own commit on top of whatever server VAD had
-# already committed, so two items can be in flight; ending on the first would
-# truncate the last words.
-TAIL_SETTLE_SECONDS = 0.3
-
 UPSTREAM_CONNECT_TIMEOUT = 12.0
 
 # WebSocket close codes the client reads to decide whether to fall back to the
@@ -336,11 +330,17 @@ async def transcribe_stream(
     }
     started = time.monotonic()
 
-    # Raised whenever a transcript lands after the client asked to stop. The
-    # upstream read loop cannot end on its own (OpenAI holds the socket open
-    # after a commit), so this is what tells the drain it is done.
-    tail_ready = asyncio.Event()
+    # Clearing after the stop commit acknowledges that all buffered audio has
+    # been consumed. Transcription runs asynchronously, so also drain every
+    # committed item before closing rather than guessing from a quiet interval.
+    input_drained = False
+    drain_ready = asyncio.Event()
     pending_items: set[str] = set()
+    stop_commit_id = "stt-stop-commit"
+
+    def check_drain() -> None:
+        if input_drained and not pending_items:
+            drain_ready.set()
 
     async with upstream:
         try:
@@ -430,14 +430,19 @@ async def transcribe_stream(
                     # transcribes, then let the drain window collect it.
                     try:
                         await upstream.send(
-                            json.dumps({"type": "input_audio_buffer.commit"})
+                            json.dumps({
+                                "type": "input_audio_buffer.commit",
+                                "event_id": stop_commit_id,
+                            })
                         )
+                        await upstream.send(json.dumps({"type": "input_audio_buffer.clear"}))
                     except Exception:  # noqa: BLE001
                         pass
                     return
 
         async def pump_upstream_to_client() -> None:
             """Upstream realtime events -> the small client protocol."""
+            nonlocal input_drained
             async for raw in upstream:
                 if isinstance(raw, bytes):
                     continue
@@ -456,6 +461,11 @@ async def transcribe_stream(
                         "item_id": event.get("item_id"),
                         "previous_item_id": event.get("previous_item_id"),
                     })
+
+                elif kind == "input_audio_buffer.cleared":
+                    if state["stopping"]:
+                        input_drained = True
+                        check_drain()
 
                 elif kind == "conversation.item.input_audio_transcription.delta":
                     delta = event.get("delta") or ""
@@ -479,8 +489,7 @@ async def transcribe_stream(
                             "text": (event.get("transcript") or "").strip(),
                         },
                     )
-                    if state["stopping"]:
-                        tail_ready.set()
+                    check_drain()
 
                 elif kind == "conversation.item.input_audio_transcription.failed":
                     pending_items.discard(event.get("item_id"))
@@ -492,8 +501,7 @@ async def transcribe_stream(
                         websocket,
                         {"type": "error", "message": detail, "fatal": False},
                     )
-                    if state["stopping"]:
-                        tail_ready.set()
+                    check_drain()
 
                 elif kind == "input_audio_buffer.speech_started":
                     await _send_client(websocket, {
@@ -511,7 +519,16 @@ async def transcribe_stream(
                     state["configured"] = True
 
                 elif kind == "error":
-                    detail = (event.get("error") or {}).get("message") or "Realtime error."
+                    error = event.get("error") or {}
+                    # VAD can consume the tail before Stop. Only the empty-buffer
+                    # rejection of our own stop commit is an expected no-op.
+                    if (
+                        state["stopping"]
+                        and error.get("code") == "input_audio_buffer_commit_empty"
+                        and error.get("event_id") == stop_commit_id
+                    ):
+                        continue
+                    detail = error.get("message") or "Realtime error."
                     # A rejected session.update before any ack is the shape
                     # mismatch the ladder exists for: try the other revision once
                     # and keep the failure off the user's screen.
@@ -536,10 +553,6 @@ async def transcribe_stream(
                     )
                     if not state["configured"]:
                         return
-                    # A failed session will never produce the transcript the
-                    # drain is waiting for — release it rather than time out.
-                    if state["stopping"]:
-                        tail_ready.set()
 
         client_task = asyncio.create_task(pump_client_to_upstream())
         upstream_task = asyncio.create_task(pump_upstream_to_client())
@@ -554,36 +567,15 @@ async def transcribe_stream(
             # transcribing upstream and its ``final`` is the text the user
             # actually wants. Anything else (client vanished, upstream closed)
             # tears down immediately.
-            # The drain ends on the TRANSCRIPT, not on the clock. Waiting for
-            # ``upstream_task`` instead always burned the full ceiling: it is an
-            # ``async for`` over a socket OpenAI keeps open after a commit, so it
-            # never completes on its own and every stop cost a flat six seconds
-            # between "I stopped talking" and the text appearing.
             if state["stopping"] and client_task in done and not upstream_task.done():
-                deadline = time.monotonic() + DRAIN_TIMEOUT_SECONDS
-                waiter = asyncio.ensure_future(tail_ready.wait())
+                waiter = asyncio.ensure_future(drain_ready.wait())
                 try:
-                    # ``wait`` rather than ``wait_for`` so upstream_task is never
-                    # cancelled out from under the pump still forwarding events.
+                    # Never cancel the pump while it is forwarding the tail.
                     await asyncio.wait(
                         {waiter, upstream_task},
                         timeout=DRAIN_TIMEOUT_SECONDS,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
-                    # Each transcript extends the window a little, so a second
-                    # in-flight item still lands; the deadline bounds the total.
-                    while tail_ready.is_set():
-                        tail_ready.clear()
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            break
-                        try:
-                            await asyncio.wait_for(
-                                tail_ready.wait(),
-                                timeout=remaining if pending_items else min(TAIL_SETTLE_SECONDS, remaining),
-                            )
-                        except asyncio.TimeoutError:
-                            break
                 except Exception:  # noqa: BLE001 - the drain is best-effort
                     pass
                 finally:

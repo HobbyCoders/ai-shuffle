@@ -253,7 +253,17 @@ class _FakeUpstream:
     for the iterator to finish will wait out the full ceiling.
     """
 
-    def __init__(self, transcript="hello world", answer_commit=True, audio_events=(), delayed_tail=False):
+    def __init__(
+        self,
+        transcript="hello world",
+        answer_commit=True,
+        audio_events=(),
+        delayed_tail=False,
+        commit_events=None,
+        answer_clear=True,
+        stop_error=None,
+        configured=True,
+    ):
         import asyncio
 
         self.sent = []
@@ -261,7 +271,12 @@ class _FakeUpstream:
         self.answer_commit = answer_commit
         self.audio_events = audio_events
         self.delayed_tail = delayed_tail
+        self.commit_events = commit_events
+        self.answer_clear = answer_clear
+        self.stop_error = stop_error
+        self.configured = configured
         self._queue = asyncio.Queue()
+        self._tasks = []
         self.entered = False
 
     async def __aenter__(self):
@@ -269,15 +284,43 @@ class _FakeUpstream:
         return self
 
     async def __aexit__(self, *exc):
+        import asyncio
+
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
         return False
 
     async def send(self, data):
         self.sent.append(data)
         message = json.loads(data)
+        if message.get("type") == "session.update" and self.configured:
+            await self._queue.put(json.dumps({"type": "session.updated"}))
+        if message.get("type") == "input_audio_buffer.clear" and self.answer_clear:
+            await self._queue.put(json.dumps({"type": "input_audio_buffer.cleared"}))
         if message.get("type") == "input_audio_buffer.append":
             for event in self.audio_events:
                 await self._queue.put(json.dumps(event))
         if message.get("type") == "input_audio_buffer.commit" and self.answer_commit:
+            if self.stop_error is not None:
+                await self._queue.put(json.dumps({"type": "error", "error": {
+                    "code": self.stop_error,
+                    "message": "Stop commit rejected",
+                    "event_id": message.get("event_id"),
+                }}))
+                return
+            if self.commit_events is not None:
+                import asyncio
+
+                async def send_events():
+                    for delay, event in self.commit_events:
+                        await asyncio.sleep(delay)
+                        if event.get("type") == "error":
+                            event["error"].setdefault("event_id", message.get("event_id"))
+                        await self._queue.put(json.dumps(event))
+
+                self._tasks.append(asyncio.create_task(send_events()))
+                return
             if self.delayed_tail:
                 for item_id, previous in (("item_1", None), ("item_2", "item_1")):
                     await self._queue.put(json.dumps({"type": "input_audio_buffer.committed", "item_id": item_id, "previous_item_id": previous}))
@@ -297,7 +340,7 @@ class _FakeUpstream:
                     await asyncio.sleep(0.5)
                     await self._queue.put(json.dumps({"type": "conversation.item.input_audio_transcription.completed", "item_id": "item_2", "transcript": "last words"}))
 
-                asyncio.create_task(send_tail())
+                self._tasks.append(asyncio.create_task(send_tail()))
 
     def __aiter__(self):
         return self
@@ -415,6 +458,156 @@ def test_stream_stop_does_not_wait_out_the_drain_ceiling(stream_client):
     assert elapsed < stt_realtime.DRAIN_TIMEOUT_SECONDS / 2, (
         f"stop took {elapsed:.2f}s; the drain is waiting on the clock again"
     )
+
+
+
+@pytest.mark.parametrize("configured", [True, False])
+def test_stop_after_vad_final_closes_without_error_or_settle_timer(stream_client, monkeypatch, configured):
+    import time
+
+    client, created = stream_client
+    monkeypatch.setattr(stt_realtime, "DRAIN_TIMEOUT_SECONDS", 0.5)
+    created["kwargs"] = {"audio_events": [
+        {"type": "input_audio_buffer.committed", "item_id": "item_1"},
+        {"type": "conversation.item.input_audio_transcription.completed", "item_id": "item_1", "transcript": "already finished"},
+    ], "stop_error": "input_audio_buffer_commit_empty"}
+    created["kwargs"]["configured"] = configured
+
+    with client.websocket_connect("/api/v1/settings/transcribe/stream") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_bytes(b"\x00\x01" * 512)
+        assert ws.receive_json()["type"] == "item_started"
+        assert ws.receive_json()["text"] == "already finished"
+        started = time.monotonic()
+        ws.send_json({"type": "stop"})
+        assert ws.receive_json()["type"] == "closed"
+        assert time.monotonic() - started < 0.2
+
+    commands = [json.loads(message) for message in created["upstream"].sent]
+    assert [message["type"] for message in commands][-2:] == [
+        "input_audio_buffer.commit", "input_audio_buffer.clear",
+    ]
+    assert commands[-2]["event_id"]
+
+
+def test_stop_waits_for_buffer_barrier_before_closing(stream_client, monkeypatch):
+    client, created = stream_client
+    monkeypatch.setattr(stt_realtime, "DRAIN_TIMEOUT_SECONDS", 1)
+    created["kwargs"] = {"commit_events": [
+        (0, {"type": "conversation.item.input_audio_transcription.completed", "item_id": "earlier", "transcript": "first"}),
+        (0.4, {"type": "input_audio_buffer.committed", "item_id": "tail"}),
+        (0, {"type": "input_audio_buffer.cleared"}),
+        (0.1, {"type": "conversation.item.input_audio_transcription.completed", "item_id": "tail", "transcript": "last words"}),
+    ], "answer_clear": False}
+    with client.websocket_connect("/api/v1/settings/transcribe/stream") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json({"type": "stop"})
+        assert ws.receive_json()["text"] == "first"
+        assert ws.receive_json()["item_id"] == "tail"
+        assert ws.receive_json()["text"] == "last words"
+        assert ws.receive_json()["type"] == "closed"
+
+
+@pytest.mark.parametrize("pending_item", [False, True])
+def test_stop_with_missing_upstream_events_keeps_bounded_fallback(stream_client, monkeypatch, pending_item):
+    import time
+
+    client, created = stream_client
+    monkeypatch.setattr(stt_realtime, "DRAIN_TIMEOUT_SECONDS", 0.15)
+    created["kwargs"] = {"answer_commit": False, "answer_clear": False}
+    if pending_item:
+        created["kwargs"] = {"commit_events": [
+            (0, {"type": "input_audio_buffer.committed", "item_id": "pending"}),
+            (0, {"type": "input_audio_buffer.cleared"}),
+        ], "answer_clear": False}
+    with client.websocket_connect("/api/v1/settings/transcribe/stream") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        started = time.monotonic()
+        ws.send_json({"type": "stop"})
+        if pending_item:
+            assert ws.receive_json()["item_id"] == "pending"
+        assert ws.receive_json()["type"] == "closed"
+        assert 0.1 <= time.monotonic() - started < 1
+
+
+
+@pytest.mark.parametrize("terminal", ["completed", "failed"])
+def test_empty_stop_commit_waits_for_pending_transcription(stream_client, monkeypatch, terminal):
+    import time
+
+    client, created = stream_client
+    monkeypatch.setattr(stt_realtime, "DRAIN_TIMEOUT_SECONDS", 1)
+    created["kwargs"] = {"audio_events": [
+        {"type": "input_audio_buffer.committed", "item_id": "pending"},
+    ], "commit_events": [
+        (0, {"type": "error", "error": {"code": "input_audio_buffer_commit_empty"}}),
+        (0, {"type": "input_audio_buffer.cleared"}),
+        (0.4, {"type": f"conversation.item.input_audio_transcription.{terminal}", "item_id": "pending", "transcript": "last words", "error": {"message": "Transcription failed"}}),
+    ], "answer_clear": False}
+    with client.websocket_connect("/api/v1/settings/transcribe/stream") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_bytes(b"\x00\x01" * 512)
+        assert ws.receive_json()["item_id"] == "pending"
+        ws.send_json({"type": "stop"})
+        result = ws.receive_json()
+        assert result["type"] == ("final" if terminal == "completed" else "error")
+        assert result.get("text", result.get("message")) == ("last words" if terminal == "completed" else "Transcription failed")
+        settled = time.monotonic()
+        assert ws.receive_json()["type"] == "closed"
+        assert time.monotonic() - settled < 0.2
+
+
+def test_stop_waits_for_earlier_item_when_tail_finishes_first(stream_client, monkeypatch):
+    client, created = stream_client
+    monkeypatch.setattr(stt_realtime, "DRAIN_TIMEOUT_SECONDS", 1)
+    created["kwargs"] = {"commit_events": [
+        (0, {"type": "input_audio_buffer.committed", "item_id": "earlier"}),
+        (0, {"type": "input_audio_buffer.committed", "item_id": "tail"}),
+        (0, {"type": "input_audio_buffer.cleared"}),
+        (0, {"type": "conversation.item.input_audio_transcription.completed", "item_id": "tail", "transcript": "last words"}),
+        (0.4, {"type": "conversation.item.input_audio_transcription.completed", "item_id": "earlier", "transcript": "first words"}),
+    ], "answer_clear": False}
+    with client.websocket_connect("/api/v1/settings/transcribe/stream") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json({"type": "stop"})
+        assert ws.receive_json()["item_id"] == "earlier"
+        assert ws.receive_json()["item_id"] == "tail"
+        assert ws.receive_json()["text"] == "last words"
+        assert ws.receive_json()["text"] == "first words"
+        assert ws.receive_json()["type"] == "closed"
+
+
+@pytest.mark.parametrize("code,event_id", [
+    ("input_audio_buffer_commit_empty", "another-commit"),
+    ("server_error", "stt-stop-commit"),
+])
+def test_stop_keeps_unrelated_upstream_errors_visible(stream_client, code, event_id):
+    client, created = stream_client
+    created["kwargs"] = {"commit_events": [
+        (0, {"type": "error", "error": {"code": code, "event_id": event_id, "message": "Real error"}}),
+        (0, {"type": "input_audio_buffer.cleared"}),
+    ], "answer_clear": False}
+    with client.websocket_connect("/api/v1/settings/transcribe/stream") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json({"type": "stop"})
+        assert ws.receive_json() == {"type": "error", "message": "Real error", "fatal": False}
+        assert ws.receive_json()["type"] == "closed"
+
+
+
+def test_successful_stop_commit_waits_for_async_final(stream_client):
+    client, created = stream_client
+    created["kwargs"] = {"commit_events": [
+        (0, {"type": "input_audio_buffer.committed", "item_id": "tail"}),
+        (0, {"type": "input_audio_buffer.cleared"}),
+        (0.1, {"type": "conversation.item.input_audio_transcription.completed", "item_id": "tail", "transcript": "last words"}),
+    ], "answer_clear": False}
+    with client.websocket_connect("/api/v1/settings/transcribe/stream") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json({"type": "stop"})
+        assert ws.receive_json()["item_id"] == "tail"
+        assert ws.receive_json()["text"] == "last words"
+        assert ws.receive_json()["type"] == "closed"
 
 
 def test_stream_rejects_a_model_that_cannot_stream(stream_client, capability_env):
