@@ -2,16 +2,17 @@
 	import { onMount } from 'svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { Smartphone, Check, Copy } from 'lucide-svelte';
-	type Connection = { status: string; code: string | null; qr_svg: string | null; error: string | null };
+	type Connection = { authorization_url?: string | null; status: string; code: string | null; qr_svg: string | null; error: string | null };
 	let connection = $state<Connection | null>(null);
 	let name = $state('My worker');
 	let busy = $state(false);
 	let error = $state('');
 	let copied = $state(false);
+	let showPairingCode = $state(false);
 	let stopped = false;
 	let poll: ReturnType<typeof setTimeout>;
 	async function refresh() {
-		try { connection = await api.get<Connection>('/mobile/hub/connection'); }
+		try { connection = await api.get<Connection>('/mobile/hub/connection'); error = ''; }
 		catch (e) { error = getErrorMessage(e); }
 		if (!stopped) poll = setTimeout(refresh, 4000);
 	}
@@ -33,17 +34,24 @@
 
 <section class="account-connection" aria-label="Account connection">
 	<div class="intro"><Smartphone size={20} /><div>
-		<h4>Use this worker on your phone</h4>
-		<p>Connect it to your Shuffle account to reach it wherever you are.</p>
+		<h4>Remote access</h4>
+		<p>Optional: link this worker to your Shuffle account to reach it from outside your local network.</p>
 	</div></div>
 	{#if connection?.status === 'connected'}
 		<p class="connected" role="status"><Check size={16} /> Connected to your account</p>
 		<p>Open Shuffle on your phone and choose this worker. Remote access reconnects automatically when Shuffle starts.</p>
 	{:else if connection?.code}
+		{#if connection.authorization_url}
+			<a class="btn btn-primary" href={connection.authorization_url} target="_blank" rel="noopener noreferrer">Sign in and link this worker</a>
+			<p class="hint">Return here after approving this worker. The connection will update automatically.</p>
+			<button class="btn" onclick={() => showPairingCode = !showPairingCode}>{showPairingCode ? 'Hide phone pairing' : 'Use my phone instead'}</button>
+		{/if}
+		{#if showPairingCode || !connection.authorization_url}
 		<p>In the Shuffle app, sign in, choose <strong>Add worker</strong>, then scan this code.</p>
 		{#if connection.qr_svg}<div class="qr" aria-label="Worker connection QR code">{@html connection.qr_svg}</div>{/if}
 		<div class="code"><code>{connection.code.match(/.{1,4}/g)?.join(' ')}</code><button class="btn" onclick={copyCode} aria-label="Copy connection code"><Copy size={14} />{copied ? 'Copied' : 'Copy'}</button></div>
 		<p class="hint">Or enter the code in Add worker. It expires after ten minutes. Approve only a worker you own.</p>
+		{/if}
 	{:else if connection?.status === 'connecting' || connection?.status === 'reconnecting'}
 		<p role="status">Connecting your worker… Shuffle will retry automatically.</p>
 	{:else}

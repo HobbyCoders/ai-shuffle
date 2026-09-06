@@ -4,7 +4,7 @@ Pydantic models for API requests and responses
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Literal
 from pydantic import BaseModel, Field, field_validator
 
 # Import-cycle safe: ``session_modes`` only imports ``tool_access``, which has
@@ -1422,7 +1422,7 @@ class ApiUserCreate(BaseModel):
     description: Optional[str] = None
     project_id: Optional[str] = None
     profile_ids: Optional[List[str]] = None
-    web_login_allowed: bool = True
+    web_login_allowed: Literal[False] = Field(default=False, deprecated=True)
     # Preconfigured run selection every session created for this user binds
     # (connectors resolve it at session creation and each turn). NULL falls
     # back to the profile's legacy config, then the global default.
@@ -1437,7 +1437,7 @@ class ApiUserUpdate(BaseModel):
     project_id: Optional[str] = None
     profile_ids: Optional[List[str]] = None
     is_active: Optional[bool] = None
-    web_login_allowed: Optional[bool] = None
+    web_login_allowed: Optional[Literal[False]] = Field(default=None, deprecated=True)
     model: Optional[str] = None
     effort: Optional[str] = Field(None, pattern="^(none|minimal|low|medium|high|xhigh|max|ultra)$")
 

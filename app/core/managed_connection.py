@@ -1,10 +1,11 @@
-"""An administrator offers this worker; their signed-in phone approves it.
+"""The local owner offers this worker; their signed-in account approves it.
 
 All hub credentials are encrypted at rest. A connector starts only on the
 install that offered the worker, and exposes the application on loopback.
 """
 import asyncio
 import hashlib
+import http.client
 import json
 import os
 import secrets
@@ -20,6 +21,7 @@ from app.core.config import settings
 from app.core.encryption import encrypt_value, decrypt_value
 from app.db import database, mobile_hub
 from app.db.async_database import run_sync
+from app.serve import REMOTE_PORT
 
 _process = None
 _state = 'disconnected'
@@ -45,7 +47,7 @@ def status():
     try:
         pending = _pending()
     except (RuntimeError, ValueError):
-        return {'status': 'locked', 'error': 'Sign in as administrator to unlock this connection.',
+        return {'status': 'locked', 'error': 'Restore the server credential key to unlock this connection.',
                 'url': None, 'code': None, 'expires_at': None}
     valid = pending and pending['expires'] > time.time()
     return {'status': _state, 'error': _error, 'url': _url,
@@ -64,8 +66,6 @@ def _begin(name):
     name = name.strip()
     if not 1 <= len(name) <= 80 or any(ord(c) < 32 or ord(c) == 127 for c in name):
         raise HTTPException(400, 'Enter a worker name')
-    if settings.port != 8000:
-        raise HTTPException(409, 'Automatic remote access requires this worker to listen on port 8000')
     if not shutil.which('cloudflared'):
         raise HTTPException(503, 'Install the current Shuffle build with automatic remote access support')
     binding = mobile_hub.get_binding()
@@ -85,6 +85,24 @@ def _begin(name):
         'code_hash': hashlib.sha256(pending['code'].encode()).hexdigest()})
     _state, _error = 'waiting', None
     return status()
+
+
+def _protected_listener_ready():
+    """Do not change a live tunnel until the authenticated origin is serving."""
+    connection = http.client.HTTPConnection('127.0.0.1', REMOTE_PORT, timeout=2)
+    try:
+        connection.request('GET', '/api/v1/mobile/hub/ingress', headers={'Accept': 'application/json'})
+        response = connection.getresponse()
+        raw = response.read(1025)
+        if response.status != 200 or len(raw) > 1024:
+            return False
+        result = json.loads(raw)
+        return (result.get('protected_ingress') is True
+                and result.get('instance_id') == settings.effective_instance_id)
+    except Exception:
+        return False
+    finally:
+        connection.close()
 
 
 def _credentials():
@@ -107,8 +125,12 @@ def _credentials():
             raise ValueError('Worker already bound to another authorization')
     if binding['linked_by'] != _owner():
         return None
-    result = account_hub.call(binding, 'POST' if not binding['active'] else 'GET',
-                              'activate' if not binding['active'] else 'connector', {} if not binding['active'] else None)
+    if not _protected_listener_ready():
+        raise ValueError('Protected remote listener is not ready')
+    result = account_hub.call(binding, 'POST',
+                              'activate' if not binding['active'] else 'connector', {'remote_port': REMOTE_PORT})
+    if result.get('remote_port') != REMOTE_PORT:
+        raise ValueError('Hub has not verified the protected remote listener')
     token, url = result.get('tunnel_token'), result.get('url')
     if not isinstance(token, str) or not 32 <= len(token) <= 4096 or any(c.isspace() for c in token):
         raise ValueError('Invalid connector credential')
@@ -141,7 +163,8 @@ def _reachable(binding, url):
         if response.status != 200 or len(raw) > 1024:
             return False
         result = json.loads(raw)
-        return result.get('ready') is True and result.get('server_id') == binding['server_id']
+        return (result.get('ready') is True and result.get('server_id') == binding['server_id']
+                and result.get('protected_ingress') is True)
     except Exception:
         return False
     finally:
@@ -177,7 +200,7 @@ async def supervise():
                     if credentials:
                         token, _url = credentials
                         executable = shutil.which('cloudflared')
-                        if not executable or settings.port != 8000:
+                        if not executable:
                             raise ValueError('Connector unavailable')
                         # Keep all application/provider secrets out of the child environment.
                         child_env = {k:v for k,v in os.environ.items() if k in ('PATH','SystemRoot','SYSTEMROOT','TEMP','TMP')}

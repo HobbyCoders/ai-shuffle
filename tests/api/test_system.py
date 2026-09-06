@@ -615,8 +615,8 @@ class TestValidateWorkspaceAuth:
         assert resp.status_code in (401, 403)
         assert not target.exists()
 
-    def test_pre_setup_request_allowed_without_admin(self, temp_workspace):
-        """During first-run setup (is_setup_required True) → allowed."""
+    def test_remote_pre_setup_request_stays_protected(self, temp_workspace):
+        """An empty installation must not grant authority on an untrusted socket."""
         client = self._client()
         with patch("app.api.system.auth_service") as mock_auth:
             mock_auth.is_setup_required.return_value = True
@@ -624,9 +624,7 @@ class TestValidateWorkspaceAuth:
                 "/api/v1/workspace/validate",
                 json={"workspace_path": str(temp_workspace)},
             )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["exists"] is True
+        assert resp.status_code in (401, 403)
 
 
 # =============================================================================

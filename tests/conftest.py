@@ -190,7 +190,7 @@ def mock_db(_raw_sqlite: sqlite3.Connection, _auto_db_shim) -> sqlite3.Connectio
 # =============================================================================
 
 @pytest.fixture(scope="function")
-def client(mock_db):
+def client(mock_db, _api_unit_credentials):
     """
     Create a FastAPI TestClient with mocked database.
 
@@ -223,7 +223,7 @@ def _mock_require_admin():
 
 
 @pytest.fixture(scope="function")
-def authenticated_client(mock_db):
+def authenticated_client(mock_db, _api_unit_credentials):
     """
     Create an authenticated test client with FastAPI dependency overrides.
 
@@ -419,6 +419,50 @@ def mock_claude_sdk():
 # =============================================================================
 # Environment Fixtures
 # =============================================================================
+
+@pytest.fixture(autouse=True)
+def _isolate_test_git_discovery(monkeypatch, tmp_path):
+    """A temp folder is never a checkout of the real repo above --basetemp.
+
+    Tests create their own repositories beneath this boundary when needed.
+    Preserve any caller-supplied ceilings as well.
+    """
+    ceilings = [os.environ.get('GIT_CEILING_DIRECTORIES', ''), str(tmp_path.parent)]
+    monkeypatch.setenv('GIT_CEILING_DIRECTORIES', os.pathsep.join(filter(None, ceilings)))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_credential_state(monkeypatch, tmp_path):
+    """Keep per-database process keys and durable files out of other tests/users.
+
+    Custody-specific tests still call the real initializer and can override this
+    private location. Legacy/rekey tests start without an adopted-key marker.
+    """
+    from types import SimpleNamespace
+    from app.core import encryption, credential_keys
+
+    monkeypatch.setattr(encryption, '_encryption_key', None)
+    monkeypatch.setattr(encryption, '_key_salt', None)
+    monkeypatch.setattr(encryption, '_credential_status', {'ready': False, 'state': 'unavailable'})
+    monkeypatch.setattr(credential_keys, 'settings', SimpleNamespace(effective_data_dir=tmp_path / 'credential-data'))
+
+
+@pytest.fixture
+def _api_unit_credentials(monkeypatch, _isolate_credential_state):
+    """Ordinary API tests exercise real crypto without invoking OS key custody.
+
+    These clients override authentication and use a per-test SQLite database;
+    initialize only an ephemeral test key, not durable migration metadata or
+    the developer's provider-file seed. Dedicated custody/startup tests and the
+    actual first-run integration tests use the real startup path separately.
+    Keeping legacy helpers real lets rekey fixtures choose their own test key.
+    """
+    from app.core import encryption, startup
+
+    monkeypatch.setattr(encryption, '_encryption_key', encryption.Fernet.generate_key())
+    monkeypatch.setattr(encryption, '_credential_status', {'ready': True, 'state': 'ready'})
+    monkeypatch.setattr(startup, 'init_encryption_and_sessions', lambda: None)
+
 
 @pytest.fixture(autouse=True)
 def reset_environment():

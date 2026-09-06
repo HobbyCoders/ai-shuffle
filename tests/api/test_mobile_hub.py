@@ -19,7 +19,7 @@ SECRET = 'a' * 64
 
 @pytest.fixture
 def setup(monkeypatch):
-    monkeypatch.setenv('MOBILE_ACCOUNT_HUB_URL', HUB)
+    monkeypatch.setattr(account_hub.settings, 'mobile_account_hub_url', HUB)
     monkeypatch.setattr(encryption, '_encryption_key', encryption.Fernet.generate_key())
     mobile_hub._limiter.reset()
     app = FastAPI()
@@ -54,7 +54,7 @@ def active(*args, **kwargs):
     'https://127.0.0.1', 'https://169.254.169.254', 'https://[::1]', 'https://10.0.0.1',
     'https://localhost', 'https://host.local', 'https://hub.example.com:444'])
 def test_unsafe_origin_rejected(setup, monkeypatch, url):
-    monkeypatch.setenv('MOBILE_ACCOUNT_HUB_URL', url)
+    monkeypatch.setattr(account_hub.settings, 'mobile_account_hub_url', url)
     with pytest.raises(ValueError):
         account_hub.trusted_origin(url)
 

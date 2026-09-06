@@ -21,7 +21,7 @@ OTHER = '44444444-4444-4444-4444-444444444444'
 
 @pytest.fixture
 def owner_app(monkeypatch):
-    monkeypatch.setenv('MOBILE_ACCOUNT_HUB_URL', HUB)
+    monkeypatch.setattr(account_hub.settings, 'mobile_account_hub_url', HUB)
     monkeypatch.setattr(settings, 'instance_id', 'owner-test-install')
     monkeypatch.setattr(encryption, '_encryption_key', encryption.Fernet.generate_key())
     monkeypatch.setattr(auth.direct_oauth, 'ensure_fresh_credentials', AsyncMock())
@@ -60,7 +60,7 @@ def bind_and_enroll(monkeypatch, linked_by='managed:owner-test-install'):
 
 
 def web_session(app):
-    client = TestClient(app)
+    client = TestClient(app, headers={'Origin': 'http://testserver'})
     response = client.post('/api/v1/mobile/web-session', headers={'Authorization': 'Bearer aim_owner-test'})
     assert response.status_code == 200, response.text
     token = response.json()['session_token']
@@ -90,7 +90,7 @@ def test_existing_managed_owner_gets_all_admin_settings_and_keeps_device_identit
     assert database.get_auth_session(token) is None
     raw_client = pairing_store.get_paired_client_by_session_hash(pairing.hash_controller_session(token))
     assert 'account_owner_admin' not in raw_client
-    fresh = TestClient(owner_app)
+    fresh = TestClient(owner_app, headers={'Origin': 'http://testserver'})
     fresh.cookies.set('session', token)
     assert change_voice(fresh).status_code == 200
     # Explicit bearer transport for the same device-bound session uses the same

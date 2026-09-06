@@ -23,6 +23,7 @@ def setup(monkeypatch):
     monkeypatch.setattr(managed, '_state', 'disconnected')
     monkeypatch.setattr(managed, '_error', None)
     monkeypatch.setattr(managed, '_url', None)
+    monkeypatch.setattr(managed, '_protected_listener_ready', lambda: True)
 
 
 def offer(monkeypatch):
@@ -71,7 +72,7 @@ def test_approved_connection_survives_restart_and_lost_activation(monkeypatch):
     assert not binding['active']
     assert encryption.decrypt_value(binding['encrypted_secret']) == pending['secret']
     server_call.side_effect = None
-    server_call.return_value = {'tunnel_token': 'x' * 64, 'url': 'https://worker.example.com'}
+    server_call.return_value = {'tunnel_token': 'x' * 64, 'url': 'https://worker.example.com', 'remote_port': 8001}
     assert managed._credentials() == ('x' * 64, 'https://worker.example.com')
     assert managed._pending() is None
     assert mobile_hub.get_binding()['active']
@@ -91,7 +92,9 @@ def test_other_shared_database_install_cannot_start_connector(monkeypatch):
 
 
 @pytest.mark.parametrize('status,body,expected', [
-    (200, {'ready': True, 'server_id': 'expected'}, True),
+    (200, {'ready': True, 'server_id': 'expected', 'protected_ingress': True}, True),
+    (200, {'ready': True, 'server_id': 'expected'}, False),
+    (200, {'ready': True, 'server_id': 'expected', 'protected_ingress': False}, False),
     (200, {'ready': True, 'server_id': 'wrong'}, False),
     (200, {'ready': False, 'server_id': 'expected'}, False),
     (302, {'ready': True, 'server_id': 'expected'}, False),
@@ -147,3 +150,28 @@ async def test_supervisor_stops_on_revocation_and_keeps_token_out_of_arguments(m
     assert spawn.call_args.kwargs['env']['TUNNEL_TOKEN'] == 'private-token' * 8
     assert 'PROVIDER_SECRET' not in spawn.call_args.kwargs['env']
     assert managed._process is None
+
+
+def test_tunnel_upgrade_requires_live_protected_socket_before_hub_mutation(monkeypatch):
+    pending, calls = offer(monkeypatch)
+    calls.return_value = {'status': 'approved', 'server_id': pending['id']}
+    server_call = Mock()
+    monkeypatch.setattr(account_hub, 'call', server_call)
+    monkeypatch.setattr(managed, '_protected_listener_ready', lambda: False)
+    with pytest.raises(ValueError, match='listener'):
+        managed._credentials()
+    server_call.assert_not_called()
+    assert not mobile_hub.get_binding()['active']
+
+
+@pytest.mark.parametrize('port', [None, 8000, '8001', 9000])
+def test_tunnel_upgrade_rejects_missing_or_wrong_origin_acknowledgement(monkeypatch, port):
+    pending, calls = offer(monkeypatch)
+    calls.return_value = {'status': 'approved', 'server_id': pending['id']}
+    server_call = Mock(return_value={'remote_port': port, 'tunnel_token': 'x'*64, 'url': 'https://worker.example.com'})
+    monkeypatch.setattr(account_hub, 'call', server_call)
+    with pytest.raises(ValueError, match='verified'):
+        managed._credentials()
+    assert not mobile_hub.get_binding()['active']
+    assert server_call.call_args.args[1:] == ('POST', 'activate', {'remote_port': 8001})
+    assert managed._pending()['id'] == pending['id']

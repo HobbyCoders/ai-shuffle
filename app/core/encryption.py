@@ -1,10 +1,8 @@
 """
 Encryption utilities for securing sensitive data at rest.
 
-Uses Fernet symmetric encryption with keys derived from the admin password.
-The encryption key is never stored - it's derived at runtime from the password.
-
-Alternatively, set ADMIN_PASSWORD env var to auto-derive the key on startup.
+Uses Fernet with a database-scoped data key wrapped by private server storage.
+Legacy password-derived data keys can be adopted once without rewriting secrets.
 """
 
 import base64
@@ -21,6 +19,52 @@ logger = logging.getLogger(__name__)
 # Global cache for the encryption key (only in memory, never persisted)
 _encryption_key: Optional[bytes] = None
 _key_salt: Optional[bytes] = None
+_credential_status = {'ready': False, 'state': 'unavailable'}
+
+
+def credential_key_status() -> dict:
+    """Safe readiness only; never expose key material or a recovery credential."""
+    return {**_credential_status, 'ready': is_encryption_ready()}
+
+
+def initialize_server_key(db_module, legacy_password=None) -> bool:
+    """Initialize local-first storage, without an account or normal password login.
+
+    ADMIN_PASSWORD is consulted only when unadopted legacy ciphertext requires
+    its existing key. Once activated, missing/corrupt custody requires explicit
+    local recovery and cannot fall back to a password or silently generate a key.
+    """
+    global _encryption_key, _credential_status, _key_salt
+    from app.core.credential_keys import load_or_adopt, CredentialKeyError
+    _encryption_key, _key_salt = None, None
+    _credential_status = {'ready': False, 'state': 'unavailable'}
+
+    def legacy():
+        if legacy_password is not None:
+            return legacy_password
+        from app.core.config import settings
+        return os.environ.get('ADMIN_PASSWORD') or settings.admin_password
+
+    try:
+        key, database_id = load_or_adopt(db_module, legacy)
+        _encryption_key = key
+        _credential_status = {'ready': True, 'state': 'ready', 'database_id': database_id}
+        return True
+    except CredentialKeyError as error:
+        _credential_status = {'ready': False, 'state': error.state}
+    except Exception:
+        # SQL/JSON/storage errors can contain private data: expose only a stable
+        # recovery state, never exception strings or SQL parameters.
+        _credential_status = {'ready': False, 'state': 'unavailable'}
+    return False
+
+
+def require_legacy_key_mode(db_module) -> None:
+    """Legacy utilities cannot change a key already held by server custody."""
+    from app.core.credential_keys import STATE_KEY
+    raw = db_module.get_system_setting(STATE_KEY)
+    if isinstance(raw, str):
+        raise RuntimeError('Server-managed credential storage cannot be password-rekeyed')
 
 
 def init_encryption_from_env(db_module) -> bool:
@@ -99,6 +143,7 @@ def set_encryption_key(password: str, db_module) -> None:
     Called when admin logs in successfully.
     """
     global _encryption_key
+    require_legacy_key_mode(db_module)
     salt = get_or_create_salt(db_module)
     _encryption_key = derive_key_from_password(password, salt)
     logger.info("Encryption key loaded into memory")
@@ -130,7 +175,7 @@ def encrypt_value(plaintext: str) -> str:
         RuntimeError: If encryption key is not loaded
     """
     if not _encryption_key:
-        raise RuntimeError("Encryption key not loaded. Admin must be logged in.")
+        raise RuntimeError("Credential storage is locked; local recovery is required.")
 
     f = Fernet(_encryption_key)
     encrypted = f.encrypt(plaintext.encode())
@@ -153,7 +198,7 @@ def decrypt_value(encrypted: str) -> str:
         ValueError: If decryption fails (wrong key or corrupted data)
     """
     if not _encryption_key:
-        raise RuntimeError("Encryption key not loaded. Admin must be logged in.")
+        raise RuntimeError("Credential storage is locked; local recovery is required.")
 
     if not encrypted.startswith("enc:"):
         # Not encrypted, return as-is (for migration compatibility)
@@ -506,6 +551,7 @@ def re_encrypt_all_secrets(old_password: str, new_password: str, db_module) -> b
         True if successful, False otherwise
     """
     global _encryption_key, _key_salt
+    require_legacy_key_mode(db_module)
 
     salt = get_or_create_salt(db_module)
     old_key = derive_key_from_password(old_password, salt)
@@ -549,7 +595,7 @@ def encrypt_existing_plaintext_keys(db_module) -> int:
         Number of keys encrypted
     """
     if not _encryption_key:
-        raise RuntimeError("Encryption key not loaded. Admin must be logged in.")
+        raise RuntimeError("Credential storage is locked; local recovery is required.")
 
     sensitive_settings = [
         "openai_api_key",

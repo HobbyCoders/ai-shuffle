@@ -221,12 +221,12 @@ class WorkspaceConfigRequest(BaseModel):
 
 
 @router.get("/api/v1/workspace/config")
-async def get_workspace_config() -> WorkspaceConfigResponse:
+async def get_workspace_config(token: str = Depends(require_auth)) -> WorkspaceConfigResponse:
     """
     Get current workspace configuration.
 
-    This endpoint is used during setup to determine if workspace needs to be configured.
-    No authentication required so it can be called before admin setup.
+    Trusted local access is available before setup; remote callers must sign in
+    before reading installation filesystem paths.
     """
     from app.core.platform import get_default_workspace_dir, is_local_mode
 
@@ -332,15 +332,14 @@ async def validate_workspace_path(request: WorkspaceConfigRequest, http_request:
     """
     Validate a workspace path without saving it.
 
-    Requires admin authentication, EXCEPT during initial setup
-    (when no admin exists yet) where it is allowed for setup convenience.
+    Requires local owner or authenticated remote owner, including first setup.
 
     This handler is stat-only: it never creates or mutates the filesystem. It
     reports existence/writability via os.stat/os.access without touching disk.
     """
-    # Gate: admin-only unless first-run setup is still pending. FastAPI always
+    # Gate: owner-only, including first-run setup. FastAPI always
     # injects http_request; the None default only applies to direct unit calls.
-    if http_request is not None and not auth_service.is_setup_required():
+    if http_request is not None:
         require_admin(http_request)
 
     workspace_path = request.workspace_path.strip()

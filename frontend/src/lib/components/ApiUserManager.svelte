@@ -64,7 +64,6 @@
 	let formDescription = $state('');
 	let formProjectId = $state('');
 	let formProfileIds: string[] = $state([]);
-	let formWebLoginAllowed = $state(false);
 	let formIsActive = $state(true);
 	// Preconfigured run selection: every session a connector starts for this
 	// user binds these (re-bound each turn). NULL/'' falls back to the profile.
@@ -109,7 +108,6 @@
 				description: formDescription.trim() || undefined,
 				project_id: formProjectId || undefined,
 				profile_ids: formProfileIds.length > 0 ? formProfileIds : undefined,
-				web_login_allowed: formWebLoginAllowed,
 				model: formModel || null,
 				effort: formEffort || null
 			});
@@ -144,7 +142,6 @@
 				project_id: formProjectId || undefined,
 				profile_ids: formProfileIds,
 				is_active: formIsActive,
-				web_login_allowed: formWebLoginAllowed,
 				model: formModel || null,
 				effort: formEffort || null
 			});
@@ -184,7 +181,6 @@
 		formDescription = user.description || '';
 		formProjectId = user.project_id || '';
 		formProfileIds = user.profile_ids ? [...user.profile_ids] : [];
-		formWebLoginAllowed = user.web_login_allowed;
 		formIsActive = user.is_active;
 		formModel = user.model || '';
 		formEffort = user.effort || '';
@@ -199,7 +195,6 @@
 		formDescription = '';
 		formProjectId = '';
 		formProfileIds = [];
-		formWebLoginAllowed = false;
 		formIsActive = true;
 		formModel = '';
 		formEffort = '';
@@ -326,7 +321,7 @@
 	});
 	let remoteChange = $state('');
 	let remoteBaseline = '';
-	function remoteSnapshot() { return JSON.stringify([formName, formDescription, formProjectId, formProfileIds, formWebLoginAllowed, formIsActive, formModel, formEffort]); }
+	function remoteSnapshot() { return JSON.stringify([formName, formDescription, formProjectId, formProfileIds, formIsActive, formModel, formEffort]); }
 	watchResources(['settings', 'agents', 'projects'], async () => {
 		const selected = editingUser;
 		const before = remoteSnapshot();
@@ -545,14 +540,6 @@
 
 					<!-- Toggles -->
 					<div class="flex flex-col gap-2">
-						<label class="flex items-center gap-2 cursor-pointer">
-							<input
-								type="checkbox"
-								bind:checked={formWebLoginAllowed}
-								class="w-4 h-4 rounded-sm border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
-							/>
-							<span class="text-sm text-foreground">Allow web login</span>
-						</label>
 						{#if editingUser}
 							<label class="flex items-center gap-2 cursor-pointer">
 								<input
@@ -640,11 +627,6 @@
 									<span class="px-1.5 py-0.5 bg-success/15 text-success text-xs rounded-sm" title="Permission requests funnel to the connector">
 										ask
 									</span>
-									{#if user.web_login_allowed}
-										<span class="px-1.5 py-0.5 bg-muted text-muted-foreground text-xs rounded-sm">
-											web login
-										</span>
-									{/if}
 									{#if !user.is_active}
 										<span class="px-1.5 py-0.5 bg-destructive/20 text-destructive text-xs rounded-sm">
 											disabled

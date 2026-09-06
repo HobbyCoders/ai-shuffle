@@ -317,6 +317,13 @@ class Settings(BaseSettings):
     # Security - Cookie settings
     cookie_secure: bool = True  # Set to False only for local HTTP development
 
+    # Local transport access and optional account service share normal Settings
+    # precedence: process environment overrides .env; neither is exported to os.environ.
+    shuffle_local_access: bool = True
+    shuffle_local_hostnames: str = ""
+    account_browser_origin: str = "https://shuffle-connect.unraidhomeserver.com"
+    mobile_account_hub_url: str = "https://shuffle-account-hub.example.workers.dev"
+
     # Security - Request limits
     max_request_body_mb: int = 50  # Maximum request body size in MB
 
@@ -324,8 +331,8 @@ class Settings(BaseSettings):
     ws_rate_limit_messages: int = 30  # Max messages per sliding window
     ws_rate_limit_window_seconds: float = 10.0  # Sliding window duration in seconds
 
-    # Admin password - used for encryption key derivation on startup
-    # Set via ADMIN_PASSWORD env var or .env file to survive server restarts
+    # Optional one-time adoption of legacy encrypted credentials. Once private
+    # server key custody is active, restarts and human access do not use this.
     admin_password: Optional[str] = None
 
     # Notes disk-sync worker. Notes are materialized to per-install local .md

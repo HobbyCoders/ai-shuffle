@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 import pytest
-from app.core import mobile_tool_identity as identity
+from app.core import mobile_tool_identity as identity, owner_auth
 from app.db import mobile_tool_identity as store, database
 from app.services import mobile_tools
 from app.api import websocket as route
@@ -43,8 +43,8 @@ def world(monkeypatch):
     monkeypatch.setattr(identity.account_hub, 'check_paired_client', lambda c: active(ownership(paired_client_id=c['id'])))
     monkeypatch.setattr(identity.mobile, 'get_mobile_devices', lambda: list(devices.values()))
     monkeypatch.setattr(identity.mobile, 'get_mobile_device', devices.get)
-    monkeypatch.setattr(store, 'admin_active', lambda h: h == identity.digest('admin-token') and 'admin' not in revoked)
-    monkeypatch.setattr(database, 'get_auth_session', lambda t: {'token': t} if t == 'admin-token' and 'admin' not in revoked else None)
+    monkeypatch.setattr(store, 'admin_active', lambda h: h == identity.digest('shr_admin-token') and 'admin' not in revoked)
+    monkeypatch.setattr(database, 'get_auth_session', lambda t: {'token': t} if t == 'shr_admin-token' and 'admin' not in revoked else None)
     monkeypatch.setattr(database, 'get_api_key_session', lambda t: None)
     monkeypatch.setattr(database, 'get_api_user_by_key_hash', lambda h: None)
     monkeypatch.setattr(database, 'get_paired_client_by_session_hash', client_by_hash)
@@ -59,9 +59,12 @@ def create(sid, principal=None):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('token,expected', [('shc_one', {'one', 'two'}), ('admin-token', {'local'})])
+@pytest.mark.parametrize('token,expected', [('shc_one', {'one', 'two'}), ('shr_admin-token', {'local'})])
 async def test_real_route_create_handler_to_tool(world, monkeypatch, token, expected):
-    ws = SimpleNamespace(state=SimpleNamespace(), cookies={}, accept=AsyncMock(), close=AsyncMock())
+    monkeypatch.setattr(owner_auth.settings, 'shuffle_local_access', False)
+    ws = SimpleNamespace(state=SimpleNamespace(), cookies={}, accept=AsyncMock(), close=AsyncMock(),
+                         scope={'shuffle.ingress': 'local'}, client=SimpleNamespace(host='127.0.0.1'),
+                         headers={'host': 'localhost'})
     captured = {}
     async def run(handler):
         handler.send_json = AsyncMock(return_value=True)
@@ -115,7 +118,7 @@ def test_direct_desktop_and_api_never_gain_global_access(world):
 def test_legacy_missing_and_explicit_admin_claim(world):
     create('old')
     assert identity.authorized_device_ids('old') == []
-    admin = identity.principal('admin', 'install', 'admin-token')
+    admin = identity.principal('admin', 'install', 'shr_admin-token')
     identity.bind_session('old', admin)
     assert store.read('old') is None
     with pytest.raises(PermissionError):
@@ -153,17 +156,16 @@ def test_startup_schema_order():
     assert mobile_tools.device_authorizer is identity.authorized_device_ids
 
 
-def test_admin_digest_rechecks_actual_auth_row(test_db):
-    test_db.create_function('convert_to', 2, lambda s, _: s.encode())
-    test_db.create_function('sha256', 1, lambda b: hashlib.sha256(b).digest())
-    test_db.create_function('encode', 2, lambda b, _: b.hex())
-    test_db.execute("INSERT INTO auth_sessions(token, expires_at) VALUES (?, ?)", ('synthetic-admin', '2999-01-01'))
-    assert store.admin_active(identity.digest('synthetic-admin'))
+def test_recovery_digest_rechecks_actual_hashed_session_row(test_db):
+    from app.core import owner_auth
+    row = (identity.digest('shr_synthetic'), owner_auth.settings.effective_instance_id, 'recovery', '2999-01-01')
+    test_db.execute("INSERT INTO owner_local_sessions VALUES (?, ?, ?, ?)", row)
+    assert store.admin_active(identity.digest('shr_synthetic'))
     assert not store.admin_active(identity.digest('other'))
-    test_db.execute("DELETE FROM auth_sessions WHERE token = ?", ('synthetic-admin',))
-    assert not store.admin_active(identity.digest('synthetic-admin'))
-    test_db.execute("INSERT INTO auth_sessions(token, expires_at) VALUES (?, ?)", ('expired', '2000-01-01'))
-    assert not store.admin_active(identity.digest('expired'))
+    test_db.execute("DELETE FROM owner_local_sessions WHERE token_hash = ?", (row[0],))
+    assert not store.admin_active(row[0])
+    test_db.execute("INSERT INTO owner_local_sessions VALUES (?, ?, ?, ?)", (*row[:3], '2000-01-01'))
+    assert not store.admin_active(row[0])
 
 
 def test_concurrent_first_bind_no_rebind(world, monkeypatch):

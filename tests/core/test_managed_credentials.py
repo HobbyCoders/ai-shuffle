@@ -27,6 +27,7 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.setattr(managed_credentials, 'settings', settings)
     monkeypatch.setattr(managed_connection, 'settings', settings)
     monkeypatch.setattr(config, 'settings', settings)
+    monkeypatch.setattr(managed_connection, '_protected_listener_ready', lambda: True)
     monkeypatch.delenv('ADMIN_PASSWORD', raising=False)
 
 
@@ -67,7 +68,7 @@ def test_cleared_process_keys_reconnect_and_check_phone_authorization_without_ad
     binding = bind()
     # Initial server activation uses the real backchannel, which durably migrates
     # the credential. Only the network is substituted; no secret resolver mock.
-    conn = connection(monkeypatch, {'tunnel_token': 'connector-token' * 8, 'url': 'https://worker.example.com'})
+    conn = connection(monkeypatch, {'tunnel_token': 'connector-token' * 8, 'url': 'https://worker.example.com', 'remote_port':8001})
     assert managed_connection._credentials() == ('connector-token' * 8, 'https://worker.example.com')
     assert mobile_hub.get_binding()['active']
     encryption.clear_encryption_key()
@@ -75,7 +76,7 @@ def test_cleared_process_keys_reconnect_and_check_phone_authorization_without_ad
     assert encryption.init_encryption_from_env(database) is False
     # No process key cache exists: this reloads the persistent installation key.
     assert managed_connection._credentials() == ('connector-token' * 8, 'https://worker.example.com')
-    assert conn.request.call_args.args[0:2] == ('GET', '/v1/servers/' + SERVER + '/connector')
+    assert conn.request.call_args.args[0:2] == ('POST', '/v1/servers/' + SERVER + '/connector')
     assert conn.request.call_args.kwargs['headers']['Authorization'] == 'Bearer ' + SECRET
     conn.getresponse.return_value.read.return_value = json.dumps({'active': True, 'account_id': SERVER, 'device_id': DEVICE}).encode()
     account_hub.require_active({'server_id': SERVER, 'account_id': SERVER, 'hub_device_id': DEVICE})
@@ -286,10 +287,11 @@ class Connection:
     def getresponse(self): return self
     def read(self, limit):
         if self.path.endswith('/connector'):
-            return json.dumps({'tunnel_token':'connector-token' * 8, 'url':'https://worker.example.com'}).encode()
+            return json.dumps({'tunnel_token':'connector-token' * 8, 'url':'https://worker.example.com', 'remote_port':8001}).encode()
         return json.dumps({'active':True, 'account_id':state['binding']['server_id'], 'device_id':state['device']}).encode()
     def close(self): pass
 account_hub._PinnedHTTPS = Connection
+managed_connection._protected_listener_ready = lambda: True
 assert managed_connection._credentials() == ('connector-token' * 8, 'https://worker.example.com')
 account_hub.require_active({'server_id':state['binding']['server_id'], 'account_id':state['binding']['server_id'], 'hub_device_id':state['device']})
 assert encryption._encryption_key is None

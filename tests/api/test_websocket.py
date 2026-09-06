@@ -101,15 +101,21 @@ class TestAuthenticateWebSocket:
     """Tests for WebSocket authentication."""
 
     @pytest.fixture
-    def mock_websocket(self):
-        """Create a mock WebSocket object."""
+    def mock_websocket(self, monkeypatch):
+        """Model explicit localhost recovery with automatic LAN access disabled."""
+        from app.core.config import settings
+        monkeypatch.setattr(settings, 'shuffle_local_access', False)
         ws = AsyncMock()
         ws.cookies = {}
+        ws.scope = {'type': 'websocket', 'shuffle.ingress': 'local'}
+        ws.headers = {'host': 'localhost', 'origin': 'http://localhost'}
+        ws.client = MagicMock(host='127.0.0.1')
+        ws.url = MagicMock(scheme='ws')
         return ws
 
     @pytest.mark.asyncio
     async def test_authenticate_with_valid_session_token(self, mock_websocket):
-        """Should authenticate with valid admin session token."""
+        """A valid console recovery session works only on explicit loopback ingress."""
         from app.api.websocket import authenticate_websocket
 
         # authenticate_websocket lives in app.api.ws_auth and reads `database`
@@ -173,7 +179,7 @@ class TestAuthenticateWebSocket:
 
     @pytest.mark.asyncio
     async def test_authenticate_with_cookie_session(self, mock_websocket):
-        """Should authenticate using session cookie."""
+        """A same-origin console recovery cookie works on explicit loopback ingress."""
         from app.api.websocket import authenticate_websocket
 
         mock_websocket.cookies = {"session": "cookie-session-token"}
@@ -1434,10 +1440,16 @@ class TestAuthenticateWebSocketEdgeCases:
     """Additional edge case tests for authentication."""
 
     @pytest.fixture
-    def mock_websocket(self):
-        """Create a mock WebSocket object."""
+    def mock_websocket(self, monkeypatch):
+        """Model explicit localhost recovery with automatic LAN access disabled."""
+        from app.core.config import settings
+        monkeypatch.setattr(settings, 'shuffle_local_access', False)
         ws = AsyncMock()
         ws.cookies = {}
+        ws.scope = {'type': 'websocket', 'shuffle.ingress': 'local'}
+        ws.headers = {'host': 'localhost', 'origin': 'http://localhost'}
+        ws.client = MagicMock(host='127.0.0.1')
+        ws.url = MagicMock(scheme='ws')
         return ws
 
     @pytest.mark.asyncio

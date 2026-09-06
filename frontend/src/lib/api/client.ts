@@ -25,7 +25,7 @@ export interface ApiError {
 
 /**
  * Auth-related endpoint path prefixes (relative to API_BASE). A 401 from any of
- * these is EXPECTED during the login / setup / status-check flow (bad password,
+ * these is EXPECTED during the login / setup / status-check flow (expired sign-in,
  * not-yet-authenticated status poll, etc.) — redirecting on those would create a
  * redirect loop off the very page that needs to render the 401. Everything else
  * that 401s means the session expired mid-use → send the user to /login.
@@ -292,6 +292,13 @@ export interface AuthStatus {
 	is_admin: boolean;
 	preference_identity?: { user_type: 'admin' | 'api_user'; user_id: string } | null;
 	setup_required: boolean;
+	auth_mode?: 'local' | 'account';
+	local_access?: boolean;
+	owner_linked?: boolean;
+	account_sign_in_available?: boolean;
+	credential_storage?: { ready: boolean; state: string };
+	local_recovery?: boolean;
+	local_recovery_available?: boolean;
 	claude_authenticated: boolean;
 	/** True only when the Claude OAuth token is present AND not expired.
 	 *  May be undefined on older backends — treat undefined as "unknown". */
@@ -400,6 +407,12 @@ export interface HealthResponse {
 	version: string;
 	authenticated: boolean;
 	setup_required: boolean;
+	auth_mode?: 'local' | 'account';
+	local_access?: boolean;
+	owner_linked?: boolean;
+	account_sign_in_available?: boolean;
+	credential_storage?: { ready: boolean; state: string };
+	local_recovery?: boolean;
 	claude_authenticated: boolean;
 }
 

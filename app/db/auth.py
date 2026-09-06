@@ -80,12 +80,8 @@ class ApiKeySessionRow(TypedDict):
 # ============================================================================
 
 def is_setup_required() -> bool:
-    """Check if admin setup is required"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) as count FROM admin")
-        row = cursor.fetchone()
-        return row["count"] == 0
+    from app.core.owner_auth import setup_required
+    return setup_required()
 
 
 def get_admin() -> Optional[AdminRow]:
@@ -222,85 +218,14 @@ _auth_session_empty_logged = False  # Rate-limit the verbose empty-table diagnos
 
 
 def get_auth_session(token: str) -> Optional[AuthSessionRow]:
-    """Get an auth session by token"""
-    global _auth_session_empty_logged
-    with get_db() as conn:
-        cursor = conn.cursor()
-        now_iso = datetime.now(timezone.utc).isoformat()
-        cursor.execute(
-            "SELECT * FROM auth_sessions WHERE token = %s AND expires_at > %s",
-            (token, now_iso)
-        )
-        result = row_to_dict(cursor.fetchone())
-
-        # Debug logging for the mystery logout issue
-        if result is None and token:
-            # Check how many tokens exist total
-            cursor.execute("SELECT COUNT(*) as cnt FROM auth_sessions")
-            total_count = cursor.fetchone()["cnt"]
-
-            # Check if THIS token exists (regardless of expiry)
-            cursor.execute(
-                "SELECT token, expires_at, created_at FROM auth_sessions WHERE token = %s",
-                (token,)
-            )
-            exact_match = cursor.fetchone()
-
-            # Log concise summary at debug level (avoid spamming on repeated WebSocket retries)
-            logger.debug(
-                f"get_auth_session FAILED for ...{token[-4:]}: "
-                f"total_tokens_in_db={total_count}, "
-                f"token_exists={exact_match is not None}, "
-                f"db_path={settings.db_path}, "
-                f"now={now_iso}"
-            )
-            if exact_match:
-                logger.warning(
-                    f"  Token ...{token[-4:]} found but expired/invalid: "
-                    f"expires_at={exact_match['expires_at']}, created_at={exact_match['created_at']}"
-                )
-
-            # If table is empty, log verbose diagnostics only ONCE to avoid log spam
-            # (This is expected before first login since sessions are cleared on startup)
-            if total_count == 0 and not _auth_session_empty_logged:
-                _auth_session_empty_logged = True
-                import traceback
-                import os
-                logger.warning(
-                    f"auth_sessions table is empty (expected before first login).\n"
-                    f"Stack trace:\n{''.join(traceback.format_stack())}\n"
-                    f"Database file exists: {settings.db_path.exists()}\n"
-                    f"Database file size: {settings.db_path.stat().st_size if settings.db_path.exists() else 'N/A'}\n"
-                    f"Process ID: {os.getpid()}"
-                )
-                # Check if other tables have data (to rule out complete DB wipe)
-                cursor.execute("SELECT COUNT(*) as cnt FROM sessions")
-                sessions_count = cursor.fetchone()["cnt"]
-                cursor.execute("SELECT COUNT(*) as cnt FROM agents")
-                profiles_count = cursor.fetchone()["cnt"]
-                logger.warning(
-                    f"Other table counts - sessions: {sessions_count}, profiles: {profiles_count}"
-                )
-
-        # Reset the flag when a session is successfully created/found
-        # so the diagnostic fires again if sessions unexpectedly disappear later
-        if result is not None:
-            _auth_session_empty_logged = False
-
-        return result
+    """Legacy password sessions never qualify; only console-issued recovery."""
+    from app.core.owner_auth import local_session
+    return local_session(token)
 
 
 def delete_auth_session(token: str):
-    """Delete an auth session"""
-    import traceback
-    # Log deletion with stack trace to help debug unexpected logouts
-    logger.warning(
-        f"delete_auth_session: Deleting token ...{token[-4:] if token else 'None'}. "
-        f"Stack: {''.join(traceback.format_stack()[-5:-1])}"
-    )
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM auth_sessions WHERE token = %s", (token,))
+    from app.core.owner_auth import revoke_local_session
+    revoke_local_session(token)
 
 
 def clear_all_sessions():
@@ -473,19 +398,5 @@ def cleanup_expired_sessions() -> dict:
 
 
 def get_api_key_session(token: str) -> Optional[ApiKeySessionRow]:
-    """Get an API key session by token"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """SELECT aks.*, au.name as user_name, au.project_id, au.is_active
-               FROM api_key_sessions aks
-               JOIN api_users au ON aks.api_user_id = au.id
-               WHERE aks.token = %s AND aks.expires_at > %s AND au.is_active = TRUE""",
-            (token, datetime.now(timezone.utc).isoformat())
-        )
-        session = row_to_dict(cursor.fetchone())
-        if session:
-            # Get profile_ids from junction table
-            profile_ids = _get_api_user_profile_ids(cursor, session["api_user_id"])
-            session["profile_ids"] = profile_ids if profile_ids else None
-        return session
+    """Human web sessions for integration users are retired; use scoped API keys."""
+    return None

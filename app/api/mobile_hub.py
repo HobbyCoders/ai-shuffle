@@ -44,19 +44,31 @@ def connection_status(_admin=Depends(require_admin)):
 
 
 def _connection_response(result):
+    from app.core.owner_auth import claim_url
     code = result.get('code')
+    result['authorization_url'] = claim_url(code)
     result['qr_svg'] = pairing.render_qr_svg('aishuffle://worker/link#code=' + code) if code else None
     return JSONResponse(result, headers={'Cache-Control': 'no-store'})
 
 
 @router.get('/endpoint')
-def endpoint_identity():
+def endpoint_identity(request: Request):
     # Public, non-secret identity used to check the assigned route. Never returns
     # an account, device, connector token, or administrator credential.
     binding = store.get_binding()
     if not binding or not binding['active']:
         raise HTTPException(404, 'Worker connection unavailable')
-    return JSONResponse({'server_id': binding['server_id'], 'ready': True},
+    return JSONResponse({'server_id': binding['server_id'], 'ready': True,
+                         'protected_ingress': request.scope.get('shuffle.ingress') == 'remote'},
+                        headers={'Cache-Control': 'no-store'})
+
+
+@router.get('/ingress')
+def protected_ingress(request: Request):
+    """Non-secret proof that the managed connector's separate socket is live."""
+    from app.core.config import settings
+    return JSONResponse({'instance_id': settings.effective_instance_id,
+                         'protected_ingress': request.scope.get('shuffle.ingress') == 'remote'},
                         headers={'Cache-Control': 'no-store'})
 
 

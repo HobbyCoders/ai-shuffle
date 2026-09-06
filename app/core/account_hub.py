@@ -7,20 +7,20 @@ per connection with every address checked before connecting to a pinned IP.
 import http.client
 import ipaddress
 import json
-import os
 import re
 import socket
 import ssl
 from urllib.parse import urlsplit
 from fastapi import HTTPException
 from app.core.managed_credentials import secret_for
+from app.core.config import settings
 from app.db import mobile_hub as store
 
 DEFAULT_HUB = 'https://shuffle-account-hub.example.workers.dev'
 
 
 def configured_origin():
-    return os.environ.get('MOBILE_ACCOUNT_HUB_URL', DEFAULT_HUB).rstrip('/')
+    return settings.mobile_account_hub_url.rstrip('/')
 
 
 def trusted_origin(value):
@@ -80,6 +80,8 @@ def call(binding, method, suffix, body=None):
                               'Content-Type': 'application/json', 'Accept': 'application/json'})
         response = conn.getresponse()
         if response.status != 200:
+            if suffix.startswith('browser-logins') and response.status in (401, 403):
+                raise HTTPException(response.status, 'Account sign-in expired or authorization was rejected.')
             raise ValueError('Hub refused authorization')
         raw = response.read(16385)
         if len(raw) > 16384:
@@ -88,6 +90,8 @@ def call(binding, method, suffix, body=None):
         if not isinstance(result, dict):
             raise ValueError('Invalid hub response')
         return result
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=503, detail='Account hub authorization unavailable') from None
     finally:

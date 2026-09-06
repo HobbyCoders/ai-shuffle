@@ -237,6 +237,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # Reuse auth info if already resolved by the auth dependency
         if getattr(request.state, "user_info", None) is not None:
             return request.state.user_info
+        from app.core import owner_auth
+        if owner_auth.local_access(request):
+            return ('local-owner', None, True)
 
         # Extract every credential source up front so we can (a) build a stable
         # cache key and (b) short-circuit the threaded DB lookups on a hit.

@@ -79,8 +79,7 @@ def normalize_config(config: Dict, connector_type: str) -> Dict:
 def encrypt_config(config: Dict, connector_type: str) -> Dict:
     """Encrypt sensitive fields in a connector config dict.
 
-    Falls back to storing plaintext when encryption is not ready (same pattern
-    as the settings API).
+    Refuses to write secrets when server key storage is unavailable.
     """
     sensitive = get_sensitive_fields(connector_type)
     if not sensitive:
@@ -90,16 +89,7 @@ def encrypt_config(config: Dict, connector_type: str) -> Dict:
     for key in sensitive:
         value = encrypted.get(key)
         if value and isinstance(value, str) and not encryption.is_encrypted(value):
-            if encryption.is_encryption_ready():
-                try:
-                    encrypted[key] = encryption.encrypt_value(value)
-                except Exception as e:
-                    logger.error(f"Failed to encrypt connector field '{key}': {e}")
-            else:
-                logger.warning(
-                    f"Storing connector config field '{key}' as plaintext — "
-                    "encryption key not loaded"
-                )
+            encrypted[key] = encryption.encrypt_value(value)
     return encrypted
 
 

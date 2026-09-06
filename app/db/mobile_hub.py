@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from app.db.base import get_db
 
 def create_schema(cursor):
+    from app.core.owner_auth import create_schema as create_owner_schema
+    create_owner_schema(cursor)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mobile_hub_binding (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -68,7 +70,7 @@ def ownership(device_id=None, *, paired_client_id=None):
         return dict(row) if row else None
 
 
-def enroll(identity, info, key_hash, expires_at, scopes):
+def enroll(identity, info, key_hash, expires_at, scopes, *, session_token_hash=None, login_proof=None):
     """Never upsert: all three rows commit together or none do.
 
     Tombstone authorizations are intentionally retained after local deletion.
@@ -79,6 +81,13 @@ def enroll(identity, info, key_hash, expires_at, scopes):
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         c = conn.cursor()
+        if login_proof:
+            from app.core.config import settings
+            c.execute('''DELETE FROM owner_browser_requests WHERE proof_hash=%s
+                AND instance_id=%s AND server_id=%s AND expires_at>%s RETURNING proof_hash''',
+                (login_proof, settings.effective_instance_id, identity['server_id'], now))
+            if not c.fetchone():
+                raise ValueError('Browser sign-in expired or already consumed')
         for table in ('mobile_devices', 'paired_clients', 'mobile_hub_authorizations'):
             c.execute(f"SELECT device_id FROM {table} WHERE device_id = %s", (device_id,))
             if c.fetchone():
@@ -98,4 +107,8 @@ def enroll(identity, info, key_hash, expires_at, scopes):
             (device_id, paired_client_id, account_id, hub_device_id, server_id)
             VALUES (%s, %s, %s, %s, %s)""",
             (device_id, client_id, identity['account_id'], device_id, identity['server_id']))
+        if session_token_hash:
+            c.execute('''UPDATE paired_clients SET session_token_hash=%s,
+                session_expires_at=%s WHERE id=%s''',
+                (session_token_hash, expires_at.isoformat(), client_id))
     return device_id

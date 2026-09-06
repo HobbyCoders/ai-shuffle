@@ -6,7 +6,7 @@ order: 0
 
 # API Reference
 
-AI Shuffle provides a comprehensive REST API for programmatic access to all features. The API supports both admin session-based authentication and API key authentication for external integrations.
+AI Shuffle provides a REST API for its browser and external integrations. Direct trusted local access, account-authorized browser/device sessions, and scoped integration API keys have separate authorization roles.
 
 ## Base URL
 
@@ -16,25 +16,18 @@ http://localhost:8000/api/v1
 
 ## Authentication
 
-### Admin Session (Cookie-based)
+### Local access and owner browser sessions
 
-Used by the web UI. After login, a session cookie is set automatically.
+The local listener grants owner access to direct localhost/LAN requests without a login. To use a worker remotely, link it through **Devices → Remote access**, then start account sign-in from the worker's browser page. Clerk verifies the worker's owner and a one-use browser completion proof authorizes the session cookie. See [Authentication](/docs/api-reference/authentication) for the full flow.
 
 ```bash
-# Login
-curl -X POST http://localhost:8000/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username": "admin", "password": "your_password"}' \
-  -c cookies.txt
-
-# Use session cookie
-curl http://localhost:8000/api/v1/sessions \
-  -b cookies.txt
+# Direct request to the enabled trusted local listener
+curl http://localhost:8000/api/v1/sessions
 ```
 
 ### API Key (Bearer Token)
 
-Used for external integrations and programmatic access. Create API users in Settings.
+Used for external integrations, connectors, and programmatic access. Create API users in Settings. They are application credentials, not human account logins or administrator credentials. Supplying an API key retains its restricted role even on the local network.
 
 ```bash
 curl http://localhost:8000/api/v1/sessions \

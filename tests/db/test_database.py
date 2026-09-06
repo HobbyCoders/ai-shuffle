@@ -1049,15 +1049,14 @@ class TestAuthSessionOperations:
         assert result["token"] == "token123"
         assert result["expires_at"] == expires
 
-    def test_get_auth_session_valid(self, mock_db):
-        """get_auth_session should return valid session."""
+    def test_legacy_auth_session_never_grants_access(self, mock_db):
+        """Even an unexpired row from the old password flow stays retired."""
         expires = datetime.now(timezone.utc) + timedelta(hours=24)
         db.create_auth_session("token123", expires)
 
         result = db.get_auth_session("token123")
 
-        assert result is not None
-        assert result["token"] == "token123"
+        assert result is None
 
     def test_get_auth_session_expired(self, mock_db):
         """get_auth_session should not return expired session."""

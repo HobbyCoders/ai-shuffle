@@ -584,22 +584,6 @@ if static_dir.exists():
 
 
 if __name__ == "__main__":
-    import uvicorn
+    from app.serve import run
 
-    uvicorn.run(
-        "app.main:app",
-        host=settings.host,
-        port=settings.port,
-        log_level=settings.log_level.lower(),
-        reload=False,
-        access_log=False,  # Replaced by AccessLogMiddleware (only logs errors/slow requests)
-        # Increase WebSocket max message size from default 1MB to 10MB
-        # This is a safety net - payloads should be truncated before hitting this limit
-        ws_max_size=10 * 1024 * 1024,  # 10MB
-        # Disable Uvicorn's built-in WebSocket ping/pong — the app has its own
-        # keepalive (30s server ping + 10s client ping). Uvicorn's default 20s
-        # ping + 20s timeout can race with app-level pings and cause spurious
-        # disconnects, especially during long load_session or tool execution.
-        ws_ping_interval=None,
-        ws_ping_timeout=None,
-    )
+    run(app, settings)

@@ -11,12 +11,10 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime, timezone
 
-import bcrypt
 from fastapi import APIRouter, HTTPException, Response, Request, Depends, status
 
-from app.core.models import (
-    SetupRequest, LoginRequest, ChangePasswordRequest,
-)
+from pydantic import BaseModel, Field, ConfigDict
+from app.core import owner_auth
 from app.core.auth import (
     auth_service,
     is_github_authenticated_cached,
@@ -195,6 +193,8 @@ def get_paired_client_from_token(token: Optional[str], *, touch: bool = True) ->
 
 
 def _set_paired_request_state(request: Request, token: str, client: dict) -> str:
+    if request.cookies.get('session') == token and request.method not in ('GET', 'HEAD', 'OPTIONS'):
+        owner_auth.same_origin(request)
     owner_admin = client.get('account_owner_admin') is True
     request.state.is_admin = owner_admin
     request.state.api_user = None
@@ -214,7 +214,9 @@ def require_auth(request: Request) -> str:
             return _set_paired_request_state(request, token, paired_client)
 
         # Check admin session
-        if auth_service.validate_session(token):
+        if owner_auth.loopback_request(request) and auth_service.validate_session(token):
+            if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+                owner_auth.same_origin(request)
             request.state.is_admin = True
             request.state.api_user = None
             request.state.auth_token = token
@@ -251,6 +253,15 @@ def require_auth(request: Request) -> str:
             request.state.user_info = (user_id, api_user["id"], False)
             return f"api_key:{api_user['id']}"
 
+    if owner_auth.local_access(request):
+        if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+            owner_auth.same_origin(request)
+        request.state.is_admin = True
+        request.state.api_user = None
+        request.state.auth_token = 'local-owner'
+        request.state.user_info = ('local-owner', None, True)
+        return 'local-owner'
+
     # Log what auth methods were attempted
     has_cookie = token is not None
     has_bearer = api_key is not None
@@ -279,15 +290,22 @@ def require_admin(request: Request) -> str:
         if client:
             if client.get('account_owner_admin') is True:
                 return _set_paired_request_state(request, candidate, client)
-        elif token and auth_service.validate_session(token):
+            raise HTTPException(403, 'Owner access required')
+        elif token and owner_auth.loopback_request(request) and auth_service.validate_session(token):
+            if getattr(request, 'method', 'GET') not in ('GET', 'HEAD', 'OPTIONS'):
+                owner_auth.same_origin(request)
             request.state.is_admin = True
             request.state.api_user = None
             return token
 
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Admin access required"
-    )
+    if owner_auth.local_access(request):
+        if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+            owner_auth.same_origin(request)
+        request.state.is_admin = True
+        request.state.api_user = None
+        request.state.auth_token = 'local-owner'
+        return 'local-owner'
+    raise HTTPException(status_code=403, detail='Owner access required')
 
 
 def get_api_user_from_request(request: Request) -> Optional[dict]:
@@ -344,7 +362,7 @@ def get_current_api_user(request: Request) -> dict:
 
 
 @router.get("/status")
-async def get_auth_status(request: Request):
+async def get_auth_status(request: Request, response: Response = None):
     """Get complete authentication status"""
     token = get_session_token(request)
     is_admin_authenticated = False
@@ -357,10 +375,17 @@ async def get_auth_status(request: Request):
             is_paired_authenticated = True
             is_admin_authenticated = paired_client.get('account_owner_admin') is True
             username = paired_client.get("device_name") or "Paired device"
-        elif auth_service.validate_session(token):
+        elif owner_auth.loopback_request(request) and auth_service.validate_session(token):
             is_admin_authenticated = True
             username = auth_service.get_admin_username()
 
+    local = owner_auth.local_access(request) and not is_paired_authenticated
+    if local:
+        is_admin_authenticated = True
+        username = 'Local owner'
+        if token and not owner_auth.local_session(token) and response is not None:
+            # Retired cookies must not strand the local browser's WebSocket.
+            response.delete_cookie('session')
     # Self-heal an expiring OAuth token before reporting status, so the UI doesn't
     # flip to "unauthorized" when a valid refresh token could silently renew it.
     await direct_oauth.ensure_fresh_credentials()
@@ -381,6 +406,13 @@ async def get_auth_status(request: Request):
 
     return {
         "authenticated": is_admin_authenticated or is_paired_authenticated,
+        "local_access": local,
+        "auth_mode": 'local' if local else 'account',
+        "owner_linked": owner_auth.linked_binding() is not None,
+        "account_sign_in_available": owner_auth.linked_binding() is not None and encryption.is_encryption_ready(),
+        "credential_storage": owner_auth.storage_status(),
+        "local_recovery": bool(token and owner_auth.loopback_request(request) and owner_auth.local_session(token)),
+        "local_recovery_available": owner_auth.loopback_request(request),
         "is_admin": is_admin_authenticated,
         "paired_client": is_paired_authenticated,
         "preference_identity": {
@@ -406,112 +438,123 @@ async def get_auth_status(request: Request):
     }
 
 
-@router.post("/setup")
-async def setup_admin(request: SetupRequest, response: Response, req: Request = None):
-    """First-launch admin creation"""
-    if not auth_service.is_setup_required():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin already configured"
-        )
+class LocalRecoveryRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    code: str = Field(min_length=43, max_length=43)
 
+
+class BrowserPollRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    completion_secret: Optional[str] = Field(default=None, pattern=r'^[A-Za-z0-9_-]{43}$')
+
+
+def _secure_cookie(request):
+    if request.scope.get('shuffle.ingress') == 'remote':
+        return True
+    if owner_auth.local_access(request) or owner_auth.loopback_request(request):
+        return request.url.scheme in ('https', 'wss')
+    return True
+
+
+def _account_cookie(request, response, token, expires):
+    response.set_cookie('session', token, httponly=True, secure=_secure_cookie(request),
+                        samesite='strict', max_age=max(1, int((expires-owner_auth.now()).total_seconds())))
+    response.headers['Cache-Control'] = 'no-store'
+
+
+def _audit_owner_action(request, event_type, method, session_token=None):
+    """Record immutable actor IDs and fixed action names, never login proofs."""
     try:
-        result = auth_service.setup_admin(request.username, request.password)
-        await run_sync(audit_service.log_admin_setup, req, request.username)
-
-        # Mark that onboarding was started via the setup flow so
-        # is_onboarding_complete() can distinguish new installs from upgrades
-        db.set_system_setting("onboarding_started", "true")
-
-        # Set encryption key in memory (derived from password)
-        try:
-            encryption.set_encryption_key(request.password, db)
-            _seed_claude_account_safe()
-        except Exception as e:
-            logger.error(f"Failed to set up encryption during admin setup: {e}")
-
-        # Set session cookie
-        response.set_cookie(
-            key="session",
-            value=result["token"],
-            httponly=True,
-            secure=settings.cookie_secure,
-            samesite="lax",
-            max_age=settings.session_expire_days * 24 * 60 * 60
-        )
-
-        return {
-            "status": "ok",
-            "message": "Admin account created",
-            "username": result["admin"]["username"]
-        }
-
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        user_type = 'admin'
+        if method == 'account':
+            from app.core import pairing
+            from app.db import pairing as pairing_store, mobile_hub
+            client = pairing_store.get_paired_client_by_session_hash(pairing.hash_controller_session(session_token))
+            owner = mobile_hub.ownership(paired_client_id=client['id']) if client else None
+            if not owner:
+                raise ValueError('Completed browser session has no owner identity')
+            user_id = owner['account_id']
+            user_type = 'account'
+        else:
+            user_id = owner_auth.preference_identity()
+        audit_service.log_event(event_type, request=request, user_id=user_id,
+                                user_type=user_type, details={'method': method})
+    except Exception:
+        # Audit failures must not consume a one-use grant while losing its login
+        # response; the audit sink itself records persistence failures safely.
+        logger.warning('Owner authentication audit recording failed', exc_info=True)
 
 
-@router.post("/login")
-async def login(req: Request, login_data: LoginRequest, response: Response):
-    """Login and get session cookie"""
-    # Check rate limiting before attempting login
-    check_rate_limit(req, login_data.username)
+@router.post('/setup')
+async def configure_local_install(request: Request, _: str = Depends(require_admin)):
+    owner_auth.same_origin(request)
+    await run_sync(owner_auth.configure_installation)
+    await run_sync(_audit_owner_action, request, audit_service.AuditEventType.INSTALLATION_SETUP, 'local_setup')
+    return {'status': 'ok'}
 
-    token = auth_service.login(login_data.username, login_data.password)
 
-    if not token:
-        # Record failed attempt
-        record_login_result(req, login_data.username, success=False)
-        audit_service.log_login_failure(req, login_data.username, "invalid_credentials")
-        client_ip = get_client_ip(req)
-        logger.warning(f"Failed login attempt for user '{login_data.username}' from IP {client_ip}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials"
-        )
+@router.post('/login')
+@router.post('/change-password')
+async def retired_password_login():
+    raise HTTPException(410, 'Shuffle uses local access or account sign-in; worker passwords are retired.')
 
-    # Record successful login
-    record_login_result(req, login_data.username, success=True)
-    audit_service.log_login_success(req, login_data.username, "admin", "password")
-    client_ip = get_client_ip(req)
-    logger.info(f"Successful admin login for user '{login_data.username}' from IP {client_ip}")
 
-    # Set encryption key in memory (derived from password)
-    encryption_warning = None
-    try:
-        encryption.set_encryption_key(login_data.password, db)
-        # Encrypt any existing plaintext API keys (migration)
-        encrypted_count = encryption.encrypt_existing_plaintext_keys(db)
-        if encrypted_count > 0:
-            logger.info(f"Encrypted {encrypted_count} existing plaintext API keys")
-        # Now that encryption is available, seed the default Claude account from
-        # any existing credentials file (idempotent).
-        _seed_claude_account_safe()
-    except Exception as e:
-        logger.warning(f"Encryption setup failed during login: {e}")
-        encryption_warning = "Encryption setup failed. API key management may be unavailable."
-
-    # Set session cookie
-    response.set_cookie(
-        key="session",
-        value=token,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite="lax",
-        max_age=settings.session_expire_days * 24 * 60 * 60
-    )
-
-    result = {"status": "ok", "message": "Logged in", "is_admin": True}
-    if encryption_warning:
-        result["encryption_warning"] = encryption_warning
+@router.post('/account/start')
+async def start_account_login(request: Request, response: Response):
+    owner_auth.same_origin(request)
+    from app.api.mobile_hub import _limiter
+    _limiter.check('browser-start:' + get_client_ip(request))
+    request_origin = request.headers.get('origin')
+    if not request_origin:
+        # Loopback command-line clients cannot complete a browser login.
+        raise HTTPException(400, 'Start account sign-in in a browser.')
+    proof, result = await run_sync(owner_auth.begin_browser, request_origin)
+    response.set_cookie(owner_auth.COOKIE, proof, httponly=True, secure=_secure_cookie(request),
+                        samesite='strict', max_age=600, path='/api/v1/auth/account')
+    response.headers['Cache-Control'] = 'no-store'
     return result
+
+
+@router.post('/account/poll')
+async def poll_account_login(body: BrowserPollRequest, request: Request, response: Response):
+    owner_auth.same_origin(request)
+    try:
+        result = await run_sync(owner_auth.poll_browser, request.cookies.get(owner_auth.COOKIE), body.completion_secret)
+    except HTTPException as error:
+        if error.status_code in (401, 403):
+            await run_sync(audit_service.log_event, audit_service.AuditEventType.LOGIN_FAILURE,
+                           request=request, user_type='account', details={'method': 'account', 'reason': 'rejected'})
+        raise
+    response.headers['Cache-Control'] = 'no-store'
+    if result is None:
+        return {'status': 'pending'}
+    token, expires = result
+    _account_cookie(request, response, token, expires)
+    response.delete_cookie(owner_auth.COOKIE, path='/api/v1/auth/account')
+    await run_sync(_audit_owner_action, request, audit_service.AuditEventType.LOGIN_SUCCESS, 'account', token)
+    return {'status': 'authenticated'}
+
+
+@router.post('/recovery')
+async def local_recovery(body: LocalRecoveryRequest, request: Request, response: Response):
+    owner_auth.require_local_request(request)
+    owner_auth.same_origin(request)
+    try:
+        token, expires = await run_sync(owner_auth.consume_console_grant, body.code, 'recovery')
+    except HTTPException as error:
+        if error.status_code in (401, 403):
+            await run_sync(audit_service.log_event, audit_service.AuditEventType.LOGIN_FAILURE,
+                           request=request, details={'method': 'local_recovery', 'reason': 'rejected'})
+        raise
+    _account_cookie(request, response, token, expires)
+    await run_sync(_audit_owner_action, request, audit_service.AuditEventType.LOGIN_SUCCESS, 'local_recovery')
+    return {'status': 'authenticated', 'local_recovery': True, 'expires_at': expires.isoformat()}
 
 
 @router.post("/logout")
 async def logout(request: Request, response: Response):
     """Logout and invalidate session"""
+    owner_auth.same_origin(request)
     token = get_session_token(request)
     if token:
         paired_client = await run_sync(get_paired_client_from_token, token, touch=False)
@@ -537,85 +580,6 @@ async def logout(request: Request, response: Response):
 
     response.delete_cookie(key="session")
     return {"status": "ok", "message": "Logged out"}
-
-
-@router.post("/change-password")
-async def change_password(
-    req: Request,
-    password_data: ChangePasswordRequest,
-    token: str = Depends(require_admin)
-):
-    """
-    Change admin password and re-encrypt all sensitive data.
-
-    This endpoint:
-    1. Verifies the current password
-    2. Decrypts all sensitive data with the old password
-    3. Re-encrypts all sensitive data with the new password
-    4. Updates the admin password hash
-    """
-    # Get current admin info
-    admin = db.get_admin()
-    if not admin:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Admin account not found"
-        )
-
-    # Verify current password
-    if not auth_service.verify_password(password_data.current_password, admin["password_hash"]):
-        await run_sync(audit_service.log_password_change_failed, req, admin["username"], "invalid_current_password")
-        client_ip = get_client_ip(req)
-        logger.warning(f"Failed password change attempt - wrong current password from IP {client_ip}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Current password is incorrect"
-        )
-
-    # Check if new password is same as old
-    if password_data.current_password == password_data.new_password:
-        await run_sync(audit_service.log_password_change_failed, req, admin["username"], "unchanged_password")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="New password must be different from current password"
-        )
-
-    # Re-encrypt all secrets with new password
-    try:
-        success = encryption.re_encrypt_all_secrets(
-            password_data.current_password,
-            password_data.new_password,
-            db
-        )
-        if not success:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to re-encrypt secrets. Password not changed."
-            )
-    except Exception as e:
-        logger.error(f"Failed to re-encrypt secrets: {e}")
-        await run_sync(audit_service.log_password_change_failed, req, admin["username"], "re_encryption_failed")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to re-encrypt secrets. Password not changed."
-        )
-
-    # Update admin password
-    new_password_hash = bcrypt.hashpw(
-        password_data.new_password.encode('utf-8'),
-        bcrypt.gensalt()
-    ).decode('utf-8')
-
-    db.update_admin_password(new_password_hash)
-    await run_sync(audit_service.log_password_changed, req, admin["username"])
-
-    client_ip = get_client_ip(req)
-    logger.info(f"Admin password changed successfully from IP {client_ip}")
-
-    return {
-        "status": "ok",
-        "message": "Password changed successfully. All encrypted data has been re-encrypted."
-    }
 
 
 @router.get("/claude/status")

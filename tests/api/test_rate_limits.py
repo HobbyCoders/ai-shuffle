@@ -132,15 +132,13 @@ def mock_request_queue():
 
 @pytest.fixture
 def admin_session_cookie():
-    """Return a session cookie value for admin.
+    """CRUD tests isolate authorization with a console-recovery double.
 
-    Admin endpoints now gate on the centralized ``app.api.auth.require_admin``,
-    which validates the ``session`` cookie via ``auth_service.validate_session``
-    (no longer ``database.get_auth_session``). Patch it to accept this token so
-    any test that sends this cookie is treated as an authenticated admin.
+    Real listener/cookie/revocation behavior is exercised in test_local_account_auth.
     """
-    token = "test-admin-session-token"
-    with patch("app.api.auth.auth_service.validate_session", return_value=True):
+    token = "shr_test-admin-session-token"
+    with patch("app.api.auth.auth_service.validate_session", return_value=True), \
+         patch("app.core.owner_auth.loopback_request", side_effect=lambda request: request.cookies.get('session') == token):
         yield token
 
 
@@ -375,8 +373,8 @@ class TestGetCurrentUser:
         assert is_admin is False
 
     @pytest.mark.asyncio
-    async def test_get_current_user_valid_session(self, mock_database):
-        """get_current_user should return admin for valid session."""
+    async def test_get_current_user_unmarked_session_is_not_local_recovery(self, mock_database):
+        """A token on an unmarked transport cannot grant recovery admin."""
         from app.api.rate_limits import get_current_user
 
         with patch("app.api.auth.auth_service.validate_session", return_value=True):
@@ -384,9 +382,9 @@ class TestGetCurrentUser:
                 self._request(session="test-token")
             )
 
-        assert user_id == "admin"
+        assert user_id is None
         assert api_key_id is None
-        assert is_admin is True
+        assert is_admin is False
 
     @pytest.mark.asyncio
     async def test_get_current_user_invalid_session(self, mock_database):
@@ -518,7 +516,7 @@ class TestRequireAdmin:
             require_admin(self._request(session=None))
 
         assert exc_info.value.status_code == 403
-        assert "Admin access required" in exc_info.value.detail
+        assert "Owner access required" in exc_info.value.detail
 
     def test_require_admin_invalid_session(self, mock_database):
         """require_admin should raise 403 when the session fails validation."""
@@ -530,14 +528,15 @@ class TestRequireAdmin:
                 require_admin(self._request(session="invalid-session"))
 
         assert exc_info.value.status_code == 403
-        assert "Admin access required" in exc_info.value.detail
+        assert "Owner access required" in exc_info.value.detail
 
     def test_require_admin_valid_session(self, mock_database):
         """require_admin should return the token and flag admin for a valid session."""
         from app.api.rate_limits import require_admin
 
         request = self._request(session="valid-token")
-        with patch("app.api.auth.auth_service.validate_session", return_value=True):
+        with patch("app.api.auth.auth_service.validate_session", return_value=True), \
+             patch("app.core.owner_auth.loopback_request", return_value=True):
             result = require_admin(request)
 
         assert result == "valid-token"
@@ -558,7 +557,7 @@ class TestGetCurrentRateLimits:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.get("/api/v1/rate-limits")
 
         assert response.status_code == 401
@@ -576,7 +575,7 @@ class TestGetCurrentRateLimits:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.get(
                         "/api/v1/rate-limits",
                         cookies={"session": admin_session_cookie}
@@ -604,7 +603,7 @@ class TestGetCurrentRateLimits:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.get(
                         "/api/v1/rate-limits",
                         headers={"Authorization": api_key_header}
@@ -626,7 +625,7 @@ class TestGetQueueStatus:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.request_queue", mock_request_queue):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.get("/api/v1/rate-limits/queue")
 
         assert response.status_code == 401
@@ -640,7 +639,7 @@ class TestGetQueueStatus:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.request_queue", mock_request_queue):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.get(
                         "/api/v1/rate-limits/queue",
                         cookies={"session": admin_session_cookie}
@@ -668,7 +667,7 @@ class TestGetQueueStatus:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.request_queue", mock_request_queue):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.get(
                         "/api/v1/rate-limits/queue",
                         cookies={"session": admin_session_cookie}
@@ -694,7 +693,7 @@ class TestListRateLimitConfigs:
         from app.main import app
 
         with patch("app.api.rate_limits.database", mock_database):
-            with TestClient(app) as client:
+            with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                 response = client.get("/api/v1/rate-limits/config")
 
         assert response.status_code == 403  # centralized require_admin -> 403 for missing/invalid session
@@ -722,7 +721,7 @@ class TestListRateLimitConfigs:
         ]
 
         with patch("app.api.rate_limits.database", mock_database):
-            with TestClient(app) as client:
+            with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                 response = client.get(
                     "/api/v1/rate-limits/config",
                     cookies={"session": admin_session_cookie}
@@ -742,7 +741,7 @@ class TestListRateLimitConfigs:
         mock_database.get_all_rate_limits.return_value = []
 
         with patch("app.api.rate_limits.database", mock_database):
-            with TestClient(app) as client:
+            with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                 response = client.get(
                     "/api/v1/rate-limits/config",
                     cookies={"session": admin_session_cookie}
@@ -762,7 +761,7 @@ class TestCreateRateLimitConfig:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.post("/api/v1/rate-limits/config", json={})
 
         assert response.status_code == 403  # centralized require_admin -> 403 for missing/invalid session
@@ -777,7 +776,7 @@ class TestCreateRateLimitConfig:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.post(
                         "/api/v1/rate-limits/config",
                         json={},
@@ -813,7 +812,7 @@ class TestCreateRateLimitConfig:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.post(
                         "/api/v1/rate-limits/config",
                         json={
@@ -846,7 +845,7 @@ class TestCreateRateLimitConfig:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.post(
                         "/api/v1/rate-limits/config",
                         json={"user_id": "existing-user"},
@@ -865,7 +864,7 @@ class TestCreateRateLimitConfig:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.post(
                         "/api/v1/rate-limits/config",
                         json={"requests_per_minute": 0},
@@ -897,7 +896,7 @@ class TestCreateRateLimitConfig:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.post(
                         "/api/v1/rate-limits/config",
                         json={
@@ -923,7 +922,7 @@ class TestUpdateRateLimitConfig:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.patch(
                         "/api/v1/rate-limits/config/test-id",
                         json={"requests_per_minute": 50}
@@ -941,7 +940,7 @@ class TestUpdateRateLimitConfig:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.patch(
                         "/api/v1/rate-limits/config/nonexistent-id",
                         json={"requests_per_minute": 50},
@@ -964,7 +963,7 @@ class TestUpdateRateLimitConfig:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.patch(
                         "/api/v1/rate-limits/config/config-to-update",
                         json={"requests_per_minute": 50, "priority": 1},
@@ -1001,7 +1000,7 @@ class TestUpdateRateLimitConfig:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.patch(
                         "/api/v1/rate-limits/config/config-to-update",
                         json={"requests_per_minute": 100},
@@ -1024,7 +1023,7 @@ class TestDeleteRateLimitConfig:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.delete("/api/v1/rate-limits/config/test-id")
 
         assert response.status_code == 403  # centralized require_admin -> 403 for missing/invalid session
@@ -1039,7 +1038,7 @@ class TestDeleteRateLimitConfig:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.delete(
                         "/api/v1/rate-limits/config/nonexistent-id",
                         cookies={"session": admin_session_cookie}
@@ -1057,7 +1056,7 @@ class TestDeleteRateLimitConfig:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.delete(
                         "/api/v1/rate-limits/config/config-to-delete",
                         cookies={"session": admin_session_cookie}
@@ -1077,7 +1076,7 @@ class TestGetDefaultLimits:
         from app.main import app
 
         with patch("app.api.rate_limits.database", mock_database):
-            with TestClient(app) as client:
+            with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                 response = client.get("/api/v1/rate-limits/config/defaults")
 
         assert response.status_code == 403  # centralized require_admin -> 403 for missing/invalid session
@@ -1090,7 +1089,7 @@ class TestGetDefaultLimits:
         mock_database.get_auth_session.return_value = {"id": "session-id"}
 
         with patch("app.api.rate_limits.database", mock_database):
-            with TestClient(app) as client:
+            with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                 response = client.get(
                     "/api/v1/rate-limits/config/defaults",
                     cookies={"session": admin_session_cookie}
@@ -1116,7 +1115,7 @@ class TestGetQueueAdminInfo:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.request_queue", mock_request_queue):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.get("/api/v1/rate-limits/queue/admin")
 
         assert response.status_code == 403  # centralized require_admin -> 403 for missing/invalid session
@@ -1130,7 +1129,7 @@ class TestGetQueueAdminInfo:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.request_queue", mock_request_queue):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.get(
                         "/api/v1/rate-limits/queue/admin",
                         cookies={"session": admin_session_cookie}
@@ -1156,7 +1155,7 @@ class TestClearQueue:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.request_queue", mock_request_queue):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.post("/api/v1/rate-limits/queue/clear")
 
         assert response.status_code == 403  # centralized require_admin -> 403 for missing/invalid session
@@ -1170,7 +1169,7 @@ class TestClearQueue:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.request_queue", mock_request_queue):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.post(
                         "/api/v1/rate-limits/queue/clear",
                         cookies={"session": admin_session_cookie}
@@ -1210,7 +1209,7 @@ class TestEdgeCases:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.post(
                         "/api/v1/rate-limits/config",
                         json={"api_key_id": "specific-api-key"},
@@ -1236,7 +1235,7 @@ class TestEdgeCases:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.post(
                         "/api/v1/rate-limits/config",
                         json={"user_id": "new-user"},
@@ -1269,7 +1268,7 @@ class TestEdgeCases:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.post(
                         "/api/v1/rate-limits/config",
                         json={
@@ -1308,7 +1307,7 @@ class TestEdgeCases:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     response = client.post(
                         "/api/v1/rate-limits/config",
                         json={
@@ -1360,7 +1359,7 @@ class TestRateLimitFlow:
 
         with patch("app.api.rate_limits.database", mock_database):
             with patch("app.api.rate_limits.rate_limiter", mock_rate_limiter):
-                with TestClient(app) as client:
+                with TestClient(app, headers={"Origin": "http://testserver"}) as client:
                     # Create
                     create_response = client.post(
                         "/api/v1/rate-limits/config",

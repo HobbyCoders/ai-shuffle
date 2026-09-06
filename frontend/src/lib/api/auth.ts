@@ -8,23 +8,12 @@ export async function getAuthStatus(): Promise<AuthStatus> {
 	return api.get<AuthStatus>('/auth/status');
 }
 
-export async function setup(username: string, password: string): Promise<void> {
-	await api.post('/auth/setup', { username, password });
-}
-
-export async function login(username: string, password: string): Promise<void> {
-	await api.post('/auth/login', { username, password });
+export async function setupInstallation(): Promise<void> {
+	await api.post('/auth/setup', {});
 }
 
 export async function logout(): Promise<void> {
 	await api.post('/auth/logout');
-}
-
-export async function changePassword(currentPassword: string, newPassword: string): Promise<{
-	status: string;
-	message: string;
-}> {
-	return api.post('/auth/change-password', { current_password: currentPassword, new_password: newPassword });
 }
 
 export async function getClaudeAuthStatus(): Promise<{
@@ -77,9 +66,8 @@ export async function pollClaudeLogin(): Promise<{
 //
 // The app can hold several Claude Code OAuth sign-ins at once and switch which
 // one it authenticates with, without re-doing the browser flow each time. The
-// list lives server-side, encrypted with the admin password — so it can only be
-// read/switched while `encryption_ready` is true (i.e. the admin has logged in
-// this session). These client functions use the shared `api` client, which
+// list lives server-side, protected by the persistent credential key. It can
+// only be read/switched while `encryption_ready` is true. These client functions use the shared `api` client, which
 // throws `{ detail, status }` on non-2xx; callers inspect `.status === 409`
 // (encryption locked / can't-delete-active) and surface `.detail`.
 // ---------------------------------------------------------------------------
@@ -95,7 +83,7 @@ export interface ClaudeAccount {
 	has_refresh_token: boolean;
 	/** True when the latest refreshed tokens couldn't be persisted (encryption
 	 *  was locked during a refresh) — the account still works this session but
-	 *  the stored copy is stale until the admin logs in again. */
+	 *  the stored copy is stale until credential storage is available again. */
 	sync_pending: boolean;
 	/** Unix epoch milliseconds of last use, or null if never used. */
 	last_used_at: number | null;
@@ -105,7 +93,7 @@ export interface ClaudeAccount {
 export interface ClaudeAccountsResponse {
 	accounts: ClaudeAccount[];
 	active_account_id: string | null;
-	/** False when the encrypted store can't be opened (admin must re-login). */
+	/** False when the encrypted store can't be opened (server key recovery is required). */
 	encryption_ready: boolean;
 }
 
@@ -205,14 +193,6 @@ export async function setWorkspaceConfig(workspace_path: string): Promise<import
 
 export async function validateWorkspacePath(workspace_path: string): Promise<import('./client').WorkspaceValidation> {
 	return api.post('/workspace/validate', { workspace_path });
-}
-
-export interface LoginResponse {
-	status: string;
-	message: string;
-	is_admin: boolean;
-	// FastAPI returns errors in 'detail' field
-	detail?: string;
 }
 
 export interface AuditLogEntry {

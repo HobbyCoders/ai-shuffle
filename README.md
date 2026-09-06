@@ -70,10 +70,10 @@ Full documentation rendered in-app covering getting started, all features, conne
 Fully responsive layout with a mobile-optimized sidebar, 44px touch targets, PWA install support, offline detection, and push notifications.
 
 Pair another browser, phone, tablet, or cluster runner with a short-lived,
-one-time code or locally rendered QR—without sharing the admin password.
+one-time code or locally rendered QR. Local/LAN use requires no Shuffle account; optionally link a worker to an account for managed remote access.
 
 ### Security
-BCrypt password hashing, session tokens (secure HTTP-only cookies), API key authentication (`aih_` prefix, SHA-256 hashed), rate limiting, audit logging, encrypted secret storage (Fernet/PBKDF2), OAuth 2.0 + PKCE for Claude authentication, and GitHub device flow.
+Local/LAN owner access is isolated from the authenticated remote listener. Remote browser and Android access use Clerk-backed owner identity and revocable device sessions. Integration API keys (`aih_`) remain scoped and non-admin. Stored credentials use Fernet with protected persistent key custody; existing password-derived keys are adopted once without rewriting their ciphertext. See [local and remote access](docs/LOCAL_ACCESS.md) and [recovery](docs/RESTORE.md).
 
 ### Analytics
 Usage dashboard with token counts, cost breakdowns by model/profile/project, daily trends, and top sessions by cost.
@@ -98,7 +98,7 @@ python run_local.py
 # macOS/Linux: ./run_local.sh
 ```
 
-Open `http://localhost:8000`. You'll be guided through account setup and Claude authentication on first launch.
+Open `http://localhost:8000`. Choose your workspace and connect your development tools or model providers on first launch. No local username, password, or Shuffle account is required.
 
 **Options:** `--port 3000` · `--no-browser` · `--check` (verify prerequisites)
 
@@ -107,7 +107,7 @@ Open `http://localhost:8000`. You'll be guided through account setup and Claude 
 ```bash
 # Configure secrets first — compose fails fast if POSTGRES_PASSWORD is unset
 cp .env.example .env
-# edit .env: set POSTGRES_PASSWORD (and ADMIN_PASSWORD)
+# edit .env: set POSTGRES_PASSWORD
 
 # Bring up the app together with its bundled PostgreSQL
 docker compose up -d
@@ -115,7 +115,7 @@ docker compose up -d
 
 The compose stack provisions PostgreSQL for you (`postgres:16-alpine`); the app
 waits for the database to be healthy before starting. Open `http://localhost:8000`
-and you'll be guided through account setup and Claude authentication on first launch.
+and choose your workspace and model providers. No local username, password, or Shuffle account is required.
 
 **Key environment variables:**
 
@@ -124,7 +124,8 @@ and you'll be guided through account setup and Claude authentication on first la
 | `POSTGRES_PASSWORD` | — | **Required.** Database password — compose fails fast if unset. The app builds its own connection URL from the `POSTGRES_*` pieces |
 | `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_DB` | `postgres` / `5432` / `ai_shuffle` / `ai_shuffle` | Remaining connection pieces — only set them if your database lives outside the bundled compose service |
 | `DATABASE_URL` | — | *Legacy.* Full connection string from pre-split installs — auto-imported into the `POSTGRES_*` values at startup, so a `.env` with only this set is fully configured (no re-setup needed); still wins at connect time when explicit pieces are also present |
-| `ADMIN_PASSWORD` | — | Master secret; the at-rest encryption key for stored credentials is derived from it (PBKDF2) |
+| `ADMIN_PASSWORD` | — | Upgrade only: unlock legacy ciphertext for its first verified key adoption, then remove. Never needed on a fresh installation |
+| `SHUFFLE_LOCAL_ACCESS` | `true` | Allow owner access on the local/LAN listener. Set `false` during a staged upgrade until managed tunnel ingress is verified |
 | `PUID` / `PGID` | `1000` | Runtime user/group for file permissions (Unraid: `99` / `100`) |
 | `AUTO_UPDATE` | `true` | Auto-update the GitHub CLI on startup (the Claude engine ships with `claude-agent-sdk`) |
 | `LOCAL_MODE` | `false` | Use local filesystem paths |

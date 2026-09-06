@@ -284,18 +284,18 @@ class TestEncryptionWithoutKey:
 
     def test_encrypt_without_key_raises_error(self):
         """Encryption without key should raise RuntimeError."""
-        with pytest.raises(RuntimeError, match="Encryption key not loaded"):
+        with pytest.raises(RuntimeError, match="Credential storage is locked"):
             encryption.encrypt_value("secret")
 
     def test_decrypt_encrypted_value_without_key_raises_error(self):
         """Decryption of encrypted value without key should raise RuntimeError."""
-        with pytest.raises(RuntimeError, match="Encryption key not loaded"):
+        with pytest.raises(RuntimeError, match="Credential storage is locked"):
             encryption.decrypt_value("enc:somebase64data")
 
     def test_decrypt_plaintext_without_key_raises_error(self):
         """Decrypting any value without key should raise RuntimeError."""
         # Even plaintext values require encryption key to be loaded
-        with pytest.raises(RuntimeError, match="Encryption key not loaded"):
+        with pytest.raises(RuntimeError, match="Credential storage is locked"):
             encryption.decrypt_value("plaintext_value")
 
 
@@ -524,7 +524,7 @@ class TestEncryptExistingPlaintextKeys:
         """Should raise RuntimeError if encryption key not loaded."""
         encryption.clear_encryption_key()
         mock_db = MagicMock()
-        with pytest.raises(RuntimeError, match="Encryption key not loaded"):
+        with pytest.raises(RuntimeError, match="Credential storage is locked"):
             encryption.encrypt_existing_plaintext_keys(mock_db)
 
     def test_encrypt_existing_keys_encrypts_plaintext(self):

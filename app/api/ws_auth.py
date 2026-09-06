@@ -9,8 +9,24 @@ from app.core import mobile_tool_identity as identity
 
 
 async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> tuple[bool, Optional[dict]]:
+    from app.core import owner_auth
+    # Only the actual local listener can establish a passwordless LAN owner.
+    # Browsers must send a matching Origin, preventing cross-site WebSocket use.
+    if not token and not websocket.cookies.get('session') and owner_auth.local_access(websocket):
+        try:
+            owner_auth.same_origin(websocket)
+        except Exception:
+            return False, None
+        websocket.state.mobile_tool_principal = identity.principal(
+            'admin', 'install', 'local-transport:' + owner_auth.settings.effective_instance_id)
+        return True, None
     # Keep the legacy return contract; authority travels only on trusted state.
     websocket.state.mobile_tool_principal = None
+    if not token and websocket.cookies.get('session'):
+        try:
+            owner_auth.same_origin(websocket)
+        except Exception:
+            return False, None
     for candidate in (token, websocket.cookies.get('session')):
         if not candidate:
             continue
@@ -26,7 +42,7 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
                 pass  # Includes live hub refusal; never fall through as admin.
             continue
         session = await run_sync(database.get_auth_session, candidate)
-        if session:
+        if session and owner_auth.loopback_request(websocket):
             websocket.state.mobile_tool_principal = identity.principal('admin', 'install', candidate)
             return True, None
         key_session = await run_sync(database.get_api_key_session, candidate)

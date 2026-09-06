@@ -221,6 +221,8 @@ class TestAuthStatusAnyCredential:
         )
         request = MagicMock()
         request.cookies = {"session": raw_session}
+        request.headers = {"origin": "https://worker.example.com", "host": "worker.example.com"}
+        request.url.scheme = "https"
 
         await auth_api.logout(request, Response())
 

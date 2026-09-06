@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
-	import { auth, authLoading, authError, setupRequired, anyCredential } from '$lib/stores/auth.svelte';
+	import { auth, anyCredential } from '$lib/stores/auth.svelte';
 	import {
 		getWorkspaceConfig,
+		setupInstallation,
 		setWorkspaceConfig,
 		getClaudeAuthStatus,
 		startClaudeLogin,
@@ -18,22 +19,22 @@
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
 	import AddProviderModal from '$lib/components/deck/cards/settings/providers/AddProviderModal.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
-	import { Check, ChevronRight, Terminal, Github, FolderOpen, UserPlus, Copy, ExternalLink, Loader2, Eye, EyeOff, Plus } from 'lucide-svelte';
+	import { Check, ChevronRight, Terminal, Github, FolderOpen, Copy, ExternalLink, Loader2, Plus } from 'lucide-svelte';
 
 	// ── Step management ──────────────────────────────────────────────────
-	type SetupStep = 'admin' | 'workspace' | 'cli-auth' | 'providers';
+	type SetupStep = 'workspace' | 'cli-auth' | 'providers';
 
-	let currentStep = $state<SetupStep>('admin');
+	let currentStep = $state<SetupStep>('workspace');
 	let completedSteps = $state(new Set<SetupStep>());
 	let loadingConfig = $state(true);
+	let setupError = $state('');
 
 	// Workspace config
 	let workspaceConfig = $state<WorkspaceConfig | null>(null);
 	let isLocalMode = $derived(workspaceConfig?.is_local_mode ?? false);
 
 	let steps = $derived.by(() => {
-		const s: { id: SetupStep; label: string }[] = [{ id: 'admin', label: 'Account' }];
-		if (isLocalMode) s.push({ id: 'workspace', label: 'Workspace' });
+		const s: { id: SetupStep; label: string }[] = [{ id: 'workspace', label: 'Workspace' }];
 		s.push({ id: 'cli-auth', label: 'Connect' });
 		s.push({ id: 'providers', label: 'Providers' });
 		return s;
@@ -50,15 +51,8 @@
 	function closeAddProvider() {
 		addProviderOpen = false;
 		auth.checkAuth().catch(() => {});
+		providers.refreshProviders().catch(() => {});
 	}
-
-	// ── Admin form state ─────────────────────────────────────────────────
-	let username = $state('');
-	let password = $state('');
-	let confirmPassword = $state('');
-	let localError = $state('');
-	let showPassword = $state(false);
-	let showConfirmPassword = $state(false);
 
 	// ── Workspace state ──────────────────────────────────────────────────
 	let workspacePath = $state('');
@@ -97,51 +91,19 @@
 	onMount(async () => {
 		try {
 			workspaceConfig = await getWorkspaceConfig();
-			if (workspaceConfig.is_local_mode) {
-				workspacePath = workspaceConfig.default_path;
-			}
+			workspacePath = workspaceConfig.workspace_path || workspaceConfig.default_path;
 		} catch (e) {
 			console.error('Failed to load workspace config:', e);
 		} finally {
 			loadingConfig = false;
 		}
 
-		// If admin already exists, skip the admin creation step.
-		// This handles the case where a user lands on setup after upgrading
-		// from a version before the setup flow existed.
-		if (!$setupRequired && currentStep === 'admin') {
-			completedSteps.add('admin');
-			advanceStep();
-		}
 	});
 
 	onDestroy(() => {
 		if (claudePollInterval) clearInterval(claudePollInterval);
 		if (githubPollInterval) clearInterval(githubPollInterval);
 	});
-
-	// ── Admin step ───────────────────────────────────────────────────────
-	async function handleAdminSubmit(e: Event) {
-		e.preventDefault();
-		localError = '';
-
-		if (password !== confirmPassword) {
-			localError = 'Passwords do not match';
-			return;
-		}
-		if (password.length < 8) {
-			localError = 'Password must be at least 8 characters';
-			return;
-		}
-
-		try {
-			await auth.setup(username, password);
-			completedSteps.add('admin');
-			advanceStep();
-		} catch {
-			// Error handled by the store
-		}
-	}
 
 	// ── Workspace step ───────────────────────────────────────────────────
 	function handleDirectorySelect(path: string) {
@@ -160,6 +122,8 @@
 
 		try {
 			await setWorkspaceConfig(workspacePath);
+			if (auth.current.status?.setup_required) await setupInstallation();
+			await auth.checkAuth();
 			completedSteps.add('workspace');
 			advanceStep();
 		} catch (e: any) {
@@ -348,13 +312,13 @@
 			await auth.checkAuth();
 			goto('/');
 		} catch {
-			goto('/');
+			setupError = 'Setup could not be saved. Please try again.';
 		}
 	}
 </script>
 
 <svelte:head>
-	<title>Setup - AI Hub</title>
+	<title>Setup - AI Shuffle</title>
 	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
 </svelte:head>
 
@@ -366,13 +330,12 @@
 				<p class="text-muted-foreground">Loading...</p>
 			</div>
 		{:else}
+			{#if setupError}<p role="alert" class="text-destructive mb-4">{setupError}</p>{/if}
 			<!-- Header -->
 			<div class="text-center mb-6 sm:mb-8">
-				<h1 class="text-xl sm:text-2xl font-bold text-foreground mb-2">Welcome to AI Hub</h1>
+				<h1 class="text-xl sm:text-2xl font-bold text-foreground mb-2">Welcome to AI Shuffle</h1>
 				<p class="text-muted-foreground text-sm sm:text-base">
-					{#if currentStep === 'admin'}
-						Create your admin account to get started
-					{:else if currentStep === 'workspace'}
+					{#if currentStep === 'workspace'}
 						Choose where project checkouts will be created on this machine
 					{:else if currentStep === 'cli-auth'}
 						Connect your development tools
@@ -410,123 +373,7 @@
 				{/each}
 			</div>
 
-			<!-- ═══════════════════════════════════════════════════════════ -->
-			<!-- Step 1: Admin Account -->
-			<!-- ═══════════════════════════════════════════════════════════ -->
-			{#if currentStep === 'admin'}
-				{#if completedSteps.has('admin')}
-					<!-- Show summary when going back after completion -->
-					<div class="space-y-4">
-						<div class="bg-success/10 border border-success/30 text-success px-4 py-3 rounded-lg text-sm flex items-center gap-2">
-							<Check size={16} strokeWidth={2} />
-							<span>Admin account created as <strong>{username}</strong></span>
-						</div>
-						<button type="button" onclick={advanceStep} class="btn btn-primary w-full py-3">
-							Continue
-						</button>
-					</div>
-				{:else}
-					<form onsubmit={handleAdminSubmit} class="space-y-4">
-						<div>
-							<label for="username" class="block text-sm font-medium text-muted-foreground mb-1">
-								Username
-							</label>
-							<input
-								type="text"
-								id="username"
-								bind:value={username}
-								class="input"
-								placeholder="admin"
-								required
-								minlength={3}
-								autocomplete="username"
-							/>
-						</div>
-
-						<div>
-							<label for="password" class="block text-sm font-medium text-muted-foreground mb-1">
-								Password
-							</label>
-							<div class="relative">
-								<input
-									type={showPassword ? "text" : "password"}
-									id="password"
-									bind:value={password}
-									class="input pr-10"
-									placeholder="Enter password"
-									required
-									minlength={8}
-									autocomplete="new-password"
-								/>
-								<button
-									type="button"
-									class="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-									onclick={() => showPassword = !showPassword}
-									tabindex={-1}
-									aria-label={showPassword ? "Hide password" : "Show password"}
-								>
-									{#if showPassword}
-										<EyeOff size={18} strokeWidth={1.5} />
-									{:else}
-										<Eye size={18} strokeWidth={1.5} />
-									{/if}
-								</button>
-							</div>
-						</div>
-
-						<div>
-							<label for="confirmPassword" class="block text-sm font-medium text-muted-foreground mb-1">
-								Confirm Password
-							</label>
-							<div class="relative">
-								<input
-									type={showConfirmPassword ? "text" : "password"}
-									id="confirmPassword"
-									bind:value={confirmPassword}
-									class="input pr-10"
-									placeholder="Confirm password"
-									required
-									autocomplete="new-password"
-								/>
-								<button
-									type="button"
-									class="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-									onclick={() => showConfirmPassword = !showConfirmPassword}
-									tabindex={-1}
-									aria-label={showConfirmPassword ? "Hide password" : "Show password"}
-								>
-									{#if showConfirmPassword}
-										<EyeOff size={18} strokeWidth={1.5} />
-									{:else}
-										<Eye size={18} strokeWidth={1.5} />
-									{/if}
-								</button>
-							</div>
-						</div>
-
-						{#if localError || $authError}
-							<div class="bg-destructive/10 border border-destructive text-destructive px-3 sm:px-4 py-3 rounded-lg text-sm">
-								{localError || $authError}
-							</div>
-						{/if}
-
-						<button
-							type="submit"
-							class="btn btn-primary w-full py-3"
-							disabled={$authLoading}
-						>
-							{#if $authLoading}
-								<Loader2 size={16} strokeWidth={2} class="inline-block animate-spin mr-2" />
-							{/if}
-							Create Account
-						</button>
-					</form>
-				{/if}
-
-			<!-- ═══════════════════════════════════════════════════════════ -->
-			<!-- Step 2: Workspace Configuration (local mode only) -->
-			<!-- ═══════════════════════════════════════════════════════════ -->
-			{:else if currentStep === 'workspace'}
+			{#if currentStep === 'workspace'}
 				<div class="space-y-4">
 					<div class="bg-primary/10 border border-primary/30 rounded-lg p-4">
 						<div class="flex items-start gap-3">
@@ -842,7 +689,7 @@
 								class="btn btn-primary flex-1 py-3"
 								disabled={!canLeaveCliAuth}
 							>
-								{canLeaveCliAuth ? 'Continue' : 'Connect an Account to Continue'}
+								{canLeaveCliAuth ? 'Continue' : 'Connect a Model Provider to Continue'}
 							</button>
 						</div>
 						{#if !canLeaveCliAuth}
@@ -870,7 +717,7 @@
 						<!-- Configured-providers summary -->
 						{#if providers.current.providers.length === 0}
 							<p class="text-sm text-muted-foreground">
-								No extra providers yet — your Claude connection from the previous step is ready to use.
+								You can add more model providers now or later in Settings.
 							</p>
 						{:else}
 							<div class="space-y-2">

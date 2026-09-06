@@ -126,6 +126,9 @@ async def get_current_user(request: Request) -> tuple[Optional[str], Optional[st
     safe — they are already-parsed attributes of the Request, not I/O.
     """
     def _resolve() -> tuple[Optional[str], Optional[str], bool]:
+        from app.core import owner_auth
+        if owner_auth.local_access(request):
+            return (owner_auth.preference_identity(), None, True)
         user_id: Optional[str] = None
         api_key_id: Optional[str] = None
         is_admin = False
@@ -137,7 +140,7 @@ async def get_current_user(request: Request) -> tuple[Optional[str], Optional[st
             if paired:
                 return (paired.get('device_name') or 'paired-device', paired['id'],
                         paired.get('account_owner_admin') is True)
-            if _auth.auth_service.validate_session(token):
+            if owner_auth.loopback_request(request) and _auth.auth_service.validate_session(token):
                 is_admin = True
                 user_id = "admin"
 

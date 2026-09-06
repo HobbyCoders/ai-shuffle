@@ -24,12 +24,17 @@ def read(session_id):
 
 
 def admin_active(digest):
-    # Persist only the digest, never the bearer. Logout deletes the source row.
+    # Local transport authority cannot be replayed as an HTTP session token.
+    from app.core import owner_auth
+    if (digest == owner_auth.digest('local-transport:' + owner_auth.settings.effective_instance_id)
+            and owner_auth.settings.shuffle_local_access):
+        return True
     with get_db() as conn:
         c = conn.cursor()
-        c.execute("""SELECT 1 FROM auth_sessions
-            WHERE encode(sha256(convert_to(token, 'UTF8')), 'hex') = %s
-              AND expires_at > NOW() LIMIT 1""", (digest,))
+        c.execute("""SELECT 1 FROM owner_local_sessions
+            WHERE token_hash = %s AND instance_id=%s
+              AND expires_at > %s LIMIT 1""", (digest, owner_auth.settings.effective_instance_id,
+                                              owner_auth.now().isoformat()))
         return c.fetchone() is not None
 
 

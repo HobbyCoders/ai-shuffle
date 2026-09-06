@@ -35,6 +35,7 @@ class AuditEventType:
 
     # Admin events
     ADMIN_SETUP = "admin_setup"
+    INSTALLATION_SETUP = "installation_setup"
     SETTINGS_CHANGED = "settings_changed"
 
 
