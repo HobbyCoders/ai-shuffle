@@ -415,3 +415,84 @@ def test_capacity_warning_is_silent_before_the_pool_exists():
     from app.core.resource_monitor import _check_warnings
 
     assert not any("at capacity" in w for w in _check_warnings({}))
+
+
+# ─── Busy guards added in round 7 ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_wake_pending_session_is_not_idle_evicted():
+    """Between a background task going terminal and the wake turn claiming the
+    client, nothing marked the session busy — so a park longer than the idle
+    tier had its client evicted milliseconds before the wake tried to use it."""
+    pool = _pool(TEST_POLICY, parked=_make_state(idle_seconds=3600))
+    assert await pool.evict_idle() == ["parked"]  # baseline: it WOULD go
+
+    pool = _pool(TEST_POLICY, parked=_make_state(idle_seconds=3600))
+    pool.note_wake_pending("parked")
+
+    assert await pool.evict_idle() == []
+    assert pool.idle_seconds_remaining("parked") is None
+    # The enqueue also counts as activity, so the stale park-time stamp is gone.
+    assert (
+        datetime.now(timezone.utc) - pool._pool["parked"].last_activity
+    ).total_seconds() < 5
+
+
+@pytest.mark.asyncio
+async def test_wake_pending_hold_is_released_when_the_wake_runs():
+    pool = _pool(TEST_POLICY, parked=_make_state(idle_seconds=3600))
+    pool.note_wake_pending("parked")
+    pool.clear_wake_pending("parked")
+    # last_activity was bumped by the hold, so age it back out again.
+    pool._pool["parked"].last_activity = (
+        datetime.now(timezone.utc) - timedelta(seconds=3600)
+    )
+
+    assert await pool.evict_idle() == ["parked"]
+
+
+@pytest.mark.asyncio
+async def test_wake_pending_hold_expires_so_a_lost_wake_cannot_pin_forever():
+    pool = _pool(TEST_POLICY, parked=_make_state(idle_seconds=3600))
+    pool.note_wake_pending("parked", ttl=0.0)
+    pool._pool["parked"].last_activity = (
+        datetime.now(timezone.utc) - timedelta(seconds=3600)
+    )
+
+    assert await pool.evict_idle() == ["parked"]
+
+
+@pytest.mark.asyncio
+async def test_session_blocked_on_a_user_question_is_not_idle_evicted(monkeypatch):
+    """AskUser advertises a 1h deadline on its durable row; the pool used to
+    reclaim the subprocess at the 30-minute idle tier underneath it, which fluid
+    reports to the model as 'input_required round-trip interrupted' and leaves a
+    live modal on the user's device."""
+    from app.core import interaction_wait
+
+    pool = _pool(TEST_POLICY, asking=_make_state(idle_seconds=3600))
+    monkeypatch.setattr(
+        interaction_wait, "has_waiters", lambda sid: sid == "asking",
+    )
+
+    assert await pool.evict_idle() == []
+    assert pool.idle_seconds_remaining("asking") is None
+
+    monkeypatch.setattr(interaction_wait, "has_waiters", lambda sid: False)
+    assert await pool.evict_idle() == ["asking"]
+
+
+@pytest.mark.asyncio
+async def test_interaction_waiter_registry_reports_a_blocked_session():
+    """The signal the pool reads is the live waiter registry, so it is true for
+    exactly as long as await_interaction blocks."""
+    from app.core import interaction_wait
+
+    assert interaction_wait.has_waiters("iw1") is False
+    event = interaction_wait.register_waiter("iw1")
+    try:
+        assert interaction_wait.has_waiters("iw1") is True
+    finally:
+        interaction_wait.unregister_waiter("iw1", event)
+    assert interaction_wait.has_waiters("iw1") is False
