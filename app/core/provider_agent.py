@@ -59,7 +59,9 @@ import re
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple
+from typing import (
+    TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Tuple,
+)
 
 from app.core import rate_limit_breaker
 
@@ -470,6 +472,16 @@ class WorkerOutcome:
     error: Optional[str] = None
     truncated: bool = False
     usage: Dict[str, Any] = field(default_factory=dict)
+    #: Progress frames the worker streamed before it settled. ``0`` means the
+    #: worker never started — it died at or before provider connect — which is
+    #: the ONLY failure shape a re-dispatch can honestly fix (a worker that ran
+    #: and failed did real work whose repetition is not free). Read by
+    #: :mod:`app.core.task_dispatch` to decide whether to retry.
+    frames_forwarded: int = 0
+    #: True when the worker was TORN DOWN (stop-all, parent turn end, tripped
+    #: circuit breaker) rather than failing on its own. Never retried: the
+    #: teardown is the answer, not a transport hiccup.
+    killed: bool = False
 
 
 #: Shapes a tool call takes when a model emits it as PROSE instead of a
@@ -755,22 +767,44 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
 
 
 async def _await_worker_idle(
-    worker_session_id: str, provider_id: Optional[str]
-) -> bool:
-    """Wait — with NO wall-clock ceiling — for a worker to go idle, bailing out
-    early only if its provider's circuit breaker trips.
+    worker_session_id: str,
+    provider_id: Optional[str],
+    *,
+    feed: Any = None,
+    first_frame_deadline: Optional[float] = None,
+    hard_deadline: Optional[float] = None,
+) -> Optional[str]:
+    """Wait for a worker to go idle, bailing out early on a liveness verdict.
 
-    Returns ``True`` when the breaker tripped (the caller must fail the worker
-    fast) and ``False`` when the worker went idle on its own.
+    Returns ``None`` when the worker went idle on its own, or one of
+    :data:`WAIT_RATE_LIMITED` / :data:`WAIT_NO_FIRST_FRAME` /
+    :data:`WAIT_DEADLINE` — in every non-``None`` case the caller must fail the
+    worker rather than read an outcome that does not exist.
 
-    A subagent may legitimately run for hours, so there is no timeout here
-    (2026-08-21 ruling): a worker that never finishes blocks until it goes idle,
-    the breaker trips, or the supervisor tears it down — a worker wedged on a
-    silently-hung provider is stopped from the UI. The wait is still observed in
-    :data:`WAIT_SLICE_SECONDS` slices so the provider's circuit breaker can be
-    re-read between them — a worker whose provider is already refusing every
-    request still fails fast instead of retrying forever into a closed door
-    (the 2026-07-22 storm's shape, one level down).
+    A WORKING subagent may legitimately run for hours, so there is still no
+    ceiling on one (2026-08-21 ruling): it blocks until it goes idle, the
+    breaker trips, or the supervisor tears it down. The two deadlines added by
+    the 2026-09-05 audit bound only the states where "running for hours" is not
+    a description of anything:
+
+    * ``first_frame_deadline`` — an absolute ``loop.time()`` by which the feed
+      must have forwarded at least one frame. Zero frames means the worker died
+      at or before provider connect, which is exactly what
+      :func:`_failure_summary` already calls "worker failed to start"; the
+      audit found ten of them reported ~900s late, one after fifteen minutes of
+      a parent parked on a corpse. Once ANY frame has been forwarded the
+      deadline stops applying, permanently.
+    * ``hard_deadline`` — an absolute ``loop.time()`` ceiling for a dispatch
+      whose caller cannot survive an unbounded wait. Only the SYNCHRONOUS lane
+      passes one: it blocks the parent's turn, so "no timeout" means "no
+      steer, no park, no progress signal" for as long as the worker sulks.
+
+    The wait is still observed in :data:`WAIT_SLICE_SECONDS` slices so the
+    provider's circuit breaker can be re-read between them — a worker whose
+    provider is already refusing every request still fails fast instead of
+    retrying forever into a closed door (the 2026-07-22 storm's shape, one
+    level down). Both deadlines are checked on the same cadence, so their
+    resolution is one slice.
 
     SCOPE LIMITATION (accepted until P3-B): the breaker is in-process state, and
     a worker turn claimed by ANOTHER runner trips THAT runner's breaker, which
@@ -785,6 +819,7 @@ async def _await_worker_idle(
     """
     from app.core import turn_manager
 
+    loop = asyncio.get_event_loop()
     waiter = asyncio.ensure_future(
         turn_manager.wait_session_idle(worker_session_id, timeout=float("inf"))
     )
@@ -797,11 +832,20 @@ async def _await_worker_idle(
                 # propagate so the worker is stopped rather than stranded. The
                 # idle bool itself no longer carries a verdict (no timeout).
                 waiter.result()
-                return False
+                return None
             # No provider binding (delegated Claude-leg worker) -> no breaker
             # to consult; the CLI's own backoff handles subscription limits.
             if provider_id and rate_limit_breaker.is_tripped(provider_id):
-                return True
+                return WAIT_RATE_LIMITED
+            now = loop.time()
+            if (
+                first_frame_deadline is not None
+                and now >= first_frame_deadline
+                and int(getattr(feed, "frames_forwarded", 0) or 0) == 0
+            ):
+                return WAIT_NO_FIRST_FRAME
+            if hard_deadline is not None and now >= hard_deadline:
+                return WAIT_DEADLINE
     finally:
         if not waiter.done():
             waiter.cancel()
@@ -859,6 +903,238 @@ def _worker_still_working(worker_session_id: str) -> bool:
         return False
 
 
+def _worker_deadlines(
+    background: bool,
+    first_frame_seconds: Optional[float],
+    max_wall_seconds: Optional[float],
+) -> Tuple[float, float]:
+    """``(first_frame_seconds, max_wall_seconds)`` for one dispatch; 0 = off.
+
+    ``None`` means "take the configured default", which differs by lane: BOTH
+    lanes get the first-frame watchdog (a worker that never connects is dead in
+    either), but only the SYNCHRONOUS lane gets a hard wall-clock cap, because
+    only it is holding a parent turn hostage while it waits. A background
+    parent has parked and can be woken; a sync parent can do nothing at all.
+    """
+    from app.core.config import settings
+
+    if first_frame_seconds is None:
+        first_frame_seconds = float(
+            getattr(settings, "task_worker_first_frame_seconds", 90.0) or 0.0
+        )
+    if max_wall_seconds is None:
+        max_wall_seconds = (
+            0.0
+            if background
+            else float(getattr(settings, "task_worker_sync_max_seconds", 0.0) or 0.0)
+        )
+    return max(0.0, float(first_frame_seconds)), max(0.0, float(max_wall_seconds))
+
+
+def _no_first_frame_error(worker_session_id: str, seconds: float) -> str:
+    """The failure text for a worker that never streamed anything.
+
+    Worded so :func:`_failure_summary` — which prefixes ``"worker failed to
+    start"`` on exactly this condition — reads as one sentence on the registry
+    row, and so the parent can tell it apart from a worker that ran and failed.
+    """
+    return (
+        f"The worker forwarded no output within {seconds:.0f}s, so its provider "
+        "connection never opened and it has done nothing. Its session is "
+        f"{worker_session_id}."
+    )
+
+
+def _hard_deadline_error(worker_session_id: str, seconds: float) -> str:
+    """The failure text for a synchronous worker that blew its wall-clock cap."""
+    return (
+        f"The worker did not finish within the {seconds:.0f}s cap for a "
+        "synchronous Task, so the call was abandoned rather than blocking the "
+        "parent turn any further. Re-dispatch it in the background if the work "
+        f"genuinely takes this long. Its partial transcript is in session "
+        f"{worker_session_id}."
+    )
+
+
+async def _stop_wedged_worker(worker_session_id: str) -> None:
+    """Interrupt a worker the watchdog just gave up on.
+
+    Deliberately NOT the supervisor's teardown: teardown latches ``torn_down``,
+    which makes ``dispatch_worker``'s ``finally`` skip the registry completion
+    and the caller wake — and a watchdog verdict is precisely the case where
+    the parent MUST be told, with the "worker failed to start" summary the
+    audit's ten stalled workers never got in time. So this only stops the turn
+    and lets the normal failure path do the reporting. Never raises.
+    """
+    from app.core import turn_manager
+
+    try:
+        await turn_manager.interrupt_async(worker_session_id, "stop")
+    except Exception:  # noqa: BLE001 — the failure verdict stands either way
+        logger.debug(
+            "ProviderAgent: could not interrupt wedged worker %s",
+            worker_session_id, exc_info=True,
+        )
+
+
+def _active_worker_background_work(worker_session_id: str) -> List[Dict[str, Any]]:
+    """The worker's own still-running background tasks (Monitors, children).
+
+    In-memory registry read; never raises (an unreadable registry answers
+    "nothing outstanding", which is the pre-existing behaviour).
+    """
+    try:
+        from app.core.task_registry import task_registry
+
+        return list(task_registry.get_active(worker_session_id) or [])
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "ProviderAgent: background-work probe failed for worker %s",
+            worker_session_id, exc_info=True,
+        )
+        return []
+
+
+def _work_task_id(record: Mapping[str, Any]) -> Optional[str]:
+    """The task id off a registry record in EITHER shape.
+
+    ``get_active`` hands back the camelCase WIRE dict (``id``/``subject``), not
+    the internal record — reading ``task_id`` there is how the first cut of
+    this reported "Monitor ?".
+    """
+    value = record.get("id") or record.get("task_id")
+    return str(value) if value else None
+
+
+def _describe_background_work(records: List[Dict[str, Any]]) -> str:
+    """A short "Monitor abc123 (npm test)" list for a failure message."""
+    parts = []
+    for record in records[:4]:
+        kind = "Monitor" if record.get("kind") == "shell" else "worker"
+        title = " ".join(
+            str(record.get("subject") or record.get("title") or "").split()
+        )[:60]
+        tid = _work_task_id(record) or "?"
+        parts.append(f"{kind} {tid}" + (f" ({title})" if title else ""))
+    if len(records) > 4:
+        parts.append(f"and {len(records) - 4} more")
+    return ", ".join(parts)
+
+
+def _background_settle_seconds() -> float:
+    """Configured drain grace for a finished worker's own background work."""
+    try:
+        from app.core.config import settings
+
+        return max(
+            0.0,
+            float(
+                getattr(settings, "task_worker_background_settle_seconds", 0.0) or 0.0
+            ),
+        )
+    except Exception:  # noqa: BLE001 — a missing setting must not fail a worker
+        return 0.0
+
+
+def _force_settle_background_work(
+    worker_session_id: str, records: List[Dict[str, Any]]
+) -> None:
+    """Retire a dead worker's abandoned Monitor rows.
+
+    Nothing else ever will: a Monitor record is scoped to the session that made
+    it (``TaskGet`` resolves against the CALLER's session), so once its worker
+    is gone the row can only sit "running" forever, keeping the session's
+    background-work predicates true. Child WORKER rows are left alone — their
+    own dispatch owns them and completes them properly. Never raises.
+    """
+    try:
+        from app.core.task_registry import task_registry
+
+        for record in records:
+            task_id = _work_task_id(record)
+            if record.get("kind") != "shell" or not task_id:
+                continue
+            task_registry.complete_task(
+                worker_session_id,
+                task_id,
+                "killed",
+                summary=(
+                    "Abandoned: the worker that started it ended first, so "
+                    "nothing can read its result."
+                ),
+                notify=False,
+            )
+    except Exception:  # noqa: BLE001 — bookkeeping, never fatal
+        logger.debug(
+            "ProviderAgent: force-settle of worker %s background work failed",
+            worker_session_id, exc_info=True,
+        )
+
+
+def _outstanding_work_error(
+    worker_session_id: str, records: List[Dict[str, Any]]
+) -> str:
+    """The failure text for a worker that ended with its own work still live."""
+    return (
+        "worker ended with background work outstanding: "
+        f"{_describe_background_work(records)}. Its final message is an interim "
+        "note, not a result, and nothing can reach that work now — a worker has "
+        "no wake seam. Re-dispatch with the work done inside the turn. Its "
+        f"transcript is in session {worker_session_id}."
+    )
+
+
+def _settle_owner_row(
+    owner_session_id: str,
+    worker_session_id: str,
+    launch_key: str,
+    status: str,
+    summary: Optional[str],
+    *,
+    report_path: Optional[str] = None,
+    report_chars: Optional[int] = None,
+    notify: bool = True,
+) -> None:
+    """Terminate the OWNER's copy of a nested worker's registry row.
+
+    The owner's row is what arms its park gate and its wake (2026-09-05 audit,
+    D). Leaving it "running" would park the dispatching worker forever on a
+    child that is already gone — the exact failure the root-parented version
+    caused in the other direction. Never raises: this is bookkeeping beside an
+    outcome that is already decided.
+    """
+    from app.core.task_registry import task_registry
+
+    try:
+        task_registry.complete_task(
+            owner_session_id,
+            worker_session_id,
+            status,
+            summary=summary,
+            report_path=report_path,
+            report_chars=report_chars,
+            notify=notify,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "ProviderAgent: owner registry completion failed for worker %s",
+            worker_session_id,
+        )
+    if status in _REGISTRY_FAILURE_STATUSES:
+        # A failed/killed worker must not keep the owner's park gate armed. The
+        # gate counts UNRESOLVED launches and ``complete_task`` above resolves
+        # this one, but a row that never existed (registry cleared mid-flight)
+        # would leave the launch id behind — so discard it outright, exactly as
+        # the supervisor does for the routing parent.
+        try:
+            task_registry.discard_background_launch(owner_session_id, launch_key)
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "ProviderAgent: owner park-gate purge failed for worker %s",
+                worker_session_id, exc_info=True,
+            )
+
+
 def _torn_down_error(reason: Optional[str], worker_session_id: str) -> str:
     """The failure message for a worker the supervisor killed underneath us."""
     from app.core import provider_agent_supervisor as sup
@@ -909,6 +1185,103 @@ def _no_terminal_event_error(worker_session_id: str, turn_id: Optional[str]) -> 
         f"The worker produced no terminal turn event{detail}, so its result "
         f"cannot be trusted. Its session is {worker_session_id}."
     )
+
+
+# ---------------------------------------------------------------------------
+# Provider rate-limit refusals at worker connect (2026-09-05 audit, C)
+# ---------------------------------------------------------------------------
+
+#: The provider's own "come back in N" hint, in the two shapes that reach us:
+#: the sentence OpenAI puts in a 429 body ("Please try again in 1.049s",
+#: "...in 980ms") and the ``retry-after`` header the SDK stringifies into the
+#: same error repr. Seconds is the unit both are normalized to.
+_RETRY_AFTER_SENTENCE_RE = re.compile(
+    r"try\s+again\s+in\s+([0-9]+(?:\.[0-9]+)?)\s*(ms|s|sec|secs|seconds?)\b",
+    re.IGNORECASE,
+)
+_RETRY_AFTER_HEADER_RE = re.compile(
+    r"['\"]?retry[-_]after['\"]?\s*[:=]\s*['\"]?([0-9]+(?:\.[0-9]+)?)",
+    re.IGNORECASE,
+)
+
+#: Substrings that identify a capacity refusal rather than a broken request.
+#: Deliberately narrow — a mis-classification here would retry a worker whose
+#: brief is the problem, which is how a bad dispatch becomes four bad
+#: dispatches.
+_RATE_LIMIT_MARKERS = (
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "too many requests",
+    "tokens per min",
+    " tpm",
+    "(tpm)",
+    "quota exceeded",
+    "over capacity",
+    "overloaded",
+)
+
+#: The HTTP status, as its own token. A bare ``"429"`` substring is NOT safe
+#: here: every failure message carries the worker's session id, and a UUID
+#: containing ``-429c-`` made a first-frame timeout read as a rate limit.
+_HTTP_429_RE = re.compile(r"(?<![0-9A-Za-z])429(?![0-9A-Za-z])")
+
+
+def looks_rate_limited(text: Optional[str]) -> bool:
+    """True when ``text`` reads as a provider CAPACITY refusal.
+
+    A capacity refusal is the one failure a re-dispatch reliably fixes: the
+    brief is fine, the org's token window was simply full. Everything else —
+    a bad model id, a missing credential, a rejected prompt — comes back
+    identical however many times it is retried.
+    """
+    if not text:
+        return False
+    lowered = text.lower()
+    if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
+        return True
+    return bool(_HTTP_429_RE.search(lowered))
+
+
+def rate_limit_retry_after(text: Optional[str]) -> Optional[float]:
+    """Seconds the provider asked us to wait, or ``None``.
+
+    ``None`` means "this is not a reschedulable capacity refusal" — either the
+    text is not a rate limit at all, or it carries no usable hint, in which
+    case guessing an interval is worse than reporting the failure. A parsed
+    value is clamped to a sane band: providers have asked for ``980ms`` (too
+    short to be worth a round trip on its own — the CALLER's backoff widens it)
+    and, rarely, for hours (which is not a retry, it is an outage).
+    """
+    if not looks_rate_limited(text):
+        return None
+    assert text is not None
+    match = _RETRY_AFTER_SENTENCE_RE.search(text)
+    if match:
+        value = float(match.group(1))
+        if match.group(2).lower() == "ms":
+            value /= 1000.0
+    else:
+        header = _RETRY_AFTER_HEADER_RE.search(text)
+        if not header:
+            return None
+        value = float(header.group(1))
+    if value <= 0 or value > 600.0:
+        return None
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Liveness watchdog verdicts (2026-09-05 audit, A/B)
+# ---------------------------------------------------------------------------
+
+#: The worker's provider connection tripped its install-wide circuit breaker.
+WAIT_RATE_LIMITED = "rate_limited"
+#: The worker forwarded ZERO frames inside the first-frame deadline — it never
+#: started. See :data:`app.core.config.Settings.task_worker_first_frame_seconds`.
+WAIT_NO_FIRST_FRAME = "no_first_frame"
+#: The worker blew a hard wall-clock cap (synchronous dispatch only).
+WAIT_DEADLINE = "deadline"
 
 
 #: Registry statuses that mean the worker did not deliver (task_registry's
@@ -1023,7 +1396,19 @@ def _failure_summary(
         or "no error detail was recorded"
     if len(text) > _FAILURE_SUMMARY_CHARS:
         text = text[: _FAILURE_SUMMARY_CHARS - 1].rstrip() + "…"
-    prefix = "worker failed to start" if not frames_forwarded else "worker failed"
+    if not frames_forwarded:
+        # Say WHICH kind of "never started" this is. A capacity refusal is a
+        # queueing problem the harness has already retried; a parent that reads
+        # only the raw provider string ("Rate limit reached for gpt-5.6-luna in
+        # organization org-…") learns to work around the harness instead — an
+        # audited model started capping its own workers at three tool calls.
+        prefix = (
+            "worker failed to start (provider at capacity, already retried)"
+            if looks_rate_limited(text)
+            else "worker failed to start"
+        )
+    else:
+        prefix = "worker failed"
     return f"{prefix}: {text}"
 
 
@@ -1135,6 +1520,35 @@ async def _notify_caller_terminal(
         )
 
 
+async def announce_abandoned_retry(
+    owner_session_id: str, worker_session_id: str, summary: str
+) -> None:
+    """Tell the caller about a failure whose wake a planned retry suppressed.
+
+    ``dispatch_worker``'s ``suppress_caller_wake`` predicate takes the chip and
+    the wake off an attempt the caller said it was going to re-dispatch. If that
+    re-dispatch then never happens — it could not be admitted — nobody has told
+    the parent anything, and a parent parked on the receipt would sit there
+    forever. This is the one caller-side escape hatch for that window.
+
+    Never raises: it runs beside an outcome that is already decided.
+    """
+    from app.core.task_registry import task_registry
+
+    try:
+        task_registry.complete_task(
+            owner_session_id, worker_session_id, "error", summary=summary,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "ProviderAgent: abandoned-retry row update failed for %s",
+            worker_session_id, exc_info=True,
+        )
+    await _notify_caller_terminal(
+        owner_session_id, worker_session_id, worker_session_id, "error", summary,
+    )
+
+
 async def dispatch_worker(
     *,
     parent_session_id: str,
@@ -1151,6 +1565,9 @@ async def dispatch_worker(
     tool_allowlist: Optional[List[str]] = None,
     agent_name: Optional[str] = None,
     worker_session_id: Optional[str] = None,
+    first_frame_seconds: Optional[float] = None,
+    max_wall_seconds: Optional[float] = None,
+    suppress_caller_wake: Optional[Callable[[str, Optional[str], int], bool]] = None,
 ) -> WorkerOutcome:
     """Run ``prompt`` in a fresh session bound to ``provider_id``/``model_id``.
 
@@ -1168,11 +1585,31 @@ async def dispatch_worker(
     — without it the parent's client can be evicted mid-flight and the worker is
     stranded.
 
-    Has NO wall-clock ceiling (2026-08-21 ruling): a subagent may legitimately
-    run for hours, so the wait blocks until the worker goes idle, its provider's
-    circuit breaker trips, or the supervisor tears it down. A worker wedged on a
-    silently-hung provider is stopped from the UI (Task card / stop control).
-    Every failure path still returns a :class:`WorkerOutcome` with ``ok=False``.
+    A WORKING worker has no wall-clock ceiling (2026-08-21 ruling): a subagent
+    may legitimately run for hours, so the wait blocks until it goes idle, its
+    provider's circuit breaker trips, or the supervisor tears it down. Two
+    bounded exceptions, added by the 2026-09-05 audit, cover the states that
+    are not "working" at all — see :func:`_await_worker_idle`:
+
+    * ``first_frame_seconds`` — a worker that has streamed NOTHING by then never
+      connected, and is failed with the "worker failed to start" summary the
+      audit's ten stalled workers only got ~900s late;
+    * ``max_wall_seconds`` — a hard cap the SYNCHRONOUS lane passes, because a
+      sync dispatch blocks the parent's turn for as long as it waits.
+
+    ``None`` for either takes the configured default (:func:`_worker_deadlines`).
+    Every failure path still returns a :class:`WorkerOutcome` with ``ok=False``,
+    now carrying ``frames_forwarded`` (0 = it never started, the only failure a
+    re-dispatch can honestly fix) and ``killed`` (a teardown, never retried).
+
+    ``suppress_caller_wake`` lets a RETRYING caller keep the doomed attempt's
+    failure off the parent's wake lane: it is handed
+    ``(status, preview, frames_forwarded)`` in the ``finally`` and returns True
+    to skip the caller wake and the terminal chip for this attempt. The card,
+    the registry row and the report are unaffected — the attempt stays fully
+    visible in the task list, it just does not spend a parent turn on a failure
+    the harness is already fixing. See
+    :func:`app.core.task_dispatch._dispatch_worker_with_retries`.
 
     Progress is forwarded to the PARENT's event feed by
     :class:`app.core.provider_agent_feed.WorkerFeed` so the existing subagent
@@ -1184,6 +1621,22 @@ async def dispatch_worker(
     It rides the feed's ``subagent.started`` and the task-registry row so the
     card names the agent rather than the model slug it happens to run on
     (2026-08-17 ruling); purely presentational, never a join key.
+
+    OWNERSHIP vs ROUTING (2026-09-05 audit, D). ``parent_session_id`` is the
+    ROUTING parent — for nested Task-tool dispatch it is the ROOT session,
+    whose UI renders the card and answers approvals (ruling A9). That stays.
+    But the same id was also arming the notification BOOKKEEPING
+    (``mark_background_launch`` → the terminal chip, the scheduler wake and the
+    task-notification steer), so a root session was woken for, and billed a
+    turn to report on, workers it never dispatched and could not act on — while
+    the worker that DID dispatch them ended its turn "waiting for research" and
+    was terminated half-way through writing a file. Those lanes are armed on
+    the OWNER (``context_session_id``, the session that actually called Task)
+    instead. The root keeps the card, the registry row and the worker BUDGET —
+    a nested worker is still a live worker on this box, and the tree ceiling
+    (``task_tool_max_workers``) is what stops one runaway agent from filling
+    it; ``_live_worker_count_for_root`` walks the caller chain, so it counts
+    nested workers wherever they registered.
     """
     # Fail closed on the registry-index-0 cost trap: a provider turn with no
     # model resolves downstream to an arbitrary curated entry, so an implicit
@@ -1212,6 +1665,15 @@ async def dispatch_worker(
     worker_session_id = worker_session_id or str(uuid.uuid4())
     title = (label or "").strip() or f"Task worker · {model_id or profile_id}"
     model_tag = model_id or "inherit"
+    # The session that actually dispatched this worker — the one whose turn is
+    # waiting on it and whose notification lanes must be armed. Equals
+    # ``parent_session_id`` at depth 1; differs for a nested dispatch, where
+    # ``parent_session_id`` is the ROOT (card routing only).
+    owner_session_id = context_session_id or parent_session_id
+    nested = bool(owner_session_id) and owner_session_id != parent_session_id
+    first_frame_seconds, max_wall_seconds = _worker_deadlines(
+        background, first_frame_seconds, max_wall_seconds
+    )
 
     def _prepare_worker_blocking() -> Tuple[
         Optional[SessionRow], Optional[str], Optional[str], Optional[str],
@@ -1379,6 +1841,23 @@ async def dispatch_worker(
         tool_use_id=launch_key,
         agent=agent_name,
     )
+    if nested:
+        # A SECOND row, on the session that dispatched it (audit finding D).
+        # The root's row above is what the human's UI renders; this one is what
+        # makes the owner's own TaskList honest, what keeps the owner's dispatch
+        # from settling while its child runs
+        # (``_drain_worker_background_work``), and what
+        # ``is_own_background_task`` reads when the terminal lands.
+        task_registry.start_task(
+            owner_session_id,
+            worker_session_id,
+            "agent",
+            title,
+            summary=title,
+            model=f"{provider_tag} · {model_tag}",
+            tool_use_id=launch_key,
+            agent=agent_name,
+        )
 
     # Ownership of this worker's terminal, for the parent's notification lanes.
     # ``is_own_background_task`` — the gate on BOTH the terminal chip
@@ -1405,8 +1884,18 @@ async def dispatch_worker(
     # session forever. The teardown path additionally purges the id outright
     # (``provider_agent_supervisor._purge_park_gate_residue`` discards
     # ``{tool_use_id, task_id, worker_session_id}`` — a superset of this key).
+    #
+    # ARMED ON THE OWNER, not the routing parent (2026-09-05 audit, D). For a
+    # depth-1 dispatch these are the same session and nothing changes. For a
+    # NESTED one they are not: arming the root made the root's scheduler wake,
+    # task-notification steer and terminal chip fire for a worker it never
+    # dispatched (2eca0b49 F3, 4ce681e2 F2, bb10c865 F9) — one audited root
+    # spent a whole costly turn calling TaskGet on a report it did not own and
+    # re-parking. The root now fails ``is_own_background_task`` for these, which
+    # is exactly the condition ``turn_scheduler.on_task_terminal`` already
+    # suppresses on, and the OWNER gets the wake it was waiting for.
     if background:
-        task_registry.mark_background_launch(parent_session_id, launch_key)
+        task_registry.mark_background_launch(owner_session_id, launch_key)
 
     feed = WorkerFeed(
         parent_session_id=parent_session_id,
@@ -1478,27 +1967,78 @@ async def dispatch_worker(
         # existing once the turn is submitted.
         feed.start_following()
 
-        rate_limited = await _await_worker_idle(worker_session_id, provider_id)
+        # Absolute deadlines, taken once so a park loop cannot reset them. The
+        # first-frame one is the watchdog the audit's ten ~900s stalls needed;
+        # the hard one is the synchronous lane's ceiling. 0 = disabled.
+        _clock = asyncio.get_event_loop().time()
+        first_frame_deadline = (
+            _clock + first_frame_seconds if first_frame_seconds > 0 else None
+        )
+        hard_deadline = _clock + max_wall_seconds if max_wall_seconds > 0 else None
 
-        # A worker that PARKED on its own background work is idle but not
-        # finished (see ``_worker_still_working``). Keep waiting for the wake
-        # turn instead of booking a half-done brief as its report. Self-limiting:
-        # the moment the work it parked on is gone, so is the loop.
+        wait_verdict = await _await_worker_idle(
+            worker_session_id,
+            provider_id,
+            feed=feed,
+            first_frame_deadline=first_frame_deadline,
+            hard_deadline=hard_deadline,
+        )
+
+        # An idle worker is not necessarily a finished one. Two shapes:
+        #
+        # 1. it PARKED on its own background work (``_worker_still_working``) —
+        #    a park is not an ending, so wait, unbounded, exactly as before;
+        # 2. its turn ENDED with background work still live. A worker has no
+        #    wake seam it can rely on, so "tests are running, I'll report when
+        #    they finish" is not describing a future — the audit found that
+        #    sentence booked as a worker's entire report. Give the work a
+        #    BOUNDED drain (``task_worker_background_settle_seconds``): if it
+        #    settles, whatever turn the worker ends on is its real report; if it
+        #    does not, the dispatch fails rather than reporting an interim note.
+        #
+        # Either way the loop re-enters ``_await_worker_idle``, so a wake turn
+        # the settling work triggers is waited out and read as the final turn.
         announced_park = False
-        while not rate_limited and not supervised.torn_down:
-            if not await asyncio.to_thread(
-                _worker_still_working, worker_session_id
-            ):
-                break
-            if not announced_park:
-                announced_park = True
-                logger.info(
-                    "ProviderAgent: worker %s is parked on its own background "
-                    "work — waiting for it to finish rather than settling the "
-                    "task", worker_session_id,
-                )
+        announced_drain = False
+        settle_deadline: Optional[float] = None
+        settle_budget = _background_settle_seconds()
+        outstanding: List[Dict[str, Any]] = []
+        while not wait_verdict and not supervised.torn_down:
+            if await asyncio.to_thread(_worker_still_working, worker_session_id):
+                if not announced_park:
+                    announced_park = True
+                    logger.info(
+                        "ProviderAgent: worker %s is parked on its own "
+                        "background work — waiting for it to finish rather "
+                        "than settling the task", worker_session_id,
+                    )
+            else:
+                outstanding = _active_worker_background_work(worker_session_id)
+                if not outstanding:
+                    break
+                now = asyncio.get_event_loop().time()
+                if settle_deadline is None:
+                    settle_deadline = now + settle_budget
+                if not announced_drain:
+                    announced_drain = True
+                    logger.info(
+                        "ProviderAgent: worker %s ended its turn with %d "
+                        "background task(s) still running — draining for up to "
+                        "%.0fs before writing its report",
+                        worker_session_id, len(outstanding), settle_budget,
+                    )
+                if now >= settle_deadline:
+                    break
             await asyncio.sleep(PARK_RECHECK_SECONDS)
-            rate_limited = await _await_worker_idle(worker_session_id, provider_id)
+            wait_verdict = await _await_worker_idle(
+                worker_session_id,
+                provider_id,
+                feed=feed,
+                # A worker that reached this loop has streamed frames, so the
+                # first-frame watchdog is spent; the hard cap is not.
+                first_frame_deadline=None,
+                hard_deadline=hard_deadline,
+            )
 
         # torn_down FIRST, on every branch: the supervisor may have killed this
         # worker while we waited (turn end, stop-all), and a killed worker's
@@ -1512,9 +2052,35 @@ async def dispatch_worker(
             status = "killed"
             return WorkerOutcome(
                 ok=False, session_id=worker_session_id, error=error,
+                frames_forwarded=feed.frames_forwarded, killed=True,
             )
 
-        if rate_limited:
+        if wait_verdict in (WAIT_NO_FIRST_FRAME, WAIT_DEADLINE):
+            # The watchdog, not the provider, is ending this. Stop the turn (the
+            # worker may be wedged on a connection that will never open) and let
+            # the ordinary failure path do the reporting — the parent needs the
+            # "worker failed to start" summary now, not in fifteen minutes.
+            error = (
+                _no_first_frame_error(worker_session_id, first_frame_seconds)
+                if wait_verdict == WAIT_NO_FIRST_FRAME
+                else _hard_deadline_error(worker_session_id, max_wall_seconds)
+            )
+            preview = error
+            status = "error"
+            logger.warning(
+                "ProviderAgent: worker %s abandoned by the %s watchdog "
+                "(%d frame(s) forwarded)",
+                worker_session_id, wait_verdict, feed.frames_forwarded,
+            )
+            await _stop_wedged_worker(worker_session_id)
+            return WorkerOutcome(
+                ok=False,
+                session_id=worker_session_id,
+                error=error,
+                frames_forwarded=feed.frames_forwarded,
+            )
+
+        if wait_verdict == WAIT_RATE_LIMITED:
             # Fail fast rather than block indefinitely: the provider is refusing
             # everything install-wide, so the worker cannot make progress. Kill
             # it through the supervisor's own per-worker teardown so the card,
@@ -1541,6 +2107,7 @@ async def dispatch_worker(
                 )
             return WorkerOutcome(
                 ok=False, session_id=worker_session_id, error=error,
+                frames_forwarded=feed.frames_forwarded, killed=True,
             )
 
         outcome = final_turn_outcome(worker_session_id)
@@ -1552,6 +2119,7 @@ async def dispatch_worker(
                 session_id=worker_session_id,
                 error=str(outcome["error"]),
                 usage=outcome["usage"],
+                frames_forwarded=feed.frames_forwarded,
             )
         if outcome["interrupted"]:
             preview = "The worker session was interrupted before it finished."
@@ -1560,6 +2128,7 @@ async def dispatch_worker(
                 session_id=worker_session_id,
                 error="The worker session was interrupted before it finished.",
                 usage=outcome["usage"],
+                frames_forwarded=feed.frames_forwarded,
             )
         if not outcome.get("terminal_found"):
             # No terminal turn event at all — see _no_terminal_event_error. The
@@ -1572,6 +2141,7 @@ async def dispatch_worker(
                 session_id=worker_session_id,
                 error=error,
                 usage=outcome["usage"],
+                frames_forwarded=feed.frames_forwarded,
             )
 
         final_text = final_assistant_text(worker_session_id)
@@ -1601,9 +2171,36 @@ async def dispatch_worker(
                 session_id=worker_session_id,
                 error=error,
                 usage=outcome["usage"],
+                frames_forwarded=feed.frames_forwarded,
             )
 
         report, truncated = bound_report(final_text)
+
+        # If this worker still has live background work after draining, its final note is interim rather than a
+        # finished report. Fail dispatch and retire abandoned Monitor rows that no other session can reach.
+        outstanding = _active_worker_background_work(worker_session_id)
+        if outstanding:
+            _force_settle_background_work(worker_session_id, outstanding)
+            error = _outstanding_work_error(worker_session_id, outstanding)
+            preview = error
+            status = "error"
+            if background:
+                # The interim text is still the best thing the worker produced;
+                # persist it so a parent that wants to see how far it got can,
+                # even though the outcome is a failure.
+                report_path, report_chars = _persist_worker_report(
+                    parent_row, worker_session_id, report
+                )
+            return WorkerOutcome(
+                ok=False,
+                session_id=worker_session_id,
+                report=report,
+                truncated=truncated,
+                error=error,
+                usage=outcome["usage"],
+                frames_forwarded=feed.frames_forwarded,
+            )
+
         status = "completed"
         preview = report
         completion_summary = _completion_summary(report)
@@ -1622,6 +2219,7 @@ async def dispatch_worker(
             report=report,
             truncated=truncated,
             usage=outcome["usage"],
+            frames_forwarded=feed.frames_forwarded,
         )
     except asyncio.CancelledError:
         # The parent's SDK client is going away (eviction / interrupt). Stop the
@@ -1641,6 +2239,10 @@ async def dispatch_worker(
             ok=False,
             session_id=worker_session_id,
             error=f"Worker dispatch failed: {exc}",
+            # Same count the ``finally``'s retry predicate reads, so the caller
+            # and the wake-suppression decision cannot disagree about whether
+            # this worker ever started.
+            frames_forwarded=feed.frames_forwarded,
         )
     finally:
         # Turn-end teardown may have already settled this worker (card, registry
@@ -1648,6 +2250,17 @@ async def dispatch_worker(
         # re-emit a terminal frame and re-complete a row that is already
         # terminal, so the latch wins and this block only unregisters.
         if supervised.torn_down:
+            if nested:
+                # The supervisor settles the ROOT's row and purges the root's
+                # park-gate residue; it knows nothing about the owner's copy.
+                # Settle it here or the dispatching worker keeps an unresolved
+                # launch and a "running" row for a worker that is already dead.
+                _settle_owner_row(
+                    owner_session_id, worker_session_id, launch_key, "killed",
+                    _torn_down_error(
+                        supervised.torn_down_reason, worker_session_id
+                    ),
+                )
             provider_agent_supervisor.unregister_worker(
                 parent_session_id, worker_session_id
             )
@@ -1691,6 +2304,25 @@ async def dispatch_worker(
             terminal_summary = _failure_summary(
                 status, preview, feed.frames_forwarded
             ) or completion_summary
+            # A caller that is about to RE-DISPATCH this brief takes the chip
+            # and the wake off this attempt: the parent should hear once, about
+            # the attempt that settles it, not once per transport hiccup the
+            # harness is already recovering from. The row itself is written
+            # either way, so the attempt stays visible in the task list.
+            retry_pending = False
+            if suppress_caller_wake is not None:
+                try:
+                    retry_pending = bool(
+                        suppress_caller_wake(
+                            status, preview, feed.frames_forwarded
+                        )
+                    )
+                except Exception:  # noqa: BLE001 — a predicate must not lose a wake
+                    logger.debug(
+                        "ProviderAgent: retry predicate raised for worker %s",
+                        worker_session_id, exc_info=True,
+                    )
+                    retry_pending = False
             try:
                 task_registry.complete_task(
                     parent_session_id,
@@ -1699,9 +2331,18 @@ async def dispatch_worker(
                     summary=terminal_summary,
                     report_path=report_path,
                     report_chars=report_chars,
+                    notify=not retry_pending,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("ProviderAgent: registry completion failed")
+            if nested:
+                _settle_owner_row(
+                    owner_session_id, worker_session_id, launch_key, status,
+                    terminal_summary,
+                    report_path=report_path,
+                    report_chars=report_chars,
+                    notify=not retry_pending,
+                )
             # The worker session's OWN row records the verdict. Only the
             # ``"error"`` status — the worker ran and did not deliver — is
             # stamped: ``"killed"`` is a teardown (the supervisor's own path,
@@ -1745,9 +2386,16 @@ async def dispatch_worker(
             # (parent client eviction / interrupt), and a wake lost to that
             # cancellation leaves a parked parent stranded. See
             # _notify_caller_terminal for the guard inventory.
-            if background:
+            #
+            # The wake goes to the OWNER — the session that dispatched this
+            # worker and is waiting on it — not to the routing parent. They are
+            # the same session for a depth-1 dispatch; for a nested one the
+            # routing parent is the ROOT, which never launched this worker and
+            # whose ``is_own_background_task`` gate now (correctly) suppresses
+            # the frame anyway.
+            if background and not retry_pending:
                 await emit_shielded(_notify_caller_terminal(
-                    parent_session_id,
+                    owner_session_id,
                     worker_session_id,
                     launch_key,
                     status,

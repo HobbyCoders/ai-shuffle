@@ -639,6 +639,78 @@ class Settings(BaseSettings):
     # Override via SUBAGENT_MAX_CONCURRENT_PER_SESSION.
     subagent_max_concurrent_per_session: int = 8
 
+    # ── Task worker lifecycle (2026-09-05 audit, round 7) ────────────────
+    # A worker has no wall-clock ceiling by design — a subagent may legitimately
+    # run for hours — but a worker that has never streamed a SINGLE frame has
+    # not started, and the harness knows it (``frames_forwarded == 0`` is what
+    # produces the "worker failed to start" summary). The audit found ten such
+    # workers sitting "started" for ~900s each across seven sessions before
+    # anyone was told. These settings bound only that pre-first-frame state; a
+    # working worker stays unbounded.
+    #
+    # How long an admitted worker may go without streaming its first frame
+    # before it is failed as "worker failed to start". 0 disables the watchdog.
+    #
+    # TRADE-OFF, because there is no third signal: a worker whose provider
+    # connection is wedged and a reasoning model whose first token is merely
+    # late look identical from here — both have an empty event log. Raise this
+    # if slow-thinking models start being reported as "failed to start"; the
+    # automatic re-dispatch already gives the retry DOUBLE this deadline for
+    # exactly that reason, so a false positive costs one wasted start rather
+    # than the work.
+    # Override via TASK_WORKER_FIRST_FRAME_SECONDS.
+    task_worker_first_frame_seconds: float = 90.0
+    # Hard wall-clock cap on a SYNCHRONOUS Task worker, measured across every
+    # attempt. A sync dispatch blocks the parent turn — it cannot park, cannot
+    # be steered and cannot be told the worker went quiet — so unlike the
+    # background lane it gets a real ceiling (two audited sync dispatches
+    # blocked their parents for 15m03s and 19m28s and produced nothing).
+    # 0 disables the cap. Override via TASK_WORKER_SYNC_MAX_SECONDS.
+    task_worker_sync_max_seconds: float = 900.0
+    # How many times a BACKGROUND dispatch whose worker never streamed a frame
+    # is re-dispatched automatically with the same brief. Each retry is its own
+    # visible task row. Sync dispatches never take this path — their caller is
+    # live and gets the failure to act on. Override via
+    # TASK_WORKER_START_RETRIES.
+    task_worker_start_retries: int = 1
+    # Reschedule provider-rate-limited worker connects using the parseable provider delay or Retry-After rather
+    # than exhausting retries before the token window clears. Applies to both modes;
+    # TASK_WORKER_RATE_LIMIT_RETRIES controls the limit.
+    task_worker_rate_limit_retries: int = 3
+    # Ceiling on one rate-limit reschedule's backoff. The provider's own
+    # retry-after is the floor; it is doubled per attempt and clamped here.
+    # Override via TASK_WORKER_RATE_LIMIT_BACKOFF_CAP_SECONDS.
+    task_worker_rate_limit_backoff_cap_seconds: float = 60.0
+    # Concurrent workers admitted per PROVIDER ORG — one ``model_providers``
+    # row is one credential is one org quota. Worker admission gated only on
+    # worker COUNT (8) and pool lane, never on provider throughput, so five
+    # large-context workers on one key were admitted and then died on the org's
+    # tokens-per-minute limit. This is the cheap interim for real token
+    # accounting: a dispatch over the cap QUEUES (it is not refused) until a
+    # sibling on that provider settles. 0 disables. Never applies to the
+    # provider-less delegated Claude leg, whose quota is per-subscription and
+    # handled by the CLI's own backoff.
+    # Override via TASK_WORKER_MAX_PER_PROVIDER.
+    task_worker_max_per_provider: int = 3
+    # How long a dispatch queues on that provider-org ceiling before giving up
+    # with a retryable capacity error. Longer than the pool admission wait (a
+    # TPM window is 60s, so waiting out one or two is usually right), but NOT
+    # unbounded: the queue happens inside the model's Task tool call, so this
+    # is also the worst case for how long that call can take to hand back a
+    # receipt. Raising it trades a slower tool call for fewer refusals.
+    # Override via TASK_WORKER_PROVIDER_QUEUE_SECONDS.
+    task_worker_provider_queue_seconds: float = 120.0
+    # How long a worker's OWN background work (Monitor shells, nested workers)
+    # is given to drain after its turn ends, before its report is written. A
+    # worker has no wake seam: one audited worker ended its turn with
+    # "Baseline tests are running. No files changed yet." and that interim
+    # sentence became its report and its registry summary. Work still
+    # outstanding when this expires fails the worker instead of booking an
+    # interim note as a result. 0 disables the WAIT, not the check: a worker
+    # that ends with live work then fails immediately.
+    # Override via TASK_WORKER_BACKGROUND_SETTLE_SECONDS.
+    task_worker_background_settle_seconds: float = 120.0
+
     # Compiled system prompt on the delegated (claude CLI) leg (agents-program
     # ruling A3). True (default since the 2026-08 prompt overhaul): the fluid
     # compiler's full output (base + instruction files + skills + env +
