@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 IDLE_SECONDS = 900
 READY_SECONDS = 45
-CALL_SECONDS = 40
 MAX_CALLS = 32
 TOOL_NAMES = frozenset({
     "browser_status", "browser_navigate", "browser_snapshot", "browser_act",
@@ -32,9 +31,62 @@ TOOL_NAMES = frozenset({
     "browser_upload", "browser_batch", "browser_wait",
 })
 
+# Tools the startup handshake itself depends on. A build that predates the
+# shared-workspace runtime exposes neither, so the handshake would otherwise
+# fail with an undiagnosable parse error (audit R7: a stale dist shipped a 503
+# reading only "startup failed (KeyError)").
+HANDSHAKE_TOOLS = ("browser_status", "browser_tabs")
+
+STALE_BUILD_DETAIL = (
+    "The browser tool build is out of date and cannot run the shared browser "
+    "(it does not provide browser_status). Rebuild it with "
+    "`npm --prefix browser-mcp ci && npm --prefix browser-mcp run build`, "
+    "or redeploy the app image, then try again."
+)
+
+# Wall clock for one agent-facing browser tool call, measured at this host-call
+# boundary. A page that stops answering (a modal dialog, a hung renderer, a
+# navigation that never commits) must return an error to the model instead of
+# holding the turn open — audit R7 saw a browser_eval + four browser_act calls
+# leave a session "running" for three hours. Override with
+# BROWSER_TOOL_TIMEOUT_SECONDS; the underlying MCP call gets a slightly longer
+# deadline so this boundary is the one that normally fires.
+DEFAULT_CALL_TIMEOUT = 30.0
+_MCP_TIMEOUT_SLACK = 10.0
+
+
+def call_timeout():
+    """Seconds one browser tool call may take, from BROWSER_TOOL_TIMEOUT_SECONDS."""
+    import os
+
+    try:
+        value = float(os.environ.get("BROWSER_TOOL_TIMEOUT_SECONDS", ""))
+    except (TypeError, ValueError):
+        return DEFAULT_CALL_TIMEOUT
+    return value if value > 0 else DEFAULT_CALL_TIMEOUT
+
 
 class RuntimeUnavailable(RuntimeError):
     pass
+
+
+def timeout_result(tool, seconds):
+    """An MCP-shaped error the model can read, for a call that outlived its deadline."""
+    return {
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "ok": False,
+                "error": (
+                    f"{tool} did not finish within {seconds:g}s. The page stopped "
+                    "responding; the outcome is unknown and was NOT replayed. Check "
+                    "browser_status, then re-read the page before assuming anything "
+                    "was applied."
+                ),
+            }),
+        }],
+        "isError": True,
+    }
 
 
 class RawMcpClient(McpClient):
@@ -80,9 +132,32 @@ def resolve_config(session_id):
         raise RuntimeUnavailable("Browser runtime unavailable")
     server.setdefault("env", {})["AIS_BROWSER_MODE"] = "runtime"
     server.update(
-        cwd=cwd, connect_timeout=15, call_timeout=CALL_SECONDS, shutdown_timeout=3
+        cwd=cwd,
+        connect_timeout=15,
+        call_timeout=call_timeout() + _MCP_TIMEOUT_SLACK,
+        shutdown_timeout=3,
     )
     return server
+
+
+def _reported_runtime_id(status):
+    """The runtime id a ``browser_status`` result claims, or None.
+
+    Never raises. The server may answer with an error result (an unknown tool on
+    a stale build, a workspace that refused the call) or with a status body that
+    carries no identity at all; both are "this is not our child", not a crash.
+    """
+    if not isinstance(status, dict) or status.get("isError"):
+        return None
+    for item in status.get("content", []) or []:
+        if not isinstance(item, dict) or item.get("type") != "text":
+            continue
+        try:
+            body = json.loads(item.get("text") or "")
+            return browser_control.identifier(body["runtime_id"])
+        except (ValueError, TypeError, KeyError, browser_control.ControlError):
+            return None
+    return None
 
 
 class Runtime:
@@ -118,15 +193,9 @@ class Runtime:
             config.setdefault("env", {})["_AIS_BROWSER_RUNTIME_ID"] = self.runtime_id
             self.client = RawMcpClient("browser", config)
             await self.client.start()
+            await self._require_handshake_tools()
             status = await self.client.call_tool("browser_status", {})
-            reported_id = None
-            for item in status.get("content", []):
-                if item.get("type") == "text":
-                    reported_id = browser_control.identifier(
-                        json.loads(item["text"])["runtime_id"]
-                    )
-                    break
-            if status.get("isError") or reported_id != self.runtime_id:
+            if _reported_runtime_id(status) != self.runtime_id:
                 raise RuntimeUnavailable("Browser runtime did not report its expected identity")
             # list ensures one initial page, unlike create (which adds a second).
             result = await self.client.call_tool("browser_tabs", {"op": "list"})
@@ -142,6 +211,21 @@ class Runtime:
         except BaseException:
             await self._dispose()
             raise
+
+    async def _require_handshake_tools(self):
+        """Fail early, and by name, when the spawned build is too old to drive.
+
+        The app and the browser server are versioned together but deployed
+        separately (a Docker image, or a local ``browser-mcp/dist`` a checkout
+        update does not rebuild). Listing the tools first turns "the handshake
+        answered something unparseable" into one sentence the operator can act on.
+        """
+        try:
+            names = {tool.name for tool in await self.client.list_tools()}
+        except Exception:
+            return  # A listing we could not take is not evidence of a stale build.
+        if not names.issuperset(HANDSHAKE_TOOLS):
+            raise RuntimeUnavailable(STALE_BUILD_DETAIL)
 
     async def ensure(self):
         if self.closed:
@@ -240,8 +324,14 @@ async def start(session_id):
             if warm:
                 await runtime.call("browser_status", {})
             return state
+    except RuntimeUnavailable as exc:
+        logger.warning("Browser runtime startup failed: %s", exc)
+        await runtime.close()
+        raise
     except Exception as exc:
-        logger.warning("Browser runtime startup failed (%s)", type(exc).__name__)
+        logger.warning(
+            "Browser runtime startup failed (%s)", type(exc).__name__, exc_info=True
+        )
         await runtime.close()
         raise RuntimeUnavailable("Browser runtime could not start") from None
 
@@ -260,7 +350,17 @@ async def call(session_id, tool, arguments):
         if not job.cancelled():
             job.exception()
     task.add_done_callback(finished)
-    return await asyncio.shield(task)
+    deadline = call_timeout()
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), deadline)
+    except (asyncio.TimeoutError, TimeoutError):
+        # The job keeps running to its own MCP deadline — an admitted mutation
+        # is never cancelled and never replayed — but the caller stops waiting
+        # so the turn is not held open by a page that will not answer.
+        logger.warning(
+            "Browser tool %s exceeded %gs for session %s", tool, deadline, session_id
+        )
+        return timeout_result(tool, deadline)
 
 
 async def close_session(session_id):
