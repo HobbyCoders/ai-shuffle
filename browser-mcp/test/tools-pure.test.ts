@@ -265,3 +265,26 @@ describe("emptyContentWarning via browser_read_text", () => {
     expect(body.warning).toBeUndefined();
   });
 });
+
+describe("content warning cost", () => {
+  it("does not ask the page anything when the snapshot has refs", async () => {
+    let asked = 0;
+    const session = {
+      ensurePage: async () => ({}),
+      notifyNavigation: () => {},
+      pageContent: async () => {
+        asked += 1;
+        return { title: "", textChars: 0 };
+      },
+      snapshot: async () => ({
+        text: RICH_SNAPSHOT,
+        snapshot_id: 3,
+        refs: ["e1", "e2"],
+        truncated: false,
+      }),
+    } as unknown as Session;
+    const body = bodyOf(await runSnapshot(session, {}));
+    expect(body.warning).toBeUndefined();
+    expect(asked).toBe(0);
+  });
+});

@@ -114,11 +114,15 @@ export async function runNavigate(
   // Emptiness is judged from the page, never from this interactive-filtered
   // snapshot: a login form, a canvas fixture and a prose page all have few or
   // no refs while being perfectly rendered.
-  const content = await session.pageContent();
+  // A snapshot with refs is proof the page rendered, so only an empty one is
+  // worth a round-trip to ask the page what it painted.
+  const content = snap.refs.length === 0 ? await session.pageContent() : undefined;
   // The title comes from Playwright, which does not depend on a page eval
   // succeeding; only the body measurement does.
-  const title = await page.title().catch(() => content.title);
-  const warning = contentWarning({ ...content, title }, snap.refs.length);
+  const title = await page.title().catch(() => content?.title ?? "");
+  const warning = content
+    ? contentWarning({ ...content, title }, snap.refs.length)
+    : undefined;
   const landed = page.url();
   const requestedOrigin =
     target === "back" || target === "forward"

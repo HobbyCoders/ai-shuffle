@@ -17,7 +17,9 @@ export async function runSnapshot(
     scopeRef: input.scope_ref,
     maxChars: input.max_chars,
   });
-  const warning = contentWarning(await session.pageContent(), snap.refs.length);
+  // Refs are proof the page rendered; only an empty tree needs the page asked.
+  const warning =
+    snap.refs.length === 0 ? contentWarning(await session.pageContent(), 0) : undefined;
   return jsonResult(
     {
       ok: true,
