@@ -44,8 +44,17 @@ def _get(**args):
 
 @pytest.fixture
 def buffered(monkeypatch):
-    """Put known records in the ring buffer the tool reads."""
+    """Put known records in the ring buffer the tool reads.
+
+    The handler is muted for the duration: it is attached to the ROOT logger,
+    so without this every line the app logs while the test runs (building the
+    tool server, for one) lands in the buffer under test.
+    """
+    import logging
+
     from app.api import logs as logs_api
+
+    monkeypatch.setattr(logs_api.ring_handler, "level", logging.CRITICAL)
 
     def _record(message, level="INFO", logger_name="app.core.turn_scheduler",
                 minutes_ago=0):
