@@ -663,11 +663,13 @@ class Settings(BaseSettings):
     # Override via TASK_WORKER_MAX_PER_PROVIDER.
     task_worker_max_per_provider: int = 3
     # How long a dispatch queues on that provider-org ceiling before giving up
-    # with a retryable capacity error. Deliberately longer than the pool
-    # admission wait: a TPM window is 60s and a sibling worker's turn is
-    # minutes, so the useful answer is almost always "wait", not "refuse".
+    # with a retryable capacity error. Longer than the pool admission wait (a
+    # TPM window is 60s, so waiting out one or two is usually right), but NOT
+    # unbounded: the queue happens inside the model's Task tool call, so this
+    # is also the worst case for how long that call can take to hand back a
+    # receipt. Raising it trades a slower tool call for fewer refusals.
     # Override via TASK_WORKER_PROVIDER_QUEUE_SECONDS.
-    task_worker_provider_queue_seconds: float = 300.0
+    task_worker_provider_queue_seconds: float = 120.0
     # How long a worker's OWN background work (Monitor shells, nested workers)
     # is given to drain after its turn ends, before its report is written. A
     # worker has no wake seam: one audited worker ended its turn with
