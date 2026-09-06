@@ -21,6 +21,7 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 
 class AddServerActivity : NativeScreen() {
     private var url: TextInputEditText? = null
@@ -46,7 +47,7 @@ class AddServerActivity : NativeScreen() {
         if (granted) launchScanner() else status.text = "Camera is off. You can still enter the pairing code."
     }
     private fun launchScanner() {
-        scan.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setBeepEnabled(false).setPrompt("Scan your worker’s pairing QR code"))
+        scan.launch(ScanOptions().setCaptureActivity(QrCaptureActivity::class.java).setDesiredBarcodeFormats(ScanOptions.QR_CODE).setBeepEnabled(false).setPrompt("Scan your worker’s pairing QR code"))
     }
     private fun scanWorker() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) launchScanner()
@@ -56,6 +57,8 @@ class AddServerActivity : NativeScreen() {
         super.onCreate(savedInstanceState)
         render(savedInstanceState?.getBoolean("direct") ?: false)
         url?.setText(savedInstanceState?.getString("worker_url").orEmpty())
+        approvedId = savedInstanceState?.getString("approved_worker_id")
+        if (approvedId != null) status.text = "Worker approved. Tap Continue to reconnect, or return to Workers and refresh. No new code is needed."
         receiveWorkerCode()
     }
     override fun onNewIntent(intent: Intent) {
@@ -95,6 +98,7 @@ class AddServerActivity : NativeScreen() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putBoolean("direct", direct)
+        outState.putString("approved_worker_id", approvedId)
         outState.putString("worker_url", runCatching { PairingInput.origin(url?.text.toString()) }.getOrDefault(""))
     }
     private fun submitAccount() {
@@ -122,24 +126,30 @@ class AddServerActivity : NativeScreen() {
     private suspend fun awaitWorker(id: String) {
         val repo = AccountRepository(this)
         var lastFailure: String? = null
-        repeat(24) {
-            status.text = "Connecting your worker…"
-            try {
-                if (repo.workerAvailable(id)) {
-                    repo.sync()
-                    if (ServerStore.get(this).getAll().any { it.hubServerId == id }) {
-                        setResult(RESULT_OK); finish(); return
+        status.text = "Worker approved. Setting up its remote connection…"
+        val connected = withTimeoutOrNull(60_000) {
+            repeat(24) {
+                try {
+                    if (repo.workerAvailable(id)) {
+                        status.text = "Connecting your phone to the worker…"
+                        repo.sync()
+                        if (ServerStore.get(this@AddServerActivity).getAll().any { it.hubServerId == id }) {
+                            return@withTimeoutOrNull true
+                        }
                     }
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) {
+                    if (!WorkerEnrollment.retryable(e)) throw e
+                    lastFailure = e.message
+                    status.text = "${e.message.orEmpty()}\n\nYour approval is saved. Retrying the connection…"
                 }
-            } catch (e: CancellationException) { throw e }
-            catch (e: Exception) {
-                if (!WorkerEnrollment.retryable(e)) throw e
-                lastFailure = e.message
+                delay(2500)
             }
-            delay(2500)
+            false
         }
+        if (connected == true) { setResult(RESULT_OK); finish(); return }
         status.text = listOfNotNull(lastFailure,
-            "Worker approved. Keep Shuffle running on it. Tap Continue to retry, or refresh Workers shortly.").joinToString("\n\n")
+            "Worker approved. Keep Shuffle running on it. Tap Continue to retry, or go back and refresh Workers. No new code is needed.").joinToString("\n\n")
     }
     private fun submitDirect() {
         try {

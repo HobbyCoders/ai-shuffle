@@ -141,7 +141,7 @@ jobs:
           # Persist startup errors and guest logcat even if boot fails before script runs.
           emulator-options: >-
             -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
-            -camera-back none -no-snapshot -memory 2048 -cores 2
+            -camera-back emulated -no-snapshot -memory 2048 -cores 2
             -logcat '*:I' > "$RUNNER_TEMP/android-emulator/emulator.log" 2>&1
           script: bash .github/scripts/run-android-ui-tests.sh
       - name: Collect emulator host diagnostics

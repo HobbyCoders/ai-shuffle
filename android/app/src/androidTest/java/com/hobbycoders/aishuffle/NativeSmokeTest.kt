@@ -12,6 +12,8 @@ import androidx.test.espresso.matcher.ViewMatchers.*
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.hobbycoders.aishuffle.account.AccountStore
+import com.hobbycoders.aishuffle.account.AccountOAuth
+import com.hobbycoders.aishuffle.account.HubClient
 import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.tools.*
 import com.hobbycoders.aishuffle.ui.*
@@ -23,6 +25,15 @@ import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.CopyOnWriteArrayList
+import net.openid.appauth.AuthorizationRequest
+import okhttp3.OkHttpClient
+import okhttp3.Response
+import okhttp3.Protocol
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
+import org.json.JSONObject
 
 /** Real native screens and actual consent collector. No test authentication route in production. */
 @RunWith(AndroidJUnit4::class)
@@ -113,6 +124,7 @@ class NativeSmokeTest {
         ActivityScenario.launch(ServerListActivity::class.java).use { scenario ->
             onView(withText("Sign in")).check(matches(isDisplayed()))
             onView(withText("Create account")).check(matches(isDisplayed()))
+            onView(withText("Use another device")).perform(scrollTo()).check(matches(isDisplayed()))
             onView(withText("Connect a worker")).perform(scrollTo()).check(matches(isDisplayed()))
             onView(withText("You can connect directly without an account.")).perform(scrollTo()).check(matches(isDisplayed()))
             variants(scenario, "welcome")
@@ -126,20 +138,80 @@ class NativeSmokeTest {
         }
         onView(withId(R.id.screenStatus)).check(matches(withText(expected)))
     }
-    @Test fun accountLoginAndCreateValidateWithoutNetwork() {
-        account("login").use { scenario ->
-            onView(withText("Continue to sign in")).check(matches(isDisplayed()))
-            onView(withText("Use an existing Shuffle password")).perform(scrollTo(), click())
+    @Test fun existingAccountPasswordValidatesWithoutNetwork() {
+        account("password").use { scenario ->
             onView(withHint("Username")).check(matches(isDisplayed()))
             onView(org.hamcrest.Matchers.allOf(withText("Sign in"), isAssignableFrom(com.google.android.material.button.MaterialButton::class.java))).perform(scrollTo(), click())
             awaitAccountStatus(scenario, "Enter your username.")
             variants(scenario, "account-login")
         }
-        account("create").use { scenario ->
-            onView(withText("Create your account")).check(matches(isDisplayed()))
-            onView(withText("Continue to create account")).check(matches(isDisplayed()))
-            onView(withText("Use Google, GitHub, Microsoft or email.")).check(matches(isDisplayed()))
-            variants(scenario, "account-create")
+    }
+    private fun withInterceptedOAuth(block: (AtomicInteger, CopyOnWriteArrayList<AuthorizationRequest>) -> Unit) {
+        // Exercise the real request builder and activity result path with no external account/network.
+        val clientField = HubClient::class.java.getDeclaredField("client").apply { isAccessible = true }
+        val original = clientField.get(null) as OkHttpClient
+        val starts = AtomicInteger()
+        val requests = CopyOnWriteArrayList<AuthorizationRequest>()
+        val fixture = original.newBuilder().addInterceptor { chain ->
+            val request = chain.request()
+            check(request.url.toString() == "${AccountStore.DEFAULT_HUB}/v1/oauth/start" && request.method == "POST")
+            val number = starts.incrementAndGet()
+            val issuer = "https://identity.example"
+            val body = JSONObject().put("issuer", issuer).put("authorization_endpoint", "$issuer/oauth/authorize")
+                .put("token_endpoint", "$issuer/oauth/token").put("redirect_uri", AccountOAuth.REDIRECT)
+                .put("client_id", "instrumentation-client").put("nonce", "nonce-$number").put("request_id", "request-$number")
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body(body.toString().toResponseBody("application/json".toMediaType())).build()
+        }.build()
+        val monitor = object : android.app.Instrumentation.ActivityMonitor() {
+            override fun onStartActivity(intent: Intent): android.app.Instrumentation.ActivityResult? {
+                if (intent.component?.className != "net.openid.appauth.AuthorizationManagementActivity") return null
+                requests.add(AuthorizationRequest.jsonDeserialize(requireNotNull(intent.getStringExtra("authRequest"))))
+                return android.app.Instrumentation.ActivityResult(android.app.Activity.RESULT_CANCELED, null)
+            }
+        }
+        clientField.set(null, fixture)
+        instrumentation.addMonitor(monitor)
+        try { block(starts, requests) }
+        finally { instrumentation.removeMonitor(monitor); clientField.set(null, original) }
+    }
+    @Test fun accountActionsOpenBrowserImmediatelyAndRetryOnlyWhenRequested() = withInterceptedOAuth { starts, requests ->
+        for ((mode, screen) in listOf("login" to "signin", "create" to "signup")) {
+            val before = starts.get()
+            account(mode).use { scenario ->
+                awaitAccountStatus(scenario, "Sign-in cancelled. You can try again when you’re ready.")
+                Assert.assertEquals(before + 1, starts.get())
+                Assert.assertEquals(before + 1, requests.size)
+                Assert.assertEquals(screen, requests.last().additionalParameters["screen"])
+                onView(withText("Welcome back")).check(androidx.test.espresso.assertion.ViewAssertions.doesNotExist())
+                onView(withText("Continue to sign in")).check(androidx.test.espresso.assertion.ViewAssertions.doesNotExist())
+                onView(withText("Continue to create account")).check(androidx.test.espresso.assertion.ViewAssertions.doesNotExist())
+                onView(withText("Try again")).check(matches(isDisplayed()))
+                // A rotation/process restoration must not replace proof belonging to the browser.
+                val pending = JSONObject().put("request_id", "existing-browser-request").toString()
+                AccountStore(context).pendingOAuth = pending
+                scenario.recreate()
+                awaitFocused(scenario)
+                Assert.assertEquals(before + 1, starts.get())
+                Assert.assertEquals(pending, AccountStore(context).pendingOAuth)
+                onView(withText("Try again")).perform(click())
+                awaitAccountStatus(scenario, "Sign-in cancelled. You can try again when you’re ready.")
+                Assert.assertEquals(before + 2, starts.get())
+                Assert.assertEquals(screen, requests.last().additionalParameters["screen"])
+                Assert.assertNull(AccountStore(context).pendingOAuth)
+                variants(scenario, "account-$mode-retry")
+            }
+        }
+    }
+    @Test fun welcomePairingOpensWithoutStartingBrowserSignIn() = withInterceptedOAuth { starts, requests ->
+        ActivityScenario.launch(ServerListActivity::class.java).use { scenario ->
+            onView(withText("Use another device")).perform(scrollTo(), click())
+            onView(withHint("Account pairing code")).check(matches(isDisplayed()))
+            onView(withText("Scan account QR")).check(matches(isDisplayed()))
+            Assert.assertEquals(0, starts.get())
+            Assert.assertTrue(requests.isEmpty())
+            androidx.test.espresso.Espresso.pressBack()
+            awaitFocused(scenario)
         }
     }
     private class TouchTrace(private val delegate: android.view.Window.Callback) : android.view.Window.Callback by delegate {
@@ -176,8 +248,9 @@ class NativeSmokeTest {
             variants(scenario, "direct-server")
         }
     }
-    @Test fun accountSetupDoesNotExposeOrAllowChangingTheService() {
+    @Test fun accountSetupDoesNotExposeOrAllowChangingTheService() = withInterceptedOAuth { _, _ ->
         account("login").use { scenario ->
+            awaitAccountStatus(scenario, "Sign-in cancelled. You can try again when you’re ready.")
             onView(withHint("Account hub HTTPS address")).check(androidx.test.espresso.assertion.ViewAssertions.doesNotExist())
             onView(withText("Account server settings")).check(androidx.test.espresso.assertion.ViewAssertions.doesNotExist())
             scenario.recreate()

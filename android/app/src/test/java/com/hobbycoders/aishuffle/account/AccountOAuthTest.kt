@@ -3,6 +3,7 @@ package com.hobbycoders.aishuffle.account
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import net.openid.appauth.AuthorizationException
 import net.openid.appauth.AuthorizationRequest
 import net.openid.appauth.AuthorizationResponse
 import net.openid.appauth.AuthorizationServiceConfiguration
@@ -64,5 +65,66 @@ class AccountOAuthTest {
             assertThrows(IllegalStateException::class.java) { AccountOAuth.consumeResponse(store, intent, now) }
             assertNull(store.pendingOAuth)
         }
+    }
+
+    @Test fun reportsProviderRejectionWithoutExposingRedirectOrDescription() {
+        arm()
+        val redirect = Uri.parse(AccountOAuth.REDIRECT + "?error=invalid_request" +
+            "&error_description=private-description&error_uri=https%3A%2F%2Fprivate.example%2Fsecret" +
+            "&state=private-state&code=private-code")
+        val intent = AuthorizationException.fromOAuthRedirect(redirect).toIntent().setData(redirect)
+        val failure = assertThrows(AccountOAuth.SignInFailure::class.java) {
+            AccountOAuth.consumeResponse(store, intent, now)
+        }
+        assertEquals(AccountOAuth.FailureCategory.PROVIDER_REJECTED, failure.category)
+        assertEquals("The account service rejected sign-in (invalid_request). Start again.", failure.message)
+        assertNull(failure.cause)
+        assertNull(store.pendingOAuth)
+        assertThrows(IllegalStateException::class.java) { AccountOAuth.consumeResponse(store, response(), now) }
+    }
+
+    @Test fun distinguishesUserCancellationFromStateMismatch() {
+        val cases = listOf(
+            AuthorizationException.GeneralErrors.USER_CANCELED_AUTH_FLOW to AccountOAuth.FailureCategory.CANCELLED,
+            AuthorizationException.AuthorizationRequestErrors.STATE_MISMATCH to AccountOAuth.FailureCategory.STATE_MISMATCH
+        )
+        val messages = mutableSetOf<String?>()
+        for ((template, category) in cases) {
+            arm()
+            val failure = assertThrows(AccountOAuth.SignInFailure::class.java) {
+                AccountOAuth.consumeResponse(store, template.toIntent(), now)
+            }
+            assertEquals(category, failure.category)
+            messages.add(failure.message)
+            assertNull(failure.cause)
+            assertNull(store.pendingOAuth)
+        }
+        assertEquals(2, messages.size)
+    }
+
+    @Test fun unknownProviderErrorsAndMalformedExceptionsCannotLeakPrivateValues() {
+        val privateError = AuthorizationException(AuthorizationException.TYPE_OAUTH_AUTHORIZATION_ERROR,
+            AuthorizationException.AuthorizationRequestErrors.OTHER.code, "private-code-in-error",
+            "private-description", Uri.parse("https://private.example/secret"), RuntimeException("private-cause"))
+        for (intent in listOf(privateError.toIntent(),
+            Intent().putExtra(AuthorizationException.EXTRA_EXCEPTION, "private-malformed-json"))) {
+            arm()
+            val failure = assertThrows(AccountOAuth.SignInFailure::class.java) {
+                AccountOAuth.consumeResponse(store, intent, now)
+            }
+            assertFalse(failure.toString().contains("private"))
+            assertNull(failure.cause)
+            assertNull(store.pendingOAuth)
+        }
+    }
+
+    @Test fun exceptionTakesPrecedenceOverAnAttachedAuthorizationCode() {
+        arm()
+        val intent = response().putExtras(AuthorizationException.AuthorizationRequestErrors.ACCESS_DENIED.toIntent())
+        val failure = assertThrows(AccountOAuth.SignInFailure::class.java) {
+            AccountOAuth.consumeResponse(store, intent, now)
+        }
+        assertEquals(AccountOAuth.FailureCategory.PROVIDER_REJECTED, failure.category)
+        assertNull(store.pendingOAuth)
     }
 }

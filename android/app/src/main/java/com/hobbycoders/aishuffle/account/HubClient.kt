@@ -11,6 +11,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.json.JSONObject
 import java.io.IOException
+import java.net.UnknownHostException
+import javax.net.ssl.SSLException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -18,6 +20,11 @@ import kotlin.coroutines.resumeWithException
 class HubFailure(val status: Int, message: String) : IOException(message)
 
 object HubClient {
+    internal fun connectionFailure(error: IOException): HubFailure = HubFailure(0, when (error) {
+        is UnknownHostException -> "This address is not available on your network yet. Check your connection and retry shortly."
+        is SSLException -> "A secure connection could not be verified. Check the worker’s HTTPS setup before retrying."
+        else -> "Could not reach the service. Check your connection and retry."
+    })
     private val client = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
         .connectTimeout(15, TimeUnit.SECONDS).callTimeout(25, TimeUnit.SECONDS).build()
     fun device(id: String): JSONObject = JSONObject().put("device_id", id).put("device_name", "${Build.MANUFACTURER} ${Build.MODEL}").put("platform", "android")
@@ -37,7 +44,7 @@ object HubClient {
             continuation.invokeOnCancellation { call.cancel() }
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
-                    if (continuation.isActive) continuation.resumeWithException(HubFailure(0, "Cannot reach this host. Check your connection and HTTPS address, then retry. If a pairing result was lost, use a new code."))
+                    if (continuation.isActive) continuation.resumeWithException(connectionFailure(e))
                 }
                 override fun onResponse(call: Call, response: Response) {
                     response.use {

@@ -25,6 +25,8 @@ import net.openid.appauth.AuthorizationService
 class AccountActivity : NativeScreen() {
     private lateinit var repo: AccountRepository
     private lateinit var pairCode: TextInputEditText
+    private var profileUsername: TextInputEditText? = null
+    private var profileDraft: String? = null
     private var mode = "login"
     private lateinit var oauthService: AuthorizationService
     private val oauthLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -50,22 +52,42 @@ class AccountActivity : NativeScreen() {
         repo = AccountRepository(this)
         oauthService = AuthorizationService(this)
         mode = savedInstanceState?.getString("account_mode") ?: intent.getStringExtra("mode") ?: "login"
+        profileDraft = savedInstanceState?.getString("profile_username")
         navigation("Account")
-        if (mode == "manage" && repo.store.session() != null) manage() else form(mode)
+        when {
+            mode == "manage" && repo.store.session() != null -> manage()
+            mode == "profile_sync" || (mode == "profile_setup" && repo.store.session()?.profileComplete == true) -> {
+                profileSyncScreen()
+                runWork { syncAfterSignIn() }
+            }
+            mode == "profile_setup" || mode == "profile_edit" -> profileForm(mode == "profile_setup")
+            mode == "profile_loading_setup" || mode == "profile_loading_edit" -> loadProfile(mode == "profile_loading_setup")
+            else -> form(mode, launchOAuth = savedInstanceState == null)
+        }
     }
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putString("account_mode", mode)
+        if (mode == "profile_setup" || mode == "profile_edit") outState.putString("profile_username", profileUsername?.text?.toString())
     }
     override fun onDestroy() { oauthService.dispose(); super.onDestroy() }
-    private fun launchScanner() { scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setBeepEnabled(false).setPrompt("Scan a trusted device’s account QR code")) }
+    private fun launchScanner() { scanner.launch(ScanOptions().setCaptureActivity(QrCaptureActivity::class.java).setDesiredBarcodeFormats(ScanOptions.QR_CODE).setBeepEnabled(false).setPrompt("Scan a trusted device’s account QR code")) }
     private fun scan() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) launchScanner()
         else camera.launch(Manifest.permission.CAMERA)
     }
-    private fun form(selected: String) {
+    private fun form(selected: String, launchOAuth: Boolean = true) {
         mode = selected
         navigation("Account")
+        if (mode == "login" || mode == "create") {
+            heading(if (mode == "create") "Create account" else "Sign in", "Finish in your browser, then return to Shuffle.")
+            button("Try again", primary = true) { openOAuth() }
+            row("Use another device", "Sign in with an account QR code or pairing code.", R.drawable.ic_qr) { form("pair") }
+            link("Use an existing Shuffle password") { form("password") }
+            // Recreating this screen while the browser is open must not replace its pending proof.
+            if (launchOAuth) openOAuth()
+            return
+        }
         val pairing = mode == "pair" || mode == "qr"
         heading(when (mode) { "create" -> "Create your account"; "recover" -> "Recover your account"; "pair", "qr" -> "Use another device"; else -> "Welcome back" },
             when (mode) {
@@ -99,20 +121,6 @@ class AccountActivity : NativeScreen() {
                     }
                 } catch (e: Exception) { status.text = e.message }
             }
-            return
-        }
-        if (mode == "login" || mode == "create") {
-            text("Use Google, GitHub, Microsoft or email.", 16f).setTextColor(color(R.color.slate))
-            gap(16)
-            button(if (mode == "create") "Continue to create account" else "Continue to sign in", primary = true) {
-                runWork {
-                    status.text = "Opening secure sign-in…"
-                    val request = AccountOAuth.begin(repo.store, mode == "create")
-                    oauthLauncher.launch(oauthService.getAuthorizationRequestIntent(request))
-                }
-            }
-            row("Use another device", "Sign in with an account QR code or pairing code.", R.drawable.ic_qr) { form("pair") }
-            link("Use an existing Shuffle password") { form("password") }
             return
         }
         val username = input("Username").apply {
@@ -153,6 +161,13 @@ class AccountActivity : NativeScreen() {
             link("New to Shuffle? Create account") { form("create") }
         } else link("Already have an account? Sign in") { form("login") }
     }
+    private fun openOAuth() {
+        runWork {
+            status.text = if (mode == "create") "Opening account creation…" else "Opening sign-in…"
+            val request = AccountOAuth.begin(repo.store, mode == "create")
+            oauthLauncher.launch(oauthService.getAuthorizationRequestIntent(request))
+        }
+    }
     private suspend fun signedIn(origin: String, result: JSONObject) {
         repo.accept(origin, result)
         val recovery = result.optString("recovery_code")
@@ -162,9 +177,63 @@ class AccountActivity : NativeScreen() {
             MaterialAlertDialogBuilder(this).setTitle("Save your recovery code")
                 .setMessage("$recovery\n\nKeep this somewhere private. You’ll need it if you forget your password. It’s shown only once.")
                 .setCancelable(false).setPositiveButton("I saved my recovery code") { _, _ ->
-                    runWork { syncAfterSignIn() }
+                    runWork { finishAccountSetup() }
                 }.show()
-        } else syncAfterSignIn()
+        } else finishAccountSetup()
+    }
+    private suspend fun finishAccountSetup() {
+        val session = repo.store.session() ?: error("Sign in again to finish setting up your account.")
+        when (session.profileComplete) {
+            true -> { profileSyncScreen(); syncAfterSignIn() }
+            false -> profileForm(onboarding = true)
+            null -> {
+                profileLoading(onboarding = true)
+                if (AccountProfile(repo.store).refresh().profileComplete == true) { profileSyncScreen(); syncAfterSignIn() }
+                else profileForm(onboarding = true)
+            }
+        }
+    }
+    private fun profileSyncScreen() {
+        mode = "profile_sync"
+        navigation("Account")
+        heading("Loading your workers", "")
+        button("Try again", primary = true) { runWork { syncAfterSignIn() } }
+    }
+    private fun profileLoading(onboarding: Boolean) {
+        mode = if (onboarding) "profile_loading_setup" else "profile_loading_edit"
+        navigation("Account")
+        heading("Loading your account", "")
+        button("Try again", primary = true) { loadProfile(onboarding) }
+    }
+    private fun loadProfile(onboarding: Boolean) {
+        profileLoading(onboarding)
+        runWork {
+            val session = AccountProfile(repo.store).refresh()
+            if (onboarding && session.profileComplete == true) { profileSyncScreen(); syncAfterSignIn() }
+            else profileForm(onboarding)
+        }
+    }
+    private fun profileForm(onboarding: Boolean) {
+        val session = repo.store.session() ?: return form("login")
+        if (session.profileComplete == null) { loadProfile(onboarding); return }
+        mode = if (onboarding) "profile_setup" else "profile_edit"
+        navigation("Account")
+        heading(if (onboarding) "Choose your username" else "Edit username", "This is how your account appears in Shuffle.")
+        val username = input("Username").apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setText(profileDraft ?: if (session.profileComplete == true) session.username else "")
+        }
+        profileDraft = null
+        profileUsername = username
+        text(AccountProfile.USERNAME_HINT, 13f).setTextColor(color(R.color.slate))
+        button(if (onboarding) "Save and continue" else "Save username", primary = true) {
+            runWork {
+                AccountProfile(repo.store).saveUsername(username.text.toString())
+                if (onboarding) { profileSyncScreen(); syncAfterSignIn() }
+                else { manage(); status.text = "Username updated." }
+            }
+        }
+        if (!onboarding) link("Cancel") { manage() }
     }
     private suspend fun syncAfterSignIn() {
         intent.getStringExtra("worker_link_code")?.let { code ->
@@ -191,6 +260,7 @@ class AccountActivity : NativeScreen() {
         val session = repo.store.session() ?: return form("login")
         navigation("Settings")
         heading(session.username, "Your Shuffle account")
+        row("Edit username", "Choose how your account appears in Shuffle", R.drawable.ic_account) { loadProfile(onboarding = false) }
         row("Trusted devices", "View devices and manage access", R.drawable.ic_phone) { runWork { devices(session) } }
         row("Add a trusted device", "Create a sign-in QR code or pairing code", R.drawable.ic_qr) { runWork { grant(session) } }
         gap(16)
@@ -222,7 +292,7 @@ class AccountActivity : NativeScreen() {
                     confirm("Revoke this device?", "${d.getString("name")} will lose access to your account and workers.") {
                         runWork {
                             HubClient.call(session.hub, "/v1/devices/${HubClient.segment(d.getString("id"))}", "DELETE", token = session.token)
-                            if (current) { repo.clearLocal(); form("login"); status.text = "This device was revoked." }
+                            if (current) { repo.clearLocal(); form("login", launchOAuth = false); status.text = "This device was revoked." }
                             else { devices(session); status.text = "Device revoked." }
                         }
                     }

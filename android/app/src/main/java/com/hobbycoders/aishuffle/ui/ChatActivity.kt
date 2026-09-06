@@ -7,11 +7,19 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.net.Uri
 import android.os.Bundle
+import android.text.TextUtils
+import android.view.View
+import android.view.ViewGroup
 import android.webkit.*
 import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.widget.PopupMenu
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
+import com.hobbycoders.aishuffle.R
 import com.hobbycoders.aishuffle.account.AccountRepository
 import com.hobbycoders.aishuffle.account.AccountStore
 import com.hobbycoders.aishuffle.account.PairingInput
@@ -44,16 +52,8 @@ class ChatActivity : NativeScreen() {
         server = ServerStore.get(this).getById(intent.getStringExtra(EXTRA_SERVER_ID).orEmpty()) ?: run { finish(); return }
         try { PairingInput.origin(server.baseUrl) } catch (_: Exception) { heading("HTTPS required", "Pair this server again using its HTTPS address. Existing insecure credentials will not be sent."); return }
         if (!authorized()) { finish(); return }
-        heading(server.name, "${server.host} · ${if (server.accountId == null) "direct pairing" else "account server"}")
-        button("Voice") { startActivity(Intent(this, VoiceCallActivity::class.java).putExtra("server_id", server.id)) }
-        button("Refresh chat") { startSession() }
         web = WebView(this)
-        // The WebView owns the available viewport rather than living in a ScrollView.
-        val shell = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val parent = content.parent as android.view.ViewGroup
-        parent.removeView(content); parent.removeView(status)
-        shell.addView(content); shell.addView(status)
-        shell.addView(web, LinearLayout.LayoutParams(-1, 0, 1f)); setContentView(shell)
+        chatLayout()
         with(web.settings) {
             javaScriptEnabled = true; domStorageEnabled = true
             allowFileAccess = false; allowContentAccess = false
@@ -105,6 +105,43 @@ class ChatActivity : NativeScreen() {
             override fun handleOnBackPressed() { if (web.canGoBack()) web.goBack() else finish() }
         })
         startSession()
+    }
+    private fun chatLayout() {
+        navigation(server.name)
+        val toolbar = findViewById<LinearLayout>(R.id.screenToolbar)
+        toolbar.setPadding(dp(4), 0, dp(4), 0)
+        for (index in 0 until toolbar.childCount) {
+            (toolbar.getChildAt(index) as? TextView)?.apply {
+                maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+                setPadding(dp(4), 0, dp(8), 0)
+            }
+        }
+        navigationAction(R.drawable.ic_mic, "Start voice call") {
+            startActivity(Intent(this, VoiceCallActivity::class.java).putExtra("server_id", server.id))
+        }
+        val more = iconButton(R.drawable.ic_more, "More chat options") { }
+        more.setOnClickListener {
+            PopupMenu(this, more).apply {
+                menu.add("Refresh chat").setOnMenuItemClickListener { startSession(); true }
+                show()
+            }
+        }
+        toolbar.addView(more)
+        (toolbar.parent as ViewGroup).removeView(toolbar)
+        (status.parent as ViewGroup).removeView(status)
+        status.setPadding(dp(16), dp(4), dp(16), dp(8))
+        status.visibility = if (status.text.isNullOrBlank()) View.GONE else View.VISIBLE
+        status.doAfterTextChanged { status.visibility = if (it.isNullOrBlank()) View.GONE else View.VISIBLE }
+        // Keep system bars and the keyboard outside the chat viewport. The WebView
+        // gets all remaining height, with no surrounding ScrollView or blank status row.
+        WindowCompat.setDecorFitsSystemWindows(window, true)
+        val shell = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setBackgroundColor(color(R.color.surface))
+            addView(toolbar, LinearLayout.LayoutParams(-1, dp(56)))
+            addView(status, LinearLayout.LayoutParams(-1, -2))
+            addView(web, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
+        setContentView(shell)
     }
     private fun authorized(): Boolean = server.accountId == null || AccountStore(this).session()?.let { it.accountId == server.accountId && it.hub == server.hubUrl } == true
     override fun onPause() {

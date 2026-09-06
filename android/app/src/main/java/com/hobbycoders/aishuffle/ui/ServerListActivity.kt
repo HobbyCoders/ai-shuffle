@@ -51,6 +51,7 @@ class ServerListActivity : NativeScreen() {
             gap(28)
             button("Sign in", primary = true) { openAccount("login") }
             button("Create account") { openAccount("create") }
+            link("Use another device") { openAccount("pair") }
             gap(24)
             row("Connect a worker", "Use a URL and pairing code, or scan a QR code.", R.drawable.ic_worker) { addWorker() }
             text("You can connect directly without an account.", 13f).apply {
@@ -67,6 +68,9 @@ class ServerListActivity : NativeScreen() {
         content.removeAllViews(); status.text = ""
         text(if (account != null) "Signed in as ${account.username}" else "Connected to this phone", 14f).setTextColor(color(R.color.slate))
         gap(12)
+        if (account != null && account.profileComplete != true) {
+            row("Choose your username", "Finish setting up your Shuffle account.", R.drawable.ic_account) { openAccount("profile_setup") }
+        }
         if (servers.isEmpty()) {
             group {
                 text("No workers yet", 20f)
@@ -108,6 +112,7 @@ class ServerListActivity : NativeScreen() {
         if (account == null) {
             section("YOUR ACCOUNT")
             row("Sign in to Shuffle", "Bring your workers to every device.", R.drawable.ic_account) { openAccount("login") }
+            link("Use another device") { openAccount("pair") }
         }
     }
 }
