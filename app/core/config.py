@@ -463,6 +463,11 @@ class Settings(BaseSettings):
     # token, Chrome native-host handshake), so keep this comfortably above a
     # normal read-and-reply gap. Override via
     # SDK_SESSION_IDLE_TIMEOUT_SECONDS.
+    #
+    # It is SHORTER than ``user_question_timeout_seconds`` (1h) below, and that
+    # is only safe because ``SessionPool._is_busy`` exempts a session blocked on
+    # a pending interaction from idle eviction. Deadlines a user can see must be
+    # the ones that fire — this timeout is not one of them.
     sdk_session_idle_timeout_seconds: int = 1800  # 30 minutes
 
     # COLD-tier idle timeout: everything ranked below the hot tier. These are
@@ -492,15 +497,40 @@ class Settings(BaseSettings):
     sdk_session_idle_reevaluate_seconds: int = 60
 
     # AskUserQuestion backstop (seconds). A parked question keeps its SDK
-    # subprocess alive AND pinned in the pool — while awaiting an answer the
-    # session still counts as "streaming", so idle/LRU eviction skips it. The
-    # backstop has to be long enough that a question survives you stepping away
-    # across many sessions, but short enough that a truly-abandoned session
+    # subprocess alive AND pinned in the pool: while awaiting an answer the
+    # session counts as "streaming" AND ``SessionPool._is_busy`` holds it via
+    # the ``interaction_wait`` waiter registry, so idle/LRU eviction skips it.
+    # The backstop has to be long enough that a question survives you stepping
+    # away across many sessions, but short enough that a truly-abandoned session
     # reaps its hot subprocess instead of holding ~100MB for hours. 1h is the
     # default; raise it toward Claude-Desktop-style persistence if you have the
     # headroom, or lower it on a tight box. Override via
     # USER_QUESTION_TIMEOUT_SECONDS.
+    #
+    # THIS is the deadline the durable ``pending_interactions`` row advertises
+    # and the ONLY one that may end a question. It deliberately exceeds
+    # ``sdk_session_idle_timeout_seconds`` (30 min) above; that is safe only
+    # because of the pool exemption named there. Without it the pool reclaimed
+    # the subprocess at 1800s under a question whose modal said 3600s, fluid
+    # answered the tool with "input_required round-trip interrupted", and the
+    # user's device kept showing a live question nobody was listening to.
+    # Whoever changes either number must keep that exemption honest.
     user_question_timeout_seconds: int = 3600  # 1 hour
+
+    # Per-turn progress watchdog (seconds). A turn that produces NO event at all
+    # — no tool result, no usage, no text — for this long is terminalized with a
+    # provider-error-shaped failure and a durable system message. It exists for
+    # a host tool call that never returns: an audited session issued a browser
+    # automation call whose own 30s cell timeout could not interrupt the blocked
+    # host call, and sat "running" for three hours with the user's final request
+    # unanswered and no way to tell from the outside.
+    #
+    # Deliberately generous — a legitimately slow model call, a long compaction
+    # or a big file write must never trip it, and a turn blocked on a user
+    # question or permission prompt is exempt outright (the wait is bounded by
+    # ``user_question_timeout_seconds`` instead). 0 disables the watchdog.
+    # Override via TURN_PROGRESS_TIMEOUT_SECONDS.
+    turn_progress_timeout_seconds: int = 1800  # 30 minutes of total silence
 
     # Between-turns idle reader — CLI-owned wake grace window (seconds). When the
     # LAST background task completes while the parent is parked, the scheduler

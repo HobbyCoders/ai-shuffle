@@ -533,6 +533,84 @@ async def _broadcast_queue_after_start(session_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Durable surface for a turn that died on a provider error
+# ---------------------------------------------------------------------------
+
+def _awaiting_user_input(session_id: str) -> bool:
+    """True while this session blocks on a durable interaction round-trip.
+
+    An ``AskUser`` question, a permission prompt or a plan gate makes a live
+    turn legitimately silent for as long as the person takes. Both the progress
+    watchdog and the pool's idle policy have to know the difference between
+    that and a wedged turn. Never raises: unknown resolves to "not waiting".
+    """
+    try:
+        from app.core import interaction_wait
+
+        return interaction_wait.has_waiters(session_id)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+#: What the durable row says when the provider gave us no message at all.
+_GENERIC_TURN_ERROR = "The turn ended with a provider error before finishing."
+
+#: Extra line on a wake turn — the user did not type anything, so without it
+#: the row reads as an error against a prompt they never sent.
+_WAKE_ERROR_NOTE = (
+    " This turn was started automatically to deliver a finished background "
+    "task's result."
+)
+
+
+async def persist_turn_error_message(
+    session_id: str,
+    turn_id: str,
+    message: Optional[str],
+    *,
+    source: str = "user",
+) -> None:
+    """Write a durable ``system`` row for a turn that ended on an error frame.
+
+    The gap: an ``error`` terminal reaches the live WebSocket and the ``turns``
+    table, but never ``session_messages``. Reload the session and it shows the
+    user's prompt followed by nothing — no banner, no explanation, no retry
+    affordance. One audited session was abandoned for twenty minutes because of
+    it; another recovered only because the user typed "resume" on a hunch.
+    Background-worker failures already write a system row (``chat_ws_handler``'s
+    terminal surface); turn failures now match.
+
+    Never raises: a message that cannot be written must not change how the turn
+    settles.
+    """
+    text = (message or "").strip() or _GENERIC_TURN_ERROR
+    if source in ("unpark", "unpark_pump"):
+        text += _WAKE_ERROR_NOTE
+    try:
+        from app.db import sessions as sessions_db
+
+        await asyncio.to_thread(
+            sessions_db.add_session_message,
+            session_id=session_id,
+            role="system",
+            content=text,
+            metadata={
+                "subtype": "error",
+                "system_data": {
+                    "message": text,
+                    "turn_id": turn_id,
+                    "turn_source": source,
+                },
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "SessionRuntime: could not persist the error message for %s turn %s",
+            session_id, turn_id, exc_info=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # SessionRuntime
 # ---------------------------------------------------------------------------
 
@@ -626,6 +704,10 @@ class SessionRuntime:
         # create_task can be garbage-collected mid-await) and so the turn can
         # wait for it at finalize rather than leaving it orphaned.
         self._start_window_sweep_task: Optional[asyncio.Task] = None
+        # Progress watchdog: when this turn last saw ANY pump event, and the
+        # task that watches that stamp. See _progress_watchdog_loop.
+        self._last_progress_at: float = time.perf_counter()
+        self._progress_watchdog: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # execute
@@ -864,9 +946,11 @@ class SessionRuntime:
                 async with get_reader_lock(sid):
                     pump = asyncio.create_task(self._run_pump(recorder))
                     self._pump_task = pump
+                    self._start_progress_watchdog()
                     try:
                         await pump
                     finally:
+                        self._stop_progress_watchdog()
                         self._pump_task = None
                         if not pump.done():
                             # execute() itself is being torn down mid-pump —
@@ -1058,6 +1142,11 @@ class SessionRuntime:
                 ),
             ):
                 etype = event.get("type") if isinstance(event, dict) else None
+                # ANY frame is proof the engine is still moving — a tool result,
+                # a usage record, a token of text. The watchdog only fires on
+                # total silence, so this is deliberately the widest possible
+                # liveness signal.
+                self._last_progress_at = time.perf_counter()
                 if etype == "steer_delivered":
                     # Internal receipt, not a render frame: it becomes a
                     # ``message.user`` in the log (below) and never reaches the
@@ -1093,6 +1182,107 @@ class SessionRuntime:
                     await self._broadcast(ws_event)
         finally:
             await recorder.close()
+
+    # ------------------------------------------------------------------
+    # progress watchdog — a turn that goes completely silent is terminalized
+    # ------------------------------------------------------------------
+
+    def _progress_timeout_seconds(self) -> float:
+        """The configured silence budget, or 0 when the watchdog is off."""
+        try:
+            return max(0.0, float(
+                getattr(settings, "turn_progress_timeout_seconds", 0) or 0
+            ))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _start_progress_watchdog(self) -> None:
+        """Arm the silence watchdog for this turn (no-op when disabled)."""
+        timeout = self._progress_timeout_seconds()
+        if timeout <= 0:
+            return
+        self._last_progress_at = time.perf_counter()
+        task = asyncio.create_task(self._progress_watchdog_loop(timeout))
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        self._progress_watchdog = task
+
+    def _stop_progress_watchdog(self) -> None:
+        task = self._progress_watchdog
+        self._progress_watchdog = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _progress_watchdog_loop(self, timeout: float) -> None:
+        """Terminalize a turn that has produced NO event for ``timeout`` seconds.
+
+        The failure it exists for: a host tool call (a browser automation step,
+        an MCP round-trip) that blocks forever. The code cell's own timeout
+        cannot interrupt a blocked ``__host_call__``, nothing above it bounds
+        the turn, and the session presents as ``running`` indefinitely — one
+        audited session sat wedged for three hours with the user's last request
+        unanswered and no signal that anything was wrong.
+
+        Two things are deliberately NOT killed:
+
+        * a turn waiting on the human (an ``AskUser`` round-trip, a permission
+          or plan gate). It is legitimately silent for as long as the person
+          takes, and its own deadline is ``user_question_timeout_seconds``.
+        * a turn that has already reached a terminal frame — the pump is
+          finishing, and cancelling it there would only lose the tail.
+
+        The kill mirrors a provider error exactly: an ``error`` frame on the
+        live stream, ``_terminal='error'`` so ``_finalize`` settles the row
+        ``aborted``/``stop_reason=error`` with the reason on it, the recorder's
+        crash path writing ``turn.aborted``, and the durable system message
+        every error terminal now leaves behind.
+        """
+        # Poll often enough to be prompt without being a busy loop: a minute, or
+        # a quarter of the budget when the budget is short (tests set seconds).
+        interval = max(0.05, min(60.0, timeout / 4))
+        while True:
+            await asyncio.sleep(interval)
+            if self._terminal is not None:
+                return  # the pump reached a terminal frame on its own
+            silent_for = time.perf_counter() - self._last_progress_at
+            if silent_for < timeout:
+                continue
+            if _awaiting_user_input(self.session_id):
+                # Blocked on a person, not wedged. Restamp so the budget starts
+                # again from the moment the answer lands.
+                self._last_progress_at = time.perf_counter()
+                continue
+            await self._terminalize_silent_turn(silent_for)
+            return
+
+    async def _terminalize_silent_turn(self, silent_for: float) -> None:
+        """End a wedged turn the way a provider error would. Never raises."""
+        message = (
+            f"This turn stopped producing any output for "
+            f"{int(silent_for // 60)} minutes and was ended by the progress "
+            f"watchdog. A tool call most likely never returned; nothing after "
+            f"it ran."
+        )
+        logger.warning(
+            "SessionRuntime: progress watchdog terminalizing %s turn %s "
+            "(silent for %.0fs)", self.session_id, self.turn_id, silent_for,
+        )
+        self._terminal = "error"
+        self._terminal_error = message
+        self._abort_reason = "progress_timeout"
+        try:
+            await self._broadcast({
+                "type": "error",
+                "message": message,
+                "session_id": self.session_id,
+            })
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "SessionRuntime: watchdog error broadcast failed for %s",
+                self.session_id, exc_info=True,
+            )
+        pump = self._pump_task
+        if pump is not None and not pump.done():
+            pump.cancel()
 
     async def _broadcast(self, event: Dict[str, Any]) -> None:
         """Route one frame through the broadcast adapter (registered or default)."""
@@ -1793,6 +1983,16 @@ class SessionRuntime:
                 )
             except Exception:
                 logger.warning("SessionRuntime: settle_turn(aborted) failed for %s", tid, exc_info=True)
+            # A turn that died on a provider error has to leave a DURABLE trace.
+            # The error frame reaches the live WebSocket and the ``turns`` row,
+            # but neither survives a reload: an audited session showed the
+            # user's prompt and then nothing at all, and was abandoned for
+            # twenty minutes because the failure was invisible. Worker failures
+            # already write a system row; turn failures now do too.
+            if self._terminal == "error":
+                await persist_turn_error_message(
+                    sid, tid, self._terminal_error, source=self.source,
+                )
             # A message this dying turn swallowed on its way out goes back on
             # the queue — BEFORE the scheduler seam fires, so it runs as the
             # very next turn.
