@@ -938,3 +938,19 @@ def test_the_alert_round_trips_through_the_durable_codec() -> None:
     )
     assert event_from_dict(event_to_dict(event)) == event
     assert event.type == "cache_miss_alert"
+
+
+def test_the_cache_key_and_image_ratio_are_configurable() -> None:
+    from fluid.config.model import ContextConfig, HarnessConfig
+
+    assert ContextConfig().image_trigger_ratio == 1.0
+    assert (
+        ContextConfig.from_dict({"image_trigger_ratio": 0.5}).image_trigger_ratio
+        == 0.5
+    )
+    assert HarnessConfig().cache_key is None
+    loaded = HarnessConfig.from_dict({"cache_key": "conv-42"})
+    assert loaded.cache_key == "conv-42"
+    assert loaded.to_dict()["cache_key"] == "conv-42"
+    # Blank is "unset", not an empty affinity key on every request.
+    assert HarnessConfig.from_dict({"cache_key": ""}).cache_key is None
