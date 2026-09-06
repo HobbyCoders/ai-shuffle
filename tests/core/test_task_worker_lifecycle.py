@@ -794,6 +794,37 @@ class TestNestedWorkerOwnership:
         assert [sid for sid, _f in worker_env.wakes] == ["root-1"]
         assert task_registry.is_own_background_task("root-1", outcome.session_id) is True
 
+    def test_the_owners_park_gate_is_armed_while_the_child_runs(
+        self, worker_env, mock_db
+    ):
+        """The half of D that stranded a worker mid-file.
+
+        The owner's park gate is what makes it PARK instead of ending its turn
+        while its research child is still running; arming the root's instead is
+        why one audited worker was terminated with
+        ``app/core/composer_suggestions.py`` missing two function definitions.
+        """
+        seen = {}
+
+        def _snapshot(_sid):
+            seen["owner_launch"] = (
+                task_registry.has_unresolved_background_launches("owner-1")
+            )
+            seen["root_launch"] = (
+                task_registry.has_unresolved_background_launches("root-1")
+            )
+            seen["owner_active"] = [
+                r["id"] for r in task_registry.get_active("owner-1")
+            ]
+
+        worker_env.tm.on_wait = _snapshot
+
+        outcome = self._dispatch_nested()
+
+        assert seen["owner_launch"] is True, "the dispatching worker must park"
+        assert seen["root_launch"] is False, "the root never launched this"
+        assert seen["owner_active"] == [outcome.session_id]
+
     def test_the_root_keeps_the_worker_budget(self, worker_env, mock_db):
         """A worker's worker is still a worker on this box (documented D)."""
         sup.register_worker(sup.WorkerRecord(
