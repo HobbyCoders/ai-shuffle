@@ -297,6 +297,101 @@ async def test_finalize_completes_when_no_background_work(mock_db):
     assert done == [{"type": "done", "metadata": {}, "session_id": "s4", "outcome": "completed"}]
 
 
+# ---------------------------------------------------------------------------
+# 3b. Park gate — durable truth (2026-09-05 audit F7/F9)
+# ---------------------------------------------------------------------------
+
+def _durable_task(session_id, task_id, status, kind="agent"):
+    from app.db import background_tasks as background_tasks_db
+    background_tasks_db.upsert_background_task({
+        "task_id": task_id,
+        "session_id": session_id,
+        "kind": kind,
+        "status": status,
+        "title": task_id,
+        "started_at": "2026-09-05T00:00:00+00:00",
+        "updated_at": "2026-09-05T00:00:01+00:00",
+    })
+
+
+async def test_park_drops_a_task_that_has_already_settled(mock_db):
+    """F7: a park named a shell that had settled four seconds earlier, and the
+    late terminal frame bought a no-op wake turn. The id is dropped."""
+    turn = turns_db.enqueue_turn("s-drop", "user", prompt="hi")
+    _durable_task("s-drop", "settled", "completed", kind="shell")
+    _durable_task("s-drop", "still-going", "running", kind="shell")
+
+    with _runtime_env(
+        pump=_make_pump([{"type": "done", "metadata": {}}]),
+        bg_work=[{"id": "settled"}, {"id": "still-going"}],
+    ) as env:
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "parked"
+    assert turns_db.get_turn(turn["id"])["payload"]["task_ids"] == ["still-going"]
+    assert env["record_parked"].await_args.args[1] == ["still-going"]
+
+
+async def test_no_park_when_every_registry_id_has_already_settled(mock_db):
+    """Parking on nothing is the stuck-parked shape; if the gate's only ids are
+    all durably terminal the turn simply completes."""
+    turn = turns_db.enqueue_turn("s-nopark", "user", prompt="hi")
+    _durable_task("s-nopark", "settled", "completed", kind="shell")
+
+    with _runtime_env(
+        pump=_make_pump([{"type": "done", "metadata": {}}]),
+        bg_work=[{"id": "settled"}],
+    ) as env:
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"
+    env["record_parked"].assert_not_called()
+    env["start_idle"].assert_not_called()
+
+
+async def test_park_gate_falls_back_to_the_durable_subagent_rows(mock_db):
+    """F9: a turn ended end_turn with an Explore still running because the gate
+    read only the in-memory registry. The durable row parks it instead."""
+    turn = turns_db.enqueue_turn("s-durable", "user", prompt="hi")
+    _durable_task("s-durable", "explore-1", "running", kind="agent")
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "parked"
+    assert turns_db.get_turn(turn["id"])["payload"]["task_ids"] == ["explore-1"]
+    env["start_idle"].assert_called_once_with("s-durable")
+
+
+async def test_durable_park_arm_ignores_monitor_shells(mock_db):
+    """A Monitor shell can be a ``serves`` process meant to stay up; parking on
+    one would pin the session forever — the same exclusion fluid makes."""
+    turn = turns_db.enqueue_turn("s-serves", "user", prompt="hi")
+    _durable_task("s-serves", "dev-server", "running", kind="shell")
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"
+    env["record_parked"].assert_not_called()
+
+
+async def test_turn_end_reconciles_the_engine_pending_set(mock_db):
+    """F1: the next park must name only work that is genuinely outstanding, so
+    turn end retires whatever the engine still counts pending and the app can
+    prove is over."""
+    turn = turns_db.enqueue_turn("s-reconcile", "user", prompt="hi")
+    reconcile = AsyncMock(return_value=["ghost"])
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+        with patch(
+            "app.core.pending_reconcile.reconcile_engine_pending", new=reconcile
+        ):
+            await session_runtime.SessionRuntime(turn).execute()
+
+    reconcile.assert_awaited_once_with("s-reconcile")
+
+
 async def test_turn_start_self_heal_settles_stale_park_when_no_bg_work(mock_db):
     """FIX 2: the 4b turn-start self-heal settles a stale parked row when NO
     background work is running — the parked row was residue from work that has
