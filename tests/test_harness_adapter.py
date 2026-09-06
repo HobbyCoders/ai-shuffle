@@ -2245,7 +2245,12 @@ def test_deferred_tools_collapse_to_name_and_one_liner(agent_workspace):
     # A deferred catalog must not expand every tool description into the prompt before those tools are loaded.
     saved = len(before.text) - len(after.text)
     assert saved > 20_000, f"only saved {saved} chars"
-    assert len(after.text) < len(before.text) * 0.35
+    # Measure the tools sections only: the fixed prompt blocks around them
+    # (agent descriptions, the verification doctrine) grow independently
+    # of deferral and would otherwise dilute the ratio.
+    tools_before = sum(len(s.text) for s in before.sections if s.kind == "tools")
+    tools_after = sum(len(s.text) for s in after.sections if s.kind == "tools")
+    assert tools_after < tools_before * 0.35
 
 
 def test_code_mode_tools_section_skipped_without_a_projection(agent_workspace):
