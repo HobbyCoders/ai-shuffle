@@ -736,11 +736,14 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     const guardedSession = new Session(guarded);
     try {
       // navigate rethrows on a blocked request exactly like a net error; the MCP
-      // dispatcher (index.ts) turns the throw into an errorResult. Assert the
-      // friendly reason reaches the caller.
-      await expect(runNavigate(guardedSession, { url: httpUrl })).rejects.toThrow(
-        /blocked by SSRF policy:.*loopback/,
+      // dispatcher (index.ts) turns the throw into an errorResult. The message
+      // must lead with what to do and still carry the policy reason.
+      const failure = await runNavigate(guardedSession, { url: httpUrl }).then(
+        () => undefined,
+        (err: Error) => err,
       );
+      expect(failure?.message ?? "").toMatch(/^Bind the server to 0\.0\.0\.0/);
+      expect(failure?.message ?? "").toMatch(/Policy detail:.*loopback/);
     } finally {
       // Close only the page we opened; leave the shared browser to the suite.
       await guarded.cleanup().catch(() => {});
