@@ -16,6 +16,10 @@ Invariants (shared with tier 1, enforced here):
 * **Batch + sticky.** Promotions happen in rare amortized batches and are
   sticky for the engine's lifetime; between batches the rendered prefix is
   byte-identical, so provider cache hits resume after the one-time break.
+  Consume-once image trims obey this too — they wait for pressure and for the
+  first model call of a turn, and they swap only the image blocks in place.
+  Firing them on every render, mid-turn, at any occupancy is what made a
+  screenshot cost a full-price re-send of the whole prompt.
 * **The tree is never mutated.** All tiers are view transformations; the
   stored SessionNodes keep full fidelity (rewind/fork/audit/recall see
   everything).
@@ -543,9 +547,11 @@ class Compactor:
         run the ladder as one amortized batch and return what it did.
 
         ``turn_boundary`` says whether this is the FIRST model call of a turn.
-        Every rung that rewrites already-sent history is held until one:
-        rewriting between two calls of the same turn breaks the prefix the
-        provider cached seconds earlier and re-bills the whole prompt.
+        The image rung waits for one — rewriting a result between two calls of
+        the same turn breaks the prefix the provider cached seconds earlier and
+        re-bills the whole prompt. The size rungs do not: past the trigger the
+        prompt is close enough to the window that one cache break beats an
+        overflow.
         """
         if not self.config.enabled:
             if not self.config.trim.enabled:
