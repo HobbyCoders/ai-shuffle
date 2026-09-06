@@ -181,3 +181,65 @@ async def test_the_scheduler_signal_still_reaches_the_reader(mock_db, test_db):
         idle_reader.register_on_task_terminal(None)
 
     assert result == idle_reader.CLI_OWNED_WAKE_SIGNAL
+
+
+# ---------------------------------------------------------------------------
+# The periodic backstop
+# ---------------------------------------------------------------------------
+#
+# A task can also be settled by stop_session_task, by force cleanup, or by a
+# worker supervisor — none of which pass through the idle reader. The 5-minute
+# sweep catches whatever marker those leave behind.
+
+async def test_sweep_clears_a_marker_with_nothing_left_to_park_on(mock_db, test_db):
+    from app.core.startup_reconcile import sweep_stale_parked_markers
+
+    session_id = _parked_session(test_db)
+
+    with patch("app.core.task_registry.task_registry", new=_registry([])), \
+            patch("app.core.sync_engine.sync_engine") as sync:
+        sync.broadcast_user_session_updated = AsyncMock()
+        assert await sweep_stale_parked_markers() == 1
+
+    assert _marker(test_db, session_id) is None
+
+
+async def test_sweep_keeps_a_marker_whose_durable_worker_outlived_the_registry(
+    mock_db, test_db
+):
+    """A registry eviction must not be read as "the work is over" — the durable
+    row is the surviving truth."""
+    from app.core.startup_reconcile import sweep_stale_parked_markers
+    from app.db import background_tasks as background_tasks_db
+
+    session_id = _parked_session(test_db)
+    background_tasks_db.upsert_background_task({
+        "task_id": "survivor",
+        "session_id": session_id,
+        "kind": "agent",
+        "status": "running",
+        "title": "survivor",
+        "started_at": "2026-09-05T00:00:00+00:00",
+        "updated_at": "2026-09-05T00:00:01+00:00",
+    })
+
+    with patch("app.core.task_registry.task_registry", new=_registry([])):
+        assert await sweep_stale_parked_markers() == 0
+
+    assert _marker(test_db, session_id) == "agent"
+
+
+async def test_sweep_leaves_another_installs_sessions_alone(mock_db, test_db):
+    from app.core.startup_reconcile import sweep_stale_parked_markers
+
+    session_id = _parked_session(test_db)
+    test_db.execute(
+        "UPDATE sessions SET instance_id = ? WHERE id = ?",
+        ("some-other-install", session_id),
+    )
+    test_db.commit()
+
+    with patch("app.core.task_registry.task_registry", new=_registry([])):
+        assert await sweep_stale_parked_markers() == 0
+
+    assert _marker(test_db, session_id) == "agent"

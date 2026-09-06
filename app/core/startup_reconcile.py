@@ -260,7 +260,76 @@ async def settle_stale_background_task_rows(
                 "Stale-task sweep: settling %s/%s failed", session_id, task_id,
                 exc_info=True,
             )
+    # Same tick, same class of orphan: a marker left behind by a terminal this
+    # sweep did not have to make.
+    await sweep_stale_parked_markers()
     return settled
+
+
+async def sweep_stale_parked_markers() -> int:
+    """Clear ``parked_task_kind`` on sessions with nothing left to park on.
+
+    The backstop behind ``turn_finalize.clear_parked_marker_if_idle``. That
+    call rides the terminal-task callback, which covers terminals the idle
+    reader drains and the two settle paths above — but a task can also be
+    settled by ``stop_session_task``, by force cleanup, or by a worker
+    supervisor, none of which pass through the reader. Any marker those leave
+    behind is caught here on the ordinary 5-minute tick instead of surviving
+    until the next boot.
+
+    Only own-instance rows, and only when BOTH the in-memory registry and the
+    durable mirror agree there is nothing running — a session whose worker
+    outlived a registry eviction must keep its marker. Returns the number
+    cleared; never raises.
+    """
+    _ph = ph()
+    instance_id = settings.effective_instance_id
+    try:
+        rows = await asyncio.to_thread(_sessions_with_parked_marker, _ph, instance_id)
+    except Exception:  # noqa: BLE001 — a sweep failure must never break cleanup
+        logger.warning("Parked-marker sweep query failed", exc_info=True)
+        return 0
+    if not rows:
+        return 0
+
+    from app.core import pending_reconcile
+    from app.core.turn_finalize import clear_parked_marker_if_idle
+
+    cleared = 0
+    for row in rows:
+        session_id = _row_value(row, "id", 0)
+        if not session_id:
+            continue
+        try:
+            outstanding = await asyncio.to_thread(
+                pending_reconcile.nonterminal_agent_task_ids, session_id
+            )
+            if outstanding:
+                continue
+            if await clear_parked_marker_if_idle(session_id):
+                cleared += 1
+        except Exception:  # noqa: BLE001 — one bad row must not block the rest
+            logger.warning(
+                "Parked-marker sweep: clearing %s failed", session_id,
+                exc_info=True,
+            )
+    if cleared:
+        logger.info(
+            "Parked-marker sweep: cleared %d session(s) marked parked with no "
+            "background work left", cleared,
+        )
+    return cleared
+
+
+def _sessions_with_parked_marker(_ph: str, instance_id: str) -> Any:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""SELECT id FROM sessions
+                 WHERE instance_id = {_ph} AND parked_task_kind IS NOT NULL""",
+            (instance_id,),
+        )
+        return cursor.fetchall()
 
 
 PARK_WATCHDOG_REASON = "park_watchdog"
