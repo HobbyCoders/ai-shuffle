@@ -432,6 +432,14 @@ async def _maybe_failover(
     invisible to the message record (source-typed persistence).
     """
     from app.core import account_failover
+    from app.core.task_registry import task_registry
+
+    if task_registry.is_user_stopped(session_id):
+        # Belt and braces for the Stop latch: a user stop settles the turn
+        # ``aborted`` so the terminal payload never qualifies here, but a
+        # turn that completed in the instant Stop landed must not respawn
+        # the session either (2026-09-05 audit, Stop semantics).
+        return False
 
     if not account_failover.is_usage_limit_error(terminal):
         return False
@@ -642,6 +650,14 @@ async def _maybe_auto_continue(
     """Policy (3): compact-boundary cut → enqueue ONE ``source=auto_continue``
     continuation. Returns True when one was enqueued."""
     from app.core import compact_continue
+    from app.core.task_registry import task_registry
+
+    if task_registry.is_user_stopped(session_id):
+        # Belt and braces for the Stop latch: a user stop settles the turn
+        # ``aborted`` so the terminal payload never qualifies here, but a
+        # turn that completed in the instant Stop landed must not respawn
+        # the session either (2026-09-05 audit, Stop semantics).
+        return False
 
     if settled.get("source") == "auto_continue":
         # The continuation itself cut at the boundary again: compaction already
