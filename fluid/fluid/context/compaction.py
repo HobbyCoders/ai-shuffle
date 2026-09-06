@@ -597,20 +597,29 @@ class Compactor:
 
         # Rung 3: fold surplus digests into epoch stubs (residency rule —
         # keeps the resident cost of N turns near-constant).
+        restore = self._tier_snapshot()
         folded = self._fold_epochs(nodes)
         if folded:
             before = estimate_tokens_of_messages(rendered)
-            rendered = self._render(nodes)
-            promotions.append(
-                Promotion(
-                    tier=3,
-                    spans=tuple((s, e, EPOCH_STUB) for s, e in folded),
-                    reclaimed_chars=max(
-                        0,
-                        (before - estimate_tokens_of_messages(rendered)) * 4,
-                    ),
-                )
+            folded_render = self._render(nodes)
+            reclaimed = max(
+                0, (before - estimate_tokens_of_messages(folded_render)) * 4
             )
+            if reclaimed:
+                rendered = folded_render
+                promotions.append(
+                    Promotion(
+                        tier=3,
+                        spans=tuple((s, e, EPOCH_STUB) for s, e in folded),
+                        reclaimed_chars=reclaimed,
+                    )
+                )
+            else:
+                # An escalation that frees nothing is pure cost: it breaks the
+                # provider's cache prefix, writes a ContextCompaction event
+                # describing no change, and leaves the ladder a rung higher for
+                # the next batch. Roll it back; the digests stay digests.
+                restore()
         return rendered, promotions
 
     def _threshold(
@@ -778,13 +787,20 @@ class Compactor:
         promotions: list[Promotion] = []
         for rung in rungs:
             before = self._estimate(nodes, overhead_tokens)
+            restore = self._tier_snapshot()
             promo = rung()
             if promo is None:
                 continue
             after = self._estimate(nodes, overhead_tokens)
-            promotions.append(
-                replace(promo, reclaimed_chars=max(0, (before - after) * 4))
-            )
+            reclaimed = max(0, (before - after) * 4)
+            if not reclaimed:
+                # This rung changed the view's shape without making it smaller.
+                # Keeping it would spend a cache break and a compaction event
+                # on nothing, and would report progress the retry does not
+                # have; undo it and let the next rung try.
+                restore()
+                continue
+            promotions.append(replace(promo, reclaimed_chars=reclaimed))
             if target is None or after <= target:
                 break
         return promotions
@@ -804,6 +820,31 @@ class Compactor:
                 self._mark_span(start, end, kind)
 
     # ── Internals ────────────────────────────────────────────────────────
+
+    def _tier_snapshot(self) -> Callable[[], None]:
+        """Capture the whole sticky ladder state; the returned call puts it back.
+
+        Rungs mutate state as they run, and a rung that turns out to have
+        reclaimed nothing has to be undone rather than reported — an
+        escalation that frees no tokens still breaks the cache prefix and
+        still records a promotion the next resume would replay.
+        """
+        digested = dict(self._digested)
+        epochs = dict(self._epoch_by_start)
+        digests = dict(self._digest_by_start)
+        trimmed = set(self.trimmer._trimmed)
+
+        def restore() -> None:
+            self._digested.clear()
+            self._digested.update(digested)
+            self._epoch_by_start.clear()
+            self._epoch_by_start.update(epochs)
+            self._digest_by_start.clear()
+            self._digest_by_start.update(digests)
+            self.trimmer._trimmed.clear()
+            self.trimmer._trimmed.update(trimmed)
+
+        return restore
 
     def _mark_span(self, start: str, end: str, kind: str) -> None:
         self._digested[(start, end)] = kind
