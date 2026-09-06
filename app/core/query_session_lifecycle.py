@@ -590,6 +590,10 @@ async def stop_all_background_tasks(
     mid-stream still goes through ``interrupt_for_query``, which sets no
     ``stop_background`` bit and never reaches here — a steer is not a Stop.
 
+    A ProviderAgent worker's OWN Monitor shells are registered under the
+    WORKER's session id and are children of the APP process, so killing the
+    worker leaves them running. On the ``user_stop`` path they are reaped too.
+
     On the ``user_stop`` path this also calls :func:`enter_user_stop` FIRST, so
     the session-wide stop latch is set, armed wakeups are dropped, queued turns
     are aborted and stale parked rows are settled before a single task is
@@ -618,6 +622,31 @@ async def stop_all_background_tasks(
 
     active = task_registry.get_active(session_id)
     task_ids = [task.get("id") for task in active if task.get("id")]
+
+    # Worker sessions to sweep AFTER the kills. A ProviderAgent worker's own
+    # Monitor shells are registered under the WORKER's session id, and killing
+    # the worker does not reach them: the shell is a child of the APP process,
+    # not of the worker's CLI, so evicting the worker's pooled client leaves its
+    # dev server or CI watcher running (and its registry row stranded). Snapshot
+    # the ids now — ``teardown_worker`` unregisters each record as it goes.
+    # ``live_workers`` is keyed on the ROOT session, which is where nested
+    # workers register too (``task_dispatch`` passes ``root_session_id``), so
+    # this covers the whole descendant tree, not just the top level.
+    worker_sessions: list[str] = []
+    if user_stop:
+        try:
+            from app.core import provider_agent_supervisor
+
+            worker_sessions = [
+                r.worker_session_id
+                for r in provider_agent_supervisor.live_workers(session_id)
+                if r.worker_session_id
+            ]
+        except Exception:  # noqa: BLE001 — never let bookkeeping fail a stop.
+            logger.debug(
+                "Stop: could not enumerate workers for %s", session_id,
+                exc_info=True,
+            )
 
     spared: list[dict] = []
     if not include_shells:
@@ -654,6 +683,22 @@ async def stop_all_background_tasks(
     results: list[dict] = list(spared)
     for task_id in task_ids:
         results.append(await stop_session_task(session_id, task_id))
+
+    for worker_session_id in worker_sessions:
+        try:
+            from app.mcp.builtin_tools import stop_session_background_shells
+
+            reaped = await stop_session_background_shells(worker_session_id)
+            if reaped:
+                logger.info(
+                    "Stop for session %s reaped %d shell(s) belonging to worker %s",
+                    session_id, reaped, worker_session_id,
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Stop: reaping worker %s shells failed", worker_session_id,
+                exc_info=True,
+            )
 
     # Terminal guarantee + engine retirement for everything we just killed.
     # Both are best-effort and neither may change what the stop reports.

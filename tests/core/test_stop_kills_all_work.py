@@ -173,6 +173,36 @@ async def test_ghost_shell_row_is_still_reaped_when_shells_are_spared():
     assert not any(r.get("skipped") for r in results)
 
 
+async def test_worker_owned_shells_are_reaped_too():
+    """A worker's dev server is a child of the APP, not of the worker's CLI.
+
+    Killing the worker session evicts its pooled client, which ends the CLI and
+    its descendants — but a Monitor shell the worker started was spawned by the
+    app process and survives that entirely, dev server and all. Stop has to
+    sweep it explicitly or "kill everything" quietly means "except that".
+    """
+    from app.core import provider_agent_supervisor as sup
+
+    session_id = "stop-worker-shells"
+    _seed(session_id, [("worker-a", "agent")])
+    sup.register_worker(sup.WorkerRecord(
+        parent_session_id=session_id,
+        worker_session_id="worker-a",
+        task_id="worker-a",
+        tool_use_id="worker-a",
+    ))
+    try:
+        with _StopPatches(), patch(
+            "app.mcp.builtin_tools.stop_session_background_shells",
+            new=AsyncMock(return_value=2),
+        ) as reap:
+            await stop_all_background_tasks(session_id, user_stop=True)
+    finally:
+        sup.reset()
+
+    reap.assert_awaited_once_with("worker-a")
+
+
 async def test_non_user_stop_paths_are_unchanged():
     """``include_shells`` still drives the internal/force callers."""
     session_id = "stop-force"
