@@ -1215,3 +1215,86 @@ class TestFluidQuestionShape:
         from app.core.user_question_handler import DISMISSED_KEY, fluid_answer_from_envelope
 
         assert fluid_answer_from_envelope({DISMISSED_KEY: True}) == ""
+
+
+# ---------------------------------------------------------------------------
+# Give-up path: the row must stop being answerable and the device must be told
+# ---------------------------------------------------------------------------
+
+class TestQuestionTimeoutRetiresTheRow:
+    """An expiring AskUser used to leave its ``pending_interactions`` row
+    ``pending`` forever: the tool had stopped waiting, but the user's device
+    still showed a live modal, and answering it landed on a dead round-trip."""
+
+    @pytest.fixture
+    def handler(self):
+        return UserQuestionHandler()
+
+    async def test_timeout_cancels_the_row_and_notifies(self, handler, mock_db):
+        from app.db import interactions
+
+        broadcast = AsyncMock(return_value=True)
+        emit = AsyncMock()
+
+        with patch(
+            "app.core.user_question_handler._question_ttl_seconds", return_value=1
+        ), patch(
+            "app.services.notification_service.emit_notification", emit
+        ), patch(
+            "app.services.push_notification.fire_and_forget_notify", lambda **kw: None
+        ):
+            result = await asyncio.wait_for(
+                handler.request_answers(
+                    request_id="q-timeout",
+                    tool_use_id="tu-timeout",
+                    session_id="s-timeout",
+                    questions=[{"question": "Ship it?", "header": "Ship"}],
+                    broadcast_func=broadcast,
+                ),
+                timeout=20.0,
+            )
+
+        assert "timed out" in result["error"]
+        # Nothing is left pending for a device to answer.
+        assert interactions.get_pending_interactions("s-timeout") == []
+        # Every watching device is told the modal is dead...
+        assert any(
+            (c[0][0] if c[0] else {}).get("type") == "user_question_timeout"
+            for c in broadcast.call_args_list
+        )
+        # ...and so is the person who walked away.
+        emit.assert_awaited_once()
+        assert emit.await_args.kwargs["category"] == "question_timeout"
+        assert emit.await_args.kwargs["session_id"] == "s-timeout"
+        assert emit.await_args.kwargs["push"] is True
+
+    async def test_timeout_emits_a_durable_expired_event(self, handler, mock_db):
+        from app.db import session_events as se_db
+
+        broadcast = AsyncMock(return_value=True)
+
+        with patch(
+            "app.core.user_question_handler._question_ttl_seconds", return_value=1
+        ), patch(
+            "app.services.notification_service.emit_notification", AsyncMock()
+        ), patch(
+            "app.services.push_notification.fire_and_forget_notify", lambda **kw: None
+        ):
+            await asyncio.wait_for(
+                handler.request_answers(
+                    request_id="q-expired",
+                    tool_use_id="tu-expired",
+                    session_id="s-expired",
+                    questions=[{"question": "Ship it?", "header": "Ship"}],
+                    broadcast_func=broadcast,
+                ),
+                timeout=20.0,
+            )
+
+        expired = [
+            e for e in se_db.get_events("s-expired")
+            if e["event_type"] == "interaction.expired"
+        ]
+        assert len(expired) == 1
+        assert expired[0]["payload"]["reason"] == "timeout"
+        assert expired[0]["payload"]["request_id"] == "q-expired"
