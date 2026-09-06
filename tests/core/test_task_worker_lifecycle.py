@@ -272,6 +272,35 @@ class TestZeroFrameRedispatch:
         assert calls[1]["label"] == "brief · retry 1"
         assert calls[1]["launch_tool_use_id"] is None
 
+    def test_the_retry_gets_double_the_first_frame_leash(self, monkeypatch):
+        """A late first token and a dead connection look identical from here.
+
+        So the retry is given twice the deadline: a slow reasoning model
+        survives it, a connection that never opens fails both.
+        """
+        from app.core import config as cfg
+
+        monkeypatch.setattr(cfg.settings, "task_worker_start_retries", 1, raising=False)
+        monkeypatch.setattr(
+            cfg.settings, "task_worker_first_frame_seconds", 90.0, raising=False
+        )
+        monkeypatch.setattr(td, "_START_RETRY_BACKOFF_SECONDS", 0.01)
+        calls = []
+
+        async def dispatcher(**kwargs):
+            calls.append(kwargs)
+            return WorkerOutcome(
+                ok=False,
+                session_id=kwargs["worker_session_id"],
+                error="The worker forwarded no output within 90s.",
+                frames_forwarded=0,
+            )
+
+        _run(self._run_retries(dispatcher))
+
+        assert calls[0].get("first_frame_seconds") is None, "attempt 1 takes the default"
+        assert calls[1]["first_frame_seconds"] == 180.0
+
     def test_the_doomed_attempts_wake_is_suppressed(self, monkeypatch):
         """Only the attempt that settles the dispatch spends a parent turn."""
         from app.core import config as cfg

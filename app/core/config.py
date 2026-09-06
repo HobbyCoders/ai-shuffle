@@ -620,6 +620,14 @@ class Settings(BaseSettings):
     #
     # How long an admitted worker may go without streaming its first frame
     # before it is failed as "worker failed to start". 0 disables the watchdog.
+    #
+    # TRADE-OFF, because there is no third signal: a worker whose provider
+    # connection is wedged and a reasoning model whose first token is merely
+    # late look identical from here — both have an empty event log. Raise this
+    # if slow-thinking models start being reported as "failed to start"; the
+    # automatic re-dispatch already gives the retry DOUBLE this deadline for
+    # exactly that reason, so a false positive costs one wasted start rather
+    # than the work.
     # Override via TASK_WORKER_FIRST_FRAME_SECONDS.
     task_worker_first_frame_seconds: float = 90.0
     # Hard wall-clock cap on a SYNCHRONOUS Task worker, measured across every

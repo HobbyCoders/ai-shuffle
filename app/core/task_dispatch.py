@@ -894,6 +894,18 @@ async def _dispatch_worker_with_retries(
         retry_worker_id = str(uuid.uuid4())
         attempt_kwargs = dict(attempt_kwargs)
         attempt_kwargs["worker_session_id"] = retry_worker_id
+        if kind == "start":
+            # The first-frame watchdog cannot tell a dead provider connection
+            # from a reasoning model whose first token is simply late — the
+            # worker's event log is empty in both cases. So the RETRY gets twice
+            # the leash: a genuinely slow model survives it (having cost one
+            # wasted start), a connection that never opens fails both and is
+            # reported, which is the whole point of the deadline.
+            leash = attempt_kwargs.get("first_frame_seconds")
+            if leash is None:
+                leash = provider_agent._worker_deadlines(background, None, None)[0]
+            if leash:
+                attempt_kwargs["first_frame_seconds"] = leash * 2
         attempt_kwargs["label"] = (
             f"{base_label} · retry {used['start'] + used['rate']}"
             if base_label
