@@ -868,6 +868,11 @@ async def test_hub_starts_screencast_and_stops_on_last_viewer(monkeypatch):
     await _wait_for(lambda: "Page.startScreencast" in fake.methods())
     assert "target-abc" in fake.uri
     assert "Page.enable" in fake.methods()
+    # Chrome only paints the foreground tab: without this the panel reaches
+    # "live" and then never receives a frame.
+    methods = fake.methods()
+    assert "Page.bringToFront" in methods
+    assert methods.index("Page.bringToFront") < methods.index("Page.startScreencast")
     sc = next(m for m in fake.sent if m["method"] == "Page.startScreencast")
     assert sc["params"] == {
         "format": "jpeg",

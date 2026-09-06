@@ -837,6 +837,13 @@ class BrowserStreamHub:
         recv_task: Optional[asyncio.Task] = None
         try:
             await self._send_upstream(ws, "Page.enable")
+            # Chrome paints — and therefore screencasts — only the foreground
+            # tab of a window. A panel attached to a backgrounded target reaches
+            # "live" and then shows "waiting for the page to draw its first
+            # frame" forever, which is exactly what the local lane reported
+            # while the agent's own screenshots of the same page worked (those
+            # force a paint). Activate the target before asking for frames.
+            await self._send_upstream(ws, "Page.bringToFront")
             await self._send_upstream(ws, "Page.startScreencast", _SCREENCAST_PARAMS)
 
             # Ask for the current URL up front; the reply lands in the pump loop

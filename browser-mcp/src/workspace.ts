@@ -117,6 +117,9 @@ export class BrowserWorkspace {
             if (this.viewer === c.viewer_id) return; // duplicate pending request settled by an earlier takeover
             if (this.pending !== c.viewer_id) throw new Error("takeover cancelled");
             this.viewer = c.viewer_id; this.pending = null;
+            // A human at the wheel owns the viewport: drop the agent's pin so
+            // panel resizes are not undone on the agent's next call.
+            this.session.clearPinnedViewport();
             this.session.notifyNavigation(); this.changed(); return;
           }
           if (this.viewer !== c.viewer_id) throw new Error("human control required");

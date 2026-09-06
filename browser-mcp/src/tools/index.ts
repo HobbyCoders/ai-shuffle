@@ -55,7 +55,8 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "browser_navigate",
     description:
-      "Open a URL (bare domains get https://) or go back/forward. Acquires the page on first use and returns the landing page's interactive snapshot.",
+      "Open a URL (bare domains get https://) or go back/forward. Acquires the page on first use and returns the landing page's interactive snapshot. " +
+      "The browser holds NO session cookies for the user's own apps: a landing on another origin (reported as redirected_to_origin) is a sign-in demand it cannot satisfy itself.",
     inputSchema: navigateSchema,
     run: (session, input) => runNavigate(session, input as { url: string }),
   },
@@ -101,7 +102,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "browser_eval",
     description:
-      "Run JavaScript in the page (top-level await allowed; last expression is returned). Result is JSON-ish, size-capped; errors return message + top stack frame.",
+      "Run JavaScript in the page (top-level await allowed; last expression is returned). Result is JSON-ish, size-capped; errors return message + top stack frame, plus recent_requests (status and content-type) so a failed fetch names itself.",
     inputSchema: evalSchema,
     run: (session, input) => runEval(session, input as { code: string }),
   },

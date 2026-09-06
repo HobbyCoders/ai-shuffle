@@ -55,33 +55,53 @@ export function capText(
  * silence, so an empty result says out loud that it is suspicious. Returns the
  * warning to attach, or undefined when the page clearly rendered something.
  *
- * `renderedText` is whatever content the tool is about to return (snapshot YAML,
- * extracted prose). Below this many non-whitespace characters a page has
- * effectively painted nothing — a bare <body>, an app that failed to mount, a
- * fetch that errored before first paint. `refCount` is checked only when the
- * caller has one (snapshot-shaped tools); text-only readers omit it.
+ * `renderedText` is whatever content the tool is about to return (extracted
+ * prose). Below this many non-whitespace characters a page has effectively
+ * painted nothing — a bare <body>, an app that failed to mount, a fetch that
+ * errored before first paint.
  */
-const MEANINGFUL_CONTENT_CHARS = 40;
+export const MEANINGFUL_CONTENT_CHARS = 40;
 
-export function emptyContentWarning(
-  renderedText: string,
+export function emptyContentWarning(renderedText: string): string | undefined {
+  if (renderedText.replace(/\s+/g, "").length < MEANINGFUL_CONTENT_CHARS) {
+    return BLANK_PAGE_WARNING;
+  }
+  return undefined;
+}
+
+export const BLANK_PAGE_WARNING =
+  "page rendered no content — likely a blank/errored app; check browser_console " +
+  "and browser_network, and confirm the page finished loading, before treating " +
+  "this as success";
+
+export const NO_REFS_NOTE =
+  "no interactive elements found (ref_count 0) — the page has content but nothing " +
+  "the snapshot can act on (a canvas, an image, plain prose). Use browser_read_text " +
+  "or browser_screenshot to read it, or browser_act with coordinates.";
+
+/** What the page says about itself; `textChars` < 0 means we could not measure. */
+export interface PageContent {
+  title: string;
+  textChars: number;
+}
+
+/**
+ * Judge emptiness from the PAGE, never from a filtered snapshot.
+ *
+ * The old heuristic measured the interactive-filtered snapshot, so any page
+ * whose content is not clickable — a canvas fixture, a rendered login form, a
+ * prose page — was announced as "rendered no content" while it was plainly
+ * fine. Four sessions in one day chased that warning. A page with a title or a
+ * body is not blank; a ref_count of 0 is a routing hint, not an alarm.
+ */
+export function contentWarning(
+  page: PageContent,
   refCount?: number,
 ): string | undefined {
-  const solid = renderedText.replace(/\s+/g, "").length;
-  if (solid < MEANINGFUL_CONTENT_CHARS) {
-    return (
-      "page rendered no content — likely a blank/errored app; check browser_console " +
-      "and browser_network, and confirm the page finished loading, before treating " +
-      "this as success"
-    );
-  }
-  if (refCount === 0) {
-    return (
-      "no interactive elements found (ref_count 0) — the page has text but nothing " +
-      "clickable; if you expected a UI here it may have failed to mount, so check " +
-      "browser_console before treating this as success"
-    );
-  }
+  const measured = page.textChars >= 0;
+  const blank = page.title.trim() === "" && page.textChars < MEANINGFUL_CONTENT_CHARS;
+  if (measured && blank) return BLANK_PAGE_WARNING;
+  if (refCount === 0) return NO_REFS_NOTE;
   return undefined;
 }
 

@@ -49,3 +49,21 @@ async def test_rpc_token_session_and_payload_validation_before_spawn(monkeypatch
         assert (await client.post("/api/v1/browser/panel/rpc", json=body)).status_code == 404
     spawn.assert_not_called()
     registry.clear("rpc-session")
+
+
+@pytest.mark.asyncio
+async def test_start_failure_detail_reaches_the_panel(monkeypatch):
+    """503s carry the reason. A bare "could not start" is unactionable."""
+    app = FastAPI()
+    app.include_router(panel.router)
+    app.dependency_overrides[panel.require_auth] = lambda: "auth"
+    monkeypatch.setattr(panel, "require_session", AsyncMock(return_value={"id": "s"}))
+    monkeypatch.setattr(
+        runtime,
+        "start",
+        AsyncMock(side_effect=runtime.RuntimeUnavailable(runtime.STALE_BUILD_DETAIL)),
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/sessions/s/browser/panel/start")
+    assert response.status_code == 503
+    assert response.json()["detail"] == runtime.STALE_BUILD_DETAIL

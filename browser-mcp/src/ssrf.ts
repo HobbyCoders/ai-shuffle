@@ -277,10 +277,11 @@ const DEFAULT_BLOCK: LabeledCidr[] = [
  * decision an operator can change; saying so turns a dead end into one action.
  */
 const REMEDY_DEFAULT_BLOCK =
-  "blocked by default policy — to allow it set BROWSER_SSRF_ALLOW " +
-  '(e.g. BROWSER_SSRF_ALLOW="127.0.0.0/8,::1/128") for the app and start a new ' +
-  "session, or on a local/self-hosted install set BROWSER_SSRF_ALLOW_LOOPBACK=true; " +
-  "otherwise bind the server to 0.0.0.0 and browse its LAN IP instead";
+  "blocked by default policy. Do this instead: bind the server to 0.0.0.0 and " +
+  "browse it by IP — run `hostname -I` (or `ipconfig`) in your shell and use that " +
+  "address with the same port. To allow this range permanently the operator sets " +
+  "BROWSER_SSRF_ALLOW_LOOPBACK=true (or " +
+  'BROWSER_SSRF_ALLOW="127.0.0.0/8,::1/128") and starts a new session';
 
 const REMEDY_ALWAYS_BLOCK =
   "always blocked and NOT overridable — BROWSER_SSRF_ALLOW cannot re-enable it; " +
