@@ -15,7 +15,7 @@ import httpx
 
 from fluid.providers._chat_completions import stream_chat_completions
 from fluid.providers._retry import RetryPolicy
-from fluid.providers._transport import DEFAULT_STREAM_DEADLINE_S
+from fluid.providers._transport import DEFAULT_STREAM_DEADLINE_S, is_usable_client
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.providers.openrouter.serialize import build_request_body
 
@@ -94,6 +94,10 @@ class OpenRouterClient:
             "accept": "text/event-stream",
         }
         body = build_request_body(request, allow_fallbacks=self._allow_fallbacks)
+        if not is_usable_client(self._http):
+            # A host-injected client its owner has closed can never send again;
+            # drop it here so later calls do not re-check a corpse.
+            self._http = None
         async for chunk in stream_chat_completions(
             self._base_url,
             body,

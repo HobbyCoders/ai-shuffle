@@ -555,7 +555,7 @@ def _is_empty_completion(result: _CallResult) -> bool:
     before the terminal chunk — never a genuine provider error, which carries
     its own message and keeps the existing error path.
     """
-    if result.interrupted or result.tool_uses:
+    if result.interrupted or result.tool_uses or result.arg_stream_error:
         return False
     for block in result.message.content:
         if isinstance(block, (Text, Thinking)) and block.text:

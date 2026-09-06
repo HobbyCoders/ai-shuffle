@@ -11,8 +11,8 @@ __all__ = [
 # so the delegated backend (and its tests) stay importable even while that
 # concurrently-developed subtree is mid-change.
 try:  # pragma: no cover - exercised indirectly
-    from fluid.engine.native import NativeLoop
+    from fluid.engine.native import NativeLoop, ToolArgStreamGuard
 
-    __all__.append("NativeLoop")
+    __all__ += ["NativeLoop", "ToolArgStreamGuard"]
 except Exception:  # pragma: no cover
     pass

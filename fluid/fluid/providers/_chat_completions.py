@@ -577,14 +577,18 @@ async def stream_chat_completions(
                         budget: float | None = (
                             FIRST_DATA_TIMEOUT if awaiting_first else None
                         )
+                        # Which clock owns the budget decides how a timeout is
+                        # reported. Comparing the wall clock afterwards is not
+                        # reliable: asyncio timers can fire a tick early.
+                        deadline_bound = False
                         if call_deadline is not None:
                             remaining = call_deadline - time.monotonic()
                             if remaining <= 0:
                                 overran = True
                                 break
-                            budget = remaining if budget is None else min(
-                                budget, remaining
-                            )
+                            if budget is None or remaining < budget:
+                                budget = remaining
+                                deadline_bound = True
                         try:
                             if budget is None:
                                 event_name, data = await events.__anext__()
@@ -595,9 +599,7 @@ async def stream_chat_completions(
                         except StopAsyncIteration:
                             break
                         except (asyncio.TimeoutError, TimeoutError):
-                            if call_deadline is not None and (
-                                time.monotonic() >= call_deadline
-                            ):
+                            if deadline_bound:
                                 overran = True
                             else:
                                 starved = True
