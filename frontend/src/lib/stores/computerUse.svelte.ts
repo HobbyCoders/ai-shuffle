@@ -17,7 +17,7 @@
  * this endpoint was hit 78 times in ten minutes from a single device while the
  * backend was already struggling, every call slow.
  */
-import { getComputerUseStatus, setComputerUseEnabled } from '$lib/api/computerUse';
+import { getComputerUseStatus, setComputerUseEnabled, stopComputerUse, type ComputerUseStatus } from '$lib/api/computerUse';
 import { notify } from '$lib/stores/notifications';
 
 export const POLL_AVAILABLE_MS = 2_000;
@@ -34,6 +34,17 @@ class ComputerUseStore {
 	active = $state(false);
 	display = $state<number | null>(null);
 	displayLabel = $state<string | null>(null);
+	action = $state<string | null>(null);
+	busy = $state(false);
+	cursor = $state<ComputerUseStatus['cursor']>(null);
+	geometry = $state<ComputerUseStatus['geometry']>(null);
+	secondsSince = $state<number | null>(null);
+	stopReason = $state<string | null>(null);
+	escapeAvailable = $state(false);
+	overlayAvailable = $state(false);
+	stopping = $state(false);
+	connectionLost = $state(false);
+	#revision = 0;
 
 	#timer: ReturnType<typeof setTimeout> | null = null;
 	#subscribers = 0;
@@ -57,14 +68,25 @@ class ComputerUseStore {
 		// timer stack requests on top of each other.
 		if (this.#inFlight) return;
 		this.#inFlight = true;
+		const revision = this.#revision;
 		try {
 			const s = await getComputerUseStatus();
+			if (revision !== this.#revision) return;
+			this.connectionLost = false;
 			this.available = s.available;
 			this.reason = s.reason;
 			this.enabled = s.enabled;
 			this.active = s.active;
 			this.display = s.display;
 			this.displayLabel = s.display_label;
+			this.action = s.action ?? null;
+			this.busy = s.busy ?? false;
+			this.cursor = s.cursor ?? null;
+			this.geometry = s.geometry ?? null;
+			this.secondsSince = s.seconds_since ?? null;
+			this.stopReason = s.stop_reason ?? null;
+			this.escapeAvailable = s.escape_available ?? false;
+			this.overlayAvailable = s.overlay_available ?? false;
 			// Toast on the rising edge of control activity, so the user is told
 			// the moment the agent starts driving a screen (and which one).
 			if (s.active && !this.#wasActive) {
@@ -75,9 +97,33 @@ class ComputerUseStore {
 			}
 			this.#wasActive = s.active;
 		} catch {
-			// Keep last-known state on transient errors.
+			if (revision === this.#revision) this.connectionLost = true;
 		} finally {
 			this.#inFlight = false;
+		}
+	}
+
+	/** Release host input immediately; don't wait for the next status poll. */
+	async halt() {
+		if (this.stopping) return;
+		this.stopping = true;
+		this.#revision++;
+		try {
+			await stopComputerUse();
+			this.#revision++;
+			this.active = false;
+			this.#wasActive = false;
+			this.stopReason = 'user';
+			this.cursor = null;
+			this.geometry = null;
+			this.display = null;
+			this.displayLabel = null;
+		} catch {
+			notify('Could not stop computer use. Press Esc on the host computer or use Stop in chat.', {
+				severity: 'error', duration_ms: 8000
+			});
+		} finally {
+			this.stopping = false;
 		}
 	}
 

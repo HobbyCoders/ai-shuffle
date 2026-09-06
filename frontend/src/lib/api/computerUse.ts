@@ -2,9 +2,8 @@
  * Computer-use API client.
  *
  * Backs the global toggle (Settings → Chat & Input) and the live status the
- * UI's indicators consume. Halting computer-use for a session is the chat
- * Stop button's job (the WS `stop` frame); there is no separate stop/resume
- * endpoint anymore.
+ * UI's indicators consume. The host stop endpoint releases active desktop
+ * control without requiring the user to find the chat that owns it.
  */
 import { api } from './client';
 
@@ -15,12 +14,25 @@ export interface ComputerUseStatus {
 	reason: string;
 	/** Whether the global toggle is currently on. */
 	enabled: boolean;
-	/** True when the agent ran a screen action within the recent window. */
+	/** True until the owning chat releases control, finishes, or is stopped. */
 	active: boolean;
 	/** Which monitor it's acting on (when active). */
 	display: number | null;
 	/** Human label for the active display, e.g. "Display 1 · 3440×1440 (primary)". */
 	display_label: string | null;
+	action?: string | null;
+	busy?: boolean;
+	cursor?: [number, number] | null;
+	geometry?: { left: number; top: number; width: number; height: number } | null;
+	seconds_since?: number | null;
+	stop_reason?: string | null;
+	escape_available?: boolean;
+	overlay_available?: boolean;
+	input_mode?: 'shared_desktop';
+}
+
+export async function stopComputerUse(): Promise<{ stopped: number }> {
+	return api.post<{ stopped: number }>('/computer-use/stop', {});
 }
 
 export async function getComputerUseStatus(): Promise<ComputerUseStatus> {

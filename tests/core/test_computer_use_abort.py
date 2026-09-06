@@ -3,8 +3,7 @@
 The chat Stop button must halt computer-use for that session alone (the
 SessionRuntime interrupt with mode="stop"), the session's next turn must
 re-arm it, and other sessions must be unaffected. The global toggle lives in
-the /computer-use endpoints; the old emergency-stop stop/resume routes are
-gone.
+the /computer-use endpoints; host Stop releases active sessions without a resume route.
 """
 
 import pytest
@@ -100,6 +99,30 @@ class TestEndpoints:
             r = api.get("/api/v1/computer-use/status")
         assert r.json()["enabled"] is True
 
-    def test_stop_and_resume_routes_are_gone(self, api):
-        assert api.post("/api/v1/computer-use/stop").status_code in (404, 405)
+    def test_stop_releases_active_sessions_but_never_resumes(self, api):
+        from app.mcp.computer_use import activity, access
+        abort.resume("active")
+        activity.record(2, session_id="active")
+        access.grant("active", ["Notepad"])
+        r = api.post("/api/v1/computer-use/stop")
+        assert r.status_code == 200
+        assert r.json() == {"stopped": 1}
+        assert abort.is_stopped("active")
+        assert not access.is_granted("active")
+        assert not activity.snapshot()["active"]
         assert api.post("/api/v1/computer-use/resume").status_code in (404, 405)
+        abort.resume("active")
+
+    def test_disable_immediately_stops_active_control(self, api):
+        from app.mcp.computer_use import activity
+        activity.record(1, session_id="active")
+        assert api.put("/api/v1/computer-use/enabled", json={"enabled": False}).status_code == 200
+        assert abort.is_stopped("active")
+        assert not activity.snapshot()["active"]
+        abort.resume("active")
+
+    def test_stop_requires_authentication(self):
+        app = FastAPI()
+        app.include_router(router)
+        with TestClient(app) as client:
+            assert client.post("/api/v1/computer-use/stop").status_code in (401, 403)

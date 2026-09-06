@@ -1,39 +1,64 @@
-"""Tracks recent computer-use activity so the UI can show a live "AI Shuffle is
-controlling your screen" indicator and which display.
+"""Session activity retained until control is released, with physical geometry.
 
-Process-global. An action calls ``record(display)``
-each time it touches the screen; the status endpoint reads ``snapshot()`` and
-considers control "active" if something happened within ACTIVE_WINDOW_SECONDS.
+The agent marker retains its last input position when the human moves the mouse.
 """
 
 from __future__ import annotations
 
 import time
-from typing import Optional
+import threading
 
-# How long after the last action we still report control as "active". Long
-# enough to span the model's think time between tool calls.
-ACTIVE_WINDOW_SECONDS = 8.0
-
-_last_at: float = 0.0
-_last_display: Optional[int] = None
+_LOCK = threading.RLock()
+_sessions: dict[str, dict] = {}
+_last_stop: str | None = None
 
 
-def record(display: Optional[int]) -> None:
-    """Mark that a computer-use action just ran on ``display``."""
-    global _last_at, _last_display
-    _last_at = time.monotonic()
-    _last_display = display
+def record(display: int | None, *, session_id: str | None = None,
+           action: str = "screenshot", geometry: dict | None = None,
+           cursor: tuple[int, int] | None = None) -> None:
+    global _last_stop
+    key = session_id or "_global"
+    with _LOCK:
+        previous = _sessions.get(key, {})
+        same_display = previous.get("display") == display
+        _sessions[key] = {
+            "session_id": key, "display": display, "action": action,
+            "busy": True,
+            "geometry": geometry or (previous.get("geometry") if same_display else None),
+            "cursor": list(cursor) if cursor is not None else (
+                previous.get("cursor") if same_display else None),
+            "at": time.monotonic(),
+        }
+        _last_stop = None
+
+
+def idle(session_id: str | None) -> None:
+    with _LOCK:
+        state = _sessions.get(session_id or "_global")
+        if state:
+            state["busy"] = False
+
+
+def finish(session_id: str | None = None, *, reason: str | None = None) -> None:
+    global _last_stop
+    with _LOCK:
+        removed = _sessions.pop(session_id or "_global", None)
+        if removed and reason:
+            _last_stop = reason
+
+
+def active_sessions() -> list[str]:
+    with _LOCK:
+        return list(_sessions)
 
 
 def snapshot() -> dict:
-    """Return ``{active, display, seconds_since}`` for the status endpoint."""
-    if _last_at <= 0:
-        return {"active": False, "display": None, "seconds_since": None}
-    since = time.monotonic() - _last_at
-    active = since <= ACTIVE_WINDOW_SECONDS
-    return {
-        "active": active,
-        "display": _last_display if active else None,
-        "seconds_since": round(since, 1),
-    }
+    with _LOCK:
+        latest = max(_sessions.values(), key=lambda s: s["at"], default=None)
+        if latest is None:
+            return {"active": False, "display": None, "seconds_since": None,
+                    "busy": False,
+                    "session_id": None, "action": None, "geometry": None,
+                    "cursor": None, "stop_reason": _last_stop}
+        return {**latest, "active": True, "stop_reason": None,
+                "seconds_since": round(time.monotonic() - latest["at"], 1)}

@@ -17,6 +17,8 @@ def _mgr_with_map(selected, entry):
     mgr.virtual_w, mgr.virtual_h = 1280, 800
     mgr._map = {selected: entry}
     mgr.selected_index = selected
+    mgr.list_displays = lambda: [DisplayInfo(selected, entry['left'], entry['top'],
+                                            entry['pw'], entry['ph'], selected == 1)]
     return mgr
 
 
@@ -73,6 +75,21 @@ class TestToPhysical:
         gx, gy = mgr.to_physical(99999, 99999)
         assert gx <= 2559 and gy <= 1599
         assert gx >= 0 and gy >= 0
+
+    def test_layout_change_requires_new_screenshot(self):
+        mgr = _mgr_with_map(2, {"scale": 1, "pw": 100, "ph": 100,
+                               "left": -100, "top": -100, "vw": 100, "vh": 100})
+        mgr.list_displays = lambda: [DisplayInfo(2, 100, 0, 100, 100, False)]
+        with pytest.raises(ValueError, match="layout changed"):
+            mgr.to_physical(50, 50)
+        assert 2 not in mgr._map
+
+    @pytest.mark.parametrize('value', [float('nan'), float('inf'), -float('inf')])
+    def test_nonfinite_coordinates_are_rejected(self, value):
+        mgr = _mgr_with_map(1, {"scale": 1, "pw": 100, "ph": 100,
+                               "left": 0, "top": 0, "vw": 100, "vh": 100})
+        with pytest.raises(ValueError, match="finite"):
+            mgr.to_physical(value, 10)
 
 
 class TestDefaultIndex:

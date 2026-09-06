@@ -123,6 +123,9 @@ class TestNewTurnRearms:
         assert abort.is_stopped("s1")
 
         rt = _runtime(sid="s1", tid="t2")
+        def check_rearmed_then_exit(*args):
+            assert not abort.is_stopped("s1")
+            raise _Bail()
         with patch(
             "app.core.session_runtime.asyncio.to_thread", new=_sync_to_thread
         ), patch(
@@ -151,9 +154,10 @@ class TestNewTurnRearms:
             with patch.object(
                 SessionRuntime,
                 "_reset_started_this_turn",
-                side_effect=_Bail(),
+                side_effect=check_rearmed_then_exit,
             ):
                 with pytest.raises(_Bail):
                     await rt.execute()
 
-        assert not abort.is_stopped("s1")
+        # Finishing (or failing) the turn releases input and fences late workers.
+        assert abort.is_stopped("s1")

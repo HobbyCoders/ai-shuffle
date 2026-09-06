@@ -15,6 +15,7 @@
 	import type { Snippet } from 'svelte';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
 	import BannerHost from '$lib/components/BannerHost.svelte';
+	import ComputerUseBanner from '$lib/components/ComputerUseBanner.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { installGlobalErrorHandlers } from '$lib/services/error-reporter';
 	import { bindVisualViewport } from '$lib/utils/visual-viewport';
@@ -192,6 +193,7 @@
 	<!-- PWA Components -->
 	<InstallPrompt />
 	<BannerHost />
+	{#if $isAuthenticated}<ComputerUseBanner />{/if}
 
 	{@render children?.()}
 {/if}

@@ -26,18 +26,13 @@ import json
 import logging
 import subprocess
 import sys
-import time
 from typing import Any, List, Optional
 
-from app.mcp.computer_use import access, activity
-from app.mcp.computer_use.abort import is_stopped
-from app.mcp.computer_use.scaling import DisplayManager, computer_use_available
+from app.mcp.computer_use import access, activity, abort, safety
+from app.mcp.computer_use.abort import is_stopped, Aborted as _Aborted
+from app.mcp.computer_use.scaling import DisplayManager, computer_use_available, foreground_display
 
 logger = logging.getLogger(__name__)
-
-
-class _Aborted(Exception):
-    """Raised inside a worker thread when the session's Stop trips mid-action."""
 
 
 _MOVE_SETTLE = 0.04
@@ -67,6 +62,7 @@ _TOOL_NAMES = [
     "key", "hold_key", "type", "scroll", "wait",
     "open_application", "read_clipboard", "write_clipboard",
     "computer_batch",
+    "release_control",
 ]
 
 
@@ -91,7 +87,7 @@ def _ok(payload: dict) -> dict:
 
 
 def _err(message: str, **extra: Any) -> dict:
-    return {"content": [_text_item({"success": False, "error": message, **extra})]}
+    return {"isError": True, "content": [_text_item({"success": False, "error": message, **extra})]}
 
 
 # ---------------------------------------------------------------------------
@@ -131,10 +127,12 @@ def create_computer_use_server(
     from app.mcp.computer_use.keymap import parse_chord, parse_modifiers
     from app.mcp.computer_use import overlay
 
-    overlay.ensure_started()
     mgr = DisplayManager(virtual_size=virtual_size, target_display=target_display)
+    overlay.ensure_started()
+    safety.ensure_started()
     mouse = MouseController()
     keyboard = KeyboardController()
+    inputs = safety.SafeInput(session_id, mouse, keyboard)
     big = ToolAnnotations(maxResultSizeChars=8_000_000)
 
     _CLICKS = {
@@ -160,9 +158,44 @@ def create_computer_use_server(
     def _guard() -> Optional[dict]:
         if is_stopped(session_id):
             return _err("Computer-use was stopped for this session. Start a new turn to continue.")
+        from app.api.computer_use import get_computer_use_enabled
+        if not get_computer_use_enabled():
+            return _err("Computer use is disabled in Settings.")
         return _access_error()
 
     # ----- the synchronous action executor (shared by tools + batch) --------
+
+    def _record(action: str, cursor=None, geo=None):
+        if cursor is not None:
+            geo = next((d for d in mgr.list_displays() if
+                        d.left <= cursor[0] < d.left + d.width and
+                        d.top <= cursor[1] < d.top + d.height), geo)
+        elif action in ("key", "hold_key", "type", "open_application"):
+            geo = foreground_display(mgr.list_displays())
+        geo = geo or mgr._selected_geometry()
+        with abort.input_guard(session_id, inputs.token):
+            activity.record(geo.index, session_id=session_id, action=action,
+                            geometry=geo.to_dict(), cursor=cursor)
+
+    def _move(point, action):
+        inputs.call(setattr, mouse, "position", point)
+        _record(action, cursor=point)
+
+    def _check_pointer(point):
+        inputs.check()
+        if tuple(mouse.position) != tuple(point):
+            # If the user moved it during the settle delay, don't click there.
+            abort.request_stop(session_id, reason="pointer_moved")
+            raise _Aborted()
+
+    def _chord(mods, main, duration=0):
+        try:
+            for key in [*mods, main]:
+                inputs.press(keyboard, key)
+            inputs.sleep(duration)
+        finally:
+            for key in reversed([*mods, main]):
+                inputs.release(keyboard, key)
 
     def _type_text(text: str) -> str:
         """Type text reliably. Returns the method used ('paced' or 'clipboard').
@@ -177,76 +210,104 @@ def create_computer_use_server(
         long_or_multiline = len(text) >= _TYPE_CLIPBOARD_THRESHOLD or "\n" in text
         if long_or_multiline and access.info(session_id).get("clipboard_write"):
             try:
+                inputs.check()
                 _clipboard_write(text)
-                time.sleep(0.05)
-                keyboard.press(Key.ctrl)
-                keyboard.press("v")
-                keyboard.release("v")
-                keyboard.release(Key.ctrl)
-                time.sleep(0.05)
+                inputs.sleep(0.05)
+                _chord([Key.ctrl], "v")
+                inputs.sleep(0.05)
                 return "clipboard"
+            except _Aborted:
+                raise
             except Exception:
                 logger.debug("clipboard type fast-path failed; falling back to paced", exc_info=True)
         for ch in text:
-            keyboard.type(ch)
+            if ch == "\n":
+                _chord([], Key.enter)
+            elif ch == "\t":
+                _chord([], Key.tab)
+            elif ch != "\r":
+                inputs.call(keyboard.type, ch)
             if _TYPE_DELAY:
-                time.sleep(_TYPE_DELAY)
+                inputs.sleep(_TYPE_DELAY)
         return "paced"
 
     def _execute(action: str, p: dict) -> list:
-        if is_stopped(session_id):
-            raise _Aborted()
-        activity.record(mgr.selected_index)
+        inputs.check()
+        _record(action)
+
+        if action in ("read_clipboard", "write_clipboard"):
+            flag = "clipboard_read" if action == "read_clipboard" else "clipboard_write"
+            if permission_mode != "bypassPermissions" and not access.info(session_id).get(flag):
+                raise ValueError(f"{flag} is not granted; call request_access first")
+            if action == "read_clipboard":
+                text = _clipboard_read()
+                inputs.check()
+                return [_text_item({"success": True, "text": text})]
+            _clipboard_write(str(p.get("text") or ""))
+            inputs.check()
+            return [_text_item({"success": True, "action": action})]
 
         if action == "screenshot":
             png, info = mgr.capture()
-            return [_text_item({"success": True, **info, **_display_note()}), _img_item(png)]
+            _record(action)
+            inputs.check()
+            return [_text_item({"success": True, **info, **_display_note(),
+                                "cursor": _virtual_cursor(*mouse.position)}), _img_item(png)]
         if action == "zoom":
             png, info = mgr.capture_region(p["region"])
+            inputs.check()
             return [_text_item({"success": True, **info}), _img_item(png)]
         if action == "cursor_position":
             gx, gy = mouse.position
             return [_text_item({"success": True, **_virtual_cursor(gx, gy)})]
         if action == "mouse_move":
             gx, gy = mgr.to_physical(*p["coordinate"])
-            mouse.position = (gx, gy)
+            _move((gx, gy), action)
             return [_text_item({"success": True, "action": action, "x": gx, "y": gy})]
         if action in _CLICKS:
             button, count = _CLICKS[action]
             gx, gy = mgr.to_physical(*p["coordinate"])
-            mouse.position = (gx, gy)
-            time.sleep(_MOVE_SETTLE)
             mods = parse_modifiers(p.get("text", ""))
-            for m in mods:
-                keyboard.press(m)
+            _move((gx, gy), action)
+            inputs.sleep(_MOVE_SETTLE)
+            _check_pointer((gx, gy))
             try:
-                if is_stopped(session_id):
-                    raise _Aborted()
-                mouse.click(button, count)
+                for m in mods:
+                    inputs.press(keyboard, m)
+                for i in range(count):
+                    inputs.press(mouse, button)
+                    inputs.release(mouse, button)
+                    if i < count - 1:
+                        inputs.sleep(0.05)
             finally:
+                inputs.release(mouse, button)
                 for m in reversed(mods):
-                    keyboard.release(m)
+                    inputs.release(keyboard, m)
             return [_text_item({"success": True, "action": action, "x": gx, "y": gy})]
         if action == "left_click_drag":
+            # Validate both endpoints before pressing any button.
+            ex, ey = mgr.to_physical(*p["coordinate"])
             if p.get("start_coordinate"):
                 sx, sy = mgr.to_physical(*p["start_coordinate"])
-                mouse.position = (sx, sy)
-                time.sleep(_MOVE_SETTLE)
-            ex, ey = mgr.to_physical(*p["coordinate"])
-            mouse.press(Button.left)
+                _move((sx, sy), action)
+                inputs.sleep(_MOVE_SETTLE)
+                _check_pointer((sx, sy))
+            sx, sy = mouse.position
             try:
-                if is_stopped(session_id):
-                    raise _Aborted()
-                mouse.position = (ex, ey)
-                time.sleep(_MOVE_SETTLE)
+                inputs.press(mouse, Button.left)
+                for step in range(1, 21):
+                    _move((round(sx + (ex - sx) * step / 20),
+                           round(sy + (ey - sy) * step / 20)), action)
+                    inputs.sleep(0.015)
             finally:
-                mouse.release(Button.left)
+                inputs.release(mouse, Button.left)
             return [_text_item({"success": True, "action": action, "x": ex, "y": ey})]
         if action == "left_mouse_down":
-            mouse.press(Button.left)
+            inputs.press(mouse, Button.left)
+            _record(action, cursor=mouse.position)
             return [_text_item({"success": True, "action": action})]
         if action == "left_mouse_up":
-            mouse.release(Button.left)
+            inputs.release(mouse, Button.left)
             return [_text_item({"success": True, "action": action})]
         if action == "type":
             method = _type_text(str(p.get("text") or ""))
@@ -255,35 +316,31 @@ def create_computer_use_server(
             mods, main = parse_chord(str(p.get("text") or ""))
             repeat = max(1, min(100, int(p.get("repeat", 1) or 1)))
             for _ in range(repeat):
-                for m in mods:
-                    keyboard.press(m)
-                keyboard.press(main)
-                keyboard.release(main)
-                for m in reversed(mods):
-                    keyboard.release(m)
+                _chord(mods, main)
             return [_text_item({"success": True, "action": action})]
         if action == "hold_key":
             mods, main = parse_chord(str(p.get("text") or ""))
             dur = max(0.0, min(100.0, float(p.get("duration", 0) or 0)))
-            for m in mods:
-                keyboard.press(m)
-            keyboard.press(main)
-            time.sleep(dur)
-            keyboard.release(main)
-            for m in reversed(mods):
-                keyboard.release(m)
+            _chord(mods, main, dur)
             return [_text_item({"success": True, "action": action})]
         if action == "scroll":
             gx, gy = mgr.to_physical(*p["coordinate"])
-            mouse.position = (gx, gy)
-            time.sleep(_MOVE_SETTLE)
-            amt = int(p.get("scroll_amount", 3) or 3)
+            amt = int(p.get("scroll_amount", 3))
+            if amt < 0 or amt > 100:
+                raise ValueError("scroll_amount must be between 0 and 100")
             direction = p.get("scroll_direction", "down")
-            dx, dy = {"up": (0, amt), "down": (0, -amt), "left": (-amt, 0), "right": (amt, 0)}.get(direction, (0, -amt))
-            mouse.scroll(dx, dy)
+            if direction not in ("up", "down", "left", "right"):
+                raise ValueError("scroll_direction must be up, down, left, or right")
+            _move((gx, gy), action)
+            inputs.sleep(_MOVE_SETTLE)
+            _check_pointer((gx, gy))
+            dx, dy = {"up": (0, 1), "down": (0, -1), "left": (-1, 0), "right": (1, 0)}[direction]
+            for _ in range(amt):
+                inputs.call(mouse.scroll, dx, dy)
+                inputs.sleep(0.01)
             return [_text_item({"success": True, "action": action, "direction": direction})]
         if action == "wait":
-            time.sleep(max(0.0, min(_MAX_WAIT, float(p.get("duration", 0) or 0))))
+            inputs.sleep(max(0.0, min(_MAX_WAIT, float(p.get("duration", 0) or 0))))
             return [_text_item({"success": True, "action": action})]
         if action == "open_application":
             _open_app(str(p.get("app") or ""))
@@ -293,19 +350,26 @@ def create_computer_use_server(
     def _open_app(name: str) -> None:
         # Launch/foreground via the Start menu: tap Win, type, Enter. Robust
         # across installed apps without resolving executables.
-        keyboard.press(Key.cmd)
-        keyboard.release(Key.cmd)
-        time.sleep(0.5)
-        keyboard.type(name)
-        time.sleep(0.6)
-        keyboard.press(Key.enter)
-        keyboard.release(Key.enter)
-        time.sleep(0.8)
+        if not name.strip():
+            raise ValueError("application name cannot be empty")
+        if sys.platform != "win32":
+            raise ValueError("open_application is supported on Windows only")
+        _chord([], Key.cmd)
+        inputs.sleep(0.5)
+        _type_text(name)
+        inputs.sleep(0.6)
+        _chord([], Key.enter)
+        inputs.sleep(0.8)
 
     def _virtual_cursor(gx: float, gy: float) -> dict:
-        out = {"physical_x": int(gx), "physical_y": int(gy), "display": mgr.selected_index}
+        actual = next((d for d in mgr.list_displays()
+                       if d.left <= gx < d.left + d.width and d.top <= gy < d.top + d.height), None)
+        on_selected = actual is not None and actual.index == mgr.selected_index
+        out = {"physical_x": int(gx), "physical_y": int(gy),
+               "display": actual.index if actual else None,
+               "selected_display": mgr.selected_index, "on_selected_display": on_selected}
         m = mgr._map.get(mgr.selected_index)
-        if m:
+        if m and on_selected:
             out["x"] = int(round((gx - m["left"]) * m["scale"]))
             out["y"] = int(round((gy - m["top"]) * m["scale"]))
         return out
@@ -322,15 +386,43 @@ def create_computer_use_server(
 
     # ----- async wrapper -----------------------------------------------------
 
+    def _serialized(fn, token):
+        # Multiple calls and sessions share one desktop. Never interleave a
+        # click/type batch, a display switch, and another action's coordinates.
+        # Don't queue stale actions behind an owner: Escape must not hand the
+        # desktop straight to a previously blocked call from another chat.
+        if not safety.DESKTOP_LOCK.acquire(blocking=False):
+            raise ValueError("Computer use is busy with another action. Retry after it finishes.")
+        try:
+            if inputs.token != token:
+                mgr._map.clear()
+            inputs.token = token
+            inputs.check()
+            others = set(activity.active_sessions()) - {session_id or "_global"}
+            if others:
+                raise ValueError("Another chat is using the desktop. Wait for it to finish.")
+            try:
+                return fn()
+            except BaseException:
+                inputs.release_all()
+                raise
+        finally:
+            activity.idle(session_id)
+            safety.DESKTOP_LOCK.release()
+
     async def _run(action: str, params: dict) -> dict:
         err = _guard()
         if err:
             return err
         try:
-            content = await asyncio.to_thread(_execute, action, params)
+            token = abort.generation(session_id)
+            content = await asyncio.to_thread(_serialized, lambda: _execute(action, params), token)
             return {"content": content}
         except _Aborted:
             return _err("aborted — computer-use was stopped for this session")
+        except asyncio.CancelledError:
+            abort.request_stop(session_id)
+            raise
         except ValueError as e:
             return _err(str(e))
         except Exception as e:
@@ -365,6 +457,10 @@ def create_computer_use_server(
         },
     )
     async def request_access(args: dict) -> dict:
+        if is_stopped(session_id):
+            return _err("Computer-use was stopped. Start a new turn to request access again.")
+        if permission_mode == "plan":
+            return _err("Computer control is disabled in plan mode.")
         # Approval already enforced by the query callback (by permission mode);
         # if we got here, record the grant.
         granted = access.grant(
@@ -393,7 +489,7 @@ def create_computer_use_server(
           "Take a screenshot of the selected display. The returned image is what "
           "subsequent click coordinates are relative to. Call before acting and to "
           "check results.",
-          {"type": "object", "properties": {"save_to_disk": {"type": "boolean"}}},
+          {"type": "object", "properties": {}},
           annotations=big)
     async def screenshot(args: dict) -> dict:
         return await _run("screenshot", args)
@@ -405,8 +501,7 @@ def create_computer_use_server(
           "screenshot, not the zoom.",
           {"type": "object",
            "properties": {"region": {"type": "array", "items": {"type": "number"},
-                                     "description": "[x0,y0,x1,y1] in the last screenshot's pixels."},
-                          "save_to_disk": {"type": "boolean"}},
+                                     "description": "[x0,y0,x1,y1] in the last screenshot's pixels."}},
            "required": ["region"]},
           annotations=big)
     async def zoom(args: dict) -> dict:
@@ -436,23 +531,34 @@ def create_computer_use_server(
           "screenshot afterwards.",
           {"type": "object", "properties": {"display": {"type": "string"}}, "required": ["display"]})
     async def switch_display(args: dict) -> dict:
+        err = _guard()
+        if err:
+            return err
         s = str(args.get("display") or "").strip()
-        try:
-            displays = await asyncio.to_thread(mgr.list_displays)
+        def switch():
+            displays = mgr.list_displays()
             if s.lower() == "auto":
                 idx = mgr._default_index(displays)
             else:
                 import re
                 mnum = re.search(r"\d+", s)
                 if not mnum:
-                    return _err(f"unrecognized display {s!r}; use a name like 'Display 2' or 'auto'")
+                    raise ValueError(f"unrecognized display {s!r}; use a name like 'Display 2' or 'auto'")
                 idx = int(mnum.group())
-            info = await asyncio.to_thread(mgr.select_display, idx)
+            info = mgr.select_display(idx)
+            _record("switch_display", geo=info)
+            return _ok({"selected": mgr.selected_index, "display": {**info.to_dict(), "name": f"Display {info.index}"}})
+        try:
+            return await asyncio.to_thread(_serialized, switch, abort.generation(session_id))
+        except _Aborted:
+            return _err("Computer-use was stopped for this session.")
+        except asyncio.CancelledError:
+            abort.request_stop(session_id)
+            raise
         except ValueError as e:
             return _err(str(e))
         except Exception as e:
             return _err(f"switch failed: {e}")
-        return _ok({"selected": mgr.selected_index, "display": {**info.to_dict(), "name": f"Display {info.index}"}})
     tools.append(switch_display)
 
     # ----- mouse -------------------------------------------------------------
@@ -546,26 +652,34 @@ def create_computer_use_server(
     @tool("read_clipboard", "Read the clipboard as text. Requires the clipboardRead grant.",
           {"type": "object", "properties": {}})
     async def read_clipboard(args: dict) -> dict:
-        if not access.info(session_id).get("clipboard_read") and permission_mode != "bypassPermissions":
-            return _err("clipboard read not granted; request_access with clipboardRead=true.")
-        try:
-            text = await asyncio.to_thread(_clipboard_read)
-        except Exception as e:
-            return _err(f"read_clipboard failed: {e}")
-        return _ok({"text": text})
+        return await _run("read_clipboard", args)
     tools.append(read_clipboard)
 
     @tool("write_clipboard", "Write text to the clipboard. Requires the clipboardWrite grant.",
           {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]})
     async def write_clipboard(args: dict) -> dict:
-        if not access.info(session_id).get("clipboard_write") and permission_mode != "bypassPermissions":
-            return _err("clipboard write not granted; request_access with clipboardWrite=true.")
-        try:
-            await asyncio.to_thread(_clipboard_write, str(args.get("text") or ""))
-        except Exception as e:
-            return _err(f"write_clipboard failed: {e}")
-        return _ok({"action": "write_clipboard"})
+        return await _run("write_clipboard", args)
     tools.append(write_clipboard)
+
+    @tool("release_control", "Release the desktop and hide the agent cursor when done using the computer.",
+          {"type": "object", "properties": {}})
+    async def release_control(args: dict) -> dict:
+        def release():
+            if not safety.DESKTOP_LOCK.acquire(blocking=False):
+                raise ValueError("Wait for the current action to finish before releasing control.")
+            try:
+                inputs.release_all()
+                activity.finish(session_id)
+                mgr._map.clear()
+            finally:
+                safety.DESKTOP_LOCK.release()
+        # Release never needs access and remains legal after Stop.
+        try:
+            await asyncio.to_thread(release)
+        except ValueError as e:
+            return _err(str(e))
+        return _ok({"action": "release_control"})
+    tools.append(release_control)
 
     # ----- batch -------------------------------------------------------------
     @tool("computer_batch",
@@ -582,6 +696,8 @@ def create_computer_use_server(
         if err:
             return err
         actions = args.get("actions") or []
+        if not isinstance(actions, list) or len(actions) > 100:
+            return _err("actions must be a list of at most 100 actions")
 
         def _run_all():
             out: list = []
@@ -589,15 +705,24 @@ def create_computer_use_server(
                 try:
                     out.extend(_execute(a.get("action"), a))
                 except _Aborted:
+                    inputs.release_all()
                     out.append(_text_item({"success": False, "error": "aborted — computer-use was stopped for this session", "action_index": i}))
-                    break
+                    return {"content": out, "isError": True}
                 except Exception as e:
+                    inputs.release_all()
                     out.append(_text_item({"success": False, "error": str(e), "action_index": i}))
-                    break
-            return out
+                    return {"content": out, "isError": True}
+            return {"content": out}
 
-        content = await asyncio.to_thread(_run_all)
-        return {"content": content}
+        try:
+            return await asyncio.to_thread(_serialized, _run_all, abort.generation(session_id))
+        except _Aborted:
+            return _err("Computer-use was stopped for this session.")
+        except asyncio.CancelledError:
+            abort.request_stop(session_id)
+            raise
+        except Exception as e:
+            return _err(str(e))
     tools.append(computer_batch)
 
     logger.info(
@@ -617,8 +742,11 @@ def create_computer_use_server(
 def _clipboard_read() -> str:
     if sys.platform == "win32":
         out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
-            capture_output=True, text=True, timeout=5,
+            ["powershell", "-NoProfile", "-Command",
+             "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); "
+             "[Console]::Write((Get-Clipboard -Raw))"],
+            capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         return out.stdout
     raise RuntimeError("clipboard read not supported on this platform")
@@ -627,8 +755,11 @@ def _clipboard_read() -> str:
 def _clipboard_write(text: str) -> None:
     if sys.platform == "win32":
         subprocess.run(
-            ["powershell", "-NoProfile", "-Command", "$input | Set-Clipboard"],
-            input=text, text=True, timeout=5,
+            ["powershell", "-NoProfile", "-Command",
+             "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new(); "
+             "Set-Clipboard -Value ([Console]::In.ReadToEnd())"],
+            input=text, text=True, encoding="utf-8", capture_output=True, timeout=5, check=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         return
     raise RuntimeError("clipboard write not supported on this platform")

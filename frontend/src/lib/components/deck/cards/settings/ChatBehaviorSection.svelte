@@ -56,14 +56,17 @@
 <div class="set-group" data-testid="computer-use-section">
 	<div class="set-grouphead">
 		<h3><Monitor />Computer use</h3>
-		<p>Host desktop control, shared with you. Stop in chat ends it for that chat.</p>
+		<p>The purple frame identifies the active screen. The Agent pointer stays visible between actions.</p>
 	</div>
 	<div class="set-row" class:disabled={!computerUse.available}>
 		<div class="lab">
 			<h4>Enable computer use <span class="hint">{statusText}</span></h4>
 			<p>
 				Let chats control this machine's screen — screenshots, mouse, and keyboard,
-				like Claude Desktop. Shares one cursor with you. Native (non-Docker) hosts only.
+				with a visible agent pointer. Press Esc on the host or Stop computer use to take control.
+				Mouse and keyboard input are shared. Use browser tools for web tasks without moving
+				your mouse; independent desktop input requires a separate desktop session or VM.
+				Native (non-Docker) hosts only.
 				{#if !computerUse.available}
 					<br /><strong>{unavailableText}</strong>
 				{/if}

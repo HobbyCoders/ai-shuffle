@@ -931,6 +931,10 @@ class SessionRuntime:
             # runtime that already took over the session is never evicted).
             if _live_runtimes.get(sid) is self:
                 _live_runtimes.pop(sid, None)
+                # End the persistent desktop indicator and release held input.
+                # Invalidate workers that outlived cancellation before re-arming.
+                from app.mcp.computer_use import abort as cu_abort
+                cu_abort.request_stop(sid, reason="completed")
             # Release the run lease + stop the heartbeat — always.
             try:
                 await asyncio.to_thread(runs_db.release_run, run_id, fence_token)

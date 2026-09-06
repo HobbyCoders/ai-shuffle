@@ -20,6 +20,7 @@ Key facts that make the math correct:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import sys
 import threading
@@ -45,6 +46,13 @@ def _ensure_dpi_awareness() -> None:
     global _dpi_done
     if sys.platform != "win32":
         return
+    # Tk and captures live on different threads. A process may already have
+    # initialized DPI handling, so set each calling thread to physical pixels.
+    try:
+        import ctypes
+        ctypes.windll.user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+    except Exception:
+        pass
     with _dpi_lock:
         if _dpi_done:
             return
@@ -85,6 +93,7 @@ def computer_use_available() -> tuple[bool, str]:
     if os.environ.get("COMPUTER_USE_DISABLED", "").lower() in ("1", "true", "yes"):
         return (False, "env-disabled")
 
+    _ensure_dpi_awareness()
     # 3. Required libraries present?
     try:
         import mss  # noqa: F401
@@ -121,13 +130,12 @@ def enumerate_displays() -> "list[DisplayInfo]":
     """
     import mss as _mss
 
+    _ensure_dpi_awareness()
     out: "list[DisplayInfo]" = []
     with _mss.mss() as sct:
         mons = sct.monitors  # [0]=union, [1..]=physical
         for i, m in enumerate(mons[1:], start=1):
-            # mss's first physical monitor (index 1) is the primary on Windows;
-            # also treat a monitor whose origin is (0,0) as primary.
-            primary = (i == 1) or (m["left"] == 0 and m["top"] == 0)
+            primary = m["left"] == 0 and m["top"] == 0
             out.append(DisplayInfo(
                 index=i,
                 left=int(m["left"]),
@@ -137,6 +145,29 @@ def enumerate_displays() -> "list[DisplayInfo]":
                 primary=primary,
             ))
     return out
+
+
+def foreground_display(displays: list["DisplayInfo"]) -> "DisplayInfo | None":
+    """Keyboard input goes to the focused window, not the screenshot selection."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(user32.GetForegroundWindow(), ctypes.byref(rect)):
+            return None
+        def overlap(d):
+            return (max(0, min(rect.right, d.left + d.width) - max(rect.left, d.left)) *
+                    max(0, min(rect.bottom, d.top + d.height) - max(rect.top, d.top)))
+        best = max(displays, key=overlap, default=None)
+        return best if best and overlap(best) > 0 else None
+    except Exception:
+        logger.debug("Could not determine the keyboard's display", exc_info=True)
+        return None
 
 
 @dataclass
@@ -174,6 +205,8 @@ class DisplayManager:
         target_display: Optional[int] = None,
     ) -> None:
         self.virtual_w, self.virtual_h = virtual_size
+        if self.virtual_w <= 0 or self.virtual_h <= 0:
+            raise ValueError("virtual screenshot dimensions must be positive")
         # Per-display scale map, filled on each screenshot, consumed by actions.
         # index -> {"scale","pw","ph","left","top","vw","vh"}
         self._map: dict[int, dict] = {}
@@ -260,10 +293,21 @@ class DisplayManager:
             "display": self.selected_index,
             "virtual_width": vw, "virtual_height": vh,
             "physical_width": pw, "physical_height": ph,
+            "geometry": geo.to_dict(),
         }
-        from app.mcp.computer_use import activity
-        activity.record(self.selected_index)
         return png, info
+
+    def mapped_geometry(self) -> dict:
+        """Reject input based on an image captured before a topology change."""
+        m = self._map.get(self.selected_index)
+        if m is None:
+            raise ValueError("take a screenshot first so coordinates can be mapped")
+        geo = next((d for d in self.list_displays() if d.index == self.selected_index), None)
+        if geo is None or (geo.left, geo.top, geo.width, geo.height) != (
+                m["left"], m["top"], m["pw"], m["ph"]):
+            self._map.pop(self.selected_index, None)
+            raise ValueError("display layout changed; take a fresh screenshot before acting")
+        return m
 
     def capture_region(self, region: "list[float]", max_w: int = 1600) -> tuple[bytes, dict]:
         """Capture a sub-region of the selected display at higher detail (zoom).
@@ -276,20 +320,19 @@ class DisplayManager:
         import mss as _mss
         from PIL import Image
 
-        m = self._map.get(self.selected_index)
-        if m is None:
-            raise ValueError("take a screenshot before zooming so the region can be mapped")
+        m = self.mapped_geometry()
+        if len(region) != 4 or not all(math.isfinite(float(v)) for v in region):
+            raise ValueError("region must contain four finite coordinates")
         scale = m["scale"] or 1.0
         x0, y0, x1, y1 = region[0], region[1], region[2], region[3]
-        gx0 = m["left"] + min(x0, x1) / scale
-        gy0 = m["top"] + min(y0, y1) / scale
-        gw = max(1, int(abs(x1 - x0) / scale))
-        gh = max(1, int(abs(y1 - y0) / scale))
-        # Clamp to the physical monitor rectangle.
-        gx0 = int(min(max(m["left"], gx0), m["left"] + m["pw"] - 1))
-        gy0 = int(min(max(m["top"], gy0), m["top"] + m["ph"] - 1))
-        gw = min(gw, m["left"] + m["pw"] - gx0)
-        gh = min(gh, m["top"] + m["ph"] - gy0)
+        # Intersect both corners; clamping only the origin enlarged clipped crops.
+        x0, x1 = max(0, min(x0, x1)), min(m["vw"], max(x0, x1))
+        y0, y1 = max(0, min(y0, y1)), min(m["vh"], max(y0, y1))
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError("zoom region does not intersect the screenshot")
+        gx0, gy0 = m["left"] + int(x0 / scale), m["top"] + int(y0 / scale)
+        gw = min(max(1, round((x1 - x0) / scale)), m["left"] + m["pw"] - gx0)
+        gh = min(max(1, round((y1 - y0) / scale)), m["top"] + m["ph"] - gy0)
 
         with _mss.mss() as sct:
             raw = sct.grab({"left": gx0, "top": gy0, "width": gw, "height": gh})
@@ -301,7 +344,10 @@ class DisplayManager:
 
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        return buf.getvalue(), {"region": [gx0, gy0, gw, gh], "display": self.selected_index}
+        return buf.getvalue(), {"region": [gx0, gy0, gw, gh], "display": self.selected_index,
+                                "image_width": img.width, "image_height": img.height,
+                                "coordinate_space": "full_screenshot",
+                                "screenshot_region": [x0, y0, x1, y1]}
 
     # ----- coordinate mapping ------------------------------------------------
 
@@ -309,12 +355,9 @@ class DisplayManager:
         """Map a virtual coordinate on the selected display to a global physical
         ``(x, y)`` for input. Requires a prior ``capture()`` of this display.
         """
-        m = self._map.get(self.selected_index)
-        if m is None:
-            raise ValueError(
-                "no screenshot taken for the selected display yet — "
-                "call screenshot first so coordinates can be mapped"
-            )
+        m = self.mapped_geometry()
+        if not all(math.isfinite(float(v)) for v in (vx, vy)):
+            raise ValueError("coordinates must be finite numbers")
         # Clamp the virtual coordinate into the captured image bounds.
         vx = min(max(0.0, float(vx)), m["vw"] - 1)
         vy = min(max(0.0, float(vy)), m["vh"] - 1)
@@ -324,6 +367,4 @@ class DisplayManager:
         # Clamp to the physical monitor rectangle.
         gx = min(max(m["left"], gx), m["left"] + m["pw"] - 1)
         gy = min(max(m["top"], gy), m["top"] + m["ph"] - 1)
-        from app.mcp.computer_use import activity
-        activity.record(self.selected_index)
         return int(round(gx)), int(round(gy))

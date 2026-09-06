@@ -7,9 +7,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const getStatus = vi.fn();
 const setEnabled = vi.fn();
+const stopControl = vi.fn();
 vi.mock('$lib/api/computerUse', () => ({
 	getComputerUseStatus: (...args: unknown[]) => getStatus(...args),
-	setComputerUseEnabled: (...args: unknown[]) => setEnabled(...args)
+	setComputerUseEnabled: (...args: unknown[]) => setEnabled(...args),
+	stopComputerUse: (...args: unknown[]) => stopControl(...args)
 }));
 vi.mock('$lib/stores/notifications', () => ({ notify: vi.fn() }));
 
@@ -37,10 +39,58 @@ beforeEach(() => {
 	vi.useFakeTimers();
 	getStatus.mockReset();
 	setEnabled.mockReset();
+	stopControl.mockReset();
 	visibility = 'visible';
 	Object.defineProperty(document, 'visibilityState', {
 		configurable: true,
 		get: () => visibility
+	});
+});
+
+describe('computerUse emergency stop', () => {
+	it('updates display and cursor from the same status snapshot', async () => {
+		getStatus.mockResolvedValue({ ...status(true, true), active: true, display: 2,
+			display_label: 'Display 2 · 2560×1600', cursor: [-100, 200], action: 'left_click',
+			geometry: { left: -2560, top: -200, width: 2560, height: 1600 }, escape_available: true });
+		await computerUse.refresh();
+		expect(computerUse.display).toBe(2);
+		expect(computerUse.cursor).toEqual([-100, 200]);
+		expect(computerUse.escapeAvailable).toBe(true);
+	});
+
+	it('clears activity only after the server acknowledges Stop', async () => {
+		computerUse.active = true;
+		let finish!: (value: { stopped: number }) => void;
+		stopControl.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+		const pending = computerUse.halt();
+		expect(computerUse.stopping).toBe(true);
+		expect(computerUse.active).toBe(true);
+		await computerUse.halt();
+		expect(stopControl).toHaveBeenCalledTimes(1);
+		finish({ stopped: 1 });
+		await pending;
+		expect(computerUse.active).toBe(false);
+		expect(computerUse.stopReason).toBe('user');
+		expect(computerUse.cursor).toBeNull();
+	});
+
+	it('does not let an older in-flight poll undo a successful Stop', async () => {
+		let finishPoll!: (value: unknown) => void;
+		getStatus.mockImplementationOnce(() => new Promise(resolve => { finishPoll = resolve; }));
+		const poll = computerUse.refresh();
+		stopControl.mockResolvedValue({ stopped: 1 });
+		await computerUse.halt();
+		finishPoll({ ...status(true, true), active: true });
+		await poll;
+		expect(computerUse.active).toBe(false);
+	});
+
+	it('keeps control visible if Stop fails', async () => {
+		computerUse.active = true;
+		stopControl.mockRejectedValue(new Error('offline'));
+		await computerUse.halt();
+		expect(computerUse.active).toBe(true);
+		expect(computerUse.stopping).toBe(false);
 	});
 });
 

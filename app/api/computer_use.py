@@ -3,8 +3,7 @@
 Backs the global computer-use toggle (Settings → Chat & Input) and the live
 status the UI's indicators consume. The toggle is a system setting consulted
 by ``query_options`` when wiring the computer-use tools; the per-session halt
-switch (see ``app.mcp.computer_use.abort``) is driven by the chat Stop button,
-not by any endpoint here.
+switch is driven by chat Stop, physical Escape, and the host stop endpoint.
 """
 
 import logging
@@ -15,7 +14,7 @@ from pydantic import BaseModel
 
 from app.api.auth import require_admin, require_auth
 from app.db.settings import get_system_setting, set_system_setting
-from app.mcp.computer_use import activity
+from app.mcp.computer_use import activity, abort, safety, overlay
 from app.mcp.computer_use.scaling import computer_use_available
 
 logger = logging.getLogger(__name__)
@@ -45,9 +44,18 @@ class StatusResponse(BaseModel):
     available: bool
     reason: str  # "ok" when available; otherwise why not (docker, no-display, ...)
     enabled: bool
-    active: bool = False               # an action ran within the recent window
+    active: bool = False               # desktop control is owned by a chat
     display: Optional[int] = None      # which monitor it's acting on (when active)
     display_label: Optional[str] = None  # human label, e.g. "Display 1 · 3440×1440 (primary)"
+    action: Optional[str] = None
+    busy: bool = False
+    cursor: Optional[list[int]] = None
+    geometry: Optional[dict] = None
+    seconds_since: Optional[float] = None
+    stop_reason: Optional[str] = None
+    escape_available: bool = False
+    overlay_available: bool = False
+    input_mode: str = "shared_desktop"
 
 
 def get_computer_use_enabled() -> bool:
@@ -80,7 +88,9 @@ async def get_status(token: str = Depends(require_auth)) -> StatusResponse:
     snap = activity.snapshot()
     label = None
     if snap["active"] and snap["display"] is not None:
-        label = _display_label(snap["display"])
+        geo = snap.get("geometry")
+        label = (f"Display {snap['display']} · {geo['width']}×{geo['height']}"
+                 if geo else _display_label(snap["display"]))
     return StatusResponse(
         available=available,
         reason=reason,
@@ -88,7 +98,16 @@ async def get_status(token: str = Depends(require_auth)) -> StatusResponse:
         active=bool(snap["active"]),
         display=snap["display"],
         display_label=label,
+        action=snap["action"], busy=snap["busy"], cursor=snap["cursor"], geometry=snap["geometry"],
+        seconds_since=snap["seconds_since"], stop_reason=snap["stop_reason"],
+        escape_available=safety.escape_available(), overlay_available=overlay.status()["available"],
     )
+
+
+@router.post("/stop")
+async def stop_computer_use(token: str = Depends(require_auth)) -> dict:
+    """Any signed-in user can release the host. Never grants or resumes access."""
+    return {"stopped": abort.stop_active("user")}
 
 
 @router.get("/enabled", response_model=EnabledStateResponse)
@@ -103,5 +122,7 @@ async def set_enabled(
 ) -> EnabledStateResponse:
     """Set the global computer-use toggle (admin — it grants host input access)."""
     set_system_setting(ENABLED_SETTING_KEY, "true" if payload.enabled else "false")
+    if not payload.enabled:
+        abort.stop_active("disabled")
     logger.info("computer-use global toggle set to %s via API", payload.enabled)
     return EnabledStateResponse(enabled=payload.enabled)
