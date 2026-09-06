@@ -198,3 +198,89 @@ async def test_a_sync_dict_receipt_is_registered_too() -> None:
     out = await handler({"agent": "Explore", "prompt": "p"}, ctx)
     assert out.background_task is not None
     assert [r.task_id for r in started] == ["t-3"]
+
+
+# ─── 3. Ledger: a delta per mutation, and rotation in one call ───────────────
+
+
+async def test_mutations_return_a_delta_not_the_whole_ledger(tmp_path) -> None:
+    """205 Ledger calls returned 1.18 MB in one audited session.
+
+    Every action echoed the full rendered ledger — state the engine already
+    recites onto every user turn — so bookkeeping was the third-largest source
+    of tool-result bytes in the session.
+    """
+    from fluid.tools.builtins.ledger import handler
+
+    ctx = ToolCtx(cwd=str(tmp_path), session_id="s1")
+    await handler(
+        {"action": "add", "section": "constraints", "text": "never touch prod"}, ctx
+    )
+    out = await handler(
+        {"action": "add", "section": "state", "text": "PR #1 open"}, ctx
+    )
+    assert out.text == 'added 1 state entry ("PR #1 open") — 1 in state, 2 total'
+    # The other section's contents are NOT echoed back.
+    assert "never touch prod" not in out.text
+    assert "# Session ledger" not in out.text
+
+    out = await handler(
+        {"action": "remove", "section": "state", "text": "PR #1 open"}, ctx
+    )
+    assert "never touch prod" not in out.text and "0 in state, 1 total" in out.text
+
+    # show is the one action that still renders it.
+    out = await handler({"action": "show"}, ctx)
+    assert "never touch prod" in out.text and out.text.startswith("# Session ledger")
+
+
+async def test_replace_rotates_a_section_in_one_call(tmp_path) -> None:
+    """The audited rotation idiom cost 15-21 calls: show, remove per line, re-add."""
+    from fluid.tools.builtins.ledger import handler
+
+    ctx = ToolCtx(cwd=str(tmp_path), session_id="s1")
+    for text in ("step 1 done", "step 2 running", "step 3 queued"):
+        await handler({"action": "add", "section": "state", "text": text}, ctx)
+    await handler(
+        {"action": "add", "section": "constraints", "text": "never touch prod"}, ctx
+    )
+
+    out = await handler(
+        {
+            "action": "replace",
+            "section": "state",
+            "entries": ["step 2 done", "step 3 running"],
+        },
+        ctx,
+    )
+    assert out.text == "replaced state: 3 entries out, 2 in — 2 in state, 3 total"
+    shown = (await handler({"action": "show"}, ctx)).text
+    assert "step 1 done" not in shown and "step 3 running" in shown
+    # Untouched sections survive a rotation.
+    assert "never touch prod" in shown
+
+
+async def test_rotate_is_an_accepted_spelling_and_takes_a_text_blob(tmp_path) -> None:
+    from fluid.tools.builtins.ledger import handler
+
+    ctx = ToolCtx(cwd=str(tmp_path), session_id="s1")
+    await handler({"action": "add", "section": "threads", "text": "old"}, ctx)
+    out = await handler(
+        {"action": "rotate", "section": "threads", "text": "- one\n- two\n"}, ctx
+    )
+    assert not out.is_error
+    shown = (await handler({"action": "show"}, ctx)).text
+    assert "- one" in shown and "- two" in shown and "old" not in shown
+
+
+async def test_replace_can_clear_a_section_and_still_validates(tmp_path) -> None:
+    from fluid.tools.builtins.ledger import handler
+
+    ctx = ToolCtx(cwd=str(tmp_path), session_id="s1")
+    await handler({"action": "add", "section": "threads", "text": "old"}, ctx)
+    out = await handler({"action": "replace", "section": "threads", "entries": []}, ctx)
+    assert not out.is_error and "0 in threads, 0 total" in out.text
+    assert (await handler({"action": "show"}, ctx)).text.endswith("(empty)")
+
+    assert (await handler({"action": "replace", "entries": ["x"]}, ctx)).is_error
+    assert (await handler({"action": "replace", "section": "threads"}, ctx)).is_error

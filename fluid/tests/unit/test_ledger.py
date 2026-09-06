@@ -25,16 +25,19 @@ from fluid.tools.registry import ToolCtx
 
 async def test_add_remove_show_roundtrip(tmp_path) -> None:
     ctx = ToolCtx(cwd=str(tmp_path), session_id="s1")
+    # add/remove answer with a one-line delta; only `show` renders the ledger.
     out = await ledger_handler(
         {"action": "add", "section": "constraints", "text": "never touch prod"}, ctx)
-    assert "never touch prod" in out.text
+    assert out.text == 'added 1 constraints entry ("never touch prod") — 1 in constraints, 1 total'
     out = await ledger_handler(
         {"action": "add", "section": "threads", "text": "flaky test in CI"}, ctx)
-    assert "constraints" in out.text and "threads" in out.text
+    assert out.text == 'added 1 threads entry ("flaky test in CI") — 1 in threads, 2 total'
     # remove takes the entry's whole text (a substring removes nothing).
     out = await ledger_handler(
         {"action": "remove", "section": "threads", "text": "flaky test in CI"}, ctx)
-    assert "removed 1 threads entry" in out.text and "never touch prod" in out.text
+    assert out.text == (
+        'removed 1 threads entry ("flaky test in CI") — 0 in threads, 1 total'
+    )
     out = await ledger_handler({"action": "show"}, ctx)
     assert "never touch prod" in out.text and "flaky test in CI" not in out.text
 

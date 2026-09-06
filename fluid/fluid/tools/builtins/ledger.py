@@ -44,28 +44,48 @@ SPEC = ToolSpec(
     name="Ledger",
     description=(
         "The session ledger: pinned state that survives all history "
-        "compaction verbatim — it is re-shown on every turn. Use it for "
+        "compaction verbatim — the whole ledger is re-shown on every user "
+        "turn, so you are always holding the current copy. Use it for "
         "user-stated constraints, decisions made, current task state, and "
-        "open threads. Actions: 'add' appends an entry to a section "
-        "(requires section + text), 'remove' deletes the one entry in a "
-        "section whose text matches exactly, 'show' returns the ledger. Keep "
-        "entries terse — "
-        "every entry costs context on every turn."
+        "open threads.\n"
+        "\n"
+        "Actions: 'add' appends an entry to a section (section + text); "
+        "'remove' deletes the one entry in a section whose text matches "
+        "exactly (section + text); 'replace' swaps a section's entire "
+        "contents for `entries` (section + entries) — use it to roll task "
+        "state forward in ONE call instead of a remove-per-line then an "
+        "add-per-line; 'show' re-renders the ledger.\n"
+        "\n"
+        "add/remove/replace answer with a one-line delta, not the ledger — "
+        "the copy on this turn is still accurate apart from that delta, so "
+        "'show' is only worth a call when you have lost track. Keep entries "
+        "terse: every entry costs context on every turn."
     ),
     input_schema={
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["add", "remove", "show"]},
+            "action": {
+                "type": "string",
+                "enum": ["add", "remove", "replace", "show"],
+            },
             "section": {
                 "type": "string",
                 "enum": list(SECTIONS),
-                "description": "Target section (action=add/remove).",
+                "description": "Target section (action=add/remove/replace).",
             },
             "text": {
                 "type": "string",
                 "description": (
                     "Entry to add, or the full text of the entry to remove "
                     "(matching is whole-entry, not substring)."
+                ),
+            },
+            "entries": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "action=replace: the section's complete new contents. An "
+                    "empty list clears the section."
                 ),
             },
         },
@@ -165,28 +185,82 @@ def render_ledger_reminder(text: str) -> str:
     )
 
 
+def _new_entries(input: dict[str, Any]) -> list[str] | None:
+    """``entries`` for a replace, accepting a list or a newline-separated blob.
+
+    Models write both, and rejecting the second spelling would cost the call
+    this action exists to save.
+    """
+    raw = input.get("entries")
+    if raw is None:
+        raw = input.get("text")
+        if raw is None:
+            return None
+    if isinstance(raw, str):
+        lines = raw.splitlines()
+    elif isinstance(raw, (list, tuple)):
+        lines = [str(item) for item in raw]
+    else:
+        return None
+    out: list[str] = []
+    for line in lines:
+        entry = line.strip()
+        if entry.startswith("- "):
+            entry = entry[2:].strip()
+        if entry:
+            out.append(entry)
+    return out
+
+
+def _counts(sections: dict[str, list[str]], section: str) -> str:
+    total = sum(len(v) for v in sections.values())
+    return f"{len(sections.get(section) or [])} in {section}, {total} total"
+
+
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
-    action = str(input.get("action", "")).strip()
+    action = str(input.get("action", "")).strip().lower()
+    # "rotate" is what models call the replace idiom; accept their word for it.
+    if action == "rotate":
+        action = "replace"
     path = _ledger_path(ctx.cwd, ctx.session_id)
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
         raw = ""
     sections = _parse(raw)
-    prefix = ""
-    if action in ("add", "remove"):
+    if action in ("add", "remove", "replace"):
         section = str(input.get("section", "")).strip().lower()
-        text = str(input.get("text", "")).strip()
         if section not in SECTIONS:
             return ToolOutcome(
                 text=f"action={action} requires section (one of {', '.join(SECTIONS)})",
                 is_error=True,
             )
-        if not text:
-            return ToolOutcome(text=f"action={action} requires text", is_error=True)
-        if action == "add":
+        text = str(input.get("text", "")).strip()
+        if action == "replace":
+            entries = _new_entries(input)
+            if entries is None:
+                return ToolOutcome(
+                    text=(
+                        "action=replace requires entries (the section's "
+                        "complete new contents, as a list of strings)"
+                    ),
+                    is_error=True,
+                )
+            before = len(sections[section])
+            sections[section] = entries
+            delta = (
+                f"replaced {section}: {before} entr"
+                f'{"ies" if before != 1 else "y"} out, {len(entries)} in — '
+                f"{_counts(sections, section)}"
+            )
+        elif action == "add":
+            if not text:
+                return ToolOutcome(text=f"action={action} requires text", is_error=True)
             sections[section].append(text)
+            delta = f'added 1 {section} entry ("{text}") — {_counts(sections, section)}'
         else:
+            if not text:
+                return ToolOutcome(text=f"action={action} requires text", is_error=True)
             entries = sections[section]
             target = text.lower()
             removed = [e for e in entries if e.strip().lower() == target]
@@ -194,10 +268,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             if not removed:
                 return _no_match(section, text, entries)
             sections[section] = kept
-            prefix = (
+            delta = (
                 f'removed {len(removed)} {section} entr'
-                f'{"ies" if len(removed) != 1 else "y"} ("{removed[0]}"); '
-                f"{len(kept)} remain in {section}"
+                f'{"ies" if len(removed) != 1 else "y"} ("{removed[0]}") — '
+                f"{_counts(sections, section)}"
             )
         rendered = _render(sections)
         try:
@@ -208,7 +282,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 path.unlink(missing_ok=True)
         except OSError as exc:
             return ToolOutcome(text=f"failed to write ledger: {exc}", is_error=True)
-    elif action != "show":
+        # A delta, not the ledger. Echoing the whole rendered ledger after
+        # every mutation put 1.18 MB of tool output into one audited session —
+        # 19% of all its tool-result bytes — for state the engine already
+        # recites onto every user turn.
+        return ToolOutcome(text=delta)
+    if action != "show":
         return ToolOutcome(text=f"unknown action: {action}", is_error=True)
-    current = _render(sections) or f"{_HEADER}\n(empty)"
-    return ToolOutcome(text=f"{prefix}\n{current}" if prefix else current)
+    return ToolOutcome(text=_render(sections) or f"{_HEADER}\n(empty)")
