@@ -279,9 +279,19 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
             "detail": "already finished",
         }
 
-    # 1) Monitor shell task — terminate the subprocess directly.
+    # 1) Monitor shell task — terminate the subprocess directly. Attributed as
+    # a user stop so the terminal chip reads "Stopped by user" instead of the
+    # blank bubble an unattributed shell kill used to produce; an attribution
+    # already on the row (a monitor timeout, say) still wins.
     from app.mcp.builtin_tools import stop_background_shell_task
-    shell = await stop_background_shell_task(task_id, session_id=session_id)
+    from app.core.task_registry import USER_STOP_REASON, USER_STOP_SUMMARY
+
+    shell = await stop_background_shell_task(
+        task_id,
+        session_id=session_id,
+        summary=USER_STOP_SUMMARY,
+        reason=USER_STOP_REASON,
+    )
     if shell is not None:
         # ``survivors`` means descendants outlived the shell (a dev server the
         # command started, typically). The row is settled either way, but the
@@ -309,7 +319,6 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
     # sweeps its parent-keyed approval prompts, completes the registry row and
     # purges the park-gate residue.
     from app.core import provider_agent_supervisor
-    from app.core.task_registry import USER_STOP_REASON, USER_STOP_SUMMARY
 
     record = provider_agent_supervisor.get_worker(session_id, task_id)
     if record is not None:
@@ -384,28 +393,214 @@ async def stop_session_task(session_id: str, task_id: str) -> dict:
             f"Failed to stop task {task_id} in session {session_id}: {e}",
             exc_info=True,
         )
-        return {"ok": False, "kind": "agent", "detail": str(e)}
+        # A FAILED stop still has to leave a terminal row (087d3809 F2). The
+        # control request is the only thing that failed here — the caller
+        # (Stop, an interrupt, the strip's "x") is tearing the session's work
+        # down either way, and a client that refused ``stop_task`` is usually
+        # a client that is already being evicted. Leaving the row ``running``
+        # is what produced the audited corpse: no terminal SubagentEvent, no
+        # notification, ``terminal_notified=false``, and a model that kept
+        # reporting the dead worker as its outstanding delegated task for
+        # four and a half minutes. The shell branch has always marked its row
+        # unconditionally; this removes the asymmetry.
+        _mark_task_stopped_by_user(session_id, task_id)
+        return {"ok": False, "kind": "agent", "task_id": task_id, "detail": str(e)}
+
+
+async def enter_user_stop(session_id: str) -> dict:
+    """Quiesce a session the user just stopped — everything BESIDES killing tasks.
+
+    STOP SEMANTICS (round 7). Stop means: everything this session is doing ends
+    now, and nothing restarts it until the user sends a new message. Killing the
+    background tasks (``stop_all_background_tasks``, which calls this first) is
+    only half of that — a stopped session still had four ways to come back to
+    life on its own, and all four are closed here:
+
+    1. **The session-wide stop latch.** ``task_registry.mark_user_stopped``
+       gates every wake producer at its entry point, so work the per-task
+       suppression could not have known about (a nested worker registered a
+       beat later, a late frame for a task the registry never saw) cannot
+       schedule a turn either. Set FIRST, before any await.
+    2. **Armed wakeups.** Every pending ``wakeups`` row for the session is
+       deleted and its local timer disarmed. Deleting the row — not just
+       disarming — is what makes this cross-runner correct: a peer install's
+       timer finds no row to claim and no-ops.
+    3. **Queued turns.** The settle path drains the queue on EVERY outcome,
+       including a user abort, so a turn sitting behind the stopped one started
+       the instant Stop landed and the session was visibly alive again one
+       second after the button. They are aborted here through the same guarded
+       transition a dropped queue chip uses (``remove_queued_turn`` ->
+       ``aborted``/``removed_from_queue``): the rows stay in history, a turn
+       that raced to live is left alone by the guard, and a message the user
+       still wants is one they re-send.
+    4. **Stale parked rows.** With all background work dead, any ``parked`` turn
+       is residue that would otherwise keep ``lifecycle_state`` reporting the
+       session busy until some later turn's self-heal cleared it.
+
+    Both the WebSocket Stop handler AND the owning runner's durable
+    ``stop_background`` path route through here, so the latch lands on whichever
+    install actually holds the session's work. Idempotent and best-effort: every
+    leg is independently guarded, and a failure in one never skips the others.
+    Returns a small counts dict for the log/tests.
+    """
+    from app.core.task_registry import task_registry
+
+    # (1) FIRST, and synchronously — before any await — so a terminal frame
+    #     racing this call is already looking at a stopped session.
+    first = task_registry.mark_user_stopped(session_id)
+
+    wakeups_cancelled = 0
+    try:
+        from app.core import wakeup_service
+
+        wakeups_cancelled = await wakeup_service.cancel_session_wakeups_async(
+            session_id
+        )
+    except Exception:  # noqa: BLE001 — one leg failing must not skip the rest.
+        logger.warning(
+            "Stop: cancelling wakeups failed for session %s", session_id,
+            exc_info=True,
+        )
+
+    queued_aborted = 0
+    try:
+        from app.db import turns as turns_db
+
+        queued = await asyncio.to_thread(turns_db.get_queued_turns, session_id)
+        for turn in queued:
+            turn_id = turn.get("id")
+            if not turn_id:
+                continue
+            removed = await asyncio.to_thread(turns_db.remove_queued_turn, turn_id)
+            if removed is not None:
+                queued_aborted += 1
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Stop: aborting queued turns failed for session %s", session_id,
+            exc_info=True,
+        )
+
+    parked_settled = 0
+    try:
+        from app.db import turns as turns_db
+
+        parked_settled = await asyncio.to_thread(
+            turns_db.settle_parked_turns, session_id
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Stop: settling parked turns failed for session %s", session_id,
+            exc_info=True,
+        )
+
+    if first or wakeups_cancelled or queued_aborted or parked_settled:
+        logger.info(
+            "Stop: quiesced session %s (latched=%s, wakeups=%d, queued=%d, "
+            "parked=%d)",
+            session_id, first, wakeups_cancelled, queued_aborted, parked_settled,
+        )
+    return {
+        "latched": first,
+        "wakeups_cancelled": wakeups_cancelled,
+        "queued_aborted": queued_aborted,
+        "parked_settled": parked_settled,
+    }
+
+
+def _keep_monitor_shells_on_stop() -> bool:
+    """The opt-in that restores the OLD Stop semantics for Monitor shells.
+
+    Default OFF: Stop kills everything, which is what the button says and what
+    the user asked for after living with the alternative. Turning
+    ``STOP_KEEPS_MONITOR_SHELLS=true`` on brings back the previous behaviour —
+    a Stop leaves a Monitor shell whose subprocess is still alive running, on
+    the theory that a dev server the user asked to keep up is not part of the
+    turn. Read through a helper so a broken/absent settings object degrades to
+    the safe default rather than failing a Stop.
+    """
+    try:
+        from app.core.config import settings
+
+        return bool(getattr(settings, "stop_keeps_monitor_shells", False))
+    except Exception:  # noqa: BLE001 — a config read never breaks a Stop.
+        return False
+
+
+async def _settle_stopped_task(session_id: str, task_id: str) -> Optional[dict]:
+    """Guarantee ONE terminal row + ONE terminal frame for a task Stop killed.
+
+    Two guarantees, both of which were missing somewhere (087d3809 F2):
+
+    * the registry row is terminal — a task whose stop path bailed out before
+      marking it (a raising ``stop_task``, a ProviderAgent teardown that took an
+      unusual branch) is completed ``killed`` here with user attribution, so
+      nothing sits ``running`` forever;
+    * the terminal SURFACE fires — ``force_terminal_surface`` drives the same
+      chip + durable row every other terminal takes, bypassing the
+      ``is_own_background_task`` / ``notify=False`` gates that silenced
+      interrupt-killed agent workers while their sibling shells got a proper
+      ``cancelled`` event. Bounded by the one-shot ``mark_terminal_notified``
+      latch, so a task that already surfaced is left alone.
+
+    Returns the wire record of the task (for the engine-retirement frame), or
+    ``None`` when the registry never knew it.
+    """
+    from app.core.task_registry import (
+        task_registry,
+        STOP_ALL_SUMMARY,
+        USER_STOP_REASON,
+    )
+
+    record = task_registry.get_task(session_id, task_id)
+    if record is None:
+        return None
+    if record.get("status") == "running":
+        task_registry.complete_task(
+            session_id,
+            task_id,
+            "killed",
+            summary=record.get("summary") or STOP_ALL_SUMMARY,
+            reason=record.get("reason") or USER_STOP_REASON,
+        )
+    task_registry.force_terminal_surface(session_id, task_id)
+    return task_registry.get_task(session_id, task_id)
 
 
 async def stop_all_background_tasks(
-    session_id: str, *, include_shells: bool = True
+    session_id: str, *, include_shells: bool = True, user_stop: bool = False
 ) -> list[dict]:
     """Stop EVERY in-flight background task in a session, one at a time.
 
-    Used by the normal Stop path: after the main turn is interrupted, iterate
-    the running-tasks view and drive each through
-    the existing per-task ``stop_session_task`` (sub-agents via the SDK client's
-    ``stop_task``, Monitor shells via their tracked subprocess). Reuses that path
-    verbatim — no re-implementation of client stop logic — so ghost-reaping and
-    idempotency behave identically to a single "x" click.
+    Used by the Stop path: after the main turn is interrupted, iterate the
+    running-tasks view and drive each through the existing per-task
+    ``stop_session_task`` (sub-agents via the SDK client's ``stop_task``,
+    ProviderAgent workers — including nested ones, which register under the ROOT
+    session id — via the supervisor's ``teardown_worker``, Monitor shells via
+    their tracked subprocess). Reuses that path verbatim — no re-implementation
+    of client stop logic — so ghost-reaping and idempotency behave identically
+    to a single "x" click.
+
+    STOP SEMANTICS (round 7). ``user_stop=True`` is the Stop button, and it now
+    kills ALL of the session's work: sub-agents and their descendants, provider-
+    lane workers, and Monitor shells — serving tasks and CI watchers included.
+    The previous rule spared a healthy Monitor shell ("a dev server the user
+    asked to keep up is not part of the turn"); the user's verdict on living
+    with it was that Stop must mean stop, so that behaviour is now an explicit
+    opt-in (``STOP_KEEPS_MONITOR_SHELLS=true``) that defaults to OFF. Typing
+    mid-stream still goes through ``interrupt_for_query``, which sets no
+    ``stop_background`` bit and never reaches here — a steer is not a Stop.
+
+    On the ``user_stop`` path this also calls :func:`enter_user_stop` FIRST, so
+    the session-wide stop latch is set, armed wakeups are dropped, queued turns
+    are aborted and stale parked rows are settled before a single task is
+    touched. Every task it kills then gets a guaranteed terminal registry row, a
+    terminal chip, and an engine retirement (``retire_task_terminals``) so
+    fluid's ``_background_pending`` set does not keep listing the dead task and
+    park on it forever.
 
     ``include_shells=False`` spares Monitor shells whose subprocess is still
-    alive — the Stop-button semantics, documented at that call site: Stop ends
-    the TURN, and a dev server the user asked to keep up is not part of the
-    turn. Ghost shell rows (registry says running, process already gone) are
-    still swept, so nothing strands in the UI. Force paths (session delete,
-    eviction reap) don't come through here at all — they use
-    ``reap_session_background_shells``, which is unchanged.
+    alive. Force paths (session delete, eviction reap) don't come through here
+    at all — they use ``reap_session_background_shells``, which is unchanged.
 
     Snapshots the active list first so mutations during iteration (a task
     dropping to a terminal state as it is stopped) don't disturb the loop.
@@ -413,6 +608,13 @@ async def stop_all_background_tasks(
     each spared shell. Never raises.
     """
     from app.core.task_registry import task_registry
+
+    if user_stop:
+        # Latch + durable quiesce BEFORE the snapshot: a task completing while
+        # we work through the list finds a stopped session and enqueues nothing.
+        await enter_user_stop(session_id)
+        if include_shells and _keep_monitor_shells_on_stop():
+            include_shells = False
 
     active = task_registry.get_active(session_id)
     task_ids = [task.get("id") for task in active if task.get("id")]
@@ -452,6 +654,41 @@ async def stop_all_background_tasks(
     results: list[dict] = list(spared)
     for task_id in task_ids:
         results.append(await stop_session_task(session_id, task_id))
+
+    # Terminal guarantee + engine retirement for everything we just killed.
+    # Both are best-effort and neither may change what the stop reports.
+    frames: list[dict] = []
+    for task_id in task_ids:
+        try:
+            record = await _settle_stopped_task(session_id, task_id)
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "Stop: terminal settle failed for %s/%s", session_id, task_id,
+                exc_info=True,
+            )
+            continue
+        if record is None:
+            continue
+        frames.append({
+            "task_id": task_id,
+            "status": record.get("status") or "killed",
+            "summary": record.get("summary") or "",
+            "reason": record.get("reason") or "",
+            "kind": record.get("kind") or "agent",
+        })
+    if frames:
+        try:
+            from app.core import turn_scheduler
+
+            # ``wake=False`` by construction: this only tells fluid the ids are
+            # terminal so they stop appearing in every later SessionParked (the
+            # audited session was parked on seven dead ids for a full day). It
+            # schedules nothing — a stop the user just asked for stays stopped.
+            await turn_scheduler.retire_task_terminals(session_id, frames)
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "Stop: engine retirement failed for %s", session_id, exc_info=True,
+            )
     return results
 
 

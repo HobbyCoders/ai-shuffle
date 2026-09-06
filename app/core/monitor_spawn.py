@@ -584,7 +584,13 @@ async def _enforce_deadline(
     try:
         from app.mcp.builtin_tools import stop_background_shell_task
 
-        await stop_background_shell_task(task.task_id, session_id)
+        # ``suppress_wake=False``: a task killed by its own time budget is the
+        # one deliberate stop the parent did NOT ask for, so its terminal frame
+        # must still reach the model. Every other caller of that function is a
+        # stop somebody chose and defaults to suppressing the notification.
+        await stop_background_shell_task(
+            task.task_id, session_id, suppress_wake=False,
+        )
     except Exception:  # noqa: BLE001 — a stop failure must not strand the wake
         logger.warning(
             "monitor_spawn: stopping timed-out task %s failed",

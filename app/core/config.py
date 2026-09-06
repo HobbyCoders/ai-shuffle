@@ -688,6 +688,18 @@ class Settings(BaseSettings):
     # Env: PARK_WATCHDOG_FORCE_SECONDS.
     park_watchdog_force_seconds: int = 3600  # 60 minutes
 
+    # STOP SEMANTICS opt-out (round 7). Stop kills EVERYTHING the session is
+    # doing: sub-agents and their descendants, provider-lane workers, and
+    # Monitor shells including serving tasks and CI watchers. That is what the
+    # button says and what the user asked for after living with the previous
+    # rule, which spared a healthy Monitor shell on the theory that "a dev
+    # server the user asked to keep up is not part of the turn" — and which is
+    # one of the ways a stopped session came back to life. Set
+    # STOP_KEEPS_MONITOR_SHELLS=true to restore that older behaviour: a Stop
+    # then leaves running Monitor shells alive and only ghost rows are swept.
+    # Defaults OFF; the default must stay "kill everything".
+    stop_keeps_monitor_shells: bool = False
+
     # Durable background-task state (Phase 1, WRITE-ONLY). When on,
     # task_registry mirrors every task transition into the background_tasks
     # table (v55) via app.core.task_persistence — a coalescing, fire-and-forget

@@ -459,9 +459,10 @@ async def test_handle_stop_interrupts_live_turn_and_stops_background(mock_db):
     row = turns_db.get_turn(live)
     assert row["state"] == "interrupting"
     assert row["stop_background"] in (True, 1)
-    # Stop ends the turn's own background work but SPARES a healthy Monitor
-    # shell (the user's dev server) — see handle_stop's STOP SEMANTICS note.
-    stop_bg.assert_awaited_once_with("sess-1", include_shells=False)
+    # STOP SEMANTICS (round 7): Stop kills ALL of the session's work — shells,
+    # serving tasks and watchers included — and quiesces the session so nothing
+    # wakes it until the user's next message. See handle_stop's note.
+    stop_bg.assert_awaited_once_with("sess-1", user_stop=True)
 
 
 async def test_handle_stop_with_current_turn_id_interrupts(mock_db):

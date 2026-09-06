@@ -207,6 +207,24 @@ def _submit_blocking(
             logger.exception(
                 "wakeup supersede failed for session %s", session_id
             )
+        # ...and release the Stop latch. Stop means "nothing wakes this session
+        # until the user sends a new message" (round 7); this IS that message,
+        # so every wake producer is live again from here on. The same source set
+        # as the wakeup supersede above, for the same reason — these are the
+        # turns a PERSON authors. A server-originated turn must never lift a
+        # stop the person asked for.
+        try:
+            from app.core.task_registry import task_registry
+
+            if task_registry.clear_user_stop(session_id):
+                logger.info(
+                    "turn_manager: %s turn released the user-stop latch on %s",
+                    source, session_id,
+                )
+        except Exception:  # noqa: BLE001 — never let this break an enqueue.
+            logger.exception(
+                "stop-latch release failed for session %s", session_id
+            )
     turn = turns.enqueue_turn(
         session_id,
         source,

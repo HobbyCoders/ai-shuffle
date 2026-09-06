@@ -110,6 +110,47 @@ SERVER_SHUTDOWN_REASON = "server_shutdown"
 USER_STOP_SUMMARY = "Stopped by user"
 USER_STOP_REASON = "user_stopped"
 
+# Kill attribution for the Stop button's session-wide sweep. Distinct from the
+# per-task "x" above only in wording — both are the user, but a sweep row wants
+# to say WHY a task the user never singled out died.
+STOP_ALL_SUMMARY = "Stopped by user (Stop ended all background work)"
+
+# The wire status a DELIBERATE stop is chipped with. ``killed`` is the registry
+# vocabulary and stays that way on the row (/live, TaskGet, retention), but the
+# chat chip built from it used to render a red cross for work an agent stopped
+# on purpose seconds earlier — an agent's own ``TaskStop`` of a healthy dev
+# server read as a failure. ``cancelled`` folds back to ``killed`` in the
+# frontend's task-summary reducer (TASK_STATE_MAP), so the chip settles cards
+# and drops off the strip exactly as before; only its wording and colour change.
+CANCELLED_CHIP_STATUS = "cancelled"
+
+# Kill reasons that mean "somebody decided to stop this", as opposed to "it
+# died". Chips built for these read as cancelled rather than failed. A stop
+# with NO reason at all is the session's own ``TaskStop`` (see
+# ``is_unattributed_cancellation``) and counts as deliberate too.
+DELIBERATE_STOP_REASONS = frozenset({
+    USER_STOP_REASON,
+    SERVER_SHUTDOWN_REASON,
+    "user_stopped_all",
+    "parent_turn_ended",
+})
+
+
+def chip_status(status: Optional[str], reason: Optional[str]) -> str:
+    """The status a terminal CHIP should carry for a registry ``status``.
+
+    Only ``killed`` is rewritten, and only when the kill was deliberate: an
+    agent-initiated ``TaskStop`` (no reason recorded at all) or one of the
+    attributed stop reasons above. Everything else — ``error``, ``completed``,
+    a ``killed`` carrying a failure-ish reason like ``monitor_timeout`` or
+    ``provider_rate_limited`` — is passed through untouched.
+    """
+    if status != "killed":
+        return status or ""
+    if not reason or reason in DELIBERATE_STOP_REASONS:
+        return CANCELLED_CHIP_STATUS
+    return status
+
 
 # Value vocabulary (documented, not enforced): the registry deliberately does NOT
 # reject unknown values, so a new SDK kind/status can flow through without a code
@@ -294,6 +335,21 @@ class TaskRegistry:
         # autonomous follow-up turn. Cleared with the session and on a genuine
         # completed-task revival under the same id.
         self._wake_suppressed: Dict[str, set] = {}
+        # Sessions the USER stopped with the Stop button, until their next
+        # message. Per-TASK suppression (``_wake_suppressed`` above) only covers
+        # the tasks that existed at the moment Stop ran; this session-wide latch
+        # covers everything else that could restart a stopped session — a nested
+        # worker registered a beat later, a scheduled wakeup row, an idle-
+        # watchdog nudge, a late terminal frame for a task the registry never
+        # saw. Set by ``query_session_lifecycle.stop_all_background_tasks`` on
+        # the user-stop path (which BOTH the WebSocket runner and the owning
+        # runner execute, so it latches wherever the work actually lives) and
+        # cleared by the next user-authored turn submit
+        # (``turn_manager._submit_blocking``). Deliberately NOT cleared by
+        # ``clear_session``: an idle eviction after a Stop must not un-stop the
+        # session (that is exactly how the audited "stopped sessions come back
+        # to life" reports were produced).
+        self._user_stopped: set = set()
         # session_id -> {child_launch_tuid -> owner_launch_tuid} (B-1). A grand-
         # child background task's launch tool_use_id mapped to the launch
         # tool_use_id of the SUB-AGENT that spawned it (its owner). Recorded when
@@ -587,6 +643,92 @@ class TaskRegistry:
         if not session_id or not task_id:
             return False
         return task_id in self._wake_suppressed.get(session_id, set())
+
+    # ------------------------------------------------------------------
+    # Session-wide user-stop latch
+    # ------------------------------------------------------------------
+
+    def mark_user_stopped(self, session_id: str) -> bool:
+        """Latch "the user pressed Stop on this session". First call wins.
+
+        The Stop button's contract is that EVERYTHING this session is doing
+        ends now and NOTHING restarts it until the user speaks again. The
+        per-task ``suppress_wake`` latch cannot carry that on its own: it only
+        knows the tasks that were active at the instant Stop ran, so a nested
+        worker that registers a beat later, a wakeup row, an idle-watchdog
+        nudge or a terminal frame for a task the registry never saw all sailed
+        past it and started a fresh turn. Every wake producer checks this latch
+        at its entry point instead.
+
+        Cleared ONLY by :meth:`clear_user_stop` (the next user-authored turn)
+        or a full ``reset_all`` — notably not by ``clear_session``, so an idle
+        eviction between the Stop and the user's next message cannot resurrect
+        the session.
+        """
+        if not session_id:
+            return False
+        if session_id in self._user_stopped:
+            return False
+        self._user_stopped.add(session_id)
+        return True
+
+    def is_user_stopped(self, session_id: str) -> bool:
+        """True while ``session_id`` is under a user Stop with no newer message."""
+        if not session_id:
+            return False
+        return session_id in self._user_stopped
+
+    def clear_user_stop(self, session_id: str) -> bool:
+        """Release the Stop latch — the user addressed the session again.
+
+        Returns True only when a latch was actually released, so the caller can
+        log the transition. Called from ``turn_manager._submit_blocking`` for
+        the person-authored turn sources (user / queue / resume), the same set
+        that supersedes armed wakeups.
+        """
+        if not session_id:
+            return False
+        if session_id not in self._user_stopped:
+            return False
+        self._user_stopped.discard(session_id)
+        return True
+
+    def force_terminal_surface(self, session_id: str, task_id: str) -> bool:
+        """Fire the terminal-surface callback for a task the APP killed.
+
+        ``complete_task`` fires that callback only for the parent's OWN
+        background work and only when ``notify`` is left on, which left two
+        real kills silent: a ProviderAgent worker torn down through
+        ``teardown_worker`` (``notify=False``, so the per-worker chip is
+        suppressed in favour of a coalesced note that only the bulk path emits)
+        and any task that is not in the unpark admission set. The audited
+        consequence is 087d3809 F2 — an interrupt-killed agent worker produced
+        no terminal event at all while its sibling shell got a proper
+        ``cancelled`` one, so the model went on believing the corpse was
+        working and redid its output by hand.
+
+        Stop and interrupt call this for every task they killed. It is bounded
+        by the SAME ``mark_terminal_notified`` one-shot latch the normal path
+        uses, so a task that already surfaced its terminal is untouched and
+        nothing is ever chipped twice. Returns True iff the callback fired.
+        """
+        if not session_id or not task_id:
+            return False
+        record = self._tasks.get(session_id, {}).get(task_id)
+        if record is None:
+            return False
+        if self._terminal_notification_callback is None:
+            return False
+        if not self.mark_terminal_notified(session_id, task_id):
+            return False
+        try:
+            self._terminal_notification_callback(session_id, to_wire(record))
+        except Exception:
+            logger.debug(
+                "forced terminal notification callback failed", exc_info=True
+            )
+            return False
+        return True
 
     def is_unattributed_cancellation(self, session_id: str, task_id: str) -> bool:
         """True iff this task was STOPPED and nobody claimed the stop.
@@ -1434,6 +1576,8 @@ class TaskRegistry:
         self._chipped.pop(session_id, None)
         self._woken.pop(session_id, None)
         self._wake_suppressed.pop(session_id, None)
+        # ``_user_stopped`` is deliberately NOT cleared here: eviction/teardown
+        # must not un-stop a session the user stopped (see mark_user_stopped).
         self._child_owner.pop(session_id, None)
         self._owner_activity_ts.pop(session_id, None)
         self._terminal_notified.pop(session_id, None)
@@ -1455,6 +1599,7 @@ class TaskRegistry:
         self._chipped.clear()
         self._woken.clear()
         self._wake_suppressed.clear()
+        self._user_stopped.clear()
         self._child_owner.clear()
         self._owner_activity_ts.clear()
         self._terminal_notified.clear()
