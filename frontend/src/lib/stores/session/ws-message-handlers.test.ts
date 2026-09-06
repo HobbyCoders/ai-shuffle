@@ -400,6 +400,21 @@ describe('ws-message-handlers', () => {
 	});
 
 	describe('done handler', () => {
+		it('stays silent while parked and notifies when the resumed turn completes', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'done', session_id: 'session-1', outcome: 'parked' });
+			expect(deps.onNotifySessionComplete).not.toHaveBeenCalled();
+			expect(deps.onPersistSession).toHaveBeenCalledOnce();
+			expect(deps.clearStopTimeout).toHaveBeenCalledOnce();
+
+			handlers.handleMessage({ type: 'done', session_id: 'session-1', outcome: 'completed' });
+			expect(deps.onNotifySessionComplete).toHaveBeenCalledOnce();
+		});
+
 		it('should call onNotifySessionComplete with metadata', () => {
 			const state = mockState();
 			state.isStreaming = true;

@@ -278,6 +278,8 @@ async def test_finalize_parks_when_background_work_survives(mock_db):
     env["record_parked"].assert_awaited_once()
     env["start_idle"].assert_called_once_with("s3")
     env["scheduler"].assert_called_once_with("s3", turn["id"], "parked")
+    done = [c.args[1] for c in env["broadcaster"].await_args_list if c.args[1]["type"] == "done"]
+    assert done == [{"type": "done", "metadata": {}, "session_id": "s3", "outcome": "parked"}]
 
 
 async def test_finalize_completes_when_no_background_work(mock_db):
@@ -291,6 +293,8 @@ async def test_finalize_completes_when_no_background_work(mock_db):
     env["start_idle"].assert_not_called()
     env["record_parked"].assert_not_called()
     env["scheduler"].assert_called_once_with("s4", turn["id"], "completed")
+    done = [c.args[1] for c in env["broadcaster"].await_args_list if c.args[1]["type"] == "done"]
+    assert done == [{"type": "done", "metadata": {}, "session_id": "s4", "outcome": "completed"}]
 
 
 async def test_turn_start_self_heal_settles_stale_park_when_no_bg_work(mock_db):

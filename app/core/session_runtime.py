@@ -563,6 +563,7 @@ class SessionRuntime:
         # Last terminal pump event seen ('done'|'interrupted'|'error'|None) —
         # drives the completed/aborted finalize decision. None ⇒ crash path.
         self._terminal: Optional[str] = None
+        self._pending_done: Optional[Dict[str, Any]] = None
         # The 'error' terminal's message text, so an aborted settle records WHY
         # (turns.error used to stay NULL — stop_reason='error' with nothing
         # behind it, and the provider's own error body only in the event log).
@@ -915,6 +916,16 @@ class SessionRuntime:
                     outcome = final["state"]
                 return outcome
             outcome, settled_here = await self._finalize(sid, tid)
+            if self._pending_done is not None:
+                # The pump ending does not prove the session is finished: the
+                # park gate above may still find background work. Deliver the
+                # WS completion only once its outcome is known.
+                await self._broadcast({
+                    **self._pending_done,
+                    "session_id": sid,
+                    "outcome": outcome,
+                })
+                self._pending_done = None
         finally:
             # Deregister ourselves as the live runtime (self-guarded so a fresh
             # runtime that already took over the session is never evicted).
@@ -1081,7 +1092,9 @@ class SessionRuntime:
                 # Render frames ride the recorder → SSE path; only the kept
                 # lifecycle/tool frames hit the WS/broadcast leg (legacy :4155
                 # parity — without the trim, render content double-delivers).
-                if not _is_trimmed_render_frame(etype):
+                if etype == "done":
+                    self._pending_done = dict(event)
+                elif not _is_trimmed_render_frame(etype):
                     ws_event = event
                     if isinstance(event, dict):
                         # FE cross-session guard tag (legacy :4148 parity).
