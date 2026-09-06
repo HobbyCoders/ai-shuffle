@@ -24,6 +24,7 @@ beforeAll(async () => {
 				name: 'OpenAI',
 				provider_type: 'openai',
 				models: [
+					{ id: 'gpt-6-astra', label: 'GPT-6 Astra', context_window: 272_000, context_window_choices: [256_000, 1_000_000] },
 					{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', context_window: 1_000_000 },
 					{ id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', context_window: 256_000 }
 				],
@@ -35,6 +36,7 @@ beforeAll(async () => {
 				provider_type: 'openrouter',
 				models: [
 					{ id: 'anthropic/claude-future', label: 'Claude Future', context_window: 1_000_000 },
+					{ id: 'gpt-6-astra', label: 'GPT-6 Astra', context_window: 1_000_000, context_window_choices: [] },
 					{ id: 'vendor/other', label: 'Other', context_window: 1_000_000 }
 				],
 				default_model: 'anthropic/claude-future'
@@ -45,15 +47,24 @@ beforeAll(async () => {
 });
 
 describe('model context choices', () => {
+	it('offers Astra 1M independently of its smaller default, scoped to its provider', () => {
+		const astra = encodeProviderModel('openai-row', 'gpt-6-astra');
+		expect(getModelContextControl(astra)?.standardLabel).toBe('256K');
+		expect(contextWindowForChoice(astra, 'standard')).toBe(256_000);
+		expect(contextWindowForChoice(astra, '1m')).toBe(1_000_000);
+		expect(contextWindowForChoice('gpt-6-astra', '1m')).toBe(1_000_000);
+		expect(getModelContextControl(encodeProviderModel('router-row', 'gpt-6-astra'))).toBeNull();
+	});
+
 	it('offers model-appropriate standard labels for 1M Claude and GPT models', () => {
-		expect(getModelContextControl('sonnet')?.standardLabel).toBe('200k');
+		expect(getModelContextControl('sonnet')?.standardLabel).toBe('200K');
 		expect(
 			getModelContextControl(encodeProviderModel('openai-row', 'gpt-5.6-sol'))?.standardLabel
-		).toBe('256k');
+		).toBe('256K');
 		expect(
 			getModelContextControl(encodeProviderModel('router-row', 'anthropic/claude-future'))
 				?.standardLabel
-		).toBe('200k');
+		).toBe('200K');
 	});
 
 	it('does not offer a 1M choice to models without a 1M registered ceiling or another family', () => {

@@ -28,7 +28,7 @@ def test_fresh_db_has_binding_columns_and_version(mock_db):
     the current schema version."""
     conn = mock_db
     assert {
-        "model", "effort", "permission_mode", "context_window", "fast",
+        "model", "effort", "permission_mode", "context_window", "fast", "workspace_project_ids",
     } <= _column_names(conn, "sessions")
     assert _schema_version(conn) == database.SCHEMA_VERSION
 

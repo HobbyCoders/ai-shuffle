@@ -242,6 +242,41 @@ def resolve_provider_context_window(
     return _positive_int(provider_row.get("context_window"))
 
 
+def context_window_choices(
+    model_id: Optional[str],
+    provider_row: Optional[ModelProviderRow] = None,
+    model_entry: Optional[Dict[str, Any]] = None,
+) -> List[int]:
+    """Selectable session windows, shared by the picker and request validation.
+
+    OpenAI's Astra and Sol support an opt-in 1M window even when their catalog
+    advertises the smaller default. Keep that capability separate from the
+    resolved default so existing sessions without an override are unchanged.
+    Other gateways must advertise their own 1M window.
+    """
+    native = get_model(model_id) if provider_row is None else None
+    identity = str(model_id or "").lower()
+    if native is not None or "claude" in identity:
+        standard = 200_000
+    elif "gpt" in identity:
+        standard = 256_000
+    else:
+        return []
+
+    if (
+        preset_kind_for(provider_row) in {"chatgpt", "openai"}
+        and model_id in {"gpt-6-astra", "gpt-5.6-sol"}
+    ):
+        return [standard, 1_000_000]
+
+    window = (
+        resolve_provider_context_window(provider_row, model_id, model_entry)
+        if provider_row is not None
+        else native.context_window if native is not None else None
+    )
+    return [standard, 1_000_000] if window and window >= 1_000_000 else []
+
+
 # Anthropic API model ids for the selectable presets. The registry's canonical
 # stored form is the short Agent SDK alias ("opus"); the delegated leg's claude
 # CLI resolves aliases itself, but fluid's native Anthropic leg sends the model
@@ -369,6 +404,9 @@ def _providers_payload() -> List[Dict[str, object]]:
                     # it made a 1M model display/run at the row's stale value.
                     "context_window": resolve_provider_context_window(
                         row, model.get("id"), model_entry=model
+                    ),
+                    "context_window_choices": context_window_choices(
+                        model.get("id"), row, model_entry=model
                     ),
                     # Still per-ROW (no per-model output cap is modelled).
                     "max_output_tokens": row.get("max_output_tokens"),

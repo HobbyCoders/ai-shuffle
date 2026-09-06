@@ -182,6 +182,8 @@ export interface ProviderModel {
 	 * fall back to the default window.
 	 */
 	context_window?: number | null;
+	/** Selectable session windows; [] means this provider offers no override. */
+	context_window_choices?: number[];
 	/** Effective levels accepted by this route; [] means no adjustable effort. */
 	effort_levels?: string[] | null;
 	effort_metadata_version?: number;

@@ -198,7 +198,7 @@ describe('integrated mobile composer controls', () => {
 		await fireEvent.click(screen.getByRole('button', { name: /model: sonnet/i }));
 		await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('region', { name: 'Choose model' })));
 		expect(screen.getByRole('radio', { name: /1m.*extended/i }).getAttribute('aria-checked')).toBe('true');
-		await fireEvent.click(screen.getByRole('radio', { name: /200k.*normal/i }));
+		await fireEvent.click(screen.getByRole('radio', { name: /200k.*standard/i }));
 		expect(onContextChoiceSelect).toHaveBeenCalledWith('standard');
 	});
 

@@ -1,14 +1,13 @@
 <script lang="ts">
 	/**
-	 * VoiceRecorder — the composer's microphone control, and the only UI voice
-	 * input has.
+	 * VoiceRecorder — the composer's microphone control.
 	 *
 	 * A trigger, not a recorder: capture, streaming and transcription all live in
 	 * the shared stack (`globalStt`), which the global hotkey drives too. What
 	 * this owns is the affordance — the button grows into a live waveform while
 	 * you talk, and shrinks back when it finishes.
 	 *
-	 * There is deliberately no separate transcript surface. Live text is written
+	 * For composer dictation, live text is written
 	 * straight into the composer through the `live` sink below, so the editor IS
 	 * the feedback, and the recording ends on its own when you stop speaking.
 	 */
@@ -96,7 +95,7 @@
 	// 'Escape' would evict the app's close-modal binding and unregistering would
 	// delete it outright.
 	$effect(() => {
-		if (!expanded) return;
+		if (!expanded || $globalSttState.source !== 'composer') return;
 		const onKey = (event: KeyboardEvent) => {
 			if (event.key !== 'Escape') return;
 			event.stopPropagation();
@@ -110,13 +109,14 @@
 	// A recording left running when the composer goes away would hold the
 	// microphone open with nowhere to put its text.
 	onDestroy(() => {
-		if ($globalSttState.isRecording || $globalSttState.isPreparing) {
+		const state = $globalSttState;
+		if (state.source === 'composer' && (state.isRecording || state.isPreparing || state.isTranscribing)) {
 			cancelVoiceInput();
 		}
 	});
 </script>
 
-{#if $globalSttState.error}
+{#if $globalSttState.source === 'composer' && $globalSttState.error}
 	<Banner
 		severity="error"
 		message={$globalSttState.error}

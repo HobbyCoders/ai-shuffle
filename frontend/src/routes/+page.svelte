@@ -33,6 +33,7 @@
 	// Layout components
 	import AppLayout from '$lib/components/layout/AppLayout.svelte';
 	import ActiveVoiceCallBar from '$lib/components/voice/ActiveVoiceCallBar.svelte';
+	import GlobalVoiceInput from '$lib/components/voice/GlobalVoiceInput.svelte';
 
 	// Modals
 	import KeyboardShortcutsModal from '$lib/components/KeyboardShortcutsModal.svelte';
@@ -531,4 +532,5 @@
 	{/if}
 
 	<!-- Global STT Indicator -->
+	<GlobalVoiceInput />
 {/if}

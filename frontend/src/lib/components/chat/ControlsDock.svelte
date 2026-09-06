@@ -770,8 +770,7 @@
 		width: min(380px, calc(100vw - 24px));
 		padding: 6px;
 		--mpp-width: 100%;
-		/* 400px = original 346px list + pinned context footer, so the 200k/1m
-		   control stays on-screen instead of being clipped by overflow. */
+		/* The list scrolls above the pinned context footer in short viewports. */
 		--mpp-height: min(400px, calc(var(--dock-pop-max, 454px) - 14px));
 	}
 

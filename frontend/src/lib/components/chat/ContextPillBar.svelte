@@ -24,6 +24,7 @@
 	 */
 	import { onDestroy } from 'svelte';
 	import ProfileSelector from './ProfileSelector.svelte';
+	import WorkspaceFolderSelector from './WorkspaceFolderSelector.svelte';
 	import BranchSelector from './BranchSelector.svelte';
 	import ExecutionModeBar from '$lib/components/layout/ExecutionModeBar.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
@@ -38,7 +39,7 @@
 	import { listInstalls, getClusterGitState, type Install } from '$lib/api/installs';
 	import { adoptSession, unpinSession, moveSession } from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
-	import { FolderClosed, GitBranch, Monitor, MonitorOff, Check, Loader2 } from 'lucide-svelte';
+	import { GitBranch, Monitor, MonitorOff, Check, Loader2 } from 'lucide-svelte';
 	import type { EligibilityMap } from '$lib/components/layout/execution-mode-eligibility';
 
 	interface Props {
@@ -231,11 +232,8 @@
 <svelte:window onclick={handleRunnerClickOutside} onkeydown={handleRunnerKeydown} />
 
 {#snippet repoChip()}
-	{#if projectName && !sheetMode}
-		<span class="ctx-chip repo-chip" title="Repository: {projectName}">
-			<FolderClosed size={12} strokeWidth={1.6} aria-hidden="true" />
-			<span class="ctx-chip-label repo-name">{projectName}</span>
-		</span>
+	{#if projectName}
+		<WorkspaceFolderSelector {projectName} {sheetMode} />
 	{/if}
 {/snippet}
 
@@ -396,10 +394,6 @@
 	/* Read-only chips describe the context without inviting a click. */
 	.ctx-chip.readonly {
 		cursor: default;
-	}
-
-	.repo-name {
-		max-width: 140px;
 	}
 
 	.branch-name {

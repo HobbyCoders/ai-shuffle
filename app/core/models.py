@@ -371,6 +371,14 @@ class SessionTag(BaseModel):
 
 
 class Session(SessionBase):
+    workspace_project_ids: List[str] = Field(default_factory=list)
+
+    @field_validator("workspace_project_ids", mode="before")
+    @classmethod
+    def decode_workspace_project_ids(cls, value):
+        from app.core.workspace_folders import normalize_workspace_project_ids
+        return normalize_workspace_project_ids(value)
+
     """Full session response"""
     id: str
     sdk_session_id: Optional[str] = None
@@ -600,9 +608,14 @@ class PaginatedSessionSearchResults(BaseModel):
 # Query Models
 # ============================================================================
 
+class WorkspaceFoldersUpdate(BaseModel):
+    workspace_project_ids: List[str] = Field(max_length=50)
+
+
 class QueryOverrides(BaseModel):
     """Optional overrides for a query"""
     model: Optional[str] = None
+    workspace_project_ids: Optional[List[str]] = Field(None, max_length=50)
     permission_mode: Optional[str] = None  # default, auto, acceptEdits, plan, bypassPermissions
     system_prompt_append: Optional[str] = None
     max_turns: Optional[int] = None

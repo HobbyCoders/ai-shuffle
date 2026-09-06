@@ -24,11 +24,7 @@ from app.core.platform import detect_deployment_mode, DeploymentMode
 
 from app.core.project_utils import get_project_working_dir
 from app.core.query_streaming import DEFAULT_SDK_BUFFER_SIZE
-from app.core.model_registry import (
-    get_context_window,
-    get_model,
-    resolve_provider_context_window,
-)
+from app.core.model_registry import context_window_choices
 
 # --- Re-exports for backward compatibility ---
 # All symbols that were previously defined here are re-exported so that
@@ -1166,29 +1162,10 @@ def build_options_from_profile(
             (main_provider_row or {}).get("provider_type") != "anthropic"
         )
 
-    # Only honor the two choices exposed by the picker, and only for GPT/Claude
-    # models whose registry ceiling is at least 1M. This also makes a stale
-    # context_window harmless after the session switches to an ineligible model.
-    if context_window is not None:
-        registered_window = (
-            resolve_provider_context_window(main_provider_row, model_to_use)
-            if main_provider_row is not None
-            else get_context_window(model_to_use) if get_model(model_to_use) else None
-        )
-        model_identity = str(model_to_use or "").lower()
-        is_claude = get_model(model_to_use) is not None or "claude" in model_identity
-        is_gpt = "gpt" in model_identity
-        allowed_windows = (
-            {200_000, 1_000_000}
-            if is_claude
-            else {256_000, 1_000_000} if is_gpt else set()
-        )
-        if (
-            registered_window is None
-            or registered_window < 1_000_000
-            or context_window not in allowed_windows
-        ):
-            context_window = None
+    # Use the same capabilities exposed by the registry to the picker. A stale
+    # choice is discarded after switching to a model that cannot support it.
+    if context_window not in context_window_choices(model_to_use, main_provider_row):
+        context_window = None
 
     # Model-facing orchestration contract. The same provider-scoped resolver
     # builds Task's schema and enforces dispatch, so prompt prose cannot promise
@@ -1660,6 +1637,14 @@ def build_options_from_profile(
     # unreachable. Always register the notes dir so referenced notes (and their
     # attachments, stored beneath it) resolve from any session.
     merged_add_dirs: list = list(config.get("add_dirs") or [])
+    if session_mode != "chat":
+        from app.core.workspace_folders import workspace_directories
+        workspace_ids = overrides.get("workspace_project_ids")
+        if workspace_ids is None:
+            workspace_ids = (_binding_row or {}).get("workspace_project_ids")
+        for directory in workspace_directories(workspace_ids, (project or {}).get("id"), api_user_id):
+            if directory not in (str(d) for d in merged_add_dirs):
+                merged_add_dirs.append(directory)
     try:
         from app.core.note_files import get_notes_dir
         notes_dir = str(get_notes_dir())

@@ -23,7 +23,7 @@
 	 * trigger and no positioning — the parent owns the popover chrome and sizes
 	 * the panel via `--mpp-height` / `--mpp-width`.
 	 */
-	import { LayoutGrid, Search, Star } from 'lucide-svelte';
+	import { Check, LayoutGrid, Search, Star } from 'lucide-svelte';
 	import { tick } from 'svelte';
 	import ProviderGlyph from './ProviderGlyph.svelte';
 	import type { PickerGroup, PickerOption } from '$lib/constants/model-picker';
@@ -212,6 +212,18 @@
 		toggleFavoriteModel(optionValue);
 	}
 
+	function onContextKeydown(e: KeyboardEvent) {
+		if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) return;
+		e.preventDefault();
+		e.stopPropagation();
+		const next: ContextWindowChoice = e.key === 'Home' ? 'standard'
+			: e.key === 'End' ? '1m'
+			: contextChoice === 'standard' ? '1m' : 'standard';
+		onContextChoiceSelect?.(next);
+		(e.currentTarget as HTMLElement)
+			.querySelector<HTMLButtonElement>(`[data-context-choice="${next}"]`)?.focus();
+	}
+
 </script>
 
 <div class="mpp" data-model-picker-panel>
@@ -351,31 +363,47 @@
 	{#if contextControl && contextChoice && onContextChoiceSelect}
 		<div class="mpp-context" data-model-context-control>
 			<div class="mpp-context-copy">
-				<span>Context</span>
-				<small>For {getModelLabel(value)}</small>
+				<span>Context window</span>
+				<small title={getModelLabel(value)}>{getModelLabel(value)}</small>
 			</div>
-			<div class="mpp-context-toggle" role="radiogroup" aria-label="Context window">
+			<div
+				class="mpp-context-toggle"
+				role="radiogroup"
+				aria-label="Context window"
+				tabindex="-1"
+				onkeydown={onContextKeydown}
+			>
 				<button
 					type="button"
 					role="radio"
 					aria-checked={contextChoice === 'standard'}
-					aria-label="{contextControl.standardLabel} · Normal"
+					aria-label="{contextControl.standardLabel} · Standard"
+					tabindex={contextChoice === 'standard' ? 0 : -1}
+					data-context-choice="standard"
 					class:on={contextChoice === 'standard'}
 					onclick={() => onContextChoiceSelect('standard')}
 				>
-					{contextControl.standardLabel}
-					<span>Normal</span>
+					<span class="mpp-context-option-copy">
+						<span class="mpp-context-value">{contextControl.standardLabel}</span>
+						<span class="mpp-context-caption">Standard</span>
+					</span>
+					<Check size={14} class="mpp-context-check" aria-hidden="true" />
 				</button>
 				<button
 					type="button"
 					role="radio"
 					aria-checked={contextChoice === '1m'}
 					aria-label="{contextControl.extendedLabel} · Extended"
+					tabindex={contextChoice === '1m' ? 0 : -1}
+					data-context-choice="1m"
 					class:on={contextChoice === '1m'}
 					onclick={() => onContextChoiceSelect('1m')}
 				>
-					{contextControl.extendedLabel}
-					<span>Extended</span>
+					<span class="mpp-context-option-copy">
+						<span class="mpp-context-value">{contextControl.extendedLabel}</span>
+						<span class="mpp-context-caption">Extended</span>
+					</span>
+					<Check size={14} class="mpp-context-check" aria-hidden="true" />
 				</button>
 			</div>
 		</div>
@@ -693,69 +721,96 @@
 	/* Context selector is pinned below the independently scrolling model list. */
 	.mpp-context {
 		display: flex;
-		align-items: center;
-		gap: 12px;
-		min-height: 54px;
-		padding: 8px 10px 8px 12px;
+		flex-direction: column;
+		gap: 8px;
+		padding: 10px;
 		border-top: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
 		background: color-mix(in srgb, var(--popover) 92%, var(--muted));
-		box-shadow: 0 -8px 18px color-mix(in srgb, var(--popover) 72%, transparent);
 		flex-shrink: 0;
 	}
 	.mpp-context-copy {
 		display: flex;
-		flex: 1;
+		align-items: baseline;
+		justify-content: space-between;
 		min-width: 0;
-		flex-direction: column;
-		gap: 1px;
+		gap: 12px;
 		color: var(--foreground);
-		font-size: 12px;
+		font-size: 11px;
 		font-weight: 600;
+		line-height: 1.4;
+	}
+	.mpp-context-copy > span {
+		flex-shrink: 0;
 	}
 	.mpp-context-copy small {
+		min-width: 0;
 		overflow: hidden;
 		color: var(--muted-foreground);
-		font-size: 10px;
-		font-weight: 450;
+		font-size: 10.5px;
+		font-weight: 400;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 	.mpp-context-toggle {
-		display: flex;
-		flex: 0 0 auto;
-		gap: 2px;
-		padding: 2px;
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 4px;
+		padding: 3px;
 		border: 1px solid var(--border);
-		border-radius: 8px;
-		background: var(--background);
+		border-radius: 10px;
+		background: color-mix(in srgb, var(--muted) 45%, transparent);
 	}
 	.mpp-context-toggle button {
 		display: inline-flex;
-		align-items: baseline;
-		gap: 4px;
-		height: 30px;
-		padding: 0 8px;
-		border: 0;
-		border-radius: 6px;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		min-width: 0;
+		min-height: 44px;
+		padding: 6px 10px;
+		border: 1px solid transparent;
+		border-radius: 7px;
 		background: transparent;
 		color: var(--muted-foreground);
 		font: inherit;
 		font-size: 12px;
 		font-weight: 600;
+		text-align: left;
 		cursor: pointer;
+		transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
 	}
-	.mpp-context-toggle button span {
-		font-size: 10px;
-		font-weight: 450;
-		opacity: 0.8;
+	.mpp-context-option-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		line-height: 1.2;
+	}
+	.mpp-context-value {
+		font-size: 13px;
+		font-variant-numeric: tabular-nums;
+	}
+	.mpp-context-caption {
+		color: var(--muted-foreground);
+		font-size: 10.5px;
+		font-weight: 400;
+	}
+	.mpp-context-toggle :global(.mpp-context-check) {
+		flex-shrink: 0;
+		color: var(--primary);
+		opacity: 0;
 	}
 	.mpp-context-toggle button:hover {
+		background: var(--mpp-hover);
 		color: var(--foreground);
 	}
 	.mpp-context-toggle button.on {
-		background: var(--muted);
+		border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
+		background: color-mix(in srgb, var(--primary) 8%, var(--popover));
 		color: var(--foreground);
-		box-shadow: inset 0 0 0 1px var(--border-strong);
+		box-shadow: 0 1px 3px color-mix(in srgb, var(--foreground) 6%, transparent);
+	}
+	.mpp-context-toggle button.on :global(.mpp-context-check) {
+		opacity: 1;
 	}
 	.mpp-context-toggle button:focus-visible {
 		outline: 2px solid var(--ring);

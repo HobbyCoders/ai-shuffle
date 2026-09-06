@@ -51,6 +51,7 @@ except ImportError:
 
 from app.core.models import (
     Session,
+    WorkspaceFoldersUpdate,
     SessionWithMessages,
     SessionSearchResult,
     PaginatedSessions,
@@ -1120,7 +1121,10 @@ async def get_live_session(
 
     # Compute session metadata from DB session — included in all response
     # paths so the frontend can correct any stale state on switch.
-    session_meta = {}
+    from app.core.workspace_folders import normalize_workspace_project_ids
+    session_meta = {
+        "workspace_project_ids": normalize_workspace_project_ids(session.get("workspace_project_ids"))
+    }
 
     # Always include the title so the frontend header stays in sync
     session_title = session.get("title")
@@ -1302,6 +1306,35 @@ async def get_live_session(
         logger.debug("provider worker attribution failed", exc_info=True)
 
     return result
+
+
+@router.put("/{session_id}/workspace-folders")
+async def update_workspace_folders(
+    request: Request,
+    session_id: str,
+    body: WorkspaceFoldersUpdate,
+    token: str = Depends(require_auth),
+):
+    """Save only this chat's additional workspace projects."""
+    from app.api.common import check_project_access
+    from app.core.workspace_folders import normalize_workspace_project_ids
+
+    existing = await require_session(request, session_id)
+    if existing.get("mode") == "chat":
+        raise HTTPException(400, "Workspace folders require a code or voice session")
+    try:
+        ids = normalize_workspace_project_ids(body.workspace_project_ids)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    ids = [item for item in ids if item != existing.get("project_id")]
+    previous_ids = normalize_workspace_project_ids(existing.get("workspace_project_ids"))
+    for project_id in ids:
+        check_project_access(request, project_id)
+        # Retaining an unavailable entry must not prevent removing another one.
+        if project_id not in previous_ids and not await run_sync(database.get_project, project_id):
+            raise HTTPException(404, f"Workspace project '{project_id}' is no longer available")
+    await run_sync(database.set_session_run_binding, session_id, workspace_project_ids=ids)
+    return {"workspace_project_ids": ids}
 
 
 @router.patch("/{session_id}")

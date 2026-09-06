@@ -185,9 +185,9 @@ describe('ControlsDock split controls', () => {
 			'true'
 		);
 
-		await fireEvent.click(screen.getByRole('radio', { name: /200k.*normal/i }));
+		await fireEvent.click(screen.getByRole('radio', { name: /200k.*standard/i }));
 		expect(screen.getByRole('dialog', { name: /choose model/i })).toBeTruthy();
-		expect(screen.getByRole('radio', { name: /200k.*normal/i }).getAttribute('aria-checked')).toBe(
+		expect(screen.getByRole('radio', { name: /200k.*standard/i }).getAttribute('aria-checked')).toBe(
 			'true'
 		);
 	});

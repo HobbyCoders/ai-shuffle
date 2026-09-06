@@ -123,7 +123,7 @@ _STEERABLE_SOURCES = ("user", "queue")
 # under settings the user did not pick. ``fast`` and ``context_window`` are
 # deliberately NOT in this set (product ruling): they shape throughput and
 # budget rather than which agent answers.
-_STEER_BINDING_KEYS = ("model", "effort", "permission_mode")
+_STEER_BINDING_KEYS = ("model", "effort", "permission_mode", "workspace_project_ids")
 
 
 async def try_steer_pending(session_id: str) -> int:
