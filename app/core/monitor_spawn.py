@@ -46,6 +46,22 @@ Three more from the round-6 audit:
   ``EXIT:1``, and the notification said "completed" over a summary that said
   the run had failed. The row and the notification are now written from, and
   re-read at, one place.
+
+And four from round 7:
+
+* a NON-ZERO EXIT IS DATA — an inline settle no longer rides on ``is_error``.
+  The code-mode runner raises on that flag, so a red TDD baseline aborted the
+  whole cell and every call queued behind it. The registry row still says
+  ``error`` (the chip and the wake notification must stay honest about a
+  command that failed); only the tool envelope changed.
+* a TAIL-BIASED, VERDICT-PRESERVING SUMMARY (:func:`_summarize`) — head+tail
+  truncation deleted exactly the ``Tests 45 passed`` block, which sits in the
+  MIDDLE of a chained command's buffer, and repeated watch-status lines filled
+  the rest.
+* a SESSION-SCOPED BOUND FOR SERVICES (``monitor_serving_idle_seconds``) — a
+  ``serves`` process outlived its session by 8h15m on an audited runner.
+* an HONEST SERVICE EXIT — a server that goes away on its own settles as a
+  stop with a capped tail, not as a failure with 34k of access log.
 """
 
 from __future__ import annotations
@@ -58,10 +74,44 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Fraction of the summary budget spent on the HEAD of the output; the rest is
-# the tail. Failures name themselves at the end far more often than at the
-# start, so the tail gets the larger share.
-_SUMMARY_HEAD_FRACTION = 0.3
+# Share of the summary budget reserved for VERDICT lines rescued out of the
+# elided middle (see :func:`_verdict_lines`). Whatever the verdicts do not use
+# goes back to the tail, so a build log with no summary lines in it is a pure
+# tail window.
+_SUMMARY_VERDICT_FRACTION = 0.35
+
+# At most this many verdict lines are rescued, newest first. A run with one
+# failure per test file would otherwise fill the whole budget with them.
+_SUMMARY_MAX_VERDICT_LINES = 12
+
+# Preserve command verdicts when summarizing chained output. Test/check summary blocks can sit between command
+# segments rather than at the end of the full buffer, so head-and-tail truncation alone can discard them.
+_VERDICT_RE = re.compile(
+    r"\b\d+\s+(?:passed|failed|skipped|errors?|warnings?|passing|failing"
+    r"|pending|todo|xfailed|xpassed|deselected)\b"
+    r"|\b(?:Test Files|Tests|Suites|Snapshots|Tests:|Suites:)\b"
+    r"|\b(?:FAILED|FAIL|PASSED|ERROR|CRITICAL)\b"
+    r"|\bfound \d+ (?:error|problem)"
+    r"|\bnpm ERR!"
+    r"|\bTraceback \(most recent call last\)"
+    r"|\bAll checks (?:were successful|have passed)"
+    r"|\bBUILD (?:SUCCESSFUL|FAILED)"
+    r"|\bcompiled (?:successfully|with)"
+    r"|\bEXIT[:=]\s*-?\d"
+    r"|\bexit(?:ed with)? code\s*-?\d",
+    re.IGNORECASE,
+)
+
+# Longest repeating BLOCK the collapser looks for. A `--watch` command prints
+# the same two- or three-line status block every poll; one audited summary was
+# ~8KB of `Refreshing checks status every 10 seconds.` and its sibling line,
+# with the two lines that mattered pushed to the very end.
+_MAX_REPEAT_PERIOD = 8
+
+# How many times a block must appear before it is collapsed. Three, not two:
+# collapsing a line that merely appears twice costs more characters than it
+# saves and makes ordinary output look edited.
+_MIN_REPEATS = 3
 
 # Bound for the log-file tail folded into a summary whose buffer came back
 # empty (see :func:`_log_tail`). Kept under the summary budget so the tail
@@ -89,6 +139,20 @@ _DRAIN_GRACE_SECONDS = 2.0
 # turn that asked for it, not a wake-turn preamble.
 _INLINE_OUTPUT_MAX_CHARS = 30_000
 
+# How long a ``serves`` process must stay up before its exit reads as "the
+# service stopped" rather than "the service never came up". Under it, a
+# non-zero exit is still a failure with its output attached — a port clash or
+# an import error is exactly what the model needs to see.
+_SERVING_STARTUP_GRACE_SECONDS = 30.0
+
+# Bound the stopped-service output tail. The completion notification needs the service verdict, not an unbounded
+# access log.
+_SERVING_EXIT_SUMMARY_MAX_CHARS = 400
+
+# How often the serving watcher asks whether its session is still alive, and
+# the default idle bound (overridable via ``monitor_serving_idle_seconds``).
+_SERVING_IDLE_POLL_SECONDS = 60.0
+
 # An explicit exit-code marker a watcher prints for itself — `echo "EXIT:$?"`,
 # the shape audited CI watchers use. When the command's own exit code says 0
 # because the watcher swallowed the failure (`… || true`, or a self-exit after
@@ -102,6 +166,8 @@ _EXIT_MARKER_RE = re.compile(r"\bEXIT[:=]\s*(-?\d+)")
 # "(no output; exit code None)" an audited session read as a crash and
 # re-launched work over.
 MONITOR_TIMEOUT_REASON = "monitor_timeout"
+#: Stamp for a serving process stopped because its session went quiet.
+SERVING_IDLE_REASON = "monitor_serving_idle"
 
 # Registry statuses that mean the task was stopped ON PURPOSE — by the user,
 # by the app's own reaper, by an agent's TaskStop, or by the time budget below.
@@ -173,7 +239,8 @@ def monitor_serving_receipt_text(task_id: str) -> str:
         "session is NOT parked on it — end the turn whenever this step is "
         "done; no completion is coming while it is healthy, and you are "
         "notified if it stops or dies. Do not sleep, poll, or check on it "
-        "yourself."
+        "yourself. If this session goes quiet for a long stretch the process "
+        "is stopped so it cannot outlive the work, and you are told why."
     )
 
 
@@ -203,13 +270,26 @@ def monitor_inline_receipt_text(
 
     No park, no wake, no fresh turn: the result is right here, so the text says
     the work is done instead of telling the model to end the turn.
+
+    A non-zero exit says so plainly AND says it is not a tool malfunction. The
+    receipt used to ride on an ``is_error`` outcome, which the code-mode runner
+    turns into a raised exception: a red TDD baseline — the expected result of
+    the operation the model asked for — aborted the whole cell and every call
+    queued behind it (five Edits lost in one audited session, four dead cells
+    in another, and a third wrapped every later Monitor in try/except).
     """
     code = "unknown" if exit_code is None else str(exit_code)
     verdict = "finished with a failure" if failed else "finished"
+    note = (
+        " That exit code is the command's own verdict, not a tool failure — "
+        "read the output and decide."
+        if failed
+        else ""
+    )
     return (
         f"The command {verdict} while you waited (task {task_id}, exit code "
         f"{code}). Nothing is running and nothing will wake you — this is the "
-        "whole result.\n\n" + (output or "(no output)")
+        f"whole result.{note}\n\n" + (output or "(no output)")
     )
 
 
@@ -283,29 +363,117 @@ def _summary_budget() -> int:
         return 1000
 
 
+def collapse_repeated_lines(lines: List[str]) -> List[str]:
+    """Collapse runs of a repeated line — or a repeated BLOCK of lines.
+
+    A `--watch` command re-prints its status block every poll, and the buffer
+    is then mostly the same three lines over and over: one audited wake summary
+    was ~8KB of "Refreshing checks status every 10 seconds." with the two lines
+    that carried the verdict at the very end, one truncation away from being
+    lost. Block-aware because the repetition is rarely a single line — the
+    period is detected (1..``_MAX_REPEAT_PERIOD``) rather than assumed.
+
+    One copy of the block survives, followed by a line saying how many more
+    there were. Order is otherwise untouched: this is a summarizer, not a sort.
+    """
+    out: List[str] = []
+    index = 0
+    total = len(lines)
+    while index < total:
+        best_period = 0
+        best_reps = 1
+        limit = min(_MAX_REPEAT_PERIOD, total - index)
+        for period in range(1, limit + 1):
+            block = lines[index:index + period]
+            if not any(line.strip() for line in block):
+                continue  # never collapse a run of blank lines into a notice
+            reps = 1
+            cursor = index + period
+            while cursor + period <= total and lines[cursor:cursor + period] == block:
+                reps += 1
+                cursor += period
+            if reps >= _MIN_REPEATS and reps * period > best_reps * best_period:
+                best_period, best_reps = period, reps
+        if best_period:
+            out.extend(lines[index:index + best_period])
+            noun = "line" if best_period == 1 else f"{best_period} lines"
+            times = "once" if best_reps == 2 else f"{best_reps - 1} more times"
+            out.append(f"... [the previous {noun} repeated {times}] ...")
+            index += best_period * best_reps
+        else:
+            out.append(lines[index])
+            index += 1
+    return out
+
+
+def _verdict_lines(text: str, *, budget: int) -> List[str]:
+    """Outcome lines rescued from a region that is about to be elided.
+
+    Newest first while selecting (a chained command's LAST verdict is the one
+    that decided the exit code), original order when returned.
+    """
+    if budget <= 0:
+        return []
+    picked: List[str] = []
+    used = 0
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if not stripped or not _VERDICT_RE.search(stripped):
+            continue
+        if used + len(stripped) + 1 > budget:
+            break
+        picked.append(stripped)
+        used += len(stripped) + 1
+        if len(picked) >= _SUMMARY_MAX_VERDICT_LINES:
+            break
+    picked.reverse()
+    return picked
+
+
 def _summarize(lines: list, *, budget: Optional[int] = None) -> str:
-    """Head+tail of the buffered output, capped at the wake-summary budget.
+    """The buffered output, capped at the wake-summary budget, TAIL-BIASED.
 
     The cap is about what a WAKE TURN has to read, not about what is kept: the
     full buffer stays available through TaskOutput. Audited wake turns were
     handed 12KB stack-trace tails from servers the agent had killed itself and
     spent the entire turn reading them.
+
+    Three round-7 corrections, all from wake summaries that hid their own
+    verdict:
+
+    * repeated lines and repeated status BLOCKS collapse first, so a watch
+      command's poll noise cannot crowd out its result;
+    * the head window is gone — the tail is what a command's outcome is in;
+    * verdict lines (``Tests 45 passed``, ``FAILED …``, ``npm ERR!``) are
+      rescued out of the elided region and kept above the truncation notice.
+      A chained ``npm test && npm run check`` puts its test summary in the
+      MIDDLE of the buffer, which is exactly what head+tail deleted — twice in
+      one audited session, at the cost of a follow-up TaskOutput call each.
     """
     # Scrub BEFORE slicing: escape sequences are gibberish to the model (and
-    # to the UI), and counting them against the head/tail budget evicts real
-    # output. Ruling A13 makes the app the supervisor here, so fluid's own
+    # to the UI), and counting them against the budget evicts real output.
+    # Ruling A13 makes the app the supervisor here, so fluid's own
     # supervisor-side strip never runs for these buffers.
     text = _strip_ansi("\n".join(lines))
-    cap = _summary_budget() if budget is None else budget
+    cap = _summary_budget() if budget is None else max(1, int(budget))
+    if len(text) > cap:
+        text = "\n".join(collapse_repeated_lines(text.split("\n")))
     if len(text) <= cap:
         return text
-    head = int(cap * _SUMMARY_HEAD_FRACTION)
-    tail = cap - head
-    dropped = len(text) - head - tail
+    tail_cap = cap - int(cap * _SUMMARY_VERDICT_FRACTION)
+    kept = _verdict_lines(text[:-tail_cap], budget=cap - tail_cap)
+    kept_text = "\n".join(kept)
+    # Whatever the verdicts did not use goes back to the tail, which may then
+    # reach back over a line the rescue already took — drop those rather than
+    # print them twice.
+    tail = text[-(cap - len(kept_text)):]
+    kept = [line for line in kept if line not in tail]
+    kept_text = "\n".join(kept)
+    dropped = len(text) - len(tail) - len(kept_text)
     return (
-        text[:head]
-        + f"\n... [{dropped} chars truncated — TaskOutput has the full buffer] ...\n"
-        + text[-tail:]
+        (kept_text + "\n" if kept_text else "")
+        + f"... [{dropped} chars truncated — TaskOutput has the full buffer] ...\n"
+        + tail
     )
 
 
@@ -387,6 +555,11 @@ def _cause_line(reason: str, recorded_summary: str, *, serves: bool) -> str:
     """
     if reason == MONITOR_TIMEOUT_REASON:
         return recorded_summary or "Stopped: the monitor's time budget expired."
+    if reason == SERVING_IDLE_REASON:
+        return recorded_summary or (
+            "Stopped: this serving task was left running while its session sat "
+            "idle. It did not fail — start it again when you need it."
+        )
     from app.core.task_registry import SERVER_SHUTDOWN_REASON, USER_STOP_REASON
 
     if reason == USER_STOP_REASON:
@@ -407,6 +580,42 @@ def _cause_line(reason: str, recorded_summary: str, *, serves: bool) -> str:
     return who + what
 
 
+def _served_before_exiting(
+    exit_code: Optional[int], ran_seconds: Optional[float]
+) -> bool:
+    """Whether a ``serves`` process actually came up before it went away.
+
+    A clean exit always counts. A non-zero one counts only when the process
+    stayed up past the startup grace: a uvicorn that dies two seconds in
+    because the port is taken never served anything, and reporting THAT as
+    "the service stopped" would bury the one failure the model must see.
+    Unknown runtime is treated as "never came up", i.e. the pre-existing
+    failure path.
+    """
+    if exit_code == 0:
+        return True
+    if ran_seconds is None:
+        return False
+    return ran_seconds >= _SERVING_STARTUP_GRACE_SECONDS
+
+
+def not_executable_hint(exit_code: Optional[int], summary: str) -> str:
+    """The one line a "Permission denied" launch failure is missing.
+
+    A shell script written by a worker that never ``chmod +x``'d it exits 126
+    with ``/bin/sh: 1: …/launch-backend.sh: Permission denied`` and nothing
+    else. One audited session lost a whole Monitor cycle plus a steer to it
+    before prefixing ``sh`` by hand. Empty string when this is not that.
+    """
+    if exit_code != 126 or "permission denied" not in (summary or "").lower():
+        return ""
+    return (
+        "\nThe file is not executable (exit code 126). Run it as "
+        "`sh <path>` (or `bash <path>`), or chmod +x it first — nothing ran, "
+        "so re-running it that way is safe."
+    )
+
+
 def settle_monitor_task(
     *,
     exit_code: Optional[int],
@@ -416,6 +625,7 @@ def settle_monitor_task(
     session_id: Optional[str],
     task_id: str,
     serves: bool,
+    ran_seconds: Optional[float] = None,
 ) -> Tuple[str, str]:
     """``(status, summary)`` for a Monitor shell that has come to rest.
 
@@ -425,6 +635,11 @@ def settle_monitor_task(
     hand. The recorded status wins over the exit code, and a deliberate stop
     settles as ``killed`` (which the fluid adapter maps to ``cancelled``) with
     a cause line INSTEAD of an output tail.
+
+    ``ran_seconds`` — how long the process was up — is what separates a SERVICE
+    that stopped from one that never started; see
+    :func:`_served_before_exiting`. The watcher knows it; callers that do not
+    may omit it and get the pre-existing "non-zero is a failure" reading.
     """
     recorded, reason, recorded_summary = _recorded_status(session_id, task_id)
     deliberate = recorded in _DELIBERATE_STATUSES or (
@@ -446,13 +661,25 @@ def settle_monitor_task(
         except Exception:  # noqa: BLE001 — best-effort nicety
             logger.debug("monitor_spawn: log-tail read failed", exc_info=True)
             summary = ""
-    if serves and exit_code == 0:
+    if serves and _served_before_exiting(exit_code, ran_seconds):
+        # A SERVICE that went away is a stop, not a failure — whatever its exit
+        # code. The audited case settled as `failed` with an access log for a
+        # summary, while its sibling (stopped on purpose) got the correct
+        # cancellation wording; the two read as different kinds of event when
+        # they are the same one. Its log is never the news either: what the
+        # parent needs is "it is gone", so the tail is capped hard.
+        tail = _summarize(lines, budget=_SERVING_EXIT_SUMMARY_MAX_CHARS)
+        code = "cleanly on its own (exit code 0)" if exit_code == 0 else (
+            f"on its own (exit code {exit_code})"
+        )
         return "completed", (
-            "The service exited cleanly on its own (exit code 0). "
-            + (summary or "(no output)")
+            f"The service exited {code}. It is no longer running; restart it "
+            "only if you still need it."
+            + (f"\n\nLast output:\n{tail}" if tail else "")
         )
     if not summary:
         summary = f"(no output; exit code {exit_code})"
+    summary += not_executable_hint(exit_code, summary)
     # The OUTCOME the summary shows beats the process's disposition. A watcher
     # ending `…; gh pr checks N || true`, or one that self-exited after the
     # command inside it errored, exits 0 while its own last word is `EXIT:1` —
@@ -535,6 +762,7 @@ def settle_inline_monitor_task(
     )
     if task.lines:
         output = _summarize(list(task.lines), budget=_INLINE_OUTPUT_MAX_CHARS)
+        output += not_executable_hint(task.exit_code, output)
     return status, output
 
 
@@ -596,6 +824,92 @@ async def _enforce_deadline(
     )
 
 
+def serving_idle_budget_seconds() -> int:
+    """The idle bound for a ``serves`` process — 0 for "no bound".
+
+    A serving task is deliberately exempt from the command time budget: it is
+    MEANT to stay up. Nothing else bounded it either, so when the session that
+    started it died, the process outlived it — an audited runner carried a
+    uvicorn fixture and a Vite dev server for 8h15m after their session's wake
+    failed, next to a resource-monitor warning about 17 orphan children and
+    RSS growing 745 MB/hour. The bound is on the SESSION's idleness, not on the
+    process's age: a server tended by a live session is never touched.
+    """
+    try:
+        from app.core.config import settings
+
+        return max(0, int(getattr(settings, "monitor_serving_idle_seconds", 0) or 0))
+    except Exception:  # noqa: BLE001 — config must never break a watcher
+        return 0
+
+
+def session_idle_seconds(session_id: Optional[str]) -> Optional[float]:
+    """Seconds since this session was last touched, or None if unknowable.
+
+    ``sessions.updated_at`` is the cheapest honest "is anyone home": every turn
+    boundary and stats write moves it, and a session whose wake died stops
+    moving it entirely. None (unknown) always means "leave the task alone".
+    """
+    if not session_id:
+        return None
+    try:
+        from datetime import datetime, timezone
+
+        from app.db import database
+
+        stamp = (database.get_session(session_id) or {}).get("updated_at")
+        if stamp is None:
+            return None
+        parsed = (
+            datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if isinstance(stamp, str)
+            else stamp
+        )
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+    except Exception:  # noqa: BLE001 — an unreadable row is simply unknown
+        logger.debug("monitor_spawn: session idle read failed", exc_info=True)
+        return None
+
+
+async def _enforce_serving_idle_bound(
+    task: Any, session_id: Optional[str], idle_seconds: float, budget_seconds: int
+) -> None:
+    """Stop an unattended serving process, with attribution the model can read."""
+    minutes = int(idle_seconds // 60)
+    summary = (
+        f"Stopped: this serving task was left running while its session sat "
+        f"idle for {minutes} minutes (bound: {budget_seconds}s). It did not "
+        "fail and it did not crash — nothing was attending it. Start it again "
+        "when you need it."
+    )
+    if session_id:
+        try:
+            from app.core.task_registry import task_registry
+
+            task_registry.complete_task(
+                session_id, task.task_id, "killed",
+                summary=summary, reason=SERVING_IDLE_REASON,
+            )
+        except Exception:  # noqa: BLE001 — attribution is best-effort
+            logger.debug("monitor_spawn: idle attribution failed", exc_info=True)
+    try:
+        from app.mcp.builtin_tools import stop_background_shell_task
+
+        await stop_background_shell_task(task.task_id, session_id)
+    except Exception:  # noqa: BLE001 — a stop failure must not strand the wake
+        logger.warning(
+            "monitor_spawn: stopping idle serving task %s failed",
+            task.task_id, exc_info=True,
+        )
+    logger.warning(
+        "monitor_spawn: serving task %s stopped — session %s idle %.0fs "
+        "(bound %ss)",
+        task.task_id, session_id, idle_seconds, budget_seconds,
+    )
+
+
 WAIT_SECONDS_PARAM = (
     f"Seconds to wait here for the command to finish (0-{MAX_WAIT_SECONDS}, "
     "default 0 = don't wait). If it finishes inside the wait you get its exit "
@@ -613,7 +927,9 @@ WAIT_SECONDS_DESCRIPTION_CLAUSE = (
     "the wait, its exit code and output come back in this result and no "
     "notification, wake or extra turn happens at all. If it does not, you get "
     "the normal background receipt and end the turn exactly as you would have. "
-    "It is never a reason to wait in Bash instead."
+    "It is never a reason to wait in Bash instead. A non-zero exit comes back "
+    "as an ordinary result carrying that exit code — a failing test run is an "
+    "answer, not a tool error, and nothing is raised."
 )
 
 
@@ -737,11 +1053,16 @@ def make_fluid_monitor_spawner(
                     session_id=caller_session_id,
                 )
                 failed = status != "completed"
+                # NOT ``is_error``. The command ran and produced a result; a
+                # non-zero exit is that result. ``is_error`` is the code-mode
+                # runner's raise signal, and raising on a red test suite tore
+                # down the whole cell — with every call queued behind it — in
+                # three audited sessions. Spawn/infra failures still raise.
                 return ToolOutcome(
                     text=monitor_inline_receipt_text(
                         task.task_id, exit_code, output, failed=failed
                     ),
-                    is_error=failed,
+                    is_error=False,
                 )
 
         # Completion watcher: fold the output tail into the registry record and
@@ -751,14 +1072,30 @@ def make_fluid_monitor_spawner(
             import asyncio
 
             async def _on_exit() -> None:
-                deadline = (time.monotonic() + budget) if budget else None
+                started = time.monotonic()
+                deadline = (started + budget) if budget else None
+                # A serving process is exempt from the command budget but not
+                # from its session: past this it is an orphan, not a service.
+                idle_budget = serving_idle_budget_seconds() if serves else 0
+                next_idle_check = started + (idle_budget or 0)
                 while task.is_running():
-                    if deadline is not None and time.monotonic() >= deadline:
+                    now = time.monotonic()
+                    if deadline is not None and now >= deadline:
                         # "Parked forever" becomes "woken with a timeout": stop
                         # the process, then fall through to the normal settle,
                         # which reads the attribution back off the registry.
                         await _enforce_deadline(task, caller_session_id, budget)
                         break
+                    if idle_budget and now >= next_idle_check:
+                        next_idle_check = now + _SERVING_IDLE_POLL_SECONDS
+                        idle = await asyncio.to_thread(
+                            session_idle_seconds, caller_session_id
+                        )
+                        if idle is not None and idle >= idle_budget:
+                            await _enforce_serving_idle_bound(
+                                task, caller_session_id, idle, idle_budget
+                            )
+                            break
                     await asyncio.sleep(_WATCH_POLL_SECONDS)
                 exit_code = task.exit_code
                 status, summary = settle_monitor_task(
@@ -769,6 +1106,7 @@ def make_fluid_monitor_spawner(
                     session_id=caller_session_id,
                     task_id=task.task_id,
                     serves=serves,
+                    ran_seconds=time.monotonic() - started,
                 )
                 # One event, one status: the row is written from the settle and
                 # re-read, so the notification below cannot say "completed"

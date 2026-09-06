@@ -64,7 +64,7 @@ async def test_spawn_background_buffers_clean_lines(monkeypatch):
     chunks = [b"\x1b[32mok\x1b[0m\n", b"\x1b[1mbold\x1b[22m done\n", b""]
 
     class _Stdout:
-        async def readline(self):
+        async def read(self, _n):
             return chunks.pop(0)
 
     class _Proc:
@@ -565,8 +565,12 @@ async def test_an_inline_failure_is_reported_as_one(spawner_harness):
     spawn = ms.make_fluid_monitor_spawner("s-spawn")
     outcome = await spawn({"command": "pytest -q", "wait_seconds": 30}, None)
 
-    assert outcome.is_error
+    # NOT is_error: a non-zero exit is the command's own verdict, and an
+    # is_error outcome is raised by the code-mode runner, which used to abort
+    # the whole cell over a red TDD baseline.
+    assert not outcome.is_error
     assert "finished with a failure" in outcome.text
+    assert "not a tool failure" in outcome.text
     assert "FAILED tests/test_a.py::test_b" in outcome.text
 
 
@@ -772,3 +776,301 @@ async def test_fluid_passes_an_inline_settle_through_without_parking(
     assert "ok" in outcome.text
     # And the cwd fallback survives the real ctx.
     assert task.cwd == "/work/tree"
+
+
+# ---------------------------------------------------------------------------
+# R7-1 — the wake summary keeps the verdict it was woken to deliver
+# ---------------------------------------------------------------------------
+
+def test_repeated_status_blocks_collapse():
+    """A `--watch` command re-prints the same block every poll; one audited
+    summary was ~8KB of it with the real result at the very end."""
+    lines = []
+    for _ in range(20):
+        lines.append("Refreshing checks status every 10 seconds.")
+        lines.append("Backend tests  pending  0  https://example/run")
+    lines.append("Backend tests  pass  7m24s")
+
+    collapsed = ms.collapse_repeated_lines(lines)
+
+    assert collapsed[0] == "Refreshing checks status every 10 seconds."
+    assert collapsed[1] == "Backend tests  pending  0  https://example/run"
+    assert "repeated 19 more times" in collapsed[2]
+    assert collapsed[-1] == "Backend tests  pass  7m24s"
+    # Two lines plus a notice plus the verdict — not 41 lines.
+    assert len(collapsed) == 4
+
+
+def test_a_short_run_of_lines_is_left_alone():
+    """Collapsing a line that merely appears twice costs more than it saves."""
+    lines = ["building", "building", "done"]
+
+    assert ms.collapse_repeated_lines(lines) == lines
+
+
+def test_blank_runs_are_never_collapsed_into_a_notice():
+    assert ms.collapse_repeated_lines(["", "", "", "x"]) == ["", "", "", "x"]
+
+
+def test_a_chained_commands_test_summary_survives_truncation(monkeypatch):
+    """`npm test && npm run check` puts its test verdict in the MIDDLE of the
+    buffer, which is exactly what head+tail truncation deleted — twice in one
+    audited session, costing a TaskOutput call each time."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "monitor_summary_max_chars", 600)
+    lines = (
+        ["npm test"]
+        + [f"filler line {i} of the vitest run" for i in range(200)]
+        + ["Test Files  7 passed (7)", "Tests  122 passed (122)"]
+        + [f"svelte-check noise {i}" for i in range(200)]
+        + ["svelte-check found 1 error and 3 warnings"]
+    )
+
+    summary = ms._summarize(lines)
+
+    assert "Tests  122 passed (122)" in summary
+    assert "Test Files  7 passed (7)" in summary
+    # And the tail — the thing that actually failed — is still there.
+    assert "found 1 error and 3 warnings" in summary
+    assert "chars truncated" in summary
+    assert len(summary) <= 700
+
+
+def test_truncation_is_tail_biased_not_head_biased(monkeypatch):
+    """Failures name themselves at the end. The head window is gone."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "monitor_summary_max_chars", 400)
+    lines = [f"step {i} running some build command" for i in range(200)]
+
+    summary = ms._summarize(lines)
+
+    assert "step 199" in summary
+    assert "step 0 " not in summary
+
+
+def test_a_summary_with_no_verdict_lines_is_pure_tail(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "monitor_summary_max_chars", 300)
+    summary = ms._summarize(["x" * 5_000])
+
+    assert "chars truncated" in summary
+    assert len(summary) < 500
+
+
+# ---------------------------------------------------------------------------
+# R7-2 — a service that goes away is a stop, not a failure
+# ---------------------------------------------------------------------------
+
+def test_a_service_that_exits_after_serving_is_a_stop():
+    status, summary = _settle(
+        exit_code=1, serves=True, ran_seconds=4000,
+        lines=["INFO: Application startup complete."],
+    )
+
+    assert status == "completed"
+    assert "no longer running" in summary
+    assert "restart it only if you still need it" in summary
+
+
+def test_a_service_that_never_came_up_is_still_a_failure():
+    """A port clash kills uvicorn in two seconds; that must stay visible."""
+    status, summary = _settle(
+        exit_code=1, serves=True, ran_seconds=2,
+        lines=["ERROR: [Errno 98] address already in use"],
+    )
+
+    assert status == "error"
+    assert "address already in use" in summary
+
+
+def test_a_stopped_services_summary_is_capped():
+    """One audited settle carried 34k characters of access log into a
+    notification whose whole news was "the service is gone"."""
+    status, summary = _settle(
+        exit_code=0, serves=True, ran_seconds=4000,
+        lines=[f'INFO: 127.0.0.1 - "GET /api/v1/x{i} HTTP/1.1" 200' for i in range(2000)],
+    )
+
+    assert status == "completed"
+    assert len(summary) < 800
+
+
+def test_permission_denied_names_the_sh_fallback():
+    status, summary = _settle(
+        exit_code=126,
+        lines=["/bin/sh: 1: /tmp/run/launch-backend.sh: Permission denied"],
+    )
+
+    assert status == "error"
+    assert "sh <path>" in summary
+
+
+def test_an_ordinary_failure_gets_no_exec_bit_hint():
+    assert ms.not_executable_hint(1, "FAILED tests/test_a.py") == ""
+    assert ms.not_executable_hint(126, "some other failure") == ""
+
+
+# ---------------------------------------------------------------------------
+# R7-3 — a serving task is bounded by its SESSION, not by its own age
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_an_idle_session_stops_its_serving_task(spawner_harness, monkeypatch):
+    """A uvicorn fixture and a Vite dev server ran unattended for 8h15m on an
+    audited runner after their session's wake died."""
+    import asyncio
+
+    from app.core.config import settings
+
+    task, frames = spawner_harness
+    monkeypatch.setattr(settings, "monitor_serving_idle_seconds", 3600)
+    monkeypatch.setattr(ms, "session_idle_seconds", lambda sid: 30_000.0)
+    _jump_clock(monkeypatch)
+
+    spawn = ms.make_fluid_monitor_spawner("s-spawn")
+    await spawn({"command": "npm run dev", "serves": True}, None)
+
+    for _ in range(100):
+        if frames:
+            break
+        await asyncio.sleep(0.01)
+
+    assert frames, "the serving watcher never bounded the task"
+    assert frames[0]["status"] == "killed"
+    assert "idle" in frames[0]["summary"]
+    assert "did not fail" in frames[0]["summary"]
+    assert not task.is_running()
+
+
+@pytest.mark.asyncio
+async def test_a_tended_session_keeps_its_serving_task(spawner_harness, monkeypatch):
+    import asyncio
+
+    from app.core.config import settings
+
+    task, frames = spawner_harness
+    monkeypatch.setattr(settings, "monitor_serving_idle_seconds", 3600)
+    monkeypatch.setattr(ms, "session_idle_seconds", lambda sid: 5.0)
+    _jump_clock(monkeypatch)
+
+    spawn = ms.make_fluid_monitor_spawner("s-spawn")
+    await spawn({"command": "npm run dev", "serves": True}, None)
+    await asyncio.sleep(0.05)
+
+    assert frames == []
+    assert task.is_running()
+
+    # Let the watcher settle so it does not outlive the test.
+    task._running = False
+    task.exit_code = 0
+    await asyncio.sleep(0.05)
+
+
+def test_the_idle_bound_is_off_when_the_setting_is_zero(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "monitor_serving_idle_seconds", 0)
+    assert ms.serving_idle_budget_seconds() == 0
+
+
+# ---------------------------------------------------------------------------
+# R7-4 — the output reader survives a line longer than the pipe limit
+# ---------------------------------------------------------------------------
+
+def _fake_proc(monkeypatch, chunks):
+    """Wire ``_spawn_background`` to a process whose stdout yields ``chunks``."""
+    import asyncio
+
+    queue = list(chunks)
+
+    class _Stdout:
+        async def read(self, _n):
+            return queue.pop(0) if queue else b""
+
+    class _Proc:
+        pid = 4242
+        stdout = _Stdout()
+        returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def _fake_exec(*args, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+
+
+@pytest.mark.asyncio
+async def test_a_line_over_the_pipe_limit_does_not_kill_the_reader(monkeypatch):
+    """`StreamReader.readline()` raises ValueError past 64 KiB and clears its
+    buffer; nothing caught it, so the reader died and the task's output froze
+    while the process kept running (live production occurrence)."""
+    from app.mcp import builtin_tools as bt
+
+    giant = b"m" * 300_000
+    _fake_proc(monkeypatch, [giant, b"\nafter the giant line\n", b""])
+
+    task = await bt._spawn_background("npm run build", None, None)
+    await task._reader_task
+
+    assert task.exit_code == 0
+    # The long line survives, in bounded pieces, and — the point — the lines
+    # AFTER it are still buffered.
+    assert task.lines[-1] == "after the giant line"
+    assert sum(line.count("m") for line in task.lines) == 300_000
+    bt._background_tasks.pop(task.task_id, None)
+
+
+@pytest.mark.asyncio
+async def test_output_split_across_chunks_still_forms_whole_lines(monkeypatch):
+    from app.mcp import builtin_tools as bt
+
+    _fake_proc(monkeypatch, [b"Tests  45 pa", b"ssed (45)\ndone\n", b""])
+
+    task = await bt._spawn_background("npm test", None, None)
+    await task._reader_task
+
+    assert task.lines == ["Tests  45 passed (45)", "done"]
+    bt._background_tasks.pop(task.task_id, None)
+
+
+# ---------------------------------------------------------------------------
+# R7-5 — a script with no exec bit is run through sh instead of failing
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no exec bit")
+def test_a_non_executable_script_is_run_through_sh(tmp_path):
+    from app.mcp.builtin_tools import sh_fallback_command
+
+    script = tmp_path / "launch-backend.sh"
+    script.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    script.chmod(0o644)
+
+    assert sh_fallback_command(str(script), None) == f"sh {script}"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no exec bit")
+def test_an_executable_script_is_left_alone(tmp_path):
+    from app.mcp.builtin_tools import sh_fallback_command
+
+    script = tmp_path / "run.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    script.chmod(0o755)
+
+    assert sh_fallback_command(str(script), None) == str(script)
+
+
+def test_a_real_command_is_never_rewritten(tmp_path):
+    from app.mcp.builtin_tools import sh_fallback_command
+
+    for command in (
+        "npm test",
+        "pytest tests/core -q",
+        "sh ./launch.sh",
+        "",
+    ):
+        assert sh_fallback_command(command, str(tmp_path)) == command

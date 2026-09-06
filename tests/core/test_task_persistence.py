@@ -272,7 +272,7 @@ async def test_monitor_spawn_and_exit_publish_shared_presence(mock_db, monkeypat
     exited = asyncio.Event()
 
     class Stdout:
-        async def readline(self):
+        async def read(self, _n):
             await exited.wait()
             return b""
 
