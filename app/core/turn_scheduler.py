@@ -249,7 +249,20 @@ def kick(session_id: str) -> None:
 
 
 def _kick_done(task: asyncio.Task) -> None:
+    """Drop the strong ref and RETRIEVE the task's exception.
+
+    The retrieval has to happen HERE, on the done callback, not at creation
+    time: a task that was created a statement ago is always pending, and
+    ``Task.exception()`` on a pending task raises ``InvalidStateError`` rather
+    than returning None. Reading it once the task is done is what clears
+    asyncio's "exception was never retrieved" traceback at GC.
+    """
     _kick_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("turn_scheduler: kick task failed: %r", exc)
 
 
 # How long a freshly-enqueued unpark wake waits before it is kicked.
@@ -303,9 +316,12 @@ def _kick_after_batch_window(session_id: str) -> None:
     task = loop.create_task(_kick_when_closed())
     _batch_kick_tasks[session_id] = task
     _kick_tasks.add(task)
+    # NEVER read task.exception() here: the task was created one line ago and
+    # is always PENDING, so the read raises InvalidStateError — which aborted
+    # on_task_terminal at this statement on every single background-task
+    # completion in production (round-6 regression, PR #1093). The retrieval
+    # this line was reaching for is what _kick_done does once the task is done.
     task.add_done_callback(_kick_done)
-    if not task.cancelled():
-        task.exception()  # retrieve, so a failed kick never logs as un-awaited
 
 
 async def _kick_impl(session_id: str) -> None:
@@ -331,6 +347,10 @@ async def _kick_impl(session_id: str) -> None:
 async def on_turn_settled(session_id: str, turn_id: str, outcome: str) -> None:
     """Settlement hook (session_runtime's scheduler seam): fired exactly once
     per real DB settlement with ``outcome in (completed|aborted|parked)``."""
+    # A turn just ran, so whatever wake was owed has been consumed — release the
+    # pool hold ``_enqueue_context_wake`` took. First, so an exception below
+    # cannot strand it (the hold's own TTL is only a backstop).
+    _clear_wake_pending(session_id)
     try:
         await _on_turn_settled_impl(session_id, turn_id, outcome)
     except Exception:  # noqa: BLE001 — settlement must never break teardown.
@@ -366,6 +386,12 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
     # fire (structural precedence guard; with OC-1 retired failover never fires
     # on a non-completed outcome, but the order is preserved).
     if await _maybe_failover(session_id, settled, terminal):
+        return
+
+    # (1b) WAKE RECOVERY — a source=unpark turn that died on a provider error
+    # before making a single model call. Same precedence rule as failover: the
+    # retry it enqueues goes to the front and the drain must not also fire.
+    if await _maybe_recover_failed_wake(session_id, settled):
         return
 
     # (2) QUEUE DRAIN — pop_ready (non-mutating peek) → kick starts the front
@@ -448,6 +474,164 @@ async def _maybe_failover(
     )
     kick(session_id)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Policy (1b) — recover a wake turn that died before it did anything
+# ---------------------------------------------------------------------------
+
+#: Payload latch marking a wake that is ALREADY the one retry it gets.
+WAKE_RETRY_KEY = "unpark_retry"
+
+
+def _turn_model_call_count(session_id: str, turn_id: str) -> int:
+    """How many model calls this turn actually made, from the durable log.
+
+    One ``turn.usage`` row per model call (``turn_recorder._coalesce_usage``
+    never collapses two indexed calls into one), so the count is the model-call
+    count. Zero means the turn died before it asked the provider for anything —
+    the signature of the wake failures this policy exists for.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) AS n FROM session_events "
+            "WHERE session_id=%s AND turn_id=%s AND event_type='turn.usage'",
+            (session_id, turn_id),
+        )
+        row = cursor.fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row["n"])
+    except (KeyError, TypeError, ValueError):  # pragma: no cover - shim shapes
+        return 0
+
+
+async def _drop_pooled_client(session_id: str) -> None:
+    """Tear the session's pooled client down so the retry connects fresh.
+
+    The whole point of the retry: the wake died because the client it reused was
+    unusable, so re-running against that same client would die the same way.
+    ``remove`` is a full teardown + rebuild on the next turn, which is exactly
+    what a user message typed into the same session was doing to recover.
+    """
+    try:
+        from app.core.session_pool import get_session_pool
+
+        await get_session_pool().remove(session_id)
+    except Exception:  # noqa: BLE001 — a retry on a stale client beats none.
+        logger.warning(
+            "turn_scheduler: could not drop the pooled client before retrying "
+            "%s's wake", session_id, exc_info=True,
+        )
+
+
+async def _maybe_recover_failed_wake(
+    session_id: str, settled: Dict[str, Any]
+) -> bool:
+    """Policy (1b): re-run a ``source=unpark`` wake that died doing nothing.
+
+    The failure this repairs, from production: a background task finishes, the
+    scheduler enqueues the wake, the wake turn starts and dies 10ms later with
+    ``RuntimeError('Cannot send a request, as the client has been closed.')`` —
+    ``retriable=False``, ``num_model_calls=0``, no assistant text, no retry, no
+    notification. The finished task's report never reaches the model, and the
+    session sits silent until the user types "Resume". One audited session lost
+    8 hours that way; three others lost 28 minutes across three wakes.
+
+    Bounded at exactly one retry (``WAKE_RETRY_KEY`` on the payload), and only
+    when the turn made ZERO model calls — a wake that died halfway through real
+    work would be re-doing that work, which is worse than surfacing the failure.
+    The retry runs against a freshly connected adapter (the pooled client is
+    dropped first) and inherits the dead turn's prompt, context and pending
+    frames, so the notification it carries is the same one that was lost.
+
+    When the retry ALSO dies, the failure stops being invisible: a durable
+    system message is already written by the runtime for any error terminal, and
+    this adds the device notification so a session that went quiet overnight
+    says so on the user's phone instead of waiting to be noticed.
+
+    Returns True only when a retry was enqueued.
+    """
+    if (settled.get("source") or "") != "unpark":
+        return False
+    if settled.get("state") != "aborted":
+        return False
+    if (settled.get("stop_reason") or "") != "error":
+        return False
+
+    payload = dict(settled.get("payload") or {})
+    turn_id = settled.get("id")
+    if payload.get(WAKE_RETRY_KEY):
+        logger.warning(
+            "turn_scheduler: retried wake %s for %s died too (%s) — surfacing "
+            "instead of retrying again", turn_id, session_id, settled.get("error"),
+        )
+        await _notify_dead_wake(session_id, settled)
+        return False
+
+    calls = await asyncio.to_thread(_turn_model_call_count, session_id, turn_id)
+    if calls:
+        logger.info(
+            "turn_scheduler: wake %s for %s failed after %d model call(s) — "
+            "not retried (a retry would redo billed work)",
+            turn_id, session_id, calls,
+        )
+        return False
+
+    await _drop_pooled_client(session_id)
+    payload[WAKE_RETRY_KEY] = True
+    retry = await asyncio.to_thread(
+        _enqueue,
+        session_id,
+        "unpark",
+        prompt=settled.get("prompt"),
+        profile_id=settled.get("profile_id"),
+        project_id=settled.get("project_id"),
+        worktree_id=settled.get("worktree_id"),
+        overrides=settled.get("overrides") or None,
+        payload=payload,
+        parent_turn_id=settled.get("id"),
+        # Continues the dead turn, exactly like a failover retry: it must run
+        # ahead of anything queued behind the wake, not after it.
+        at_front=True,
+    )
+    note_wake_pending(session_id)
+    logger.info(
+        "turn_scheduler: wake %s for %s died with 0 model calls (%s) — "
+        "re-enqueued once as turn %s on a fresh client",
+        turn_id, session_id, settled.get("error"), retry["id"],
+    )
+    kick(session_id)
+    return True
+
+
+async def _notify_dead_wake(session_id: str, settled: Dict[str, Any]) -> None:
+    """Push the "your session went quiet" notification. Never raises."""
+    payload = settled.get("payload") or {}
+    try:
+        from app.services.notification_service import emit_notification
+
+        await emit_notification(
+            payload.get("api_user_id") or "admin",
+            severity="error",
+            title="Session stalled",
+            message=(
+                "A background task finished, but the session could not be woken "
+                "to read its report. Send a message to pick it back up."
+            ),
+            category="wake_failed",
+            surface="notification",
+            session_id=session_id,
+            persist=True,
+            push=True,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "turn_scheduler: dead-wake notification failed for %s", session_id,
+            exc_info=True,
+        )
 
 
 async def _maybe_auto_continue(
@@ -729,7 +913,7 @@ async def _enqueue_context_wake(
         # must not run its wake as an admin turn — that flips is_admin gates
         # (app-config tools) and credential scoping to the wrong principal.
         payload["api_user_id"] = session_row["api_user_id"]
-    return await asyncio.to_thread(
+    turn = await asyncio.to_thread(
         _enqueue,
         session_id,
         source,
@@ -746,6 +930,44 @@ async def _enqueue_context_wake(
         payload=payload,
         parent_turn_id=context.get("id"),
     )
+    note_wake_pending(session_id)
+    return turn
+
+
+def note_wake_pending(session_id: str) -> None:
+    """Hold the session's pooled client from enqueue until the wake claims it.
+
+    Nothing else marks the session busy across that gap: the parked turn has
+    returned (``is_streaming`` False), the task that fired this wake is now
+    terminal (``_has_background_work`` False), and ``last_activity`` is as old
+    as the park. The pool's idle sweep therefore evicted the client
+    milliseconds before the wake tried to use it — a crash before PR #1104, and
+    a full respawn plus conversation resume after it, on EVERY park longer than
+    the idle tier. Never raises: the hold is an optimisation, not a
+    correctness requirement.
+    """
+    try:
+        from app.core.session_pool import get_session_pool
+
+        get_session_pool().note_wake_pending(session_id)
+    except Exception:  # noqa: BLE001 — never let bookkeeping lose a wake.
+        logger.debug(
+            "turn_scheduler: could not hold the pool for %s's pending wake",
+            session_id, exc_info=True,
+        )
+
+
+def _clear_wake_pending(session_id: str) -> None:
+    """Release the enqueue→start hold (the turn started, settled, or died)."""
+    try:
+        from app.core.session_pool import get_session_pool
+
+        get_session_pool().clear_wake_pending(session_id)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "turn_scheduler: could not release %s's wake hold", session_id,
+            exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------

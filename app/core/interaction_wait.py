@@ -86,6 +86,22 @@ def register_waiter(session_id: str) -> asyncio.Event:
     return event
 
 
+def has_waiters(session_id: str) -> bool:
+    """True while something in THIS process blocks on an interaction for
+    ``session_id``.
+
+    The session pool reads this to keep a turn that is parked on a user
+    question (or a permission / plan gate) out of idle eviction: the turn is
+    live but silent for as long as the human takes, and reclaiming its client
+    mid-question cancels the engine's round-trip — fluid then answers the tool
+    with ``input_required round-trip interrupted`` and the device is left
+    showing a modal nobody is waiting on. Cheap: one dict lookup under the
+    registry lock, no DB.
+    """
+    with _lock:
+        return bool(_waiters.get(session_id))
+
+
 def unregister_waiter(session_id: str, event: asyncio.Event) -> None:
     """Remove a waiter; drop the session key once empty."""
     with _lock:
