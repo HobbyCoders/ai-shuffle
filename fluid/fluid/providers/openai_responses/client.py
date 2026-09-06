@@ -35,8 +35,6 @@ from fluid.providers._transport import (
     with_deadline,
 )
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-
-log = logging.getLogger(__name__)
 from fluid.providers.openai_responses.pricing import estimate_cost as _estimate_cost
 from fluid.providers.openai_responses.serialize import (
     ResponsesStreamNormalizer,
@@ -45,6 +43,8 @@ from fluid.providers.openai_responses.serialize import (
 
 API_URL = "https://api.openai.com/v1/responses"
 CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
+
+log = logging.getLogger(__name__)
 
 
 @runtime_checkable

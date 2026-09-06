@@ -464,6 +464,7 @@ def _describe_engine_failure(exc: BaseException, *, transient: bool) -> str:
         f"the turn stopped on an unexpected harness error ({name}: {detail})."
     )
 
+
 # How long a turn parks on a QuestionRequest before giving up on an answer.
 # A host that renders no questions and never interrupts used to hold the
 # turn open for good. An engine instance may set ``question_timeout`` to
