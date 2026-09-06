@@ -883,9 +883,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         self.cache_key = cache_key or None
         self._prefix_fingerprint: dict[str, str] | None = None
         self._prev_prefix_fingerprint: dict[str, str] | None = None
-        # Consecutive misses the probe could not pin on anything fluid did.
-        # Reset by every explained call and at the start of every turn.
+        # Consecutive misses the probe could not pin on anything fluid did,
+        # and whether this run has already been alerted on. Both reset by any
+        # explained call and at the start of every turn.
         self._unexplained_misses = 0
+        self._cache_miss_alerted = False
         # Sessions whose previous-request fingerprint was already looked for in
         # the persisted Usage events. The app rebuilds the engine per run, so
         # without this every turn's first call reported "no_previous_request"
@@ -2085,6 +2087,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         # A run of misses is only interesting inside one turn: the gap between
         # turns is user time, and a cache that expired over it is ordinary.
         self._unexplained_misses = 0
+        self._cache_miss_alerted = False
         self._begin_friction_turn()
         total_usage: dict[str, Any] = {}
         final_stop = "end_turn"
@@ -2761,10 +2764,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._prev_prefix_fingerprint = fingerprint
         if diagnosis is None:
             self._unexplained_misses = 0
+            self._cache_miss_alerted = False
             return out
         out["cache_miss"] = diagnosis
         if not is_unexplained_miss(diagnosis):
             self._unexplained_misses = 0
+            self._cache_miss_alerted = False
             log.warning(
                 "prompt cache miss: %s (%s); fresh=%s cache_read=%s",
                 diagnosis.get("reason"),
@@ -2774,10 +2779,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
             return out
         # A verified-identical prefix that read nothing. Fluid did not move the
-        # prompt, so the two remaining suspects are provider routing and a
-        # missing breakpoint — and they are told apart by what the provider
-        # itself reported plus which affinity key the request carried. Logging
-        # the diagnosis alone left every audit guessing between them.
+        # prompt, so what is left is on the provider — and what separates its
+        # routing from its partitioning is the usage block it returned plus the
+        # affinity key the request carried. Logging the diagnosis alone left
+        # every audit guessing between them.
         self._unexplained_misses += 1
         diagnosis["consecutive_unexplained"] = self._unexplained_misses
         key = self._affinity_key()
@@ -2806,12 +2811,16 @@ class NativeLoop(BackgroundLifecycleMixin):
         in the transcript saying so. Emitted once when the streak reaches the
         threshold, not on every later call in the same run.
         """
+        threshold = self._cache_probe.alert_after_misses
+        if threshold <= 0 or self._cache_miss_alerted:
+            return
         diagnosis = usage_raw.get("cache_miss")
         if not isinstance(diagnosis, dict):
             return
         streak = diagnosis.get("consecutive_unexplained")
-        if streak != self._cache_probe.alert_after_misses:
+        if not isinstance(streak, int) or streak < threshold:
             return
+        self._cache_miss_alerted = True
         payload = {
             "session_id": sid,
             "turn_id": turn_id,
