@@ -130,7 +130,12 @@ SPEC = ToolSpec(
             "mode": {
                 "type": "string",
                 "enum": ["sync", "background"],
-                "description": "sync (default) waits; background returns at once.",
+                "description": (
+                    "sync (default) waits; background returns at once. The "
+                    "host may run a target in background regardless of what "
+                    "you ask — trust the receipt you get back, not the mode "
+                    "you sent."
+                ),
             },
             "label": {
                 "type": "string",
@@ -178,7 +183,23 @@ def _background_outcome(result: Any, input: dict[str, Any]) -> ToolOutcome:
     return ToolOutcome(text=str(result))
 
 
-async def _dispatch_background(dispatch: Any, input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+async def _dispatch_and_register(
+    dispatch: Any, input: dict[str, Any], ctx: ToolCtx
+) -> ToolOutcome:
+    """Dispatch, then register whatever the HOST actually detached.
+
+    The decision is read off the returned receipt, never off the requested
+    ``mode``. Hosts upgrade: ai-shuffle promotes every read-only agent surface
+    (its Explore class) to background, and the model correctly omits ``mode``
+    because the schema hides it for those targets. Branching on the request
+    meant the sync path returned the receipt without ever calling
+    ``background_task_started`` — the task never entered ``_background_pending``,
+    the turn ended with a live worker and no ``SessionParked``, and the
+    completion arrived through ``background.py``'s "finished a task we never saw
+    start" recovery path. Two audited sessions ended turns that way, one for
+    44% of its workers, and any host trusting fluid's accounting sees an idle
+    session with research still running.
+    """
     outcome = _background_outcome(await dispatch(input, ctx), input)
     receipt = outcome.background_task
     if receipt is None or outcome.is_error:
@@ -205,13 +226,12 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         # The spawn acknowledgement is an atomic detach boundary. Interrupting
         # the parent turn may stop consuming this tool result, but must not cancel
         # a worker the host has already started or lose its durable task id.
-        spawn = asyncio.create_task(_dispatch_background(dispatch, input, ctx))
+        spawn = asyncio.create_task(_dispatch_and_register(dispatch, input, ctx))
         tracked = (ctx.extra or {}).get("background_spawn_tasks")
         if isinstance(tracked, set):
             tracked.add(spawn)
             spawn.add_done_callback(tracked.discard)
         return await asyncio.shield(spawn)
-    result = await dispatch(input, ctx)
-    if isinstance(result, ToolOutcome):
-        return result
-    return ToolOutcome(text=str(result))
+    # A sync REQUEST can still come back detached — the host decides. Same
+    # registration path either way; a plain report simply carries no receipt.
+    return await _dispatch_and_register(dispatch, input, ctx)

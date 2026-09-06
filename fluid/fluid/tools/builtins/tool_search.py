@@ -19,6 +19,7 @@ nor loadable.
 
 from __future__ import annotations
 
+import difflib
 import json
 import re
 from collections.abc import Sequence
@@ -147,10 +148,13 @@ SPEC = ToolSpec(
         "Find and load deferred tools (e.g. MCP server tools) so they can be "
         "called. Deferred tools are known by name and description but their "
         "schemas stay out of context until loaded here. Query forms: "
-        "'select:<name>[,<name>...]' loads those exact tools (names it does "
-        "not recognise are reported, the rest still load); any other text "
-        "is a keyword search over names + descriptions. Once a tool's schema "
-        "appears in the result, it is callable from your next reply."
+        "'select:<name>[,<name>...]' loads those exact tools — either the full "
+        "wire name (mcp__browser__browser_navigate) or the leaf name "
+        "(browser_navigate) that search_tools and the code surface print; "
+        "names it does not recognise are reported with the closest match and "
+        "the rest still load. Any other text is a keyword search over names + "
+        "descriptions. Once a tool's schema appears in the result, it is "
+        "callable from your next reply."
     ),
     input_schema={
         "type": "object",
@@ -198,6 +202,69 @@ def _import_lines(specs: Sequence[ToolSpec]) -> str:
     return "\n".join(out)
 
 
+# ── select: name resolution ──
+# The discovery surface and the load surface used to speak different languages.
+# ``search_tools`` / ``read_tool_docs`` / ``from tools.X import X`` all name a
+# tool by its LEAF (``browser_navigate``); ``select:`` resolved through
+# ``registry.get``, which knows only the WIRE name
+# (``mcp__browser__browser_navigate``). Six audited sessions in one day asked
+# for the leaf names the code surface had just printed at them and got a bare
+# "unknown tool(s)" — each raise aborting the enclosing cell and the calls
+# queued behind it. Both spellings resolve here now, through the same
+# projection the kernel mounts, so the leaf a session was taught is the leaf
+# that loads.
+
+
+def _projection(registry: Any, tool_filter: Any) -> Any:
+    """The code-mode projection over this session's visible tools, or None."""
+    from fluid.codemode.projection import Projection
+
+    try:
+        specs = list(registry.list_tools(loaded_only=False))
+    except Exception:  # noqa: BLE001 - a registry double without the accessor
+        return None
+    try:
+        return Projection(specs, tool_filter=tool_filter)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _candidates(registry: Any, projection: Any, visible: Any) -> list[str]:
+    """Every name a ``select:`` may legally use — leaves and wire names."""
+    names: list[str] = []
+    try:
+        names += [s.name for s in registry.list_tools(loaded_only=False) if visible(s.name)]
+    except Exception:  # noqa: BLE001
+        pass
+    if projection is not None:
+        names += projection.leaves()
+    return sorted(set(names))
+
+
+def _did_you_mean(name: str, candidates: Sequence[str]) -> str:
+    """Read's "did you mean" clause, for tool names."""
+    close = difflib.get_close_matches(name, candidates, n=3, cutoff=0.6)
+    return f" (did you mean: {', '.join(close)})" if close else ""
+
+
+def _resolve_selection(
+    names: Sequence[str], registry: Any, projection: Any, visible: Any
+) -> tuple[dict[str, str], list[str]]:
+    """``({wire_name: as_requested}, unresolved)`` for one ``select:`` list."""
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    for name in names:
+        if registry.get(name) is not None and visible(name):
+            resolved.setdefault(name, name)
+            continue
+        spec = projection.spec_for(name) if projection is not None else None
+        if spec is not None and visible(spec.name):
+            resolved.setdefault(spec.name, name)
+            continue
+        missing.append(name)
+    return resolved, missing
+
+
 def _spec_line(spec: ToolSpec) -> str:
     return json.dumps(
         {
@@ -231,20 +298,38 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     note = ""
     if query.startswith("select:"):
         names = [n.strip() for n in query[len("select:"):].split(",") if n.strip()]
-        known = [n for n in names if registry.get(n) is not None and visible(n)]
-        missing = [n for n in names if n not in known]
+        projection = _projection(registry, tool_filter)
+        resolved, missing = _resolve_selection(names, registry, projection, visible)
         # Partial success: one mistyped name used to throw away the whole call,
         # including the names that were right.
-        if not known:
+        if not resolved:
+            candidates = _candidates(registry, projection, visible)
+            listing = ", ".join(n + _did_you_mean(n, candidates) for n in missing)
             return ToolOutcome(
-                text=f"unknown tool(s): {', '.join(missing)}", is_error=True
+                text=(
+                    f"unknown tool(s): {listing}. Both the leaf name "
+                    "(browser_navigate) and the full wire name "
+                    "(mcp__browser__browser_navigate) are accepted here — "
+                    "search by keyword to see what exists."
+                ),
+                is_error=True,
             )
         if missing:
-            note = (
-                f"\nNot loaded — no such tool: {', '.join(missing)}. Search by "
-                "keyword to find the right name."
+            candidates = _candidates(registry, projection, visible)
+            listing = ", ".join(n + _did_you_mean(n, candidates) for n in missing)
+            note = f"\nNot loaded — no such tool: {listing}."
+        specs = [registry.load_schema(n) for n in resolved]
+        # A leaf that resolved to a different wire name: on the JSON surface
+        # the call must use the wire name, and nothing else would say so.
+        renamed = [
+            f"{asked} → {wire}" for wire, asked in resolved.items() if asked != wire
+        ]
+        if renamed and not (ctx.extra or {}).get("in_kernel_call"):
+            note += (
+                "\nLoaded by leaf name; call these by their full name: "
+                + ", ".join(renamed)
+                + "."
             )
-        specs = [registry.load_schema(n) for n in known]
     else:
         specs = [s for s in registry.search_tools(query) if visible(s.name)][:limit]
         specs = [registry.load_schema(s.name) for s in specs]
