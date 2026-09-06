@@ -63,10 +63,26 @@ async def test_plan_twice_errors_but_stays_active() -> None:
 # ─── StopPlanning (approval-gated exit) ──────────────────────────────────────
 
 
-async def test_stop_outside_plan_mode_errors() -> None:
-    ctx, _ = _ctx(active=False)
+async def test_stop_outside_plan_mode_accepts_the_plan() -> None:
+    # Round 7: this used to be an is_error whose remedy read "Enter it with
+    # Plan." — an audited session obeyed it, entered plan mode and left again
+    # one call later. Plan mode does not survive an engine teardown, so a plan
+    # written before a park legitimately arrives with the mode already off.
+    ctx, state = _ctx(active=False)
     outcome = await stop_handler({"plan": "do the thing"}, ctx)
-    assert outcome.is_error
+    assert not outcome.is_error
+    assert state["active"] is False
+    assert "proceed with the plan" in outcome.text
+    assert "does not survive an engine teardown" in outcome.text
+    # Never the instruction that caused the round trip.
+    assert "Enter it with Plan" not in outcome.text
+
+
+async def test_stop_outside_plan_mode_without_a_plan_is_still_not_an_error() -> None:
+    ctx, _ = _ctx(active=False)
+    outcome = await stop_handler({}, ctx)
+    assert not outcome.is_error
+    assert "no plan was passed" in outcome.text
 
 
 async def test_stop_requires_a_plan() -> None:
@@ -150,10 +166,37 @@ async def test_already_off_exit_does_not_claim_a_user_approved() -> None:
     )
     assert not outcome.is_error
     assert not outcome.text.startswith("Plan approved")
-    assert "ended it by policy" in outcome.text
-    assert "No user review of this plan was recorded" in outcome.text
+    assert "ended plan mode by policy" in outcome.text
+    assert "no user review was recorded" in outcome.text
     # The actionable half survives: the tools are back.
-    assert "write tools are on the surface" in outcome.text
+    assert "write tools are back" in outcome.text
+
+
+async def test_already_off_exit_leads_with_the_imperative() -> None:
+    # An audited session read the old text — two sentences about the absence of
+    # approval, then the instruction — and ended the turn with "The plan has
+    # not received user approval", needless spend and zero edits. The order is the fix.
+    ctx, _ = _ctx(active=False)
+    outcome = await stop_handler(
+        {"plan": "p", "__input_responses__": {"approve": "1"}}, ctx
+    )
+    first_line = outcome.text.splitlines()[0]
+    assert first_line.startswith("Plan mode is off — proceed with the plan now")
+    assert "approv" not in first_line.lower()
+    # The caveat is still there, after the instruction, and scoped to how the
+    # plan is described rather than to whether to execute it.
+    caveat = outcome.text.index("do not report the plan as user-approved")
+    assert caveat > outcome.text.index("proceed with the plan now")
+
+
+def test_stop_description_names_the_policy_host() -> None:
+    text = STOP_SPEC.description
+    # No longer promises a human decision unconditionally.
+    assert "ask the user to approve" not in text
+    assert "answer it by policy" in text
+    assert "keep the plan short" in text
+    assert "post it for the user to read afterwards" in text
+    assert "does not survive an engine teardown" in text
 
 
 async def test_a_host_that_saw_a_real_answer_gets_the_approved_wording() -> None:

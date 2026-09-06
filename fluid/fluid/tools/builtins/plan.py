@@ -69,8 +69,9 @@ ENTER_RESULT_AUTO = (
     "Explore the codebase with the read tools, weigh the approaches, then "
     "present a concrete plan with StopPlanning. Note that this host approves "
     "automatically — StopPlanning restores your tools by policy, no one "
-    "reviews the plan, so do not report it back as user-approved. Write the "
-    "plan for the user to read afterwards. Do not describe edits as if you "
+    "reviews the plan, so do not report it back as user-approved. Keep the "
+    "plan short: nobody is reading it before you execute it, and the host may "
+    "post it for the user to read afterwards. Do not describe edits as if you "
     "were making them."
 )
 
@@ -114,9 +115,9 @@ PLAN_SPEC = ToolSpec(
 STOP_SPEC = ToolSpec(
     name="StopPlanning",
     description=(
-        "Present your finished plan and ask the user to approve leaving "
-        "plan mode. Approval is THIS tool's job — never ask \"is this plan "
-        "okay?\" through another channel.\n"
+        "Present your finished plan and end plan mode. The decision is THIS "
+        "tool's job — never ask \"is this plan okay?\" through another "
+        "channel.\n"
         "\n"
         "Pass the complete plan in your final response: what will change "
         "(file by file), the approach chosen and why, and how the result "
@@ -124,6 +125,19 @@ STOP_SPEC = ToolSpec(
         "the approved plan without re-asking permission for steps it "
         "already covers. On rejection you stay in plan mode: read the "
         "user's feedback, revise, and present again.\n"
+        "\n"
+        "Who answers depends on the host. Some hosts put the plan in front of "
+        "a person; others answer it by policy (bypass permissions, an "
+        "unattended runner) and nobody reads it before you execute — the "
+        "result text says which happened. When the answer is policy, keep the "
+        "plan short, do not report it back as user-approved, and expect the "
+        "host to post it for the user to read afterwards.\n"
+        "\n"
+        "Calling this outside plan mode is fine, not an error: the plan is "
+        "recorded and you proceed. Plan mode is engine-session state and does "
+        "not survive an engine teardown between turns, so a plan you began in "
+        "an earlier turn can land there — never re-enter plan mode just to "
+        "leave it again.\n"
         "\n"
         "Only for implementation planning: a research or explanation task "
         "does not need approval to finish."
@@ -150,12 +164,22 @@ STOP_SPEC = ToolSpec(
 # models relayed that to users verbatim — on hosts that auto-approve under
 # bypass permissions, nobody had read the plan at all. State the mechanism, not
 # a verdict: the tools are back either way, which is the actionable part.
+#
+# ORDER IS THE POINT. An earlier revision led with two sentences about the
+# absence of approval and buried "proceed with the plan" in the third; an
+# audited session read it, made two more calls and ended the turn with "The
+# plan has not received user approval" - needless spend and no edits, and the user had
+# to type "Complete the plan." to restart it. The imperative comes first now,
+# and the attribution caveat is scoped to what it is actually about: how to
+# describe the plan later, not whether to execute it.
 ALREADY_OFF_RESULT = (
-    "Plan mode is OFF — the host ended it by policy, not through an approval "
-    "you can attribute to the user. No user review of this plan was recorded, "
-    "so do not report the plan as approved. Your write tools are on the "
-    f"surface ({LEAVES}): proceed with the plan, and raise anything in it a "
-    "user would want to weigh in on before you do the irreversible part."
+    "Plan mode is off — proceed with the plan now. Your write tools are back "
+    f"on the surface ({LEAVES}) and steps the plan already covers need no "
+    "further permission; raise anything a user would want to weigh in on "
+    "before you do the irreversible part.\n"
+    "One caveat, for how you describe this later and not for what you do "
+    "next: the host ended plan mode by policy, so no user review was "
+    "recorded — do not report the plan as user-approved."
 )
 
 # The host ended plan mode itself AND is telling us a real answer came back
@@ -164,6 +188,30 @@ ALREADY_OFF_APPROVED_RESULT = (
     "Plan approved by the user — plan mode is OFF (the host had already ended "
     f"it). Your write tools are on the surface ({LEAVES}). Execute the "
     "approved plan now; steps it already covers need no further permission."
+)
+
+# StopPlanning called while plan mode is already off. This used to be an ERROR
+# reading "Not in plan mode — nothing to stop. Enter it with Plan.", and models
+# followed it literally: an audited session entered plan mode purely so it could
+# leave it again one call later, paying for a full uncached prefix on the way.
+# Plan mode is engine-session state and does not survive an engine teardown, so
+# a plan begun before a park legitimately lands here. Accept the plan, say the
+# tools are already available, and forbid the round trip by name.
+NOT_PLANNING_RESULT = (
+    "Plan mode is off — proceed with the plan now. Nothing had to be exited: "
+    f"your write tools were already on the surface ({LEAVES}). Plan mode does "
+    "not survive an engine teardown between turns, so a plan begun in an "
+    "earlier turn arrives here rather than at an approval prompt. Do NOT "
+    "re-enter plan mode just to leave it again; present the plan to the user "
+    "in your own words if it needs their input."
+)
+
+# Same situation, but the call carried no plan text — there is nothing to
+# record, so the only useful thing left to say is "carry on".
+NOT_PLANNING_NO_PLAN_RESULT = (
+    "Plan mode is off — there was nothing to exit, and no plan was passed. "
+    f"Your write tools are on the surface ({LEAVES}); carry on. Do not enter "
+    "plan mode just to leave it again."
 )
 
 #: Optional key in the ``__input_responses__`` payload. A host that can tell a
@@ -267,12 +315,14 @@ async def stop_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     answers = input.get("__input_responses__")
     if answers is None:
         # ── First leg: nothing has been asked yet. ───────────────────────────
-        if not control.is_active():
-            return ToolOutcome(
-                text="Not in plan mode — nothing to stop. Enter it with Plan.",
-                is_error=True,
-            )
         plan = str(input.get("plan", "")).strip()
+        if not control.is_active():
+            # Not an error: there is nothing to stop, the write tools are
+            # already available, and the plan the model just wrote is the
+            # thing to act on. See NOT_PLANNING_RESULT.
+            return ToolOutcome(
+                text=NOT_PLANNING_RESULT if plan else NOT_PLANNING_NO_PLAN_RESULT
+            )
         if not plan:
             return ToolOutcome(
                 text="pass the complete plan as markdown in `plan`", is_error=True
