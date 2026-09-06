@@ -23,6 +23,55 @@ Cost: one pass over the text already in memory, hashed with blake2b at 8 bytes
 per digest (~16 hex chars). Nothing is re-serialized that the provider
 serializer would not serialize anyway, and the whole payload attached to a
 ``Usage`` event is a dozen short strings.
+
+What ``prefix_grew_only`` turned out to mean
+--------------------------------------------
+
+A production day across 24 sessions on one ``openai_responses`` gateway
+(gpt-6-astra, 353 calls billing over 10k fresh input tokens, 164 of them with
+``cache_read == 0``) was measured against this diagnostic. The verdict on the
+unexplained misses is **provider-side**, and the evidence rules out the
+harness-side theories one at a time. Read this before spending another day on
+prefix discipline.
+
+* **The cached prefix demonstrably existed while it was being ignored.** In one
+  turn: call 3 read 49,536 cached tokens; call 4, five seconds later, on a
+  byte-identical superset of that prefix (checkpoints matched through m41),
+  read **0**; calls 5-9 also read 0; call 10, 90 seconds later and longer
+  still, read **49,536** again — the same entry. An append-only request cannot
+  invalidate a prefix and then re-validate it. Nothing fluid renders explains
+  that shape.
+* **Misses correlate across unrelated sessions.** Conditioned on another
+  session being active within 90 s, 81% of full misses coincided with a full
+  miss in a *different* session (different affinity key, different prefix,
+  different system prompt) against 37% for hits. Whole minutes went by where
+  every concurrent session missed and none hit.
+* **It is not the affinity key.** ``_sticky_poisoned`` never fired — zero
+  ``ProviderRetry`` events in the entire corpus — so every request carried
+  ``prompt_cache_key``. A session resumed onto a NEW fluid session id (hence a
+  new key) still read the cache on its very first call, so a new key does not
+  by itself partition anything; a stable host key (``NativeLoop(cache_key=…)``)
+  is worth having, but it is not the cure.
+* **It is not images.** The miss rate with a live image in context was *lower*
+  (40.5%) than without (56.4%), and the longest miss run in the corpus ran for
+  four calls before that session's first screenshot existed.
+* **It is not the first two calls being special.** Call 1 is unavoidable
+  (nothing to hit). Of the 16 sessions that started cold, call 2 missed in 9
+  and hit in 7 on the same request shape, with overlapping call-1-to-call-2
+  gaps in both groups (a hit at 5.1 s, a miss at 23.4 s).
+* **A rewrite costs one call, and the provider often takes two.** After a
+  ``trigger`` compaction the next call is degraded in 83 of 87 cases — expected,
+  the prefix moved — but the call after it, which should read what the previous
+  one just wrote, is degraded again in 52 of those. That second one is on the
+  provider: fluid rewrote nothing between them.
+* **There is no breakpoint to place.** ``openai_responses`` reports
+  ``explicit_cache_breakpoints=False`` and its serializer has no field for one,
+  so :func:`diagnose_cache_miss` stops naming that suspect there.
+
+The one lever the harness does own is how often it rewrites an already-sent
+prefix. That is why image consumption is now gated on pressure and a turn
+boundary (see :mod:`fluid.context.trim`) — not because it caused the misses
+above, but because every avoidable rewrite pays the provider's warm-up twice.
 """
 
 from __future__ import annotations
@@ -39,6 +88,7 @@ __all__ = [
     "CacheProbeConfig",
     "fingerprint_prefix",
     "diagnose_cache_miss",
+    "is_unexplained_miss",
     "checkpoint_positions",
     "message_count",
 ]
@@ -61,6 +111,11 @@ class CacheProbeConfig:
     # Treat a small structural cache read as no effective cache reuse; providers can return such a read even on
     # a full resend.
     max_cache_read_tokens: int = 1_024
+    # Consecutive UNEXPLAINED misses (verified-identical prefix, zero cache
+    # read, no compaction in between) inside one turn before the engine raises
+    # a CacheMissAlert. One is indistinguishable from a TTL expiry; two in a
+    # row is a pattern. 0 disables the alert.
+    alert_after_misses: int = 2
 
 
 def _hasher() -> Any:
@@ -233,6 +288,7 @@ def diagnose_cache_miss(
     cache_read_tokens: int,
     config: CacheProbeConfig | None = None,
     history_rewrites: Sequence[Mapping[str, Any]] | None = None,
+    explicit_breakpoints: bool = True,
 ) -> dict[str, Any] | None:
     """Name the first prefix segment that changed, when a call missed cache.
 
@@ -246,6 +302,13 @@ def diagnose_cache_miss(
     :func:`fluid.context.compaction.describe_promotions`). A rung rewrites a
     message the provider already cached, so a miss right after one is fluid's
     own doing — naming it beats sending the reader after provider routing.
+
+    ``explicit_breakpoints`` is the provider's
+    :attr:`~fluid.providers.base.ProviderCaps.explicit_cache_breakpoints`.
+    On a provider that has no breakpoint API at all (OpenAI Responses caches
+    automatically), "a missing cache breakpoint" is not one of the suspects,
+    and every audit that chased it was chasing a request field that does not
+    exist.
     """
     config = config or CacheProbeConfig()
     if not config.enabled:
@@ -299,14 +362,23 @@ def diagnose_cache_miss(
             "stable_through": stable_through,
             "shared_messages": shared_messages,
             "verified_messages": verified_messages,
+            "full_coverage": full_coverage,
             "input_tokens": input_tokens,
             "cache_read_tokens": cache_read_tokens,
         }
+        suspects = (
+            "cache expiry, provider routing, or a missing cache breakpoint"
+            if explicit_breakpoints
+            else (
+                "cache expiry or provider routing (this provider caches "
+                "automatically — there is no breakpoint to place)"
+            )
+        )
         if full_coverage:
             note = (
                 f"every shared checkpoint matched and they cover the whole "
                 f"shared prefix (all {shared_messages} messages) — suspect "
-                f"cache expiry, provider routing, or a missing cache breakpoint"
+                f"{suspects}"
             )
         else:
             note = (
@@ -314,8 +386,7 @@ def diagnose_cache_miss(
                 f"message {verified_messages} of {shared_messages}: messages "
                 f"{verified_messages + 1}..{shared_messages} were never "
                 f"compared, so a rewrite in there looks exactly like this. "
-                f"Failing that, suspect cache expiry, provider routing, or a "
-                f"missing cache breakpoint"
+                f"Failing that, suspect {suspects}"
             )
         if rewrites:
             # A trim/digest rewrote already-sent history between the two
@@ -358,3 +429,29 @@ def diagnose_cache_miss(
         out["history_rewritten"] = rewrites
         out["note"] += f"; {_rewrite_phrase(rewrites)} since the last request"
     return out
+
+
+# Verdicts where fluid has verified it did NOT move the prompt: the whole
+# shared prefix hashed identical, no compaction ran between the two requests,
+# and the provider still billed everything fresh. The other verdicts name a
+# local cause (``prefix_changed``, ``history_rewritten``) or an unavoidable
+# one (``no_previous_request``) and are not worth alerting on.
+_UNEXPLAINED_REASONS = frozenset({"prefix_grew_only", "prefix_unchanged"})
+
+
+def is_unexplained_miss(diagnosis: Mapping[str, Any] | None) -> bool:
+    """True when a miss survives every explanation fluid can offer itself.
+
+    The bar is deliberately high: the checkpoints must cover the WHOLE shared
+    prefix (a partial verification cannot rule out a rewrite past the last
+    shared checkpoint), the provider must have read literally nothing, and no
+    compaction rung may have run since the previous request.
+    """
+    if not diagnosis:
+        return False
+    return (
+        diagnosis.get("reason") in _UNEXPLAINED_REASONS
+        and bool(diagnosis.get("full_coverage"))
+        and not diagnosis.get("history_rewritten")
+        and int(diagnosis.get("cache_read_tokens") or 0) == 0
+    )

@@ -225,28 +225,107 @@ def test_compactor_trims_consumed_image_results() -> None:
     """The Compactor renders node-by-node, so the consume-once decision has to
     be computed over the WHOLE path before those per-node renders happen."""
     nodes = _image_history()
-    c = Compactor(config=CompactionConfig())
+    c = Compactor(config=_armed())
 
-    viewed = c.view(nodes)
-    assert _images(viewed[2]) == []
-    # An image gets its OWN placeholder: HistoryExpand cannot restore it.
-    assert "image consumed from context" in "\n".join(_texts([viewed[2]]))
-    assert c.trimmer._trimmed == set()  # view stays read-only
+    # Nothing decided yet, so the view still carries the image: consumption is
+    # a decision apply() makes, not something rendering does behind its back.
+    assert _images(c.view(nodes)[2]) != []
 
     rendered, promotions = c.apply(nodes)
     assert _images(rendered[2]) == []
+    # An image gets its OWN placeholder: HistoryExpand cannot restore it.
     assert "image consumed from context" in "\n".join(_texts([rendered[2]]))
     # No size tier fired, but the consume-once trim is itself reported so the
     # loss is visible in the transcript instead of silent.
     assert [(p.tier, p.reason, p.trimmed) for p in promotions] == [
         (1, "image_consumed", (("r0", "call0"),))
     ]
-    assert ("r0", "call0") in c.trimmer._trimmed   # persisted into the sticky set
+    assert ("r0", "call0") in c.trimmer._image_consumed  # the sticky decision
+    assert c.trimmer._trimmed == set()  # NOT a full trim of the whole result
+    # Decided now, so the read-only view reports exactly the next request.
+    assert _images(c.view(nodes)[2]) == []
+
+
+def _armed() -> CompactionConfig:
+    """A ladder whose image rung is armed — consumption needs real pressure."""
+    return CompactionConfig(trigger_tokens=1, trim=TrimConfig(trigger_tokens=1))
+
+
+def test_images_survive_until_the_context_is_under_real_pressure() -> None:
+    """The audited cost bug: images were consumed before the threshold was even
+    computed, so a session at 18% window occupancy paid a mid-prefix rewrite
+    per screenshot. Under the default trigger this history is nowhere near it.
+    """
+    nodes = _image_history()
+    c = Compactor(config=CompactionConfig())
+
+    rendered, promotions = c.apply(nodes)
+    assert promotions == []
+    assert _images(rendered[2]) != []
+    assert c.trimmer._image_consumed == set()
+
+
+def test_images_are_never_consumed_mid_turn() -> None:
+    """A rewrite between two calls of one turn breaks a prefix the provider
+    built seconds ago, so pressure alone is not enough: the batch waits for
+    the next turn's first call."""
+    nodes = _image_history()
+    c = Compactor(config=_armed())
+
+    rendered, promotions = c.apply(nodes, turn_boundary=False)
+    assert promotions == []
+    assert _images(rendered[2]) != []
+
+    rendered, promotions = c.apply(nodes, turn_boundary=True)
+    assert [p.reason for p in promotions] == ["image_consumed"]
+    assert _images(rendered[2]) == []
+
+
+def test_consuming_an_image_keeps_its_sibling_text_in_place() -> None:
+    """trim.py used to replace the whole ToolResultBlock, so a 57-line test
+    summary left context with the PNG it shared a result with."""
+    nodes = _image_history()
+    nodes[2] = _node("r0", "user", [ToolResultBlock(
+        tool_use_id="call0",
+        content=[
+            Text("[image: /w/shot.png, image/png, 12 bytes]"),
+            Image(media_type="image/png", data="a" * 20_000),
+            Text("PASS: 57 checks"),
+        ],
+    )])
+    rendered, _promotions = Compactor(config=_armed()).apply(nodes)
+
+    texts = [b.text for b in rendered[2].content[0].content]
+    assert texts[0] == "[image: /w/shot.png, image/png, 12 bytes]"
+    assert texts[2] == "PASS: 57 checks"               # sibling text untouched
+    assert "image consumed from context" in texts[1]   # placeholder, in position
+    assert 'Re-Read the file at "/w/shot.png"' in texts[1]
+    assert _images(rendered[2]) == []
+
+
+def test_a_consumed_image_replays_as_an_image_not_a_full_trim() -> None:
+    """Resume rehydration: the two tier-1 reasons rewrite different amounts of
+    the block, so replaying one as the other would move the prefix."""
+    nodes = _image_history()
+    nodes[2] = _node("r0", "user", [ToolResultBlock(
+        tool_use_id="call0",
+        content=[Text("keep me"), Image(media_type="image/png", data="a" * 20_000)],
+    )])
+    first = Compactor(config=_armed())
+    rendered, promotions = first.apply(nodes)
+
+    resumed = Compactor(config=_armed())
+    resumed.rehydrate(promotions)
+    assert resumed.trimmer._image_consumed == first.trimmer._image_consumed
+    assert resumed.trimmer._trimmed == set()
+    assert _texts(resumed.view(nodes)) == _texts(rendered)  # byte-identical view
 
 
 def test_compactor_keeps_images_when_trim_disabled() -> None:
     nodes = _image_history()
-    c = Compactor(config=CompactionConfig(trim=TrimConfig(enabled=False)))
+    c = Compactor(config=CompactionConfig(
+        trigger_tokens=1, trim=TrimConfig(enabled=False, trigger_tokens=1)
+    ))
 
     assert _images(c.view(nodes)[2]) == _images(nodes[2].message)
     rendered, _promos = c.apply(nodes)
@@ -257,8 +336,10 @@ def test_compactor_keeps_images_when_trim_disabled() -> None:
 def test_compactor_keeps_unconsumed_image() -> None:
     """No later assistant node → the image has not reached the model yet."""
     nodes = _image_history(consumed=False)
-    c = Compactor(config=CompactionConfig())
-    assert _images(c.view(nodes)[2]) == _images(nodes[2].message)
+    c = Compactor(config=_armed())
+    rendered, promotions = c.apply(nodes)
+    assert promotions == []
+    assert _images(rendered[2]) == _images(nodes[2].message)
 
 
 # ─── Threshold arithmetic ────────────────────────────────────────────────────

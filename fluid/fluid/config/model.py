@@ -284,6 +284,11 @@ class ContextConfig:
     headroom_tokens: int = 16_000
     target_ratio: float = 0.7
     keep_recent_turns: int = 3
+    # Fraction of the arming threshold at which consume-once image trims fire.
+    # 1.0 = the same trigger as the other rungs; lower reclaims image bytes
+    # earlier; 0 holds them for overflow recovery only. Image consumption also
+    # waits for a turn boundary whatever this says.
+    image_trigger_ratio: float = 1.0
     max_resident_span_digests: int = 20
     epoch_fold_spans: int = 10
     intake_stub_chars: int = 25_000
@@ -302,6 +307,7 @@ class ContextConfig:
             headroom_tokens=int(d.get("headroom_tokens", 16_000)),
             target_ratio=float(d.get("target_ratio", 0.7)),
             keep_recent_turns=int(d.get("keep_recent_turns", 3)),
+            image_trigger_ratio=float(d.get("image_trigger_ratio", 1.0)),
             max_resident_span_digests=int(d.get("max_resident_span_digests", 20)),
             epoch_fold_spans=int(d.get("epoch_fold_spans", 10)),
             intake_stub_chars=int(d.get("intake_stub_chars", 25_000)),
@@ -389,6 +395,13 @@ class HarnessConfig:
     # maxTokens/rawMaxTokens/percentage in the context-usage breakdown; None
     # leaves those None rather than guessing a window.
     context_window: int | None = None
+    # Prompt-cache affinity key (OpenAI Responses ``prompt_cache_key`` /
+    # OpenRouter ``session_id``). None = the fluid session id, which is right
+    # until a conversation is resumed onto a NEW fluid session — that
+    # repartitions the provider cache at the moment the prefix is longest. A
+    # host with its own durable conversation id sets it here. Must be stable
+    # for the conversation's life and distinct per conversation.
+    cache_key: str | None = None
     # Your own base prompt. When set it replaces the CLI's shipped default
     # (fluid.cli.prompt.DEFAULT_BASE_PROMPT); base_prompt=False drops the
     # default without replacing it. Embedding hosts pass their own base to the
@@ -441,6 +454,7 @@ class HarnessConfig:
             context_window=(
                 int(d["context_window"]) if d.get("context_window") else None
             ),
+            cache_key=d.get("cache_key") or None,
             system=d.get("system"),
             base_prompt=bool(d.get("base_prompt", True)),
             identity=d.get("identity"),
@@ -481,6 +495,7 @@ class HarnessConfig:
             "max_tokens": self.max_tokens,
             "max_model_calls": self.max_model_calls,
             "context_window": self.context_window,
+            "cache_key": self.cache_key,
             "system": self.system,
             "base_prompt": self.base_prompt,
             "identity": self.identity,

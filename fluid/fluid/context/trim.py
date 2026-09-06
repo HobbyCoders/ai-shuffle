@@ -13,6 +13,12 @@ estimated context size crosses a trigger. Design rules (plan §7):
 * **Keep recent, keep errors.** The newest K tool results are never trimmed
   (the model is often still acting on them), and error results are always kept
   verbatim — losing an error message is how doom loops start.
+* **Images play by the same rules.** A delivered image is consume-once, but the
+  consumption is a batched decision like any other: it needs pressure and a
+  turn boundary, and it swaps only the Image blocks in place so the sibling
+  text — and every request byte before the result — is untouched. Consuming an
+  image between two calls of the same turn rewrote a message the provider had
+  already cached and re-billed the whole prompt at full price.
 * **The tree is never mutated.** Trimming is a view transformation applied when
   history is rendered for a request; the stored SessionNodes keep full fidelity
   (rewind/fork/audit see everything).
@@ -182,7 +188,12 @@ def image_source_path(head: str) -> str:
 
 
 def _image_placeholder(
-    node_id: str, chars: int, head: str = "", *, recall: bool = True,
+    node_id: str,
+    chars: int,
+    head: str = "",
+    *,
+    recall: bool = True,
+    text_retained: bool = False,
 ) -> Text:
     """What replaces an image once the model has already seen it.
 
@@ -192,6 +203,10 @@ def _image_placeholder(
     of a screenshot it had seen once. So this says what actually happened, says
     plainly that HistoryExpand is not the recovery route, and names the one
     that is: re-Read the file.
+
+    ``text_retained`` is the in-place form: only the image block was swapped
+    and every sibling Text in the result is still verbatim in context, so the
+    "recover the text with HistoryExpand" clause would be false.
     """
     path = image_source_path(head)
     recovery = (
@@ -205,6 +220,15 @@ def _image_placeholder(
             f"already saw this image; it is NOT in context now. {recovery}. "
             f"Do not describe its contents from memory — look again if any "
             f"detail matters]"
+        )
+    if text_retained:
+        return Text(
+            f"[image consumed from context — {chars} chars removed. You "
+            f"already saw this image; it is NOT in context now, and "
+            f"HistoryExpand cannot restore it (it recovers text only). "
+            f"{recovery}. Do not describe its contents from memory — look "
+            f"again if any detail matters. The text of this result is "
+            f"unchanged; only the image was removed]"
         )
     return Text(
         f"[image consumed from context — {chars} chars removed. You already "
@@ -252,6 +276,13 @@ class ToolResultTrimmer:
     # (node_id, tool_use_id) blocks already trimmed — stays for the engine's
     # lifetime so the rendered prefix is stable between batch trims.
     _trimmed: set = field(default_factory=set)
+    # (node_id, tool_use_id) blocks whose IMAGE payloads have been consumed.
+    # Deliberately a SEPARATE set from ``_trimmed``: the two rewrites differ in
+    # blast radius. A trim replaces the whole result with one placeholder; an
+    # image consumption swaps only the Image blocks and leaves every sibling
+    # Text verbatim, so the 57-line test summary that shared a ToolResultBlock
+    # with a PNG stops leaving context with it.
+    _image_consumed: set = field(default_factory=set)
 
     @staticmethod
     def _has_image(block: ToolResultBlock) -> bool:
@@ -289,13 +320,43 @@ class ToolResultTrimmer:
                     out.add((node.node_id, USER_IMAGE_KEY))
         return out
 
+    def _images_swapped(
+        self, node_id: str, block: ToolResultBlock
+    ) -> ToolResultBlock:
+        """``block`` with each Image replaced, IN PLACE, by a placeholder.
+
+        Every sibling block keeps its position and its bytes. That is what
+        makes the rewrite local: only the request bytes of the images move, so
+        a provider prefix that ends before this result stays byte-identical.
+        """
+        head = block_head(block)
+        content: list[Any] = []
+        for inner in block.content or ():
+            if isinstance(inner, Image):
+                content.append(
+                    _image_placeholder(
+                        node_id, block_chars(inner), head,
+                        recall=self.config.recall_tools,
+                        text_retained=True,
+                    )
+                )
+            else:
+                content.append(inner)
+        return ToolResultBlock(
+            tool_use_id=block.tool_use_id,
+            content=content,
+            is_error=block.is_error,
+        )
+
     def _render(
         self,
         nodes: list[SessionNode],
         trimmed: set[tuple[str, str]] | None = None,
+        consumed: set[tuple[str, str]] | None = None,
     ) -> list[Message]:
         trimmed = self._trimmed if trimmed is None else trimmed
-        if not trimmed:
+        consumed = self._image_consumed if consumed is None else consumed
+        if not trimmed and not consumed:
             return [n.message for n in nodes]
         out: list[Message] = []
         for node in nodes:
@@ -306,10 +367,12 @@ class ToolResultTrimmer:
             blocks: list[Any] = []
             changed = False
             for block in message.content:
-                if (
-                    isinstance(block, ToolResultBlock)
-                    and (node.node_id, block.tool_use_id) in trimmed
-                ):
+                key = (
+                    node.node_id,
+                    block.tool_use_id if isinstance(block, ToolResultBlock)
+                    else USER_IMAGE_KEY,
+                )
+                if isinstance(block, ToolResultBlock) and key in trimmed:
                     # An image is not recoverable the way text is, so it does
                     # not get text's placeholder.
                     render = (
@@ -331,8 +394,14 @@ class ToolResultTrimmer:
                     )
                     changed = True
                 elif (
-                    isinstance(block, Image)
-                    and (node.node_id, USER_IMAGE_KEY) in trimmed
+                    isinstance(block, ToolResultBlock)
+                    and key in consumed
+                    and self._has_image(block)
+                ):
+                    blocks.append(self._images_swapped(node.node_id, block))
+                    changed = True
+                elif isinstance(block, Image) and (
+                    key in trimmed or key in consumed
                 ):
                     blocks.append(
                         _user_image_placeholder(
@@ -365,8 +434,18 @@ class ToolResultTrimmer:
             for block in node.message.content:
                 if not isinstance(block, ToolResultBlock):
                     continue
+                chars = block_chars(block)
+                if (node.node_id, block.tool_use_id) in self._image_consumed:
+                    # The images are already placeholders; price what is left
+                    # so a result that is now just a caption is not trimmed
+                    # for weight it no longer carries.
+                    chars -= sum(
+                        block_chars(inner)
+                        for inner in block.content or ()
+                        if isinstance(inner, Image)
+                    )
                 found.append(
-                    (node.node_id, block.tool_use_id, block_chars(block),
+                    (node.node_id, block.tool_use_id, chars,
                      bool(block.is_error))
                 )
         keep = (
@@ -403,16 +482,39 @@ class ToolResultTrimmer:
         is a real loss of information the model was working from, and it used
         to happen with no event at all — invisible in the transcript, and
         indistinguishable to the model from "I must remember what I saw".
+
+        This is a DECISION, not a view property. Callers gate it on pressure
+        and on a turn boundary; rendering never consumes on its own, because a
+        consumption between two calls of the same turn rewrites a message the
+        provider already cached and re-bills the whole prompt.
         """
         if not self.config.enabled:
             return []
-        newly = sorted(self._consumed_image_results(nodes) - self._trimmed)
-        self._trimmed.update(newly)
+        newly = sorted(
+            self._consumed_image_results(nodes)
+            - self._image_consumed
+            - self._trimmed
+        )
+        self._image_consumed.update(newly)
         return newly
 
     def mark_trimmed(self, pairs: Iterable[tuple[str, str]]) -> None:
         """Re-apply previously persisted trim decisions (resume rehydration)."""
         self._trimmed.update(tuple(p) for p in pairs)
+
+    def mark_image_consumed(self, pairs: Iterable[tuple[str, str]]) -> None:
+        """Re-apply persisted image-consumption decisions (resume)."""
+        self._image_consumed.update(tuple(p) for p in pairs)
+
+    def image_candidates(self, nodes: list[SessionNode]) -> int:
+        """How many delivered image results are still carrying their bytes."""
+        if not self.config.enabled:
+            return 0
+        return len(
+            self._consumed_image_results(nodes)
+            - self._image_consumed
+            - self._trimmed
+        )
 
     def force_trim(self, nodes: list[SessionNode]) -> bool:
         """Trim every eligible result NOW, ignoring the trigger (context-
@@ -430,11 +532,12 @@ class ToolResultTrimmer:
         """
         if not self.config.enabled:
             return [n.message for n in nodes]
-        # Keep this read-only while still reporting the exact view the next
-        # request will carry: previously consumed images are deterministically
-        # compacted even before apply() persists the sticky key.
-        trimmed = self._trimmed | self._consumed_image_results(nodes)
-        return self._render(nodes, trimmed)
+        # Decisions only. Image consumption used to be recomputed here so the
+        # snapshot could predict it, which also meant an image left context
+        # the moment a later assistant node existed — regardless of pressure,
+        # and mid-turn. Now the next request carries exactly what has been
+        # decided, so reporting the decided view IS reporting the request.
+        return self._render(nodes)
 
     def trigger_threshold(self, context_window: int | None = None) -> int:
         """The armed threshold for this trimmer: ``trigger_tokens`` on its own,
@@ -449,23 +552,36 @@ class ToolResultTrimmer:
         )
 
     def apply(
-        self, nodes: list[SessionNode], *, context_window: int | None = None
+        self,
+        nodes: list[SessionNode],
+        *,
+        context_window: int | None = None,
+        turn_boundary: bool = True,
     ) -> list[Message]:
-        """Render history with sticky trims; arm a new batch when over trigger."""
+        """Render history with sticky trims; arm a new batch when over trigger.
+
+        Image consumption obeys the same two gates as every other rung, which
+        it used to skip: it needs real pressure (over the trigger) and a turn
+        boundary. A bare trimmer has no notion of a turn, so ``turn_boundary``
+        defaults to True and the engine passes the real answer.
+        """
         if not self.config.enabled:
             return [n.message for n in nodes]
-        # Consume-once semantics for screenshots and image reads. This is
-        # independent of the ordinary text-size trigger because provider image
-        # tokenization can dwarf the base64 chars/4 estimate.
-        self.consume_images(nodes)
         rendered = self._render(nodes)
-        if estimate_tokens_of_messages(rendered) > self.trigger_threshold(
-            context_window
-        ):
-            newly = self._eligible(nodes)
-            if newly:
-                self._trimmed.update(newly)
-                rendered = self._render(nodes)
+        threshold = self.trigger_threshold(context_window)
+        if estimate_tokens_of_messages(rendered) <= threshold:
+            return rendered
+        # Images first: they are the cheapest reclaim per byte and the loss is
+        # bounded (the model already saw them), so an image batch often puts
+        # the estimate back under the trigger without trimming any text.
+        if turn_boundary and self.consume_images(nodes):
+            rendered = self._render(nodes)
+            if estimate_tokens_of_messages(rendered) <= threshold:
+                return rendered
+        newly = self._eligible(nodes)
+        if newly:
+            self._trimmed.update(newly)
+            rendered = self._render(nodes)
         return rendered
 
 

@@ -1058,6 +1058,7 @@ def build_engine(
         epoch_fold_spans=cc.epoch_fold_spans,
         intake_stub_chars=cc.intake_stub_chars,
         tool_result_stub_chars=cc.tool_result_stub_chars,
+        image_trigger_ratio=getattr(cc, "image_trigger_ratio", 1.0),
     )
 
     return NativeLoop(
@@ -1069,6 +1070,7 @@ def build_engine(
         system=system if system is not None else config.system,
         system_sections=system_sections,
         context_window=config.context_window,
+        cache_key=config.cache_key,
         max_tokens=config.max_tokens,
         # 0 means unlimited; NativeLoop spells that None.
         max_model_calls_per_turn=config.max_model_calls or None,
