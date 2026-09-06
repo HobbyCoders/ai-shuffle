@@ -78,6 +78,12 @@ class CompactionConfig:
     # Whether the session can call HistoryExpand and HistorySearch. Off, the
     # digests and stubs stop naming a recovery route the model cannot take.
     recall_tools: bool = True
+    # Fraction of the arming threshold at which consume-once image trims fire.
+    # 1.0 = the same trigger as every other rung. Lower it to reclaim image
+    # bytes earlier (they are the cheapest reclaim and the model has already
+    # seen them); 0 disables image consumption outside overflow recovery.
+    # Never fires mid-turn whatever the value — see Compactor.apply.
+    image_trigger_ratio: float = 1.0
     # Tier-1 knobs (the owned trimmer's config).
     trim: TrimConfig = field(default_factory=TrimConfig)
     # Estimated-total-context trigger FLOOR; also the whole story when the
@@ -426,15 +432,13 @@ class Compactor:
 
     def _render(self, nodes: list[SessionNode]) -> list[Message]:
         index = {n.node_id: i for i, n in enumerate(nodes)}
-        # Consume-once image trims need the FULL path: a later assistant node
-        # is the evidence an image was already delivered, and the per-node
-        # trimmer calls below can never see one. Recomputed every render
-        # (a deterministic view, like trimmer.view); apply() persists the pairs.
+        # Decided state only. This used to recompute the consume-once image set
+        # on every render, which made an image leave context the instant a
+        # later assistant node existed — no pressure check, no turn boundary,
+        # and a rewritten message in the middle of an already-cached prefix.
+        # apply() owns the decision now; rendering just replays it.
         trimmed = self.trimmer._trimmed
-        if self.trimmer.config.enabled:
-            consumed = self.trimmer._consumed_image_results(nodes)
-            if consumed:
-                trimmed = trimmed | consumed
+        consumed = self.trimmer._image_consumed
         out: list[Message] = []
         i = 0
         while i < len(nodes):
@@ -444,7 +448,7 @@ class Compactor:
                 # persisted one rehydrated from a session that *did* run the
                 # ladder stays inert rather than digesting history behind the
                 # host app's back.
-                out.append(self._render_live(node, trimmed))
+                out.append(self._render_live(node, trimmed, consumed))
                 i += 1
                 continue
             end_id = self._epoch_by_start.get(node.node_id)
@@ -465,15 +469,18 @@ class Compactor:
                 )
                 i = j + 1
                 continue
-            out.append(self._render_live(node, trimmed))
+            out.append(self._render_live(node, trimmed, consumed))
             i += 1
         return out
 
     def _render_live(
-        self, node: SessionNode, trimmed: set[tuple[str, str]]
+        self,
+        node: SessionNode,
+        trimmed: set[tuple[str, str]],
+        consumed: set[tuple[str, str]],
     ) -> Message:
         message = (
-            self.trimmer._render([node], trimmed)[0]
+            self.trimmer._render([node], trimmed, consumed)[0]
             if self.trimmer.config.enabled
             else node.message
         )
@@ -530,9 +537,16 @@ class Compactor:
         overhead_tokens: int = 0,
         context_window: int | None = None,
         output_reserve_tokens: int = 0,
+        turn_boundary: bool = True,
     ) -> tuple[list[Message], list[Promotion]]:
         """Render history; when the estimated total crosses the threshold,
-        run the ladder as one amortized batch and return what it did."""
+        run the ladder as one amortized batch and return what it did.
+
+        ``turn_boundary`` says whether this is the FIRST model call of a turn.
+        Every rung that rewrites already-sent history is held until one:
+        rewriting between two calls of the same turn breaks the prefix the
+        provider cached seconds earlier and re-bills the whole prompt.
+        """
         if not self.config.enabled:
             if not self.config.trim.enabled:
                 return [n.message for n in nodes], []
@@ -541,19 +555,29 @@ class Compactor:
                 overhead_tokens=overhead_tokens,
                 context_window=context_window,
                 output_reserve_tokens=output_reserve_tokens,
+                turn_boundary=turn_boundary,
             )
-        # Persist consume-once image trims into the sticky set (mirrors
-        # trimmer.apply, which the Compactor path never calls). The decision
-        # is deterministic from the path, so this is about keeping the
-        # rendered prefix byte-identical between requests, not durability.
-        promotions: list[Promotion] = self._consume_images(nodes)
         rendered = self._render(nodes)
         threshold = self._threshold(
             self.config.trigger_tokens, context_window, output_reserve_tokens
         )
         total = overhead_tokens + estimate_tokens_of_messages(rendered)
+        # Consume-once image trims: a rung like any other, so they wait for
+        # pressure and for a turn boundary. They used to run unconditionally
+        # before the threshold was even computed, which is how a session at
+        # 18% window occupancy paid twelve mid-turn prefix rewrites.
+        promotions: list[Promotion] = []
+        if turn_boundary and total > self._image_threshold(threshold):
+            promotions = self._consume_images(nodes)
+            if promotions:
+                rendered = self._render(nodes)
+                total = overhead_tokens + estimate_tokens_of_messages(rendered)
         if total <= threshold:
             return rendered, promotions
+        # The rungs below stay available mid-turn on purpose: past the trigger
+        # the prompt is genuinely close to the window, and a rewrite that costs
+        # one cache break beats a turn that overflows. Only the image rung —
+        # which used to fire at any occupancy — is held for a turn boundary.
         target = int(threshold * self.config.target_ratio)
 
         # Rung 1: batch-trim tool results.
@@ -633,6 +657,19 @@ class Compactor:
             output_reserve_tokens=output_reserve_tokens,
         )
 
+    def _image_threshold(self, threshold: int) -> int:
+        """Estimated tokens at which the consume-once image rung arms.
+
+        ``image_trigger_ratio`` scales the ladder's own threshold, so an image
+        never leaves context on a session that is nowhere near its window.
+        A ratio of 0 pins it out of reach: images then survive until overflow
+        recovery, which is the only rung that ignores every guard.
+        """
+        ratio = self.config.image_trigger_ratio
+        if ratio <= 0:
+            return 1 << 62
+        return int(threshold * ratio)
+
     def _consume_images(self, nodes: list[SessionNode]) -> list[Promotion]:
         """Persist consume-once image trims and report them as a promotion.
 
@@ -661,13 +698,14 @@ class Compactor:
         overhead_tokens: int,
         context_window: int | None,
         output_reserve_tokens: int,
+        turn_boundary: bool = True,
     ) -> tuple[list[Message], list[Promotion]]:
         """Tier 1 on its own: trim tool results, never digest a turn.
 
         Same batch-and-sticky discipline as the full ladder (rare, amortized,
-        cache-safe), driven by the tier-1 trigger rather than the ladder's.
+        cache-safe), driven by the tier-1 trigger rather than the ladder's —
+        image consumption included, which this path used to run unguarded.
         """
-        promotions = self._consume_images(nodes)
         rendered = self._render(nodes)
         threshold = self._threshold(
             self.config.trim.trigger_tokens,
@@ -675,7 +713,14 @@ class Compactor:
             output_reserve_tokens,
             window_ratio=self.config.trim.trigger_window_ratio,
         )
-        if overhead_tokens + estimate_tokens_of_messages(rendered) <= threshold:
+        total = overhead_tokens + estimate_tokens_of_messages(rendered)
+        promotions: list[Promotion] = []
+        if turn_boundary and total > self._image_threshold(threshold):
+            promotions = self._consume_images(nodes)
+            if promotions:
+                rendered = self._render(nodes)
+                total = overhead_tokens + estimate_tokens_of_messages(rendered)
+        if total <= threshold:
             return rendered, promotions
         pairs = self.trimmer.trim_batch(nodes)
         if not pairs:
@@ -735,6 +780,17 @@ class Compactor:
             )
         digest_target = target or 0
 
+        def images() -> Promotion | None:
+            # Overflow is maximal pressure and the model has already seen every
+            # one of these, so this rung ignores the trigger and the turn
+            # boundary the ordinary path respects. Cheapest reclaim first.
+            newly = self.trimmer.consume_images(nodes)
+            if not newly:
+                return None
+            return Promotion(
+                tier=1, reason="image_consumed", trimmed=tuple(newly)
+            )
+
         def trim(keep: int | None) -> Callable[[], Promotion | None]:
             def rung() -> Promotion | None:
                 pairs = self.trimmer.trim_batch(nodes, keep_recent=keep)
@@ -771,9 +827,9 @@ class Compactor:
             )
 
         rungs: list[Callable[[], Promotion | None]] = (
-            [trim(None), trim(0)]
+            [images, trim(None), trim(0)]
             if trim_only
-            else [trim(None), digest(None), fold, trim(0), digest(0)]
+            else [images, trim(None), digest(None), fold, trim(0), digest(0)]
         )
         promotions: list[Promotion] = []
         for rung in rungs:
@@ -797,7 +853,14 @@ class Compactor:
         """Re-apply persisted decisions (resume). Rendering is deterministic,
         so the rehydrated view is byte-identical to the pre-restart one."""
         for promo in promotions:
-            self.trimmer.mark_trimmed(promo.trimmed)
+            # The two tier-1 reasons rewrite different amounts of the block, so
+            # they replay into different sets: an image consumption that came
+            # back as a full trim would take the sibling text with it and the
+            # resumed prefix would not match the pre-restart one.
+            if promo.reason == "image_consumed":
+                self.trimmer.mark_image_consumed(promo.trimmed)
+            else:
+                self.trimmer.mark_trimmed(promo.trimmed)
             if not self.config.enabled:
                 continue  # trim-only: tier 2/3 history is not re-armed
             for start, end, kind in promo.spans:
@@ -920,5 +983,6 @@ class Compactor:
             "digestedSpans": digests,
             "epochStubs": epochs,
             "trimmedToolResults": len(self.trimmer._trimmed),
+            "consumedImages": len(self.trimmer._image_consumed),
             "reclaimedTokens": max(0, (raw - rendered) // 4),
         }

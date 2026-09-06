@@ -591,7 +591,9 @@ async def test_engine_blames_its_own_image_trim_not_the_provider() -> None:
     loop = NativeLoop(
         provider=provider, store=MemoryStore(), model="m", system="sys",
         compaction=CompactionConfig(
-            enabled=False, trim=TrimConfig(enabled=True, trigger_tokens=10**9)
+            # Armed: image consumption needs real pressure now, and the trim
+            # rung it shares a threshold with cannot reach the one result.
+            enabled=False, trim=TrimConfig(enabled=True, trigger_tokens=1)
         ),
     )
     await loop.submit(UserTurn(content=[Image(data="A" * 4_000, media_type="image/png")]))

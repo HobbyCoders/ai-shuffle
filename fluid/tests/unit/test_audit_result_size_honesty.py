@@ -293,6 +293,13 @@ def test_run_python_documents_the_stdout_budget() -> None:
 # ── 4. images say what images need ────────────────────────────────────────
 
 
+def _armed() -> CompactionConfig:
+    """A ladder whose image rung is armed: consumption needs real pressure."""
+    return CompactionConfig(
+        trigger_tokens=1, trim=TrimConfig(trigger_tokens=1)
+    )
+
+
 def _image_path() -> list[SessionNode]:
     return [
         _node("node_aa0", "user", [Text("look")]),
@@ -322,7 +329,7 @@ def test_read_captions_an_image_with_its_full_path(tmp_path) -> None:
 
 
 def test_consumed_image_placeholder_names_the_re_read_not_history_expand() -> None:
-    trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=10_000_000))
+    trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=1))
     rendered = trimmer.apply(_image_path())
     text = "".join(
         inner.text
@@ -343,7 +350,7 @@ def test_a_pathless_image_says_re_run_the_tool() -> None:
         tool_use_id="call0",
         content=[Text("screenshot taken"), Image(media_type="image/png", data="a" * 20_000)],
     )])
-    trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=10_000_000))
+    trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=1))
     rendered = trimmer.apply(nodes)
     text = "".join(
         inner.text
@@ -357,7 +364,7 @@ def test_a_pathless_image_says_re_run_the_tool() -> None:
 
 
 def test_a_consume_once_trim_is_reported_not_silent() -> None:
-    compactor = Compactor(config=CompactionConfig())
+    compactor = Compactor(config=_armed())
     _rendered, promotions = compactor.apply(_image_path())
 
     assert [(p.tier, p.reason) for p in promotions] == [(1, "image_consumed")]

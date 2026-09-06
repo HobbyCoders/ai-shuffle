@@ -307,6 +307,32 @@ class Usage(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class CacheMissAlert(Event):
+    """A run of prompt-cache misses fluid has ruled itself out of.
+
+    Raised once per run, when ``consecutive`` unexplained misses in a row have
+    happened inside one turn: every shared prefix checkpoint hashed identical,
+    no compaction rung ran between the requests, and the provider still billed
+    the whole prompt fresh. At production prefix sizes that is roughly a
+    dollar a call, so the host wants to see it rather than find it in a
+    month-end bill. Never terminal — the turn continues.
+
+    ``cache_key`` is the affinity key the request carried (OpenAI Responses
+    ``prompt_cache_key`` / OpenRouter ``session_id``), so a reader can tell a
+    routing problem from a partitioning one.
+    """
+
+    consecutive: int
+    reason: str
+    input_tokens: int = 0
+    cache_read_tokens: int = 0
+    provider: str = ""
+    model: str = ""
+    cache_key: str | None = None
+    note: str = ""
+
+
+@dataclass(frozen=True, kw_only=True)
 class RateLimit(Event):
     kind: str
     resets_at: str | None = None
@@ -469,6 +495,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         ToolUse, ToolResult, SteerDelivered,
         PermissionRequest, QuestionRequest, HandoffCreated,
         ContextCompaction, Usage, RateLimit, ProviderRetry, SubagentEvent, HookEvent,
+        CacheMissAlert,
         ContinualUpdate, DelegatedSurface,
     )
 }

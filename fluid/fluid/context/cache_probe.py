@@ -39,6 +39,7 @@ __all__ = [
     "CacheProbeConfig",
     "fingerprint_prefix",
     "diagnose_cache_miss",
+    "is_unexplained_miss",
     "checkpoint_positions",
     "message_count",
 ]
@@ -61,6 +62,11 @@ class CacheProbeConfig:
     # Treat a small structural cache read as no effective cache reuse; providers can return such a read even on
     # a full resend.
     max_cache_read_tokens: int = 1_024
+    # Consecutive UNEXPLAINED misses (verified-identical prefix, zero cache
+    # read, no compaction in between) inside one turn before the engine raises
+    # a CacheMissAlert. One is indistinguishable from a TTL expiry; two in a
+    # row is a pattern. 0 disables the alert.
+    alert_after_misses: int = 2
 
 
 def _hasher() -> Any:
@@ -233,6 +239,7 @@ def diagnose_cache_miss(
     cache_read_tokens: int,
     config: CacheProbeConfig | None = None,
     history_rewrites: Sequence[Mapping[str, Any]] | None = None,
+    explicit_breakpoints: bool = True,
 ) -> dict[str, Any] | None:
     """Name the first prefix segment that changed, when a call missed cache.
 
@@ -246,6 +253,13 @@ def diagnose_cache_miss(
     :func:`fluid.context.compaction.describe_promotions`). A rung rewrites a
     message the provider already cached, so a miss right after one is fluid's
     own doing — naming it beats sending the reader after provider routing.
+
+    ``explicit_breakpoints`` is the provider's
+    :attr:`~fluid.providers.base.ProviderCaps.explicit_cache_breakpoints`.
+    On a provider that has no breakpoint API at all (OpenAI Responses caches
+    automatically), "a missing cache breakpoint" is not one of the suspects,
+    and every audit that chased it was chasing a request field that does not
+    exist.
     """
     config = config or CacheProbeConfig()
     if not config.enabled:
@@ -299,14 +313,23 @@ def diagnose_cache_miss(
             "stable_through": stable_through,
             "shared_messages": shared_messages,
             "verified_messages": verified_messages,
+            "full_coverage": full_coverage,
             "input_tokens": input_tokens,
             "cache_read_tokens": cache_read_tokens,
         }
+        suspects = (
+            "cache expiry, provider routing, or a missing cache breakpoint"
+            if explicit_breakpoints
+            else (
+                "cache expiry or provider routing (this provider caches "
+                "automatically — there is no breakpoint to place)"
+            )
+        )
         if full_coverage:
             note = (
                 f"every shared checkpoint matched and they cover the whole "
                 f"shared prefix (all {shared_messages} messages) — suspect "
-                f"cache expiry, provider routing, or a missing cache breakpoint"
+                f"{suspects}"
             )
         else:
             note = (
@@ -314,8 +337,7 @@ def diagnose_cache_miss(
                 f"message {verified_messages} of {shared_messages}: messages "
                 f"{verified_messages + 1}..{shared_messages} were never "
                 f"compared, so a rewrite in there looks exactly like this. "
-                f"Failing that, suspect cache expiry, provider routing, or a "
-                f"missing cache breakpoint"
+                f"Failing that, suspect {suspects}"
             )
         if rewrites:
             # A trim/digest rewrote already-sent history between the two
@@ -358,3 +380,29 @@ def diagnose_cache_miss(
         out["history_rewritten"] = rewrites
         out["note"] += f"; {_rewrite_phrase(rewrites)} since the last request"
     return out
+
+
+# Verdicts where fluid has verified it did NOT move the prompt: the whole
+# shared prefix hashed identical, no compaction ran between the two requests,
+# and the provider still billed everything fresh. The other verdicts name a
+# local cause (``prefix_changed``, ``history_rewritten``) or an unavoidable
+# one (``no_previous_request``) and are not worth alerting on.
+_UNEXPLAINED_REASONS = frozenset({"prefix_grew_only", "prefix_unchanged"})
+
+
+def is_unexplained_miss(diagnosis: Mapping[str, Any] | None) -> bool:
+    """True when a miss survives every explanation fluid can offer itself.
+
+    The bar is deliberately high: the checkpoints must cover the WHOLE shared
+    prefix (a partial verification cannot rule out a rewrite past the last
+    shared checkpoint), the provider must have read literally nothing, and no
+    compaction rung may have run since the previous request.
+    """
+    if not diagnosis:
+        return False
+    return (
+        diagnosis.get("reason") in _UNEXPLAINED_REASONS
+        and bool(diagnosis.get("full_coverage"))
+        and not diagnosis.get("history_rewritten")
+        and int(diagnosis.get("cache_read_tokens") or 0) == 0
+    )

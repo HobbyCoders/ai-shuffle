@@ -53,6 +53,7 @@ from fluid.context.cache_probe import (
     CacheProbeConfig,
     diagnose_cache_miss,
     fingerprint_prefix,
+    is_unexplained_miss,
     message_count,
 )
 from fluid.context.compaction import (
@@ -75,6 +76,7 @@ from fluid.events.bus import EventBus
 from fluid.events.model import (
     BlockStart,
     BlockStop,
+    CacheMissAlert,
     ContextCompaction,
     ErrorEvent,
     Event,
@@ -668,6 +670,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         trim: TrimConfig | None = None,
         compaction: CompactionConfig | None = None,
         cache_probe: CacheProbeConfig | None = None,
+        cache_key: str | None = None,
         pricing: PricingResolver | None = None,
         mcp_servers: dict[str, dict[str, Any]] | None = None,
         agents: Sequence[dict[str, Any]] | None = None,
@@ -870,8 +873,19 @@ class NativeLoop(BackgroundLifecycleMixin):
         # with ~no cache read, the two fingerprints are bisected to name the
         # segment that moved. Purely diagnostic — it never changes a request.
         self._cache_probe = cache_probe or CacheProbeConfig()
+        # Host-supplied prompt-cache affinity key. Default None keeps the
+        # historical behavior (the fluid session id). A host whose users resume
+        # a conversation onto a NEW fluid session passes its own durable
+        # conversation id here, so the provider keeps serving the same cache
+        # partition across the resume instead of re-billing the longest prefix
+        # the session will ever have. Must be stable for the life of the
+        # conversation and distinct per conversation.
+        self.cache_key = cache_key or None
         self._prefix_fingerprint: dict[str, str] | None = None
         self._prev_prefix_fingerprint: dict[str, str] | None = None
+        # Consecutive misses the probe could not pin on anything fluid did.
+        # Reset by every explained call and at the start of every turn.
+        self._unexplained_misses = 0
         # Sessions whose previous-request fingerprint was already looked for in
         # the persisted Usage events. The app rebuilds the engine per run, so
         # without this every turn's first call reported "no_previous_request"
@@ -2068,6 +2082,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         parent = user_node
         num_calls = 0
         self._turn_model_calls = 0
+        # A run of misses is only interesting inside one turn: the gap between
+        # turns is user time, and a cache that expired over it is ordinary.
+        self._unexplained_misses = 0
         self._begin_friction_turn()
         total_usage: dict[str, Any] = {}
         final_stop = "end_turn"
@@ -2084,6 +2101,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                 overhead_tokens=self._context_overhead_tokens(),
                 context_window=self.context_window,
                 output_reserve_tokens=self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
+                # Only the FIRST call of a turn may rewrite already-sent
+                # history for reasons other than size pressure. Between two
+                # calls of one turn the provider is holding a prefix it built
+                # seconds ago; rewriting it there re-bills the whole prompt.
+                turn_boundary=num_calls == 0,
             )
             history = repair_dangling_tool_calls(rendered)
             if self._encrypted_reasoning_poisoned:
@@ -2192,6 +2214,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     ),
                     raw=usage_raw,
                 ))
+                await self._alert_unexplained_cache_misses(sid, turn_id, usage_raw)
                 if (
                     not self._encrypted_reasoning_poisoned
                     and result.error_message
@@ -2305,6 +2328,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 raw=usage_raw,
                 context_usage=snapshot,
             ))
+            await self._alert_unexplained_cache_misses(sid, turn_id, usage_raw)
             parent = node
 
             if result.interrupted:
@@ -2647,8 +2671,22 @@ class NativeLoop(BackgroundLifecycleMixin):
             extra={**self._affinity_keys(sticky), **self.request_extra},
         )
 
+    def _affinity_key(self) -> str | None:
+        """The value the provider's cache-affinity key carries.
+
+        ``cache_key`` (host-supplied) wins over the fluid session id. The
+        session id is the right default — one fluid session, one prefix — but
+        it is not durable: a host that resumes a conversation on a NEW fluid
+        session repartitions the provider cache at exactly the moment the
+        prefix is longest. A host with its own durable conversation id passes
+        it here and the partition survives the resume.
+        """
+        if self.cache_key:
+            return self.cache_key
+        return self._session.session_id if self._session is not None else None
+
     def _affinity_keys(self, sticky: bool) -> dict[str, Any]:
-        """The provider's prompt-cache affinity key, set to the session id.
+        """The provider's prompt-cache affinity key.
 
         OpenRouter documents ``session_id`` as its sticky-routing key; the
         OpenAI Responses API takes ``prompt_cache_key`` for the same job
@@ -2657,13 +2695,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         may pick a different upstream replica (see the empty-completion retry
         in _agent_loop). Empty before a session exists.
         """
-        if not sticky or self._session is None:
+        key = self._affinity_key()
+        if not sticky or key is None:
             return {}
-        sid = self._session.session_id
         if self.provider.name == "openrouter":
-            return {"session_id": sid}
+            return {"session_id": key}
         if self.provider.name == "openai_responses":
-            return {"prompt_cache_key": sid}
+            return {"prompt_cache_key": key}
         return {}
 
     def _fingerprint_request(self, request: ProviderRequest) -> None:
@@ -2715,13 +2753,18 @@ class NativeLoop(BackgroundLifecycleMixin):
                 ),
                 config=self._cache_probe,
                 history_rewrites=rewrites,
+                explicit_breakpoints=self.provider.caps.explicit_cache_breakpoints,
             )
         except Exception:  # noqa: BLE001 — instrumentation is never fatal
             log.debug("cache-miss diagnosis failed", exc_info=True)
             diagnosis = None
         self._prev_prefix_fingerprint = fingerprint
-        if diagnosis is not None:
-            out["cache_miss"] = diagnosis
+        if diagnosis is None:
+            self._unexplained_misses = 0
+            return out
+        out["cache_miss"] = diagnosis
+        if not is_unexplained_miss(diagnosis):
+            self._unexplained_misses = 0
             log.warning(
                 "prompt cache miss: %s (%s); fresh=%s cache_read=%s",
                 diagnosis.get("reason"),
@@ -2729,7 +2772,77 @@ class NativeLoop(BackgroundLifecycleMixin):
                 diagnosis.get("input_tokens"),
                 diagnosis.get("cache_read_tokens"),
             )
+            return out
+        # A verified-identical prefix that read nothing. Fluid did not move the
+        # prompt, so the two remaining suspects are provider routing and a
+        # missing breakpoint — and they are told apart by what the provider
+        # itself reported plus which affinity key the request carried. Logging
+        # the diagnosis alone left every audit guessing between them.
+        self._unexplained_misses += 1
+        diagnosis["consecutive_unexplained"] = self._unexplained_misses
+        key = self._affinity_key()
+        log.warning(
+            "prompt cache miss: %s (%s); fresh=%s cache_read=%s; "
+            "provider=%s model=%s cache_key=%s provider_usage=%s",
+            diagnosis.get("reason"),
+            diagnosis.get("note", ""),
+            diagnosis.get("input_tokens"),
+            diagnosis.get("cache_read_tokens"),
+            self.provider.name,
+            self.model,
+            key,
+            {k: v for k, v in usage.items() if k != "provider_requests"},
+        )
         return out
+
+    async def _alert_unexplained_cache_misses(
+        self, sid: str, turn_id: str, usage_raw: dict[str, Any]
+    ) -> None:
+        """Surface a run of misses fluid cannot explain, once per run.
+
+        One unexplained miss is noise (a TTL expiry looks identical). Two in a
+        row inside one turn is a pattern the host should be able to see and act
+        on - audited sessions repeatedly paid full price with nothing
+        in the transcript saying so. Emitted once when the streak reaches the
+        threshold, not on every later call in the same run.
+        """
+        diagnosis = usage_raw.get("cache_miss")
+        if not isinstance(diagnosis, dict):
+            return
+        streak = diagnosis.get("consecutive_unexplained")
+        if streak != self._cache_probe.alert_after_misses:
+            return
+        payload = {
+            "session_id": sid,
+            "turn_id": turn_id,
+            "provider": self.provider.name,
+            "model": self.model,
+            "cache_key": self._affinity_key(),
+            "consecutive": streak,
+            "reason": diagnosis.get("reason"),
+            "input_tokens": diagnosis.get("input_tokens"),
+            "cache_read_tokens": diagnosis.get("cache_read_tokens"),
+            "note": diagnosis.get("note"),
+        }
+        await self._emit(CacheMissAlert(
+            session_id=sid, turn_id=turn_id,
+            consecutive=int(streak),
+            reason=str(diagnosis.get("reason") or ""),
+            input_tokens=int(diagnosis.get("input_tokens") or 0),
+            cache_read_tokens=int(diagnosis.get("cache_read_tokens") or 0),
+            provider=self.provider.name,
+            model=self.model,
+            cache_key=payload["cache_key"],
+            note=str(diagnosis.get("note") or ""),
+        ))
+        if self.hooks is not None:
+            # Optional host hook, safe default: no subscriber, nothing happens.
+            # A host that wants to trip a breaker (drop the affinity key, warn
+            # the user, switch route) gets the whole diagnosis here.
+            try:
+                await self.hooks.emit("CacheMiss", payload)
+            except Exception:  # noqa: BLE001 — a hook never ends a turn
+                log.debug("CacheMiss hook failed", exc_info=True)
 
     async def _stream_once(
         self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True

@@ -103,7 +103,8 @@ def test_browser_screenshot_is_available_once_then_compacted() -> None:
         )
     ])
     assistant = _node("assistant-after-image", "assistant", [Text("I inspected it")])
-    trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=10_000_000))
+    # Armed: consumption needs pressure, so the trigger has to be reachable.
+    trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=1))
 
     first = trimmer.apply([image_result])
     assert any(
@@ -115,18 +116,42 @@ def test_browser_screenshot_is_available_once_then_compacted() -> None:
     assert estimate_tokens_of_messages(first) < 5_000
 
     # A later assistant node proves the image was already delivered to one
-    # model call. It is compacted even though the ordinary text trigger is far
-    # above this transcript and even though it is the newest tool result.
+    # model call, so with the trigger crossed it is consumed even though it is
+    # the newest tool result.
     second = trimmer.apply([image_result, assistant])
-    placeholder = _tool_result_texts(second)[0]
-    assert "image consumed from context" in placeholder
+    texts = _tool_result_texts(second)[0]
+    assert "image consumed from context" in texts
     # The recovery route is the one that works: HistoryExpand returns text.
-    assert "HistoryExpand cannot restore it" in placeholder
+    assert "HistoryExpand cannot restore it" in texts
+    # Only the image left; the caption beside it is still verbatim in context.
+    assert "screenshot taken" in texts
     assert not any(
         isinstance(inner, Image)
         for block in second[0].content
         for inner in getattr(block, "content", [])
     )
+
+
+def test_a_screenshot_survives_a_session_that_is_not_under_pressure() -> None:
+    """The consume-once rule used to ignore the trigger entirely, so every
+    screenshot rewrote the middle of an already-cached prefix at any context
+    occupancy. Under the real trigger this transcript keeps its image."""
+    image_result = _node("image-result", "user", [
+        ToolResultBlock(
+            tool_use_id="shot-1",
+            content=[Image(media_type="image/png", data="a" * 531_476)],
+        )
+    ])
+    assistant = _node("assistant-after-image", "assistant", [Text("seen")])
+    trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=10_000_000))
+
+    rendered = trimmer.apply([image_result, assistant])
+    assert any(
+        isinstance(inner, Image)
+        for block in rendered[0].content
+        for inner in getattr(block, "content", [])
+    )
+    assert trimmer._image_consumed == set()
 
 
 def test_consumed_screenshot_view_is_read_only_but_matches_next_request() -> None:
@@ -137,11 +162,19 @@ def test_consumed_screenshot_view_is_read_only_but_matches_next_request() -> Non
         )
     ])
     assistant = _node("assistant-after-image", "assistant", [Text("done")])
-    trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=10_000_000))
+    trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=1))
 
+    # The view reports the DECIDED state, so before apply() it still shows the
+    # image — which is exactly what the next request would carry.
+    assert "image consumed from context" not in _tool_result_texts(
+        trimmer.view([image_result, assistant])
+    )[0]
+    assert trimmer._image_consumed == set()
+
+    trimmer.apply([image_result, assistant])
     rendered = trimmer.view([image_result, assistant])
     assert "image consumed from context" in _tool_result_texts(rendered)[0]
-    assert trimmer._trimmed == set()
+    assert trimmer._trimmed == set()  # an image swap is not a full trim
 
 
 def _screenshot_path() -> list[SessionNode]:
@@ -176,12 +209,11 @@ def test_compactor_trims_consumed_image_results() -> None:
     """Regression: Compactor._render_live rendered node-by-node, so the
     later-assistant evidence was invisible and consume-once never fired."""
     nodes = _screenshot_path()
-    compactor = Compactor(config=CompactionConfig())
+    compactor = Compactor(config=CompactionConfig(
+        trigger_tokens=1, trim=TrimConfig(trigger_tokens=1)
+    ))
 
-    viewed = compactor.view(nodes)
-    assert not _has_image(viewed[2])
-    assert "image consumed from context" in _tool_result_texts([viewed[2]])[0]
-    assert compactor.trimmer._trimmed == set()  # view stays read-only
+    assert _has_image(compactor.view(nodes)[2])  # nothing decided yet
 
     rendered, promotions = compactor.apply(nodes)
     assert not _has_image(rendered[2])
@@ -189,13 +221,16 @@ def test_compactor_trims_consumed_image_results() -> None:
     # Nothing near the digest/epoch triggers, but the consume-once trim is
     # reported so an image leaving context is visible in the transcript.
     assert [(p.tier, p.reason) for p in promotions] == [(1, "image_consumed")]
-    assert ("r0", "call0") in compactor.trimmer._trimmed
+    assert ("r0", "call0") in compactor.trimmer._image_consumed
+    assert compactor.trimmer._trimmed == set()
 
 
 def test_compactor_keeps_images_when_trim_disabled() -> None:
     nodes = _screenshot_path()
     compactor = Compactor(
-        config=CompactionConfig(trim=TrimConfig(enabled=False))
+        config=CompactionConfig(
+            trigger_tokens=1, trim=TrimConfig(enabled=False, trigger_tokens=1)
+        )
     )
 
     assert _has_image(compactor.view(nodes)[2])
@@ -207,8 +242,12 @@ def test_compactor_keeps_images_when_trim_disabled() -> None:
 def test_compactor_keeps_unconsumed_image() -> None:
     """No later assistant node → the image has not been delivered yet."""
     nodes = _screenshot_path()[:-1]
-    compactor = Compactor(config=CompactionConfig())
-    assert _has_image(compactor.view(nodes)[2])
+    compactor = Compactor(config=CompactionConfig(
+        trigger_tokens=1, trim=TrimConfig(trigger_tokens=1)
+    ))
+    rendered, promotions = compactor.apply(nodes)
+    assert promotions == []
+    assert _has_image(rendered[2])
 
 
 # ─── Estimator: reasoning envelopes and user images ──────────────────────────
@@ -252,7 +291,7 @@ def test_user_image_estimates_flat_and_is_consumed_after_one_call() -> None:
     ])
     assert 1_400 < estimate_tokens_of_messages([attachment.message]) < 1_700
 
-    trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=10_000_000))
+    trimmer = ToolResultTrimmer(config=TrimConfig(trigger_tokens=1))
     first = trimmer.apply([attachment])
     assert any(isinstance(b, Image) for b in first[0].content)  # first call sees it
 
@@ -263,16 +302,18 @@ def test_user_image_estimates_flat_and_is_consumed_after_one_call() -> None:
     assert "what is this?" in text  # the caption beside it survives
     assert "image attachment consumed from context" in text
     assert "attach it again" in text
-    assert ("u-img", USER_IMAGE_KEY) in trimmer._trimmed
+    assert ("u-img", USER_IMAGE_KEY) in trimmer._image_consumed
     assert estimate_tokens_of_messages(second) < 300
 
     # The Compactor path (what the engine renders through) agrees, and the
     # decision is reported like any other consume-once trim.
-    compactor = Compactor(config=CompactionConfig())
+    compactor = Compactor(config=CompactionConfig(
+        trigger_tokens=1, trim=TrimConfig(trigger_tokens=1)
+    ))
     rendered, promotions = compactor.apply([attachment, assistant])
     assert not any(isinstance(b, Image) for b in rendered[0].content)
     assert [(p.tier, p.reason) for p in promotions] == [(1, "image_consumed")]
-    assert ("u-img", USER_IMAGE_KEY) in compactor.trimmer._trimmed
+    assert ("u-img", USER_IMAGE_KEY) in compactor.trimmer._image_consumed
 
 
 # ─── Note builtin ────────────────────────────────────────────────────────────
