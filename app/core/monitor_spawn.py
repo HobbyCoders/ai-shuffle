@@ -239,7 +239,8 @@ def monitor_serving_receipt_text(task_id: str) -> str:
         "session is NOT parked on it — end the turn whenever this step is "
         "done; no completion is coming while it is healthy, and you are "
         "notified if it stops or dies. Do not sleep, poll, or check on it "
-        "yourself."
+        "yourself. If this session goes quiet for a long stretch the process "
+        "is stopped so it cannot outlive the work, and you are told why."
     )
 
 
@@ -462,8 +463,12 @@ def _summarize(lines: list, *, budget: Optional[int] = None) -> str:
     tail_cap = cap - int(cap * _SUMMARY_VERDICT_FRACTION)
     kept = _verdict_lines(text[:-tail_cap], budget=cap - tail_cap)
     kept_text = "\n".join(kept)
-    # Whatever the verdicts did not use goes back to the tail.
+    # Whatever the verdicts did not use goes back to the tail, which may then
+    # reach back over a line the rescue already took — drop those rather than
+    # print them twice.
     tail = text[-(cap - len(kept_text)):]
+    kept = [line for line in kept if line not in tail]
+    kept_text = "\n".join(kept)
     dropped = len(text) - len(tail) - len(kept_text)
     return (
         (kept_text + "\n" if kept_text else "")
@@ -848,25 +853,21 @@ def session_idle_seconds(session_id: Optional[str]) -> Optional[float]:
     if not session_id:
         return None
     try:
+        from datetime import datetime, timezone
+
         from app.db import database
 
-        row = database.get_session(session_id) or {}
-        stamp = row.get("updated_at")
+        stamp = (database.get_session(session_id) or {}).get("updated_at")
         if stamp is None:
             return None
-        if isinstance(stamp, str):
-            from datetime import datetime
-
-            parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-        else:
-            parsed = stamp
-        from datetime import timezone as _tz
-
+        parsed = (
+            datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if isinstance(stamp, str)
+            else stamp
+        )
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=_tz.utc)
-        from datetime import datetime as _dt
-
-        return max(0.0, (_dt.now(_tz.utc) - parsed).total_seconds())
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
     except Exception:  # noqa: BLE001 — an unreadable row is simply unknown
         logger.debug("monitor_spawn: session idle read failed", exc_info=True)
         return None
@@ -926,7 +927,9 @@ WAIT_SECONDS_DESCRIPTION_CLAUSE = (
     "the wait, its exit code and output come back in this result and no "
     "notification, wake or extra turn happens at all. If it does not, you get "
     "the normal background receipt and end the turn exactly as you would have. "
-    "It is never a reason to wait in Bash instead."
+    "It is never a reason to wait in Bash instead. A non-zero exit comes back "
+    "as an ordinary result carrying that exit code — a failing test run is an "
+    "answer, not a tool error, and nothing is raised."
 )
 
 
