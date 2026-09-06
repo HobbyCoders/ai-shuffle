@@ -18,7 +18,23 @@ What this module adds on top of raw ``dispatch_worker``:
 * cycle detection (A9) — an agent already active in the ancestor chain cannot
   be dispatched again beneath itself;
 * worker budget (A9) — at most ``settings.task_tool_max_workers`` live
-  workers per root session tree;
+  workers per root session tree. NESTED workers count against it: the budget
+  is about what is running on this box under one human's session, and a
+  worker's worker is still a worker. (What nested dispatch no longer spends on
+  the root is its NOTIFICATION lanes — see "root routing" below.);
+* provider-org admission — session ceilings say nothing about a credential's
+  token throughput, and the 2026-09-05 audit lost eleven workers to one org's
+  500k tokens-per-minute limit. A dispatch bound to a provider row also has to
+  fit under ``settings.task_worker_max_per_provider``; over that it QUEUES
+  (and the receipt says so) rather than being refused;
+* worker liveness — a worker that never streams a frame has not started, and
+  is failed at ``settings.task_worker_first_frame_seconds`` with the existing
+  "worker failed to start" summary rather than after fifteen silent minutes.
+  A zero-frame failure is then re-dispatched automatically (transport: once;
+  provider capacity: with backoff), each attempt its own visible task row.
+  A WORKING worker stays unbounded; a SYNCHRONOUS one additionally gets the
+  hard cap ``settings.task_worker_sync_max_seconds``, because it is holding
+  the parent's turn while it waits;
 * pool admission — the worker budget is a per-tree ceiling, not a statement
   about the box; a dispatch also has to fit on the box. That is checked HERE,
   before anything is returned: a dispatch at a ceiling waits briefly and is
@@ -31,7 +47,13 @@ What this module adds on top of raw ``dispatch_worker``:
   the per-parent fan-out limit;
 * root routing (A9) — approvals, progress cards, and supervisor registration
   land on the ROOT session (the one with a human watching), while
-  project/worktree/cwd inheritance still reads the direct caller;
+  project/worktree/cwd inheritance still reads the direct caller. The
+  NOTIFICATION lanes are the exception (2026-09-05 audit): the terminal chip,
+  the scheduler wake and the task-notification steer are armed on the
+  DISPATCHING session, not the root — a root that never called Task cannot act
+  on the report, and while it was spending turns trying, the worker that did
+  call Task ended prematurely waiting for a wake that went elsewhere. See
+  ``provider_agent.dispatch_worker``'s "OWNERSHIP vs ROUTING" note;
 * modes (A8) — ``sync`` blocks, writes the worker's full report to a file
   under the parent's ``.fluid/task-reports/`` and returns ``report_path`` +
   ``report_chars`` + a bounded ``report_head`` so the parent reads the rest
@@ -173,6 +195,11 @@ _ADMISSION_POLL_SECONDS = 0.5
 #: dropped as soon as its session is really pooled, and expires regardless.
 _ADMISSION_RESERVATION_SECONDS = 180.0
 
+# Provider-org admission: session counts alone do not prevent token-window oversubscription. Until dispatch has
+# prompt-size estimates and per-credential rolling windows, queue excess workers behind
+# settings.task_worker_max_per_provider for each provider row. A provider row represents one credential and
+# quota. The provider-less delegated subscription leg retains the CLI backoff policy.
+
 
 @dataclass(frozen=True)
 class _Reservation:
@@ -180,12 +207,15 @@ class _Reservation:
 
     ``lane`` decides which ceiling this reservation counts against (only a
     delegated one holds a subprocess slot); ``parent`` is the session whose
-    fan-out budget it is spending.
+    fan-out budget it is spending; ``provider`` is the provider row whose org
+    throughput budget it is spending (``None`` on the delegated Claude leg,
+    which has no per-org ceiling here).
     """
 
     expires: float
     lane: str = DELEGATED_LANE
     parent: Optional[str] = None
+    provider: Optional[str] = None
 
 
 #: worker session id -> its admission reservation.
@@ -318,7 +348,10 @@ def _admission_lock() -> asyncio.Lock:
 
 
 def _pending_admission_count(
-    *, lane: Optional[str] = None, parent: Optional[str] = None
+    *,
+    lane: Optional[str] = None,
+    parent: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> int:
     """Dispatches admitted here that the pool has not counted yet.
 
@@ -327,9 +360,10 @@ def _pending_admission_count(
     dispatch died before connecting, or is wedged — either way it must stop
     holding a slot hostage).
 
-    ``lane`` and ``parent`` narrow the count to the reservations that gate the
-    ceiling being checked: the subprocess cap only sees delegated reservations,
-    and a parent's fan-out budget only sees its own.
+    ``lane``, ``parent`` and ``provider`` narrow the count to the reservations
+    that gate the ceiling being checked: the subprocess cap only sees delegated
+    reservations, a parent's fan-out budget only sees its own, and a provider
+    org's throughput budget only sees dispatches bound to that provider row.
     """
     if not _PENDING_ADMISSIONS:
         return 0
@@ -351,6 +385,7 @@ def _pending_admission_count(
         for reservation in _PENDING_ADMISSIONS.values()
         if (lane is None or reservation.lane == lane)
         and (parent is None or reservation.parent == parent)
+        and (provider is None or reservation.provider == provider)
     )
 
 
@@ -369,6 +404,68 @@ def _live_worker_count_for_parent(parent_session_id: Optional[str]) -> int:
         return len(getattr(sup, "_LIVE", {}).get(parent_session_id, ()) or ())
     except Exception:  # noqa: BLE001 — a bookkeeping read, never fatal
         return 0
+
+
+def _live_worker_count_for_provider(provider_id: Optional[str]) -> int:
+    """Live workers anywhere on this box bound to ``provider_id``.
+
+    A provider row is a credential is an org quota, so this is deliberately
+    process-wide rather than per-session: two unrelated sessions fanning out on
+    the same key share one tokens-per-minute window, which is exactly how the
+    audited day put five workers into a 500k budget and lost four of them.
+    """
+    if not provider_id:
+        return 0
+    from app.core import provider_agent_supervisor as sup
+
+    count = 0
+    try:
+        for bucket in list(getattr(sup, "_LIVE", {}).values()):
+            for record in list(bucket.values()):
+                if (getattr(record, "provider_id", "") or None) == provider_id:
+                    count += 1
+    except Exception:  # noqa: BLE001 — a bookkeeping read, never fatal
+        logger.debug(
+            "task_dispatch: provider worker count failed for %s",
+            provider_id, exc_info=True,
+        )
+        return 0
+    return count
+
+
+def _provider_worker_limit() -> int:
+    """Concurrent workers allowed per provider org (0 = disabled)."""
+    try:
+        from app.core.config import settings
+
+        return int(getattr(settings, "task_worker_max_per_provider", 0) or 0)
+    except Exception:  # noqa: BLE001 — a missing setting must not gate dispatch
+        return 0
+
+
+def _sync_cap_seconds() -> float:
+    """Hard wall-clock cap for a synchronous Task, across attempts (0 = off)."""
+    try:
+        from app.core.config import settings
+
+        return max(
+            0.0, float(getattr(settings, "task_worker_sync_max_seconds", 0.0) or 0.0)
+        )
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _provider_queue_seconds() -> float:
+    """How long a dispatch queues on the provider-org ceiling before refusing."""
+    try:
+        from app.core.config import settings
+
+        return max(
+            0.0,
+            float(getattr(settings, "task_worker_provider_queue_seconds", 0.0) or 0.0),
+        )
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 def _worker_lane(provider_id: Optional[str], model_id: Optional[str]) -> str:
@@ -413,15 +510,18 @@ async def _reserve_admission(
     *,
     lane: str = DELEGATED_LANE,
     parent_session_id: Optional[str] = None,
+    provider_id: Optional[str] = None,
     wait_seconds: Optional[float] = None,
-) -> Optional[str]:
-    """Hold a slot for ``worker_session_id``, waiting briefly if needed.
+) -> Tuple[Optional[str], float]:
+    """Hold a slot for ``worker_session_id``, waiting if needed.
 
-    Returns ``None`` once the slot is reserved, or a caller-facing refusal
-    string if the box is still at a ceiling when the wait runs out. The wait is
-    what makes a fan-out behave: dispatches queue on the lock in arrival order
-    and take slots as siblings settle, so a transient cap costs seconds instead
-    of a false receipt.
+    Returns ``(None, waited_seconds)`` once the slot is reserved, or
+    ``(refusal, waited_seconds)`` if the box is still at a ceiling when the
+    wait runs out. The wait is what makes a fan-out behave: dispatches queue on
+    the lock in arrival order and take slots as siblings settle, so a transient
+    cap costs seconds instead of a false receipt. ``waited_seconds`` is how long
+    this dispatch spent queued — the caller reports a non-zero value to the
+    model so a slow dispatch reads as "queued", not as a mystery.
 
     Which ceilings apply depends on ``lane``:
 
@@ -433,9 +533,16 @@ async def _reserve_admission(
 
     The per-parent limit applies to BOTH lanes: a parent with that many workers
     already running is fanning out faster than it can use the answers, whatever
-    they cost.
+    they cost. So does the PROVIDER-ORG limit — see the block comment above
+    ``_Reservation``: session ceilings say nothing about a credential's
+    tokens-per-minute budget, and that budget is what actually killed workers.
+    A dispatch held only by the provider ceiling gets the much longer
+    ``task_worker_provider_queue_seconds`` budget, because a saturated TPM
+    window empties in about a minute and a sibling worker's turn is minutes —
+    "wait" is nearly always the right answer there, and refusing instead is how
+    a model learns to cap its own workers at three tool calls.
 
-    The refusal is deliberately a REAL error rather than a queued receipt. A
+    A refusal is deliberately a REAL error rather than a queued receipt. A
     receipt is a promise the parent will be woken, and nothing outside this
     process would keep that promise for a dispatch that never started — the
     registry row, the park gate and the completion wake are all armed inside
@@ -443,9 +550,15 @@ async def _reserve_admission(
     """
     from app.core import session_pool as pool_module
 
+    started = time.monotonic()
     budget = _ADMISSION_WAIT_SECONDS if wait_seconds is None else wait_seconds
-    deadline = time.monotonic() + max(0.0, float(budget))
+    budget = max(0.0, float(budget))
     fanout_limit = _fanout_limit()
+    provider_limit = _provider_worker_limit() if provider_id else 0
+    # A dispatch queued ONLY behind the provider org's throughput ceiling waits
+    # far longer than one queued behind a full box: the box does not empty on a
+    # timer, a token window does.
+    provider_budget = max(budget, _provider_queue_seconds()) if provider_limit else budget
     lock = _admission_lock()
     waited = False
     while True:
@@ -467,21 +580,46 @@ async def _reserve_admission(
                     parent_session_id
                 ) + _pending_admission_count(parent=parent_session_id)
                 over_fanout = siblings >= fanout_limit
-            if snapshot.refusal is None and not at_cap and not over_fanout:
+            on_provider = 0
+            over_provider = False
+            if provider_limit > 0:
+                on_provider = _live_worker_count_for_provider(
+                    provider_id
+                ) + _pending_admission_count(provider=provider_id)
+                over_provider = on_provider >= provider_limit
+            if (
+                snapshot.refusal is None
+                and not at_cap
+                and not over_fanout
+                and not over_provider
+            ):
                 _PENDING_ADMISSIONS[worker_session_id] = _Reservation(
                     expires=time.monotonic() + _ADMISSION_RESERVATION_SECONDS,
                     lane=lane,
                     parent=parent_session_id,
+                    provider=provider_id,
                 )
+                queued_for = time.monotonic() - started
                 if waited:
                     logger.info(
                         "task_dispatch: %s worker %s admitted after waiting "
-                        "(%d/%d subprocess sessions, %d reserved, %d sibling "
-                        "worker(s))",
-                        lane, worker_session_id, snapshot.delegated_in_pool,
-                        snapshot.hard_cap, pending, siblings,
+                        "%.1fs (%d/%d subprocess sessions, %d reserved, %d "
+                        "sibling worker(s), %d on provider %s)",
+                        lane, worker_session_id, queued_for,
+                        snapshot.delegated_in_pool, snapshot.hard_cap, pending,
+                        siblings, on_provider, provider_id,
                     )
-                return None
+                return None, queued_for
+            # The applicable deadline depends on WHICH ceiling is holding this
+            # dispatch: a box ceiling gets the short budget, a provider-org one
+            # the long queue budget.
+            only_provider = (
+                over_provider
+                and snapshot.refusal is None
+                and not at_cap
+                and not over_fanout
+            )
+            deadline_budget = provider_budget if only_provider else budget
             if snapshot.refusal is not None:
                 reason = snapshot.refusal
             elif at_cap:
@@ -490,24 +628,263 @@ async def _reserve_admission(
                     f"{snapshot.hard_cap} subprocess sessions) with {pending} "
                     "worker(s) already admitted and starting"
                 )
-            else:
+            elif over_fanout:
                 reason = (
                     f"{siblings} worker(s) already running for this session "
                     f"(limit {fanout_limit})"
                 )
-            if time.monotonic() >= deadline:
+            else:
+                reason = (
+                    f"{on_provider} worker(s) already running on this model "
+                    f"provider (limit {provider_limit}) — its token-per-minute "
+                    "budget is shared, so a sixth concurrent worker does not "
+                    "run faster, it fails"
+                )
+            if time.monotonic() - started >= deadline_budget:
                 logger.warning(
                     "task_dispatch: refusing %s dispatch %s at capacity — %s",
                     lane, worker_session_id, reason,
                 )
                 return (
                     f"Server is at capacity — {reason}. The worker was NOT "
-                    f"started (nothing freed in {max(0.0, float(budget)):.0f}s). "
-                    "Wait for a running worker to finish before dispatching "
-                    "another, or do this work yourself."
-                )
+                    f"started (it queued {deadline_budget:.0f}s and nothing "
+                    "freed). Wait for a running worker to finish before "
+                    "dispatching another, or do this work yourself."
+                ), time.monotonic() - started
         waited = True
         await asyncio.sleep(_ADMISSION_POLL_SECONDS)
+
+
+# ---------------------------------------------------------------------------
+# Automatic re-dispatch (2026-09-05 audit, A + C)
+# ---------------------------------------------------------------------------
+# A worker that forwarded ZERO frames never started: it died at or before
+# provider connect, so nothing it was asked to do has been done and re-running
+# the same brief costs exactly one worker. The audit found ten such deaths in
+# seven sessions — transport drops ("peer closed connection without sending
+# complete message body") and org TPM refusals ("Please try again in 1.049s") —
+# each reported ~900s late, each re-dispatched BY THE MODEL, by hand, from a
+# woken turn. Two of them were dispatched three times and executed once.
+#
+# So the harness re-dispatches instead. Deliberately narrow:
+#
+# * only a ZERO-FRAME failure. A worker that streamed anything did real work,
+#   and repeating real work is not free (nor idempotent — it may have edited
+#   files);
+# * only an ``error`` terminal. A ``killed`` one is a teardown or a Stop: the
+#   answer is the kill, not a retry;
+# * a transport start failure gets ONE retry (``task_worker_start_retries``);
+# * a CAPACITY refusal gets up to ``task_worker_rate_limit_retries``
+#   reschedules with backoff seeded from the provider's own retry-after, which
+#   is what "reschedule, do not terminate" means for a 429;
+# * a failure that will read identically on the tenth attempt — no credentials,
+#   no such provider, an unresolvable model — is never retried.
+#
+# Each attempt is its own worker session and its own visible task row, labelled
+# "· retry N", and only the attempt that SETTLES the dispatch spends a wake on
+# the parent (see ``dispatch_worker(suppress_caller_wake=...)``).
+
+#: Pause before re-dispatching a transport start failure. Short — the point is
+#: to let a dropped connection's socket state clear, not to wait anything out.
+_START_RETRY_BACKOFF_SECONDS = 2.0
+
+#: Fallback backoff when a capacity refusal carries no parseable retry-after.
+_RATE_RETRY_FALLBACK_SECONDS = 5.0
+
+#: Start failures a retry cannot change. Matched case-insensitively against the
+#: worker's error text; keep this list narrow — over-matching here silently
+#: turns the watchdog back off.
+_PERMANENT_START_FAILURES = (
+    "could not create",
+    "requires an explicit model",
+    "no credentials configured",
+    "needs to be reconnected",
+    "no longer exists",
+    "is disabled",
+    "did not finish within the",
+    "server is at capacity",
+)
+
+
+def _retry_kind(
+    status: str,
+    error_text: Optional[str],
+    frames_forwarded: int,
+    used: Dict[str, int],
+    *,
+    start_max: int,
+    rate_max: int,
+) -> Optional[str]:
+    """``"rate"``, ``"start"`` or ``None`` — how (and whether) to re-dispatch.
+
+    Pure, so ``dispatch_worker``'s in-``finally`` wake-suppression predicate and
+    the caller's post-return decision cannot disagree: both read the same
+    ``used`` counters, which only ever change between attempts.
+    """
+    from app.core import provider_agent
+
+    if status != "error" or frames_forwarded:
+        return None
+    text = error_text or ""
+    if provider_agent.looks_rate_limited(text):
+        return "rate" if used["rate"] < rate_max else None
+    lowered = text.lower()
+    if any(marker in lowered for marker in _PERMANENT_START_FAILURES):
+        return None
+    return "start" if used["start"] < start_max else None
+
+
+def _retry_backoff(kind: str, error_text: Optional[str], attempt: int, cap: float) -> float:
+    """How long to wait before the next attempt of ``kind``.
+
+    A capacity refusal starts from the provider's OWN retry-after — it knows
+    when its window rolls over and we do not — doubled per attempt so a
+    still-saturated org is not hammered, and clamped at ``cap``.
+    """
+    from app.core import provider_agent
+
+    if kind != "rate":
+        return _START_RETRY_BACKOFF_SECONDS
+    base = provider_agent.rate_limit_retry_after(error_text)
+    if base is None:
+        base = _RATE_RETRY_FALLBACK_SECONDS
+    return min(max(0.0, float(cap)), base * (2 ** max(0, attempt)) + 0.25)
+
+
+async def _dispatch_worker_with_retries(
+    *,
+    kwargs: Dict[str, Any],
+    background: bool,
+    lane: str,
+    provider_id: Optional[str],
+    parent_session_id: Optional[str],
+    dispatcher: Callable[..., Any],
+    overall_deadline: Optional[float] = None,
+):
+    """Run one Task dispatch, re-dispatching a worker that never started.
+
+    Returns the FINAL :class:`app.core.provider_agent.WorkerOutcome`. The first
+    attempt's reservation is already held by the caller; every later attempt
+    takes (and releases) its own.
+
+    ``dispatcher`` is ``provider_agent.dispatch_worker``, resolved by the CALLER
+    rather than looked up here: a background dispatch runs detached, and binding
+    the callable at dispatch time keeps every attempt on the same
+    implementation the call was made against.
+
+    ``overall_deadline`` is a ``time.monotonic()`` ceiling for the whole
+    sequence — the synchronous lane's hard cap, which must bound the retries
+    too or a "capacity, retrying" loop becomes exactly the unbounded block it
+    was added to prevent.
+    """
+    from app.core import provider_agent
+    from app.core.config import settings
+
+    start_max = (
+        int(getattr(settings, "task_worker_start_retries", 0) or 0)
+        if background
+        # A synchronous caller is LIVE: it can read the failure, decide, and
+        # re-dispatch in the background (which is what the audited model did,
+        # correctly, within one turn). Silently re-blocking its turn for
+        # another attempt is the opposite of what B asks for.
+        else 0
+    )
+    rate_max = int(getattr(settings, "task_worker_rate_limit_retries", 0) or 0)
+    backoff_cap = float(
+        getattr(settings, "task_worker_rate_limit_backoff_cap_seconds", 60.0) or 60.0
+    )
+    used: Dict[str, int] = {"start": 0, "rate": 0}
+    base_label = kwargs.get("label")
+    attempt_kwargs = dict(kwargs)
+    outcome = None
+
+    while True:
+        worker_id = attempt_kwargs["worker_session_id"]
+        if overall_deadline is not None:
+            remaining = overall_deadline - time.monotonic()
+            if remaining <= 0:
+                # Only reachable when the cap is already spent (a pathological
+                # setting, or a retry loop that used all of it). Never return
+                # ``None`` to a caller that is about to read ``.ok``.
+                return outcome or provider_agent.WorkerOutcome(
+                    ok=False,
+                    session_id=worker_id,
+                    error=(
+                        "The synchronous Task budget was exhausted before the "
+                        "worker could be started."
+                    ),
+                )
+            attempt_kwargs["max_wall_seconds"] = remaining
+
+        def _will_retry(
+            status: str, preview: Optional[str], frames: int
+        ) -> bool:
+            return _retry_kind(
+                status, preview, frames, used,
+                start_max=start_max, rate_max=rate_max,
+            ) is not None
+
+        try:
+            outcome = await dispatcher(
+                background=background,
+                suppress_caller_wake=_will_retry if background else None,
+                **attempt_kwargs,
+            )
+        finally:
+            _release_admission(worker_id)
+
+        status = (
+            "completed" if outcome.ok
+            else ("killed" if outcome.killed else "error")
+        )
+        kind = _retry_kind(
+            status, outcome.error, outcome.frames_forwarded, used,
+            start_max=start_max, rate_max=rate_max,
+        )
+        if kind is None:
+            return outcome
+
+        delay = _retry_backoff(kind, outcome.error, used[kind], backoff_cap)
+        used[kind] += 1
+        if overall_deadline is not None and (
+            time.monotonic() + delay >= overall_deadline
+        ):
+            return outcome
+        logger.warning(
+            "task_dispatch: worker %s never started (%s) — re-dispatching the "
+            "same brief in %.1fs (attempt %d)",
+            worker_id, kind, delay, used["start"] + used["rate"] + 1,
+        )
+        await asyncio.sleep(delay)
+
+        retry_worker_id = str(uuid.uuid4())
+        attempt_kwargs = dict(attempt_kwargs)
+        attempt_kwargs["worker_session_id"] = retry_worker_id
+        attempt_kwargs["label"] = (
+            f"{base_label} · retry {used['start'] + used['rate']}"
+            if base_label
+            else f"Task worker · retry {used['start'] + used['rate']}"
+        )
+        # A fresh card for a fresh worker: reusing the model's launch tool_use
+        # id would have the reducer absorb two workers into one placeholder.
+        attempt_kwargs["launch_tool_use_id"] = None
+        capacity_error, _queued = await _reserve_admission(
+            retry_worker_id,
+            lane=lane,
+            parent_session_id=parent_session_id,
+            provider_id=provider_id,
+        )
+        if capacity_error:
+            return provider_agent.WorkerOutcome(
+                ok=False,
+                session_id=outcome.session_id,
+                error=(
+                    f"{outcome.error or 'The worker failed to start.'} The "
+                    f"automatic re-dispatch could not be admitted: "
+                    f"{capacity_error}"
+                ),
+                frames_forwarded=outcome.frames_forwarded,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1055,8 +1432,11 @@ async def dispatch_task_tool(
     # subprocess, so the subprocess cap is not its ceiling) — resolving it can
     # read the provider row, so it runs off the loop.
     lane = await asyncio.to_thread(_worker_lane, effective_provider_id, model_id)
-    capacity_error = await _reserve_admission(
-        worker_id, lane=lane, parent_session_id=root_session_id
+    capacity_error, queued_seconds = await _reserve_admission(
+        worker_id,
+        lane=lane,
+        parent_session_id=root_session_id,
+        provider_id=effective_provider_id,
     )
     if capacity_error:
         return {
@@ -1068,13 +1448,21 @@ async def dispatch_task_tool(
 
     if mode == "background":
         task = asyncio.create_task(
-            provider_agent.dispatch_worker(background=True, **kwargs)
+            _dispatch_worker_with_retries(
+                kwargs=kwargs,
+                background=True,
+                lane=lane,
+                provider_id=effective_provider_id,
+                parent_session_id=root_session_id,
+                dispatcher=provider_agent.dispatch_worker,
+            )
         )
         _BACKGROUND_TASKS.add(task)
         task.add_done_callback(_BACKGROUND_TASKS.discard)
         # The reservation stops counting once the worker is pooled (or ages
         # out); this also frees it the moment a dispatch dies before it ever
-        # got that far.
+        # got that far. (The retry wrapper releases each attempt's own
+        # reservation; this is the belt for the first one.)
         task.add_done_callback(lambda _t, _w=worker_id: _release_admission(_w))
         registered = await _await_worker_registration(
             root_session_id, worker_id, task=task
@@ -1110,7 +1498,11 @@ async def dispatch_task_tool(
             "have genuinely disjoint work — you will be woken with the report "
             "when it completes. Never re-derive the worker's brief yourself; "
             "mcp__builtins__TaskList and mcp__builtins__TaskGet are for "
-            "explicit inspection, not polling."
+            "explicit inspection, not polling. Before fanning out on a bug the "
+            "user reported, resolve any ambiguity in their description that "
+            "would change this brief — ask them first; a worker sent on the "
+            "wrong premise returns a confident wrong answer, and you pay for "
+            "it twice."
         )
         background_payload: Dict[str, Any] = {
             "ok": True,
@@ -1121,6 +1513,17 @@ async def dispatch_task_tool(
             "worker_session_id": worker_id,
             "description": label,
         }
+        if queued_seconds >= 1.0:
+            # Visible capacity, not a mystery delay: the model asked for a
+            # worker and got one, after queueing behind this provider's own
+            # throughput ceiling. Saying so is what stops it from inventing
+            # workarounds (an audited model started capping its workers at
+            # three tool calls to dodge the failure this queue replaces).
+            background_payload["queued_seconds"] = round(queued_seconds, 1)
+            note = (
+                f"Queued {queued_seconds:.0f}s behind provider capacity before "
+                "starting — this is normal backpressure, not a failure. " + note
+            )
         if ignored_mode:
             background_payload["requested_mode_ignored"] = ignored_mode
             note = (
@@ -1131,8 +1534,26 @@ async def dispatch_task_tool(
         background_payload["note"] = note
         return background_payload
 
+    # A SYNC dispatch blocks the parent turn: it cannot park, cannot be steered
+    # and cannot be told the worker went quiet. Two audited sync Tasks held
+    # their parents for 15m03s and 19m28s on a provider connection that never
+    # opened, and both ended only because a human intervened. So this lane gets
+    # a hard wall-clock cap across every attempt (``dispatch_worker`` also
+    # applies the first-frame watchdog, which normally fires long before it),
+    # and it returns a worker-failed result the parent can act on.
+    sync_cap = _sync_cap_seconds()
     try:
-        outcome = await provider_agent.dispatch_worker(**kwargs)
+        outcome = await _dispatch_worker_with_retries(
+            kwargs=kwargs,
+            background=False,
+            lane=lane,
+            provider_id=effective_provider_id,
+            parent_session_id=root_session_id,
+            dispatcher=provider_agent.dispatch_worker,
+            overall_deadline=(
+                time.monotonic() + sync_cap if sync_cap > 0 else None
+            ),
+        )
     finally:
         # A sync worker holds its slot for as long as it runs, and the pool is
         # what counts that; the reservation only ever covered the gap before it
@@ -1145,6 +1566,8 @@ async def dispatch_task_tool(
         "model": model_id,
         "worker_session_id": outcome.session_id,
     }
+    if queued_seconds >= 1.0:
+        payload["queued_seconds"] = round(queued_seconds, 1)
     if outcome.ok:
         # Out-of-band delivery. A full report inline is up to MAX_REPORT_CHARS
         # of the parent's context spent before it knows whether it needs any of
@@ -1397,5 +1820,17 @@ def subagent_system_prompt(session_id: Optional[str]) -> Optional[str]:
         "result. Do not start a conversation with the user or take unrelated "
         "side work. Your final response is returned to the parent, so report "
         "concise accomplishments, findings, changed files, verification, and "
-        f"blockers. {nesting}"
+        "blockers.\n"
+        "YOU HAVE NO WAKE SEAM. Ending your turn ends you — there is no later "
+        "turn in which you report, and no one can read a Monitor or a "
+        "background task you leave running (those records are scoped to your "
+        "session, which stops existing). So finish the work inside this turn: "
+        "if you start a test run or a build, wait for it and report what it "
+        "actually said. Never end with 'X is running; I'll report when it "
+        "completes' — that sentence becomes your entire report, and the parent "
+        "will redo your work.\n"
+        "Lead your final response with ONE sentence stating the result — what "
+        "is now true, or what you found. That line is what the parent sees in "
+        "its task list, so a heading, a title, or 'I'll start by…' there tells "
+        f"it nothing. {nesting}"
     )
