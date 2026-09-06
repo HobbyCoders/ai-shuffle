@@ -115,7 +115,10 @@ export async function runNavigate(
   // snapshot: a login form, a canvas fixture and a prose page all have few or
   // no refs while being perfectly rendered.
   const content = await session.pageContent();
-  const warning = contentWarning(content, snap.refs.length);
+  // The title comes from Playwright, which does not depend on a page eval
+  // succeeding; only the body measurement does.
+  const title = await page.title().catch(() => content.title);
+  const warning = contentWarning({ ...content, title }, snap.refs.length);
   const landed = page.url();
   const requestedOrigin =
     target === "back" || target === "forward"
@@ -136,7 +139,7 @@ export async function runNavigate(
     {
       ok: true,
       url: landed,
-      title: content.title,
+      title,
       snapshot_id: snap.snapshot_id,
       ref_count: snap.refs.length,
       truncated: snap.truncated,
