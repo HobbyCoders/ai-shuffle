@@ -141,6 +141,40 @@ def _runtime_env(*, pump, bg_work=None, bg_launches=None, patch_idle=True):
 
 # ---------------------------------------------------------------------------
 # 1. Mandatory lease
+
+@pytest.mark.parametrize("phase", ["start", "done", "close", "timer"])
+@pytest.mark.parametrize("background", [False, True])
+async def test_recording_failure_aborts_and_cleans_up(mock_db, phase, background):
+    turn = turns_db.enqueue_turn("recording-failure", "user", prompt="hello")
+    holder = {}
+
+    async def pump(**kwargs):
+        if phase == "timer":
+            asyncio.get_running_loop().call_soon(holder["runtime"]._on_recorder_recording_failed)
+            await asyncio.Event().wait()
+        yield {"type": "done", "metadata": {}}
+
+    with _runtime_env(pump=pump, bg_work=[{"id": "task"}] if background else []) as env:
+        rt = session_runtime.SessionRuntime(turn)
+        holder["runtime"] = rt
+        async def fail(*args, **kwargs):
+            rt._on_recorder_recording_failed()
+            await asyncio.sleep(0)  # A self-cancel would interrupt cleanup here.
+        if phase != "timer":
+            method = {"start": "start", "done": "on_event", "close": "close"}[phase]
+            getattr(env["recorder"], method).side_effect = fail
+        with patch("app.core.query_session_lifecycle.interrupt_session", new=AsyncMock()) as interrupt:
+            await asyncio.wait_for(rt.execute(), 2)
+            await asyncio.sleep(0)
+            interrupt.assert_awaited_once_with(turn["session_id"])
+        assert rt._abort_reason == "recording_failed"
+        assert turns_db.get_turn(turn["id"])["state"] == "aborted"
+        env["recorder"].close.assert_awaited_once()
+        assert all(call.args[1].get("type") != "done" for call in env["broadcaster"].await_args_list)
+        env["start_idle"].assert_not_called()
+        assert rt._pump_task is None
+        assert session_runtime.get_live_runtime(turn["session_id"]) is None
+
 # ---------------------------------------------------------------------------
 
 async def test_execute_requires_run_claim(mock_db):
@@ -1107,6 +1141,59 @@ async def test_task_notification_receipt_settles_the_card_and_latches(mock_db):
     recorder.record_task_terminal.assert_awaited_once_with(frames)
     delivered.assert_called_once_with("sn3", ["bg-1"])
     assert rt._task_steers == {}
+
+
+async def test_failed_task_receipt_remains_recoverable(mock_db):
+    frames = _notification_frames()
+    rt = session_runtime.SessionRuntime(
+        {"session_id": "failed-task", "id": "failed-task-turn", "source": "user"}
+    )
+    entry = {"frames": frames, "task_ids": ["bg-1"]}
+    rt._task_steers["task-notify:failed"] = entry
+    recorder = _recorder_mock()
+    recorder.recording_failed = False
+
+    async def fail_recording(_frames):
+        recorder.recording_failed = True
+        rt._on_recorder_recording_failed()
+        return 0
+
+    recorder.record_task_terminal.side_effect = fail_recording
+    with patch("app.core.query_session_lifecycle.interrupt_session", new_callable=AsyncMock), \
+         patch("app.core.turn_scheduler.retire_task_terminals", new_callable=AsyncMock) as retire, \
+         patch("app.core.turn_scheduler.on_task_notification_delivered") as delivered, \
+         patch("app.core.turn_scheduler.on_task_notification_stranded", new_callable=AsyncMock) as stranded:
+        await rt._on_steer_delivered(recorder, {"steers": [{"id": "task-notify:failed"}]})
+        assert rt._abort_reason == "recording_failed"
+        assert rt._task_steers == {"task-notify:failed": entry}
+        retire.assert_not_awaited()
+        delivered.assert_not_called()
+        await rt._strand_task_steers()
+        stranded.assert_awaited_once_with("failed-task", frames, ["bg-1"])
+        await asyncio.sleep(0)
+
+
+async def test_failed_user_receipt_keeps_queue_without_legacy_duplicate(mock_db):
+    row = turns_db.enqueue_turn("failed-user", "user", prompt="follow-up")
+    rt = session_runtime.SessionRuntime(
+        {"session_id": "failed-user", "id": "failed-user-turn", "source": "user"}
+    )
+    recorder = _recorder_mock()
+
+    async def fail_recording(*args, **kwargs):
+        rt._on_recorder_recording_failed()
+        return False
+
+    recorder.record_steered_user_message = AsyncMock(side_effect=fail_recording)
+    with patch("app.core.query_session_lifecycle.interrupt_session", new_callable=AsyncMock), \
+         patch.object(rt, "_persist_user_message", new_callable=AsyncMock) as persist, \
+         patch.object(rt, "_absorb_delivered_row", new_callable=AsyncMock) as absorb:
+        await rt._on_steer_delivered(recorder, {"steers": [{"id": row["id"]}]})
+        assert rt._abort_reason == "recording_failed"
+        assert turns_db.get_turn(row["id"])["state"] == "queued"
+        persist.assert_not_awaited()
+        absorb.assert_not_awaited()
+        await asyncio.sleep(0)
 
 
 async def test_undelivered_task_notification_is_handed_back_at_finalize(mock_db):

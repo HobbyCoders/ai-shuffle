@@ -655,6 +655,7 @@ class SessionRuntime:
         self._drain_after_cancel = False
         # stop_reason override for an escalation-forced abort.
         self._abort_reason: Optional[str] = None
+        self._recorder_closing = False
         # Queued turn ids already handed to the engine as steers THIS turn.
         # ``try_steer_pending`` fires once per send, so without this a message
         # still awaiting its receipt would be submitted again by the next send.
@@ -946,6 +947,7 @@ class SessionRuntime:
             # recorder goes silent and this hook stops the pump we are still
             # driving (same cancel path as interrupt escalation).
             recorder.on_superseded = self._on_recorder_superseded
+            recorder.on_recording_failed = self._on_recorder_recording_failed
 
             # 6/7. Pump under the reader token, then ALWAYS finalize. A pump
             #    crash is absorbed (``_terminal`` stays ``None`` → finalize
@@ -1099,46 +1101,53 @@ class SessionRuntime:
             and (self.turn.get("payload") or {}).get("deferred_user_record")
         ):
             await self._persist_user_message(prompt)
-        await recorder.start(
-            prompt,
-            profile_id=self.turn.get("profile_id"),
-            record_user=not resume and not already_recorded,
-        )
-        if completion_frames:
-            # The wake turn is the claimed completions' delivery point, so this
-            # is where the event log — and with it the frontend card — learns
-            # the task is done. A task that finished BETWEEN turns produces no
-            # terminal frame inside this turn's stream, and the frontend no
-            # longer force-settles background shells at turn end (#991), so
-            # without this append the card runs forever.
-            try:
-                await recorder.record_task_terminal(completion_frames)
-            except Exception:  # noqa: BLE001 — a card badge never kills a turn
-                logger.warning(
-                    "SessionRuntime: recording terminal task events failed for "
-                    "%s (%d frame(s))",
-                    self.session_id, len(completion_frames), exc_info=True,
-                )
-            # This wake turn IS the delivery of those completions, so it is also
-            # where ``terminal_notified`` becomes true — the steered mid-turn
-            # path latches it at its own delivery receipt. Without this the flag
-            # stayed False forever for every clean completion (only the
-            # error/killed chip in ``complete_task`` ever set it).
-            try:
-                from app.core import turn_scheduler
-
-                turn_scheduler.on_task_notification_delivered(
-                    self.session_id,
-                    (self.turn.get("payload") or {}).get("task_ids")
-                    or [f.get("task_id") for f in completion_frames
-                        if isinstance(f, dict)],
-                )
-            except Exception:  # noqa: BLE001 — bookkeeping never kills a turn
-                logger.warning(
-                    "SessionRuntime: terminal_notified latch failed for %s",
-                    self.session_id, exc_info=True,
-                )
+        done_event = None
         try:
+            await recorder.start(
+                prompt,
+                profile_id=self.turn.get("profile_id"),
+                record_user=not resume and not already_recorded,
+            )
+            if self._abort_reason == "recording_failed":
+                return
+            if completion_frames:
+                # The wake turn is the claimed completions' delivery point, so this
+                # is where the event log — and with it the frontend card — learns
+                # the task is done. A task that finished BETWEEN turns produces no
+                # terminal frame inside this turn's stream, and the frontend no
+                # longer force-settles background shells at turn end (#991), so
+                # without this append the card runs forever.
+                try:
+                    await recorder.record_task_terminal(completion_frames)
+                    if self._abort_reason == "recording_failed":
+                        return
+                except Exception:  # noqa: BLE001 — a card badge never kills a turn
+                    logger.warning(
+                        "SessionRuntime: recording terminal task events failed for "
+                        "%s (%d frame(s))",
+                        self.session_id, len(completion_frames), exc_info=True,
+                    )
+                # This wake turn IS the delivery of those completions, so it is also
+                # where ``terminal_notified`` becomes true — the steered mid-turn
+                # path latches it at its own delivery receipt. Without this the flag
+                # stayed False forever for every clean completion (only the
+                # error/killed chip in ``complete_task`` ever set it).
+                try:
+                    from app.core import turn_scheduler
+
+                    turn_scheduler.on_task_notification_delivered(
+                        self.session_id,
+                        (self.turn.get("payload") or {}).get("task_ids")
+                        or [f.get("task_id") for f in completion_frames
+                            if isinstance(f, dict)],
+                    )
+                except Exception:  # noqa: BLE001 — bookkeeping never kills a turn
+                    logger.warning(
+                        "SessionRuntime: terminal_notified latch failed for %s",
+                        self.session_id, exc_info=True,
+                    )
+            if self._abort_reason == "recording_failed":
+                return
             async for event in _stream_to_websocket_impl(
                 prompt=engine_prompt,
                 resume=resume,
@@ -1181,6 +1190,8 @@ class SessionRuntime:
                     # be folded in rather than run as a second turn.
                     self._sweep_start_window_steers()
                 await recorder.on_event(event)
+                if self._abort_reason == "recording_failed":
+                    return
                 if etype in ("done", "interrupted", "error"):
                     self._terminal = etype
                     if etype == "error":
@@ -1202,9 +1213,15 @@ class SessionRuntime:
                         # WS consumer reads (copies rather than mutating, so the
                         # recorder's already-handed-over dict is untouched).
                         ws_event = _cap_ws_tool_input(event)
-                    await self._broadcast(ws_event)
+                    if etype == "done":
+                        done_event = ws_event
+                    else:
+                        await self._broadcast(ws_event)
         finally:
+            self._recorder_closing = True
             await recorder.close()
+        if done_event is not None and self._abort_reason != "recording_failed":
+            await self._broadcast(done_event)
 
     # ------------------------------------------------------------------
     # progress watchdog — a turn that goes completely silent is terminalized
@@ -1654,9 +1671,12 @@ class SessionRuntime:
                 # where the event log learns the task is done — the same
                 # ``task.updated`` append the wake turn makes, so the frontend
                 # card settles mid-turn instead of running forever (#991).
-                await self._on_task_notification_delivered(
-                    recorder, self._task_steers.pop(row_id)
+                delivered = await self._on_task_notification_delivered(
+                    recorder, self._task_steers[row_id]
                 )
+                if not delivered:
+                    return
+                self._task_steers.pop(row_id, None)
                 continue
             try:
                 row = await asyncio.to_thread(turns_db.get_turn, row_id)
@@ -1690,12 +1710,14 @@ class SessionRuntime:
                 continue
             content = row.get("prompt") or steer.get("text") or ""
             profile_id = row.get("profile_id") or self.turn.get("profile_id")
-            await self._persist_user_message(content, profile_id=profile_id)
-            await recorder.record_steered_user_message(
+            recorded = await recorder.record_steered_user_message(
                 content,
                 profile_id=profile_id,
                 command_id=row.get("command_id"),
             )
+            if not recorded:
+                return
+            await self._persist_user_message(content, profile_id=profile_id)
             if await self._absorb_delivered_row(row_id):
                 absorbed = True
                 # Remember WHEN this turn swallowed the row, and the row
@@ -1710,7 +1732,7 @@ class SessionRuntime:
 
     async def _on_task_notification_delivered(
         self, recorder: TurnRecorder, entry: Dict[str, Any]
-    ) -> None:
+    ) -> bool:
         """Close out one steered ``<task-notification>`` fluid just delivered.
 
         Three effects, all best-effort and none allowed to disturb the pump:
@@ -1734,6 +1756,8 @@ class SessionRuntime:
         if frames:
             try:
                 await recorder.record_task_terminal(frames)
+                if recorder.recording_failed is True or self._abort_reason == "recording_failed":
+                    return False
             except Exception:  # noqa: BLE001 — a card badge never kills a turn
                 logger.warning(
                     "SessionRuntime: recording steered terminal task events "
@@ -1750,6 +1774,7 @@ class SessionRuntime:
                 "SessionRuntime: task-notification delivery callback failed "
                 "for %s", self.session_id, exc_info=True,
             )
+        return True
 
     async def _strand_task_steers(self) -> None:
         """Hand back every task notification this turn swallowed undelivered.
@@ -2057,7 +2082,12 @@ class SessionRuntime:
         # nothing — the stuck-parked shape the launch-set arm was narrowed to
         # avoid. The unresolved-LAUNCH arm still parks with an empty list on
         # purpose: that is the launched-but-not-yet-registered race.
-        if task_ids or has_unresolved_launches:
+        # A turn aborted because recording failed (#1124) never parks: the
+        # transcript is holed and the row must settle, not wait on work.
+        if (
+            (task_ids or has_unresolved_launches)
+            and self._abort_reason != "recording_failed"
+        ):
             parked = None
             try:
                 parked = await asyncio.to_thread(turns_db.park_turn, tid, task_ids)
@@ -2074,8 +2104,10 @@ class SessionRuntime:
             start_idle_reader(sid)
             return "parked", parked is not None
 
-        if self._terminal in ("interrupted", "error") or self._terminal is None:
-            stop_reason = self._terminal or self._abort_reason or "crash"
+        if (self._abort_reason == "recording_failed"
+                or self._terminal in ("interrupted", "error") or self._terminal is None):
+            stop_reason = ("recording_failed" if self._abort_reason == "recording_failed"
+                           else self._terminal or self._abort_reason or "crash")
             settled = None
             try:
                 # Record the pump's error text on the row (an 'error' terminal
@@ -2374,6 +2406,24 @@ class SessionRuntime:
         self._drain_after_cancel = True
         self._cancel_pump()
         return "draining"
+
+    def _on_recorder_recording_failed(self) -> None:
+        """Stop generation without cancelling the task doing recorder cleanup."""
+        if self._abort_reason == "recording_failed":
+            return
+        self._abort_reason = "recording_failed"
+        self._drain_after_cancel = False
+        task = self._pump_task
+        if not self._recorder_closing and task is not asyncio.current_task():
+            self._cancel_pump()
+        try:
+            from app.core.query_session_lifecycle import interrupt_session
+
+            interrupt = asyncio.get_running_loop().create_task(interrupt_session(self.session_id))
+            interrupt.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        except Exception:
+            logger.debug("SessionRuntime: interrupt after recording failure failed for %s",
+                         self.session_id, exc_info=True)
 
     def _on_recorder_superseded(self) -> None:
         """The run lease moved to another runner mid-turn (fence violation).

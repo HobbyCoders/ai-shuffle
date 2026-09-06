@@ -251,17 +251,15 @@ class Settings(BaseSettings):
     postgres_password: Optional[str] = None
     postgres_db: str = "ai_shuffle"
     database_url: Optional[str] = None
-    db_pool_min: int = 2  # Min connections in PostgreSQL pool
-    db_pool_max: int = 32  # Max connections in PostgreSQL pool
-    # Headroom note: the rate-limit middleware does a synchronous DB auth
-    # lookup on every HTTP request, multiple devices poll /live, and several
-    # thread pools draw on this one pool concurrently (asyncio's default
-    # executor is capped at 32 threads, anyio's sync-dependency pool at 40,
-    # the git pool at 4), so a burst of concurrent requests can need many
-    # slots at once. The old max of 20 was below that concurrency and a
-    # transient overlap produced hard "connection pool exhausted" 500s. 32 is
-    # still well within a default Postgres max_connections=100 even with a
-    # second install sharing the same database (2×32 = 64 leaves headroom).
+    db_pool_min: int = 2  # Connections opened at startup
+    db_pool_max: int = 32  # Pool limit; healthy burst connections stay open for reuse
+    # Several thread pools share this pool: the asyncio default executor,
+    # AnyIO sync dependencies, and Git workers. Agents borrow connections for
+    # short operations rather than holding one for their entire turn.
+    # Budget db_pool_max plus one dedicated listener for EVERY app process
+    # across all installs against the server's actual max_connections, minus
+    # reserved slots and headroom for other clients. Agent count alone is not
+    # a reason to raise this limit.
 
     # Instance identity — isolates projects, sessions, and workspace path
     # when multiple deployments share the same database.

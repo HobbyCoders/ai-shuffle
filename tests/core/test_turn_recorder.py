@@ -37,6 +37,64 @@ from app.db import sessions as sessions_db
 
 SID = "sess-v2"
 
+@pytest.mark.parametrize("phase", ["start", "timer", "done", "close", "usage"])
+@pytest.mark.parametrize("callback_raises", [False, True])
+async def test_recording_failure_latches_without_retry(mock_db, monkeypatch, phase, callback_raises):
+    from unittest.mock import Mock
+
+    _mk_session()
+    rec = await _recorder()
+    if phase != "start":
+        await rec.start("hello")
+    if phase in ("timer", "close"):
+        await rec.on_event({"type": "stream_delta", "delta_type": "text", "content": "pending"})
+    if phase == "usage":
+        await rec.on_event({"type": "done", "metadata": {}})
+        rec._pending_usage = {"tokens_in": 10}
+    callback = Mock(side_effect=RuntimeError("owner failed") if callback_raises else None)
+    rec.on_recording_failed = callback
+    append = Mock(side_effect=RuntimeError("commit outcome unknown"))
+    monkeypatch.setattr(se, "append_events", append)
+    if phase == "start":
+        await rec.start("hello")
+    elif phase == "timer":
+        await asyncio.wait_for(rec._flush_task, 1)
+    elif phase == "done":
+        await rec.on_event({"type": "done", "metadata": {}})
+    else:
+        await rec.close()
+    assert rec.recording_failed
+    for _ in range(100):
+        await rec.on_event({"type": "stream_delta", "delta_type": "text", "content": "ignored"})
+        await rec.on_event({"type": "turn_usage", "usage": {"tokens_in": 20}})
+    assert not await rec.record_steered_user_message("ignored")
+    assert await rec.record_task_terminal([{"task_id": "task", "status": "completed"}]) == 0
+    await rec.record_empty_turn_discard()
+    await rec.start("ignored")
+    await rec.close()
+    await rec.close()
+    assert append.call_count == 1
+    callback.assert_called_once_with()
+    assert not rec._delta_buffers
+    assert rec._pending_usage is None
+    assert rec._flush_task is None
+    assert rec._renew_task is None
+    assert rec.recording_failed_dropped > 0
+    if phase != "usage":
+        assert "turn.completed" not in _types()
+
+
+async def test_task_terminal_failed_append_returns_zero(mock_db, monkeypatch):
+    from unittest.mock import Mock
+
+    _mk_session()
+    rec = await _recorder()
+    monkeypatch.setattr(se, "append_events", Mock(side_effect=RuntimeError("unavailable")))
+    assert await rec.record_task_terminal([{"task_id": "task", "status": "completed"}]) == 0
+    assert rec.recording_failed
+    await rec.close()
+
+
 
 def _mk_session(session_id: str = SID, v2: bool = True) -> None:
     # `v2` is vestigial — create_session always stamps v2_stream TRUE now.
