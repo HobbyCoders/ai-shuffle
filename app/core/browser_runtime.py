@@ -9,6 +9,7 @@ import asyncio
 import copy
 import json
 import logging
+import os
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -57,8 +58,6 @@ _MCP_TIMEOUT_SLACK = 10.0
 
 def call_timeout():
     """Seconds one browser tool call may take, from BROWSER_TOOL_TIMEOUT_SECONDS."""
-    import os
-
     try:
         value = float(os.environ.get("BROWSER_TOOL_TIMEOUT_SECONDS", ""))
     except (TypeError, ValueError):
