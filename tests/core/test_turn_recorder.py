@@ -1469,6 +1469,55 @@ async def test_record_voice_exchange_does_not_retitle_a_named_session(mock_db):
     assert sessions_db.get_session(SID)["title"] == "Release prep"
 
 
+async def test_record_voice_exchange_stores_a_bridge_note_as_system(mock_db):
+    # A backend-injected note ("[call started]", "[agent update]") is not the
+    # user's words: it persists as a tagged ``system`` row so it cannot title
+    # the session or come back as history on the next call.
+    sessions_db.create_session(SID, "default", title=tr.VOICE_PLACEHOLDER_TITLE)
+    await tr.record_voice_exchange(
+        SID, None, "Welcome back — we were on the release checklist.",
+        system_text="[call started] The user just joined the call.",
+    )
+
+    rows = _rows()
+    assert [r["event_type"] for r in rows] == [
+        "turn.started", "message.user", "message.assistant", "turn.completed",
+    ]
+    assert rows[1]["payload"]["source"] == tr.VOICE_SYSTEM_NOTE_SOURCE
+
+    messages = sessions_db.get_session_messages(SID)
+    assert [(m["role"], m["content"]) for m in messages] == [
+        ("system", "[call started] The user just joined the call."),
+        ("assistant", "Welcome back — we were on the release checklist."),
+    ]
+    assert messages[0]["metadata"] == {"source": tr.VOICE_SYSTEM_NOTE_SOURCE}
+    assert sessions_db.get_session(SID)["title"] == tr.VOICE_PLACEHOLDER_TITLE
+
+
+async def test_record_voice_exchange_never_titles_from_a_machine_note(mock_db):
+    # Belt-and-braces: both audited voice sessions were titled "[call started]
+    # The user just joined the call…" because the greeting reached the title
+    # deriver as user text.
+    sessions_db.create_session(SID, "default", title=tr.VOICE_PLACEHOLDER_TITLE)
+    await tr.record_voice_exchange(
+        SID, "[call started] The user just joined the call.", "hello",
+    )
+    assert sessions_db.get_session(SID)["title"] == tr.VOICE_PLACEHOLDER_TITLE
+
+
+async def test_record_voice_exchange_writes_a_note_only_exchange(mock_db):
+    _mk_session()
+    turn_id = await tr.record_voice_exchange(
+        SID, None, None, system_text="[agent update] Worker 'x' finished.",
+    )
+    assert turn_id is not None
+    # The assistant event is unconditional (same as a user-only exchange).
+    assert _types() == [
+        "turn.started", "message.user", "message.assistant", "turn.completed",
+    ]
+    assert _rows()[1]["payload"]["source"] == tr.VOICE_SYSTEM_NOTE_SOURCE
+
+
 async def test_record_voice_exchange_never_raises(mock_db, monkeypatch):
     _mk_session()
 

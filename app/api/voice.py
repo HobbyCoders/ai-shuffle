@@ -1118,6 +1118,20 @@ async def hangup_voice_call(
     await _require_voice_session(session_id)
     _forget_client_secret(session_id)
     stopped = await voice_bridge.registry.detach(session_id)
+
+    # Creation stamps ``is_active`` True and, until this, nothing in the voice
+    # lane ever wrote it back — so every finished call left a session card that
+    # looked live forever. Unconditional: the bridge clears it when there IS one
+    # to stop, and a hangup after the sideband already dropped is exactly the
+    # case that needs the write here.
+    try:
+        await run_sync(database.set_session_active, session_id, False)
+    except Exception:  # noqa: BLE001 — ending a call must always succeed
+        logger.warning(
+            "Voice: could not clear is_active for session %s", session_id,
+            exc_info=True,
+        )
+
     logger.info(
         "Voice: hangup for session %s (%s)",
         session_id, "bridge stopped" if stopped else "no live bridge",
