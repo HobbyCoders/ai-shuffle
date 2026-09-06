@@ -249,7 +249,20 @@ def kick(session_id: str) -> None:
 
 
 def _kick_done(task: asyncio.Task) -> None:
+    """Drop the strong ref and RETRIEVE the task's exception.
+
+    The retrieval has to happen HERE, on the done callback, not at creation
+    time: a task that was created a statement ago is always pending, and
+    ``Task.exception()`` on a pending task raises ``InvalidStateError`` rather
+    than returning None. Reading it once the task is done is what clears
+    asyncio's "exception was never retrieved" traceback at GC.
+    """
     _kick_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("turn_scheduler: kick task failed: %r", exc)
 
 
 # How long a freshly-enqueued unpark wake waits before it is kicked.
@@ -303,9 +316,12 @@ def _kick_after_batch_window(session_id: str) -> None:
     task = loop.create_task(_kick_when_closed())
     _batch_kick_tasks[session_id] = task
     _kick_tasks.add(task)
+    # NEVER read task.exception() here: the task was created one line ago and
+    # is always PENDING, so the read raises InvalidStateError — which aborted
+    # on_task_terminal at this statement on every single background-task
+    # completion in production (round-6 regression, PR #1093). The retrieval
+    # this line was reaching for is what _kick_done does once the task is done.
     task.add_done_callback(_kick_done)
-    if not task.cancelled():
-        task.exception()  # retrieve, so a failed kick never logs as un-awaited
 
 
 async def _kick_impl(session_id: str) -> None:

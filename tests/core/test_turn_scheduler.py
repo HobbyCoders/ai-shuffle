@@ -1963,3 +1963,49 @@ async def test_delivery_latches_terminal_notified(mock_db):
 
     # The one-shot latch is spent: a second delivery cannot claim it again.
     assert task_registry.mark_terminal_notified("mt7", "task-mt7") is False
+
+
+# ---------------------------------------------------------------------------
+# Round-6 regression: the batch-window kick must not read a pending task's
+# exception (InvalidStateError aborted on_task_terminal on EVERY completion)
+# ---------------------------------------------------------------------------
+
+async def test_batch_window_kick_does_not_touch_a_pending_tasks_exception():
+    """``_kick_after_batch_window`` used to call ``task.exception()`` on the task
+    it had just created. A task created a statement ago is always PENDING, so
+    the read raised ``InvalidStateError`` — every single time."""
+    turn_scheduler._batch_kick_tasks.pop("bw1", None)
+    try:
+        turn_scheduler._kick_after_batch_window("bw1")  # must not raise
+        task = turn_scheduler._batch_kick_tasks.get("bw1")
+        assert task is not None and not task.done()
+    finally:
+        task = turn_scheduler._batch_kick_tasks.pop("bw1", None)
+        if task is not None:
+            task.cancel()
+            turn_scheduler._kick_tasks.discard(task)
+
+
+async def test_on_task_terminal_completes_without_a_failure_warning(mock_db, caplog):
+    """End-to-end shape of the same regression: the wake enqueue is followed by
+    the batch-window kick, and ``on_task_terminal`` must return normally instead
+    of falling into its blanket ``except`` and logging
+    ``on_task_terminal failed``."""
+    live = turns_db.enqueue_turn("bw2", "user", prompt="working")
+    turns_db.start_turn(live["id"], None, "runner")
+    _own_agent_task("bw2", "task-bw2")
+    frame = _terminal_frame("task-bw2", "child report")
+
+    with caplog.at_level(logging.WARNING, logger="app.core.turn_scheduler"):
+        with ExitStack() as stack:
+            stack.enter_context(_patch_execute())
+            stack.enter_context(patch(
+                "app.core.query_engine._read_task_output_file", return_value="",
+            ))
+            await turn_scheduler.on_task_terminal("bw2", frame)
+            await _drain_kicks()
+
+    assert "on_task_terminal failed" not in caplog.text
+    assert "InvalidStateError" not in caplog.text
+    (wake,) = _by_source("bw2", "unpark")
+    assert wake["payload"]["task_ids"] == ["task-bw2"]
