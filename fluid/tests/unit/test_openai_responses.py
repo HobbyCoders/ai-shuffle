@@ -558,6 +558,107 @@ def test_request_body_carries_the_output_ceiling() -> None:
     assert "max_output_tokens" not in build_request_body(request)
 
 
+# ─── consecutive text blocks: separated, never empty ─────────────────────
+
+
+def _status_stub_events(fragments, *, empty_first=False):
+    """The recorded gpt-6-astra shape: one message item per status fragment."""
+    events = [("response.created", {"response": {"id": "resp_1"}})]
+    if empty_first:
+        events += [
+            ("response.output_item.added", {"item": {"id": "msg_0", "type": "message"}}),
+            ("response.output_item.done",
+             {"item": {"id": "msg_0", "type": "message", "content": []}}),
+        ]
+    for n, fragment in enumerate(fragments, start=1):
+        item = {"id": f"msg_{n}", "type": "message"}
+        events += [
+            ("response.output_item.added", {"item": item}),
+            ("response.output_text.delta", {"item_id": item["id"], "delta": fragment}),
+            ("response.output_item.done", {"item": item}),
+        ]
+    events.append(("response.completed", {"response": {
+        "id": "resp_1", "status": "completed",
+        "usage": {"input_tokens": 10, "output_tokens": 8},
+    }}))
+    return events
+
+
+def _text_of(chunks) -> str:
+    return "".join(c.payload["text"] for c in chunks if c.kind == "text_delta")
+
+
+def test_consecutive_text_blocks_are_separated_by_a_blank_line() -> None:
+    # Recorded: a turn of per-batch status lines arrived as one run-on,
+    # "**Stopping local servers****Waiting for local test**".
+    chunks = _consume_all(_status_stub_events([
+        "**Stopping local servers**",
+        "**Waiting for local test**",
+        "**Waiting for agent review**",
+    ]))
+    assert _text_of(chunks) == (
+        "**Stopping local servers**\n\n"
+        "**Waiting for local test**\n\n"
+        "**Waiting for agent review**"
+    )
+
+
+def test_a_message_item_that_streams_nothing_leaves_no_block() -> None:
+    chunks = _consume_all(
+        _status_stub_events(["**Waiting for agent results**"], empty_first=True)
+    )
+    starts = [c for c in chunks if c.kind == "block_start"]
+    assert [s.payload["block_type"] for s in starts] == ["text"]
+    assert [c.kind for c in chunks].count("block_stop") == 1
+    assert _text_of(chunks) == "**Waiting for agent results**"
+
+
+def test_text_that_already_ends_in_newlines_is_not_padded_further() -> None:
+    chunks = _consume_all(_status_stub_events(["one\n", "two\n\n", "three"]))
+    assert _text_of(chunks) == "one\n\ntwo\n\nthree"
+
+
+def test_a_block_between_two_texts_leaves_them_as_the_model_wrote_them() -> None:
+    # A tool call already separates the message items around it.
+    chunks = _consume_all([
+        ("response.created", {"response": {"id": "resp_1"}}),
+        ("response.output_item.added", {"item": {"id": "msg_1", "type": "message"}}),
+        ("response.output_text.delta", {"item_id": "msg_1", "delta": "before"}),
+        ("response.output_item.done", {"item": {"id": "msg_1", "type": "message"}}),
+        ("response.output_item.added", {"item": {
+            "id": "fc_1", "type": "function_call",
+            "name": "get_weather", "call_id": "call_1",
+        }}),
+        ("response.function_call_arguments.delta", {"item_id": "fc_1", "delta": "{}"}),
+        ("response.output_item.done", {"item": {
+            "id": "fc_1", "type": "function_call", "name": "get_weather",
+            "call_id": "call_1", "arguments": "{}",
+        }}),
+        ("response.output_item.added", {"item": {"id": "msg_2", "type": "message"}}),
+        ("response.output_text.delta", {"item_id": "msg_2", "delta": "after"}),
+        ("response.output_item.done", {"item": {"id": "msg_2", "type": "message"}}),
+        ("response.completed", {"response": {"id": "resp_1", "status": "completed"}}),
+    ])
+    assert [c.payload["text"] for c in chunks if c.kind == "text_delta"] == [
+        "before", "after",
+    ]
+
+
+def test_text_carried_only_by_the_done_item_is_still_delivered() -> None:
+    # Dropping an empty text block must not drop a message that never streamed.
+    chunks = _consume_all([
+        ("response.created", {"response": {"id": "resp_1"}}),
+        ("response.output_item.added", {"item": {"id": "msg_1", "type": "message"}}),
+        ("response.output_item.done", {"item": {
+            "id": "msg_1", "type": "message",
+            "content": [{"type": "output_text", "text": "the whole answer"}],
+        }}),
+        ("response.completed", {"response": {"id": "resp_1", "status": "completed"}}),
+    ])
+    assert _text_of(chunks) == "the whole answer"
+    assert [c.kind for c in chunks].count("block_stop") == 1
+
+
 # ─── reasoning summary vs reasoning text ─────────────────────────────────────
 
 

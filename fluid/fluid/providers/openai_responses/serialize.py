@@ -330,6 +330,19 @@ def _summary_key(item_id: str) -> str:
     return f"{item_id}{_SUMMARY_SUFFIX}"
 
 
+def _item_text(item: dict[str, Any]) -> str:
+    """The visible text a finished ``message`` item carries, if any."""
+    parts: list[str] = []
+    for part in item.get("content") or ():
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "output_text":
+            parts.append(part.get("text") or "")
+        elif part.get("type") == "refusal":
+            parts.append(part.get("refusal") or "")
+    return "".join(parts)
+
+
 class ResponsesStreamNormalizer:
     """Stateful normalizer: feed parsed Responses SSE events, get StreamChunks.
 
@@ -344,6 +357,9 @@ class ResponsesStreamNormalizer:
         self._next_index = 0
         self._has_function_call = False
         self._stopped: set[int] = set()
+        # Trailing characters of the text emitted so far in the current run of
+        # text blocks; "" once a block of another kind opens. See _open_text.
+        self._text_tail = ""
 
     def _close_open_blocks(self) -> list[StreamChunk]:
         """``block_stop`` for every block still open, in index order.
@@ -380,6 +396,8 @@ class ResponsesStreamNormalizer:
         index = self._next_index
         self._next_index += 1
         self._index_of[key] = index
+        if block_type != "text":
+            self._text_tail = ""
         return [
             StreamChunk(
                 "block_start",
@@ -393,6 +411,31 @@ class ResponsesStreamNormalizer:
                 },
             )
         ]
+
+    def _text_chunk(self, index: int, text: str) -> StreamChunk:
+        """A ``text_delta``, remembering how the block's text now ends."""
+        if text:
+            self._text_tail = (self._text_tail + text)[-2:]
+        return StreamChunk("text_delta", {"index": index, "text": text})
+
+    def _open_text(self, key: str) -> list[StreamChunk]:
+        """Open a text block, separated from a text block that just closed.
+
+        Each ``message`` item is its own block and a host renders their text
+        end to end, so back-to-back items with nothing between them arrived
+        as a run-on: a turn of short per-batch status lines read as
+        "**Stopping local servers****Waiting for local test**". Start the new
+        block on a blank line, minus whatever newlines the last one ended
+        with, so text that already separated itself is left alone.
+        """
+        if key in self._index_of:
+            return []
+        tail = self._text_tail
+        out = self._open(key, "text")
+        missing = 2 - (len(tail) - len(tail.rstrip("\n")))
+        if tail and missing > 0:
+            out.append(self._text_chunk(self._index_of[key], "\n" * missing))
+        return out
 
     def consume(self, name: str, data: dict[str, Any]) -> list[StreamChunk]:
         data = data or {}
@@ -422,8 +465,10 @@ class ResponsesStreamNormalizer:
                     tool_use_id=item.get("call_id"),
                     block=item,
                 )
-            elif itype == "message":
-                out += self._open(item.get("id", ""), _ITEM_BLOCK_TYPE[itype], block=item)
+            # A message item is NOT opened here either: an item that streams
+            # no text would leave an empty block behind (the one that preceded
+            # the run-on status stubs), and the engine builds a text block from
+            # its deltas alone, so the skeleton carries nothing it needs.
             # A reasoning item is NOT opened here: which of its two text
             # channels arrives first decides the block order, and a summary
             # that never streams must not leave an empty block behind. The
@@ -436,13 +481,8 @@ class ResponsesStreamNormalizer:
             # rendering it as text is what keeps the reply from coming back
             # blank.
             item_id = data.get("item_id", "")
-            out += self._open(item_id, "text")
-            out.append(
-                StreamChunk(
-                    "text_delta",
-                    {"index": self._index_of[item_id], "text": data.get("delta", "")},
-                )
-            )
+            out += self._open_text(item_id)
+            out.append(self._text_chunk(self._index_of[item_id], data.get("delta", "")))
             return out
 
         if name in (
@@ -496,6 +536,16 @@ class ResponsesStreamNormalizer:
             item_id = item.get("id", "")
             key = item_id
             subtype: str | None = None
+            if block_type == "text" and key not in self._index_of:
+                # Nothing streamed for this message item. Open it only if the
+                # done payload has text to carry, and carry it as a delta —
+                # the engine assembles a text block from deltas, so opening
+                # one here regardless only ever produced an empty block.
+                recovered = _item_text(item)
+                if not recovered:
+                    return out
+                out += self._open_text(key)
+                out.append(self._text_chunk(self._index_of[key], recovered))
             if itype == "reasoning":
                 # The done item is the encrypted round-trip envelope and only
                 # ONE block may carry it. It rides the reasoning-text block when
