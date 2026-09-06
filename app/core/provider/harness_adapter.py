@@ -2506,6 +2506,19 @@ class HarnessAdapter(ProviderAdapter):
                 sections.append(
                     PromptSection(kind="extra", text=GITHUB_BLOCK)
                 )
+            _lane = (options.extra or {}).get("session_mode") or "code"
+            if native and _lane == "code" and (
+                permitted is None or bool({"Edit", "Write"} & permitted)
+            ):
+                # What "verified" has to mean (see VERIFICATION_BLOCK). Code
+                # lane only: the chat lane cannot change anything the user
+                # sees, and the voice lane never reaches this compilation.
+                # Gated on a write tool for the same reason as the blocks above
+                # (ruling T9) — an agent that cannot edit is never the one
+                # reporting a change as shipped.
+                sections.append(
+                    PromptSection(kind="extra", text=VERIFICATION_BLOCK)
+                )
             if code_mode:
                 # LAST, after env and the app's extra blocks: it is the
                 # operating rule for every "use the X tool" line above it.
@@ -3946,6 +3959,41 @@ first). If you absolutely must remove one by hand, first delete each link \
 itself without recursing (`Remove-Item` on the link path in PowerShell, or \
 `fsutil reparsepoint delete`; never `rm -rf` on it), then remove the \
 worktree."""
+
+# What "verified" has to mean before a code session says it. Written against
+# six sessions in one day that shipped user-facing changes checked only against
+# their own fixtures, mocks or public docs — four of which the user then
+# rejected, twice in a row. Every clause here is one of those misses:
+# a fixture that seeded the field the change read; public model docs standing in
+# for the user's account; a shared CSS rule verified on one of its three
+# surfaces; temp fixtures inside the typechecked tree; "562 tests passed" in a
+# PR body for a feature that never worked. Fixed text, so the prefix stays
+# cache-stable.
+VERIFICATION_BLOCK = """# Verification
+A change the user will see is verified only when you have watched it work in \
+the running app — a real session, the real UI, driven through the browser \
+tools. Tests, fixtures and a green build show the code does what you wrote, \
+not that the user's problem is gone. Say what you actually exercised (which \
+page, which session, which command); if you never opened the app, write that \
+in the summary and in the PR body instead of calling it verified. A test count \
+is not a verification.
+
+A fixture that seeds the field your change reads proves only that the consumer \
+reads it. What populates that field in production is the half that breaks — so \
+drive the producing path too, with the state the real code writes, or report \
+the gap.
+
+Provider and model capabilities come from a live probe of the configured \
+provider on the user's own credential. Public docs describe someone else's \
+account, and the current serializer only repeats what this code already \
+assumes; neither is evidence.
+
+Change a rule that is shared — a CSS rule, a helper, a default — and verify \
+every surface it applies to, not just the one named in the report.
+
+Keep scratch fixtures and temp servers OUT of the typechecked and tested tree \
+(a scratch dir, never under the project's source or test roots), and delete \
+them before you hand the work back."""
 
 
 def _model_guidance_blocks(model: Optional[str]) -> Tuple[str, ...]:
