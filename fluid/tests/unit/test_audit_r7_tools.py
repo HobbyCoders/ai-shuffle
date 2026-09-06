@@ -284,3 +284,39 @@ async def test_replace_can_clear_a_section_and_still_validates(tmp_path) -> None
 
     assert (await handler({"action": "replace", "entries": ["x"]}, ctx)).is_error
     assert (await handler({"action": "replace", "section": "threads"}, ctx)).is_error
+
+
+# ─── 4. Monitor: one doctrine, two receipts ──────────────────────────────────
+
+
+def test_monitor_and_task_receipts_agree_about_ending_the_turn() -> None:
+    """Monitor forbade unconditionally what Task explicitly permitted.
+
+    An audited session started a Monitor, kept working on disjoint work (right),
+    and read its output afterwards (also right) — both literal violations of
+    Monitor's receipt and both endorsed by Task's.
+    """
+    from fluid.tools.builtins.monitor import started_text
+    from fluid.tools.builtins.task import describe
+
+    receipt = started_text("mon-1")
+    assert "unless you have genuinely disjoint work" in receipt
+    assert "End the turn now —" not in receipt
+    # The shared fragment Task's description carries says the same thing.
+    assert "do not sleep, poll" in describe().lower()
+
+
+def test_monitor_receipt_asks_for_every_independent_job_first() -> None:
+    from fluid.tools.builtins.monitor import describe, started_text
+
+    assert "one park can cover several" in started_text("mon-2")
+    assert "one park can cover several" in describe()
+
+
+def test_monitor_receipt_permits_reading_the_buffer_after_completion() -> None:
+    from fluid.tools.builtins.monitor import started_text
+
+    receipt = started_text("mon-3")
+    assert "reading the full output is expected, not polling" in receipt
+    # The blanket prohibition that covered it is gone.
+    assert "check on it yourself" not in receipt

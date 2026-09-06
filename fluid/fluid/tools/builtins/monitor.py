@@ -125,7 +125,9 @@ def describe(
         "watching the job needs belongs inside this one Monitor command."
     ) + (
         " Do not start a Monitor and then wait for it yourself: start it and "
-        "end the turn."
+        "end the turn. Start every independent job you already know you need "
+        "before you end the turn — one park can cover several, and a turn "
+        "boundary per command is the expensive way to run two things."
     )
     closing = (
         "Prefer Monitor over a blocking Bash call whenever the wait is longer "
@@ -243,11 +245,26 @@ SPEC = ToolSpec(
 def started_text(task_id: str) -> str:
     """The success receipt. It commands the park rather than merely reporting
     the spawn: sessions that read a neutral acknowledgement have gone on to
-    sleep-poll the very task they just handed off."""
+    sleep-poll the very task they just handed off.
+
+    Three audited corrections. (1) "End the turn now" was unconditional here
+    while Task's receipt said "unless you have genuinely disjoint work" — a
+    session did the disjoint work, which was right, and violated this receipt
+    to do it. Two receipts for the same doctrine may not disagree. (2) Nothing
+    said to start the OTHER independent jobs first, so three turns went
+    start-park-wake, start-park-wake for two commands that could have shared
+    one park. (3) "Do not check on it yourself" also forbade reading the full
+    buffer after the completion arrived, which is not polling and is often the
+    only way to see the failure.
+    """
     return (
-        f"Monitoring started (task {task_id}). End the turn now — the "
-        "completion wakes the session when the command exits. Do not sleep, "
-        "poll, or check on it yourself."
+        f"Monitoring started (task {task_id}). Start every other independent "
+        "job you already know you need before you end the turn — one park can "
+        "cover several. Then end the turn, unless you have genuinely disjoint "
+        "work to do first: the completion wakes the session when the command "
+        "exits. Do not sleep or poll waiting for it — but once its completion "
+        "notification arrives, reading the full output is expected, not "
+        "polling."
     )
 
 
@@ -260,8 +277,8 @@ def serving_text(task_id: str) -> str:
         f"Serving task {task_id} started and is expected to stay up. The "
         "session is NOT parked on it — end the turn whenever this step is "
         "done; no completion is coming while it is healthy, and you are "
-        "notified if it stops or dies. Do not sleep, poll, or check on it "
-        "yourself."
+        "notified if it stops or dies. Do not sleep or poll waiting on it; "
+        "reading its output when you actually need it is fine."
     )
 
 
