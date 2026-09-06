@@ -87,8 +87,18 @@ class _TextExtractor(HTMLParser):
         self._skip_depth = 0
         self._parts: list[str] = []
         self._href: str | None = None
+        self._link_start = 0
         self.title = ""
         self._in_title = False
+        #: ``[(anchor text, absolute url)]`` in document order, for the
+        #: navigation-page diagnostic. Duplicates are kept — how often a link
+        #: repeats is itself signal about a nav bar.
+        self.links: list[tuple[str, str]] = []
+        #: Characters the links occupy in the extracted text — anchor text
+        #: plus the " (url)" the extractor renders after it. The rendered URL
+        #: is part of the link, not prose, so counting it as prose would hide
+        #: exactly the pages this measure exists to catch.
+        self.link_chars = 0
 
     def handle_starttag(self, tag: str, attrs) -> None:
         if tag in _SKIP_TAGS:
@@ -102,6 +112,7 @@ class _TextExtractor(HTMLParser):
             self._parts.append("#" * int(tag[1]) + " ")
         if tag == "a":
             self._href = next((v for k, v in attrs if k == "href"), None)
+            self._link_start = len(self._parts)
 
     def handle_endtag(self, tag: str) -> None:
         if tag in _SKIP_TAGS and self._skip_depth:
@@ -112,8 +123,12 @@ class _TextExtractor(HTMLParser):
         if tag == "a" and self._href:
             href = self._href
             self._href = None
+            anchor = " ".join("".join(self._parts[self._link_start:]).split())
             if href.startswith(("http://", "https://", "/")):
-                self._parts.append(f" ({urljoin(self._base, href)})")
+                url = urljoin(self._base, href)
+                self._parts.append(f" ({url})")
+                self.links.append((anchor, url))
+                self.link_chars += len(anchor) + len(url) + 3  # " (url)"
         if tag in _BLOCK_TAGS:
             self._parts.append("\n")
 
@@ -139,14 +154,96 @@ class _TextExtractor(HTMLParser):
         return "\n".join(out).strip()
 
 
-def html_to_text(html: str, base_url: str = "") -> tuple[str, str]:
-    """(title, extracted text) for an HTML document. Never raises."""
+def _extract(html: str, base_url: str = "") -> _TextExtractor:
+    """A fed extractor — title, text, and the link inventory. Never raises."""
     extractor = _TextExtractor(base_url)
     try:
         extractor.feed(html)
     except Exception:
         pass
+    return extractor
+
+
+def html_to_text(html: str, base_url: str = "") -> tuple[str, str]:
+    """(title, extracted text) for an HTML document. Never raises."""
+    extractor = _extract(html, base_url)
     return extractor.title.strip(), extractor.text()
+
+
+# ─── navigation-page diagnostic ──────────────────────────────────────────────
+#
+# A doc-site index fetches as a wall of link text with almost no prose, and the
+# model gets no signal that the page it just paid for is a table of contents.
+# Two audited sessions ended there: one fetched a docs index, reported "mainly
+# navigation and internal indexes", and handed the question back to the user
+# without trying a single one of the links it had just been handed; another
+# spent unnecessary calls and money re-deriving a fact the linked page held. The
+# footer below turns that dead end into a next move.
+
+#: Link text this share (or more) of the extracted text ⇒ a navigation page.
+NAV_LINK_RATIO = 0.55
+#: Below this many links, a link-heavy page is just a short page with links.
+NAV_MIN_LINKS = 12
+#: Prose shorter than this cannot carry an answer, whatever the ratio says.
+NAV_MAX_PROSE_CHARS = 400
+_NAV_LINKS_SHOWN = 8
+_NAV_ANCHOR_CAP = 60
+# Anchor text that names a site fixture rather than a document.
+_NAV_CHROME = frozenset({
+    "home", "docs", "documentation", "search", "menu", "skip to content",
+    "log in", "login", "sign in", "sign up", "contact", "about", "blog",
+    "pricing", "support", "back", "next", "previous", "github", "twitter",
+    "terms", "privacy", "cookies", "français", "english", "edit this page",
+})
+
+
+def _detail_links(links: list[tuple[str, str]], page_url: str) -> list[tuple[str, str]]:
+    """The links on a nav page that plausibly lead to the actual content."""
+    page = urlparse(page_url)
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for anchor, url in links:
+        parsed = urlparse(url)
+        if parsed.hostname != page.hostname:
+            continue  # off-site: ads, socials, the org's other properties
+        if url in seen or url.rstrip("/") == page_url.rstrip("/"):
+            continue
+        text = anchor.strip()
+        if len(text) < 4 or text.lower() in _NAV_CHROME:
+            continue
+        if not parsed.path.strip("/"):
+            continue  # the site root
+        seen.add(url)
+        if len(text) > _NAV_ANCHOR_CAP:
+            text = text[:_NAV_ANCHOR_CAP].rstrip() + "…"
+        out.append((text, url))
+    return out
+
+
+def navigation_note(extractor: _TextExtractor, text: str, url: str) -> str:
+    """A structured "this is an index page" hint, or "" when the page is prose."""
+    total = len(text)
+    if not total or len(extractor.links) < NAV_MIN_LINKS:
+        return ""
+    prose = total - extractor.link_chars
+    if extractor.link_chars / total < NAV_LINK_RATIO and prose > NAV_MAX_PROSE_CHARS:
+        return ""
+    candidates = _detail_links(extractor.links, url)
+    if not candidates:
+        return ""
+    shown = candidates[:_NAV_LINKS_SHOWN]
+    listing = "\n".join(f"- {anchor} — {link}" for anchor, link in shown)
+    more = (
+        f"\n(…and {len(candidates) - len(shown)} more.)"
+        if len(candidates) > len(shown)
+        else ""
+    )
+    return (
+        f"\n[This page is mostly navigation: {extractor.link_chars} of "
+        f"{total} characters are link text, across {len(extractor.links)} "
+        f"links. {len(candidates)} candidate detail links found — fetch one "
+        f"rather than reporting the index as the answer:\n{listing}{more}]"
+    )
 
 
 # ─── HTTP plumbing (httpx, injectable transport for tests) ───────────────────
@@ -196,6 +293,11 @@ def describe_fetch(tools: frozenset[str] | None = None) -> str:
         "instead of followed; call again with the reported URL if it is the "
         "right target. http(s) only, and http:// is silently upgraded to "
         "https://; hosts on the user's private network are refused.\n"
+        "\n"
+        "One fetch is rarely the whole job. When a result is mostly link text "
+        "the footer says so and lists candidate detail links — fetch one "
+        "instead of reporting the index page as the answer, and continue with "
+        "`offset` rather than concluding the page had nothing in it.\n"
         "\n"
         f"Fetched content is {WEB_UNTRUSTED}" + bash_route + " Under the "
         "default permission policy the first fetch to a new domain may ask "
@@ -276,8 +378,10 @@ async def fetch_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     charset = response.charset_encoding or "utf-8"
     text = body.decode(charset, errors="replace")
     title = ""
+    extractor: _TextExtractor | None = None
     if "html" in content_type or re.search(r"<html[\s>]", text[:2048], re.IGNORECASE):
-        title, text = html_to_text(text, url)
+        extractor = _extract(text, url)
+        title, text = extractor.title.strip(), extractor.text()
     # Invisible/bidi control characters are how pages hide instructions from a
     # human skimming the fetched text while the model still reads them.
     from fluid.context.screening import strip_invisible
@@ -294,6 +398,10 @@ async def fetch_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             f"\n[{len(text)} chars total; showing {offset}..{offset + len(window)} "
             f"— continue with offset={offset + len(window)}]"
         )
+    if extractor is not None:
+        # Rides after the offset marker, never instead of it: a long index page
+        # is both truncated and mostly navigation, and both facts are actionable.
+        footer += navigation_note(extractor, text, url)
     return ToolOutcome(
         text=f"{header}\n\n" + fence_untrusted(window, "WebFetch") + footer
     )

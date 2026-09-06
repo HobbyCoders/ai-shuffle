@@ -320,3 +320,68 @@ def test_monitor_receipt_permits_reading_the_buffer_after_completion() -> None:
     assert "reading the full output is expected, not polling" in receipt
     # The blanket prohibition that covered it is gone.
     assert "check on it yourself" not in receipt
+
+
+# ─── 5. WebFetch: name a navigation page and offer the next hop ──────────────
+
+
+def _nav_html(n: int = 20) -> str:
+    items = "\n".join(
+        f'<li><a href="/docs/guide/topic-{i}">Configuring topic {i} in depth</a></li>'
+        for i in range(n)
+    )
+    return (
+        "<html><head><title>Docs index</title></head><body>"
+        '<nav><a href="/">Home</a><a href="/docs">Docs</a>'
+        '<a href="https://twitter.com/x">Twitter</a></nav>'
+        f"<ul>{items}</ul><p>Browse the guides.</p></body></html>"
+    )
+
+
+def test_navigation_note_lists_candidate_detail_links() -> None:
+    from fluid.tools.builtins.web import _extract, navigation_note
+
+    url = "https://example.com/docs"
+    extractor = _extract(_nav_html(), url)
+    note = navigation_note(extractor, extractor.text(), url)
+    assert "mostly navigation" in note
+    assert "candidate detail links" in note
+    assert "https://example.com/docs/guide/topic-0" in note
+    # Site chrome and off-site links are not offered as next hops.
+    assert "twitter.com" not in note
+    assert "- Home —" not in note
+
+
+def test_a_prose_page_gets_no_navigation_note() -> None:
+    from fluid.tools.builtins.web import _extract, navigation_note
+
+    url = "https://example.com/article"
+    body = "The pricing is $3 per million tokens. " * 60
+    html = f'<html><body><p>{body}</p><a href="/other">Another article</a></body></html>'
+    extractor = _extract(html, url)
+    assert navigation_note(extractor, extractor.text(), url) == ""
+
+
+async def test_fetch_appends_the_note_after_the_offset_marker() -> None:
+    import httpx
+
+    from fluid.tools.builtins.web import fetch_handler
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=_nav_html(200).encode("utf-8"),
+        )
+
+    ctx = ToolCtx(extra={"web_transport": httpx.MockTransport(respond)})
+    out = await fetch_handler(
+        {"url": "https://example.com/docs", "max_chars": 500}, ctx
+    )
+    assert not out.is_error
+    # The paging marker survives; the note rides after it.
+    assert "continue with offset=" in out.text
+    assert out.text.index("continue with offset=") < out.text.index(
+        "mostly navigation"
+    )
+    assert "candidate detail links" in out.text
