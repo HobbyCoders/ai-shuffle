@@ -2,6 +2,10 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/sve
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ModelPickerPanel from './ModelPickerPanel.svelte';
 import { reloadFavoriteModels } from '$lib/stores/modelFavorites.svelte';
+import { hydrateModelRegistry } from '$lib/constants/models';
+
+const mocks = vi.hoisted(() => ({ get: vi.fn() }));
+vi.mock('$lib/api/client', () => ({ api: { get: mocks.get } }));
 
 const groups = [
 	{ key: '__claude__', name: 'Claude', subtext: null, glyph: 'claude' as const, isApi: false }
@@ -25,13 +29,52 @@ const options = [
 	}
 ];
 
-beforeEach(() => {
+beforeEach(async () => {
 	localStorage.clear();
 	reloadFavoriteModels();
+	mocks.get.mockResolvedValue({
+		models: [
+			{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 },
+			{ value: 'opus', label: 'Opus', family: 'opus', context_window: 1_000_000 },
+			{ value: 'haiku', label: 'Haiku', family: 'haiku', context_window: 200_000 }
+		],
+		default: 'sonnet', legacy_map: {},
+		providers: [{
+			id: 'openai', name: 'OpenAI', provider_type: 'openai', default_model: 'gpt-6-astra',
+			models: [{ id: 'gpt-6-astra', label: 'GPT-6 Astra', context_window: 272_000,
+				context_window_choices: [256_000, 1_000_000] }]
+		}]
+	});
+	await hydrateModelRegistry();
 });
 afterEach(() => cleanup());
 
 describe('ModelPickerPanel', () => {
+	it('shows Astra context choices and supports keyboard selection without selecting a model', async () => {
+		const onContextChoiceSelect = vi.fn();
+		const onSelect = vi.fn();
+		const { rerender } = render(ModelPickerPanel, {
+			props: { groups, options, value: 'prov:openai:gpt-6-astra', onSelect,
+				contextChoice: '1m', onContextChoiceSelect }
+		});
+		const standard = screen.getByRole('radio', { name: '256K · Standard' });
+		const extended = screen.getByRole('radio', { name: '1M · Extended' });
+		expect(extended.tabIndex).toBe(0);
+		expect(standard.tabIndex).toBe(-1);
+		await fireEvent.keyDown(extended, { key: 'ArrowLeft' });
+		expect(onContextChoiceSelect).toHaveBeenLastCalledWith('standard');
+		expect(document.activeElement).toBe(standard);
+		await rerender({ contextChoice: 'standard' });
+		expect(standard.getAttribute('aria-checked')).toBe('true');
+		expect(standard.tabIndex).toBe(0);
+		await fireEvent.keyDown(standard, { key: 'End' });
+		expect(onContextChoiceSelect).toHaveBeenLastCalledWith('1m');
+		expect(document.activeElement).toBe(extended);
+		expect(onSelect).not.toHaveBeenCalled();
+		await rerender({ value: 'haiku' });
+		expect(screen.queryByRole('radiogroup', { name: 'Context window' })).toBeNull();
+	});
+
 	it('keeps Favorites first in the rail and persists functional row stars', async () => {
 		render(ModelPickerPanel, {
 			props: { groups, options, value: 'sonnet', onSelect: vi.fn() }
@@ -67,8 +110,8 @@ describe('ModelPickerPanel', () => {
 		expect(screen.getByRole('radio', { name: /1m.*extended/i }).getAttribute('aria-checked')).toBe(
 			'true'
 		);
-		expect(screen.getByRole('radio', { name: /200k.*normal/i })).toBeTruthy();
-		await fireEvent.click(screen.getByRole('radio', { name: /200k.*normal/i }));
+		expect(screen.getByRole('radio', { name: /200k.*standard/i })).toBeTruthy();
+		await fireEvent.click(screen.getByRole('radio', { name: /200k.*standard/i }));
 		expect(onContextChoiceSelect).toHaveBeenCalledWith('standard');
 	});
 

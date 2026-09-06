@@ -11,6 +11,8 @@ context-window resolution shared with the spawn env overlay.
 
 import json
 
+import pytest
+
 from app.api import settings_crypto
 from app.core import model_registry as m
 from app.core.config import settings
@@ -241,6 +243,35 @@ class TestResolveProviderContextWindow:
         assert m.resolve_provider_context_window(row, "m") is None
 
 
+class TestContextWindowChoices:
+    @pytest.mark.parametrize("model_id", ["gpt-6-astra", "gpt-5.6-sol"])
+    @pytest.mark.parametrize("provider", [
+        {"provider_type": "openai"},
+        {"provider_type": "chatgpt"},
+        {"provider_type": "custom", "auth_mode": "chatgpt"},
+    ])
+    def test_openai_extended_capability_is_separate_from_default(self, model_id, provider):
+        row = {**provider, "context_window": 272000, "models_json": [
+            {"id": model_id, "context_window": 272000},
+        ]}
+        assert m.resolve_provider_context_window(row, model_id) == 272000
+        assert m.context_window_choices(model_id, row) == [256_000, 1_000_000]
+
+    @pytest.mark.parametrize("model_id,provider,expected", [
+        ("sonnet", None, [200_000, 1_000_000]),
+        ("haiku", None, []),
+        ("gpt-6-astra", {"provider_type": "openai"}, [256_000, 1_000_000]),
+        ("gpt-6-astra-custom", {"provider_type": "openai"}, []),
+        ("gpt-6-astra", {"provider_type": "custom", "context_window": 272000}, []),
+        ("openai/gpt-6-astra", {"provider_type": "openrouter", "context_window": 272000}, []),
+        ("openai/gpt-6-astra", {"provider_type": "openrouter", "context_window": 1_000_000}, [256_000, 1_000_000]),
+        ("anthropic/claude-future", {"provider_type": "openrouter", "context_window": 1_000_000}, [200_000, 1_000_000]),
+        ("vendor/other", {"provider_type": "openrouter", "context_window": 1_000_000}, []),
+    ])
+    def test_choices_follow_the_serving_provider(self, model_id, provider, expected):
+        assert m.context_window_choices(model_id, provider) == expected
+
+
 class TestRegistryPayloadProviders:
     """``providers`` is a lazily-sourced projection of enabled
     ``model_providers`` rows — never carries the encrypted auth token, and
@@ -287,6 +318,7 @@ class TestRegistryPayloadProviders:
                 "label": "GPT-5.6",
                 # Additive metadata (Chunk D.4) — null when the row omits them.
                 "context_window": None,
+                "context_window_choices": [],
                 "max_output_tokens": None,
                 "effort_levels": ["low", "medium", "high"],
                 "default_effort": None,
@@ -334,14 +366,25 @@ class TestRegistryPayloadProviders:
         entry = payload["providers"][0]
         assert entry["models"] == [
             {"id": "model-a", "label": "Model A",
-             "context_window": 200000, "max_output_tokens": 8192,
+             "context_window": 200000, "context_window_choices": [], "max_output_tokens": 8192,
              "effort_levels": None, "default_effort": None,
              "effort_metadata_version": 0},
             {"id": "model-b", "label": "Model B",
-             "context_window": 200000, "max_output_tokens": 8192,
+             "context_window": 200000, "context_window_choices": [], "max_output_tokens": 8192,
              "effort_levels": None, "default_effort": None,
              "effort_metadata_version": 0},
         ]
+
+    def test_astra_payload_offers_1m_with_a_smaller_catalog_default(self, mock_db):
+        db.create_model_provider(
+            provider_id="astra", name="ChatGPT", provider_type="chatgpt",
+            base_url="https://chatgpt.example/api",
+            models=[{"id": "gpt-6-astra", "label": "GPT-6 Astra", "context_window": 272000}],
+            enabled=True,
+        )
+        model = m.registry_payload()["providers"][0]["models"][0]
+        assert model["context_window"] == 272000
+        assert model["context_window_choices"] == [256_000, 1_000_000]
 
     def test_chatgpt_row_is_subscription_and_carries_its_plan_type(self, mock_db):
         """A ChatGPT row reports ``auth_kind='subscription'`` and the plan string

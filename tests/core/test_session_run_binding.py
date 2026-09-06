@@ -18,6 +18,8 @@ Covers:
 
 from unittest.mock import patch
 
+import pytest
+
 import app.core.query_options as qo
 from app.core import encryption
 from app.core import turn_manager
@@ -359,6 +361,28 @@ class TestTurnResolution:
         )
         assert opts.aih_context_window == 256_000
         assert opts.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "256000"
+
+    @pytest.mark.parametrize("window", [256_000, 1_000_000])
+    def test_astra_context_choice_reaches_the_runtime(self, mock_db, tmp_path, window):
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="astra", name="OpenAI", provider_type="openai",
+            base_url="https://api.openai.com/v1",
+            auth_token=encryption.encrypt_value("test-token"),
+            models=[{"id": "gpt-6-astra", "label": "Astra", "context_window": 272000}],
+            enabled=True,
+        )
+        _mk_profile("agent", {"cwd": str(tmp_path)})
+        db.create_session(
+            "s-astra", profile_id="agent", model="prov:astra:gpt-6-astra",
+            context_window=window,
+        )
+        opts = _build_options(
+            {"id": "agent", "config": {"cwd": str(tmp_path)}},
+            session_id="s-astra", overrides={"cwd": str(tmp_path)},
+        )
+        assert opts.aih_context_window == window
+        assert opts.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == str(window)
 
 
 # ---------------------------------------------------------------------------

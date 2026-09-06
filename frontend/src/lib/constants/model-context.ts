@@ -3,6 +3,7 @@ import {
 	getClaudeContextWindow,
 	getModelLabel,
 	getProviderContextWindow,
+	getProviders,
 	isPresetModel,
 	normalizeModel
 } from './models';
@@ -18,14 +19,13 @@ export const EXTENDED_CONTEXT = 1_000_000;
 export interface ModelContextControl {
 	standardTokens: typeof CLAUDE_STANDARD_CONTEXT | typeof GPT_STANDARD_CONTEXT;
 	extendedTokens: typeof EXTENDED_CONTEXT;
-	standardLabel: '200k' | '256k';
-	extendedLabel: '1m';
+	standardLabel: '200K' | '256K';
+	extendedLabel: '1M';
 }
 
 /**
- * Return the two context choices for GPT/Claude models that advertise a 1M
- * window in the hydrated registry. Other families and models whose registered
- * ceiling is below 1M do not get a control and never send an override.
+ * Use the registry's selectable windows, which can exceed a model's default.
+ * Older registries without explicit choices fall back to the advertised window.
  */
 export function getModelContextControl(
 	model: string | null | undefined
@@ -34,28 +34,38 @@ export function getModelContextControl(
 
 	const composite = decodeProviderModel(model);
 	const modelId = composite?.modelId ?? normalizeModel(model);
+	const nativeClaude = isPresetModel(model);
+	const choices = nativeClaude
+		? undefined
+		: getProviders()
+				.filter((provider) => !composite || provider.id === composite.providerId)
+				.flatMap((provider) => provider.models)
+				.find((entry) => entry.id === modelId)?.context_window_choices;
 	const registeredWindow = composite
 		? getProviderContextWindow(composite.modelId, composite.providerId)
 		: getClaudeContextWindow(model) ?? getProviderContextWindow(modelId);
 
-	if (registeredWindow == null || registeredWindow < EXTENDED_CONTEXT) return null;
+	if (choices !== undefined) {
+		if (!choices.includes(EXTENDED_CONTEXT)) return null;
+	} else if (registeredWindow == null || registeredWindow < EXTENDED_CONTEXT) return null;
 
 	const identity = `${modelId} ${getModelLabel(model)}`.toLowerCase();
-	const nativeClaude = isPresetModel(model);
 	if (nativeClaude || identity.includes('claude')) {
+		if (choices && !choices.includes(CLAUDE_STANDARD_CONTEXT)) return null;
 		return {
 			standardTokens: CLAUDE_STANDARD_CONTEXT,
 			extendedTokens: EXTENDED_CONTEXT,
-			standardLabel: '200k',
-			extendedLabel: '1m'
+			standardLabel: '200K',
+			extendedLabel: '1M'
 		};
 	}
 	if (identity.includes('gpt')) {
+		if (choices && !choices.includes(GPT_STANDARD_CONTEXT)) return null;
 		return {
 			standardTokens: GPT_STANDARD_CONTEXT,
 			extendedTokens: EXTENDED_CONTEXT,
-			standardLabel: '256k',
-			extendedLabel: '1m'
+			standardLabel: '256K',
+			extendedLabel: '1M'
 		};
 	}
 	return null;
