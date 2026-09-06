@@ -127,6 +127,37 @@ async def test_a_kernel_that_died_between_turns_restores_and_says_so() -> None:
         await k.stop()
 
 
+async def test_tool_imports_are_re_seeded_after_a_restart() -> None:
+    """The audited NameError was for `Bash`, `Note`, `Ledger` — imported tools.
+
+    A stub is a function in a VFS module and does not pickle as checkpoint
+    data, so restoring the namespace alone left exactly the names the model
+    was using undefined. The checkpoint records which stubs were imported and
+    the restore re-imports them.
+    """
+    k = SubprocessKernel()
+    await k.start()
+    await k.set_vfs({"Grep": stub_source(GREP_SPEC, "Grep")})
+    try:
+        await k.exec(
+            "from tools import Grep\nkept = 41\nGrep(pattern='x')",
+            timeout=20,
+            on_host_call=_no_tools,
+        )
+        proc = k._proc
+        proc.kill()
+        await proc.wait()
+
+        result = await k.exec(
+            "print(Grep(pattern='y'), kept)", timeout=20, on_host_call=_no_tools
+        )
+        assert not result.error, result.error
+        assert "ok 41" in result.stdout
+        assert "re-imported: Grep" in result.notes
+    finally:
+        await k.stop()
+
+
 async def test_a_first_exec_carries_no_restart_notice() -> None:
     k = SubprocessKernel()
     await k.start()

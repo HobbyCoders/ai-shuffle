@@ -139,6 +139,12 @@ class SubprocessKernel:
         self._job_handle: int | None = None  # Windows Job Object (memory limit)
         self._ckpt_vars: dict[str, str] | None = None  # last namespace checkpoint
         self._ckpt_dropped: list[str] = []  # unpicklables at checkpoint time
+        # Tool/skill stubs the namespace had imported. They never pickle as
+        # data, so the restore re-imports them by name instead — which is the
+        # difference between a restarted kernel the model can keep using and
+        # one that answers `Bash(...)` with "Did you mean: 'hash'?".
+        self._ckpt_tools: list[str] = []
+        self._ckpt_skills: list[str] = []
         # A restart the model has not been told about yet. Set on every
         # restart, cleared once it has ridden out on a cell result — the exec
         # paths that already inline it in their error clear it themselves.
@@ -298,6 +304,8 @@ class SubprocessKernel:
             await self._restart_and_restore()
             return
         vars_map = frame.get("vars") or {}
+        self._ckpt_tools = list(frame.get("tools") or [])
+        self._ckpt_skills = list(frame.get("skills") or [])
         # The child already stopped at the budget; base64 widens the pickled
         # bytes by a third, so the wire size is allowed that much over it.
         wire_cap = self.config.checkpoint_max_bytes * 4 // 3 + 1024
@@ -326,10 +334,16 @@ class SubprocessKernel:
         return detail
 
     async def _restore(self) -> str:
-        if not self.config.checkpoint or not self._ckpt_vars:
+        have = self._ckpt_vars or self._ckpt_tools or self._ckpt_skills
+        if not self.config.checkpoint or not have:
             return " (namespace lost)"
         try:
-            await self._send({"kind": "restore", "vars": self._ckpt_vars})
+            await self._send({
+                "kind": "restore",
+                "vars": self._ckpt_vars or {},
+                "tools": self._ckpt_tools,
+                "skills": self._ckpt_skills,
+            })
             frame = await asyncio.wait_for(self._read_frame(), 30)
         except Exception:
             await self._restart()
@@ -337,8 +351,11 @@ class SubprocessKernel:
         if not frame or frame.get("kind") != "restored":
             return " (namespace lost)"
         restored = list(frame.get("restored") or [])
+        reimported = list(frame.get("reimported") or [])
         dropped = self._ckpt_dropped + list(frame.get("dropped") or [])
         note = f"; namespace restored from last checkpoint ({len(restored)} vars"
+        if reimported:
+            note += f"; re-imported: {', '.join(sorted(set(reimported)))}"
         if dropped:
             note += f"; not restorable: {', '.join(sorted(set(dropped)))}"
         return note + ")"

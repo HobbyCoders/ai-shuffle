@@ -919,15 +919,46 @@ def _checkpoint() -> dict:
         "vars": vars_map,
         "dropped": sorted(dropped),
         "oversized": sorted(oversized),
+        # Tool and skill stubs never pickle as data, and re-importing them is
+        # both cheap and exactly what the model would have to do by hand. A
+        # restart that drops `Bash` and `Note` is the audited NameError; the
+        # names are recorded here so the restore can just put them back.
+        "tools": sorted(_bound_stubs(_SOURCES)),
+        "skills": sorted(_bound_stubs(_SKILLS)),
     }
 
 
-def _restore(vars_map: dict) -> dict:
+def _bound_stubs(mounted: dict) -> list:
+    """Names in the namespace that are imports of a mounted stub."""
+    return [
+        name for name, value in _NS.items()
+        if name in mounted and callable(value)
+    ]
+
+
+def _reimport_stubs(names, package: str) -> list:
+    """Re-bind ``from <package> import <name>`` for each name. Best-effort."""
+    import importlib
+
+    done: list = []
+    for name in names or ():
+        try:
+            module = importlib.import_module(f"{package}.{name}")
+            value = getattr(module, name)
+        except Exception:
+            continue
+        _NS[name] = value
+        done.append(name)
+    return done
+
+
+def _restore(vars_map: dict, tools=None, skills=None) -> dict:
     import base64
     import pickle
 
     restored: list = []
     dropped: list = []
+    reimported = _reimport_stubs(tools, "tools") + _reimport_stubs(skills, "skills")
     for key, encoded in (vars_map or {}).items():
         try:
             value = pickle.loads(base64.b64decode(encoded))
@@ -940,7 +971,12 @@ def _restore(vars_map: dict) -> dict:
         if isinstance(value, vfs.ResultRef):
             _REFS.adopt(value)
         restored.append(key)
-    return {"kind": "restored", "restored": sorted(restored), "dropped": sorted(dropped)}
+    return {
+        "kind": "restored",
+        "restored": sorted(restored),
+        "dropped": sorted(dropped),
+        "reimported": sorted(reimported),
+    }
 
 
 def _set_vfs(sources: dict, skills: dict) -> None:
@@ -1077,7 +1113,11 @@ def _main() -> None:
         elif kind == "checkpoint":
             _send(_checkpoint())
         elif kind == "restore":
-            _send(_restore(frame.get("vars") or {}))
+            _send(_restore(
+                frame.get("vars") or {},
+                frame.get("tools") or [],
+                frame.get("skills") or [],
+            ))
         elif kind == "shutdown":
             break
 
