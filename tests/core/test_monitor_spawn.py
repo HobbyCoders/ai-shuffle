@@ -339,7 +339,9 @@ def spawner_harness(monkeypatch):
         tr.task_registry.start_task(session_id, task.task_id, "shell", command)
         return task
 
-    async def _fake_stop(task_id, session_id=None):
+    async def _fake_stop(task_id, session_id=None, **kwargs):
+        # ``**kwargs`` absorbs the real signature's summary/reason/suppress_wake
+        # attribution kwargs; this fake only cares that the process was stopped.
         task._running = False
         return {"task_id": task_id}
 

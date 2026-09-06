@@ -387,10 +387,19 @@ def _cause_line(reason: str, recorded_summary: str, *, serves: bool) -> str:
     """
     if reason == MONITOR_TIMEOUT_REASON:
         return recorded_summary or "Stopped: the monitor's time budget expired."
-    from app.core.task_registry import SERVER_SHUTDOWN_REASON, USER_STOP_REASON
+    from app.core.task_registry import (
+        AGENT_STOP_REASON,
+        SERVER_SHUTDOWN_REASON,
+        USER_STOP_REASON,
+    )
 
     if reason == USER_STOP_REASON:
         who = "Stopped by the user."
+    elif reason == AGENT_STOP_REASON:
+        # The reason the reason-less branch below used to cover: the stop path
+        # now stamps it explicitly so the chip can tell a deliberate stop from
+        # a reap, and the wording it produced stays exactly the same.
+        who = "Stopped deliberately by the app or by an agent, not by a crash."
     elif reason == SERVER_SHUTDOWN_REASON:
         who = "Stopped because the server restarted."
     elif reason:

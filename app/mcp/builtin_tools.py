@@ -414,9 +414,17 @@ async def stop_background_shell_task(
         # path stamps its own summary/reason first and relies on this call
         # leaving them in place, and ``complete_task`` only overwrites a field
         # it is actually given.
+        from app.core.task_registry import AGENT_STOP_REASON, AGENT_STOP_SUMMARY
+
         recorded = task_registry.get_task(session_id, task_id) or {}
-        kill_summary = summary if not recorded.get("summary") else None
-        kill_reason = reason if not recorded.get("reason") else None
+        # Default attribution: this function only ever runs because SOMEBODY
+        # asked for the stop, and by far the most common somebody is the model
+        # firing ``TaskStop`` at its own watcher or dev server. Saying so keeps
+        # that out of the failure vocabulary (the chip reads "cancelled", not a
+        # red cross) and out of the blank-summary bucket. Callers with a better
+        # answer pass one; an attribution already on the row always wins.
+        kill_summary = (summary or AGENT_STOP_SUMMARY) if not recorded.get("summary") else None
+        kill_reason = (reason or AGENT_STOP_REASON) if not recorded.get("reason") else None
         _registry_safe(
             lambda: task_registry.complete_task(
                 session_id, task_id, "killed",

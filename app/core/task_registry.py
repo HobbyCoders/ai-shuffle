@@ -124,13 +124,23 @@ STOP_ALL_SUMMARY = "Stopped by user (Stop ended all background work)"
 # and drops off the strip exactly as before; only its wording and colour change.
 CANCELLED_CHIP_STATUS = "cancelled"
 
+# Kill attribution for the session's OWN ``TaskStop`` — a model stopping a
+# watcher or dev server it no longer needs. Stamped by
+# ``stop_background_shell_task`` when no caller supplies an attribution, so the
+# terminal chip can tell "an agent stopped this on purpose" apart from a task
+# that was reaped because something died underneath it. Both leave a ``killed``
+# row; only one of them is worth a red cross in the transcript.
+AGENT_STOP_SUMMARY = "Stopped by the agent"
+AGENT_STOP_REASON = "agent_stopped"
+
 # Kill reasons that mean "somebody decided to stop this", as opposed to "it
-# died". Chips built for these read as cancelled rather than failed. A stop
-# with NO reason at all is the session's own ``TaskStop`` (see
-# ``is_unattributed_cancellation``) and counts as deliberate too.
+# died". Chips built for these read as cancelled rather than failed. An
+# EXPLICIT reason is required: a reason-less ``killed`` is what the ghost reap
+# and the force-eviction sweep write, and those really are failures from the
+# user's point of view — the work cannot finish.
 DELIBERATE_STOP_REASONS = frozenset({
     USER_STOP_REASON,
-    SERVER_SHUTDOWN_REASON,
+    AGENT_STOP_REASON,
     "user_stopped_all",
     "parent_turn_ended",
 })
@@ -139,15 +149,15 @@ DELIBERATE_STOP_REASONS = frozenset({
 def chip_status(status: Optional[str], reason: Optional[str]) -> str:
     """The status a terminal CHIP should carry for a registry ``status``.
 
-    Only ``killed`` is rewritten, and only when the kill was deliberate: an
-    agent-initiated ``TaskStop`` (no reason recorded at all) or one of the
-    attributed stop reasons above. Everything else — ``error``, ``completed``,
-    a ``killed`` carrying a failure-ish reason like ``monitor_timeout`` or
+    Only ``killed`` is rewritten, and only when the record says WHO stopped it
+    and that answer is a person or an agent. Everything else — ``error``,
+    ``completed``, a reason-less reap, a ``killed`` carrying a failure-ish
+    reason like ``monitor_timeout``, ``server_shutdown`` or
     ``provider_rate_limited`` — is passed through untouched.
     """
     if status != "killed":
         return status or ""
-    if not reason or reason in DELIBERATE_STOP_REASONS:
+    if reason in DELIBERATE_STOP_REASONS:
         return CANCELLED_CHIP_STATUS
     return status
 
