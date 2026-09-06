@@ -77,25 +77,18 @@ class AccountActivity : NativeScreen() {
         else camera.launch(Manifest.permission.CAMERA)
     }
     private fun form(selected: String, launchOAuth: Boolean = true) {
-        mode = selected
+        mode = selected.takeIf { it in setOf("login", "create", "pair", "qr") } ?: "login"
         navigation("Account")
         if (mode == "login" || mode == "create") {
             heading(if (mode == "create") "Create account" else "Sign in", "Finish in your browser, then return to Shuffle.")
             button("Try again", primary = true) { openOAuth() }
             row("Use another device", "Sign in with an account QR code or pairing code.", R.drawable.ic_qr) { form("pair") }
-            link("Use an existing Shuffle password") { form("password") }
             // Recreating this screen while the browser is open must not replace its pending proof.
             if (launchOAuth) openOAuth()
             return
         }
         val pairing = mode == "pair" || mode == "qr"
-        heading(when (mode) { "create" -> "Create your account"; "recover" -> "Recover your account"; "pair", "qr" -> "Use another device"; else -> "Welcome back" },
-            when (mode) {
-                "create" -> "One account for your workers on every device."
-                "recover" -> "Use your recovery code to set a new password."
-                "pair", "qr" -> "On a signed-in device, open Account and choose Add a trusted device."
-                else -> "Sign in to see your workers."
-            })
+        heading("Use another device", "On a signed-in device, open Account and choose Add a trusted device.")
         if (pairing) {
             navigationAction(R.drawable.ic_qr, "Scan account QR code") { scan() }
             button("Scan account QR") { scan() }
@@ -123,43 +116,6 @@ class AccountActivity : NativeScreen() {
             }
             return
         }
-        val username = input("Username").apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-        }
-        val password = input(if (mode == "recover") "New password" else "Password", true)
-        if (mode != "login") text("Use at least 12 characters.", 13f).setTextColor(color(R.color.slate))
-        val recovery = if (mode == "recover") input("Recovery code", true) else null
-        button(when (mode) { "create" -> "Create account"; "recover" -> "Reset password"; else -> "Sign in" }, primary = true) {
-            try {
-                require(username.text.toString().trim().isNotEmpty()) { "Enter your username." }
-                require(password.text.toString().length >= 12) { "Use a password with at least 12 characters." }
-                val origin = AccountStore.DEFAULT_HUB
-                val submit = {
-                    runWork {
-                        val body = HubClient.device(repo.store.beginSignIn()).put("username", username.text.toString().trim()).put("password", password.text.toString())
-                        recovery?.let { body.put("recovery_code", it.text.toString().trim()) }
-                        val path = when (mode) { "create" -> "/v1/accounts"; "recover" -> "/v1/accounts/recover"; else -> "/v1/sessions" }
-                        val result = try { HubClient.call(origin, path, "POST", body) }
-                            catch (e: HubFailure) {
-                                if (e.status == 401 && mode == "password") throw IllegalArgumentException("Check your username and password, then try again.")
-                                throw e
-                            }
-                        password.setText(""); recovery?.setText("")
-                        signedIn(origin, result)
-                    }
-                }
-                when {
-                    mode == "recover" -> confirm("Reset password?", "This signs out your other devices and replaces your password and recovery code.", submit)
-                    else -> submit()
-                }
-            } catch (e: Exception) { status.text = e.message }
-        }
-        if (mode == "password") {
-            link("Forgot password?") { form("recover") }
-            gap(8)
-            row("Use another device", "Sign in with an account QR code or pairing code.", R.drawable.ic_qr) { form("pair") }
-            link("New to Shuffle? Create account") { form("create") }
-        } else link("Already have an account? Sign in") { form("login") }
     }
     private fun openOAuth() {
         runWork {
@@ -170,16 +126,8 @@ class AccountActivity : NativeScreen() {
     }
     private suspend fun signedIn(origin: String, result: JSONObject) {
         repo.accept(origin, result)
-        val recovery = result.optString("recovery_code")
         status.text = "Signed in. Loading your workers…"
-        if (recovery.isNotBlank()) {
-            // Never persist, copy automatically or log the recovery code.
-            MaterialAlertDialogBuilder(this).setTitle("Save your recovery code")
-                .setMessage("$recovery\n\nKeep this somewhere private. You’ll need it if you forget your password. It’s shown only once.")
-                .setCancelable(false).setPositiveButton("I saved my recovery code") { _, _ ->
-                    runWork { finishAccountSetup() }
-                }.show()
-        } else finishAccountSetup()
+        finishAccountSetup()
     }
     private suspend fun finishAccountSetup() {
         val session = repo.store.session() ?: error("Sign in again to finish setting up your account.")

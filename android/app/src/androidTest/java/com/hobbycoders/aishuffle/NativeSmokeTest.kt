@@ -138,12 +138,15 @@ class NativeSmokeTest {
         }
         onView(withId(R.id.screenStatus)).check(matches(withText(expected)))
     }
-    @Test fun existingAccountPasswordValidatesWithoutNetwork() {
+    @Test fun obsoletePasswordEntryUsesClerkWithoutExposingPasswordFields() = withInterceptedOAuth { starts, requests ->
         account("password").use { scenario ->
-            onView(withHint("Username")).check(matches(isDisplayed()))
-            onView(org.hamcrest.Matchers.allOf(withText("Sign in"), isAssignableFrom(com.google.android.material.button.MaterialButton::class.java))).perform(scrollTo(), click())
-            awaitAccountStatus(scenario, "Enter your username.")
-            variants(scenario, "account-login")
+            awaitAccountStatus(scenario, "Sign-in cancelled. You can try again when you’re ready.")
+            Assert.assertEquals(1, starts.get())
+            Assert.assertEquals("signin", requests.single().additionalParameters["screen"])
+            onView(withHint("Username")).check(androidx.test.espresso.assertion.ViewAssertions.doesNotExist())
+            onView(withHint("Password")).check(androidx.test.espresso.assertion.ViewAssertions.doesNotExist())
+            onView(withText("Use an existing Shuffle password")).check(androidx.test.espresso.assertion.ViewAssertions.doesNotExist())
+            onView(withText("Use another device")).check(matches(isDisplayed()))
         }
     }
     private fun withInterceptedOAuth(block: (AtomicInteger, CopyOnWriteArrayList<AuthorizationRequest>) -> Unit) {
