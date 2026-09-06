@@ -1012,16 +1012,20 @@ class SessionRuntime:
                     outcome = final["state"]
                 return outcome
             outcome, settled_here = await self._finalize(sid, tid)
-            if self._pending_done is not None:
+            if (
+                self._pending_done is not None
+                and self._abort_reason != "recording_failed"
+            ):
                 # The pump ending does not prove the session is finished: the
                 # park gate above may still find background work. Deliver the
-                # WS completion only once its outcome is known.
+                # WS completion only once its outcome is known. A turn aborted
+                # because recording failed (#1124) never completes.
                 await self._broadcast({
                     **self._pending_done,
                     "session_id": sid,
                     "outcome": outcome,
                 })
-                self._pending_done = None
+            self._pending_done = None
         finally:
             # Deregister ourselves as the live runtime (self-guarded so a fresh
             # runtime that already took over the session is never evicted).
