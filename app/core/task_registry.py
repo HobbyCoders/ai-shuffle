@@ -1275,6 +1275,28 @@ class TaskRegistry:
         wire.sort(key=lambda w: w.get("updatedAt") or "", reverse=True)
         return wire[:limit]
 
+    def sessions_with_task(self, task_id: str) -> List[str]:
+        """Every session whose registry knows ``task_id``, live map first.
+
+        Additive and read-only, for the task tools' SCOPING check: they used to
+        resolve a task id against a process-global dict with no session in it,
+        so one session's shell answered another session's ``TaskGet`` (and told
+        it to park on a completion that would never wake it). Knowing WHICH
+        session owns an id is what lets the tools allow a parent to read its
+        own worker's task and refuse everybody else's by name.
+
+        Normally 0 or 1 entries; ids are uuid4-derived, so a collision across
+        two sessions is theoretical rather than real.
+        """
+        owners: List[str] = []
+        for session_id, tasks in list(self._tasks.items()):
+            if task_id in tasks:
+                owners.append(session_id)
+        for session_id, entries in list(self._recent_terminal.items()):
+            if task_id in entries and session_id not in owners:
+                owners.append(session_id)
+        return owners
+
     def get_task(
         self, session_id: str, task_id: str, *, durable: bool = False
     ) -> Optional[Dict[str, Any]]:
