@@ -635,25 +635,32 @@ def _build_provider_client(config: HarnessConfig, provider_name: str):
     """
     pc = config.provider(provider_name)
     api_key = os.environ.get(pc.api_key_env) if pc.api_key_env else None
+    # 0 in config means "no whole-stream deadline"; absent leaves the client's
+    # own default in place.
+    deadline: dict[str, Any] = (
+        {"stream_deadline": pc.stream_deadline or None}
+        if pc.stream_deadline is not None
+        else {}
+    )
 
     if pc.kind == "anthropic":
         from fluid.providers.anthropic.client import AnthropicClient
 
-        kwargs: dict[str, Any] = {"api_key": api_key}
+        kwargs: dict[str, Any] = {"api_key": api_key, **deadline}
         if pc.base_url:
             kwargs["base_url"] = pc.base_url
         client: Any = AnthropicClient(**kwargs)
     elif pc.kind == "openai_responses":
         from fluid.providers.openai_responses.client import OpenAIResponsesClient
 
-        kwargs = {"api_key": api_key}
+        kwargs = {"api_key": api_key, **deadline}
         if pc.base_url:
             kwargs["base_url"] = pc.base_url
         client = OpenAIResponsesClient(**kwargs)
     elif pc.kind == "openrouter":
         from fluid.providers.openrouter.client import OpenRouterClient
 
-        kwargs = {"api_key": api_key}
+        kwargs = {"api_key": api_key, **deadline}
         if pc.base_url:
             kwargs["base_url"] = pc.base_url
         client = OpenRouterClient(**kwargs)
@@ -666,7 +673,9 @@ def _build_provider_client(config: HarnessConfig, provider_name: str):
                 "(e.g. http://127.0.0.1:8080 for llama-server, "
                 "http://127.0.0.1:11434 for Ollama)"
             )
-        client = LocalClient(api_key, base_url=pc.base_url, extra=pc.extra)
+        client = LocalClient(
+            api_key, base_url=pc.base_url, extra=pc.extra, **deadline
+        )
     else:
         raise ValueError(f"{pc.kind!r} is not a native provider kind")
 

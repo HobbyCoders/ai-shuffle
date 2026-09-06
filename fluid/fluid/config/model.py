@@ -72,6 +72,17 @@ def _optional_int(value: object) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _optional_seconds(value: object) -> float | None:
+    """``None``/absent/unparseable stays absent; ``0`` means "no deadline"."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return max(parsed, 0.0)
+
+
 @dataclass(frozen=True, kw_only=True)
 class ProviderConfig:
     kind: str  # one of PROVIDER_KINDS
@@ -79,6 +90,12 @@ class ProviderConfig:
     base_url: str | None = None
     api_key_env: str | None = None
     tool_style: str = "native"  # one of TOOL_STYLES
+    # Wall-clock budget for ONE whole model call, in seconds. The httpx
+    # ``timeout`` is per read, so a provider that keeps emitting bytes (a
+    # degenerate generation, an upstream streaming padding) resets it forever;
+    # this bounds the call itself. Absent → the client's own generous default
+    # (fluid.providers._transport.DEFAULT_STREAM_DEADLINE_S); 0 disables it.
+    stream_deadline: float | None = None
     # Standing server-specific request-body knobs, merged into every request
     # (llama.cpp cache_prompt/samplers, Ollama options, …). Currently honoured
     # by the "local" kind.
@@ -100,6 +117,7 @@ class ProviderConfig:
             base_url=d.get("base_url"),
             api_key_env=d.get("api_key_env"),
             tool_style=tool_style,
+            stream_deadline=_optional_seconds(d.get("stream_deadline")),
             extra=dict(d.get("extra") or {}),
         )
 

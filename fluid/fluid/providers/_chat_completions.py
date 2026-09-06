@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -36,7 +38,16 @@ from fluid.providers._retry import (
     is_retriable_status,
 )
 from fluid.providers._sse import sse_events
+from fluid.providers._transport import (
+    DEFAULT_STREAM_DEADLINE_S,
+    StreamDeadlineExceeded,
+    deadline_error_payload,
+    is_closed_client_error,
+    is_usable_client,
+)
 from fluid.providers.base import StreamChunk
+
+log = logging.getLogger(__name__)
 
 # ─── request: Message[] → chat/completions messages ──────────────────────────
 
@@ -443,16 +454,35 @@ async def stream_chat_completions(
     timeout: float,
     retry: RetryPolicy,
     track_provider_requests: bool = False,
+    stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
 ) -> AsyncIterator[StreamChunk]:
     """POST ``body`` to ``url`` and normalize the SSE response into StreamChunks.
 
     Retries retriable statuses and pre-stream transport failures per ``retry``;
     mid-stream failures surface as an ``error`` chunk (chunks were already
-    delivered downstream). When ``http_client`` is None a client is created and
-    closed per call.
+    delivered downstream). When ``http_client`` is None — or the injected one
+    has been closed by its owner — a client is created and closed per call.
+    ``stream_deadline`` bounds one whole call in wall-clock seconds, above the
+    per-read ``timeout``; None disables it.
     """
-    client = http_client or httpx.AsyncClient(timeout=timeout)
-    owns_client = http_client is None
+    injected = http_client
+    owned: httpx.AsyncClient | None = None
+
+    def pick_client() -> httpx.AsyncClient:
+        nonlocal injected, owned
+        if is_usable_client(injected):
+            assert injected is not None
+            return injected
+        if injected is not None:
+            log.warning(
+                "injected http client is closed; falling back to a per-call client"
+            )
+            injected = None
+        if not is_usable_client(owned):
+            owned = httpx.AsyncClient(timeout=timeout)
+        assert owned is not None
+        return owned
+
     attempt = 0
     logical_call_id = f"fluid-{uuid.uuid4().hex}"
     request_headers = dict(headers)
@@ -471,6 +501,12 @@ async def stream_chat_completions(
     try:
         while True:
             yielded = False
+            client = pick_client()
+            call_deadline = (
+                time.monotonic() + stream_deadline
+                if stream_deadline and stream_deadline > 0
+                else None
+            )
             try:
                 trace_request("chat_completions", body)
                 async with client.stream(
@@ -530,23 +566,41 @@ async def stream_chat_completions(
                     pending_start: StreamChunk | None = None
                     content_seen = False
                     retry_error: StreamChunk | None = None
+                    overran = False
                     while True:
+                        # Two clocks. The first-data watchdog catches a replica
+                        # that answers 200 and says nothing; the call deadline
+                        # catches the opposite failure — a stream that keeps
+                        # talking forever, which resets every per-read timeout
+                        # it touches. sse_events drops comment lines, so a
+                        # keepalive heartbeat satisfies neither.
+                        budget: float | None = (
+                            FIRST_DATA_TIMEOUT if awaiting_first else None
+                        )
+                        if call_deadline is not None:
+                            remaining = call_deadline - time.monotonic()
+                            if remaining <= 0:
+                                overran = True
+                                break
+                            budget = remaining if budget is None else min(
+                                budget, remaining
+                            )
                         try:
-                            if awaiting_first:
-                                # Only the first data event is deadlined; once
-                                # the provider says anything the watchdog is
-                                # done (mid-stream stalls are out of scope).
-                                # sse_events drops comment lines, so a keepalive
-                                # heartbeat can never satisfy this.
-                                event_name, data = await asyncio.wait_for(
-                                    events.__anext__(), FIRST_DATA_TIMEOUT
-                                )
-                            else:
+                            if budget is None:
                                 event_name, data = await events.__anext__()
+                            else:
+                                event_name, data = await asyncio.wait_for(
+                                    events.__anext__(), budget
+                                )
                         except StopAsyncIteration:
                             break
                         except (asyncio.TimeoutError, TimeoutError):
-                            starved = True
+                            if call_deadline is not None and (
+                                time.monotonic() >= call_deadline
+                            ):
+                                overran = True
+                            else:
+                                starved = True
                             break
                         awaiting_first = False
                         for chunk in normalizer.consume(event_name, data):
@@ -590,6 +644,16 @@ async def stream_chat_completions(
                         yielded = True
                         yield pending_start
                         pending_start = None
+                    if overran:
+                        yield StreamChunk(
+                            "error",
+                            with_request_evidence(
+                                deadline_error_payload(
+                                    StreamDeadlineExceeded(float(stream_deadline or 0))
+                                )
+                            ),
+                        )
+                        return
                     if starved or (not normalizer.finished and not normalizer.errored):
                         # Stream closed before the usage/terminal chunk, or the
                         # watchdog gave up waiting for its first byte of data:
@@ -614,6 +678,25 @@ async def stream_chat_completions(
                             )
                         yield StreamChunk("error", truncated)
                     return
+            except RuntimeError as exc:
+                # httpx answers a send on a closed client with a plain
+                # RuntimeError, which no transport handler sees. Nothing left
+                # the process, so the next attempt gets a live client.
+                if not is_closed_client_error(exc):
+                    raise
+                injected = None
+                if not yielded and attempt < retry.transport_retries:
+                    await asyncio.sleep(retry.delay(attempt))
+                    attempt += 1
+                    continue
+                yield StreamChunk(
+                    "error",
+                    with_request_evidence({
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "retriable": True,
+                    }),
+                )
+                return
             except httpx.TransportError as exc:
                 # Pre-stream connection failures retry; mid-stream ones
                 # don't (chunks were already delivered downstream).
@@ -637,5 +720,5 @@ async def stream_chat_completions(
                 )
                 return
     finally:
-        if owns_client:
-            await client.aclose()
+        if owned is not None:
+            await owned.aclose()

@@ -15,6 +15,7 @@ import httpx
 
 from fluid.providers._chat_completions import stream_chat_completions
 from fluid.providers._retry import RetryPolicy
+from fluid.providers._transport import DEFAULT_STREAM_DEADLINE_S
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.providers.openrouter.serialize import build_request_body
 
@@ -41,6 +42,7 @@ class OpenRouterClient:
         *,
         base_url: str = API_URL,
         timeout: float = 600.0,
+        stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
         pricing: dict[str, dict[str, float]] | None = None,
@@ -49,6 +51,8 @@ class OpenRouterClient:
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         self._base_url = base_url
         self._timeout = timeout
+        # Wall clock for one whole model call, above the per-read ``timeout``.
+        self._stream_deadline = stream_deadline
         self._http = http_client
         # A refused request (429, 5xx, or an error chunk sent in place of
         # content) started no generation, so it retries with backoff. A
@@ -98,5 +102,6 @@ class OpenRouterClient:
             timeout=self._timeout,
             retry=self._retry,
             track_provider_requests=True,
+            stream_deadline=self._stream_deadline,
         ):
             yield chunk
