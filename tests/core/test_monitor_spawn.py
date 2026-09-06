@@ -64,7 +64,7 @@ async def test_spawn_background_buffers_clean_lines(monkeypatch):
     chunks = [b"\x1b[32mok\x1b[0m\n", b"\x1b[1mbold\x1b[22m done\n", b""]
 
     class _Stdout:
-        async def readline(self):
+        async def read(self, _n):
             return chunks.pop(0)
 
     class _Proc:
@@ -565,8 +565,12 @@ async def test_an_inline_failure_is_reported_as_one(spawner_harness):
     spawn = ms.make_fluid_monitor_spawner("s-spawn")
     outcome = await spawn({"command": "pytest -q", "wait_seconds": 30}, None)
 
-    assert outcome.is_error
+    # NOT is_error: a non-zero exit is the command's own verdict, and an
+    # is_error outcome is raised by the code-mode runner, which used to abort
+    # the whole cell over a red TDD baseline.
+    assert not outcome.is_error
     assert "finished with a failure" in outcome.text
+    assert "not a tool failure" in outcome.text
     assert "FAILED tests/test_a.py::test_b" in outcome.text
 
 

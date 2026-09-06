@@ -674,6 +674,16 @@ class Settings(BaseSettings):
     # Bound the completion summary delivered with a wake; the full buffer remains available through TaskOutput.
     # MONITOR_SUMMARY_MAX_CHARS controls this budget.
     monitor_summary_max_chars: int = 1000
+    # Idle bound for a SERVING Monitor task (``serves``). Those are exempt from
+    # the command budget by design — they are meant to stay up — and nothing
+    # else bounded them: when a session's wake died, an audited runner carried
+    # a uvicorn fixture and a Vite dev server for 8h15m, next to a
+    # resource-monitor warning about 17 orphan children. The bound is on the
+    # SESSION, not the process: while the session that started it keeps being
+    # touched, the server is never disturbed. Past this many seconds with no
+    # activity on that session, the process is stopped and the completion says
+    # why. 0 disables. Env: MONITOR_SERVING_IDLE_SECONDS.
+    monitor_serving_idle_seconds: int = 3600  # 60 minutes
 
     # Park watchdog: periodic sweeps report background parks with no wake after the warning interval. Past the
     # force ceiling, settle still-running task rows and emit their terminals so the session wakes.
