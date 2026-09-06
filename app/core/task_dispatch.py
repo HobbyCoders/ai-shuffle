@@ -921,14 +921,24 @@ async def _dispatch_worker_with_retries(
             provider_id=provider_id,
         )
         if capacity_error:
+            error = (
+                f"{outcome.error or 'The worker failed to start.'} The "
+                f"automatic re-dispatch could not be admitted: {capacity_error}"
+            )
+            if background:
+                # The failed attempt's wake was suppressed on the promise of
+                # this retry. The retry is not happening, so somebody has to
+                # tell the parent — otherwise it stays parked on a receipt
+                # nothing will ever settle.
+                await provider_agent.announce_abandoned_retry(
+                    kwargs.get("context_session_id") or parent_session_id or "",
+                    worker_id,
+                    error[:240],
+                )
             return provider_agent.WorkerOutcome(
                 ok=False,
                 session_id=outcome.session_id,
-                error=(
-                    f"{outcome.error or 'The worker failed to start.'} The "
-                    f"automatic re-dispatch could not be admitted: "
-                    f"{capacity_error}"
-                ),
+                error=error,
                 frames_forwarded=outcome.frames_forwarded,
             )
 

@@ -1549,6 +1549,35 @@ async def _notify_caller_terminal(
         )
 
 
+async def announce_abandoned_retry(
+    owner_session_id: str, worker_session_id: str, summary: str
+) -> None:
+    """Tell the caller about a failure whose wake a planned retry suppressed.
+
+    ``dispatch_worker``'s ``suppress_caller_wake`` predicate takes the chip and
+    the wake off an attempt the caller said it was going to re-dispatch. If that
+    re-dispatch then never happens — it could not be admitted — nobody has told
+    the parent anything, and a parent parked on the receipt would sit there
+    forever. This is the one caller-side escape hatch for that window.
+
+    Never raises: it runs beside an outcome that is already decided.
+    """
+    from app.core.task_registry import task_registry
+
+    try:
+        task_registry.complete_task(
+            owner_session_id, worker_session_id, "error", summary=summary,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "ProviderAgent: abandoned-retry row update failed for %s",
+            worker_session_id, exc_info=True,
+        )
+    await _notify_caller_terminal(
+        owner_session_id, worker_session_id, worker_session_id, "error", summary,
+    )
+
+
 async def dispatch_worker(
     *,
     parent_session_id: str,

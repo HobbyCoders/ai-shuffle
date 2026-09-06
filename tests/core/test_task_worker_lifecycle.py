@@ -967,3 +967,75 @@ class TestCapacityIsSaidOutLoud:
             frames_forwarded=9,
         )
         assert td._capacity_worded(outcome, 1) is outcome
+
+
+class TestAbandonedRetryStillTellsTheParent:
+    """A suppressed wake plus a retry that never happens = a stranded parent."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        td._PENDING_ADMISSIONS.clear()
+        td._ADMISSION_LOCK = None
+        yield
+        td._PENDING_ADMISSIONS.clear()
+        td._ADMISSION_LOCK = None
+        task_registry.clear_session("root-1")
+        sup.reset()
+
+    def test_a_retry_refused_at_admission_wakes_the_caller_anyway(
+        self, mock_db, monkeypatch
+    ):
+        from app.core import config as cfg
+
+        monkeypatch.setattr(cfg.settings, "task_worker_start_retries", 1, raising=False)
+        monkeypatch.setattr(td, "_START_RETRY_BACKOFF_SECONDS", 0.01)
+        announced = []
+
+        async def _announce(owner, worker, summary):
+            announced.append((owner, worker, summary))
+
+        monkeypatch.setattr(pa, "announce_abandoned_retry", _announce)
+
+        async def _refuse(worker_id, **kwargs):
+            return "Server is at capacity — nothing freed.", 0.0
+
+        monkeypatch.setattr(td, "_reserve_admission", _refuse)
+
+        async def dispatcher(**kwargs):
+            # The predicate says "I am about to retry", so the wake is skipped.
+            assert kwargs["suppress_caller_wake"]("error", "reset", 0) is True
+            return WorkerOutcome(
+                ok=False, session_id=kwargs["worker_session_id"],
+                error="reset", frames_forwarded=0,
+            )
+
+        outcome = _run(td._dispatch_worker_with_retries(
+            kwargs=dict(
+                parent_session_id="root-1", context_session_id="owner-1",
+                profile_id="p1", prompt="go", label="x",
+                worker_session_id="w-1",
+            ),
+            background=True,
+            lane="native",
+            provider_id=None,
+            parent_session_id="root-1",
+            dispatcher=dispatcher,
+        ))
+
+        assert outcome.ok is False
+        assert "could not be admitted" in outcome.error
+        assert len(announced) == 1
+        owner, worker, _summary = announced[0]
+        assert owner == "owner-1", "the dispatching session, not the routing root"
+        assert worker == "w-1"
+
+    def test_the_announcement_reaches_the_scheduler(self, worker_env, mock_db):
+        task_registry.start_task("owner-1", "w-9", "agent", "stranded")
+
+        _run(pa.announce_abandoned_retry("owner-1", "w-9", "it never started"))
+
+        assert [sid for sid, _f in worker_env.wakes] == ["owner-1"]
+        _sid, frame = worker_env.wakes[0]
+        assert frame["task_id"] == "w-9"
+        assert frame["status"] == "error"
+        assert task_registry.get_task("owner-1", "w-9")["status"] == "error"
