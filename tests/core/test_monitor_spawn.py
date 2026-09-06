@@ -401,6 +401,10 @@ async def test_deadline_stops_the_task_and_wakes_with_a_timeout(
 async def test_serves_skips_the_deadline_and_marks_the_receipt(
     spawner_harness, monkeypatch
 ):
+    # The idle bound is a separate feature with its own tests; keep this one
+    # about the command budget alone (the jumped clock would otherwise fire
+    # the idle poll on every reading).
+    monkeypatch.setattr(ms, "session_idle_seconds", lambda sid: None)
     import asyncio
 
     from app.core.config import settings

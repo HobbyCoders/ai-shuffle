@@ -1106,6 +1106,11 @@ def make_fluid_monitor_spawner(
                         idle = await asyncio.to_thread(
                             session_idle_seconds, caller_session_id
                         )
+                        if not task.is_running():
+                            # The process went away while the idle read
+                            # was off-thread: settle it now, not after the
+                            # next poll.
+                            break
                         if idle is not None and idle >= idle_budget:
                             await _enforce_serving_idle_bound(
                                 task, caller_session_id, idle, idle_budget
