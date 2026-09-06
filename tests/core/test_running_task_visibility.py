@@ -64,7 +64,10 @@ async def _spawn_fake_shell(monkeypatch, *, exit_code=0, lines=(b"",), **kwargs)
     chunks = list(lines)
 
     class _Stdout:
-        async def readline(self):
+        # ``read``, not ``readline``: the output reader pulls fixed chunks and
+        # splits lines itself, so a line longer than the pipe limit can no
+        # longer kill it (see builtin_tools._read_lines).
+        async def read(self, _n):
             return chunks.pop(0) if chunks else b""
 
     class _Proc:
@@ -140,7 +143,7 @@ async def test_module_level_spawn_records_nothing(monkeypatch, appended):
     """No session → no parent to show a chip to."""
     async def _fake_exec(*args, **kw):
         class _Stdout:
-            async def readline(self):
+            async def read(self, _n):
                 return b""
 
         class _Proc:
