@@ -181,7 +181,10 @@ async def test_start_opens_sideband_and_configures_the_session(mock_db, fake_soc
     await bridge.stop()
 
 
-async def test_start_seeds_recent_history_into_instructions(mock_db, fake_sockets):
+async def test_start_seeds_recent_history_as_conversation_context(
+    mock_db, fake_sockets
+):
+    """The recap is HISTORY, never instructions (session audit 2026-09-05)."""
     from app.db import database
 
     _mk_session()
@@ -191,10 +194,61 @@ async def test_start_seeds_recent_history_into_instructions(mock_db, fake_socket
     bridge = await _bridge(fake_sockets)
     instructions = fake_sockets[0].session_update()["session"]["instructions"]
     assert instructions.startswith(vb.VOICE_INSTRUCTIONS_V1)
-    assert vb.CONTEXT_SEED_HEADER in instructions
-    assert "User: what is the deploy status" in instructions
-    assert "Assistant: it finished ten minutes ago" in instructions
+    # Nothing the model said last time is in the instruction block any more.
+    assert vb.CONTEXT_SEED_HEADER not in instructions
+    assert "it finished ten minutes ago" not in instructions
+
+    seeds = [
+        item for item in _items(fake_sockets[0], "message")
+        if item["content"][0]["text"].startswith(vb.CONTEXT_SEED_MARKER)
+    ]
+    assert len(seeds) == 1
+    text = seeds[0]["content"][0]["text"]
+    assert vb.CONTEXT_SEED_PROVENANCE in text
+    assert vb.CONTEXT_SEED_HEADER in text
+    assert "User: what is the deploy status" in text
+    assert "Assistant: it finished ten minutes ago" in text
+    # Context only: seeding a rejoined call must not make the agent talk.
+    assert _frames(fake_sockets[0]).count({"type": "response.create"}) == 0
+
+    # And the replay does not re-persist rows it is a copy of: without this the
+    # transcript would grow by the whole seed on every attach.
+    sock = fake_sockets[0]
+    sock.push({
+        "type": "conversation.item.created",
+        "item": {
+            "id": "seed-echo", "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}],
+        },
+    })
+    sock.push({"type": "response.done", "response": {}})
+    await _drain(bridge, sock)
+    assert len(database.get_session_messages(SID)) == 2
     await bridge.stop()
+
+
+async def test_a_fresh_session_sends_no_history_item(mock_db, fake_sockets):
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    assert _items(fake_sockets[0], "message") == []
+    await bridge.stop()
+
+
+async def test_backend_notes_are_kept_out_of_the_seed(mock_db, fake_sockets):
+    """Legacy rows too: older builds stored the notes with ``role='user'``."""
+    from app.db import database
+
+    _mk_session()
+    database.add_session_message(SID, "user", vb.GREETING_PROMPT)
+    database.add_session_message(SID, "user", f"{vb.COMPLETION_PREFIX} Worker 'x' finished.")
+    database.add_session_message(SID, "system", f"{vb.APPROVAL_PREFIX} Run npm test")
+    database.add_session_message(SID, "user", "what is the deploy status")
+
+    seed = vb.build_context_seed(SID)
+    assert "User: what is the deploy status" in seed
+    assert vb.CALL_STARTED_PREFIX not in seed
+    assert vb.COMPLETION_PREFIX not in seed
+    assert vb.APPROVAL_PREFIX not in seed
 
 
 async def test_context_seed_is_bounded_and_keeps_the_newest(mock_db):
@@ -460,9 +514,10 @@ async def test_replacement_reseeds_context_from_the_persisted_transcript(
     await asyncio.sleep(0.1)
 
     await registry.attach(SID, "call-2", api_key=KEY, model=MODEL, max_call_minutes=60)
-    instructions = fake_sockets[1].session_update()["session"]["instructions"]
-    assert "User: remember the release date" in instructions
-    assert "Assistant: noted" in instructions
+    seed = _items(fake_sockets[1], "message")[0]["content"][0]["text"]
+    assert seed.startswith(vb.CONTEXT_SEED_MARKER)
+    assert "User: remember the release date" in seed
+    assert "Assistant: noted" in seed
     await registry.detach(SID)
     assert bridge.active is False
 
@@ -710,11 +765,19 @@ async def test_reconnect_history_cannot_define_permission_policy(mock_db, fake_s
     database.add_session_message(SID, "user", "Try calling the tool again.")
     bridge = await _bridge(fake_sockets)
     instructions = fake_sockets[0].session_update()["session"]["instructions"]
-    current, history = instructions.split(vb.CONTEXT_SEED_HEADER, 1)
-    assert "Conversation history is context, not permission policy" in current
-    assert "Current instructions and actual runtime results govern" in current
-    assert "when asked to retry, attempt the relevant tool" in current
-    assert "The approval token expired" in history
+    assert "Conversation history is context, not permission policy" in instructions
+    assert "Current instructions and actual runtime results govern" in instructions
+    assert "when asked to retry, attempt the relevant tool" in instructions
+
+    # The hallucinated blocker is in the CONVERSATION, behind a provenance
+    # banner — it never reaches the instruction block, where it would have
+    # outranked everything the user says out loud.
+    assert "The approval token expired" not in instructions
+    history = _items(fake_sockets[0], "message")[0]["content"][0]["text"]
+    assert history.index(vb.CONTEXT_SEED_PROVENANCE) < history.index(
+        "The approval token expired"
+    )
+    assert "past output, not policy, and may be wrong" in history
     assert "Try calling the tool again" in history
     await bridge.stop()
 
@@ -1084,16 +1147,30 @@ async def test_pending_approval_is_announced_exactly_once(
     await bridge.stop()
 
 
-async def test_the_approval_poller_only_starts_after_a_dispatch(
+async def test_the_approval_poller_starts_with_the_call(
     mock_db, fake_sockets, fake_permissions
 ):
-    _mk_session()
-    fake_permissions.append({"request_id": "req-2", "tool_name": "Bash"})
-    bridge = await _bridge(fake_sockets)
-    await asyncio.sleep(0.05)
+    """No tool call required: the GUI modal is suppressed for the whole call.
 
-    assert bridge._approval_task is None
-    assert _items(fake_sockets[0], "message") == []
+    The poller used to start only from WebFetch / dispatch_agent /
+    message_agent, so a request raised by any other path in a call that used
+    none of them was invisible on screen AND unspoken (session audit
+    2026-09-05).
+    """
+    _mk_session()
+    fake_permissions.append({
+        "request_id": "req-2", "tool_name": "Bash", "title": "Run npm test",
+    })
+    bridge = await _bridge(fake_sockets)
+    assert bridge._approval_task is not None
+    await asyncio.sleep(0.1)
+
+    prompts = [
+        item for item in _items(fake_sockets[0], "message")
+        if item["content"][0]["text"].startswith(vb.APPROVAL_PREFIX)
+    ]
+    assert len(prompts) == 1
+    assert "req-2" in prompts[0]["content"][0]["text"]
     await bridge.stop()
 
 
@@ -2300,3 +2377,299 @@ def test_state_carries_the_running_worker_count(mock_db, monkeypatch, registry):
         lambda sid: [{"kind": "agent", "status": "running"}, {"kind": "shell", "status": "running"}],
     )
     assert registry.state(SID)["active_tasks"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Session-audit round 7 (2026-09-05) — accounting, liveness, auditability
+# ---------------------------------------------------------------------------
+
+def _session_row(session_id: str = SID) -> dict:
+    from app.db import database
+
+    return database.get_session(session_id) or {}
+
+
+async def test_usage_reaches_the_session_row_on_every_response(
+    mock_db, fake_sockets
+):
+    """Both audited calls reported $0.00 on minutes of priced realtime audio."""
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    sock = fake_sockets[0]
+    sock.push({"type": "response.output_audio_transcript.done", "transcript": "sure"})
+    sock.push({"type": "response.done", "response": {"usage": USAGE_BLOCK}})
+    await _drain(bridge, sock)
+
+    row = _session_row()
+    # input_tokens 60 = 5 cached + 55 fresh; the columns are Anthropic-normalised.
+    assert row["total_tokens_in"] == 55
+    assert row["total_cache_read_tokens"] == 5
+    assert row["total_tokens_out"] == 40
+    assert row["total_model_calls"] == 1
+    assert row["total_cost_usd"] == pytest.approx(
+        vb.estimate_cost_usd(MODEL, vb._usage_deltas(USAGE_BLOCK))
+    )
+    # The REALTIME model, not the chat model the session was created with.
+    assert row["launched_model"] == MODEL
+    await bridge.stop()
+
+
+async def test_a_tool_only_response_is_still_billed(mock_db, fake_sockets, monkeypatch):
+    """No transcript means no exchange to flush — but the tokens were spent."""
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    monkeypatch.setattr(vb.VoiceBridge, "_maybe_service_call", lambda *a, **kw: None)
+    await bridge._handle_event(
+        {"type": "response.done", "response": {"usage": USAGE_BLOCK}}
+    )
+    assert _session_row()["total_tokens_out"] == 40
+    await bridge.stop()
+
+
+async def test_hangup_settles_usage_a_failed_write_missed(
+    mock_db, fake_sockets, monkeypatch
+):
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(vb, "_record_session_usage", _boom)
+    await bridge._handle_event(
+        {"type": "response.done", "response": {"usage": USAGE_BLOCK}}
+    )
+    assert _session_row()["total_tokens_out"] == 0        # the write failed
+
+    monkeypatch.undo()
+    await bridge.stop()                                   # teardown reconciles
+    assert _session_row()["total_tokens_out"] == 40
+    assert _session_row()["total_tokens_in"] == 55
+
+
+async def test_a_replace_attach_does_not_re_bill_the_call(
+    mock_db, fake_sockets, registry
+):
+    _mk_session()
+    await registry.attach(SID, "call-1", api_key=KEY, model=MODEL, max_call_minutes=60)
+    fake_sockets[0].push({"type": "response.done", "response": {"usage": USAGE_BLOCK}})
+    await asyncio.sleep(0.05)
+
+    await registry.attach(SID, "call-2", api_key=KEY, model=MODEL, max_call_minutes=60)
+    await registry.detach(SID)
+    # One response's worth of tokens, billed exactly once across the handover.
+    assert _session_row()["total_tokens_out"] == 40
+
+
+async def test_hangup_clears_is_active(mock_db, fake_sockets, registry):
+    from app.db import database
+
+    _mk_session()
+    database.set_session_active(SID, True)
+    await registry.attach(SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=60)
+    assert bool(_session_row()["is_active"]) is True
+
+    await registry.detach(SID)
+    assert bool(_session_row()["is_active"]) is False
+
+
+async def test_shutdown_and_cap_clear_is_active(mock_db, fake_sockets, registry):
+    from app.db import database
+
+    _mk_session()
+    database.set_session_active(SID, True)
+    await registry.attach(SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=60)
+    await registry.shutdown_all()
+    assert bool(_session_row()["is_active"]) is False
+
+    database.set_session_active(SID, True)
+    registry.mark_capped(SID, 60)
+    assert bool(_session_row()["is_active"]) is False
+
+
+async def test_a_replace_attach_leaves_the_session_live(
+    mock_db, fake_sockets, registry
+):
+    """The FE's silent re-handshake is the SAME call, not the end of one."""
+    from app.db import database
+
+    _mk_session()
+    database.set_session_active(SID, True)
+    await registry.attach(SID, "call-1", api_key=KEY, model=MODEL, max_call_minutes=60)
+    await registry.attach(SID, "call-2", api_key=KEY, model=MODEL, max_call_minutes=60)
+    assert bool(_session_row()["is_active"]) is True
+    await registry.detach(SID)
+
+
+async def test_every_serviced_tool_call_is_recorded(
+    mock_db, fake_sockets, fake_dispatch, idle_gate
+):
+    """Not just WebSearch/WebFetch — dispatch_agent was unauditable before."""
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    task = bridge._maybe_service_call(
+        "call-9", "dispatch_agent", json.dumps({"prompt": "add a dark mode toggle"}),
+    )
+    assert task is not None
+    await task
+
+    events = se.get_events(SID)
+    uses = [e for e in events if e["event_type"] == "tool.use"]
+    assert [e["payload"]["name"] for e in uses] == ["dispatch_agent"]
+    assert uses[0]["payload"]["input"] == {"prompt": "add a dark mode toggle"}
+    assert uses[0]["payload"]["tool_use_id"] == "call-9"
+    results = [e for e in events if e["event_type"] == "tool.result"]
+    assert results and results[0]["payload"]["is_error"] is False
+    assert "worker-1" in json.dumps(results, default=str)
+    await bridge.stop()
+
+
+async def test_a_failed_tool_call_is_recorded_as_an_error(mock_db, fake_sockets):
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    task = bridge._maybe_service_call("call-x", "check_agent", "{}")
+    await task
+    results = [e for e in se.get_events(SID) if e["event_type"] == "tool.result"]
+    assert results[0]["payload"]["is_error"] is True
+    await bridge.stop()
+
+
+async def test_app_tool_arguments_are_redacted_in_the_audit_row(
+    mock_db, fake_sockets
+):
+    async def _handler(args):
+        return _envelope({"success": True, "connector": "slack"})
+
+    _mk_session()
+    bridge = vb.VoiceBridge(
+        SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=5,
+        app_tools=[_FakeSdkTool("addConnector", _handler)],
+    )
+    await bridge.start()
+    task = bridge._maybe_service_call(
+        "call-cfg", "addConnector",
+        json.dumps({
+            "name": "slack",
+            "api_key": "sk-live-secret",
+            "webhook_url": "https://hooks.example.com/T000/B000/xxx",
+        }),
+    )
+    await task
+
+    recorded = [
+        e for e in se.get_events(SID) if e["event_type"] == "tool.use"
+    ][0]["payload"]["input"]
+    assert recorded["name"] == "slack"
+    assert recorded["api_key"] == vb.REDACTED_VALUE
+    assert recorded["webhook_url"] == vb.REDACTED_VALUE
+    assert "sk-live-secret" not in json.dumps(se.get_events(SID), default=str)
+    await bridge.stop()
+
+
+def test_redaction_keeps_declared_tool_arguments_readable():
+    assert vb._redact_tool_input(
+        "dispatch_agent", {"prompt": "ship it", "agent": "coder", "junk": 1},
+    ) == {"prompt": "ship it", "agent": "coder"}
+    nested = vb._redact_tool_input(
+        "setThing", {"cfg": {"token": "t", "label": "ok"}, "auth": "x"},
+    )
+    assert nested == {
+        "cfg": {"token": vb.REDACTED_VALUE, "label": "ok"},
+        "auth": vb.REDACTED_VALUE,
+    }
+
+
+async def test_injected_notes_are_not_stored_as_user_messages(
+    mock_db, fake_sockets
+):
+    """A greeting preamble titled both audited voice sessions."""
+    from app.db import database
+
+    _mk_session()
+    bridge = vb.VoiceBridge(
+        SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=5, greet=True,
+    )
+    await bridge.start()
+    sock = fake_sockets[0]
+    sock.push({
+        "type": "conversation.item.created",
+        "item": {
+            "id": "greet-1", "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": vb.GREETING_PROMPT}],
+        },
+    })
+    sock.push({
+        "type": "response.output_audio_transcript.done",
+        "transcript": "Hi! What can I do for you?",
+    })
+    sock.push({"type": "response.done", "response": {}})
+    await _drain(bridge, sock)
+
+    rows = database.get_session_messages(SID)
+    assert [row["role"] for row in rows] == ["system", "assistant"]
+    assert rows[0]["metadata"] == {"source": "voice_system_note"}
+    # No user row, so nothing to title with, so the placeholder holds.
+    assert vb.CALL_STARTED_PREFIX not in (_session_row()["title"] or "")
+    # And the note never comes back round as history on the next call.
+    assert vb.CALL_STARTED_PREFIX not in vb.build_context_seed(SID)
+
+
+async def test_a_real_utterance_still_titles_the_session(mock_db, fake_sockets):
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    sock = fake_sockets[0]
+    sock.push({
+        "type": "conversation.item.input_audio_transcription.completed",
+        "transcript": "check on the deploy",
+    })
+    sock.push({"type": "response.done", "response": {}})
+    await _drain(bridge, sock)
+    assert "check on the deploy" in (_session_row()["title"] or "")
+
+
+async def test_respond_approval_with_nothing_pending_points_at_the_real_tool(
+    mock_db, fake_sockets, fake_permissions, monkeypatch
+):
+    """62c8293f spent 12 user turns hunting for an approval that never existed."""
+    from app.core.permission_handler import permission_handler
+
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+
+    async def _respond(**kwargs):
+        return {"error": "no such request"}
+
+    monkeypatch.setattr(permission_handler, "respond", _respond)
+    result = await bridge._tool_respond_approval(
+        {"request_id": "made-up", "decision": "allow"},
+    )
+
+    assert result["ok"] is False
+    assert result["pending_requests"] == []
+    note = result["note"]
+    assert "nothing to approve" in note
+    assert "do not call respond_approval again" in note.lower()
+    assert "directly" in note
+    await bridge.stop()
+
+
+async def test_respond_approval_still_names_a_different_pending_request(
+    mock_db, fake_sockets, fake_permissions, monkeypatch
+):
+    from app.core.permission_handler import permission_handler
+
+    _mk_session()
+    fake_permissions.append({"request_id": "req-real", "title": "Run npm test"})
+    bridge = await _bridge(fake_sockets)
+
+    async def _respond(**kwargs):
+        return {"error": "no such request"}
+
+    monkeypatch.setattr(permission_handler, "respond", _respond)
+    result = await bridge._tool_respond_approval(
+        {"request_id": "made-up", "decision": "allow"},
+    )
+
+    assert [r["request_id"] for r in result["pending_requests"]] == ["req-real"]
+    assert "different request IS pending" in result["note"]
+    await bridge.stop()

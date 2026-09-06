@@ -1469,10 +1469,15 @@ def _derive_title(text: str) -> str:
     return derive_session_title(text, max_chars=_TITLE_MAX_CHARS)
 
 
+#: Metadata stamped on the ``session_messages`` row for a backend-authored note.
+VOICE_SYSTEM_NOTE_SOURCE = "voice_system_note"
+
+
 def _voice_exchange_side_effects(
     session_id: str,
     user_text: Optional[str],
     assistant_text: Optional[str],
+    system_text: Optional[str] = None,
 ) -> Optional[str]:
     """Search rows + board bookkeeping for one voice exchange (sync).
 
@@ -1481,16 +1486,27 @@ def _voice_exchange_side_effects(
     the first exchange of a still-unnamed voice session the title is backfilled
     from the user's first utterance; the derived title is returned so the caller
     can log it (``None`` when nothing was renamed).
+
+    ``system_text`` is a note the BRIDGE injected (``[call started]``,
+    ``[agent update]``, ``[approval needed]``). It persists as a ``system`` row,
+    not a ``user`` one: it is not the user's words, it must not name the
+    session, and the voice context seed — which reads user/assistant rows — must
+    not replay it back into the next call as if the user had said it.
     """
     from app.db import database
 
+    if system_text:
+        database.add_session_message(
+            session_id, "system", system_text,
+            metadata={"source": VOICE_SYSTEM_NOTE_SOURCE},
+        )
     if user_text:
         database.add_session_message(session_id, "user", user_text)
     if assistant_text:
         database.add_session_message(session_id, "assistant", assistant_text)
 
     new_title: Optional[str] = None
-    if user_text:
+    if user_text and not _is_voice_system_note(user_text):
         row = database.get_session(session_id)
         current = (row or {}).get("title") or ""
         if not current.strip() or current.strip() == VOICE_PLACEHOLDER_TITLE:
@@ -1502,6 +1518,21 @@ def _voice_exchange_side_effects(
     return new_title
 
 
+def _is_voice_system_note(text: str) -> bool:
+    """Whether ``text`` is bridge boilerplate rather than something spoken.
+
+    Belt-and-braces behind the bridge's own classification: the greeting
+    preamble reaching this function as ``user_text`` is exactly how two audited
+    sessions ended up titled "[call started] The user just joined the call…".
+    """
+    try:
+        from app.core.voice_bridge import is_backend_note
+
+        return is_backend_note(text)
+    except Exception:  # noqa: BLE001 — a title guard never blocks a write
+        return False
+
+
 async def record_voice_exchange(
     session_id: str,
     user_text: Optional[str],
@@ -1509,6 +1540,7 @@ async def record_voice_exchange(
     *,
     model: Optional[str] = None,
     usage: Optional[Dict[str, Any]] = None,
+    system_text: Optional[str] = None,
 ) -> Optional[str]:
     """Persist ONE completed voice exchange as a synthetic turn (ruling VM9).
 
@@ -1520,19 +1552,30 @@ async def record_voice_exchange(
 
     ``user_text=None`` is legitimate — a model-initiated response, or an input
     transcription that never arrived — and simply omits the ``message.user``
-    event. Returns the synthetic turn id, or ``None`` when nothing was written.
-    Never raises: a persistence bug must not kill the call.
+    event. ``system_text`` is a note the bridge injected into the call, kept
+    apart from the user's words throughout (see
+    :func:`_voice_exchange_side_effects`). Returns the synthetic turn id, or
+    ``None`` when nothing was written. Never raises: a persistence bug must not
+    kill the call.
     """
     try:
         user_text = (user_text or "").strip() or None
         assistant_text = (assistant_text or "").strip() or None
-        if not user_text and not assistant_text:
+        system_text = (system_text or "").strip() or None
+        if not user_text and not assistant_text and not system_text:
             return None
 
         turn_id = f"voice-{uuid.uuid4()}"
         rows: List[Dict[str, Any]] = [
             _build_event(contract.TurnStarted, session_id, turn_id=turn_id),
         ]
+        if system_text:
+            # Tagged, and first: it is what PROMPTED the reply that follows.
+            rows.append(_build_event(
+                contract.MessageUser, session_id, turn_id=turn_id,
+                content=system_text, kind="text",
+                extra_payload={"source": VOICE_SYSTEM_NOTE_SOURCE},
+            ))
         if user_text:
             rows.append(_build_event(
                 contract.MessageUser, session_id, turn_id=turn_id,
@@ -1551,7 +1594,8 @@ async def record_voice_exchange(
 
         try:
             new_title = await asyncio.to_thread(
-                _voice_exchange_side_effects, session_id, user_text, assistant_text,
+                _voice_exchange_side_effects,
+                session_id, user_text, assistant_text, system_text,
             )
             if new_title:
                 logger.info(
