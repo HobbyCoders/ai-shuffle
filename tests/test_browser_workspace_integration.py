@@ -146,7 +146,7 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
 ):
     from app.api import browser_panel as panel
     from app.core import browser_panel_registry as registry
-    from app.core import mcp_config, native_chrome
+    from app.core import browser_runtime, mcp_config, native_chrome
 
     caplog.set_level("DEBUG", logger="app.core.browser_stream")
     root = Path(__file__).resolve().parents[1]
@@ -156,6 +156,7 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
         os.environ.get("CHROMIUM_PATH")
         or shutil.which("chromium")
         or shutil.which("google-chrome")
+        or native_chrome.resolve_chrome_executable()
     )
     assert chromium, "Chromium is required for an explicit integration run"
     api_port, cdp_port = _port(), _port()
@@ -171,7 +172,7 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
     async def authenticate(ws, token):
         return token == auth, None
 
-    async def cdp_get(path):
+    async def cdp_get(path, port=None):
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.get(cdp_origin + path, timeout=2)
@@ -197,9 +198,52 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
 
     app = FastAPI()
     app.include_router(panel.router)
+    app.dependency_overrides[panel.require_auth] = lambda: auth
+
+    async def require_fixture_session(request, sid):
+        from fastapi import HTTPException
+        if sid != session_id:
+            raise HTTPException(403)
+        return {"id": sid}
+
+    monkeypatch.setattr(panel, "require_session", require_fixture_session)
+
+    def runtime_config(sid):
+        assert sid == session_id
+        return {
+            "command": "node", "args": [str(entry)],
+            "env": {**mcp_config._build_browser_server_env({
+                "CHROME_CDP_PORT": str(cdp_port),
+                "BROWSER_SSRF_ALLOW": "127.0.0.0/8,::1/128",
+            }, session_id=sid), "AIS_BROWSER_MODE": "runtime"},
+            "connect_timeout": 15, "call_timeout": 40, "shutdown_timeout": 3,
+        }
+
+    monkeypatch.setattr(browser_runtime, "resolve_config", runtime_config)
+
+    start_states = []
+
+    @app.middleware("http")
+    async def observe_start(request, call_next):
+        response = await call_next(request)
+        if request.url.path == f"/api/v1/sessions/{session_id}/browser/panel/start":
+            body = b"".join([chunk async for chunk in response.body_iterator])
+            start_states.append(json.loads(body))
+            from starlette.responses import Response
+            return Response(body, status_code=response.status_code, headers=dict(response.headers))
+        return response
+
+    fixture_loads = 0
+
+    @app.get("/slow")
+    async def slow():
+        await asyncio.sleep(8)
+        return HTMLResponse("<title>Slow fixture</title><h1>Slow response</h1>")
 
     @app.get("/fixture")
     async def fixture():
+        nonlocal fixture_loads
+        fixture_loads += 1
         return HTMLResponse("""<!doctype html><html><head><title>Workspace fixture</title></head>
 <body style="margin:0"><input aria-label="Message" style="position:absolute;left:10px;top:10px;width:240px;height:40px"
  oninput="document.querySelector('output').textContent='Typed: '+this.value;document.title='Typed: '+this.value"><main style="padding-top:70px">
@@ -213,6 +257,7 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
         hub = browser_stream._hubs.get(session_id)
         broker = browser_control._brokers.get(session_id)
         return {
+            "fixture_loads": fixture_loads,
             "last_metadata": hub._last_metadata if hub else None,
             "attached_target": hub._attached_target_id if hub else None,
             "frame_identity": hub._frame_identity if hub else None,
@@ -272,10 +317,8 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
         )
         server_task = asyncio.create_task(server.serve())
         await _ready(origin + "/fixture")
-        mcp = await start_mcp()
-        navigation = await mcp.tool("browser_navigate", {"url": origin + "/fixture"})
-        assert not navigation.get("isError"), _text(navigation)
-
+        assert not browser_runtime._runtimes
+        assert registry.get_target(session_id) is None
         if os.environ.get("RUN_BROWSER_WORKSPACE_UI") == "1":
             ui = await asyncio.create_subprocess_exec(
                 "node",
@@ -283,6 +326,7 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
                 cwd=root / "frontend",
                 env={
                     **os.environ,
+                    "CHROMIUM_PATH": chromium,
                     "BROWSER_WORKSPACE_FIXTURE_API": origin,
                     "BROWSER_WORKSPACE_FIXTURE_SESSION": session_id,
                     "BROWSER_WORKSPACE_FIXTURE_TOKEN": auth,
@@ -291,9 +335,36 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
                 stderr=asyncio.subprocess.STDOUT,
             )
             processes.append(ui)
-            output, _ = await asyncio.wait_for(ui.communicate(), 180)
+            output, _ = await asyncio.wait_for(ui.communicate(), 300)
             assert ui.returncode == 0, output.decode().replace(auth, "[fixture-token]")
             print(output.decode().replace(auth, "[fixture-token]"))
+
+            assert len(start_states) == 1
+            cold_state = start_states[0]
+            assert len(browser_runtime._runtimes) == 1
+            print("Real UI cold start: one POST, one runtime, one initial tab; no prior agent")
+        else:
+            async with httpx.AsyncClient() as http:
+                started = await http.post(origin + f"/api/v1/sessions/{session_id}/browser/panel/start", timeout=60)
+            assert started.status_code == 200, started.text
+            cold_state = started.json()
+            assert len(cold_state["tabs"]) == 1
+            assert cold_state["control"]["owner"] == "agent"
+            assert cold_state["target_id"]
+        # No agent exists yet. A human can acquire control and navigate.
+        async with websockets.connect(f"ws://127.0.0.1:{api_port}/api/v1/ws/browser/{session_id}?token={auth}", max_size=8_000_000) as human:
+            await _receive(human, lambda msg: msg.get("type") == "hello")
+            await _command(human, cold_state, "takeover")
+            await _command(human, cold_state, "navigate", {"url": origin + "/fixture"})
+            mcp = await start_mcp()
+            status = json.loads(_text(await mcp.tool("browser_status")))
+            assert status["runtime_id"] == cold_state["runtime_id"]
+            assert status["target_id"] == cold_state["target_id"]
+            assert status["control"]["owner"] == "human"
+            blocked = await mcp.tool("browser_navigate", {"url": origin + "/fixture?blocked"})
+            assert blocked.get("isError") and "human_control" in _text(blocked)
+            await _command(human, cold_state, "release")
+
 
         ws_url = (
             f"ws://127.0.0.1:{api_port}/api/v1/ws/browser/{session_id}?token={auth}"
@@ -466,9 +537,17 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
             )
             assert observed["state"]["viewport"]["height"] == 239
             old_state = state
-            mcp.process.terminate()
+            mcp.process.stdin.close()
             await asyncio.wait_for(mcp.process.wait(), 10)
             mcp = await start_mcp()
+            reused = json.loads(_text(await mcp.tool("browser_status")))
+            assert reused["runtime_id"] == old_state["runtime_id"]
+            assert reused["target_id"] == old_state["target_id"]
+            assert len(reused["tabs"]) == 2
+            # Explicit runtime disposal, not proxy EOF, retires the old identity.
+            await browser_runtime.get(session_id).close()
+            remaining_targets = await cdp_get("/json/list")
+            assert old_state["target_id"] not in {target["id"] for target in remaining_targets}
             navigation = await mcp.tool(
                 "browser_navigate", {"url": origin + "/fixture?restarted"}
             )
@@ -519,6 +598,7 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
             )
             assert frame["metadata"]["runtime_id"] == current_runtime
     finally:
+        await browser_runtime.shutdown()
         for proc in reversed(processes):
             if proc.returncode is None:
                 proc.terminate()

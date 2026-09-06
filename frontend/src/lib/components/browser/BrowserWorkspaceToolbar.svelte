@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Plus, X, RotateCw } from 'lucide-svelte';
+	import { Plus, X, RotateCw, Settings2 } from 'lucide-svelte';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
 	import {
 		ownsControl,
@@ -8,14 +8,18 @@
 		type BrowserViewport,
 	} from '$lib/browser-panel/workspace';
 	let {
+		mode = 'all',
 		workspace,
 		viewerId,
 		connected,
+		starting = false,
 		onCommand,
 	}: {
+		mode?: 'all' | 'tabs' | 'controls';
 		workspace: BrowserWorkspaceState | null;
 		viewerId: string | null;
 		connected: boolean;
+		starting?: boolean;
 		onCommand: (op: string, args: Record<string, unknown>) => void;
 	} = $props();
 	const owner = $derived(connected && ownsControl(workspace, viewerId));
@@ -30,6 +34,7 @@
 	let customWidth = $state(1280);
 	let customHeight = $state(800);
 	let error = $state('');
+	let settingsEl = $state<HTMLDetailsElement>();
 	const viewportWidth = $derived(workspace?.viewport.width);
 	const viewportHeight = $derived(workspace?.viewport.height);
 	$effect(() => {
@@ -60,36 +65,51 @@
 	}
 </script>
 
-<div class="workspace-tools">
+<svelte:window onkeydown={(e) => {
+	if (e.key === 'Escape' && settingsEl?.open && settingsEl.contains(e.target as Node)) {
+		e.preventDefault();
+		settingsEl.open = false;
+		settingsEl.querySelector('summary')?.focus();
+	}
+}} />
+
+<div class="workspace-tools" class:tabs-only={mode === 'tabs'}>
+	{#if mode !== 'controls'}
 	<nav class="tabs" aria-label="Shared browser tabs">
+		{#if !workspace?.tabs.length}<div class="tab current"><span class="tab-select">New tab</span></div>{/if}
 		{#each workspace?.tabs ?? [] as tab (tab.id)}
 			<div class="tab" class:current={tab.id === workspace?.active_tab_id}>
 				<button
 					class="tab-select"
+					aria-label={`Select ${tab.title || tab.url || 'New tab'}`}
 					aria-current={tab.current ? 'page' : undefined}
 					disabled={!owner}
 					onclick={() =>
 						onCommand('tabs', { action: 'select', tab_id: tab.id })}
 					title={tab.url}>{tab.title || tab.url || 'New tab'}</button
 				>
-				<button
+				{#if (workspace?.tabs.length ?? 0) > 1}<button
 					class="icon"
 					disabled={!owner || (workspace?.tabs.length ?? 0) <= 1}
 					aria-label={`Close ${tab.title || 'tab'}`}
 					onclick={() => onCommand('tabs', { action: 'close', tab_id: tab.id })}
 					><X size={12} /></button
-				>
+				>{/if}
 			</div>
 		{/each}
 		<button
 			class="new-tab"
-			disabled={!owner}
+			aria-label="New tab"
+			title="New tab"
+			disabled={starting || other}
 			onclick={() => onCommand('tabs', { action: 'create' })}
-			><Plus size={14} /> New tab</button
+			><Plus size={14} /></button
 		>
 	</nav>
+	{/if}
+	{#if mode !== 'tabs'}
 	<div class="ownership">
-		<span role="status"
+		<span role="status" class="ownership-label"
 			>{!connected
 				? 'View only · connecting'
 				: !workspace?.available
@@ -113,15 +133,8 @@
 				onclick={() => onCommand('takeover', {})}>Take control</button
 			>{/if}
 	</div>
-	<details class="viewport">
-		<summary
-			>Viewport <span class="dimensions"
-				>{workspace
-					? `${workspace.viewport.width} × ${workspace.viewport.height}`
-					: 'Not connected'}</span
-			><span>{workspace?.viewport.mode === 'fit' ? 'Fit' : 'Fixed'}</span
-			></summary
-		>
+	<details class="viewport" bind:this={settingsEl}>
+		<summary aria-label="Browser settings" title="Viewport and browser settings"><Settings2 size={15} /></summary>
 		<div class="viewport-content">
 			<label
 				>Size <select
@@ -198,15 +211,16 @@
 			</p>
 		</div>
 	</details>
+	{/if}
 </div>
 
 <style>
-	.workspace-tools {
-		flex: none;
-		border-bottom: 1px solid var(--border);
-		font-size: 11px;
-		color: var(--foreground);
-	}
+	.workspace-tools { display: contents; font-size: 11px; color: var(--foreground); }
+	.workspace-tools.tabs-only { display: block; flex: 1; min-width: 0; }
+	.viewport { position: static; }
+	.viewport-content { position: absolute; top: 70px; right: 5px; width: min(340px, calc(100% - 10px)); box-sizing: border-box; z-index: 30; background: var(--background); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px #0003; padding: 12px !important; }
+	.ownership-label { display: none; }
+
 	button,
 	input,
 	select {
@@ -242,7 +256,7 @@
 		display: flex;
 		gap: 4px;
 		overflow: auto;
-		padding: 7px 10px;
+		padding: 3px 4px;
 		background: var(--muted);
 	}
 	.tab {
@@ -250,7 +264,7 @@
 		align-items: center;
 		min-width: 95px;
 		max-width: 180px;
-		border-radius: 6px;
+		border-radius: 7px 7px 0 0;
 		border: 1px solid transparent;
 	}
 	.tab.current {
@@ -272,6 +286,7 @@
 		padding: 6px;
 	}
 	.new-tab {
+		border-radius: 7px 7px 0 0;
 		display: flex;
 		align-items: center;
 		gap: 4px;
@@ -282,7 +297,7 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 8px;
-		padding: 7px 10px;
+		padding: 3px 4px;
 	}
 	.ownership > span {
 		color: var(--muted-foreground);
@@ -294,15 +309,8 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		padding: 7px 10px;
+		padding: 3px 4px;
 		cursor: pointer;
-	}
-	.dimensions {
-		font-family: var(--font-mono, monospace);
-		margin-left: auto;
-	}
-	summary > span:last-child {
-		color: var(--muted-foreground);
 	}
 	.viewport-content {
 		padding: 4px 10px 10px;
@@ -356,13 +364,13 @@
 		button,
 		select,
 		summary {
-			min-height: 36px;
+			min-height: 28px;
 		}
 		.tabs {
-			padding-block: 5px;
+			padding-block: 3px;
 		}
 		.ownership {
-			padding-block: 5px;
+			padding-block: 3px;
 		}
 	}
 </style>

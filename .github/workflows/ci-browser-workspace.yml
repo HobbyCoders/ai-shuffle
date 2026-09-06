@@ -12,12 +12,14 @@ on:
       - 'app/core/mcp_config.py'
       - 'app/core/builtin_mcp_servers.py'
       - 'browser-mcp/**'
+      - 'frontend/src/lib/api/browser-panel*'
       - 'frontend/src/lib/browser-panel/**'
       - 'frontend/src/lib/components/browser/**'
       - 'frontend/src/lib/stores/browser-panel*'
       - 'frontend/tests/*browser-workspace*'
       - 'frontend/tests/BrowserWorkspaceParent.svelte'
       - 'frontend/tests/verify-provider-login.mjs'
+      - 'frontend/tests/verify-browser-cold-start.mjs'
       - 'frontend/src/lib/components/deck/cards/settings/providers/OpenAICredits.svelte'
       - 'frontend/package*.json'
       - 'tests/test_browser_workspace_integration.py'
@@ -79,6 +81,7 @@ jobs:
           path: |
             /tmp/browser-workspace-live-*.png
             /tmp/browser-workspace-*.png
+            /tmp/browser-cold-start-*.png
             /tmp/provider-login-*.png
           if-no-files-found: ignore
           retention-days: 7

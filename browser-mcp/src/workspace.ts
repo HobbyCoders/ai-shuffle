@@ -2,9 +2,17 @@ import { randomUUID } from "node:crypto";
 import { Session, raceWithTimeout } from "./session.js";
 import { object, validateCommand, type BrowserCommand, type BrowserWorkspaceState } from "./workspace-protocol.js";
 
+// Internal app-owned process correlation; standalone sessions keep random IDs.
+const runtimeIdentities = new WeakMap<Session, string>();
+export function setWorkspaceRuntimeIdentity(session: Session, env = process.env): void {
+  if (env.AIS_BROWSER_MODE === "runtime" && env._AIS_BROWSER_RUNTIME_ID) {
+    runtimeIdentities.set(session, env._AIS_BROWSER_RUNTIME_ID);
+  }
+}
+
 export const HUMAN_LEASE_MS = 65000;
 export interface CommandResult { id: string; ok: boolean; error?: string }
-/** All page operations use Session's single queue. Control admission is synchronous. */
+/** Page operations share one queue; an admitted Stop interrupts it. */
 export class BrowserWorkspace {
   readonly runtimeId: string;
   private viewer: string | null = null;
@@ -20,7 +28,7 @@ export class BrowserWorkspace {
     target_id: null, active_tab_id: null, tabs: [], viewport: { mode: "fixed", width: 1280, height: 800 },
   };
   onChange?: () => void;
-  constructor(readonly session: Session, runtimeId = randomUUID(), private now = Date.now) {
+  constructor(readonly session: Session, runtimeId = runtimeIdentities.get(session) ?? randomUUID(), private now = Date.now) {
     this.runtimeId = runtimeId;
     session.agentAdmission = () => this.admitAgent();
     session.onWorkspaceChange = () => this.changed();
@@ -66,7 +74,8 @@ export class BrowserWorkspace {
       const c = validateCommand(raw, this.runtimeId, this.now()); id = c.id;
       if (this.stopped) throw new Error("runtime stopped");
       if (this.seen.has(id)) throw new Error("duplicate command; not replayed");
-      if (this.queued >= 64) throw new Error("workspace queue full");
+      const interrupt = c.op === "command" && c.args.command === "stop";
+      if (!interrupt && this.queued >= 64) throw new Error("workspace queue full");
       this.seen.add(id);
       if (this.seen.size > 1024) this.seen.delete(this.seen.values().next().value!);
       this.expireLease();
@@ -83,6 +92,21 @@ export class BrowserWorkspace {
         this.changed(); // reserve BEFORE entering queue: queued agent calls recheck admission
       }
       const generation = this.ownershipGeneration;
+      if (interrupt) {
+        const check = () => {
+          this.expireLease();
+          validateCommand(c, this.runtimeId, this.now());
+          if (this.stopped || generation !== this.ownershipGeneration) throw new Error("control reservation expired or released");
+          if (this.viewer !== c.viewer_id) throw new Error("human control required");
+          if (!c.tab_id || c.tab_id !== this.session.currentTabId()) throw new Error("stale tab: refresh workspace state");
+        };
+        check();
+        const cdp = await this.session.currentCDP();
+        check();
+        await raceWithTimeout(cdp.send("Page.stopLoading"), 5000, "stop timed out");
+        if (!this.stopped && c.tab_id === this.session.currentTabId()) this.session.notifyNavigation();
+        return { id, ok: true };
+      }
       this.queued++;
       try {
         await this.session.runExclusive(async () => {
@@ -132,10 +156,9 @@ export class BrowserWorkspace {
       await raceWithTimeout(cdp.send(a.method as "Input.insertText", a.params as { text: string }), 5000, "input timed out; outcome unknown, do not replay");
     } else if (c.op === "command") {
       const options = { waitUntil: "domcontentloaded" as const, timeout: 15000 };
-      if (a.command === "back") await page.goBack(options);
-      else if (a.command === "forward") await page.goForward(options);
+      if (a.command === "back") await page.goBack({ ...options, waitUntil: "commit" });
+      else if (a.command === "forward") await page.goForward({ ...options, waitUntil: "commit" });
       else if (a.command === "reload") await page.reload(options);
-      else await raceWithTimeout((await this.session.currentCDP()).send("Page.stopLoading"), 5000, "stop timed out");
     }
   }
 }

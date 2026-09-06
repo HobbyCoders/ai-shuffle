@@ -23,10 +23,17 @@ import { normalizeOptionalInput, validateInput } from "./schemas.js";
 import { errorResult } from "./tools/result.js";
 import { reportCurrentTarget } from "./panel.js";
 import { startWorkspaceBridge } from "./workspace-bridge.js";
+import { setWorkspaceRuntimeIdentity } from "./workspace.js";
 
 async function main(): Promise<void> {
+  if (process.env.AIS_BROWSER_MODE === "proxy" && process.env.AIS_SESSION_ID && process.env.AIS_PANEL_TOKEN && process.env.AIS_PANEL_REGISTER_URL) {
+    const { startProxy } = await import("./proxy.js");
+    await startProxy();
+    return;
+  }
   const manager = new BrowserManager();
   const session = new Session(manager);
+  setWorkspaceRuntimeIdentity(session);
   const bridge = startWorkspaceBridge(session);
 
   // Log the effective SSRF egress policy to stderr (stdout is the MCP channel).

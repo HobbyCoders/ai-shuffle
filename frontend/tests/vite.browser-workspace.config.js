@@ -1,10 +1,16 @@
 import { readFile } from 'node:fs/promises';
-import { defineConfig, mergeConfig } from 'vite';
+import { realpathSync } from 'node:fs';
+import { defineConfig, mergeConfig, searchForWorkspaceRoot } from 'vite';
 import base from '../vite.config.js';
 // Serve a standalone fixture before SvelteKit's authenticated application shell.
 export default mergeConfig(
 	base,
 	defineConfig({
+		server: {
+			fs: {
+				allow: [searchForWorkspaceRoot(process.cwd()), realpathSync(new URL('../node_modules', import.meta.url))],
+			},
+		},
 		plugins: [
 			{
 				name: 'browser-workspace-fixture',

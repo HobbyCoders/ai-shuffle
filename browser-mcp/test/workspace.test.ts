@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Session } from "../src/session.js";
 import { BrowserManager } from "../src/browser.js";
-import { BrowserWorkspace, HUMAN_LEASE_MS } from "../src/workspace.js";
+import { BrowserWorkspace, HUMAN_LEASE_MS, setWorkspaceRuntimeIdentity } from "../src/workspace.js";
 import { validateCommand, validateInputCommand } from "../src/workspace-protocol.js";
 import { TOOL_MAP } from "../src/tools/index.js";
 import { runWait } from "../src/tools/wait.js";
@@ -12,6 +12,37 @@ let seq = 0;
 const command = (ws: BrowserWorkspace, op = "takeover", args = {}, extra = {}) => ({ id: `c${++seq}`, runtime_id: ws.runtimeId, tab_id: null, viewer_id: "alice", op, args, expires_at: Date.now() + 30000, ...extra });
 const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; };
 afterEach(() => { runtimes.forEach(w => w.stop()); runtimes.length = 0; vi.useRealTimers(); vi.restoreAllMocks(); });
+
+describe("runtime identity", () => {
+  it("echoes the app-owned identity without affecting other sessions", () => {
+    const session = new Session(new BrowserManager());
+    setWorkspaceRuntimeIdentity(session, { AIS_BROWSER_MODE: "runtime", _AIS_BROWSER_RUNTIME_ID: "owned-child" });
+    const ws = new BrowserWorkspace(session);
+    runtimes.push(ws);
+    expect(ws.runtimeId).toBe("owned-child");
+    expect(session.workspaceStatus?.().runtime_id).toBe("owned-child");
+    expect(make().ws.runtimeId).not.toBe("owned-child");
+    const explicit = new BrowserWorkspace(session, "explicit-id");
+    runtimes.push(explicit);
+    expect(explicit.runtimeId).toBe("explicit-id");
+  });
+  it.each([undefined, "proxy", "direct"])("ignores injected identity in %s mode", mode => {
+    const session = new Session(new BrowserManager());
+    setWorkspaceRuntimeIdentity(session, { AIS_BROWSER_MODE: mode, _AIS_BROWSER_RUNTIME_ID: "ignored" });
+    const ws = new BrowserWorkspace(session);
+    runtimes.push(ws);
+    expect(ws.runtimeId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ws.runtimeId).not.toBe("ignored");
+    expect(make().ws.runtimeId).not.toBe(ws.runtimeId);
+  });
+  it("keeps the random default when runtime mode has no injected identity", () => {
+    const session = new Session(new BrowserManager());
+    setWorkspaceRuntimeIdentity(session, { AIS_BROWSER_MODE: "runtime" });
+    const ws = new BrowserWorkspace(session);
+    runtimes.push(ws);
+    expect(ws.runtimeId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
 
 describe("shared control queue", () => {
   it("preserves the panel's committed-text size limit", () => {
@@ -53,8 +84,9 @@ describe("shared control queue", () => {
     vi.spyOn(session,"ensurePage").mockResolvedValue(page as never);
     vi.spyOn(session,"currentCDP").mockResolvedValue(cdp as never);
     for(const action of ["back","forward","reload","stop"]) expect((await ws.receive(command(ws,"command",{command:action},{tab_id:"tab1"}))).ok).toBe(true);
-    expect(page.goBack).toHaveBeenCalledWith({waitUntil:"domcontentloaded",timeout:15000});
-    expect(page.goForward).toHaveBeenCalledOnce(); expect(page.reload).toHaveBeenCalledOnce();
+    expect(page.goBack).toHaveBeenCalledWith({waitUntil:"commit",timeout:15000});
+    expect(page.goForward).toHaveBeenCalledWith({waitUntil:"commit",timeout:15000});
+    expect(page.reload).toHaveBeenCalledWith({waitUntil:"domcontentloaded",timeout:15000});
     expect(cdp.send).toHaveBeenCalledWith("Page.stopLoading");
     expect((await ws.receive(command(ws,"input",{method:"Input.insertText",params:{text:"hello"}},{tab_id:"tab1"}))).ok).toBe(true);
     expect(cdp.send).toHaveBeenCalledWith("Input.insertText",{text:"hello"});
@@ -165,6 +197,60 @@ describe("typed command validation", () => {
   });
   it.each([NaN, Infinity, 0, Date.now()+200000])("rejects bad deadline %s", expires_at => {
     const { ws } = make(); expect(() => validateCommand(command(ws, "takeover", {}, {expires_at}), ws.runtimeId)).toThrow();
+  });
+});
+
+describe("navigation interruption", () => {
+  it("stops a blocked navigation before the operation queue drains and recovers", async () => {
+    const { session, ws } = make();
+    await ws.receive(command(ws));
+    const started = deferred(), gate = deferred();
+    const page = {
+      goto: vi.fn(async () => { started.resolve(); await gate.promise; throw new Error("navigation aborted"); }),
+      reload: vi.fn(async () => {}),
+    };
+    const cdp = { send: vi.fn(async () => { gate.resolve(); }) };
+    vi.spyOn(session, "currentTabId").mockReturnValue("tab1");
+    vi.spyOn(session, "hasPage").mockReturnValue(true);
+    vi.spyOn(session, "ensurePage").mockResolvedValue(page as never);
+    vi.spyOn(session, "currentCDP").mockResolvedValue(cdp as never);
+    const navigation = ws.receive(command(ws, "navigate", { url: "https://example.com" }, { tab_id: "tab1" }));
+    await started.promise;
+    const stopped = ws.receive(command(ws, "command", { command: "stop" }, { tab_id: "tab1" }));
+    try {
+      await Promise.resolve();
+      expect(cdp.send).toHaveBeenCalledWith("Page.stopLoading");
+    } finally {
+      gate.resolve();
+      await navigation;
+      await stopped;
+    }
+    expect((await navigation).ok).toBe(false);
+    expect((await stopped).ok).toBe(true);
+    expect((await ws.receive(command(ws, "command", { command: "reload" }, { tab_id: "tab1" }))).ok).toBe(true);
+    expect(page.reload).toHaveBeenCalledOnce();
+  });
+
+  it.each(["release", "tab", "runtime", "expiry"])("rechecks %s after acquiring the stop CDP session", async (change) => {
+    if (change === "expiry") vi.useFakeTimers();
+    const { session, ws } = make();
+    await ws.receive(command(ws));
+    const gate = deferred(), started = deferred();
+    let tab = "tab1";
+    const cdp = { send: vi.fn(async () => {}) };
+    vi.spyOn(session, "currentTabId").mockImplementation(() => tab);
+    vi.spyOn(session, "hasPage").mockReturnValue(true);
+    vi.spyOn(session, "ensurePage").mockResolvedValue({} as never);
+    vi.spyOn(session, "currentCDP").mockImplementation(async () => { started.resolve(); await gate.promise; return cdp as never; });
+    const stopped = ws.receive(command(ws, "command", { command: "stop" }, { tab_id: "tab1" }));
+    await started.promise;
+    if (change === "release") await ws.receive(command(ws, "release"));
+    else if (change === "tab") tab = "tab2";
+    else if (change === "runtime") ws.stop();
+    else vi.setSystemTime(Date.now() + HUMAN_LEASE_MS + 1);
+    gate.resolve();
+    expect((await stopped).ok).toBe(false);
+    expect(cdp.send).not.toHaveBeenCalled();
   });
 });
 

@@ -3,9 +3,9 @@
  *
  * Mirrors the layout store pattern (Svelte 5 runes + the createSubscribers shim
  * for `$storeName` auto-subscription in .svelte files). Width, auto-open policy,
- * and the viewport default sync through the browser_panel server preference; `open`/`status`/`url` are runtime-only, and
- * `userClosedForSession` is a per-runtime suppression flag so an auto-open never
- * fights a user who deliberately closed the panel for the session they're in.
+ * and viewport defaults sync through the browser_panel server preference.
+ * Visibility, expansion, dismissal and page state live only in a session-keyed
+ * runtime map. Background activity cannot change another session's panel.
  */
 import { compatible } from '$lib/services/preference-values';
 import type { BrowserViewport } from '$lib/browser-panel/workspace';
@@ -29,6 +29,7 @@ interface BrowserPanelState {
 	defaultViewport: BrowserViewport;
 	/** Whether the panel is docked open. */
 	open: boolean;
+	expanded: boolean;
 	/** Panel width in px (user-resizable, persisted, clamped). */
 	width: number;
 	/** Latest stream status. */
@@ -191,6 +192,7 @@ if (browser && typeof window !== 'undefined') {
 
 let _state = $state<BrowserPanelState>({
 	open: false,
+	expanded: false,
 	autoOpen: true,
 	defaultViewport: { ...defaults.defaultViewport },
 	width: loadPersistedWidth(),
@@ -207,7 +209,7 @@ let _state = $state<BrowserPanelState>({
 // Subscribe shim (centralized via store-utils)
 // ============================================
 
-const { subscribe, notifySubscribers, createDerived } =
+const { subscribe, notifySubscribers } =
 	createSubscribers<BrowserPanelState>(
 		() => _state,
 		(v) => {
@@ -220,12 +222,24 @@ function _update(fn: (s: BrowserPanelState) => BrowserPanelState) {
 	notifySubscribers();
 }
 
+// Runtime state never enters preferenceSync or localStorage.
+type RuntimeState = Pick<BrowserPanelState, 'open' | 'expanded' | 'status' | 'url' | 'pageLoading' | 'pageTracked' | 'userClosedForSession' | 'inspectMode' | 'selectedElement'>;
+let runtime = $state<Record<string, RuntimeState>>({});
+function updateSession(sessionId: string | null, fn: (s: BrowserPanelState) => BrowserPanelState) {
+	if (!sessionId) return;
+	const next = fn(untrack(() => browserPanel.forSession(sessionId)));
+	const { open, expanded, status, url, pageLoading, pageTracked, userClosedForSession, inspectMode, selectedElement } = next;
+	runtime[sessionId] = { open, expanded, status, url, pageLoading, pageTracked, userClosedForSession, inspectMode, selectedElement };
+	notifySubscribers();
+}
+
 // ============================================
 // Exported Store
 // ============================================
 
 export const browserPanel = {
-	get current() {
+	/** Shared preferences only; runtime state requires an explicit session. */
+	get current(): Pick<BrowserPanelState, 'width' | 'autoOpen' | 'defaultViewport'> {
 		return _state;
 	},
 
@@ -243,53 +257,28 @@ export const browserPanel = {
 		persistWidth(_state.width);
 	},
 
-	/** Open the panel and lift any close-suppression (the user wants it visible). */
-	openPanel() {
-		_update((s) => ({ ...s, open: true, userClosedForSession: null }));
+	forSession(sessionId: string | null): BrowserPanelState {
+		return { ..._state, ...(sessionId ? runtime[sessionId] : undefined) };
 	},
-
-	/**
-	 * Close the panel and remember which session it was closed for, so a later
-	 * browser tool in that same session won't auto-reopen it. Inspect state is
-	 * per-viewing, so it resets with the panel.
-	 */
+	openPanel(sessionId: string | null) {
+		updateSession(sessionId, s => ({ ...s, open: true, userClosedForSession: null }));
+	},
 	closePanel(sessionId: string | null) {
-		_update((s) => ({
-			...s,
-			open: false,
-			userClosedForSession: sessionId,
-			inspectMode: false,
-			selectedElement: null,
-		}));
+		updateSession(sessionId, s => ({ ...s, open: false, expanded: false,
+			userClosedForSession: sessionId, inspectMode: false, selectedElement: null }));
 	},
-
-	/** Toggle open/closed. Closing records the suppression for `sessionId`. */
 	toggle(sessionId: string | null) {
-		_update((s) =>
-			s.open
-				? {
-						...s,
-						open: false,
-						userClosedForSession: sessionId,
-						inspectMode: false,
-						selectedElement: null,
-					}
-				: { ...s, open: true, userClosedForSession: null },
-		);
+		if (this.forSession(sessionId).open) this.closePanel(sessionId);
+		else this.openPanel(sessionId);
 	},
-
-	/** Toggle point-and-prompt mode. Leaving it drops the current selection. */
-	setInspectMode(on: boolean) {
-		_update((s) => ({
-			...s,
-			inspectMode: on,
-			selectedElement: on ? s.selectedElement : null,
-		}));
+	setExpanded(sessionId: string, expanded: boolean) {
+		updateSession(sessionId, s => ({ ...s, expanded }));
 	},
-
-	/** Store the element picked in inspect mode (null clears the selection). */
-	setSelectedElement(element: SelectedElement | null) {
-		_update((s) => ({ ...s, selectedElement: element }));
+	setInspectMode(on: boolean, sessionId: string) {
+		updateSession(sessionId, s => ({ ...s, inspectMode: on, selectedElement: on ? s.selectedElement : null }));
+	},
+	setSelectedElement(element: SelectedElement | null, sessionId: string) {
+		updateSession(sessionId, s => ({ ...s, selectedElement: element }));
 	},
 
 	/** Set the panel width (clamped to a 320px minimum) and persist it. */
@@ -300,8 +289,8 @@ export const browserPanel = {
 	},
 
 	/** Update the stream status (and optionally the current URL). */
-	setStatus(status: BrowserStatus, url?: string | null) {
-		_update((s) => ({
+	setStatus(status: BrowserStatus, url: string | null | undefined, sessionId: string) {
+		updateSession(sessionId, (s) => ({
 			...s,
 			status,
 			// Registry-metadata URLs only fill the gap before CDP tracking kicks
@@ -311,8 +300,8 @@ export const browserPanel = {
 	},
 
 	/** Toolbar page state from a `page` frame (CDP-tracked url + loading). */
-	setPage(url: string | null, loading: boolean) {
-		_update((s) => ({
+	setPage(url: string | null, loading: boolean, sessionId: string) {
+		updateSession(sessionId, (s) => ({
 			...s,
 			url,
 			pageLoading: loading,
@@ -322,9 +311,11 @@ export const browserPanel = {
 
 	/** Reset per-attachment page tracking (session switch / stream teardown).
 	 *  A selection from the previous session's page is meaningless — drop it. */
-	resetPageTracking() {
-		_update((s) => ({
+	resetPageTracking(sessionId: string) {
+		updateSession(sessionId, (s) => ({
 			...s,
+			url: null,
+			inspectMode: false,
 			pageLoading: false,
 			pageTracked: false,
 			selectedElement: null,
@@ -337,7 +328,7 @@ export const browserPanel = {
 	 * already open.
 	 */
 	autoOpenFor(sessionId: string | null) {
-		_update((s) => {
+		updateSession(sessionId, (s) => {
 			if (s.open || !s.autoOpen) return s;
 			if (sessionId !== null && s.userClosedForSession === sessionId) return s;
 			return { ...s, open: true };
@@ -345,14 +336,7 @@ export const browserPanel = {
 	},
 
 	/** Current state snapshot. */
-	getState(): BrowserPanelState {
-		return _state;
+	getState(sessionId: string | null): BrowserPanelState {
+		return this.forSession(sessionId);
 	},
 };
-
-// ============================================
-// Derived stores (via store-utils createDerived)
-// ============================================
-
-export const browserPanelOpen = createDerived(() => _state.open);
-export const browserPanelStatus = createDerived(() => _state.status);

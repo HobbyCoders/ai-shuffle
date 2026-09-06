@@ -43,7 +43,7 @@
 	import { exportSession } from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
 	import { Download } from 'lucide-svelte';
-	import { browserPanel, browserPanelOpen } from '$lib/stores/browser-panel.svelte';
+	import { browserPanel } from '$lib/stores/browser-panel.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { gitOperations, gitOperationRunning } from '$lib/stores/gitOperations.svelte';
 	import GitProgressPopover from '$lib/components/git/GitProgressPopover.svelte';
@@ -202,7 +202,7 @@
 	// hovering the toggle prefetches the chunk so the first open is instant.
 	let browserPanelEverOpened = $state(false);
 	$effect(() => {
-		if ($browserPanelOpen) browserPanelEverOpened = true;
+		if (sessionBrowser.open) browserPanelEverOpened = true;
 	});
 
 	// Same treatment for the git review surfaces: they are modal, so they mount
@@ -215,6 +215,8 @@
 	const activeTab = $derived(
 		$activeView?.type === 'session' ? $activeSession : null
 	);
+	const sessionBrowser = $derived(browserPanel.forSession(activeTab?.sessionId ?? null));
+
 
 	// Header title. For a chat, a session BOUND to an id always shows its own
 	// title — including when it currently has zero messages (just cleared, or
@@ -939,13 +941,15 @@
 		{/if}
 		{#if showChatSurface}
 			<div class="chat-row">
+				<div class="chat-browser-underlay" inert={sessionBrowser.open && sessionBrowser.expanded}>
 				<ChatView
 					onBrowserToggle={$activeView?.type === 'session' && activeTab?.sessionId
 						? () => browserPanel.toggle(activeTab?.sessionId ?? null)
 						: undefined}
 					onBrowserPreload={() => BrowserSidePanel.preload()}
-					browserOpen={$browserPanelOpen}
+					browserOpen={sessionBrowser.open}
 				/>
+				</div>
 				{#if activeTab?.sessionId && browserPanelEverOpened}
 					<LazyPanel
 						handle={BrowserSidePanel}
@@ -1068,6 +1072,8 @@
 {/if}
 
 <style>
+	.chat-browser-underlay { display: flex; flex: 1; min-width: 0; min-height: 0; }
+	.chat-browser-underlay > :global(.chat-view) { flex: 1; min-width: 0; }
 	.main-panel {
 		flex: 1;
 		display: flex;

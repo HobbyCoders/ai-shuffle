@@ -148,6 +148,50 @@ async def workspace_control(operation: str, request: Request):
         raise HTTPException(422, "Invalid workspace payload")
 
 
+@router.post("/api/v1/sessions/{session_id}/browser/panel/start")
+async def start_panel(
+    request: Request, session_id: str, token: str = Depends(require_auth),
+) -> dict:
+    """Ready the shared workspace without taking control or navigating it."""
+    await require_session(request, session_id)
+    from app.core import browser_runtime
+    try:
+        return await browser_runtime.start(session_id)
+    except browser_runtime.RuntimeUnavailable:
+        raise HTTPException(503, "Browser runtime could not start") from None
+
+
+@router.post("/api/v1/browser/panel/rpc", include_in_schema=False)
+async def browser_rpc(request: Request):
+    from app.core import browser_runtime
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > browser_control.MAX_BODY:
+            raise HTTPException(413, "Browser payload too large")
+    try:
+        body = json.loads(raw)
+        if not isinstance(body, dict):
+            raise ValueError()
+        session_id = browser_control.identifier(body.get("session_id"))
+        token = body.get("token")
+        if not isinstance(token, str) or len(token) > 256:
+            raise ValueError()
+    except (ValueError, TypeError, RecursionError):
+        raise HTTPException(422, "Invalid browser payload") from None
+    if not registry.verify_token(session_id, token):
+        raise HTTPException(403, "Invalid panel token")
+    # Tokens from deleted sessions, even during cleanup, cannot start a process.
+    if not await run_sync(database.get_session, session_id):
+        raise HTTPException(404, "Session unavailable")
+    try:
+        return await browser_runtime.call(session_id, body.get("tool"), body.get("arguments", {}))
+    except (ValueError, TypeError, RecursionError):
+        raise HTTPException(422, "Invalid browser tool call") from None
+    except browser_runtime.RuntimeUnavailable:
+        raise HTTPException(503, "Browser runtime unavailable; outcome unknown") from None
+
+
 @router.get("/api/v1/sessions/{session_id}/browser/panel")
 async def get_panel_status(
     request: Request,

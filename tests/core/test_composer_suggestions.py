@@ -114,15 +114,19 @@ async def test_failures_do_not_propagate(failure):
 
 @pytest.mark.asyncio
 async def test_outer_timeout(caplog):
+    started = asyncio.Event()
+
     async def slow(*args, **kwargs):
+        started.set()
         await asyncio.Event().wait()
     with patch.object(cs, "TIMEOUT_SECONDS", 0.01), \
          patch.object(cs, "_eligible", AsyncMock(return_value=True)), \
-         patch.object(cs, "_final_answer", return_value="Done."), \
+         patch("app.core.composer_suggestions.asyncio.to_thread", AsyncMock(return_value="Done.")), \
          patch.object(cs, "_publish", AsyncMock()) as publish, \
          patch("app.api.generation.generate_with_claude", slow):
         await cs._run("s", "t")
         publish.assert_not_awaited()
+    assert started.is_set()
     record, = caplog.records
     assert (record.stage, record.reason, record.exception_type) == (
         "generation", "timeout", "TimeoutError",

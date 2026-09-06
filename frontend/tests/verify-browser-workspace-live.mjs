@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { isDeepStrictEqual } from 'node:util';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
 import { createServer } from 'vite';
 
 const require = createRequire(new URL('../../browser-mcp/package.json', import.meta.url));
@@ -75,7 +78,8 @@ try {
     root: fileURLToPath(new URL('../', import.meta.url)),
     configFile: fileURLToPath(new URL('./vite.browser-workspace.config.js', import.meta.url)),
     logLevel: 'silent',
-    server: { host: '127.0.0.1', port: 0, strictPort: false, open: false },
+    server: { host: '127.0.0.1', port: 0, strictPort: false, open: false,
+      fs: { allow: [fileURLToPath(new URL('../', import.meta.url)), realpathSync(fileURLToPath(new URL('../node_modules', import.meta.url)))] } },
   });
   await server.listen();
   const address = server.httpServer.address();
@@ -98,6 +102,7 @@ try {
     headless: true, args: ['--no-sandbox', '--disable-gpu'],
   });
   let pageErrors = 0;
+  let starts = 0;
   async function viewer(viewport) {
     const page = await browser.newPage({ viewport });
     page.setDefaultTimeout(20_000);
@@ -112,6 +117,19 @@ try {
     // routing does not intercept WebSockets: those go to the real API origin.
     await page.route(url => url.pathname.startsWith('/api/'), async route => {
       const path = new URL(route.request().url()).pathname;
+      if (path === `/api/v1/sessions/${encodeURIComponent(config.session)}/browser/panel/start`) {
+        assert.equal(route.request().method(), 'POST');
+        assert.ok(!route.request().postData());
+        starts++;
+        const response = await route.fetch({ url: config.api + path,
+          headers: { Authorization: `Bearer ${config.token}` }, timeout: 60_000 });
+        assert.equal(response.status(), 200);
+        const actual = await response.json();
+        assert.equal(actual.tabs.length, 1);
+        assert.ok(actual.runtime_id && actual.target_id);
+        await route.fulfill({ response });
+        return;
+      }
       let body = {};
       if (path.endsWith('/preferences/all')) body = { preferences: {} };
       else if (path.includes('/preferences/')) {
@@ -124,7 +142,7 @@ try {
     await page.addInitScript(value => { window.browserWorkspaceLive = value; }, config);
     await page.goto(url);
     try {
-      await wait(page, () => !!window.browserFixture?.viewerId && window.browserFixture.state.available);
+      await wait(page, () => !!window.browserFixture?.viewerId);
     } catch (error) {
       console.error('Live fixture readiness', JSON.stringify(await page.evaluate(() => ({
         fixture: !!window.browserFixture,
@@ -139,11 +157,61 @@ try {
   }
   phase = 'initial real stream';
   primary = await viewer({ width: 1440, height: 900 });
+  assert.equal((await state(primary)).available, false);
+  assert.equal((await state(primary)).tabs.length, 0);
+  const coldAddress = primary.getByRole('textbox', { name: 'Page address', exact: true });
+  await primary.locator('.address-display').click();
+  await coldAddress.fill(config.api + '/fixture');
+  await coldAddress.press('Enter');
+  await wait(primary, url => window.browserFixture.state.tabs.some(t => t.current && t.url === url), config.api + '/fixture');
+  await painted(primary);
+  assert.equal(starts, 1);
+  assert.equal((await state(primary)).control.owner, 'human');
+  await button(primary, 'Return control').click();
+  await wait(primary, () => window.browserFixture.state.control.owner === 'agent');
   const initial = await state(primary);
   assert.equal(initial.tabs.length, 1);
   assert.equal(initial.control.owner, 'agent');
   originalId = initial.tabs[0].id;
   const initialViewport = initial.viewport;
+  phase = 'rendered navigation controls';
+  async function navigate(page, destination) {
+    const input = page.getByRole('textbox', { name: 'Page address', exact: true });
+    if (!await input.count()) await page.locator('.address-display').click();
+    await input.fill(destination);
+    await input.press('Enter');
+  }
+  const firstUrl = config.api + '/fixture';
+  const nextUrl = config.api + '/fixture?history=second';
+  await navigate(primary, nextUrl);
+  await wait(primary, u => window.browserFixture.state.tabs.some(t => t.current && t.url === u), nextUrl);
+  await painted(primary);
+  phase = 'real Back';
+  await button(primary, 'Go back').click();
+  await wait(primary, u => window.browserFixture.state.tabs.some(t => t.current && t.url === u), firstUrl);
+  phase = 'real Forward';
+  await button(primary, 'Go forward').click();
+  await wait(primary, u => window.browserFixture.state.tabs.some(t => t.current && t.url === u), nextUrl);
+  phase = 'real Reload';
+  const beforeReload = await (await fetch(config.api + '/fixture-stream-state')).json();
+  await button(primary, 'Reload page').click();
+  await wait(primary, () => window.browserFixture.messages.some(m => m.op === 'command' && m.args.command === 'reload'));
+  const reloadDeadline = Date.now() + 10_000;
+  while ((await (await fetch(config.api + '/fixture-stream-state')).json()).fixture_loads <= beforeReload.fixture_loads) {
+    assert.ok(Date.now() < reloadDeadline, 'Reload must fetch actual HTML');
+    await primary.waitForTimeout(50);
+  }
+  await painted(primary);
+  phase = 'real Stop';
+  await navigate(primary, config.api + '/slow');
+  await button(primary, 'Stop loading').click();
+  // A stopped navigation may reply with an explicit cancellation; inspect it below.
+  await button(primary, 'Reload page').waitFor();
+  await navigate(primary, firstUrl);
+  await wait(primary, u => window.browserFixture.state.tabs.some(t => t.current && t.url === u), firstUrl);
+  await painted(primary);
+  await button(primary, 'Return control').click();
+  await wait(primary, () => window.browserFixture.state.control.owner === 'agent');
   secondary = await viewer({ width: 900, height: 700 });
   await mirrored(() => window.browserFixture.state.control.owner === 'agent');
   assert.deepEqual((await state(secondary)).viewport, initialViewport);
@@ -157,12 +225,12 @@ try {
   ]) {
     phase = `${name} ownership`;
     await primary.setViewportSize(viewport);
-    assert.equal(await button(primary, 'New tab').isDisabled(), true);
+    assert.equal(await button(primary, 'New tab').isDisabled(), false);
     await button(primary, 'Take control').click();
     const ownerId = await primary.evaluate(() => window.browserFixture.viewerId);
     await mirrored(() => window.browserFixture.state.control.owner === 'human');
     assert.equal((await state(secondary)).control.viewer_id, ownerId);
-    await secondary.getByRole('status').filter({ hasText: 'Another viewer controls' }).waitFor();
+    assert.match(await secondary.getByRole('status', { includeHidden: true }).filter({ hasText: 'Another viewer controls' }).textContent(), /Another viewer controls/);
     assert.equal(await button(secondary, 'Take control').isDisabled(), true);
     assert.equal(await button(secondary, 'New tab').isDisabled(), true);
 
@@ -205,7 +273,34 @@ try {
     assert.deepEqual(await Promise.all([primary, secondary].map(page => page.evaluate(() => window.browserFixture.messages.filter(m => m.op === 'viewport').length))), counts);
     await Promise.all([painted(primary, 390, 844), painted(secondary, 390, 844)]);
     assert.equal(await primary.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-    const screenshot = `/tmp/browser-workspace-live-${name}.png`;
+    await primary.locator('details.viewport summary').click();
+    await button(primary, 'Expand browser panel').click();
+    const bounds = await primary.evaluate(() => {
+      const panel = document.querySelector('[aria-label="Live browser view"]').getBoundingClientRect();
+      const chat = document.querySelector('.chat-row').getBoundingClientRect();
+      return { panel: panel.toJSON(), chat: chat.toJSON(), overflow: document.documentElement.scrollWidth > innerWidth };
+    });
+    assert.equal(bounds.overflow, false);
+    assert.equal(bounds.panel.x, bounds.chat.x);
+    assert.equal(bounds.panel.width, bounds.chat.width);
+    assert.equal(bounds.panel.y, bounds.chat.y);
+    assert.equal(bounds.panel.height, bounds.chat.height);
+    await button(primary, 'Restore browser panel').click();
+    if (name === 'mobile') {
+      phase = 'mobile real keyboard';
+      await painted(primary, 390, 844);
+      const canvas = await primary.locator('canvas').boundingBox();
+      await primary.mouse.click(canvas.x + canvas.width * 80 / 390, canvas.y + canvas.height * 30 / 844);
+      await button(primary, 'Show keyboard').click();
+      await wait(primary, () => document.activeElement?.tagName === 'TEXTAREA');
+      const frameCount = await primary.evaluate(() => browserFixture.frames);
+      await primary.keyboard.type('sticky');
+      await wait(primary, () => browserFixture.state.tabs.some(t => t.current && t.title.includes('sticky')));
+      await wait(primary, count => browserFixture.frames > count, frameCount);
+      assert.equal(await primary.evaluate(() => document.activeElement?.tagName), 'TEXTAREA');
+      await button(primary, 'Hide keyboard').click();
+    }
+    const screenshot = join(tmpdir(), `browser-workspace-live-${name}.png`);
     await primary.screenshot({ path: screenshot });
     screenshots.push(screenshot);
 
@@ -214,17 +309,28 @@ try {
     await mirrored(id => window.browserFixture.state.active_tab_id === id, originalId);
     await button(primary, 'Return control').click();
     await mirrored(() => window.browserFixture.state.control.owner === 'agent' && !window.browserFixture.state.control.viewer_id);
-    assert.equal(await button(primary, 'New tab').isDisabled(), true);
-    assert.equal(await button(secondary, 'New tab').isDisabled(), true);
+    assert.equal(await button(primary, 'New tab').isDisabled(), false);
+    assert.equal(await button(secondary, 'New tab').isDisabled(), false);
   }
   assert.equal(pageErrors, 0);
   for (const page of [primary, secondary]) {
-    assert.equal(await page.evaluate(() => window.browserFixture.commandFailures), 0);
+    const failures = await page.evaluate(() => window.browserFixture.messages.filter(m => m.failedResult));
+    assert.equal(await page.evaluate(() => window.browserFixture.commandFailures), failures.length);
+    for (const { failedResult } of failures) {
+      const command = await page.evaluate(id => window.browserFixture.messages.find(m => m.id === id), failedResult.id);
+      assert.equal(page, primary);
+      assert.equal(command.op, 'navigate');
+      assert.equal(command.args.url, config.api + '/slow');
+      assert.match(failedResult.error, /net::ERR_ABORTED/);
+    }
+    assert.ok(failures.length <= 1, 'Only the deliberately stopped navigation may fail');
+    assert.equal(await page.getByRole('alert').count(), 0);
   }
   console.log(JSON.stringify({ pass: true, views: ['desktop', 'mobile'], realFrames: true,
     mirroredControl: true, mirroredTabs: true, fixedViewport: true,
     passiveViewer: true, finalTabs: 1, finalControl: 'agent', screenshots }));
 } catch (error) {
+  if (primary) console.error('UI failure state:', JSON.stringify(await primary.evaluate(() => ({state: browserFixture.state, messages: browserFixture.messages, text: document.body.innerText.slice(0, 1000)}))));
   console.error('Backend stream state:', await (await fetch(config.api + '/fixture-stream-state')).text());
   const detail = String(error?.message ?? error).replaceAll(config.token || '\0', '[fixture-token]')
     .replace(/wss?:\/\/[^\s"']+/g, '[workspace-socket]').slice(0, 1200);

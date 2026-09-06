@@ -231,7 +231,8 @@ class TestBrowserPanelWebSocket:
         registry.clear("s1")
 
     @pytest.mark.parametrize(
-        "message", ["x" * 32769, '{"type":"input","x":NaN}', "[1]", "{"]
+        "message", ["x" * 32769, '{"type":"input","x":NaN}', "[1]", "{"],
+        ids=["oversized", "nonfinite", "array", "invalid-json"],
     )
     def test_bounded_finite_ws_payloads(self, client, monkeypatch, message):
         monkeypatch.setattr(

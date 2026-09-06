@@ -1,15 +1,20 @@
 import assert from 'node:assert/strict';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { verifyProviderLogin } from './verify-provider-login.mjs';
+import { verifyColdStart } from './verify-browser-cold-start.mjs';
 import { createRequire } from 'node:module';
 const require = createRequire(
 	new URL('../../browser-mcp/package.json', import.meta.url),
 );
 const { chromium } = require('playwright-core');
 const browser = await chromium.launch({
-	executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
+	executablePath: process.env.CHROMIUM_PATH || (process.platform === 'win32' ? 'C:/Program Files/Google/Chrome/Application/chrome.exe' : '/usr/bin/chromium'),
 	headless: true,
 	args: ['--no-sandbox', '--disable-gpu'],
 });
+const newPage = browser.newPage.bind(browser);
+browser.newPage = async options => { const page = await newPage(options); page.on('response', response => { if (response.status() >= 400) console.error('Fixture resource failure', response.status(), response.url()); }); return page; };
 const url =
 	process.env.BROWSER_FIXTURE_URL ||
 	'http://127.0.0.1:5180/tests/browser-workspace.html';
@@ -29,7 +34,7 @@ try {
 			await page
 				.getByRole('button', { name: 'New tab', exact: true })
 				.isDisabled(),
-			true,
+			false,
 		);
 		assert.deepEqual(
 			await page.evaluate(() => window.browserFixture.messages),
@@ -40,6 +45,10 @@ try {
 			.click();
 		await page.getByRole('button', { name: 'New tab', exact: true }).click();
 		await page.locator('canvas').waitFor();
+		await page.evaluate(() => { window.originalCanvas = document.querySelector('canvas'); });
+		await page.getByRole('button', { name: 'New tab', exact: true }).click();
+		await page.waitForTimeout(150);
+		assert.equal(await page.evaluate(() => window.originalCanvas === document.querySelector('canvas')), true, 'target switch must preserve canvas');
 		await page.evaluate(() => window.browserFixture.setWidth(640));
 		await page.locator('summary').click();
 		assert.deepEqual(
@@ -75,6 +84,25 @@ try {
 		// Fit must settle even though every accepted command publishes workspace state.
 		await page.getByLabel('Viewport preset', { exact: true }).selectOption('fit');
 		await page.waitForTimeout(500);
+		await page.locator('summary').click();
+		await page.getByRole('button', { name: 'Show keyboard', exact: true }).click();
+		await page.waitForFunction(() => document.activeElement?.tagName === 'TEXTAREA');
+		await page.evaluate(() => {
+			window.sampledCanvas = document.querySelector('canvas');
+			window.frameSample = { clears: 0, draws: 0, removals: 0 };
+			const ctx = window.sampledCanvas.getContext('2d');
+			const clear = ctx.clearRect.bind(ctx), draw = ctx.drawImage.bind(ctx);
+			ctx.clearRect = (...args) => { window.frameSample.clears++; return clear(...args); };
+			ctx.drawImage = (...args) => { window.frameSample.draws++; return draw(...args); };
+			window.canvasObserver = new MutationObserver(() => { if (!window.sampledCanvas.isConnected) window.frameSample.removals++; });
+			window.canvasObserver.observe(document.querySelector('.panel-body'), { childList: true, subtree: true });
+		});
+		for (let i = 0; i < 4; i++) { await page.evaluate(i => window.browserFixture.churn(i), i); await page.waitForTimeout(60); }
+		assert.equal(await page.evaluate(() => document.activeElement?.tagName), 'TEXTAREA', 'same-target updates retain keyboard focus');
+		assert.equal(await page.evaluate(() => document.querySelector('canvas') === window.sampledCanvas), true);
+		const sample = await page.evaluate(() => { window.canvasObserver.disconnect(); return window.frameSample; });
+		assert.equal(sample.removals, 0); assert.ok(sample.draws > 0); assert.equal(sample.clears, sample.draws, 'every clear is paired with a paint');
+		await page.getByRole('button', { name: 'Hide keyboard', exact: true }).click();
 		await page.locator('.address-display').click();
 		const address = page.getByRole('textbox', { name: 'Page address' });
 		await address.fill('https://draft.test/not-yet-sent');
@@ -101,7 +129,7 @@ try {
 		await page.waitForTimeout(400);
 		assert.equal(await page.evaluate(() => window.browserFixture.messages.filter(m => m.op === 'viewport').length), afterChurn + 2);
 		await page.screenshot({
-			path: `/tmp/browser-workspace-${viewport.width}.png`,
+			path: join(tmpdir(), `browser-workspace-${viewport.width}.png`),
 		});
 		await page
 			.getByRole('button', { name: 'Return control', exact: true })
@@ -110,7 +138,7 @@ try {
 			await page
 				.getByRole('button', { name: 'New tab', exact: true })
 				.isDisabled(),
-			true,
+			false,
 		);
 		const count = await page.evaluate(
 			() => window.browserFixture.messages.length,
@@ -123,10 +151,26 @@ try {
 			await page.evaluate(() => window.browserFixture.messages.length),
 			count,
 		);
+		// Expansion covers the chat area, not global navigation; restore keeps width.
+		const docked = await page.locator('.browser-panel').boundingBox();
+		await page.getByRole('button', { name: 'Expand browser panel' }).click();
+		assert.deepEqual(await page.locator('.browser-panel').boundingBox(), await page.locator('.chat-row').boundingBox());
+		assert.equal(await page.locator('.chat').evaluate(el => el.inert), true);
+		await page.screenshot({ path: join(tmpdir(), `browser-workspace-expanded-${viewport.width}.png`) });
+		await page.getByRole('button', { name: 'Restore browser panel' }).click();
+		assert.deepEqual(await page.locator('.browser-panel').boundingBox(), docked);
+		assert.equal(await page.locator('.chat').evaluate(el => el.inert), false);
 		await page.evaluate(() => window.browserFixture.setSession('another-fixture'));
-		await page.waitForTimeout(300);
-		assert.equal(await page.evaluate(() => window.browserFixture.socketCount), 2);
-		assert.equal(await page.evaluate(() => window.browserFixture.openSockets), 1);
+		await page.waitForTimeout(150);
+		assert.equal(await page.locator('canvas').count(), 0, 'closed session must not expose previous frame');
+		assert.equal(await page.evaluate(() => window.browserFixture.openSockets), 0);
+		await page.evaluate(() => window.browserFixture.setSession('isolated-fixture'));
+		await page.getByRole('button', { name: 'Close browser panel' }).click();
+		await page.evaluate(() => { window.browserFixture.autoOpenSession('another-fixture'); window.browserFixture.setSession('another-fixture'); });
+		await page.getByRole('button', { name: 'Close browser panel' }).waitFor();
+		await page.evaluate(() => window.browserFixture.setSession('isolated-fixture'));
+		assert.equal(await page.locator('.browser-panel').count(), 0, 'A remains dismissed after B browser activity');
+
 		assert.deepEqual(errors, []);
 		console.log(
 			JSON.stringify({
@@ -136,18 +180,22 @@ try {
 				fixedResize: 'no commands',
 				fitChurn: { before: beforeChurn, after: afterChurn, draftAndFocusPreserved: true, sockets: 1 },
 				fitResize: 'one command per changed size',
-				sessionSwitch: 'one replacement socket',
+				sessionSwitch: 'visibility and dismissal isolated; no frame in closed session',
+				canvasSample: sample,
+				stickyKeyboard: true,
+				expandedBounds: 'chat only; restore preserves width',
 				presets: true,
 				orientation: true,
 				release: true,
 				passiveResize: 'no commands',
 				pageErrors: errors,
-				screenshot: `/tmp/browser-workspace-${viewport.width}.png`,
+				screenshot: join(tmpdir(), `browser-workspace-${viewport.width}.png`),
 			}),
 		);
 		await page.close();
-		await verifyProviderLogin(browser, url, viewport);
+
 	}
+	for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) { await verifyProviderLogin(browser, url, viewport); await verifyColdStart(browser, url, viewport); }
 } finally {
 	await browser.close();
 }

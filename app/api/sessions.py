@@ -1717,6 +1717,8 @@ async def delete_session(
 
     # Delete DB row first — cheap and authoritative for the UI.
     await run_sync(database.delete_session, session_id)
+    from app.core import browser_runtime
+    await browser_runtime.close_session(session_id)
 
     # Fan the deletion out to the user's other devices/tabs so their sidebars
     # drop the row and an open view of this session leaves it — without this a
@@ -1955,6 +1957,8 @@ async def batch_delete_sessions(
         try:
             existing = await require_session(request, session_id)
             await run_sync(database.delete_session, session_id)
+            from app.core import browser_runtime
+            await browser_runtime.close_session(session_id)
             # Same fan-out as the single delete: other devices drop the row
             # and leave the session if they have it open. Best-effort.
             try:

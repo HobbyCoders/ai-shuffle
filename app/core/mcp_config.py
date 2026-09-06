@@ -130,6 +130,7 @@ def _build_browser_server_env(
         from app.core import browser_panel_registry
 
         env["AIS_SESSION_ID"] = session_id
+        env["AIS_BROWSER_MODE"] = "proxy"
         env["AIS_PANEL_TOKEN"] = browser_panel_registry.issue_token(session_id)
         register_url = os.environ.get(_BROWSER_PANEL_REGISTER_URL_OS_KEY)
         if not register_url:

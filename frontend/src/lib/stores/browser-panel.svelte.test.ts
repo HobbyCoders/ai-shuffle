@@ -1,19 +1,48 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { browserPanel, flushWidthPersist } from './browser-panel.svelte';
-
-// The store is a module singleton; openPanel() gives every test a known baseline
-// (open=true, userClosedForSession=null) without needing a private reset.
-beforeEach(() => {
-	localStorage.clear();
-	browserPanel.openPanel();
-	browserPanel.setAutoOpen(true);
-	browserPanel.setWidth(480);
-	// Settle the debounced write so no timer from one test lands in another.
-	flushWidthPersist();
-	// Reset per-attachment page tracking so url assertions start clean.
-	browserPanel.resetPageTracking();
-	browserPanel.setStatus('disconnected', null);
-	browserPanel.setInspectMode(false);
+let sequence = 0;
+let a: string;
+let b: string;
+beforeEach(() => { a = `a-${++sequence}`; b = `b-${sequence}`; localStorage.clear(); browserPanel.setAutoOpen(true); browserPanel.setWidth(480); flushWidthPersist(); });
+describe('session browser visibility', () => {
+ it('starts closed and never borrows another session visibility', () => {
+  browserPanel.openPanel(a);
+  expect(browserPanel.forSession(b).open).toBe(false);
+  expect(browserPanel.forSession(a).open).toBe(true);
+ });
+ it('keeps dismissal after activity in a background session', () => {
+  browserPanel.openPanel(a); browserPanel.closePanel(a); browserPanel.autoOpenFor(b); browserPanel.autoOpenFor(a);
+  expect(browserPanel.forSession(a).open).toBe(false); expect(browserPanel.forSession(b).open).toBe(true);
+  browserPanel.openPanel(a); expect(browserPanel.forSession(a).userClosedForSession).toBeNull();
+ });
+ it('toggles only the supplied session', () => {
+  browserPanel.toggle(a); browserPanel.toggle(b); browserPanel.toggle(a);
+  expect(browserPanel.forSession(a).open).toBe(false); expect(browserPanel.forSession(b).open).toBe(true);
+ });
+ it('keeps expansion per session and restores the global width', () => {
+  browserPanel.setWidth(640); browserPanel.openPanel(a); browserPanel.setExpanded(a, true);
+  expect(browserPanel.forSession(b).expanded).toBe(false);
+  browserPanel.setExpanded(a, false); expect(browserPanel.current.width).toBe(640);
+ });
+ it('does not auto-open without a session or when disabled', () => {
+  browserPanel.autoOpenFor(null); browserPanel.setAutoOpen(false); browserPanel.autoOpenFor(a);
+  expect(browserPanel.forSession(a).open).toBe(false); browserPanel.openPanel(a); expect(browserPanel.forSession(a).open).toBe(true);
+ });
+ it('isolates page metadata and inspection and clears attachment state', () => {
+  browserPanel.setStatus('live', 'https://a.test', a); browserPanel.setPage('https://tracked.test', true, a);
+  browserPanel.setStatus('connecting', 'https://old.test', a);
+  expect(browserPanel.forSession(a).url).toBe('https://tracked.test'); expect(browserPanel.forSession(b).url).toBeNull();
+  browserPanel.setInspectMode(true, a); expect(browserPanel.forSession(b).inspectMode).toBe(false);
+  browserPanel.resetPageTracking(a); expect(browserPanel.forSession(a).inspectMode).toBe(false); expect(browserPanel.forSession(a).url).toBeNull();
+ });
+ it('persists preferences but no runtime map', () => {
+  browserPanel.openPanel(a); browserPanel.setExpanded(a, true); browserPanel.setWidth(700); flushWidthPersist();
+  expect(JSON.parse(localStorage.getItem('ai-shuffle-browser-panel')!)).toEqual({ width: 700 });
+  browserPanel.setDefaultViewport({ mode: 'fixed', width: 390, height: 844 });
+  expect(browserPanel.forSession(a).defaultViewport).toEqual(browserPanel.forSession(b).defaultViewport);
+  browserPanel.setWidth(-1); expect(browserPanel.current.width).toBe(320);
+  browserPanel.setWidth(Infinity); expect(browserPanel.current.width).toBe(480);
+ });
 });
 
 const sampleElement = {
@@ -24,97 +53,20 @@ const sampleElement = {
 	rect: { x: 1, y: 2, width: 3, height: 4 },
 };
 
-describe('browserPanel open/close/toggle', () => {
-	it('openPanel opens and clears close-suppression', () => {
-		browserPanel.closePanel('s1');
-		browserPanel.openPanel();
-		expect(browserPanel.current.open).toBe(true);
-		expect(browserPanel.current.userClosedForSession).toBeNull();
-	});
-
-	it('closePanel closes and records the session it was closed for', () => {
-		browserPanel.closePanel('s1');
-		expect(browserPanel.current.open).toBe(false);
-		expect(browserPanel.current.userClosedForSession).toBe('s1');
-	});
-
-	it('toggle flips open→closed (recording the session) and closed→open', () => {
-		// starts open (baseline)
-		browserPanel.toggle('s1');
-		expect(browserPanel.current.open).toBe(false);
-		expect(browserPanel.current.userClosedForSession).toBe('s1');
-
-		browserPanel.toggle('s1');
-		expect(browserPanel.current.open).toBe(true);
-		expect(browserPanel.current.userClosedForSession).toBeNull();
-	});
-});
-
-describe('browserPanel autoOpenFor suppression', () => {
-	it('persists auto-open policy independently of manual opening', () => {
-		browserPanel.setAutoOpen(false);
-		browserPanel.closePanel(null);
-		browserPanel.autoOpenFor('fresh');
-		expect(browserPanel.current.open).toBe(false);
-		browserPanel.openPanel();
-		expect(browserPanel.current.open).toBe(true);
-		expect(browserPanel.current.autoOpen).toBe(false);
-	});
-	it('accepts bounded viewport defaults without changing runtime page state', () => {
-		browserPanel.setStatus('live', 'https://example.test');
-		browserPanel.setDefaultViewport({ mode: 'fixed', width: 390, height: 844 });
-		browserPanel.setDefaultViewport({
-			mode: 'fixed',
-			width: 0,
-			height: Infinity,
-		});
-		expect(browserPanel.current.defaultViewport).toEqual({
-			mode: 'fixed',
-			width: 390,
-			height: 844,
-		});
-		expect(browserPanel.current.url).toBe('https://example.test');
-	});
-	it('opens when nothing was closed', () => {
-		browserPanel.closePanel('other'); // suppression is for a different session
-		browserPanel.autoOpenFor('s1');
-		expect(browserPanel.current.open).toBe(true);
-	});
-
-	it('is suppressed for the exact session the user closed', () => {
-		browserPanel.closePanel('s1');
-		browserPanel.autoOpenFor('s1');
-		expect(browserPanel.current.open).toBe(false);
-	});
-
-	it('still opens for a different session after a close', () => {
-		browserPanel.closePanel('s1');
-		browserPanel.autoOpenFor('s2');
-		expect(browserPanel.current.open).toBe(true);
-	});
-
-	it('is a no-op (leaves suppression intact) when already open', () => {
-		// open baseline; autoOpen must not clear an unrelated suppression record
-		browserPanel.openPanel();
-		browserPanel.autoOpenFor('s3');
-		expect(browserPanel.current.open).toBe(true);
-	});
-});
-
 describe('browserPanel width clamp + persistence', () => {
 	it('clamps below the minimum to 320', () => {
 		browserPanel.setWidth(100);
-		expect(browserPanel.current.width).toBe(320);
+		expect(browserPanel.forSession(a).width).toBe(320);
 	});
 
 	it('does not cap widths above the old 960px maximum', () => {
 		browserPanel.setWidth(1400);
-		expect(browserPanel.current.width).toBe(1400);
+		expect(browserPanel.forSession(a).width).toBe(1400);
 	});
 
 	it('keeps an in-range width (rounded)', () => {
 		browserPanel.setWidth(512.6);
-		expect(browserPanel.current.width).toBe(513);
+		expect(browserPanel.forSession(a).width).toBe(513);
 	});
 
 	it('persists the clamped width to localStorage once the debounce settles', () => {
@@ -132,7 +84,7 @@ describe('browserPanel width clamp + persistence', () => {
 		localStorage.clear();
 
 		for (let w = 500; w <= 560; w += 10) browserPanel.setWidth(w);
-		expect(browserPanel.current.width).toBe(560);
+		expect(browserPanel.forSession(a).width).toBe(560);
 		expect(localStorage.getItem('ai-shuffle-browser-panel')).toBeNull();
 
 		flushWidthPersist();
@@ -143,84 +95,84 @@ describe('browserPanel width clamp + persistence', () => {
 
 describe('browserPanel setStatus', () => {
 	it('updates status and url, and preserves url when omitted', () => {
-		browserPanel.setStatus('live', 'https://example.com');
-		expect(browserPanel.current.status).toBe('live');
-		expect(browserPanel.current.url).toBe('https://example.com');
+		browserPanel.setStatus('live', 'https://example.com', a);
+		expect(browserPanel.forSession(a).status).toBe('live');
+		expect(browserPanel.forSession(a).url).toBe('https://example.com');
 
-		browserPanel.setStatus('connecting');
-		expect(browserPanel.current.status).toBe('connecting');
-		expect(browserPanel.current.url).toBe('https://example.com'); // preserved
+		browserPanel.setStatus('connecting', undefined, a);
+		expect(browserPanel.forSession(a).status).toBe('connecting');
+		expect(browserPanel.forSession(a).url).toBe('https://example.com'); // preserved
 	});
 });
 
 describe('browserPanel page tracking', () => {
 	it('setPage records url + loading and marks tracking live', () => {
-		browserPanel.setPage('https://tracked.example/', true);
-		expect(browserPanel.current.url).toBe('https://tracked.example/');
-		expect(browserPanel.current.pageLoading).toBe(true);
-		expect(browserPanel.current.pageTracked).toBe(true);
+		browserPanel.setPage('https://tracked.example/', true, a);
+		expect(browserPanel.forSession(a).url).toBe('https://tracked.example/');
+		expect(browserPanel.forSession(a).pageLoading).toBe(true);
+		expect(browserPanel.forSession(a).pageTracked).toBe(true);
 	});
 
 	it('once tracked, coarse status frames no longer overwrite the CDP url', () => {
-		browserPanel.setPage('https://tracked.example/page2', false);
-		browserPanel.setStatus('live', 'https://stale-registry.example/');
-		expect(browserPanel.current.url).toBe('https://tracked.example/page2');
+		browserPanel.setPage('https://tracked.example/page2', false, a);
+		browserPanel.setStatus('live', 'https://stale-registry.example/', a);
+		expect(browserPanel.forSession(a).url).toBe('https://tracked.example/page2');
 
 		// …but before any page frame, registry metadata still fills the gap.
-		browserPanel.resetPageTracking();
-		browserPanel.setStatus('connecting', 'https://registry.example/');
-		expect(browserPanel.current.url).toBe('https://registry.example/');
+		browserPanel.resetPageTracking(a);
+		browserPanel.setStatus('connecting', 'https://registry.example/', a);
+		expect(browserPanel.forSession(a).url).toBe('https://registry.example/');
 	});
 
-	it('resetPageTracking clears loading + tracked but keeps the last url', () => {
-		browserPanel.setPage('https://kept.example/', true);
-		browserPanel.resetPageTracking();
-		expect(browserPanel.current.pageLoading).toBe(false);
-		expect(browserPanel.current.pageTracked).toBe(false);
-		expect(browserPanel.current.url).toBe('https://kept.example/');
+	it('resetPageTracking clears loading, tracking and the previous attachment URL', () => {
+		browserPanel.setPage('https://kept.example/', true, a);
+		browserPanel.resetPageTracking(a);
+		expect(browserPanel.forSession(a).pageLoading).toBe(false);
+		expect(browserPanel.forSession(a).pageTracked).toBe(false);
+		expect(browserPanel.forSession(a).url).toBeNull();
 	});
 });
 
 describe('browserPanel inspect mode + selection', () => {
 	it('starts with inspect off and nothing selected', () => {
-		expect(browserPanel.current.inspectMode).toBe(false);
-		expect(browserPanel.current.selectedElement).toBeNull();
+		expect(browserPanel.forSession(a).inspectMode).toBe(false);
+		expect(browserPanel.forSession(a).selectedElement).toBeNull();
 	});
 
 	it('setInspectMode(true) keeps a selection; setInspectMode(false) drops it', () => {
-		browserPanel.setInspectMode(true);
-		browserPanel.setSelectedElement(sampleElement);
-		expect(browserPanel.current.selectedElement).toEqual(sampleElement);
+		browserPanel.setInspectMode(true, a);
+		browserPanel.setSelectedElement(sampleElement, a);
+		expect(browserPanel.forSession(a).selectedElement).toEqual(sampleElement);
 
-		browserPanel.setInspectMode(true); // re-arm is a no-op for the selection
-		expect(browserPanel.current.selectedElement).toEqual(sampleElement);
+		browserPanel.setInspectMode(true, a); // re-arm is a no-op for the selection
+		expect(browserPanel.forSession(a).selectedElement).toEqual(sampleElement);
 
-		browserPanel.setInspectMode(false);
-		expect(browserPanel.current.inspectMode).toBe(false);
-		expect(browserPanel.current.selectedElement).toBeNull();
+		browserPanel.setInspectMode(false, a);
+		expect(browserPanel.forSession(a).inspectMode).toBe(false);
+		expect(browserPanel.forSession(a).selectedElement).toBeNull();
 	});
 
 	it('closePanel and toggle-close reset inspect state', () => {
-		browserPanel.setInspectMode(true);
-		browserPanel.setSelectedElement(sampleElement);
-		browserPanel.closePanel('s1');
-		expect(browserPanel.current.inspectMode).toBe(false);
-		expect(browserPanel.current.selectedElement).toBeNull();
+		browserPanel.setInspectMode(true, a);
+		browserPanel.setSelectedElement(sampleElement, a);
+		browserPanel.closePanel(a);
+		expect(browserPanel.forSession(a).inspectMode).toBe(false);
+		expect(browserPanel.forSession(a).selectedElement).toBeNull();
 
-		browserPanel.openPanel();
-		browserPanel.setInspectMode(true);
-		browserPanel.setSelectedElement(sampleElement);
-		browserPanel.toggle('s1'); // closes
-		expect(browserPanel.current.inspectMode).toBe(false);
-		expect(browserPanel.current.selectedElement).toBeNull();
+		browserPanel.openPanel(a);
+		browserPanel.setInspectMode(true, a);
+		browserPanel.setSelectedElement(sampleElement, a);
+		browserPanel.toggle(a); // closes
+		expect(browserPanel.forSession(a).inspectMode).toBe(false);
+		expect(browserPanel.forSession(a).selectedElement).toBeNull();
 	});
 
 	it('resetPageTracking (session switch) drops the selection', () => {
-		browserPanel.setInspectMode(true);
-		browserPanel.setSelectedElement(sampleElement);
-		browserPanel.resetPageTracking();
-		expect(browserPanel.current.selectedElement).toBeNull();
-		// The mode itself survives — the user re-picks on the new page.
-		expect(browserPanel.current.inspectMode).toBe(true);
+		browserPanel.setInspectMode(true, a);
+		browserPanel.setSelectedElement(sampleElement, a);
+		browserPanel.resetPageTracking(a);
+		expect(browserPanel.forSession(a).selectedElement).toBeNull();
+		// Inspection never carries over to a different attachment.
+		expect(browserPanel.forSession(a).inspectMode).toBe(false);
 	});
 });

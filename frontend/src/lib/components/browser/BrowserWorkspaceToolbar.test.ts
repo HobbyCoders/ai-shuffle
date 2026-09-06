@@ -15,6 +15,16 @@ const state: BrowserWorkspaceState = {
 	busy: false,
 };
 describe('shared workspace toolbar', () => {
+ it('hides the last tab close button and closes only the requested extra tab', async () => {
+  const onCommand = vi.fn();
+  const tab = { id: 'a', title: 'Alpha', url: 'https://a.test', current: true };
+  const view = render(BrowserWorkspaceToolbar, { workspace: { ...state, active_tab_id: 'a', tabs: [tab] }, viewerId: 'v', connected: true, onCommand });
+  expect(view.queryByRole('button', { name: 'Close Alpha' })).toBeNull();
+  await view.rerender({ workspace: { ...state, active_tab_id: 'a', tabs: [tab, { ...tab, id: 'b', title: 'Beta', current: false }] } });
+  await fireEvent.click(view.getByRole('button', { name: 'Close Beta' }));
+  expect(onCommand).toHaveBeenCalledWith('tabs', { action: 'close', tab_id: 'b' });
+  expect(view.getByRole('navigation').contains(view.getByRole('button', { name: 'New tab' }))).toBe(true);
+ });
 	it('allows first tab creation without a stream frame', async () => {
 		const onCommand = vi.fn();
 		const view = render(BrowserWorkspaceToolbar, {
@@ -23,7 +33,7 @@ describe('shared workspace toolbar', () => {
 			connected: true,
 			onCommand,
 		});
-		await fireEvent.click(view.getByText('New tab'));
+		await fireEvent.click(view.getByRole('button', { name: 'New tab' }));
 		expect(onCommand).toHaveBeenCalledWith('tabs', { action: 'create' });
 		expect(view.getByText('You control')).toBeTruthy();
 	});
@@ -35,7 +45,7 @@ describe('shared workspace toolbar', () => {
 			connected: true,
 			onCommand,
 		});
-		expect((view.getByText('New tab') as HTMLButtonElement).disabled).toBe(
+		expect((view.getByRole('button', { name: 'New tab' }) as HTMLButtonElement).disabled).toBe(
 			true,
 		);
 		expect(view.getByText('Another viewer controls')).toBeTruthy();

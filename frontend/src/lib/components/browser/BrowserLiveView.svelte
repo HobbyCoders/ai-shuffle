@@ -37,7 +37,7 @@
 
 	interface FramePayload {
 		data: string;
-		metadata: FrameMetadata;
+		metadata: FrameMetadata & { runtime_id?: string; tab_id?: string };
 	}
 
 	interface Props {
@@ -69,7 +69,7 @@
 	let {
 		frame,
 		interactive: inputEnabled = true,
-		keyboardEnabled = inputEnabled,
+		keyboardEnabled: keyboardAllowed = inputEnabled,
 		keyboardOpen = $bindable(false),
 		viewport,
 		inspecting = false,
@@ -86,15 +86,16 @@
 	let focused = $state(false);
 
 	let currentBitmap: ImageBitmap | null = null;
-	let currentMeta = $state.raw<FrameMetadata | null>(null);
+	let currentMeta = $state.raw<FramePayload['metadata'] | null>(null);
 	// Wait for the matching bitmap to finish decoding too: receiving metadata
 	// alone does not mean the picture under the pointer has changed yet.
-	const waitingForFrame = $derived(!!viewport && (
+	const waitingForFrame = $derived(currentMeta?.runtime_id !== frame?.metadata.runtime_id || currentMeta?.tab_id !== frame?.metadata.tab_id || (!!viewport && (
 		currentMeta?.deviceWidth !== viewport.width ||
 		currentMeta?.deviceHeight !== viewport.height ||
 		frame?.metadata.deviceWidth !== viewport.width ||
 		frame?.metadata.deviceHeight !== viewport.height
-	));
+	)));
+	const keyboardEnabled = $derived(keyboardAllowed && !waitingForFrame);
 	const interactive = $derived(inputEnabled && !waitingForFrame);
 
 	// ── Frame decode + paint (rAF-coalesced) ──────────────────────────────
@@ -318,7 +319,7 @@
 		}
 	});
 	$effect(() => {
-		if (!keyboardEnabled || inspecting) dismissKeyboard();
+		if (!keyboardAllowed || inspecting) dismissKeyboard();
 	});
 	onDestroy(dismissKeyboard);
 
@@ -727,7 +728,7 @@
 		class="keyboard-bridge"
 		aria-label="Type in the remote browser"
 		tabindex="-1"
-		disabled={!keyboardEnabled || inspecting}
+		disabled={!keyboardAllowed || inspecting}
 		autocomplete="off"
 		{...{ autocorrect: 'off' }}
 		autocapitalize="off"
@@ -750,7 +751,7 @@
 
 
 	{#if waitingForFrame}
-		<div class="focus-hint" role="status">Waiting for an updated frame…</div>
+		<div class="focus-hint" role="status">Waiting for an updated frame · view only</div>
 	{:else if interactive && inspecting}
 		<div class="focus-hint inspect-hint">Click an element to select it</div>
 	{:else if interactive && !focused && !keyboardOpen}

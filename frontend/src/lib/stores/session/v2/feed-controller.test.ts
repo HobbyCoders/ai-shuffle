@@ -946,56 +946,55 @@ describe('feedController activeTasks', () => {
 // ─── Browser-panel auto-open on a live browser tool.use ──────────────────────
 
 describe('feedController browser-panel auto-open', () => {
-	beforeEach(() => {
-		// Clean, closed baseline with no close-suppression for the fed session.
-		browserPanel.closePanel(null);
-	});
-
 	it('auto-opens on a LIVE mcp__browser__* tool.use', () => {
 		const deps = makeDeps();
+		deps.state.sessionId = 'browser-live';
 		feedController.attach(deps);
-		feedController.start('s1');
+		feedController.start('browser-live');
 		hoisted.onEvent!(caughtUp(0)); // enter live mode
 
-		expect(browserPanel.current.open).toBe(false);
+		expect(browserPanel.forSession('browser-live').open).toBe(false);
 		hoisted.onEvent!(toolUse('t1', 'mcp__browser__browser_navigate'));
-		expect(browserPanel.current.open).toBe(true);
+		expect(browserPanel.forSession('browser-live').open).toBe(true);
 	});
 
 	it('does NOT open for a non-browser tool.use', () => {
 		const deps = makeDeps();
+		deps.state.sessionId = 'browser-other';
 		feedController.attach(deps);
-		feedController.start('s1');
+		feedController.start('browser-other');
 		hoisted.onEvent!(caughtUp(0));
 
 		hoisted.onEvent!(toolUse('t1', 'Bash'));
-		expect(browserPanel.current.open).toBe(false);
+		expect(browserPanel.forSession('browser-other').open).toBe(false);
 	});
 
 	it('does NOT open during history backfill (before caught_up)', () => {
 		const deps = makeDeps();
+		deps.state.sessionId = 'browser-history';
 		feedController.attach(deps);
-		feedController.start('s1');
+		feedController.start('browser-history');
 
 		// A backfilled browser tool.use (no caught_up yet) must not pop the panel.
 		hoisted.onEvent!(toolUse('t1', 'mcp__browser__browser_navigate'));
-		expect(browserPanel.current.open).toBe(false);
+		expect(browserPanel.forSession('browser-history').open).toBe(false);
 
 		// Once caught up, the same backfilled event is not replayed, so still closed.
 		hoisted.onEvent!(caughtUp(1));
-		expect(browserPanel.current.open).toBe(false);
+		expect(browserPanel.forSession('browser-history').open).toBe(false);
 	});
 
 	it('does NOT open after the user closed the panel for that session', () => {
 		const deps = makeDeps();
+		deps.state.sessionId = 'browser-dismissed';
 		feedController.attach(deps);
-		feedController.start('s1');
+		feedController.start('browser-dismissed');
 		hoisted.onEvent!(caughtUp(0));
 
 		// User dismissed the panel for s1 → a later browser tool must not reopen it.
-		browserPanel.closePanel('s1');
+		browserPanel.closePanel('browser-dismissed');
 		hoisted.onEvent!(toolUse('t1', 'mcp__browser__browser_navigate'));
-		expect(browserPanel.current.open).toBe(false);
+		expect(browserPanel.forSession('browser-dismissed').open).toBe(false);
 	});
 });
 

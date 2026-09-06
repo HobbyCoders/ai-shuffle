@@ -128,6 +128,25 @@ describe('authoritative viewport frame gate', () => {
 	});
 });
 
+
+describe('target identity frame gate', () => {
+ it('keeps the canvas but blocks old target input until the replacement decodes', async () => {
+  const { container, rerender, onInput } = await setup();
+  await rerender({ frame: { data: 'AA==', metadata: { deviceWidth: 300, deviceHeight: 500, runtime_id: 'r', tab_id: 'a' } } });
+  await tick(); await Promise.resolve();
+  const canvas = container.querySelector('canvas');
+  let resolve!: (bitmap: ImageBitmap) => void;
+  vi.mocked(createImageBitmap).mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+  await rerender({ frame: { data: 'AA==', metadata: { deviceWidth: 300, deviceHeight: 500, runtime_id: 'r', tab_id: 'b' } } });
+  pointer(screen.getByRole('application'), 'pointerdown'); pointer(screen.getByRole('application'), 'pointerup');
+  expect(onInput).not.toHaveBeenCalled();
+  expect(container.querySelector('canvas')).toBe(canvas);
+  expect(screen.getByRole('status')).toBeTruthy();
+  resolve({ close: vi.fn() } as unknown as ImageBitmap);
+  await waitFor(() => expect(screen.queryByRole('status')).toBeNull());
+ });
+});
+
 describe('native remote-browser keyboard bridge', () => {
 	it('sends a remote tap without opening the native keyboard', async () => {
 		const { surface, input, onInput } = await setup();
@@ -192,7 +211,7 @@ describe('native remote-browser keyboard bridge', () => {
 		await fireEvent.compositionStart(input);
 		await fireEvent.compositionEnd(input, { data: '日本' });
 		await text(input, '日本', 'insertFromComposition');
-		expect(onInput.mock.calls.map(([p]) => p)).toEqual([{ type: 'input', kind: 'text', text: '日本' }]);
+		expect(onInput).not.toHaveBeenCalled(); // Keep focus, but never send text against stale geometry.
 		await rerender({ interactive: true, viewport: { width: 300, height: 500 } });
 		click();
 		expect(focus).not.toHaveBeenCalled();

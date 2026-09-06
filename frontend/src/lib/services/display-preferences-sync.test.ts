@@ -19,7 +19,7 @@ describe('remaining persistent display preferences', () => {
   const adapter = transport.adapters.get('browser_panel')!;
   adapter.apply({ width: 600, autoOpen: false, future: 'kept', defaultViewport: { mode: 'fixed', width: 390, height: 844, futureScale: 2 } });
   expect(panel.current.autoOpen).toBe(false);
-  panel.closePanel(null); panel.autoOpenFor('new-session'); expect(panel.current.open).toBe(false);
+  panel.autoOpenFor('new-session'); expect(panel.forSession('new-session').open).toBe(false);
   panel.setWidth(700); panel.setAutoOpen(true); panel.setDefaultViewport({ mode: 'fixed', width: 768, height: 1024 });
   expect(transport.save).toHaveBeenLastCalledWith('browser_panel', { width: 700, autoOpen: true, future: 'kept', defaultViewport: { mode: 'fixed', width: 768, height: 1024, futureScale: 2 } });
   adapter.apply({ defaultViewport: { mode: 'fixed', width: NaN, height: 900 } });
@@ -27,15 +27,15 @@ describe('remaining persistent display preferences', () => {
  });
 
 	it('shares width, never URL or open state', () => {
-		panel.openPanel(); panel.setStatus('live', 'https://local.example');
+		panel.openPanel('local-session'); panel.setStatus('live', 'https://local.example', 'local-session');
 		panel.setWidth(712); flush();
 		expect(transport.save).toHaveBeenCalledWith('browser_panel', { width: 712, autoOpen: true, defaultViewport: { mode: 'fixed', width: 1280, height: 800 } });
 		expect(transport.adapters.get('browser_panel')!.read()).toEqual({ width: 712, autoOpen: true, defaultViewport: { mode: 'fixed', width: 1280, height: 800 } });
 		transport.save.mockClear();
 		transport.adapters.get('browser_panel')!.apply({ width: 860 });
 		expect(panel.current.width).toBe(860);
-		expect(panel.current.open).toBe(true);
-		expect(panel.current.url).toBe('https://local.example');
+		expect(panel.forSession('local-session').open).toBe(true);
+		expect(panel.forSession('local-session').url).toBe('https://local.example');
 		expect(transport.save).not.toHaveBeenCalled();
 	});
 	it('cancels stale local disk debounce on remote width and resets missing values', () => {

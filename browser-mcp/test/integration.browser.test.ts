@@ -10,14 +10,14 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BrowserManager } from "../src/browser.js";
 import { compilePolicy } from "../src/ssrf.js";
-import { Session } from "../src/session.js";
+import { Session, raceWithTimeout } from "../src/session.js";
 import { runNavigate } from "../src/tools/navigate.js";
 import { runSnapshot } from "../src/tools/snapshot.js";
 import { runAct } from "../src/tools/act.js";
@@ -70,6 +70,16 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function findBrowser(): string | null {
+  if (process.platform === "win32") {
+    for (const base of [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA]) {
+      if (!base) continue;
+      for (const relative of ["Google/Chrome/Application/chrome.exe", "Microsoft/Edge/Application/msedge.exe"]) {
+        const candidate = join(base, relative);
+        if (existsSync(candidate)) return candidate;
+      }
+    }
+    return null;
+  }
   for (const cmd of ["chromium", "chromium-browser", "google-chrome-stable", "google-chrome"]) {
     try {
       const p = execSync(`command -v ${cmd}`, { stdio: ["ignore", "pipe", "ignore"] })
@@ -119,8 +129,8 @@ function firstText(result: McpToolResult): string {
 }
 
 const browserPath = findBrowser();
-const fixtureUrl = "file://" + fileURLToPath(new URL("./fixtures/basic.html", import.meta.url));
-const uploadFixtureUrl = "file://" + fileURLToPath(new URL("./fixtures/upload.html", import.meta.url));
+const fixtureUrl = new URL("./fixtures/basic.html", import.meta.url).href;
+const uploadFixtureUrl = new URL("./fixtures/upload.html", import.meta.url).href;
 
 describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
   let proc: ChildProcess;
@@ -715,6 +725,57 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await ws.refresh(); expect(ws.state().active_tab_id).not.toBe(created);
       expect((await send("release",{},null)).ok).toBe(true);
     } finally {
+      ws.stop();
+      session.agentAdmission = undefined; session.onWorkspaceChange = undefined; session.workspaceStatus = undefined;
+    }
+  }, 30000);
+
+  it("navigation buttons traverse history, reload content, and interrupt a pending document", async () => {
+    let requests = 0;
+    let slowRequested!: () => void;
+    const slowStarted = new Promise<void>(resolve => { slowRequested = resolve; });
+    const server = createHttpServer((req, res) => {
+      if (req.url === "/slow") { slowRequested(); return; }
+      res.setHeader("content-type", "text/html");
+      res.end(`<main>Page ${req.url}, visit ${++requests}</main>`);
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address() as { port: number };
+    const url = `http://127.0.0.1:${address.port}`;
+    const ws = new BrowserWorkspace(session);
+    let n = 0;
+    const send = (op: string, args = {}) => ws.receive({
+      id: `navigation-${++n}`, runtime_id: ws.runtimeId, viewer_id: "navigation-viewer",
+      tab_id: session.currentTabId() ?? null, op, args, expires_at: Date.now() + 30000,
+    });
+    let navigation: ReturnType<BrowserWorkspace["receive"]> | undefined;
+    try {
+      expect((await send("takeover")).ok).toBe(true);
+      expect((await send("tabs", { action: "create" })).ok).toBe(true);
+      const page = await session.ensurePage();
+      expect((await send("navigate", { url: `${url}/one` })).ok).toBe(true);
+      expect((await send("navigate", { url: `${url}/two` })).ok).toBe(true);
+      const back = await send("command", { command: "back" });
+      expect(back, JSON.stringify({ back, url: page.url(), readyState: await page.evaluate(() => document.readyState) })).toMatchObject({ ok: true });
+      expect(page.url()).toBe(`${url}/one`);
+      expect((await send("command", { command: "forward" })).ok).toBe(true);
+      expect(page.url()).toBe(`${url}/two`);
+      const beforeReload = await page.locator("main").textContent();
+      expect((await send("command", { command: "reload" })).ok).toBe(true);
+      expect(page.url()).toBe(`${url}/two`);
+      expect(await page.locator("main").textContent()).not.toBe(beforeReload);
+      navigation = send("navigate", { url: `${url}/slow` });
+      await raceWithTimeout(slowStarted, 5000, "slow navigation did not reach the server");
+      const stopped = await raceWithTimeout(send("command", { command: "stop" }), 2000, "Stop did not interrupt navigation");
+      expect(stopped.ok).toBe(true);
+      expect((await raceWithTimeout(navigation, 2000, "navigation did not settle after Stop")).ok).toBe(false);
+      expect((await send("navigate", { url: `${url}/recovered` })).ok).toBe(true);
+      expect(page.url()).toBe(`${url}/recovered`);
+      expect((await page.locator("main").textContent())).toContain("/recovered");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      if (navigation) await navigation;
       ws.stop();
       session.agentAdmission = undefined; session.onWorkspaceChange = undefined; session.workspaceStatus = undefined;
     }

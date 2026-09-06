@@ -37,7 +37,12 @@
 		Check,
 		MessageSquare,
 		Keyboard,
+		Maximize2,
+		Minimize2,
 	} from 'lucide-svelte';
+	import { untrack } from 'svelte';
+	import { startPanelBrowser } from '$lib/api/browser-panel';
+	import { PanelOperation } from '$lib/browser-panel/panel-operation';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
@@ -66,7 +71,7 @@
 
 	let { sessionId }: Props = $props();
 
-	const panel = $derived(browserPanel.current);
+	const panel = $derived(browserPanel.forSession(sessionId));
 	const open = $derived(panel.open);
 	const status = $derived(panel.status);
 	const url = $derived(panel.url);
@@ -101,10 +106,11 @@
 			return;
 		}
 		hoverRect = null;
-		browserPanel.setSelectedElement(el);
+		browserPanel.setSelectedElement(el, sessionId);
 		if (el) {
 			// Land the cursor in the composer so "click, type, send" flows.
-			queueMicrotask(() => promptEl?.focus());
+			const selectedSession = sessionId;
+			queueMicrotask(() => { if (sessionId === selectedSession) promptEl?.focus(); });
 		}
 	}
 
@@ -130,79 +136,126 @@
 		latestFrame.metadata.deviceHeight === workspace.viewport.height,
 	);
 	let commandSequence = 0;
+	let operation: PanelOperation | null = null;
+	let submitting = $state(false);
+	let navigationPending = $state(false);
+	const loading = $derived(pageLoading || navigationPending);
+	let trackedPage = false;
+	const replies = new Map<string, { ok: boolean; error?: string }>();
+	const awaitingReplies = new Set<string>();
 	// Last session we held a frame for. The canvas keeps its last picture across
 	// reconnects and transient status changes; only a genuine session switch
 	// invalidates it (showing another session's page would be wrong).
-	let framedSessionId: string | null = null;
+	let framedSessionId = $state<string | null>(null);
 
 	$effect(() => {
 		const isOpen = open;
 		const sid = sessionId;
+		return untrack(() => {
+		if (framedSessionId !== sid) {
+			latestFrame = null;
+			hoverRect = null;
+			frameIdentity = null;
+			workspace = null;
+			keyboardOpen = false;
+			promptText = '';
+			addressDraft = null;
+			if (framedSessionId) browserPanel.resetPageTracking(framedSessionId);
+		}
 		if (!isOpen || !sid) return;
+		let active = true;
+		const scope = new PanelOperation();
+		operation = scope;
+		submitting = false;
+		navigationPending = false;
+		trackedPage = false;
+		replies.clear();
+		awaitingReplies.clear();
 
 		if (framedSessionId !== sid) {
 			latestFrame = null;
 			framedSessionId = sid;
 			hoverRect = null;
-			browserPanel.resetPageTracking();
+			browserPanel.resetPageTracking(sid);
 		}
 		workspace = null;
 		viewerId = null;
 		commandError = '';
-		browserPanel.setStatus('connecting');
+		browserPanel.setStatus('connecting', null, sid);
 		const c = createBrowserStreamClient({
 			sessionId: sid,
 			getAuthToken,
-			onStatus: (s, u) => browserPanel.setStatus(s, u),
-			onPage: (u, loading) => browserPanel.setPage(u, loading),
+			onStatus: (s, u) => { if (active) browserPanel.setStatus(s, u, sid); },
+			onPage: (u, loading) => { if (active) { trackedPage = true; browserPanel.setPage(u, loading, sid); } },
 			onFrame: (data, metadata) => {
+				if (!active) return;
 				if (!workspace?.available || !workspace.active_tab_id) return;
 				latestFrame = { data, metadata };
 			},
-			onInspectHit: handleInspectHit,
+			onInspectHit: (mode, raw) => { if (active && frameMatchesWorkspace) handleInspectHit(mode, raw); },
 			onError: (message) => {
+				if (!active) return;
 				commandError = message;
 			},
 			onHello: (id) => {
+				if (!active) return;
 				viewerId = id;
+				scope.notify();
 			},
 			onCommandResult: (_id, ok, error) => {
+				if (!active) return;
+				if (awaitingReplies.has(_id)) replies.set(_id, { ok, error });
+				scope.notify();
 				if (!ok)
 					commandError =
 						error || 'Command failed. Try again after checking control.';
 			},
 			onWorkspace: (state) => {
+				if (!active) return;
 				workspace = state;
 				if (state) {
 					const identity = `${state.runtime_id}:${state.active_tab_id}`;
 					if (frameIdentity !== identity) {
-						latestFrame = null;
+						// Keep the last image until this target paints; input stays gated.
 						hoverRect = null;
-						browserPanel.resetPageTracking();
+						browserPanel.resetPageTracking(sid);
 						frameIdentity = identity;
+						trackedPage = false;
 					}
-					browserPanel.setPage(
+					// Workspace busy includes input/viewport/heartbeat work, not page loading.
+					if (!trackedPage) browserPanel.setPage(
 						state.tabs.find((t) => t.id === state.active_tab_id)?.url ?? null,
-						state.busy,
+						false,
+						sid,
 					);
 				}
+				scope.notify();
 			},
 			onOpen: () => {
+				if (!active) return;
 				streamOpen = true;
+				scope.notify();
 			},
 			onClose: (wasClean) => {
+				if (!active) return;
 				streamOpen = false;
-				if (!wasClean) browserPanel.setStatus('disconnected');
+				if (!wasClean) browserPanel.setStatus('disconnected', undefined, sid);
 			},
 		});
 		client = c;
 		c.connect();
 
 		return () => {
+			active = false;
+			scope.close();
+			if (operation === scope) operation = null;
+			submitting = false;
+			navigationPending = false;
 			c.destroy();
 			streamOpen = false;
 			if (client === c) client = null;
 		};
+		});
 	});
 
 	// Cross-page navigation invalidates the selection: the element (and its
@@ -219,7 +272,7 @@
 		else if (u !== selectionUrl) {
 			selectionUrl = u;
 			hoverRect = null;
-			browserPanel.setSelectedElement(null);
+			browserPanel.setSelectedElement(null, sessionId);
 		}
 	});
 
@@ -233,6 +286,7 @@
 		});
 	}
 	function workspaceCommand(op: string, args: Record<string, unknown>) {
+		if (op === 'tabs' && args.action === 'create') { void browse(); return; }
 		if (!['takeover', 'release'].includes(op) && !humanControl) {
 			commandError = 'Take control before changing the browser.';
 			return;
@@ -244,7 +298,7 @@
 
 	function sendInput(payload: Record<string, unknown>) {
 		if (!humanControl || !(payload.kind === 'text' || payload.kind === 'key'
-			? keyboardEnabled : frameMatchesWorkspace)) return;
+			? keyboardEnabled && frameMatchesWorkspace : frameMatchesWorkspace)) return;
 		sendIdentified(payload);
 	}
 
@@ -316,16 +370,16 @@
 
 	function toggleInspect() {
 		hoverRect = null;
-		browserPanel.setInspectMode(!inspectMode);
+		browserPanel.setInspectMode(!inspectMode, sessionId);
 	}
 
 	function exitInspect() {
 		hoverRect = null;
-		browserPanel.setInspectMode(false);
+		browserPanel.setInspectMode(false, sessionId);
 	}
 
 	function clearSelection() {
-		browserPanel.setSelectedElement(null);
+		browserPanel.setSelectedElement(null, sessionId);
 	}
 
 	function close() {
@@ -381,7 +435,7 @@
 	let panelEl: HTMLElement | undefined = $state();
 	let isResizing = $state(false);
 	function startResize(e: PointerEvent) {
-		if (isFullscreen) return; // fullscreen overlay isn't resizable
+		if (isFullscreen || panel.expanded) return; // fullscreen overlay isn't resizable
 		e.preventDefault();
 		isResizing = true;
 		const startX = e.clientX;
@@ -421,28 +475,118 @@
 		});
 	}
 
-	function commitAddress() {
-		if (addressDraft === null) return;
+	async function commitAddress() {
+		if (addressDraft === null || submitting) return;
 		const raw = addressDraft.trim();
-		addressDraft = null;
-		if (!raw || !canNavigate || !client?.isConnected()) return;
-		const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)
-			? raw
-			: `https://${raw}`;
+		if (!raw) return;
+		const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw) ? raw : `https://${raw}`;
 		if (!/^https?:\/\//i.test(withScheme)) {
 			commandError = 'Use an http or https address.';
+			addressEl?.focus();
 			return;
 		}
-		workspaceCommand('navigate', { url: withScheme });
+		await browse(withScheme);
+	}
+
+	async function acknowledged(scope: PanelOperation, op: string, args: Record<string, unknown>) {
+		if (operation !== scope || scope.controller.signal.aborted || !workspace?.available || !client?.isConnected())
+			throw new Error('Browser disconnected. Try the address again.');
+		const id = `panel-${Date.now()}-${++commandSequence}`;
+		awaitingReplies.add(id);
+		try {
+			if (!client.send({ type: 'workspace-command', id, op, args,
+				runtime_id: workspace.runtime_id, tab_id: workspace.active_tab_id }))
+				throw new Error('Command not sent. Check the connection and try again.');
+			await scope.wait(() => replies.has(id), 'Browser did not respond. Try again.', 30_000);
+			const reply = replies.get(id)!;
+			if (!reply.ok) throw new Error(reply.error || 'Command failed. Try again.');
+		} finally { replies.delete(id); awaitingReplies.delete(id); }
+	}
+
+	function checkOwner() {
+		if (workspace && ((workspace.control.owner === 'human' && workspace.control.viewer_id !== viewerId) ||
+			(workspace.control.pending_viewer_id && workspace.control.pending_viewer_id !== viewerId)))
+			throw new Error('Another viewer controls this browser. Ask them to return control, then try again.');
+	}
+
+	async function browse(address?: string) {
+		const scope = operation;
+		if (submitting || navigationPending || !scope) return;
+		const sid = sessionId;
+		const draft = addressDraft;
+		const assertCurrent = () => {
+			if (operation !== scope || scope.controller.signal.aborted || sessionId !== sid || !open)
+				throw new Error('Browser panel closed.');
+		};
+		submitting = true;
+		commandError = '';
+		try {
+			checkOwner();
+			const cold = !workspace?.available || !workspace.active_tab_id;
+			let runtimeId = workspace?.runtime_id;
+			if (cold) {
+				const request = new AbortController();
+				const abort = () => request.abort();
+				scope.controller.signal.addEventListener('abort', abort, { once: true });
+				const timer = setTimeout(abort, 30_000);
+				try { runtimeId = (await startPanelBrowser(sid, request.signal)).runtime_id; }
+				finally {
+					clearTimeout(timer);
+					scope.controller.signal.removeEventListener('abort', abort);
+				}
+			}
+			// HTTP is not a viewer connection acknowledgement. Wait for the WS state.
+			assertCurrent();
+			await scope.wait(() => streamOpen && !!viewerId && !!workspace?.available &&
+				workspace.runtime_id === runtimeId && !!workspace.active_tab_id,
+				'Browser is not ready. Try again.');
+			assertCurrent();
+			checkOwner();
+			if (!ownsControl(workspace, viewerId)) {
+				await acknowledged(scope, 'takeover', {});
+				await scope.wait(() => { checkOwner(); return ownsControl(workspace, viewerId); },
+					'Control was not granted. Try again when the browser is free.');
+			}
+			assertCurrent();
+			if (workspace?.runtime_id !== runtimeId || !ownsControl(workspace, viewerId))
+				throw new Error('Browser control changed. Try again.');
+			if (address) {
+				navigationPending = true;
+				await acknowledged(scope, 'navigate', { url: address });
+				if (operation === scope && addressDraft === draft) addressDraft = null;
+			} else if (!cold) await acknowledged(scope, 'tabs', { action: 'create' });
+			// A cold New tab uses the bootstrap tab, never creates a second blank tab.
+		} catch (error) {
+			if (operation === scope && sessionId === sid && open) {
+				commandError = error instanceof Error ? (error.name === 'AbortError'
+					? 'Browser startup timed out. Try the address again.' : error.message) :
+					(error as { detail?: string })?.detail || 'Browser could not start. Try again.';
+				if (address) addressEl?.focus();
+			}
+		} finally {
+			if (operation === scope) { submitting = false; navigationPending = false; }
+		}
 	}
 
 	function cancelEditing() {
 		addressDraft = null;
 	}
 
-	function sendCommand(command: string) {
-		if (!client?.isConnected()) return;
-		workspaceCommand('command', { command });
+	async function sendCommand(command: string) {
+		if (!client?.isConnected() || !humanControl) return;
+		if (command === 'stop') {
+			// Interrupts navigation even while its acknowledgement is outstanding.
+			workspaceCommand('command', { command });
+			return;
+		}
+		const scope = operation;
+		if (!scope || navigationPending || submitting) return;
+		navigationPending = true;
+		commandError = '';
+		try { await acknowledged(scope, 'command', { command }); }
+		catch (error) {
+			if (operation === scope) commandError = error instanceof Error ? error.message : 'Navigation failed. Try again.';
+		} finally { if (operation === scope) navigationPending = false; }
 	}
 
 	// Toolbar is usable whenever the panel socket is up and Chromium is on.
@@ -464,9 +608,7 @@
 			!!workspace.active_tab_id &&
 			status === 'live',
 	);
-	const keyboardEnabled = $derived(isLive && humanControl && !!latestFrame &&
-		latestFrame.metadata.runtime_id === workspace?.runtime_id &&
-		latestFrame.metadata.tab_id === workspace?.active_tab_id);
+	const keyboardEnabled = $derived(isLive && humanControl && !!latestFrame && latestFrame.metadata.runtime_id === workspace?.runtime_id && latestFrame.metadata.tab_id === workspace?.active_tab_id);
 	/** A frame is on the canvas — keep showing it, whatever the socket is doing. */
 	const hasFrame = $derived(latestFrame !== null);
 	/** Short overlay text shown over a stale frame while the stream isn't live. */
@@ -508,10 +650,11 @@
 		class="browser-panel"
 		class:fullscreen={isFullscreen}
 		class:resizing={isResizing}
-		style={isFullscreen ? '' : `width: ${width}px`}
+		class:expanded={panel.expanded}
+		style={isFullscreen || panel.expanded ? '' : `width: ${width}px`}
 		aria-label="Live browser view"
 	>
-		{#if !isFullscreen}
+		{#if !isFullscreen && !panel.expanded}
 			<div
 				class="resize-handle"
 				onpointerdown={startResize}
@@ -523,28 +666,15 @@
 			</div>
 		{/if}
 
-		<BrowserWorkspaceToolbar
-			{workspace}
-			{viewerId}
-			connected={streamOpen}
-			onCommand={workspaceCommand}
-		/>
-		{#if commandError}<div class="workspace-banner" role="alert">
-				{commandError}<button
-					onclick={() => (commandError = '')}
-					aria-label="Dismiss browser error">×</button
-				>
-			</div>{/if}
-		{#if streamOpen && !workspace?.available}<div
-				class="workspace-banner"
-				role="status"
-			>
-				Browser runtime unavailable. Ask the agent to start the browser.
-			</div>{:else if !streamOpen}<div class="workspace-banner" role="status">
-				Connecting to the browser workspace…{hasFrame
-					? ' Last image is stale.'
-					: ''}
-			</div>{/if}
+		<div class="tab-row">
+			<BrowserWorkspaceToolbar mode="tabs" starting={submitting} {workspace} {viewerId} connected={streamOpen} onCommand={workspaceCommand} />
+			<div class="window-actions">
+				<button class="tool-btn" aria-label={panel.expanded ? 'Restore browser panel' : 'Expand browser panel'} onclick={() => browserPanel.setExpanded(sessionId, !panel.expanded)}>
+					{#if panel.expanded}<Minimize2 size={15} />{:else}<Maximize2 size={15} />{/if}
+				</button>
+				<button class="tool-btn" onclick={close} aria-label="Close browser panel"><X size={16} /></button>
+			</div>
+		</div>
 		<header class="panel-header">
 			<div class="nav-buttons">
 				<button
@@ -567,13 +697,13 @@
 				</button>
 				<button
 					class="tool-btn"
-					class:loading={pageLoading}
-					onclick={() => sendCommand(pageLoading ? 'stop' : 'reload')}
+					class:loading={loading}
+					onclick={() => sendCommand(loading ? 'stop' : 'reload')}
 					disabled={!canNavigate}
-					aria-label={pageLoading ? 'Stop loading' : 'Reload page'}
-					title={pageLoading ? 'Stop' : 'Reload'}
+					aria-label={loading ? 'Stop loading' : 'Reload page'}
+					title={loading ? 'Stop' : 'Reload'}
 				>
-					{#if pageLoading}
+					{#if loading}
 						<StopIcon size={14} strokeWidth={2} />
 					{:else}
 						<RotateCw size={14} strokeWidth={1.75} />
@@ -604,14 +734,12 @@
 						onkeydown={(e) => {
 							if (e.key === 'Escape') cancelEditing();
 						}}
-						onblur={commitAddress}
 					/>
 				{:else}
 					<button
 						type="button"
 						class="address-display"
 						onclick={startEditing}
-						disabled={!canNavigate}
 						title={canNavigate ? `${displayUrl} — click to edit` : displayUrl}
 					>
 						<span class="status-dot status-{status}" aria-hidden="true"></span>
@@ -620,6 +748,7 @@
 				{/if}
 			</form>
 
+			<BrowserWorkspaceToolbar mode="controls" {workspace} {viewerId} connected={streamOpen} onCommand={workspaceCommand} />
 			<div class="header-actions">
 				<button
 					class="tool-btn keyboard-toggle"
@@ -640,7 +769,7 @@
 					class="tool-btn inspect-toggle"
 					class:active={inspectMode}
 					onclick={toggleInspect}
-					disabled={!isLive}
+					disabled={!isLive || !frameMatchesWorkspace}
 					aria-label="Select an element to edit with AI"
 					aria-pressed={inspectMode}
 					title="Point & prompt — click an element, then tell the AI what to change"
@@ -659,22 +788,17 @@
 						<ExternalLink size={14} strokeWidth={1.75} />
 					</a>
 				{/if}
-				<button
-					class="tool-btn close-btn"
-					onclick={close}
-					aria-label="Close browser panel"
-				>
-					<X size={16} strokeWidth={1.5} />
-				</button>
+
 			</div>
 		</header>
 
 		<div class="panel-body" bind:this={panelBodyEl}>
-			{#if hasFrame}
+			{#if commandError}<div class="command-error" role="alert">{commandError}<button onclick={() => commandError = ''} aria-label="Dismiss browser error">×</button></div>{/if}
+			{#if hasFrame && framedSessionId === sessionId}
 				<!-- The canvas stays mounted across reconnects and target re-attaches:
 				     unmounting it made every transient status blank the preview. -->
 				<div class="live-holder">
-					{#key frameIdentity}
+					{#key sessionId}
 						<BrowserLiveView
 							bind:this={liveView}
 							bind:keyboardOpen
@@ -682,7 +806,7 @@
 							frame={latestFrame}
 							interactive={isLive && frameMatchesWorkspace && (humanControl || inspectMode)}
 							viewport={workspace?.viewport}
-							inspecting={inspectMode && isLive}
+							inspecting={inspectMode && isLive && frameMatchesWorkspace}
 							{hoverRect}
 							{selectionRect}
 							onInput={sendInput}
@@ -691,7 +815,7 @@
 							onExitInspect={exitInspect}
 						/>
 					{/key}
-					{#if showStreamBadge}
+					{#if !frameMatchesWorkspace}<div class="stream-badge" role="status">Previous page · waiting for the current frame · view only</div>{:else if showStreamBadge}
 						<div class="stream-badge" role="status">
 							{#if status === 'connecting' || status === 'disconnected'}
 								<Loader2 class="spin" size={12} strokeWidth={2} />
@@ -705,7 +829,7 @@
 					{#if status === 'connecting'}
 						<Loader2 class="spin" size={26} strokeWidth={1.5} />
 						<p class="empty-title">Connecting to the live view</p>
-						<p class="empty-copy">Hooking up to the agent's browser…</p>
+						<p class="empty-copy">Connecting to this session’s browser…</p>
 					{:else if status === 'live'}
 						<!-- Attached and healthy, but the page hasn't painted a frame
 						     yet (background tab / nothing to draw). Not an error. -->
@@ -718,13 +842,13 @@
 						<Globe size={26} strokeWidth={1.5} />
 						<p class="empty-title">No page open yet</p>
 						<p class="empty-copy">
-							Take control, then choose New tab to open the first page.
+							Enter an address above and press Enter to start browsing.
 						</p>
 					{:else if status === 'browser_off'}
 						<MonitorOff size={26} strokeWidth={1.5} />
 						<p class="empty-title">Browser isn't running</p>
 						<p class="empty-copy">
-							Nothing to show until the agent starts a browser session.
+							Enter an address above to start this session’s browser.
 						</p>
 					{:else}
 						<PlugZap size={26} strokeWidth={1.5} />
@@ -819,6 +943,12 @@
 {/if}
 
 <style>
+	.tab-row { display: flex; align-items: stretch; min-height: 34px; background: var(--muted); border-bottom: 1px solid var(--border); }
+	.window-actions { display: flex; align-items: center; margin-left: auto; padding: 0 4px; flex: none; }
+	.browser-panel.expanded { inset: 0; width: 100%; border-left: 0; }
+	.command-error { position: absolute; top: 8px; left: 8px; right: 8px; z-index: 3; padding: 6px; background: var(--background); border: 1px solid var(--border); font-size: 11px; }
+	.command-error button { float: right; }
+
 	.workspace-banner {
 		display: flex;
 		justify-content: space-between;
@@ -829,15 +959,6 @@
 		background: var(--muted);
 		color: var(--foreground);
 		border-bottom: 1px solid var(--border);
-	}
-	.workspace-banner button {
-		border: 0;
-		background: transparent;
-		color: inherit;
-		cursor: pointer;
-	}
-	.workspace-banner button:focus-visible {
-		outline: 2px solid var(--primary);
 	}
 	.browser-panel {
 		position: absolute;
@@ -862,7 +983,7 @@
 
 	/* Fullscreen overlay at/under the handheld cutoff. */
 	.browser-panel.fullscreen {
-		position: fixed;
+		position: absolute;
 		inset: 0;
 		z-index: 95;
 		width: 100% !important;
@@ -874,7 +995,7 @@
 
 	@media (max-width: 1080px) {
 		.browser-panel {
-			position: fixed;
+			position: absolute;
 			inset: 0;
 			z-index: 95;
 			width: 100% !important;
@@ -915,9 +1036,9 @@
 	.panel-header {
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		padding: 6px 8px;
-		min-height: 44px;
+		gap: 3px;
+		padding: 3px 5px;
+		min-height: 34px;
 		border-bottom: 1px solid var(--border);
 		flex-shrink: 0;
 	}
@@ -1074,35 +1195,9 @@
 		}
 	}
 
-	/* ── Handheld header ergonomics: real touch targets, roomier bar ────── */
-	@media (max-width: 1080px) {
-		.panel-header {
-			gap: 4px;
-			padding: 8px 10px;
-			min-height: 54px;
-		}
-		.tool-btn {
-			width: 38px;
-			height: 38px;
-			border-radius: calc(var(--radius) - 2px);
-		}
-		.address-display,
-		.address-input {
-			height: 38px;
-			font-size: 0.8125rem;
-		}
-	}
-
-	/* The forward button is the least-used control — cede its space to the
-	   address bar on very narrow phones. */
-	@media (max-width: 400px) {
-		.nav-forward {
-			display: none;
-		}
-	}
-
 	/* ── Body ───────────────────────────────────────────────────────────── */
 	.panel-body {
+		position: relative;
 		flex: 1;
 		min-height: 0;
 		display: flex;
@@ -1387,5 +1482,13 @@
 		.resize-handle-bar {
 			transition: none;
 		}
+	}
+	@media (max-width: 1080px) {
+		.panel-header { gap: 2px; padding: 3px 4px; min-height: 34px; }
+		.tool-btn { width: 26px; height: 30px; }
+		.nav-forward { display: flex; }
+		.address-bar { min-width: 32px; }
+		.address-display, .address-input { height: 30px; font-size: 0.75rem; }
+		.address-display { padding-inline: 5px; }
 	}
 </style>
