@@ -74,8 +74,12 @@ async def test_receipt_commands_the_park():
 
     out = await handler({"command": "make ci"}, ToolCtx(extra={"monitor_spawn": spawn}))
     assert "mon-park" in out.text
-    assert "End the turn now" in out.text
-    assert "Do not sleep, poll" in out.text
+    assert "Then end the turn" in out.text
+    assert "Do not sleep or poll waiting for it" in out.text
+    # Round 7: aligned with Task's receipt, which conditions the park, and the
+    # completion notification is explicitly not something to re-read as polling.
+    assert "unless you have genuinely disjoint work" in out.text
+    assert "one park can cover several" in out.text
 
 
 @pytest.mark.asyncio
@@ -85,7 +89,7 @@ async def test_mapping_without_text_falls_back_to_the_park_receipt():
 
     out = await handler({"command": "make ci"}, ToolCtx(extra={"monitor_spawn": spawn}))
     assert "mon-park-2" in out.text
-    assert "End the turn now" in out.text
+    assert "Then end the turn" in out.text
 
 
 def test_description_carries_no_copyable_poll_loop():
@@ -212,7 +216,7 @@ async def test_serves_marks_the_receipt_and_changes_the_park_instruction():
     assert out.background_task.serves is True
     assert seen[0].serves is True
     assert "NOT parked on it" in out.text
-    assert "Do not sleep, poll" in out.text
+    assert "Do not sleep or poll waiting on it" in out.text
 
 
 @pytest.mark.asyncio

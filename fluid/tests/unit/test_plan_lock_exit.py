@@ -84,9 +84,11 @@ async def test_approval_confirms_even_when_the_host_already_left_plan_mode() -> 
     assert not outcome.is_error
     assert state["active"] is False
     text = outcome.text
-    assert "approved" in text.lower()
-    assert "OFF" in text  # the mode change, stated
-    assert "write" in text.lower()  # what is available now
+    # Round 7 reordered this result to lead with the instruction; what it must
+    # still convey is the mode change and the unlock, not a verdict.
+    assert text.splitlines()[0].startswith("Plan mode is off")
+    assert "proceed with the plan now" in text
+    assert "write tools are back on the surface" in text
     assert _RE_LOCK_BAIT not in text
 
 
@@ -105,12 +107,20 @@ async def test_approval_leaves_the_flag_off_whichever_way_it_started() -> None:
         assert state["active"] is False
 
 
-async def test_first_leg_still_refuses_outside_plan_mode() -> None:
-    """The guard is right where it belongs — nothing has been asked yet."""
+async def test_first_leg_outside_plan_mode_accepts_the_plan() -> None:
+    """Nothing has been asked yet and there is nothing to exit.
+
+    Round 7: this leg used to answer with an error whose stated remedy was the
+    re-lock bait itself, and an audited session followed it — Plan, then
+    StopPlanning one call later, purely to leave a mode it never wanted. Plan
+    mode is engine-session state that does not survive a teardown between
+    turns, so a plan written before a park lands exactly here.
+    """
     ctx, _ = _ctx(active=False)
     outcome = await stop_handler({"plan": "do the thing"}, ctx)
-    assert outcome.is_error
-    assert _RE_LOCK_BAIT in outcome.text  # correct advice on THIS leg
+    assert not outcome.is_error
+    assert "proceed with the plan now" in outcome.text
+    assert _RE_LOCK_BAIT not in outcome.text
 
 
 async def test_rejection_after_an_external_exit_does_not_claim_plan_mode_is_on() -> None:
@@ -277,7 +287,8 @@ async def test_an_approved_exit_unlocks_the_very_next_call_of_the_same_turn() ->
     # The host had already flipped the flag, so this is the "already off"
     # wording — but it still has to READ as an approval that unlocks writing.
     assert stop.output == ALREADY_OFF_RESULT
-    assert "approved" in stop.output.lower() and "OFF" in stop.output
+    assert "proceed with the plan now" in stop.output
+    assert "write tools are back on the surface" in stop.output
     assert _RE_LOCK_BAIT not in stop.output
 
     # The write tool ran, and the request that offered it carried the schema.
