@@ -792,6 +792,16 @@ class SessionRuntime:
             #     block the self-heal (that would re-introduce the stuck-parked
             #     stick this heal exists to clear). Best-effort: a settle failure
             #     must never delay/kill the turn.
+            #
+            #     "stale" is the exceptional case, not the common one: the
+            #     ORDINARY unpark passes through here with its parked row just
+            #     resolved, and settling it is the normal hand-off, not a
+            #     repair. (An audit read the old "self-healed N stale parked
+            #     turn(s)" line as evidence of a fault because it fires on
+            #     essentially every unpark.) The Stop path now settles parked
+            #     rows itself (``query_session_lifecycle.enter_user_stop``), so
+            #     a session the user stopped no longer waits for its next turn
+            #     to stop reporting itself parked.
             try:
                 from app.core.task_registry import task_registry
 
@@ -801,7 +811,7 @@ class SessionRuntime:
                     )
                     if settled:
                         logger.info(
-                            "SessionRuntime: self-healed %d stale parked turn(s) "
+                            "SessionRuntime: settled %d resolved parked turn(s) "
                             "for %s at turn %s start", settled, sid, tid,
                         )
             except Exception:

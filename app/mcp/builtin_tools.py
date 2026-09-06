@@ -408,23 +408,27 @@ async def stop_background_shell_task(
     # running — the shell itself is gone and nothing would ever settle it — but
     # they are reported to the caller.
     if session_id:
-        from app.core.task_registry import task_registry
+        from app.core.task_registry import (
+            AGENT_STOP_REASON,
+            AGENT_STOP_SUMMARY,
+            task_registry,
+        )
 
-        # Never clobber an attribution the caller already recorded: the timeout
-        # path stamps its own summary/reason first and relies on this call
-        # leaving them in place, and ``complete_task`` only overwrites a field
-        # it is actually given.
-        from app.core.task_registry import AGENT_STOP_REASON, AGENT_STOP_SUMMARY
-
-        recorded = task_registry.get_task(session_id, task_id) or {}
         # Default attribution: this function only ever runs because SOMEBODY
         # asked for the stop, and by far the most common somebody is the model
         # firing ``TaskStop`` at its own watcher or dev server. Saying so keeps
         # that out of the failure vocabulary (the chip reads "cancelled", not a
         # red cross) and out of the blank-summary bucket. Callers with a better
-        # answer pass one; an attribution already on the row always wins.
-        kill_summary = (summary or AGENT_STOP_SUMMARY) if not recorded.get("summary") else None
-        kill_reason = (reason or AGENT_STOP_REASON) if not recorded.get("reason") else None
+        # answer pass one; an attribution ALREADY on the row always wins — the
+        # timeout path stamps its own before calling here and relies on this
+        # leaving it alone (``complete_task`` only overwrites what it is given).
+        recorded = task_registry.get_task(session_id, task_id) or {}
+        kill_summary = (
+            None if recorded.get("summary") else (summary or AGENT_STOP_SUMMARY)
+        )
+        kill_reason = (
+            None if recorded.get("reason") else (reason or AGENT_STOP_REASON)
+        )
         _registry_safe(
             lambda: task_registry.complete_task(
                 session_id, task_id, "killed",

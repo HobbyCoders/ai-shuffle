@@ -133,6 +133,10 @@ CANCELLED_CHIP_STATUS = "cancelled"
 AGENT_STOP_SUMMARY = "Stopped by the agent"
 AGENT_STOP_REASON = "agent_stopped"
 
+# Ceiling on remembered user-stop latches (see ``TaskRegistry._user_stopped``).
+# Generous: the latch normally lives for seconds, until the user's next message.
+_USER_STOPPED_MAX = 5000
+
 # Kill reasons that mean "somebody decided to stop this", as opposed to "it
 # died". Chips built for these read as cancelled rather than failed. An
 # EXPLICIT reason is required: a reason-less ``killed`` is what the ghost reap
@@ -358,8 +362,9 @@ class TaskRegistry:
         # (``turn_manager._submit_blocking``). Deliberately NOT cleared by
         # ``clear_session``: an idle eviction after a Stop must not un-stop the
         # session (that is exactly how the audited "stopped sessions come back
-        # to life" reports were produced).
-        self._user_stopped: set = set()
+        # to life" reports were produced). A dict, not a set, purely so the
+        # insertion order gives the cap below something to evict.
+        self._user_stopped: Dict[str, float] = {}
         # session_id -> {child_launch_tuid -> owner_launch_tuid} (B-1). A grand-
         # child background task's launch tool_use_id mapped to the launch
         # tool_use_id of the SUB-AGENT that spawned it (its owner). Recorded when
@@ -679,7 +684,14 @@ class TaskRegistry:
             return False
         if session_id in self._user_stopped:
             return False
-        self._user_stopped.add(session_id)
+        # Bounded: the latch is normally released by the user's very next
+        # message, but a session stopped and never returned to would otherwise
+        # hold its entry for the life of the process. Evicting the oldest is
+        # safe — by then every task it named is dead and every wakeup row it
+        # had is deleted, so there is nothing left for the latch to block.
+        while len(self._user_stopped) >= _USER_STOPPED_MAX:
+            self._user_stopped.pop(next(iter(self._user_stopped)), None)
+        self._user_stopped[session_id] = _now_epoch()
         return True
 
     def is_user_stopped(self, session_id: str) -> bool:
@@ -698,10 +710,7 @@ class TaskRegistry:
         """
         if not session_id:
             return False
-        if session_id not in self._user_stopped:
-            return False
-        self._user_stopped.discard(session_id)
-        return True
+        return self._user_stopped.pop(session_id, None) is not None
 
     def force_terminal_surface(self, session_id: str, task_id: str) -> bool:
         """Fire the terminal-surface callback for a task the APP killed.
