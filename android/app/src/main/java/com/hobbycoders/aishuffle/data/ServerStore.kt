@@ -28,6 +28,11 @@ class ServerStore private constructor(private val prefs: SharedPreferences) {
 
     fun getById(id: String): Server? = getAll().firstOrNull { it.id == id }
 
+    var selectedToolsServerId: String?
+        get() = prefs.getString("selected_tools_server", null)
+        set(value) { prefs.edit().putString("selected_tools_server", value).commit() }
+    fun selectedToolsServer(): Server? = selectedToolsServerId?.let(::getById)
+
     /** Adds a server (or replaces one with the same id). */
     fun add(server: Server) {
         val updated = getAll().filterNot { it.id == server.id } + server
@@ -45,10 +50,16 @@ class ServerStore private constructor(private val prefs: SharedPreferences) {
         save(getAll().filterNot { it.id == id })
     }
 
+    fun removeAccountServers() { save(com.hobbycoders.aishuffle.account.AccountBoundary.directOnly(getAll())) }
+
+    fun replaceAccountServers(servers: List<Server>) {
+        save(com.hobbycoders.aishuffle.account.AccountBoundary.directOnly(getAll()) + servers)
+    }
+
     private fun save(servers: List<Server>) {
         val arr = JSONArray()
         servers.forEach { arr.put(it.toJson()) }
-        prefs.edit().putString(KEY_SERVERS, arr.toString()).apply()
+        prefs.edit().putString(KEY_SERVERS, arr.toString()).commit()
     }
 
     /** The last UnifiedPush endpoint the distributor handed us, if any. */

@@ -1,332 +1,144 @@
 package com.hobbycoders.aishuffle.ui
 
 import android.annotation.SuppressLint
-import android.app.DownloadManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
 import android.os.Bundle
-import android.webkit.CookieManager
-import android.webkit.ConsoleMessage
-import android.webkit.DownloadListener
-import android.webkit.JavascriptInterface
-import android.webkit.ValueCallback
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.webkit.*
+import android.widget.LinearLayout
 import androidx.activity.OnBackPressedCallback
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.net.toUri
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import com.google.android.material.snackbar.Snackbar
-import com.hobbycoders.aishuffle.R
+import com.hobbycoders.aishuffle.account.AccountRepository
+import com.hobbycoders.aishuffle.account.AccountStore
+import com.hobbycoders.aishuffle.account.PairingInput
 import com.hobbycoders.aishuffle.data.ServerStore
-import com.hobbycoders.aishuffle.databinding.ActivityChatBinding
 import com.hobbycoders.aishuffle.model.Server
 import com.hobbycoders.aishuffle.net.ApiClient
 import com.hobbycoders.aishuffle.net.ApiResult
-import com.hobbycoders.aishuffle.push.NotificationHelper
+import com.hobbycoders.aishuffle.tools.DeviceToolsRuntime
+import com.hobbycoders.aishuffle.voice.VoiceCallActivity
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import java.io.ByteArrayInputStream
 
-/**
- * Hosts the server's web UI in a WebView. Before loading, it mints a web session
- * via the mobile API and injects the `session` cookie into the [CookieManager]
- * for the server origin.
- */
-class ChatActivity : AppCompatActivity() {
-
-    private lateinit var binding: ActivityChatBinding
+/** No JavascriptInterface: even a trusted page's frames cannot call native code. */
+class ChatActivity : NativeScreen() {
     private lateinit var server: Server
-
-    /** Optional session id from a notification deep-link; opens that chat. */
-    private var deepLinkSessionId: String? = null
-
-    private var filePathCallback: ValueCallback<Array<Uri>>? = null
-
-    /**
-     * Whether the current touch gesture began on the hosted web UI's main app
-     * header (the `.topbar`). Pull-to-refresh is reserved exclusively for that
-     * header so it never competes with normal scrolling anywhere else in the
-     * page — including at the top of the chat or side panels. Injected JS reports
-     * this on every touchstart via [RefreshBridge]. Written from the WebView's JS
-     * thread, read on the UI thread, hence @Volatile.
-     */
-    @Volatile
-    private var pullFromHeader = false
-
-    /** Bridge the injected JS calls on touchstart to report where the touch began. */
-    private inner class RefreshBridge {
-        @JavascriptInterface
-        fun setFromHeader(fromHeader: Boolean) {
-            pullFromHeader = fromHeader
-        }
+    private lateinit var web: WebView
+    private var sessionJob: Job? = null
+    private var fileCallback: ValueCallback<Array<Uri>>? = null
+    private val fileChooser = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { result ->
+        fileCallback?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data))
+        fileCallback = null
     }
-
-    private val fileChooser =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            val callback = filePathCallback ?: return@registerForActivityResult
-            val uris = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
-            callback.onReceiveValue(uris)
-            filePathCallback = null
-        }
-
+    private val signedOut = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) { web.stopLoading(); web.loadUrl("about:blank"); finish() }
+    }
+    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityChatBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-        // No toolbar: the WebView is fullscreen. Back is handled by the
-        // OnBackPressedCallback registered in registerBackHandler().
-
-        val serverId = intent.getStringExtra(EXTRA_SERVER_ID)
-        // A notification tap may target a specific session; deep-link into it.
-        deepLinkSessionId = intent.getStringExtra(NotificationHelper.EXTRA_SESSION_ID)
-            ?.takeIf { it.isNotBlank() }
-        val loaded = serverId?.let { ServerStore.get(this).getById(it) }
-        if (loaded == null) {
-            Snackbar.make(binding.root, R.string.error_server_missing, Snackbar.LENGTH_LONG).show()
-            finish()
-            return
+        server = ServerStore.get(this).getById(intent.getStringExtra(EXTRA_SERVER_ID).orEmpty()) ?: run { finish(); return }
+        try { PairingInput.origin(server.baseUrl) } catch (_: Exception) { heading("HTTPS required", "Pair this server again using its HTTPS address. Existing insecure credentials will not be sent."); return }
+        if (!authorized()) { finish(); return }
+        heading(server.name, "${server.host} · ${if (server.accountId == null) "direct pairing" else "account server"}")
+        button("Voice") { startActivity(Intent(this, VoiceCallActivity::class.java).putExtra("server_id", server.id)) }
+        button("Refresh chat") { startSession() }
+        web = WebView(this)
+        // The WebView owns the available viewport rather than living in a ScrollView.
+        val shell = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val parent = content.parent as android.view.ViewGroup
+        parent.removeView(content); parent.removeView(status)
+        shell.addView(content); shell.addView(status)
+        shell.addView(web, LinearLayout.LayoutParams(-1, 0, 1f)); setContentView(shell)
+        with(web.settings) {
+            javaScriptEnabled = true; domStorageEnabled = true
+            allowFileAccess = false; allowContentAccess = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            javaScriptCanOpenWindowsAutomatically = false; setSupportMultipleWindows(false)
+            mediaPlaybackRequiresUserGesture = true
         }
-        server = loaded
-        title = server.name
-
-        configureWebView()
-        configureSwipeRefresh()
-        registerBackHandler()
-        startSession()
-    }
-
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun configureWebView() {
-        with(binding.webView.settings) {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            databaseEnabled = true
-            loadWithOverviewMode = true
-            useWideViewPort = true
-            mediaPlaybackRequiresUserGesture = false
+        CookieManager.getInstance().setAcceptThirdPartyCookies(web, false)
+        web.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(message: ConsoleMessage?) = true
+            override fun onShowFileChooser(view: WebView, callback: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean {
+                if (!PairingInput.sameOrigin(server.baseUrl, view.url.orEmpty()) || !authorized()) return false
+                fileCallback?.onReceiveValue(null)
+                fileCallback = callback
+                return try { fileChooser.launch(params.createIntent()); true }
+                catch (_: Exception) { fileCallback = null; callback.onReceiveValue(null); true }
+            }
+            override fun onPermissionRequest(request: PermissionRequest) { request.deny() }
         }
-
-        CookieManager.getInstance().apply {
-            setAcceptCookie(true)
-            setAcceptThirdPartyCookies(binding.webView, true)
-        }
-
-        binding.webView.addJavascriptInterface(RefreshBridge(), "AndroidRefresh")
-
-        binding.webView.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(
-                view: WebView,
-                request: WebResourceRequest,
-            ): Boolean {
-                val url = request.url.toString()
-                return if (isSameOrigin(url)) {
-                    false // let the WebView handle it
-                } else {
-                    openExternally(request.url)
-                    true
+        web.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                if (PairingInput.sameOrigin(server.baseUrl, request.url.toString())) return false
+                if (request.isForMainFrame && request.hasGesture() && request.url.scheme == "https") {
+                    confirm("Open outside Shuffle?", "${request.url.host} opens in your browser. No account or server credential will be added.") {
+                        runCatching { startActivity(Intent(Intent.ACTION_VIEW, request.url)) }
+                    }
                 }
-            }
-
-            override fun onPageFinished(view: WebView, url: String) {
-                super.onPageFinished(view, url)
-                binding.swipeRefresh.isRefreshing = false
-                view.evaluateJavascript(REFRESH_GATE_JS, null)
-            }
-        }
-
-        binding.webView.webChromeClient = object : WebChromeClient() {
-            override fun onShowFileChooser(
-                webView: WebView,
-                callback: ValueCallback<Array<Uri>>,
-                params: FileChooserParams,
-            ): Boolean {
-                filePathCallback?.onReceiveValue(null)
-                filePathCallback = callback
-                return try {
-                    fileChooser.launch(params.createIntent())
-                    true
-                } catch (e: Exception) {
-                    filePathCallback = null
-                    false
-                }
-            }
-
-            override fun onConsoleMessage(message: ConsoleMessage): Boolean {
-                android.util.Log.d(TAG, "console: ${message.message()}")
                 return true
             }
-        }
-
-        binding.webView.setDownloadListener(DownloadListener { url, _, contentDisposition, mimeType, _ ->
-            routeDownload(url, contentDisposition, mimeType)
-        })
-    }
-
-    /**
-     * Swipe down from the web UI's main app header to reload — the only way to
-     * pick up a freshly deployed frontend inside the chrome-less WebView.
-     * [pullFromHeader] (fed by injected JS) ensures the gesture only engages when
-     * the touch began on the header, so it never steals scrolls anywhere else in
-     * the page. Reporting "the child can scroll up" for every non-header touch
-     * tells SwipeRefreshLayout to leave that gesture to the WebView.
-     */
-    private fun configureSwipeRefresh() {
-        with(binding.swipeRefresh) {
-            // Match the dark web UI so the spinner is visible against it.
-            setProgressBackgroundColorSchemeColor(0xFF1E1F22.toInt())
-            setColorSchemeColors(0xFFFFFFFF.toInt())
-            setOnChildScrollUpCallback { _, _ -> !pullFromHeader }
-            setOnRefreshListener { binding.webView.reload() }
-        }
-    }
-
-    private fun startSession() {
-        setLoading(true)
-        lifecycleScope.launch {
-            // When the server is behind Cloudflare Access, exchange the service
-            // token for a CF_Authorization cookie first, so the WebView (and the
-            // chat WebSocket) are authorized; otherwise Access redirects to login.
-            if (server.hasCfAccess) {
-                ApiClient.fetchCfAuthorizationCookie(server)?.let { injectRawCookie(it) }
+            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                if (!PairingInput.sameOrigin(server.baseUrl, request.url.toString()))
+                    return WebResourceResponse("text/plain", "UTF-8", 403, "External content blocked", emptyMap(), ByteArrayInputStream(ByteArray(0)))
+                if (request.isForMainFrame && request.method != "GET")
+                    return WebResourceResponse("text/plain", "UTF-8", 403, "Blocked", emptyMap(), ByteArrayInputStream("Use the native sign-in screen to reconnect.".toByteArray()))
+                return if (request.isForMainFrame) ContainedDocument.load(server, request.url.toString(), request.requestHeaders["User-Agent"].orEmpty()) else null
             }
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                if (!PairingInput.sameOrigin(server.baseUrl, url)) { view.stopLoading(); return }
+            }
+            override fun onPageFinished(view: WebView, url: String) { if (PairingInput.sameOrigin(server.baseUrl, url)) status.text = "" }
+            override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: android.net.http.SslError) {
+                handler.cancel(); status.text = "HTTPS verification failed. Fix the server certificate before reconnecting."
+            }
+        }
+        // Downloads never forward session cookies into Android's redirect-following DownloadManager.
+        web.setDownloadListener { _, _, _, _, _ -> status.text = "For downloads, open this server in your browser and sign in there." }
+        ContextCompat.registerReceiver(this, signedOut, IntentFilter(AccountRepository.ACTION_CLEARED), ContextCompat.RECEIVER_NOT_EXPORTED)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() { if (web.canGoBack()) web.goBack() else finish() }
+        })
+        startSession()
+    }
+    private fun authorized(): Boolean = server.accountId == null || AccountStore(this).session()?.let { it.accountId == server.accountId && it.hub == server.hubUrl } == true
+    override fun onPause() {
+        if (::web.isInitialized) DeviceToolsRuntime.detach(this)
+        super.onPause()
+    }
+    override fun onStop() {
+        if (::web.isInitialized) { DeviceToolsRuntime.detach(this); web.onPause() }
+        sessionJob?.cancel()
+        super.onStop()
+    }
+    override fun onResume() { super.onResume(); if (::web.isInitialized) { if (!authorized()) finish() else { web.onResume(); DeviceToolsRuntime.attach(this, server) } } }
+    private fun startSession() {
+        if (sessionJob?.isActive == true) return
+        sessionJob = lifecycleScope.launch {
+            status.text = "Opening a secure chat…"
+            if (server.hasCfAccess) ApiClient.fetchCfAuthorizationCookie(server)?.let { CookieManager.getInstance().setCookie(server.baseUrl, "$it; Path=/; Secure; HttpOnly; SameSite=Strict") }
             when (val result = ApiClient.createWebSession(server)) {
                 is ApiResult.Success -> {
-                    injectSessionCookie(result.data)
-                    binding.webView.loadUrl(buildStartUrl())
-                    setLoading(false)
+                    if (!authorized()) return@launch
+                    require(!result.data.contains(';') && !result.data.contains('\n') && !result.data.contains('\r'))
+                    CookieManager.getInstance().setCookie(server.baseUrl, "session=${result.data}; Path=/; Secure; HttpOnly; SameSite=Strict") {
+                        if (!isFinishing && authorized()) { CookieManager.getInstance().flush(); web.loadUrl(server.baseUrl + "/") }
+                    }
                 }
-                is ApiResult.NeedsCfAccess -> {
-                    setLoading(false)
-                    showError(getString(R.string.cf_access_reauth))
-                }
-                is ApiResult.Failure -> {
-                    setLoading(false)
-                    showError(result.message)
-                }
+                is ApiResult.Failure -> status.text = result.message
+                is ApiResult.NeedsCfAccess -> status.text = "Cloudflare Access rejected this device. Pair the server again with a valid service token."
             }
         }
     }
-
-    /**
-     * The URL to open: the server root, or — when a notification targeted a
-     * specific session — the web UI with a `?session=<id>` hint it reads on
-     * boot. Auth cookies are set on the origin with `Path=/`, so the deeper URL
-     * stays authenticated. Remote (cluster) sessions use this same URL; the
-     * hosting install relays them to the owning device.
-     */
-    private fun buildStartUrl(): String {
-        val sid = deepLinkSessionId ?: return server.baseUrl
-        return "${server.baseUrl}/?session=${Uri.encode(sid)}"
-    }
-
-    private fun injectSessionCookie(token: String) {
-        val cookieManager = CookieManager.getInstance()
-        cookieManager.setCookie(server.baseUrl, "session=$token; Path=/")
-        cookieManager.flush()
-    }
-
-    /** Seed a raw `name=value` cookie (e.g. CF_Authorization) for the origin. */
-    private fun injectRawCookie(cookiePair: String) {
-        val cookieManager = CookieManager.getInstance()
-        cookieManager.setCookie(server.baseUrl, "$cookiePair; Path=/")
-        cookieManager.flush()
-    }
-
-    private fun registerBackHandler() {
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                finishOrGoBack()
-            }
-        })
-    }
-
-    /** Walk back through web history first; only leave the screen when there's none. */
-    private fun finishOrGoBack() {
-        if (binding.webView.canGoBack()) {
-            binding.webView.goBack()
-        } else {
-            finish()
-        }
-    }
-
-    /** True when [url] shares scheme + host + port with the server origin. */
-    private fun isSameOrigin(url: String): Boolean = runCatching {
-        val u = url.toUri()
-        val b = server.baseUrl.toUri()
-        u.scheme.equals(b.scheme, ignoreCase = true) &&
-            u.host.equals(b.host, ignoreCase = true) &&
-            u.port == b.port
-    }.getOrDefault(false)
-
-    private fun openExternally(uri: Uri) {
-        runCatching {
-            startActivity(Intent(Intent.ACTION_VIEW, uri))
-        }.onFailure {
-            Snackbar.make(binding.root, R.string.error_open_external, Snackbar.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun routeDownload(url: String, contentDisposition: String?, mimeType: String?) {
-        runCatching {
-            val uri = url.toUri()
-            val request = DownloadManager.Request(uri).apply {
-                setMimeType(mimeType)
-                addRequestHeader("User-Agent", binding.webView.settings.userAgentString)
-                // Forward the session cookie so authenticated downloads succeed.
-                CookieManager.getInstance().getCookie(url)?.let { addRequestHeader("Cookie", it) }
-                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                val name = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
-                setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS, name)
-            }
-            (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
-            Snackbar.make(binding.root, R.string.download_started, Snackbar.LENGTH_SHORT).show()
-        }.onFailure {
-            Snackbar.make(binding.root, R.string.error_download, Snackbar.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun setLoading(loading: Boolean) {
-        binding.progress.visibility = if (loading) android.view.View.VISIBLE else android.view.View.GONE
-    }
-
-    private fun showError(message: String) {
-        binding.errorText.text = message
-        binding.errorText.visibility = android.view.View.VISIBLE
-        binding.webView.visibility = android.view.View.GONE
-    }
-
     override fun onDestroy() {
-        binding.webView.destroy()
+        fileCallback?.onReceiveValue(null); fileCallback = null
+        if (::web.isInitialized) { runCatching { unregisterReceiver(signedOut) }; web.stopLoading(); web.clearHistory(); web.destroy() }
         super.onDestroy()
     }
-
-    companion object {
-        private const val TAG = "ChatActivity"
-        const val EXTRA_SERVER_ID = "server_id"
-
-        /**
-         * Installed once per full page load. On every touchstart it reports
-         * whether the touch began inside the web UI's main app header
-         * (`.topbar`), so native pull-to-refresh only arms for a pull that starts
-         * on the header and never interferes with scrolling elsewhere. Survives
-         * SvelteKit's client-side route changes (same document); the guard avoids
-         * stacking duplicate listeners across reloads.
-         */
-        private val REFRESH_GATE_JS = """
-            (function () {
-              if (window.__aishRefreshGate) return;
-              window.__aishRefreshGate = true;
-              document.addEventListener('touchstart', function (e) {
-                try {
-                  var t = e.target;
-                  var onHeader = !!(t && t.closest && t.closest('.topbar'));
-                  AndroidRefresh.setFromHeader(onHeader);
-                } catch (_) {}
-              }, { passive: true, capture: true });
-            })();
-        """.trimIndent()
-    }
+    companion object { const val EXTRA_SERVER_ID = "server_id" }
 }

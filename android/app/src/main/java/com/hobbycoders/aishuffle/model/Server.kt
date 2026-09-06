@@ -25,7 +25,12 @@ data class Server(
     val unifiedPushEndpoint: String? = null,
     val cfAccessClientId: String? = null,
     val cfAccessClientSecret: String? = null,
+    val accountId: String? = null,
+    val hubUrl: String? = null,
+    val hubServerId: String? = null,
 ) {
+    override fun toString(): String = "Server(id=$id, name=$name, host=$host, accountId=$accountId)"
+
     /** Host portion of [baseUrl], used as a compact subtitle in lists. */
     val host: String
         get() = baseUrl
@@ -37,6 +42,9 @@ data class Server(
         get() = !cfAccessClientId.isNullOrBlank() && !cfAccessClientSecret.isNullOrBlank()
 
     fun toJson(): JSONObject = JSONObject().apply {
+        put("accountId", accountId ?: JSONObject.NULL)
+        put("hubUrl", hubUrl ?: JSONObject.NULL)
+        put("hubServerId", hubServerId ?: JSONObject.NULL)
         put("id", id)
         put("name", name)
         put("baseUrl", baseUrl)
@@ -49,17 +57,20 @@ data class Server(
 
     companion object {
         fun fromJson(obj: JSONObject): Server = Server(
+            accountId = obj.optString("accountId").takeUnless { it.isBlank() || it == "null" },
+            hubUrl = obj.optString("hubUrl").takeUnless { it.isBlank() || it == "null" },
+            hubServerId = obj.optString("hubServerId").takeUnless { it.isBlank() || it == "null" },
             id = obj.getString("id"),
             name = obj.getString("name"),
             baseUrl = obj.getString("baseUrl"),
             apiKey = obj.getString("apiKey"),
             deviceId = obj.getString("deviceId"),
             unifiedPushEndpoint = obj.optString("unifiedPushEndpoint", "")
-                .takeIf { it.isNotBlank() },
+                .takeIf { !obj.isNull("unifiedPushEndpoint") && it.isNotBlank() },
             cfAccessClientId = obj.optString("cfAccessClientId", "")
-                .takeIf { it.isNotBlank() },
+                .takeIf { !obj.isNull("cfAccessClientId") && it.isNotBlank() },
             cfAccessClientSecret = obj.optString("cfAccessClientSecret", "")
-                .takeIf { it.isNotBlank() },
+                .takeIf { !obj.isNull("cfAccessClientSecret") && it.isNotBlank() },
         )
 
         /**
@@ -81,18 +92,7 @@ data class Server(
         }
 
         /** Trim, strip a trailing slash and require an http/https scheme. */
-        fun normalizeUrl(rawUrl: String): String {
-            val trimmed = rawUrl.trim().trimEnd('/')
-            require(trimmed.isNotEmpty()) { "Server URL is required" }
-            val lower = trimmed.lowercase()
-            require(lower.startsWith("http://") || lower.startsWith("https://")) {
-                "Server URL must start with http:// or https://"
-            }
-            // Reject a scheme with no host (e.g. "https://").
-            require(trimmed.substringAfter("://").isNotBlank()) {
-                "Server URL is missing a host"
-            }
-            return trimmed
-        }
+        fun normalizeUrl(rawUrl: String): String =
+            com.hobbycoders.aishuffle.account.PairingInput.origin(rawUrl)
     }
 }

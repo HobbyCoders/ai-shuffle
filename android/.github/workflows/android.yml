@@ -2,7 +2,7 @@ name: Android CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, feat/add-cross-device-auth-sharing ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -11,6 +11,24 @@ permissions:
   contents: read
 
 jobs:
+  account-hub:
+    name: Account hub Worker and D1 tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hub
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: hub/package-lock.json
+      - run: npm install --global npm@11
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
   build:
     name: Build signed release APK
     runs-on: ubuntu-latest
@@ -31,6 +49,21 @@ jobs:
 
       - name: Make gradlew executable
         run: chmod +x gradlew
+
+      - name: Unit tests and Android lint
+        run: ./gradlew testDebugUnitTest lintDebug --stacktrace
+
+      - name: Build instrumentation APKs
+        run: ./gradlew assembleDebug assembleDebugAndroidTest --max-workers=2 --stacktrace
+
+      - name: Upload instrumentation APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-instrumentation-apks
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          if-no-files-found: error
 
       - name: Decode release keystore
         env:
@@ -62,3 +95,67 @@ jobs:
           name: ai-shuffle-release-apk
           path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
+
+  android-ui:
+    name: Android emulator verification
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-instrumentation-apks
+          path: instrumentation-apks
+      - uses: android-actions/setup-android@v3
+      - name: Check emulator readiness and instrumentation result parsers
+        run: |
+          python3 .github/scripts/test-emulator-readiness.py
+          python3 .github/scripts/test-instrumentation-parser.py
+      - name: Enable emulator acceleration
+        run: sudo chmod 666 /dev/kvm
+      # The emulator action catches launch-hook errors and still attempts boot.
+      # A separate failing step is necessary to genuinely stop before launch.
+      - name: Prepare AVD and check disk space before emulator startup
+        run: |
+          sdkmanager --install platform-tools 'platforms;android-34' emulator 'system-images;android-34;default;x86_64'
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          avdmanager create avd --force --name test --package 'system-images;android-34;default;x86_64' --device pixel_6 <<< no
+          printf '\ndisk.dataPartition.size=6144M\n' >> "$ANDROID_AVD_HOME/test.avd/config.ini"
+          bash .github/scripts/emulator-diagnostics.sh before-boot
+          bash .github/scripts/emulator-storage.sh check
+      - name: Exercise native onboarding and tool permissions
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: default
+          arch: x86_64
+          profile: pixel_6
+          # Reuse the AVD whose filesystem passed the standalone preflight.
+          force-avd-creation: false
+          # API 24+ first boot enforces 6 GiB regardless of smaller requests.
+          disk-size: 6144M
+          disable-animations: true
+          pre-emulator-launch-script: bash .github/scripts/emulator-diagnostics.sh before-boot
+          # Persist startup errors and guest logcat even if boot fails before script runs.
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -camera-back none -no-snapshot -memory 2048 -cores 2
+            -logcat '*:I' > "$RUNNER_TEMP/android-emulator/emulator.log" 2>&1
+          script: bash .github/scripts/run-android-ui-tests.sh
+      - name: Collect emulator host diagnostics
+        if: always()
+        run: bash .github/scripts/emulator-diagnostics.sh after-emulator
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-ui-verification
+          path: |
+            ${{ runner.temp }}/android-emulator/
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
+            app/build/outputs/ui-screenshots/
+            app/build/outputs/connected_android_test_additional_output/
+          if-no-files-found: warn

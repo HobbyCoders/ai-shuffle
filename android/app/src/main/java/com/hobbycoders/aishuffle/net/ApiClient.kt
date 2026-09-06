@@ -71,10 +71,11 @@ object ApiClient {
         deviceId: String,
         cfAccessClientId: String? = null,
         cfAccessClientSecret: String? = null,
+        pairingCode: String,
     ): ApiResult<RegistrationResult> = withContext(Dispatchers.IO) {
         val capabilities = JSONObject().apply {
             put("supports_biometric", false)
-            put("supports_push", true)
+            put("supports_push", false)
             put("biometric_types", JSONArray())
         }
         val deviceInfo = JSONObject().apply {
@@ -83,7 +84,10 @@ object ApiClient {
             put("platform", "android")
             put("capabilities", capabilities)
         }
-        val body = JSONObject().apply { put("device_info", deviceInfo) }
+        val body = JSONObject().apply {
+            put("device_info", deviceInfo)
+            put("pairing_code", com.hobbycoders.aishuffle.account.PairingInput.code(pairingCode))
+        }
 
         val request = Request.Builder()
             .url("$baseUrl/api/v1/mobile/register")
@@ -230,16 +234,19 @@ object ApiClient {
                 ApiResult.Success(parse(json))
             }
         } catch (e: IOException) {
-            ApiResult.Failure("Network error: ${e.message ?: "unreachable"}")
+            ApiResult.Failure("Cannot reach this server. Check your HTTPS address and connection, then retry.")
         } catch (e: Exception) {
-            ApiResult.Failure("Unexpected error: ${e.message ?: e.javaClass.simpleName}")
+            ApiResult.Failure("The server returned an unsupported response. Update the server and retry.")
         }
     }
 
     private fun errorMessage(code: Int, raw: String): String {
-        val detail = runCatching { JSONObject(raw).optString("detail") }
-            .getOrNull()
-            ?.takeIf { it.isNotBlank() }
-        return if (detail != null) "$detail (HTTP $code)" else "Request failed (HTTP $code)"
+        return when (code) {
+            401 -> "Authorization expired or was revoked. Pair this phone again."
+            403 -> "Pairing was refused. Check the code and this device’s access."
+            404, 405 -> "This server does not support this mobile action. Check the address and update the server."
+            409, 410 -> "This pairing code was used or expired. Generate a new code."
+            else -> "The server could not complete this request (HTTP $code). Try again."
+        }
     }
 }

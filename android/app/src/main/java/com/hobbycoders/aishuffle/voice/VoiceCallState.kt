@@ -10,6 +10,7 @@ enum class CallStatus { IDLE, CONNECTING, LIVE, ENDED, ERROR }
 data class CallUiState(
     val status: CallStatus = CallStatus.IDLE,
     val serverName: String? = null,
+    val serverId: String? = null,
     val userCaption: String = "",
     val assistantCaption: String = "",
     val muted: Boolean = false,
@@ -18,7 +19,7 @@ data class CallUiState(
 
 /**
  * Single source of truth shared between [VoiceCallService] (writer) and
- * [VoiceCallActivity] / the wake-word service (readers). A process-wide object
+ * [VoiceCallActivity] (reader). A process-wide object
  * keeps this trivial — there is at most one call at a time.
  */
 object VoiceCallState {

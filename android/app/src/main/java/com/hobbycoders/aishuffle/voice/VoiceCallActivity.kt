@@ -16,9 +16,8 @@ import kotlinx.coroutines.launch
 
 /**
  * The talk screen: a viewer over [VoiceCallState] with mute/hang-up controls.
- * The call itself lives in [VoiceCallService], so rotating or leaving this
- * screen never drops it. Launched by the wake word, the QS tile, the assist
- * gesture (long-press power on supported devices), or the settings screen.
+ * The call lives in [VoiceCallService] across rotation, but leaving this screen
+ * hangs up and releases the microphone. Started only for the explicitly selected server.
  */
 class VoiceCallActivity : AppCompatActivity() {
 
@@ -26,17 +25,18 @@ class VoiceCallActivity : AppCompatActivity() {
 
     private val micPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) startCallIfIdle() else finish()
+            if (granted) startCallIfIdle() else renderMicrophoneOff()
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!VoiceCallState.isActive) VoiceCallState.reset()
         binding = ActivityVoiceCallBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
         binding.muteButton.setOnClickListener { VoiceCallService.toggleMute(this) }
         binding.hangupButton.setOnClickListener {
-            VoiceCallService.hangup(this)
+            if (VoiceCallState.isActive) VoiceCallService.hangup(this)
             finish()
         }
 
@@ -44,23 +44,80 @@ class VoiceCallActivity : AppCompatActivity() {
         ensureMicThenStart()
     }
 
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        ensureMicThenStart()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val id = intent.getStringExtra(VoiceCallService.EXTRA_SERVER_ID) ?: VoiceCallState.state.value.serverId
+        val server = id?.let { com.hobbycoders.aishuffle.data.ServerStore.get(this).getById(it) }
+        if (server != null && authorizedServerId() != null) com.hobbycoders.aishuffle.tools.DeviceToolsRuntime.attach(this, server)
+        ensureMicThenStart()
+    }
+
+    override fun onPause() {
+        if (!isChangingConfigurations && VoiceCallState.isActive) VoiceCallService.hangup(this)
+        com.hobbycoders.aishuffle.tools.DeviceToolsRuntime.detach(this)
+        super.onPause()
+    }
+
+    private fun hasMicrophone() = ContextCompat.checkSelfPermission(
+        this, Manifest.permission.RECORD_AUDIO,
+    ) == PackageManager.PERMISSION_GRANTED
+
+    private fun authorizedServerId(): String? = runCatching {
+        val id = intent.getStringExtra(VoiceCallService.EXTRA_SERVER_ID)
+            ?: VoiceCallState.state.value.serverId ?: return@runCatching null
+        val server = com.hobbycoders.aishuffle.data.ServerStore.get(this).getById(id)
+            ?: return@runCatching null
+        if (server.apiKey.isBlank()) return@runCatching null
+        if (server.accountId != null) {
+            val session = com.hobbycoders.aishuffle.account.AccountStore(this).session()
+            if (session == null || session.accountId != server.accountId || session.hub != server.hubUrl) return@runCatching null
+        }
+        id
+    }.getOrNull()
+
+    private fun renderMicrophoneOff() {
+        binding.statusText.text = "Microphone is off. Voice stays off until you grant access."
+        binding.muteButton.text = "Enable microphone"
+        binding.orb.isActivated = false
+        binding.muteButton.setOnClickListener {
+            if (authorizedServerId() == null) finish()
+            else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
     private fun ensureMicThenStart() {
-        val granted = ContextCompat.checkSelfPermission(
-            this, Manifest.permission.RECORD_AUDIO,
-        ) == PackageManager.PERMISSION_GRANTED
-        if (granted) startCallIfIdle() else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        if (authorizedServerId() == null) { finish(); return }
+        if (hasMicrophone()) startCallIfIdle() else renderMicrophoneOff()
     }
 
     private fun startCallIfIdle() {
-        if (!VoiceCallState.isActive) {
-            VoiceCallService.start(this)
+        val serverId = authorizedServerId()
+        if (serverId == null) { finish(); return }
+        if (!hasMicrophone()) { renderMicrophoneOff(); return }
+        binding.muteButton.setOnClickListener { VoiceCallService.toggleMute(this) }
+        if (VoiceCallState.isActive && VoiceCallState.state.value.serverId != null && VoiceCallState.state.value.serverId != serverId) {
+            // A deliberate selection must never attach this screen to another account/server's call.
+            if (VoiceCallState.isActive) VoiceCallService.hangup(this)
+            finish()
+            return
         }
+        if (!VoiceCallState.isActive) VoiceCallService.start(this, serverId, SessionMode.CHAT)
     }
 
     private fun observeState() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 VoiceCallState.state.collect { state ->
+                    if (!hasMicrophone()) {
+                        renderMicrophoneOff()
+                        return@collect
+                    }
                     binding.statusText.text = when (state.status) {
                         CallStatus.IDLE, CallStatus.CONNECTING ->
                             getString(R.string.voice_status_connecting)

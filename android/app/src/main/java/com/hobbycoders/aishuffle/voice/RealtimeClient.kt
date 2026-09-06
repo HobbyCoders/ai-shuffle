@@ -54,14 +54,13 @@ class RealtimeClient(
             PeerConnectionFactory.InitializationOptions.builder(appContext)
                 .createInitializationOptions(),
         )
-        factory = PeerConnectionFactory.builder()
-            .setAudioDeviceModule(
-                JavaAudioDeviceModule.builder(appContext)
-                    .setUseHardwareAcousticEchoCanceler(true)
-                    .setUseHardwareNoiseSuppressor(true)
-                    .createAudioDeviceModule(),
-            )
-            .createPeerConnectionFactory()
+        val audioModule = JavaAudioDeviceModule.builder(appContext)
+            .setUseHardwareAcousticEchoCanceler(true)
+            .setUseHardwareNoiseSuppressor(true)
+            .createAudioDeviceModule()
+        factory = try {
+            PeerConnectionFactory.builder().setAudioDeviceModule(audioModule).createPeerConnectionFactory()
+        } finally { audioModule.release() }
 
         val constraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
@@ -74,8 +73,12 @@ class RealtimeClient(
         val config = PeerConnection.RTCConfiguration(emptyList()).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
         }
-        peer = factory.createPeerConnection(config, PeerObserver())
-            ?: throw IllegalStateException("Could not create the WebRTC peer connection")
+        peer = factory.createPeerConnection(config, PeerObserver()) ?: run {
+            micTrack.dispose()
+            audioSource.dispose()
+            factory.dispose()
+            throw IllegalStateException("Could not create the WebRTC peer connection")
+        }
 
         // The events channel must exist BEFORE the offer so it is negotiated in
         // the same exchange (no second round trip).
@@ -89,7 +92,7 @@ class RealtimeClient(
                 val text = String(bytes, StandardCharsets.UTF_8)
                 runCatching { JSONObject(text) }
                     .onSuccess(onEvent)
-                    .onFailure { Log.w(TAG, "Unparsable realtime event: ${text.take(120)}") }
+                    .onFailure { Log.w(TAG, "Unparsable realtime event") }
             }
         })
 
@@ -180,8 +183,12 @@ class RealtimeClient(
     fun close() {
         if (closed) return
         closed = true
+        runCatching { events.unregisterObserver() }
         runCatching { events.close() }
         runCatching { peer.close() }
+        runCatching { events.dispose() }
+        runCatching { peer.dispose() }
+        runCatching { micTrack.dispose() }
         runCatching { audioSource.dispose() }
         runCatching { factory.dispose() }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {

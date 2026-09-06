@@ -1,171 +1,113 @@
 package com.hobbycoders.aishuffle.ui
 
-import android.Manifest
-import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
+import android.content.res.ColorStateList
 import android.os.Bundle
-import android.os.PowerManager
-import android.provider.Settings
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
-import androidx.recyclerview.widget.LinearLayoutManager
-import com.google.android.material.snackbar.Snackbar
+import android.widget.ImageView
+import android.widget.LinearLayout
+import androidx.appcompat.widget.PopupMenu
 import com.hobbycoders.aishuffle.R
+import com.hobbycoders.aishuffle.account.AccountRepository
 import com.hobbycoders.aishuffle.data.ServerStore
-import com.hobbycoders.aishuffle.databinding.ActivityServerListBinding
-import com.hobbycoders.aishuffle.model.Server
-import com.hobbycoders.aishuffle.net.NotificationStreamService
-import com.hobbycoders.aishuffle.push.NotificationHelper
+import com.hobbycoders.aishuffle.voice.VoiceCallActivity
 
-/**
- * Launcher screen: a list of saved servers. FAB adds one; tap opens chat;
- * long-press deletes.
- *
- * Notifications are delivered by [NotificationStreamService], an embedded
- * foreground service that holds an HTTPS Server-Sent-Events connection to each
- * server — no Firebase and no separate UnifiedPush distributor app required.
- * This screen starts that service whenever at least one server is configured
- * and stops it when the last one is removed.
- */
-class ServerListActivity : AppCompatActivity() {
-
-    private lateinit var binding: ActivityServerListBinding
-    private lateinit var store: ServerStore
-    private lateinit var adapter: ServerAdapter
-
-    private val notificationPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* result ignored */ }
-
-    private val addServerLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode == RESULT_OK) refresh()
-        }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        binding = ActivityServerListBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-        setSupportActionBar(binding.toolbar)
-
-        store = ServerStore.get(this)
-        NotificationHelper.ensureChannels(this)
-
-        adapter = ServerAdapter(
-            onClick = { openChat(it) },
-            onLongClick = { confirmDelete(it) },
-        )
-        binding.serverList.layoutManager = LinearLayoutManager(this)
-        binding.serverList.adapter = adapter
-
-        binding.addServerFab.setOnClickListener {
-            addServerLauncher.launch(Intent(this, AddServerActivity::class.java))
-        }
-
-        maybeRequestNotificationPermission()
-    }
-
-    override fun onCreateOptionsMenu(menu: android.view.Menu): Boolean {
-        menuInflater.inflate(R.menu.menu_server_list, menu)
-        return true
-    }
-
-    override fun onOptionsItemSelected(item: android.view.MenuItem): Boolean {
-        if (item.itemId == R.id.action_assist_settings) {
-            startActivity(Intent(this, AssistSettingsActivity::class.java))
-            return true
-        }
-        return super.onOptionsItemSelected(item)
-    }
-
+class ServerListActivity : NativeScreen() {
+    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent) }
     override fun onResume() {
         super.onResume()
-        refresh()
-        // Bring the wake-word listener back if it was enabled (e.g. after an
-        // app update or a boot where the mic service couldn't start).
-        com.hobbycoders.aishuffle.wake.WakeWordService.startIfEnabled(this)
-    }
-
-    private fun refresh() {
-        val servers = store.getAll()
-        adapter.submit(servers)
-        binding.emptyState.visibility = if (servers.isEmpty()) android.view.View.VISIBLE else android.view.View.GONE
-        binding.serverList.visibility = if (servers.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
-
-        if (servers.isNotEmpty()) {
-            // Bring the notification stream online (idempotent — safe each resume).
-            NotificationStreamService.start(this)
-            maybeHintBatteryOptimization()
-        } else {
-            // No servers left to watch: drop the connection and its notice.
-            NotificationStreamService.stop(this)
+        render()
+        if (intent.getBooleanExtra("auth_expired", false)) {
+            status.text = "Your sign-in expired. Sign in again to restore your workers."
+            intent.removeExtra("auth_expired")
         }
+        intent.getStringExtra("sync_message")?.let { status.text = it; intent.removeExtra("sync_message") }
+        ServerStore.get(this).selectedToolsServer()?.let { com.hobbycoders.aishuffle.tools.DeviceToolsRuntime.attach(this, it) }
     }
-
-    private fun openChat(server: Server) {
-        startActivity(
-            Intent(this, ChatActivity::class.java)
-                .putExtra(ChatActivity.EXTRA_SERVER_ID, server.id),
-        )
-    }
-
-    private fun confirmDelete(server: Server) {
-        AlertDialog.Builder(this)
-            .setTitle(getString(R.string.delete_server_title))
-            .setMessage(getString(R.string.delete_server_message, server.name))
-            .setPositiveButton(R.string.delete) { _, _ ->
-                store.remove(server.id)
-                refresh()
+    private fun openAccount(mode: String) { startActivity(Intent(this, AccountActivity::class.java).putExtra("mode", mode)) }
+    private fun addWorker() { startActivity(Intent(this, AddServerActivity::class.java)) }
+    private fun render() {
+        val repo = AccountRepository(this)
+        val account = repo.store.session()
+        if (account == null && repo.store.hasStoredSession()) {
+            runWork { repo.clearLocal(); render(); status.text = "Your sign-in expired. Sign in again to restore your workers." }
+            return
+        }
+        navigation("Shuffle", back = false)
+        navigationAction(R.drawable.ic_settings, "Settings") { startActivity(Intent(this, SettingsActivity::class.java)) }
+        val servers = ServerStore.get(this).getAll().filter { it.accountId == null || (it.accountId == account?.accountId && it.hubUrl == account?.hub) }
+        if (account == null && servers.isEmpty()) {
+            content.removeAllViews()
+            gap(24)
+            content.addView(ImageView(this).apply {
+                setImageResource(R.drawable.ic_shuffle)
+                imageTintList = ColorStateList.valueOf(color(R.color.ink))
+                background = rounded(R.color.container, 20)
+                setPadding(dp(15), dp(15), dp(15), dp(15))
+                importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }, LinearLayout.LayoutParams(dp(64), dp(64)))
+            gap(28)
+            text("Welcome to Shuffle", 32f).typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+            text("Your workers, wherever you are. Sign in to bring them to this phone.", 16f).setTextColor(color(R.color.slate))
+            gap(28)
+            button("Sign in", primary = true) { openAccount("login") }
+            button("Create account") { openAccount("create") }
+            gap(24)
+            row("Connect a worker", "Use a URL and pairing code, or scan a QR code.", R.drawable.ic_worker) { addWorker() }
+            text("You can connect directly without an account.", 13f).apply {
+                gravity = android.view.Gravity.CENTER; setTextColor(color(R.color.slate))
             }
-            .setNegativeButton(R.string.cancel, null)
-            .show()
-    }
-
-    /**
-     * Android aggressively dozes background apps, which can silently kill the
-     * SSE connection. The persistent connection is far more reliable once the
-     * app is exempt from battery optimization, so prompt once.
-     */
-    private fun maybeHintBatteryOptimization() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
-
-        val prefs = getSharedPreferences("ai_shuffle_ui", MODE_PRIVATE)
-        if (prefs.getBoolean(KEY_BATTERY_HINT_SHOWN, false)) return
-
-        val power = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
-        if (power.isIgnoringBatteryOptimizations(packageName)) return
-
-        prefs.edit().putBoolean(KEY_BATTERY_HINT_SHOWN, true).apply()
-
-        Snackbar.make(binding.root, R.string.battery_hint_message, Snackbar.LENGTH_LONG)
-            .setAction(R.string.battery_hint_action) { openBatteryOptimizationSettings() }
-            .show()
-    }
-
-    private fun openBatteryOptimizationSettings() {
-        // Opens the global battery-optimization list (no special permission
-        // required). The user can mark AI Shuffle as "not optimized" there.
-        runCatching {
-            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-        }.onFailure {
-            runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+            return
         }
-    }
-
-    private fun maybeRequestNotificationPermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-        val granted = ContextCompat.checkSelfPermission(
-            this, Manifest.permission.POST_NOTIFICATIONS,
-        ) == PackageManager.PERMISSION_GRANTED
-        if (!granted) {
-            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        navigation("Workers", back = false)
+        navigationAction(R.drawable.ic_settings, "Settings") { startActivity(Intent(this, SettingsActivity::class.java)) }
+        if (account != null) navigationAction(R.drawable.ic_refresh, "Refresh workers") {
+            runWork { repo.sync(); render(); status.text = "Workers are up to date." }
         }
-    }
-
-    companion object {
-        private const val KEY_BATTERY_HINT_SHOWN = "battery_hint_shown"
+        navigationAction(R.drawable.ic_add, "Add worker") { addWorker() }
+        content.removeAllViews(); status.text = ""
+        text(if (account != null) "Signed in as ${account.username}" else "Connected to this phone", 14f).setTextColor(color(R.color.slate))
+        gap(12)
+        if (servers.isEmpty()) {
+            group {
+                text("No workers yet", 20f)
+                text("Connect your first worker with its pairing code or QR code. Workers linked to your account appear here.", 15f).setTextColor(color(R.color.slate))
+                button("Add worker", primary = true) { addWorker() }
+            }
+        }
+        for (server in servers) {
+            val workerRow = row(server.name, "${server.host}\n${if (server.accountId == null) "This phone" else "Your account"}", R.drawable.ic_worker) {
+                startActivity(Intent(this, ChatActivity::class.java).putExtra("server_id", server.id))
+            }
+            workerRow.removeViewAt(workerRow.childCount - 1)
+            val more = iconButton(R.drawable.ic_more, "Options for ${server.name}") {}
+            more.background = rounded(R.color.card)
+            workerRow.addView(more)
+            more.setOnClickListener {
+                if (!busy) PopupMenu(this, more).apply {
+                    menu.add("Start voice chat").setOnMenuItemClickListener {
+                        startActivity(Intent(this@ServerListActivity, VoiceCallActivity::class.java).putExtra("server_id", server.id)); true
+                    }
+                    menu.add("Phone tools").setOnMenuItemClickListener {
+                        startActivity(Intent(this@ServerListActivity, ToolSettingsActivity::class.java).putExtra("server_id", server.id)); true
+                    }
+                    if (account != null && server.accountId == null) menu.add("Share with account").setOnMenuItemClickListener {
+                        confirm("Share ${server.name}?", "Devices signed in as ${account.username} will be able to connect to ${server.host}.") {
+                            runWork { repo.link(server); repo.sync(); render(); status.text = "Worker linked to your account." }
+                        }; true
+                    }
+                    menu.add("Remove from this phone").setOnMenuItemClickListener {
+                        confirm("Remove ${server.name}?", "This removes its saved connection from this phone. The worker keeps running.") {
+                            com.hobbycoders.aishuffle.tools.DeviceToolsRuntime.stop()
+                            ServerStore.get(this@ServerListActivity).remove(server.id); render()
+                        }; true
+                    }
+                    show()
+                }
+            }
+        }
+        if (account == null) {
+            section("YOUR ACCOUNT")
+            row("Sign in to Shuffle", "Bring your workers to every device.", R.drawable.ic_account) { openAccount("login") }
+        }
     }
 }

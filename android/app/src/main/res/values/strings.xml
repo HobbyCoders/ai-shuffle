@@ -1,102 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AI Shuffle</string>
-
-    <!-- Server list -->
-    <string name="add_server">Add server</string>
-    <string name="empty_servers">No servers yet.\nTap + to connect to a server.</string>
-    <string name="delete_server_title">Remove server</string>
-    <string name="delete_server_message">Remove \"%1$s\"? You can add it again later.</string>
-    <string name="delete">Delete</string>
-    <string name="cancel">Cancel</string>
-    <string name="dismiss">Dismiss</string>
-
-    <!-- Add server -->
-    <string name="display_name">Display name</string>
-    <string name="server_url">Server URL</string>
-    <string name="connect">Connect</string>
-    <string name="error_invalid_input">Please check your input</string>
-
-    <!-- Cloudflare Access (shown only when detected on the entered server) -->
-    <string name="cf_access_title">Cloudflare Access</string>
-    <string name="cf_access_explainer">This server is protected by Cloudflare Access. Create a service token in Cloudflare Zero Trust (Access → Service Auth) and add a policy that allows it, then paste its Client ID and Secret below.</string>
-    <string name="cf_access_client_id">Access Client ID</string>
-    <string name="cf_access_client_secret">Access Client Secret</string>
-    <string name="cf_access_detected">This server is behind Cloudflare Access. Add a service token to continue.</string>
-    <string name="cf_access_missing">Enter both the Access Client ID and Secret.</string>
-    <string name="cf_access_connect">Connect with token</string>
-    <string name="cf_access_reauth">Cloudflare Access blocked this session. Remove and re-add the server with a valid service token.</string>
-
-    <!-- Chat / WebView -->
-    <string name="error_server_missing">Server not found</string>
-    <string name="error_open_external">Couldn\'t open link</string>
-    <string name="download_started">Download started</string>
-    <string name="error_download">Couldn\'t start download</string>
-
-    <!-- Push -->
-    <string name="channel_actions_name">Questions &amp; permissions</string>
-    <string name="channel_actions_desc">Prompts that need your response</string>
-    <string name="channel_updates_name">Updates</string>
-    <string name="channel_updates_desc">Session and status notifications</string>
-    <string name="channel_service_name">Connection</string>
-    <string name="channel_service_desc">Keeps notifications flowing while running in the background</string>
-    <string name="no_distributor_hint">To receive push notifications, install a UnifiedPush distributor such as ntfy.</string>
-
-    <!-- Foreground service status -->
-    <string name="service_connecting">Connecting…</string>
-    <string name="service_reconnecting">Reconnecting…</string>
-    <string name="service_waiting_network">Waiting for network…</string>
-    <plurals name="service_connected">
-        <item quantity="one">Connected to %d server</item>
-        <item quantity="other">Connected to %d servers</item>
-    </plurals>
-
-    <!-- Battery optimization hint -->
-    <string name="battery_hint_title">Allow background connection</string>
-    <string name="battery_hint_message">For reliable notifications, allow AI Shuffle to keep running in the background (exempt it from battery optimization).</string>
-    <string name="battery_hint_action">Open settings</string>
-
-    <!-- Voice assistant: call screen -->
-    <string name="voice_status_connecting">Connecting…</string>
-    <string name="voice_status_live">Live — %1$s</string>
-    <string name="voice_status_live_generic">Live</string>
-    <string name="voice_status_ended">Call ended</string>
-    <string name="voice_status_error">The call could not be started</string>
+    <string name="cf_access_reauth">Cloudflare Access blocked this session. Pair the server again with a valid service token.</string>
+    <string name="voice_status_connecting">Connecting voice chat…</string>
+    <string name="voice_status_live">Live · %1$s</string>
+    <string name="voice_status_live_generic">Voice chat is live</string>
+    <string name="voice_status_ended">Voice chat ended</string>
+    <string name="voice_status_error">Voice chat could not connect. Check your server and try again.</string>
     <string name="voice_mute">Mute</string>
     <string name="voice_unmute">Unmute</string>
-    <string name="voice_hang_up">Hang up</string>
-    <string name="voice_call_notification_title">Voice assistant</string>
-    <string name="voice_call_notification_text">In a live voice session</string>
-    <string name="voice_error_no_server">Add a server first, then start a voice session.</string>
-    <string name="voice_error_disabled">Voice mode is disabled on the server. Enable it in AI Shuffle settings (and add an OpenAI API key).</string>
-
-    <!-- Voice assistant: wake word -->
-    <string name="wake_notification_title">Wake word active</string>
-    <string name="wake_notification_text">Listening for “%1$s” (offline, nothing is recorded)</string>
-    <string name="wake_detected_title">AI Shuffle</string>
-    <string name="wake_detected_text">Wake word heard — tap to open the call</string>
-    <string name="assist_tile_label">AI Shuffle Talk</string>
-
-    <!-- Voice assistant: settings -->
-    <string name="assist_settings_title">Voice assistant</string>
-    <string name="assist_wake_switch">Always listen for the wake phrase</string>
-    <string name="assist_wake_hint">Wake-word spotting runs fully offline on your phone with a small speech model. Audio only leaves the device after the phrase is heard, when the realtime call starts.</string>
-    <string name="assist_wake_phrase">Wake phrase</string>
-    <string name="assist_save_phrase">Save phrase</string>
-    <string name="assist_phrase_saved">Wake phrase saved</string>
-    <string name="assist_model_needed">Offline wake-word model not downloaded yet (~40 MB).</string>
-    <string name="assist_model_download">Download model</string>
-    <string name="assist_model_downloading">Downloading model… %1$d%%</string>
-    <string name="assist_model_unpacking">Unpacking model…</string>
-    <string name="assist_model_ready">Offline wake-word model ready.</string>
-    <string name="assist_server_label">Server for voice sessions</string>
-    <string name="assist_permissions_title">Phone action permissions</string>
-    <string name="assist_permissions_all_granted">All permissions granted.</string>
-    <string name="assist_permissions_missing">%1$d permissions not yet granted — the matching voice actions will be unavailable.</string>
-    <string name="assist_grant_permissions">Grant permissions</string>
-    <string name="assist_notification_access">Grant notification access (for “what did I miss?”)</string>
-    <string name="assist_notification_access_granted">Notification access granted ✓</string>
-    <string name="assist_overlay">Allow display over other apps (recommended)</string>
-    <string name="assist_overlay_granted">Display over other apps allowed ✓</string>
-    <string name="assist_talk_now">Start a voice session now</string>
+    <string name="voice_hang_up">End voice chat</string>
+    <string name="voice_call_notification_title">Voice chat is open</string>
+    <string name="voice_call_notification_text">Microphone active for your voice chat. End the chat to stop.</string>
+    <string name="voice_error_no_server">Choose a paired server, then start voice chat.</string>
+    <string name="voice_error_disabled">Enable voice on your server before starting a voice chat.</string>
+    <string name="accessibility_label">AI Shuffle app control</string>
+    <string name="accessibility_description">Optional app control for supported media and maps screens while Shuffle is open. Screen reading and actions need your approval. Password, payment, messaging and permission screens are excluded. Turn off access here at any time.</string>
 </resources>

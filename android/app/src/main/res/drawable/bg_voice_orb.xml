@@ -1,18 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- The talk screen's status orb: dim while connecting, lit while live. -->
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:state_activated="true">
-        <shape android:shape="oval">
-            <gradient
-                android:type="radial"
-                android:gradientRadius="70dp"
-                android:startColor="#7B5CFF"
-                android:endColor="#2B2450" />
-        </shape>
-    </item>
-    <item>
-        <shape android:shape="oval">
-            <solid android:color="#26282D" />
-        </shape>
-    </item>
+    <item android:state_activated="true"><shape android:shape="oval"><solid android:color="@color/primary" /></shape></item>
+    <item><shape android:shape="oval"><solid android:color="@color/container" /></shape></item>
 </selector>

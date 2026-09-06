@@ -13,7 +13,6 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.hobbycoders.aishuffle.R
-import com.hobbycoders.aishuffle.data.AssistPrefs
 import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.model.Server
 import com.hobbycoders.aishuffle.net.ApiClient
@@ -36,7 +35,7 @@ import java.util.Collections
  * session on the server, runs the WebRTC leg against OpenAI Realtime, attaches
  * the server's sideband (declaring the phone tools), and services those phone
  * tool calls locally. The UI ([VoiceCallActivity]) is just a viewer over
- * [VoiceCallState]; killing the activity does not end the call.
+ * [VoiceCallState]; leaving the activity ends the call and releases audio.
  */
 class VoiceCallService : Service() {
 
@@ -55,6 +54,7 @@ class VoiceCallService : Service() {
     @Volatile
     private var lastActivityMs = 0L
     private var watchdog: Job? = null
+    private var connectionJob: Job? = null
 
     /** Function calls already serviced (each arrives twice — see sideband notes). */
     private val servicedCalls = Collections.synchronizedSet(mutableSetOf<String>())
@@ -80,6 +80,12 @@ class VoiceCallService : Service() {
             }
         }
 
+        if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            VoiceCallState.update { it.copy(status = CallStatus.ERROR, error = "Microphone permission is required. Open the voice screen to grant it.") }
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         // Started via startForegroundService: startForeground() must run even
         // if we bail out right after, or the system kills the app. On Android
         // 14 a mic-type FGS from a background context can be refused HERE,
@@ -102,30 +108,22 @@ class VoiceCallService : Service() {
         } else {
             SessionMode.CHAT
         }
-        // Claim the call SYNCHRONOUSLY so a near-simultaneous second starter
-        // (e.g. the call screen opening right after the wake word) sees it
-        // as active and can't restart it in a different mode.
+        // Claim synchronously so repeated taps cannot create duplicate calls.
         VoiceCallState.reset()
-        VoiceCallState.update { it.copy(status = CallStatus.CONNECTING) }
         val serverId = intent?.getStringExtra(EXTRA_SERVER_ID)
-            ?: AssistPrefs.get(this).voiceServerId
-        scope.launch { connect(serverId) }
+        VoiceCallState.update { it.copy(status = CallStatus.CONNECTING, serverId = serverId) }
+        connectionJob = scope.launch {
+            try { connect(serverId) }
+            catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { failCall("Cannot access the selected server or Android audio services. Reopen voice and retry.") }
+        }
         return START_NOT_STICKY
     }
 
     private fun startForegroundWithNotification() {
         val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Declaring the location type without the permission granted is a
-            // SecurityException on Android 14 — only add it when we have it.
-            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            val locationGranted = androidx.core.content.ContextCompat.checkSelfPermission(
-                this, android.Manifest.permission.ACCESS_FINE_LOCATION,
-            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-            if (locationGranted) {
-                type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-            }
-            startForeground(NOTIFICATION_ID, notification, type)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -136,6 +134,7 @@ class VoiceCallService : Service() {
         val openIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, VoiceCallActivity::class.java)
+                .putExtra(EXTRA_SERVER_ID, server?.id ?: VoiceCallState.state.value.serverId)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -162,13 +161,13 @@ class VoiceCallService : Service() {
     private suspend fun connect(serverId: String?) {
         // State was already set to CONNECTING synchronously in onStartCommand.
         val store = ServerStore.get(this)
-        val srv = serverId?.let { store.getById(it) } ?: store.getAll().firstOrNull()
+        val srv = serverId?.let { store.getById(it) }
         if (srv == null) {
             failCall(getString(R.string.voice_error_no_server))
             return
         }
         server = srv
-        VoiceCallState.update { it.copy(serverName = srv.name) }
+        VoiceCallState.update { it.copy(serverName = srv.name, serverId = srv.id) }
 
         // 1. aim_ key -> web session cookie (voice endpoints don't take aim_).
         val cookie = when (val result = ApiClient.createWebSession(srv)) {
@@ -183,8 +182,7 @@ class VoiceCallService : Service() {
         sessionCookie = cookie
 
         // 2. Create the voice session (server mints the ephemeral ek_ secret).
-        // No settings pre-check: it cost a round trip on every wake, and the
-        // session create fails with a descriptive error when voice mode is off.
+        // Session creation returns a descriptive error when voice mode is off.
         val sessionMode = if (mode == SessionMode.COMMAND) "command" else "chat"
         val session = when (val result = VoiceApi.createSession(srv, cookie, sessionMode)) {
             is ApiResult.Success -> result.data
@@ -234,13 +232,15 @@ class VoiceCallService : Service() {
                     sessionMode = sessionMode,
                 )
                 if (attach is ApiResult.Failure) {
-                    Log.w(TAG, "Sideband attach failed: ${attach.message}")
+                    Log.w(TAG, "Sideband attach failed")
                 }
             } else {
                 Log.w(TAG, "No call_id from OpenAI — server sideband cannot join")
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
-            failCall("Call setup failed: ${e.message}")
+            failCall("Call setup failed. Check the connection and retry.")
             return
         }
 
@@ -254,8 +254,7 @@ class VoiceCallService : Service() {
     }
 
     /**
-     * The "speak now" cue — the wake chime only meant "phrase heard"; this
-     * one means the agent is actually on the line. Loud (full tone volume), a
+     * The "speak now" cue means the agent is on the line. Full tone volume, a
      * distinctive rising triple beep, and played on the VOICE_CALL stream so
      * it comes out of whatever device the call itself uses (headset/car),
      * not the phone speaker.
@@ -344,7 +343,7 @@ class VoiceCallService : Service() {
         if (!tools.owns(name)) return
         if (!servicedCalls.add(callId)) return
 
-        scope.launch(Dispatchers.IO) {
+        scope.launch {
             val args = runCatching { JSONObject(arguments.ifBlank { "{}" }) }
                 .getOrDefault(JSONObject())
             val outcome = tools.execute(name, args)
@@ -359,8 +358,7 @@ class VoiceCallService : Service() {
             realtime?.send(JSONObject().put("type", "response.create"))
 
             if (outcome.endSession) {
-                // Let the model speak its short wrap-up, then hang up. This is
-                // what makes hands-free "hey shuffle → call my love" one-shot.
+                // Let the model speak its short wrap-up before hanging up.
                 delay(outcome.endDelayMs)
                 endCall(userInitiated = true)
             }
@@ -372,7 +370,7 @@ class VoiceCallService : Service() {
     // ------------------------------------------------------------------
 
     private fun failCall(message: String) {
-        Log.w(TAG, "Voice call failed: $message")
+        Log.w(TAG, "Voice call failed")
         VoiceCallState.update { it.copy(status = CallStatus.ERROR, error = message) }
         cleanup()
         stopSelf()
@@ -389,6 +387,9 @@ class VoiceCallService : Service() {
 
     /** Close the WebRTC leg and tell the server to drop the sideband. */
     private fun cleanup() {
+        scope.cancel()
+        connectionJob?.cancel()
+        connectionJob = null
         watchdog?.cancel()
         watchdog = null
         realtime?.close()
@@ -403,11 +404,13 @@ class VoiceCallService : Service() {
             }
         }
         voiceSessionId = null
+        sessionCookie = null
+        server = null
+        stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     override fun onDestroy() {
-        realtime?.close()
-        realtime = null
+        cleanup()
         scope.cancel()
         if (VoiceCallState.isActive) {
             VoiceCallState.update { it.copy(status = CallStatus.ENDED) }
@@ -428,9 +431,8 @@ class VoiceCallService : Service() {
         const val ACTION_TOGGLE_MUTE = "com.hobbycoders.aishuffle.voice.TOGGLE_MUTE"
 
         /**
-         * Start a call (no-op if one is already active). COMMAND mode = wake
-         * word: do one task, then the agent hangs itself up. CHAT mode =
-         * button/tile/assist: stays connected until the user ends it.
+         * Start a deliberate continuous call. CHAT remains connected until ended.
+         * A selected server and previously granted microphone access are required.
          */
         fun start(
             context: Context,
