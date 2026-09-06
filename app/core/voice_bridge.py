@@ -1272,13 +1272,12 @@ class VoiceBridge:
                 # backend injections, so our own notes echo back here looking
                 # exactly like typed user text. Classify by opener and keep them
                 # out of the user's transcript. The history replay is dropped
-                # outright rather than buffered — it is a copy of rows that are
-                # already persisted, and storing it again would grow the
-                # transcript by the whole seed on every single attach.
-                if text.lstrip().startswith(CONTEXT_SEED_MARKER):
-                    pass
-                elif is_backend_note(text):
-                    self._pending_notes.append(text)
+                # rather than buffered — it is a copy of rows that are already
+                # persisted, and storing it again would grow the transcript by
+                # the whole seed on every single attach.
+                if is_backend_note(text):
+                    if not text.lstrip().startswith(CONTEXT_SEED_MARKER):
+                        self._pending_notes.append(text)
                 else:
                     self._pending_user.append(text)
             return
@@ -2012,10 +2011,10 @@ class VoiceBridge:
                     "to confirm that one before answering it."
                 )
             else:
-                # The no-op path — the one 62c8293f fell into. Answering "that "
-                # id is invalid" sends the model to the user for an approval
-                # nothing will ever create; the only correct next move is the
-                # tool it was reaching around.
+                # The no-op path — the one 62c8293f fell into. Answering only
+                # that the id is invalid sends the model to the user for an
+                # approval nothing will ever create; the correct next move is
+                # the tool it was reaching around.
                 note = (
                     "There is nothing to approve: this session has NO pending "
                     "permission request, and none was created. Do not infer "

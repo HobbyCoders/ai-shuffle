@@ -1552,8 +1552,11 @@ async def record_voice_exchange(
 
     ``user_text=None`` is legitimate — a model-initiated response, or an input
     transcription that never arrived — and simply omits the ``message.user``
-    event. Returns the synthetic turn id, or ``None`` when nothing was written.
-    Never raises: a persistence bug must not kill the call.
+    event. ``system_text`` is a note the bridge injected into the call, kept
+    apart from the user's words throughout (see
+    :func:`_voice_exchange_side_effects`). Returns the synthetic turn id, or
+    ``None`` when nothing was written. Never raises: a persistence bug must not
+    kill the call.
     """
     try:
         user_text = (user_text or "").strip() or None
