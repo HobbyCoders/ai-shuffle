@@ -53,12 +53,12 @@ prefix discipline.
   by itself partition anything; a stable host key (``NativeLoop(cache_key=…)``)
   is worth having, but it is not the cure.
 * **It is not images.** The miss rate with a live image in context was *lower*
-  (40.5%) than without (56.4%), and the longest miss run in the corpus began
-  three calls before the session's first screenshot existed.
+  (40.5%) than without (56.4%), and the longest miss run in the corpus ran for
+  four calls before that session's first screenshot existed.
 * **It is not the first two calls being special.** Call 1 is unavoidable
-  (nothing to hit). Call 2 missed in 9 of 20 fresh sessions and hit in 7, on
-  the same request shape, with overlapping call-1-to-call-2 gaps in both groups
-  (a hit at 5.1 s, a miss at 23.4 s).
+  (nothing to hit). Of the 16 sessions that started cold, call 2 missed in 9
+  and hit in 7 on the same request shape, with overlapping call-1-to-call-2
+  gaps in both groups (a hit at 5.1 s, a miss at 23.4 s).
 * **A rewrite costs one call, and the provider often takes two.** After a
   ``trigger`` compaction the next call is degraded in 83 of 87 cases — expected,
   the prefix moved — but the call after it, which should read what the previous
