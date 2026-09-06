@@ -19,6 +19,7 @@ from fluid.context.cache_probe import (
     checkpoint_positions,
     diagnose_cache_miss,
     fingerprint_prefix,
+    is_unexplained_miss,
     message_count,
 )
 from fluid.context.compaction import (
@@ -28,10 +29,14 @@ from fluid.context.compaction import (
 )
 from fluid.context.trim import ToolResultTrimmer, TrimConfig
 from fluid.engine.native import NativeLoop
-from fluid.events import Usage, UserTurn
+from fluid.events import CacheMissAlert, Usage, UserTurn
+from fluid.hooks.bus import HookBus
 from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.permissions.engine import PermissionEngine
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore, SessionNode
+from fluid.tools.inproc import create_inproc_server, tool
+from fluid.tools.registry import ToolRegistry
 
 # ─── Trigger derivation ──────────────────────────────────────────────────────
 
@@ -662,3 +667,274 @@ async def test_the_very_first_call_of_a_session_still_says_so() -> None:
     await asyncio.wait_for(loop.wait_turn(), timeout=5)
     usage = next(e for e in loop.bus.log(loop.session_id) if isinstance(e, Usage))
     assert usage.raw["cache_miss"]["reason"] == "no_previous_request"
+
+
+# ─── Acting on the diagnostic ────────────────────────────────────────────────
+
+
+def _grew(cache_read: int = 0, **over) -> dict:
+    """A ``prefix_grew_only`` verdict on a fully verified prefix."""
+    base = {
+        "reason": "prefix_grew_only",
+        "full_coverage": True,
+        "shared_messages": 40,
+        "verified_messages": 40,
+        "input_tokens": 60_000,
+        "cache_read_tokens": cache_read,
+    }
+    base.update(over)
+    return base
+
+
+def test_only_a_verified_zero_read_miss_counts_as_unexplained() -> None:
+    assert is_unexplained_miss(_grew())
+    assert not is_unexplained_miss(None)
+    # A partial read is the provider serving something — not a full miss.
+    assert not is_unexplained_miss(_grew(cache_read=512))
+    # Checkpoints that stop short cannot rule out a rewrite past them.
+    assert not is_unexplained_miss(_grew(full_coverage=False))
+    # Fluid rewrote history itself: explained, and named.
+    assert not is_unexplained_miss(
+        _grew(history_rewritten=[{"tier": 1, "reason": "image_consumed"}])
+    )
+    assert not is_unexplained_miss({"reason": "prefix_changed", "changed": "system"})
+    assert not is_unexplained_miss({"reason": "no_previous_request"})
+
+
+def test_the_note_drops_breakpoints_on_a_provider_that_has_none() -> None:
+    """Every audit chased "a missing cache breakpoint" on openai_responses,
+    where there is no breakpoint field to place — the API caches by itself."""
+    previous = fingerprint_prefix(system="s", tools=[], messages=_messages(4))
+    current = fingerprint_prefix(system="s", tools=[], messages=_messages(6))
+    kwargs = dict(
+        previous=previous, current=current,
+        input_tokens=60_000, cache_read_tokens=0,
+    )
+    explicit = diagnose_cache_miss(**kwargs, explicit_breakpoints=True)
+    automatic = diagnose_cache_miss(**kwargs, explicit_breakpoints=False)
+
+    assert "a missing cache breakpoint" in explicit["note"]
+    assert "a missing cache breakpoint" not in automatic["note"]
+    assert "there is no breakpoint to place" in automatic["note"]
+    assert "caches automatically" in automatic["note"]
+    assert automatic["reason"] == explicit["reason"] == "prefix_grew_only"
+
+
+class _MissProvider:
+    """Full misses on every call, and a tool call to keep the turn going."""
+
+    name = "openai_responses"
+    caps = ProviderCaps(explicit_cache_breakpoints=False)
+
+    def __init__(self, tool_calls: int, *, cache_read: int = 0) -> None:
+        self.tool_calls = tool_calls
+        self.cache_read = cache_read
+        self.calls = 0
+        self.request_extra: list[dict] = []
+
+    async def stream(self, request: ProviderRequest):
+        self.request_extra.append(dict(request.extra))
+        self.calls += 1
+        yield StreamChunk("message_start", {"usage": {
+            "input_tokens": 60_000 + self.calls,
+            "cache_read_input_tokens": self.cache_read,
+        }})
+        if self.calls <= self.tool_calls:
+            yield StreamChunk("block_start", {
+                "index": 0, "block_type": "tool_use",
+                "tool_name": "mcp__t__ping", "tool_use_id": f"t{self.calls}",
+            })
+            yield StreamChunk("tool_args_delta", {"index": 0, "partial_json": "{}"})
+            yield StreamChunk("block_stop", {"index": 0})
+            yield StreamChunk("usage", {"usage": {"output_tokens": 5},
+                                        "stop_reason": "tool_use"})
+        else:
+            yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
+            yield StreamChunk("text_delta", {"index": 0, "text": "done"})
+            yield StreamChunk("block_stop", {"index": 0})
+            yield StreamChunk("usage", {"usage": {"output_tokens": 5},
+                                        "stop_reason": "end_turn"})
+        yield StreamChunk("message_stop", {})
+
+
+def _ping_registry() -> ToolRegistry:
+    @tool("ping", "Ping", {"type": "object", "properties": {}})
+    async def ping(args: dict) -> dict:
+        return {"content": [{"type": "text", "text": "pong"}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("t", [ping]))
+    return registry
+
+
+async def _run_misses(tool_calls: int, **kwargs) -> NativeLoop:
+    loop = NativeLoop(
+        provider=kwargs.pop("provider", _MissProvider(tool_calls)),
+        store=MemoryStore(), model="m", system="sys",
+        registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
+        **kwargs,
+    )
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+    return loop
+
+
+async def test_two_unexplained_misses_in_one_turn_raise_an_alert() -> None:
+    """Ten consecutive full-price calls went by with nothing in the transcript
+    saying the cache had stopped working. The second one now says so."""
+    loop = await _run_misses(3)
+    events = loop.bus.log(loop.session_id)
+    alerts = [e for e in events if isinstance(e, CacheMissAlert)]
+
+    assert len(alerts) == 1, "one alert per run, not one per call"
+    alert = alerts[0]
+    assert alert.consecutive == 2
+    assert alert.reason == "prefix_grew_only"
+    assert alert.provider == "openai_responses"
+    assert alert.cache_read_tokens == 0
+    # The key the request actually carried, so a reader can tell a routing
+    # problem from a partitioning one.
+    assert alert.cache_key == loop.session_id
+    # The streak rides the diagnostic too, for whoever reads Usage rows later.
+    streaks = [
+        e.raw["cache_miss"].get("consecutive_unexplained")
+        for e in events if isinstance(e, Usage) and "cache_miss" in e.raw
+    ]
+    # Call 1 has no previous request to compare against, so it is explained;
+    # the streak runs over the three calls after it.
+    assert streaks == [None, 1, 2, 3]
+
+
+async def test_the_alert_stays_quiet_when_the_cache_is_working() -> None:
+    loop = await _run_misses(3, provider=_MissProvider(3, cache_read=90_000))
+    assert not [e for e in loop.bus.log(loop.session_id)
+                if isinstance(e, CacheMissAlert)]
+
+
+async def test_the_alert_threshold_is_configurable_and_can_be_off() -> None:
+    off = await _run_misses(3, cache_probe=CacheProbeConfig(alert_after_misses=0))
+    assert not [e for e in off.bus.log(off.session_id)
+                if isinstance(e, CacheMissAlert)]
+
+    late = await _run_misses(5, cache_probe=CacheProbeConfig(alert_after_misses=4))
+    alerts = [e for e in late.bus.log(late.session_id)
+              if isinstance(e, CacheMissAlert)]
+    assert [a.consecutive for a in alerts] == [4]
+
+
+async def test_the_alert_reaches_an_optional_host_hook() -> None:
+    seen: list[dict] = []
+
+    async def spy(event: str, payload: dict):
+        seen.append(payload)
+        return None
+
+    hooks = HookBus()
+    hooks.on("CacheMiss", spy)
+    await _run_misses(3, hooks=hooks)
+
+    assert len(seen) == 1
+    assert seen[0]["consecutive"] == 2
+    assert seen[0]["provider"] == "openai_responses"
+    assert seen[0]["reason"] == "prefix_grew_only"
+    assert seen[0]["note"]
+
+
+async def test_no_hook_wired_is_not_an_error() -> None:
+    """Safe default: the alert is emitted, nothing listens, the turn ends."""
+    loop = await _run_misses(3)
+    assert loop.bus.log(loop.session_id)[-1].__class__.__name__ == "TurnComplete"
+
+
+async def test_an_unexplained_miss_logs_the_usage_block_and_the_cache_key(
+    caplog,
+) -> None:
+    """Provider routing and a missing breakpoint look identical in the
+    diagnostic alone; what tells them apart is what the provider reported and
+    which affinity key the request carried."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="fluid.engine.native"):
+        loop = await _run_misses(1)
+
+    lines = [r.getMessage() for r in caplog.records if "cache miss" in r.getMessage()]
+    assert lines, "an unexplained miss must be logged"
+    detailed = lines[-1]
+    assert "provider=openai_responses" in detailed
+    assert f"cache_key={loop.session_id}" in detailed
+    assert "provider_usage=" in detailed
+    assert "'cache_read_input_tokens': 0" in detailed
+    assert "'input_tokens': 60" in detailed
+
+
+# ─── Cache-key durability ────────────────────────────────────────────────────
+
+
+async def test_the_affinity_key_defaults_to_the_fluid_session_id() -> None:
+    provider = _MissProvider(0)
+    loop = await _run_misses(0, provider=provider)
+    assert provider.request_extra[0]["prompt_cache_key"] == loop.session_id
+
+
+async def test_a_host_supplied_cache_key_survives_a_new_fluid_session() -> None:
+    """A resumed conversation lands on a new fluid session id, which used to
+    repartition the provider cache at the moment the prefix is longest. A host
+    with its own durable conversation id keeps the partition."""
+    first = _MissProvider(0)
+    second = _MissProvider(0)
+    leg_one = await _run_misses(0, provider=first, cache_key="conv-42")
+    leg_two = await _run_misses(0, provider=second, cache_key="conv-42")
+
+    assert leg_one.session_id != leg_two.session_id
+    assert first.request_extra[0]["prompt_cache_key"] == "conv-42"
+    assert second.request_extra[0]["prompt_cache_key"] == "conv-42"
+
+
+async def test_the_openrouter_key_takes_the_same_override() -> None:
+    class _Router(_MissProvider):
+        name = "openrouter"
+        caps = ProviderCaps(explicit_cache_breakpoints=True, max_cache_breakpoints=4)
+
+    provider = _Router(0)
+    await _run_misses(0, provider=provider, cache_key="conv-7")
+    assert provider.request_extra[0] == {"session_id": "conv-7"}
+
+
+async def test_an_empty_cache_key_falls_back_to_the_session_id() -> None:
+    provider = _MissProvider(0)
+    loop = await _run_misses(0, provider=provider, cache_key="")
+    assert provider.request_extra[0]["prompt_cache_key"] == loop.session_id
+
+
+async def test_the_streak_does_not_carry_across_turns() -> None:
+    """A cache that expired over user think-time is ordinary, so the run is
+    only counted inside one turn."""
+    provider = _MissProvider(0)
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model="m", system="sys",
+        registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
+    )
+    for i in range(4):
+        await loop.submit(UserTurn(content=f"turn {i}"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=10)
+
+    events = loop.bus.log(loop.session_id)
+    assert not [e for e in events if isinstance(e, CacheMissAlert)]
+    streaks = [
+        e.raw["cache_miss"].get("consecutive_unexplained")
+        for e in events if isinstance(e, Usage) and "cache_miss" in e.raw
+    ]
+    assert streaks == [None, 1, 1, 1]
+
+
+def test_the_alert_round_trips_through_the_durable_codec() -> None:
+    from fluid.events.model import event_from_dict, event_to_dict
+
+    event = CacheMissAlert(
+        session_id="s", turn_id="t", consecutive=2, reason="prefix_grew_only",
+        input_tokens=94_000, cache_read_tokens=0,
+        provider="openai_responses", model="gpt-6-astra",
+        cache_key="conv-42", note="every shared checkpoint matched",
+    )
+    assert event_from_dict(event_to_dict(event)) == event
+    assert event.type == "cache_miss_alert"
