@@ -9,6 +9,7 @@ subprocess), not this client.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import AsyncIterator
 
@@ -18,12 +19,22 @@ from fluid.providers._trace import trace_request
 
 from fluid.providers._retry import RETRIABLE_STATUSES, RetryPolicy
 from fluid.providers._sse import sse_events
+from fluid.providers._transport import (
+    DEFAULT_STREAM_DEADLINE_S,
+    StreamDeadlineExceeded,
+    deadline_error_payload,
+    is_closed_client_error,
+    is_usable_client,
+    with_deadline,
+)
 from fluid.providers.anthropic.pricing import estimate_cost as _estimate_cost
 from fluid.providers.anthropic.serialize import build_request_body, sse_to_chunk
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
+
+log = logging.getLogger(__name__)
 
 
 class AnthropicClient:
@@ -41,18 +52,45 @@ class AnthropicClient:
         *,
         base_url: str = API_URL,
         timeout: float = 600.0,
+        stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self._base_url = base_url
         self._timeout = timeout
+        # Wall clock for one whole model call, above the per-read ``timeout``.
+        # None disables it. See fluid.providers._transport.
+        self._stream_deadline = stream_deadline
         self._http = http_client
         self._retry = retry or RetryPolicy()
 
     def estimate_cost(self, model: str, usage: dict) -> float | None:
         """Optional engine cost hook: list-price estimate for one model call."""
         return _estimate_cost(model, usage)
+
+    def _pick_client(
+        self, owned: httpx.AsyncClient | None
+    ) -> tuple[httpx.AsyncClient, httpx.AsyncClient | None]:
+        """The client for the next attempt, plus the one this call owns.
+
+        A host-injected client may have been closed between calls; a closed
+        client can never send again, so it is dropped in favor of a per-call
+        one (see OpenAIResponsesClient._pick_client).
+        """
+        if is_usable_client(self._http):
+            assert self._http is not None
+            return self._http, owned
+        if self._http is not None:
+            log.warning(
+                "injected http client is closed; falling back to a per-call "
+                "client for anthropic"
+            )
+            self._http = None
+        if not is_usable_client(owned):
+            owned = httpx.AsyncClient(timeout=self._timeout)
+        assert owned is not None
+        return owned, owned
 
     async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
         headers = {
@@ -62,12 +100,12 @@ class AnthropicClient:
             "accept": "text/event-stream",
         }
         body = build_request_body(request)
-        client = self._http or httpx.AsyncClient(timeout=self._timeout)
-        owns_client = self._http is None
+        owned: httpx.AsyncClient | None = None
         attempt = 0
         try:
             while True:
                 yielded = False
+                client, owned = self._pick_client(owned)
                 try:
                     trace_request("anthropic", body)
                     async with client.stream(
@@ -93,7 +131,10 @@ class AnthropicClient:
                         # begin. Once content has flowed, an error surfaces.
                         pending_start: StreamChunk | None = None
                         retry_error = False
-                        async for event_name, data in sse_events(resp.aiter_lines()):
+                        events = with_deadline(
+                            sse_events(resp.aiter_lines()), self._stream_deadline
+                        )
+                        async for event_name, data in events:
                             chunk = sse_to_chunk(event_name, data)
                             if chunk is None:
                                 continue
@@ -122,6 +163,25 @@ class AnthropicClient:
                             yielded = True
                             yield pending_start
                         return
+                except StreamDeadlineExceeded as exc:
+                    yield StreamChunk("error", deadline_error_payload(exc))
+                    return
+                except RuntimeError as exc:
+                    # A send on a closed injected client: nothing left the
+                    # process, so this is a pre-stream failure and the next
+                    # attempt gets a live client from _pick_client.
+                    if not is_closed_client_error(exc):
+                        raise
+                    self._http = None
+                    if not yielded and attempt < self._retry.transport_retries:
+                        await asyncio.sleep(self._retry.delay(attempt))
+                        attempt += 1
+                        continue
+                    yield StreamChunk(
+                        "error",
+                        {"message": f"{type(exc).__name__}: {exc}", "retriable": True},
+                    )
+                    return
                 except httpx.TransportError as exc:
                     # Pre-stream connection failures retry; mid-stream ones
                     # don't (chunks were already delivered downstream).
@@ -135,5 +195,5 @@ class AnthropicClient:
                     )
                     return
         finally:
-            if owns_client:
-                await client.aclose()
+            if owned is not None:
+                await owned.aclose()

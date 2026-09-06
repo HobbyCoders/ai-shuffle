@@ -284,6 +284,7 @@ Every provider block has the same keys; `kind` decides which client is built.
 | `base_url` | none | Override the endpoint. Required for `local`. |
 | `api_key_env` | none | Environment variable holding the API key. The Anthropic, OpenAI, and OpenRouter clients also fall back to `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `OPENROUTER_API_KEY` respectively. |
 | `tool_style` | `"native"` | `text` switches to the `<tool_call>` text protocol for models without reliable native tool calling. See [local-models.md](local-models.md). |
+| `stream_deadline` | `900` (seconds) | Wall clock for one whole model call. The HTTP timeout is per read, so a provider that keeps emitting bytes — a degenerate generation, an upstream streaming padding — resets it forever; this bounds the call itself and surfaces as a retriable error. `0` disables it. |
 | `extra` | `{}` | Request-body fields merged into every request. Honoured by `local` (llama.cpp `cache_prompt`, samplers, Ollama `options`). |
 
 The built-in blocks:

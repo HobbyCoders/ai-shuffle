@@ -30,6 +30,7 @@ import httpx
 
 from fluid.providers._chat_completions import stream_chat_completions
 from fluid.providers._retry import RetryPolicy
+from fluid.providers._transport import DEFAULT_STREAM_DEADLINE_S, is_usable_client
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.providers.local.serialize import build_request_body, normalize_base_url
 
@@ -47,6 +48,7 @@ class LocalClient:
         *,
         base_url: str,
         timeout: float = 600.0,
+        stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
         extra: dict[str, Any] | None = None,
@@ -54,6 +56,8 @@ class LocalClient:
         self._api_key = api_key or "local"
         self._url = normalize_base_url(base_url)
         self._timeout = timeout
+        # Wall clock for one whole model call, above the per-read ``timeout``.
+        self._stream_deadline = stream_deadline
         self._http = http_client
         self._retry = retry or RetryPolicy()
         self._extra = dict(extra) if extra else {}
@@ -70,6 +74,9 @@ class LocalClient:
             "accept": "text/event-stream",
         }
         body = build_request_body(request, extra=self._extra)
+        if not is_usable_client(self._http):
+            # A host-injected client its owner has closed can never send again.
+            self._http = None
         async for chunk in stream_chat_completions(
             self._url,
             body,
@@ -77,5 +84,6 @@ class LocalClient:
             http_client=self._http,
             timeout=self._timeout,
             retry=self._retry,
+            stream_deadline=self._stream_deadline,
         ):
             yield chunk

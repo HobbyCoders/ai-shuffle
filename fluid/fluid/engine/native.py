@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -328,6 +329,30 @@ def _steer_receipt(
     return entry
 
 
+@dataclass(frozen=True, kw_only=True)
+class ToolArgStreamGuard:
+    """Limits on one tool call's streamed argument JSON.
+
+    A model can degenerate mid-``arguments`` and stream padding forever: the
+    JSON never becomes callable, the per-read HTTP timeout never fires because
+    data keeps arriving, and the only thing that ends the call is the user
+    pressing Stop. Three sessions in one audited day burned 224 s, 495 s and
+    839 s that way, the last of them on 423 KB of whitespace across 27,845
+    delta events.
+
+    Any limit set to ``None`` is off; all three off means no guard at all.
+    """
+
+    # Total accumulated argument bytes for one call. Above this the call cannot
+    # plausibly still be an honest one.
+    max_bytes: int | None = 256 * 1024
+    # Consecutive whitespace-only argument bytes.
+    stall_bytes: int | None = 8 * 1024
+    # Seconds of nothing but whitespace, once the run is long enough to be more
+    # than a slow provider drawing indentation (_WHITESPACE_MIN_RUN).
+    stall_seconds: float | None = 20.0
+
+
 @dataclass
 class _CallResult:
     """Outcome of one streamed model call."""
@@ -337,6 +362,10 @@ class _CallResult:
     usage: dict[str, Any] = field(default_factory=dict)  # tokens (int) + optional cost_usd (float)
     stop_reason: str = "end_turn"
     interrupted: bool = False
+    # Set when ToolArgStreamGuard aborted the stream: why, and the tool call it
+    # abandoned (registered as a failed call only once the retry is spent).
+    arg_stream_error: str | None = None
+    arg_stream_tool: dict[str, Any] | None = None
     error_message: str | None = None  # set when stop_reason == "error"
     error_retriable: bool = False
     # HTTP status of a rejected request, when the provider reported one. A
@@ -363,6 +392,78 @@ _OVERFLOW_MARKERS = (
 
 # HTTP statuses that mean the request body itself was rejected for size.
 _OVERFLOW_STATUSES = frozenset({413})
+
+# Events whose loss costs a gap in the replay log and nothing else: they are
+# progress frames, and the assistant node the turn stores carries the same
+# content in full. A store failure on one of these is logged, not raised (see
+# NativeLoop._emit). Everything else — ToolUse, ToolResult, Usage, every
+# lifecycle event — is load-bearing, and a store that cannot take it must say
+# so loudly.
+_RECONSTRUCTIBLE_EVENTS = (TextDelta, ThinkingDelta, ToolArgsDelta)
+
+# Exception class-name suffixes that mean "the transport or the database was
+# briefly unavailable", matched anywhere in an exception's inheritance chain.
+# Named rather than imported: fluid must not depend on whichever driver the
+# host wired its store to (psycopg2, psycopg3, asyncpg, aiosqlite, …).
+_TRANSIENT_ERROR_SUFFIXES = (
+    "OperationalError",     # psycopg2/psycopg3/sqlite3: connection lost, refused
+    "InterfaceError",       # psycopg2: connection already closed
+    "PoolError",            # psycopg pools: exhausted / closed
+    "PoolTimeout",
+    "TransportError",       # httpx
+    "ConnectError",
+    "ConnectTimeout",
+    "ReadTimeout",
+    "WriteTimeout",
+    "RemoteProtocolError",
+    "ConnectionDoesNotExistError",  # asyncpg
+    "TooManyConnectionsError",
+    "CannotConnectNowError",
+)
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    """True when an exception that reached the agent loop looks retriable.
+
+    Socket and OS errors (Windows' WSAEADDRINUSE from ephemeral-port
+    exhaustion, a refused connection, a read timeout) and driver-level
+    connection failures are blips: the same turn re-run normally succeeds. A
+    bug in a tool handler is not. Wrapped causes count — drivers routinely
+    re-raise an OSError as their own error type.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (OSError, TimeoutError, ConnectionError)):
+            return True
+        for cls in type(current).__mro__:
+            if cls.__name__.endswith(_TRANSIENT_ERROR_SUFFIXES):
+                return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _describe_engine_failure(exc: BaseException, *, transient: bool) -> str:
+    """A turn-ending exception as something a reader can act on.
+
+    ``repr(exc)`` alone shipped bare ``OperationalError('connection to server
+    … failed: Address already in use')`` to the user with no hint that it was
+    infrastructure rather than their work, and no hint that retrying would
+    work.
+    """
+    detail = str(exc).strip() or repr(exc)
+    name = type(exc).__name__
+    if transient:
+        return (
+            f"the turn stopped on a transient storage or transport failure "
+            f"({name}: {detail}). Nothing in the conversation was lost — "
+            "resume the turn to continue."
+        )
+    return (
+        f"the turn stopped on an unexpected harness error ({name}: {detail})."
+    )
+
 
 # How long a turn parks on a QuestionRequest before giving up on an answer.
 # A host that renders no questions and never interrupts used to hold the
@@ -455,7 +556,7 @@ def _is_empty_completion(result: _CallResult) -> bool:
     before the terminal chunk — never a genuine provider error, which carries
     its own message and keeps the existing error path.
     """
-    if result.interrupted or result.tool_uses:
+    if result.interrupted or result.tool_uses or result.arg_stream_error:
         return False
     for block in result.message.content:
         if isinstance(block, (Text, Thinking)) and block.text:
@@ -604,6 +705,51 @@ def _explain_truncation(arg_error: str, stop_reason: str | None) -> str:
     return f"{head}{_OUTPUT_BUDGET_CAUSE}" + (f"\nReceived: {tail}" if tail else "")
 
 
+# A whitespace run shorter than this is a slow provider drawing indentation,
+# not a degenerate one. Both stall limits wait for it.
+_WHITESPACE_MIN_RUN = 256
+# How much whitespace has to pile up before the accumulated arguments are
+# tested for syntactic completeness, and how much more before re-testing. The
+# answer only sharpens the wording of the abort, so the probe is cheap on
+# purpose: a complete-JSON test over hundreds of KB, once per delta, would cost
+# more than the runaway it is catching.
+_WHITESPACE_PROBE_BYTES = 512
+_WHITESPACE_REPROBE_BYTES = 64 * 1024
+# Runaway argument streams retried before the failure is handed to the model.
+_ARG_STREAM_MAX_RETRIES = 1
+
+
+def _json_object_complete(raw_args: str) -> bool:
+    """True when the accumulated argument text is already a whole JSON object."""
+    try:
+        return isinstance(json.loads(raw_args), dict)
+    except (json.JSONDecodeError, ValueError):
+        return False
+
+
+def _explain_arg_runaway(
+    tool_name: str, raw_args: str, cause: str, *, closed: bool
+) -> str:
+    """The tool error a caller gets for a call the guard killed.
+
+    It has to say three things: the call did not run, why it did not run, and
+    what to do — because the model's next move (reissue the same call) is
+    usually right, and without this it sees only silence.
+    """
+    state = (
+        "Your arguments were already complete before the padding started"
+        if closed
+        else "Your arguments were still unfinished when the padding started"
+    )
+    return (
+        f"Tool arguments for {tool_name or 'this call'} were abandoned and the "
+        f"call was not run: {cause}. {state}. This is a degenerate generation, "
+        "not a problem with the payload — reissue the call, and if it carries "
+        "a large body consider splitting it.\n"
+        f"Received {len(raw_args)} argument bytes."
+    )
+
+
 def _parse_tool_args(raw_args: str) -> tuple[dict[str, Any], str | None]:
     """Decode a tool call's accumulated argument JSON.
 
@@ -665,6 +811,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         journal: Any | None = None,
         max_model_calls_per_turn: int | None = 200,
         max_continuations_per_turn: int = 3,
+        tool_arg_guard: ToolArgStreamGuard | None = None,
         trim: TrimConfig | None = None,
         compaction: CompactionConfig | None = None,
         cache_probe: CacheProbeConfig | None = None,
@@ -776,6 +923,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         # when a turn has to stop. Every comparison below guards that case.
         self.max_model_calls_per_turn = max_model_calls_per_turn
         self.max_continuations_per_turn = max_continuations_per_turn
+        # Runaway tool-argument streams. Pass
+        # ``ToolArgStreamGuard(max_bytes=None, stall_bytes=None,
+        # stall_seconds=None)`` to turn the guard off entirely.
+        self.tool_arg_guard = tool_arg_guard or ToolArgStreamGuard()
         self._session: SessionMeta | None = None
         self._session_id = session_id
         self._interrupted = asyncio.Event()
@@ -783,6 +934,17 @@ class NativeLoop(BackgroundLifecycleMixin):
         # loop's local counter so terminal events raised OUTSIDE the loop (the
         # catch-all handler in _start_and_loop) can still report the count.
         self._turn_model_calls = 0
+        # The live turn-totals dict the agent loop folds each call's usage
+        # into, by reference, for the same reason: a turn that dies outside the
+        # loop still bills what it spent. Four crashed turns in one audited day
+        # carried ``cost_usd: null`` and lost real spend.
+        self._turn_usage: dict[str, Any] = {}
+        # Streaming deltas the store refused (see _emit / _note_dropped_event).
+        # Cumulative for the engine; the per-turn count drives the log's
+        # once-per-turn rate limit and hosts can read the total as a metric.
+        self.dropped_delta_events = 0
+        self._dropped_events_turn: str | None = None
+        self._dropped_events_in_turn = 0
         # Hook bookkeeping. ``_session_hook_started`` gates the one SessionStart
         # per engine and ``_session_start_context`` holds what those hooks
         # asked to add to the first user message. ``_turn_end_hook_fired``
@@ -1356,10 +1518,50 @@ class NativeLoop(BackgroundLifecycleMixin):
         ))
 
     async def _emit(self, event: Event) -> Event:
-        """Publish to the bus (assigns seq) and persist for durable replay."""
+        """Publish to the bus (assigns seq) and persist for durable replay.
+
+        The bus is never optional — live clients render from it. Persistence
+        is, for one class of event: the streaming deltas. They exist to make a
+        reply visible while it is written, and every one of them is
+        reconstructible from the assistant node the turn goes on to store, so
+        a store that refuses a single ``ToolArgsDelta`` INSERT costs a gap in
+        the replay log and nothing else. It used to cost the turn: the failure
+        raised through the agent loop into the catch-all in
+        :meth:`_start_and_loop`, which ended the turn on a non-retriable
+        ErrorEvent. One transient database blip killed two turns and three
+        workers that way. Load-bearing events (ToolUse, ToolResult, Usage, and
+        every lifecycle event) still surface their failures — losing one of
+        those really does corrupt the record.
+        """
         sequenced = await self.bus.publish(event)
-        await self.store.append_event(event.session_id, sequenced)
+        try:
+            await self.store.append_event(event.session_id, sequenced)
+        except Exception as exc:
+            if not isinstance(event, _RECONSTRUCTIBLE_EVENTS):
+                raise
+            self._note_dropped_event(event, exc)
         return sequenced
+
+    def _note_dropped_event(self, event: Event, exc: BaseException) -> None:
+        """Count a delta the store refused, logging once per turn.
+
+        Rate-limited on purpose: the failure mode is a store that is down for
+        seconds, and a degenerate stream emits thousands of deltas a second.
+        One warning names the cause; the rest are counted and reported at the
+        end of the turn.
+        """
+        turn = self._active_turn_id
+        if turn != self._dropped_events_turn:
+            self._dropped_events_turn = turn
+            self._dropped_events_in_turn = 0
+            log.warning(
+                "store refused a %s event (%s: %s); the turn continues — "
+                "streaming deltas are reconstructible from the stored "
+                "assistant message",
+                type(event).__name__, type(exc).__name__, exc,
+            )
+        self._dropped_events_in_turn += 1
+        self.dropped_delta_events += 1
 
     def events(self, *, since_seq: int = 0) -> AsyncIterator[Event]:
         assert self._session is not None, "no session yet — submit a turn first"
@@ -1568,6 +1770,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         turn_id = new_id("turn")
         self._background_turn_terminal = False
         self._turn_model_calls = 0
+        self._turn_usage = {}
         self._active_turn_id = turn_id
 
         # Connect config MCP servers before building the user node so newly
@@ -1678,9 +1881,19 @@ class NativeLoop(BackgroundLifecycleMixin):
             cancelled = True
             raise
         except Exception as exc:  # surface, never swallow
+            transient = _is_transient_error(exc)
+            log.warning(
+                "turn %s ended on an unhandled %s", turn_id, type(exc).__name__,
+                exc_info=True,
+            )
+            # Whatever the turn billed before it fell over is still billed.
+            partial, partial_cost = self._partial_usage(self._turn_usage)
             await self._emit_terminal_with_park(
                 ErrorEvent(
-                    session_id=sid, turn_id=turn_id, message=repr(exc),
+                    session_id=sid, turn_id=turn_id,
+                    message=_describe_engine_failure(exc, transient=transient),
+                    retriable=transient,
+                    usage=partial, cost_usd=partial_cost,
                     num_model_calls=self._turn_model_calls,
                 )
             )
@@ -2069,13 +2282,17 @@ class NativeLoop(BackgroundLifecycleMixin):
         num_calls = 0
         self._turn_model_calls = 0
         self._begin_friction_turn()
+        # Shared by reference with _start_and_loop's catch-all, so a turn that
+        # dies on an exception still reports what it spent.
         total_usage: dict[str, Any] = {}
+        self._turn_usage = total_usage
         final_stop = "end_turn"
         overflow_retries = 0
         result: _CallResult | None = None
         empty_retries = 0  # CONSECUTIVE empty completions; any real call resets it
         continuations = 0
         stop_hook_continuations = 0
+        arg_stream_retries = 0  # runaway tool-argument streams, retried once
 
         while True:
             nodes = await self.store.load_path(sid, parent.node_id)
@@ -2173,6 +2390,61 @@ class NativeLoop(BackgroundLifecycleMixin):
                     error_retriable=False,
                     native_stop_reason=result.native_stop_reason,
                 )
+            if result.arg_stream_error is not None:
+                if (
+                    arg_stream_retries < _ARG_STREAM_MAX_RETRIES
+                    and not self._interrupted.is_set()
+                ):
+                    # A degenerate generation is usually a one-off: the audited
+                    # sessions all re-issued the identical cell successfully on
+                    # the next attempt. Re-send the same history — nothing is
+                    # appended, so the prompt and its cache prefix are
+                    # unchanged — and bill what the abandoned call produced.
+                    arg_stream_retries += 1
+                    self._fold_call_usage(total_usage, result.usage)
+                    usage_raw = dict(result.usage)
+                    usage_raw["model_call_index"] = num_calls
+                    usage_raw["projected_prompt_tokens"] = projected_prompt
+                    usage_raw["tool_arg_stream_aborted"] = result.arg_stream_error
+                    usage_raw.update(self._cache_probe_fields(result.usage))
+                    await self._emit(Usage(
+                        session_id=sid, node_id=parent.node_id, turn_id=turn_id,
+                        input_tokens=result.usage.get("input_tokens", 0),
+                        output_tokens=result.usage.get("output_tokens", 0),
+                        cache_read_tokens=result.usage.get(
+                            "cache_read_input_tokens", 0
+                        ),
+                        cache_creation_tokens=result.usage.get(
+                            "cache_creation_input_tokens", 0
+                        ),
+                        raw=usage_raw,
+                    ))
+                    await self._emit(ProviderRetry(
+                        session_id=sid, turn_id=turn_id,
+                        attempt=arg_stream_retries,
+                        max_attempts=_ARG_STREAM_MAX_RETRIES,
+                        reason=(
+                            "abandoned a runaway tool-argument stream; "
+                            "reissuing the call"
+                        ),
+                        delay_seconds=0.0, model=self.model,
+                    ))
+                    continue
+                if self.registry is None or result.arg_stream_tool is None:
+                    # No tool surface to answer on — end the turn instead.
+                    result.stop_reason = "error"
+                    result.error_message = result.arg_stream_error
+                    result.error_retriable = True
+                else:
+                    # Retry spent. Keep the abandoned call in the transcript so
+                    # the model reads why it failed and can reissue it — the
+                    # same route a truncated argument payload takes.
+                    result.tool_uses.append(result.arg_stream_tool)
+                    await self._emit(ToolUse(
+                        session_id=sid, turn_id=turn_id,
+                        tool_use_id=result.arg_stream_tool["tool_use_id"],
+                        name=result.arg_stream_tool["name"], input={},
+                    ))
             if result.stop_reason == "error":
                 # A failed HTTP request can still be billable. Record and
                 # publish it before deciding whether the context-overflow path
@@ -2745,6 +3017,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         stop_reason = "end_turn"
         native_stop_reason: str | None = None
         interrupted = False
+        arg_abort: tuple[int, str] | None = None
 
         async for chunk in self._provider_chunks_interruptible(request):
             if self._interrupted.is_set():
@@ -2818,6 +3091,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                     name=block["tool_name"] or "",
                     partial_json=fragment,
                 ))
+                cause = self._arg_stream_verdict(block, fragment)
+                if cause is not None:
+                    arg_abort = (index, cause)
+                    break
             elif chunk.kind == "signature_delta":
                 blocks[payload["index"]]["signature"] += payload["signature"]
             elif chunk.kind == "block_stop":
@@ -2874,6 +3151,37 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._interrupted.is_set():
             interrupted = True
 
+        arg_stream_error: str | None = None
+        arg_stream_tool: dict[str, Any] | None = None
+        if arg_abort is not None and not interrupted:
+            # The guard, not the provider, ended this stream: close the block
+            # for live clients and describe the abandoned call. Whether it is
+            # retried or handed to the model as a failed tool call is the agent
+            # loop's decision — nothing is registered as a tool_use here, so a
+            # retry leaves no ToolUse without a ToolResult behind it.
+            index, cause = arg_abort
+            block = blocks[index]
+            block["input"] = {}
+            stop_reason = "tool_use"
+            await self._emit(BlockStop(session_id=sid, turn_id=turn_id, index=index))
+            arg_stream_error = _explain_arg_runaway(
+                block["tool_name"] or "", block["args"], cause,
+                closed=bool(block.get("args_closed")),
+            )
+            arg_stream_tool = {
+                "tool_use_id": block["tool_use_id"] or "",
+                "name": block["tool_name"] or "",
+                "input": {},
+                "arg_error": arg_stream_error,
+            }
+            log.warning(
+                "aborted a runaway tool-argument stream for %r: %s",
+                block["tool_name"], cause,
+            )
+
+        if interrupted or arg_stream_error is not None:
+            self._estimate_partial_usage(usage_totals, blocks, request)
+
         # Reasoning-channel answer fallback (observed on GLM-4.5 via
         # OpenRouter): the model ends its final call with the entire answer in
         # thinking_deltas and an EMPTY text channel. Without this, the turn's
@@ -2910,7 +3218,95 @@ class NativeLoop(BackgroundLifecycleMixin):
             stop_reason=stop_reason,
             interrupted=interrupted,
             native_stop_reason=native_stop_reason,
+            arg_stream_error=arg_stream_error,
+            arg_stream_tool=arg_stream_tool,
         )
+
+    def _arg_stream_verdict(
+        self, block: dict[str, Any], fragment: str
+    ) -> str | None:
+        """Why this tool-argument stream has to stop, or None to keep going.
+
+        Two shapes, both seen in production: arguments that simply never end,
+        and arguments that reached a plausible payload and then streamed
+        nothing but whitespace. The second is the common one and the harder to
+        see, because every fragment still arrives on time.
+        """
+        guard = self.tool_arg_guard
+        args: str = block["args"]
+        if guard.max_bytes is not None and len(args) > guard.max_bytes:
+            return (
+                f"the arguments passed {guard.max_bytes} bytes and were still "
+                "being written"
+            )
+        if guard.stall_bytes is None and guard.stall_seconds is None:
+            return None
+        if not fragment:
+            return None
+        if fragment.strip():
+            # Real content: the whitespace run (if any) is over.
+            block["ws_run"] = 0
+            block["ws_since"] = None
+            block["ws_probe_at"] = _WHITESPACE_PROBE_BYTES
+            block["args_closed"] = False
+            return None
+        run = block.get("ws_run", 0) + len(fragment)
+        block["ws_run"] = run
+        since = block.get("ws_since")
+        if since is None:
+            since = block["ws_since"] = time.monotonic()
+        if run < _WHITESPACE_MIN_RUN:
+            return None
+        if not block.get("args_closed"):
+            probe_at = block.get("ws_probe_at") or _WHITESPACE_PROBE_BYTES
+            if run >= probe_at:
+                if _json_object_complete(args):
+                    block["args_closed"] = True
+                else:
+                    block["ws_probe_at"] = run + _WHITESPACE_REPROBE_BYTES
+        if guard.stall_bytes is not None and run >= guard.stall_bytes:
+            return f"{run} consecutive bytes of whitespace arrived"
+        if (
+            guard.stall_seconds is not None
+            and time.monotonic() - since >= guard.stall_seconds
+        ):
+            return (
+                f"nothing but whitespace arrived for "
+                f"{guard.stall_seconds:g}s ({run} bytes)"
+            )
+        return None
+
+    def _estimate_partial_usage(
+        self,
+        usage_totals: dict[str, Any],
+        blocks: dict[int, dict[str, Any]],
+        request: ProviderRequest,
+    ) -> None:
+        """Fill in what an abandoned stream was billed but never reported.
+
+        A call that ends mid-stream — the user pressed Stop, or the argument
+        guard fired — normally never reaches the provider's terminal usage
+        chunk, so its usage dict is empty and every downstream number reads
+        zero: an interrupted turn used to record ``cost_usd: 0.0`` for a
+        prompt and an output the provider certainly charged for. The tokens
+        that were generated are sitting in the accumulated blocks, and the
+        prompt is the request that was just sent, so both are estimated here
+        and flagged as estimates.
+        """
+        if not usage_totals.get("output_tokens"):
+            produced = "".join(
+                str(block.get("text") or "") + str(block.get("args") or "")
+                for block in blocks.values()
+            )
+            estimated = estimate_tokens_of_text(produced)
+            if estimated > 0:
+                usage_totals["output_tokens"] = estimated
+                usage_totals["output_tokens_estimated"] = True
+        if _measured_prompt_tokens(usage_totals) == 0:
+            projected = self._estimate_request_input_tokens(request.messages)
+            if projected > 0:
+                usage_totals["input_tokens"] = projected
+                usage_totals["input_tokens_estimated"] = True
 
     async def _ensure_block(
         self, blocks: dict[int, dict[str, Any]], index: int, block_type: str,
