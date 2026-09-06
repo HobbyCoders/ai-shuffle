@@ -194,7 +194,7 @@
 	const modelValue = $derived($activeSession.modelOverride ?? getDefaultModel());
 
 	// ── Fast service tier ───────────────────────────────────────────
-	// Offered only on models that carry the tier (Claude Opus, OpenAI GPT-5 on
+	// Offered only on models that carry the tier (Claude Opus, GPT-5 and Astra on
 	// an OpenAI/Codex provider row). It rides the effort popover because both
 	// are knobs on how hard — and how fast — the turn runs.
 	const fastMode = $derived($activeSession.fastMode);

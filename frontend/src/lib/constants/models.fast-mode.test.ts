@@ -46,7 +46,7 @@ describe('isFastModeCapable — native Claude models', () => {
 });
 
 describe('isFastModeCapable — provider composites', () => {
-	it('accepts gpt-5 on an OpenAI API-key row and rejects it on a non-OpenAI row', async () => {
+	it('accepts GPT-5 and Astra on OpenAI/Codex rows and rejects other providers', async () => {
 		mocks.get.mockResolvedValueOnce({
 			models: [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 }],
 			default: 'sonnet',
@@ -86,9 +86,16 @@ describe('isFastModeCapable — provider composites', () => {
 
 		expect(isFastModeCapable(encodeProviderModel('oai', 'gpt-5.6'))).toBe(true);
 		expect(isFastModeCapable(encodeProviderModel('codex', 'gpt-5.6-sol'))).toBe(true);
+		for (const provider of ['oai', 'codex']) {
+			expect(isFastModeCapable(encodeProviderModel(provider, 'gpt-6-astra'))).toBe(true);
+			expect(isFastModeCapable(encodeProviderModel(provider, 'gpt-6-astra-custom'))).toBe(false);
+		}
 		// Right model id, wrong provider kind.
 		expect(isFastModeCapable(encodeProviderModel('or', 'gpt-5.6'))).toBe(false);
-		// Right provider kind is irrelevant when the model id isn't gpt-5.
+		expect(isFastModeCapable(encodeProviderModel('or', 'gpt-6-astra'))).toBe(false);
+		expect(isFastModeCapable(encodeProviderModel('or', 'openai/gpt-6-astra'))).toBe(false);
+		expect(isFastModeCapable('gpt-6-astra')).toBe(false);
+		// The provider kind alone does not give other model families a fast tier.
 		expect(isFastModeCapable(encodeProviderModel('oai', 'gpt-4.1'))).toBe(false);
 		expect(isFastModeCapable(encodeProviderModel('grok', 'grok-5'))).toBe(false);
 	});
@@ -97,6 +104,7 @@ describe('isFastModeCapable — provider composites', () => {
 		// Pre-hydration (or a row disabled after the pick was stored): the toggle
 		// must not blink out while `/models` is still in flight.
 		expect(isFastModeCapable(encodeProviderModel('not-hydrated-yet', 'gpt-5.6'))).toBe(true);
+		expect(isFastModeCapable(encodeProviderModel('not-hydrated-yet', 'gpt-6-astra'))).toBe(true);
 		expect(isFastModeCapable(encodeProviderModel('not-hydrated-yet', 'claude-3'))).toBe(false);
 	});
 });

@@ -528,13 +528,14 @@ class TestFastModeBinding:
         """A mid-session toggle sent with a user turn sticks server-side, the
         same way a model switch does."""
         _mk_profile("agent", {"cwd": str(tmp_path)})
-        db.create_session("f-flip", profile_id="agent", fast=True)
-        turn_manager.submit(
-            "f-flip",
-            "user",
-            prompt="hi",
-            profile_id="agent",
-            overrides={"fast": False},
-            no_kick=True,
-        )
-        assert db.get_session("f-flip")["fast"] in (False, 0)
+        db.create_session("f-flip", profile_id="agent", fast=False)
+        for fast in [True, False]:
+            turn_manager.submit(
+                "f-flip",
+                "user",
+                prompt="hi",
+                profile_id="agent",
+                overrides={"fast": fast},
+                no_kick=True,
+            )
+            assert db.get_session("f-flip")["fast"] == fast

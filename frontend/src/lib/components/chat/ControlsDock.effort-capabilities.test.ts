@@ -20,6 +20,38 @@ import { effortRegistryFixture as payload } from '$lib/test-stubs/effort-registr
 const renderDock = () => render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
 
 describe('ControlsDock dynamic effort', () => {
+ it.each(['desktop', 'mobile'])('preserves fast mode when switching to Astra and lets it toggle both ways on %s', async (surface) => {
+  mocks.get.mockResolvedValue(payload);
+  await hydrateModelRegistry();
+  activeSession.newChat();
+  activeSession.setModelOverride('prov:codex:gpt-5.6-sol');
+  activeSession.setEffortLevelOverride('high');
+  activeSession.setFastMode(true);
+  const { container } = renderDock();
+  await tick();
+  activeSession.setModelOverride('prov:codex:gpt-6-astra');
+  await tick();
+  expect(get(activeSession).fastMode).toBe(true);
+  if (surface === 'desktop') {
+   await fireEvent.click(screen.getByRole('button', { name: 'Effort: High' }));
+  } else {
+   await fireEvent.click(container.querySelector('.mobile-settings-trigger')!);
+  }
+  const toggle = screen.getByRole(surface === 'desktop' ? 'button' : 'switch', { name: 'Fast mode' });
+  const stateAttribute = surface === 'desktop' ? 'aria-pressed' : 'aria-checked';
+  expect(toggle.getAttribute(stateAttribute)).toBe('true');
+  await fireEvent.click(toggle);
+  expect(get(activeSession).fastMode).toBe(false);
+  expect(toggle.getAttribute(stateAttribute)).toBe('false');
+  await fireEvent.click(toggle);
+  expect(get(activeSession).fastMode).toBe(true);
+  expect(toggle.getAttribute(stateAttribute)).toBe('true');
+  expect(get(activeSession).effortLevelOverride).toBe('high');
+  activeSession.setModelOverride('prov:or:openai/gpt-6-astra');
+  await tick();
+  expect(get(activeSession).fastMode).toBe(false);
+  expect(screen.queryByRole(surface === 'desktop' ? 'button' : 'switch', { name: 'Fast mode' })).toBeNull();
+ });
  it.each(['desktop', 'mobile'])('offers six live Codex levels and no Ultra for sparse GLM on %s', async (surface) => {
   mocks.get.mockResolvedValue(payload);
   await hydrateModelRegistry();

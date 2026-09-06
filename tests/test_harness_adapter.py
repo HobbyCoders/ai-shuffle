@@ -6100,6 +6100,36 @@ async def test_delegated_without_fast_sends_no_settings(monkeypatch, fast):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider_type", ["chatgpt", "openai"])
+async def test_astra_fast_mode_can_be_enabled_and_disabled_mid_session(
+    monkeypatch, tmp_path, provider_type
+):
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+
+    adapter = ha.HarnessAdapter()
+    for index, fast in enumerate([False, True, False]):
+        options = SessionOptions(
+            model="gpt-6-astra",
+            fast=fast,
+            cwd=str(tmp_path),
+            extra={"provider_type": provider_type},
+        )
+        if index:
+            assert adapter.requires_reconnect(options) is True
+            await adapter.disconnect()
+        await adapter.connect(options)
+        assert adapter._is_delegated is False
+        assert _CapturingLoop.captured["request_extra"] == (
+            {"service_tier": "priority"} if fast else None
+        )
+        assert adapter.requires_reconnect(options) is False
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_openai_responses_fast_mode_sets_priority_service_tier(
     monkeypatch, tmp_path
 ):

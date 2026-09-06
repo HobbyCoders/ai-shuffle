@@ -247,6 +247,25 @@ describe('message-sender workspace folders', () => {
 });
 
 describe('message-sender fast-mode override', () => {
+	it('sends both fast-mode changes on successive turns of an existing Astra session', async () => {
+		const { deps, wsConn } = makeDeps(baseState({
+			sessionId: 'astra-session',
+			modelOverride: 'prov:codex:gpt-6-astra',
+			fastMode: false,
+		}));
+		const sender = createMessageSender(deps);
+		for (const fastMode of [false, true, false]) {
+			deps.update(s => ({ ...s, isStreaming: false, fastMode }));
+			expect(await sender.sendMessage(fastMode ? 'go fast' : 'normal speed')).toBe(true);
+		}
+		const queries = wsConn.send.mock.calls.map(([frame]) => frame).filter(frame => frame.type === 'query');
+		expect(queries).toHaveLength(3);
+		expect(queries.map(frame => frame.session_id)).toEqual(['astra-session', 'astra-session', 'astra-session']);
+		expect(queries.map(frame => frame.overrides)).toEqual([false, true, false].map(fast =>
+			expect.objectContaining({ model: 'prov:codex:gpt-6-astra', fast })
+		));
+	});
+
 	it('sends fast: true when the session has fast mode on', async () => {
 		const { deps, wsConn } = makeDeps(baseState({
 			worktreeIntent: 'local',
