@@ -44,6 +44,28 @@ describe("runtime identity", () => {
   });
 });
 
+describe("viewport ownership", () => {
+  it("re-asserts the agent's pinned viewport on its own admitted calls", async () => {
+    const { session } = make();
+    const restore = vi.spyOn(session, "restorePinnedViewport").mockResolvedValue();
+    await session.runAgentExclusive(async () => undefined);
+    expect(restore).toHaveBeenCalledTimes(1);
+  });
+  it("does not re-assert it while a viewer owns the browser", async () => {
+    const { session, ws } = make();
+    const restore = vi.spyOn(session, "restorePinnedViewport").mockResolvedValue();
+    expect((await ws.receive(command(ws))).ok).toBe(true);
+    await expect(session.runAgentExclusive(async () => undefined)).rejects.toThrow("human_control");
+    expect(restore).not.toHaveBeenCalled();
+  });
+  it("drops the agent's pin when a human takes control", async () => {
+    const { session, ws } = make();
+    const clear = vi.spyOn(session, "clearPinnedViewport");
+    expect((await ws.receive(command(ws))).ok).toBe(true);
+    expect(clear).toHaveBeenCalled();
+  });
+});
+
 describe("shared control queue", () => {
   it("preserves the panel's committed-text size limit", () => {
     expect(() => validateInputCommand("Input.insertText", { text: "x".repeat(16384) })).not.toThrow();

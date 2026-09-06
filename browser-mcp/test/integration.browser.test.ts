@@ -573,6 +573,47 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     expect([explicit.width, explicit.height]).toEqual([900, 650]);
   });
 
+  it("resize reports the page's own viewport, not the request", async () => {
+    await runNavigate(session, { url: fixtureUrl });
+    const page = await session.ensurePage();
+    const body = JSON.parse(firstText(await runResize(session, { width: 412, height: 700 })));
+
+    const inner = await page.evaluate(() => ({
+      w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio,
+    }));
+    expect(body.requested).toEqual({ width: 412, height: 700 });
+    expect([body.width, body.height]).toEqual([inner.w, inner.h]);
+    expect(body.device_scale_factor).toBe(inner.dpr);
+
+    // A viewer resize behind the agent's back is reported, not papered over.
+    await page.setViewportSize({ width: 369, height: 714 });
+    const stale = await session.appliedViewport();
+    expect([stale.width, stale.height]).toEqual([369, 714]);
+
+    // …and the agent's pinned size is restored on its next admitted call.
+    await session.runAgentExclusive(async () => undefined);
+    const restored = await page.evaluate(() => window.innerWidth);
+    expect(restored).toBe(412);
+  });
+
+  it("screenshot brings a backgrounded tab forward before capturing", async () => {
+    await runNavigate(session, { url: fixtureUrl });
+    const first = session.currentTabId()!;
+    const opened = JSON.parse(firstText(await runTabs(session, { op: "create" })));
+    await runNavigate(session, { url: fixtureUrl });
+    // Back to the first tab: Chrome still has the newest one in the foreground.
+    await runTabs(session, { op: "select", tab_id: first });
+    try {
+      const shot = await runScreenshot(session, {});
+      expect(shot.isError).toBeUndefined();
+      expect(shot.content.find((c) => c.type === "image")).toBeTruthy();
+      const page = await session.ensurePage();
+      expect(await page.evaluate(() => document.visibilityState)).toBe("visible");
+    } finally {
+      await runTabs(session, { op: "close", tab_id: opened.tab_id });
+    }
+  });
+
   it("upload: env-gate, not-a-file-input guard, and allowlisted happy path", async () => {
     // Non-file-input ref (a textbox) is rejected clearly once the dir is set.
     await runNavigate(session, { url: fixtureUrl });

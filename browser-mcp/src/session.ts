@@ -48,6 +48,17 @@ export class StaleRefError extends Error {
 
 /** Default wall-clock ceiling for a page-side eval (Playwright has none). */
 export const EVAL_TIMEOUT_MS = 5000;
+/** Ceiling for pulling a tab to the foreground before a capture. */
+export const BRING_TO_FRONT_TIMEOUT_MS = 3000;
+/** Ceiling for reading the page's own viewport back after a resize. */
+export const APPLIED_VIEWPORT_TIMEOUT_MS = 3000;
+
+/** The viewport the page reports for itself, in CSS pixels. */
+export interface AppliedViewport {
+  width: number;
+  height: number;
+  deviceScaleFactor: number;
+}
 
 /**
  * Race a promise against a timer. Playwright's `page.evaluate` has no timeout,
@@ -103,11 +114,16 @@ export class Session {
   private readonly cdpSessions = new WeakMap<Page, Promise<CDPSession>>();
   viewportMode: "fit" | "fixed" = "fixed";
   private desiredViewport = { width: 1280, height: 800 };
+  private pinnedViewport?: { width: number; height: number };
   workspaceStatus?: () => Record<string, unknown>;
 
   runAgentExclusive<T>(fn: () => Promise<T>): Promise<T> {
     try { this.agentAdmission?.(); } catch (err) { return Promise.reject(err); }
-    return this.runExclusive(async () => { this.agentAdmission?.(); return fn(); });
+    return this.runExclusive(async () => {
+      this.agentAdmission?.();
+      await this.restorePinnedViewport();
+      return fn();
+    });
   }
 
   async currentCDP(): Promise<CDPSession> {
@@ -371,11 +387,84 @@ export class Session {
     return raceWithTimeout(this.requirePage().title(), 5000, "title timed out");
   }
 
-  async setViewport(width: number, height: number): Promise<void> {
+  /**
+   * Make the current tab the foreground one. Chrome paints — and screencasts —
+   * only the foreground tab of a window, so a capture of a background tab
+   * blocks until its own deadline and the live panel receives no frames at all.
+   * Best effort: a target that refuses to come forward is not a reason to fail
+   * the caller.
+   */
+  async bringToFront(): Promise<boolean> {
+    const entry = this.currentEntry();
+    if (!entry) return false;
+    try {
+      await raceWithTimeout(entry.page.bringToFront(), BRING_TO_FRONT_TIMEOUT_MS, "bringToFront timed out");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Set the viewport and read back what the page actually got.
+   *
+   * `pinned` marks an agent-requested size: the panel's own resizes (a human
+   * dragging the docked view) apply immediately but do not clear the pin, and
+   * the pin is re-asserted before the agent's next tool call whenever no viewer
+   * holds control — so a measurement the agent takes is the size it asked for.
+   */
+  async setViewport(width: number, height: number, pinned = false): Promise<AppliedViewport> {
     await raceWithTimeout(this.requirePage().setViewportSize({ width, height }), 5000, "viewport timed out; outcome unknown, do not replay");
     this.desiredViewport = { width, height };
     this.viewportMode = "fixed";
+    if (pinned) this.pinnedViewport = { width, height };
     this.notifyNavigation();
+    return this.appliedViewport();
+  }
+
+  /** What the page reports as its own viewport, not what we asked for. */
+  async appliedViewport(): Promise<AppliedViewport> {
+    const page = this.requirePage();
+    try {
+      return await raceWithTimeout(
+        page.evaluate(() => ({
+          width: window.innerWidth,
+          height: window.innerHeight,
+          deviceScaleFactor: window.devicePixelRatio,
+        })),
+        APPLIED_VIEWPORT_TIMEOUT_MS,
+        "viewport read-back timed out",
+      );
+    } catch {
+      const size = page.viewportSize() ?? this.desiredViewport;
+      return { ...size, deviceScaleFactor: 1 };
+    }
+  }
+
+  /**
+   * Re-apply the agent's pinned viewport when nothing else owns the browser.
+   * Called on the agent's own admission path, so a panel resize that happened
+   * between two agent calls does not silently change what the agent measures.
+   */
+  async restorePinnedViewport(): Promise<void> {
+    const pin = this.pinnedViewport;
+    const entry = this.currentEntry();
+    if (!pin || !entry) return;
+    const current = entry.page.viewportSize();
+    if (current && current.width === pin.width && current.height === pin.height) return;
+    try {
+      await raceWithTimeout(entry.page.setViewportSize(pin), 5000, "viewport timed out");
+      this.desiredViewport = { ...pin };
+      this.viewportMode = "fixed";
+      this.onWorkspaceChange?.();
+    } catch {
+      /* no page yet, or a target that went away: the next call re-tries */
+    }
+  }
+
+  /** Forget the agent's pin (a human took the wheel). */
+  clearPinnedViewport(): void {
+    this.pinnedViewport = undefined;
   }
 
   // ---- console / network buffers (current page) -----------------------------
