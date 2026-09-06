@@ -461,6 +461,26 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     expect(firstText(err)).toContain("kaboom");
   });
 
+  it("a failed fetch in eval reports the response's status and content-type", async () => {
+    await runNavigate(session, { url: httpUrl });
+    // The classic auth-wall shape: an HTML page parsed as JSON. The thrown
+    // message says nothing about HTTP, so the recorded response has to.
+    const failed = await runEval(session, {
+      code: "const r = await fetch('/'); return await r.json();",
+    });
+    expect(failed.isError).toBe(true);
+    const body = JSON.parse(firstText(failed));
+    expect(body.ok).toBe(false);
+    expect(Array.isArray(body.recent_requests)).toBe(true);
+    const html = body.recent_requests.find((r: { url: string }) => !r.url.includes("/api/"));
+    expect(html.status).toBe(200);
+    expect(html.content_type).toContain("text/html");
+    expect(typeof html.id).toBe("string");
+    // Leave the shared page's buffer as we found it: the two-phase network test
+    // reads the oldest recorded /api/data response.
+    session.clearNetwork();
+  });
+
   it("eval bounds a pathological wide+deep object via the work budget", async () => {
     await runNavigate(session, { url: fixtureUrl });
 

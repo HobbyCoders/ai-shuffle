@@ -5,7 +5,7 @@
  */
 
 import type { Session } from "../session.js";
-import { emptyContentWarning, jsonResult, type McpToolResult } from "./result.js";
+import { contentWarning, jsonResult, type McpToolResult } from "./result.js";
 
 export async function runSnapshot(
   session: Session,
@@ -17,7 +17,7 @@ export async function runSnapshot(
     scopeRef: input.scope_ref,
     maxChars: input.max_chars,
   });
-  const warning = emptyContentWarning(snap.text, snap.refs.length);
+  const warning = contentWarning(await session.pageContent(), snap.refs.length);
   return jsonResult(
     {
       ok: true,

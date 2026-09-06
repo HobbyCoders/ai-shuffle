@@ -38,6 +38,7 @@ import {
   type MutationStats,
 } from "./dommutation.js";
 import { reportCurrentTarget } from "./panel.js";
+import type { PageContent } from "./tools/result.js";
 
 export class StaleRefError extends Error {
   constructor(ref: string) {
@@ -52,6 +53,17 @@ export const EVAL_TIMEOUT_MS = 5000;
 export const BRING_TO_FRONT_TIMEOUT_MS = 3000;
 /** Ceiling for reading the page's own viewport back after a resize. */
 export const APPLIED_VIEWPORT_TIMEOUT_MS = 3000;
+/** Ceiling for asking a page whether it painted anything. */
+export const PAGE_CONTENT_TIMEOUT_MS = 3000;
+
+/** One recorded response, reduced to what a failure diagnosis needs. */
+export interface NetworkSummary {
+  id: string;
+  method: string;
+  url: string;
+  status: number;
+  content_type: string | null;
+}
 
 /** The viewport the page reports for itself, in CSS pixels. */
 export interface AppliedViewport {
@@ -479,6 +491,52 @@ export class Session {
 
   networkEntries(): readonly NetworkEntry[] {
     return this.requireEntry().network.all();
+  }
+
+  /**
+   * The newest recorded responses, with the two fields a failure usually turns
+   * on: HTTP status and content-type. Reading them off the buffered handles
+   * costs nothing and needs no page access, so a tool that failed can say what
+   * the network actually returned instead of only what the page threw.
+   */
+  recentNetwork(limit = 3): NetworkSummary[] {
+    let entries: readonly NetworkEntry[];
+    try {
+      entries = this.requireEntry().network.all();
+    } catch {
+      return [];
+    }
+    return entries.slice(-limit).map((entry) => {
+      let contentType: string | null = null;
+      try {
+        contentType = entry.response.headers()["content-type"] ?? null;
+      } catch {
+        /* the handle can outlive its page */
+      }
+      return {
+        id: entry.id,
+        method: entry.method,
+        url: entry.url.slice(0, 1024),
+        status: entry.status,
+        content_type: contentType,
+      };
+    });
+  }
+
+  /** What the page says about itself. `textChars` < 0 when it could not be read. */
+  async pageContent(): Promise<PageContent> {
+    try {
+      return await this.evaluate(
+        () => ({
+          title: document.title || "",
+          textChars: ((document.body && document.body.innerText) || "").replace(/\s+/g, "").length,
+        }),
+        "",
+        PAGE_CONTENT_TIMEOUT_MS,
+      );
+    } catch {
+      return { title: "", textChars: -1 };
+    }
   }
 
   findNetworkEntry(id: string): NetworkEntry | undefined {
