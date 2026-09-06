@@ -159,6 +159,9 @@ def _auto_db_shim(_raw_sqlite: sqlite3.Connection, request):
             patch.object(database, "get_connection", _get_connection), \
             patch.object(base, "init_pool", _noop), \
             patch.object(base, "close_pool", _noop):
+        # Startup-owned extension schemas are not part of create_postgres_schema.
+        from app.db import mobile_tool_identity
+        mobile_tool_identity.init_schema()
         # Seed a "default" profile so tests can reference it.
         try:
             database.create_profile(

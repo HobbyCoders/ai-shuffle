@@ -16,6 +16,7 @@
 	import { MonitorSmartphone, RefreshCw, Pencil, Trash2, Check, X, KeyRound, Globe, ShieldCheck, ShieldOff } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
 	import PairingPanel from './PairingPanel.svelte';
+	import AccountConnection from './AccountConnection.svelte';
 	import { appData } from '$lib/stores/app-data.svelte';
 	import {
 		listInstalls,
@@ -245,6 +246,7 @@
 	{#if loading}
 		<div class="sg-body"><p class="muted">Loading…</p></div>
 	{:else}
+		<AccountConnection />
 		<PairingPanel />
 
 		<!-- Cluster secret -->

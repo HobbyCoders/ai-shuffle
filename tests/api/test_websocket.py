@@ -128,18 +128,15 @@ class TestAuthenticateWebSocket:
         """A live shc_ controller token authenticates without becoming an API user."""
         from app.api.websocket import authenticate_websocket
 
-        with patch("app.api.ws_auth.database") as mock_db:
-            mock_db.get_paired_client_by_session_hash.return_value = {
-                "id": "paired-client-1",
-                "device_name": "Tablet",
-            }
+        client = {"id": "paired-client-1", "device_name": "Tablet", "scopes": ["controller"]}
+        with patch("app.api.auth.get_paired_client_from_token", return_value=client),                 patch("app.core.mobile_tool_identity.pairing.get_paired_client_by_session_hash", return_value=client),                 patch("app.core.account_hub.check_paired_client"),                 patch("app.db.mobile_hub.ownership", return_value=None):
             is_auth, api_user = await authenticate_websocket(
                 mock_websocket, "shc_controller-token"
             )
 
         assert is_auth is True
         assert api_user is None
-        mock_db.touch_paired_client.assert_called_once_with("paired-client-1")
+        assert mock_websocket.state.mobile_tool_principal["kind"] == "paired"
 
     @pytest.mark.asyncio
     async def test_authenticate_with_api_key_session(self, mock_websocket):

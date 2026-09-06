@@ -212,6 +212,8 @@ async def lifespan(app: FastAPI):
     if runner_approved:
         await start_services()
         bg_tasks = start_background_tasks()
+        from app.core.managed_connection import supervise as supervise_account_connection
+        bg_tasks.append(asyncio.create_task(supervise_account_connection()))
         monitor_task = await start_resource_monitor(interval_seconds=300)
         # Thread-based: keeps working while the loop is frozen and logs the
         # loop thread's stack so a stall is diagnosable after the fact.
@@ -499,6 +501,8 @@ app.include_router(mcp.router)
 app.include_router(tools_api.router)
 app.include_router(browser_panel.router)
 app.include_router(mobile.router)
+from app.api import mobile_tools
+app.include_router(mobile_tools.router)
 app.include_router(pairing.router)
 app.include_router(internal.router)
 app.include_router(workspace_files.router)

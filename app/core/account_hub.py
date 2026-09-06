@@ -1,0 +1,157 @@
+"""Account-hub backchannel. Product or administrator-selected origin, pinned TLS.
+
+MOBILE_ACCOUNT_HUB_URL may override the product default. No caller-selected
+origin is trusted, no proxy environment is inherited, and DNS is resolved once
+per connection with every address checked before connecting to a pinned IP.
+"""
+import http.client
+import ipaddress
+import json
+import os
+import re
+import socket
+import ssl
+from urllib.parse import urlsplit
+from fastapi import HTTPException
+from app.core.managed_credentials import secret_for
+from app.db import mobile_hub as store
+
+DEFAULT_HUB = 'https://shuffle-account-hub.example.workers.dev'
+
+
+def configured_origin():
+    return os.environ.get('MOBILE_ACCOUNT_HUB_URL', DEFAULT_HUB).rstrip('/')
+
+
+def trusted_origin(value):
+    configured = configured_origin()
+    for candidate in (value, configured):
+        u = urlsplit(candidate)
+        if (not candidate or u.scheme != 'https' or not u.hostname or u.username
+                or u.password or u.query or u.fragment or u.path not in ('', '/')
+                or u.port not in (None, 443) or any(ch.isspace() for ch in candidate)
+                or '%' in candidate or '@' in candidate or '?' in candidate or '#' in candidate):
+            raise ValueError('Administrator must configure an HTTPS account hub origin')
+        host = u.hostname
+        if host == 'localhost' or host.endswith(('.localhost', '.local', '.internal')):
+            raise ValueError('Public hub required')
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            pass
+        else:
+            if not address.is_global:
+                raise ValueError('Public hub required')
+    if value.rstrip('/') != configured.rstrip('/'):
+        raise ValueError('Hub does not match administrator-selected origin')
+    return configured.rstrip('/')
+
+
+def identifier(value):
+    if not isinstance(value, str) or not re.fullmatch(r'[a-f0-9-]{36}', value):
+        raise ValueError('Invalid hub identity')
+    return value
+
+
+class _PinnedHTTPS(http.client.HTTPSConnection):
+    def connect(self):
+        addresses = socket.getaddrinfo(self.host, 443, type=socket.SOCK_STREAM)
+        if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
+            raise ValueError('Public hub required')
+        raw = socket.create_connection((addresses[0][4][0], 443), self.timeout)
+        try:
+            self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+        except Exception:
+            raw.close()
+            raise
+
+
+def call(binding, method, suffix, body=None):
+    """Bounded, nonredirecting request; never include hub bodies or secrets in errors."""
+    conn = None
+    try:
+        origin = trusted_origin(binding['hub_url'])
+        server = identifier(binding['server_id'])
+        timeout = 65 if suffix in ('activate', 'connector') else 4
+        conn = _PinnedHTTPS(urlsplit(origin).hostname, timeout=timeout, context=ssl.create_default_context())
+        conn.request(method, f'/v1/servers/{server}/{suffix}',
+                     body=json.dumps(body) if body is not None else None,
+                     headers={'Authorization': 'Bearer ' + secret_for(binding),
+                              'Content-Type': 'application/json', 'Accept': 'application/json'})
+        response = conn.getresponse()
+        if response.status != 200:
+            raise ValueError('Hub refused authorization')
+        raw = response.read(16385)
+        if len(raw) > 16384:
+            raise ValueError('Oversize hub response')
+        result = json.loads(raw)
+        if not isinstance(result, dict):
+            raise ValueError('Invalid hub response')
+        return result
+    except Exception:
+        raise HTTPException(status_code=503, detail='Account hub authorization unavailable') from None
+    finally:
+        if conn:
+            conn.close()
+
+
+def worker_link_call(action, body):
+    """Only the two product-owned bootstrap routes may be called before binding."""
+    if action not in ('start', 'poll'):
+        raise ValueError('Invalid worker linking action')
+    conn = None
+    try:
+        origin = trusted_origin(configured_origin())
+        conn = _PinnedHTTPS(urlsplit(origin).hostname, timeout=8, context=ssl.create_default_context())
+        conn.request('POST', '/v1/worker-links/' + action, body=json.dumps(body),
+                     headers={'Content-Type': 'application/json', 'Accept': 'application/json'})
+        response = conn.getresponse()
+        raw = response.read(16385)
+        if response.status != 200 or len(raw) > 16384:
+            raise ValueError('Link unavailable')
+        result = json.loads(raw)
+        if not isinstance(result, dict):
+            raise ValueError('Invalid response')
+        return result
+    except Exception:
+        raise HTTPException(503, 'Account connection unavailable. Try again shortly.') from None
+    finally:
+        if conn:
+            conn.close()
+
+
+def require_active(owner):
+    """Live, uncached hub check. None means a legacy/direct-paired credential."""
+    if owner is None:
+        return
+    binding = store.get_binding()
+    if not binding or not binding['active'] or owner['server_id'] != binding['server_id']:
+        raise HTTPException(status_code=401, detail='Account authorization revoked')
+    result = call(binding, 'GET', 'devices/' + identifier(owner['hub_device_id']))
+    if (result.get('active') is not True or result.get('account_id') != owner['account_id']
+            or result.get('device_id') != owner['hub_device_id']):
+        raise HTTPException(status_code=401, detail='Account authorization revoked')
+
+
+def mobile_hub_ownership(device):
+    """Live-checked ownership dict or None for direct pairing. device is DB row."""
+    owner = store.ownership(device['device_id'])
+    require_active(owner)
+    return owner
+
+
+def check_paired_client(client):
+    owner = store.ownership(paired_client_id=client['id'])
+    if owner is None:
+        return
+    from app.db.mobile import get_mobile_device
+    from datetime import datetime, timezone
+    device = get_mobile_device(owner['device_id'])
+    if not device or device.get('revoked_at') or device.get('paired_client_id') != client['id']:
+        raise HTTPException(status_code=401, detail='Mobile authorization revoked')
+    expires = device.get('api_key_expires_at')
+    if isinstance(expires, str):
+        expires = datetime.fromisoformat(expires.replace('Z', '+00:00'))
+    if not expires or expires <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=401, detail='Mobile authorization expired')
+    require_active(owner)

@@ -728,7 +728,7 @@ class TestListDevices:
     def test_list_devices_module_structure(self, mock_database):
         """Admin device listing endpoint should exist in router."""
         from app.api.mobile import router
-        routes = [r.path for r in router.routes]
+        routes = [r.path for r in router.routes if hasattr(r, "path")]
         assert "/devices" in routes or any("/devices" in r for r in routes)
 
 
@@ -738,7 +738,7 @@ class TestDeleteDevice:
     def test_delete_device_module_structure(self, mock_database):
         """Admin device delete endpoint should exist in router."""
         from app.api.mobile import router
-        routes = [r.path for r in router.routes]
+        routes = [r.path for r in router.routes if hasattr(r, "path")]
         assert any("devices" in str(r) for r in routes)
 
 

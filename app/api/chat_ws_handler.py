@@ -371,11 +371,13 @@ class ChatWebSocketHandler:
         device_id: str,
         user_id: str,
         api_user_id: Optional[str],
+        trusted_principal: Optional[dict] = None,
     ):
         self.websocket = websocket
         self.device_id = device_id
         self.user_id = user_id
         self.api_user_id = api_user_id
+        self.trusted_principal = trusted_principal
 
         # Mutable connection state (formerly nonlocal variables)
         self.current_session_id: Optional[str] = None
@@ -975,11 +977,23 @@ class ChatWebSocketHandler:
         })
         return "approved" if approved else "feedback"
 
+    async def _authorize_mobile_session(self, session_id, *, claim=False):
+        from app.core.mobile_tool_identity import bind_session
+        try:
+            await run_sync(bind_session, session_id, self.trusted_principal, claim=claim)
+            return True
+        except Exception:
+            await self.send_json({"type": "error", "message": "Session authorization denied"})
+            return False
+
     async def handle_query(self, data: dict) -> None:
         """Handle 'query' message type."""
 
         prompt = data.get("prompt", "").strip()
         session_id = data.get("session_id")
+        if session_id and not await self._authorize_mobile_session(
+                session_id, claim=data.get("claim_mobile_authority") is True):
+            return
         profile_id = data.get("profile", "claude-code")
         project_id = data.get("project") or None
         if isinstance(project_id, str):
@@ -1181,6 +1195,8 @@ class ChatWebSocketHandler:
                         mode=session_mode,
                         _conn=txn
                     )
+                    from app.core.mobile_tool_identity import bind_session
+                    bind_session(session_id, self.trusted_principal, new=True, conn=txn)
                     _msg_role = "user"
                     _msg_meta = None
                     if prompt.strip().startswith("/"):
@@ -1651,6 +1667,9 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "session_not_found", "session_id": session_id})
             return
 
+        if not await self._authorize_mobile_session(session_id):
+            return
+
         # Unregister from old session if switching
         if self.current_session_id and self.current_session_id != session_id:
             await sync_engine.unregister_device(self.device_id, self.current_session_id, self.websocket)
@@ -2084,6 +2103,9 @@ class ChatWebSocketHandler:
             return
         if not session_id:
             await self.send_json({"type": "error", "message": "No session for queue"})
+            return
+
+        if not await self._authorize_mobile_session(session_id):
             return
 
         # V2 placement: the durable queued turn IS the hand-off (see

@@ -266,21 +266,32 @@ async def test_shared_device_tabs_have_independent_user_writers():
 def test_paired_admin_global_identity_and_ping():
     from app.api import ws_sync
     from app.core.auth import auth_service
-    from app.core.pairing import PAIRED_SESSION_PREFIX
-    from app.db import database
+    from app.core.pairing import PAIRED_SESSION_PREFIX, hash_controller_session
+    from app.db import pairing
+    from datetime import datetime, timedelta, timezone
+    from starlette.websockets import WebSocketDisconnect
     app = FastAPI()
     app.include_router(ws_sync.router)
-    with patch.object(database, "get_paired_client_by_session_hash", return_value={"id": "paired", "scopes": ["controller"]}), \
-         patch.object(database, "touch_paired_client"), \
-         patch.object(auth_service, "get_admin_username", return_value="same"):
+    # Both initial authentication and the live principal check read the actual
+    # paired session. Mocking only the facade hid this second authorization read.
+    paired = pairing.ensure_paired_client_for_mobile({"device_id": "global-controller", "scopes": ["controller"]})
+    token = PAIRED_SESSION_PREFIX + "global-test"
+    pairing.set_paired_client_session(paired["id"], hash_controller_session(token),
+                                      datetime.now(timezone.utc) + timedelta(minutes=5))
+    with patch.object(auth_service, "get_admin_username", return_value="same"):
         with TestClient(app) as client:
-            with client.websocket_connect("/ws/global?device_id=paired&token=" + PAIRED_SESSION_PREFIX + "test") as ws:
+            with client.websocket_connect("/ws/global?device_id=paired&token=" + token) as ws:
                 assert ws.receive_json() == {"type": "sync_ready"}
                 assert any(kind == "admin" and identity == "same" for kind, identity, _, _ in global_events.connections.values())
                 global_events.preference_changed("admin", "same", "theme")
                 assert ws.receive_json() == {"type": "preferences_changed", "keys": ["theme"]}
                 ws.send_json({"type": "ping"})
                 assert ws.receive_json() == {"type": "pong"}
+            pairing.revoke_paired_client(paired["id"])
+            with client.websocket_connect("/ws/global?device_id=paired&token=" + token) as ws:
+                with pytest.raises(WebSocketDisconnect) as error:
+                    ws.receive_json()
+                assert error.value.code == 4001
 
 
 @pytest.mark.asyncio

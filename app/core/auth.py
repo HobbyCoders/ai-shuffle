@@ -184,8 +184,8 @@ class AuthService:
         return token
 
     def validate_session(self, token: str) -> bool:
-        """Validate a session token"""
-        if not token:
+        """Validate an admin session; mobile/controller credentials never qualify."""
+        if not token or token.startswith(("shc_", "aim_")):
             return False
         session = database.get_auth_session(token)
         if session is None:

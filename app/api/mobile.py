@@ -34,6 +34,8 @@ from app.db.async_database import run_sync
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/mobile", tags=["Mobile"])
+from app.api.mobile_hub import router as hub_router
+router.include_router(hub_router)
 
 # Mobile API key prefix
 MOBILE_API_KEY_PREFIX = "aim_"
@@ -96,6 +98,9 @@ def get_device_from_api_key(request: Request) -> dict:
 
     if not device.get("scopes"):
         device["scopes"] = list(pairing.DEFAULT_MOBILE_SCOPES)
+
+    from app.core.account_hub import mobile_hub_ownership
+    mobile_hub_ownership(device)
 
     # Update last seen
     db.update_mobile_device_last_seen(device["device_id"])

@@ -200,6 +200,10 @@ def init_core() -> None:
     init_database()
     run_migrations()
 
+    from app.db import mobile_tools, mobile_tool_identity
+    mobile_tools.init_schema()
+    mobile_tool_identity.init_schema()
+
     # Auto-migrate from SQLite if it exists and Postgres is empty
     _auto_migrate_sqlite_to_postgres()
 

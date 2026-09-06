@@ -1308,6 +1308,70 @@ def create_builtin_tools_server(
 
     all_tools: list = []
 
+    # Native Android tools are visible in NORMAL sessions. Identity comes only
+    # from this runtime session id, never from model-supplied account/admin flags.
+    @tool(
+        "AndroidDevices",
+        "List only Android devices authorized for this session, with supported tools, "
+        "foreground heartbeat and enabled state. No devices/offline is a normal result.",
+        {"type": "object", "properties": {}, "additionalProperties": False},
+    )
+    async def android_devices(args: dict) -> dict:
+        from app.services import mobile_tools
+        try:
+            return _ok(await asyncio.to_thread(mobile_tools.list_devices, session_id))
+        except mobile_tools.CommandError as exc:
+            return _ok({"error": str(exc)})
+        except Exception:
+            return _ok({"error": "android_service_unavailable"})
+
+    from app.services.mobile_tools import FIELDS as android_fields
+    android_variants = []
+    for android_name, (required_fields, optional_fields) in android_fields.items():
+        android_variants.append({
+            "type": "object",
+            "properties": {
+                "device_id": {"type": "string", "minLength": 1, "maxLength": 256},
+                "name": {"const": android_name},
+                "arguments": {
+                    "type": "object",
+                    "properties": {key: {"type": "integer" if kind is int else "string"}
+                                   for key, kind in (required_fields | optional_fields).items()},
+                    "required": list(required_fields), "additionalProperties": False,
+                },
+                "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 25},
+            },
+            "required": ["device_id", "name", "arguments"], "additionalProperties": False,
+        })
+
+    @tool(
+        "AndroidAction",
+        "Run a supported native action on ONE explicitly selected Android device. "
+        "Use AndroidDevices first. Foreground tools must be locally enabled; "
+        "sensitive actions require real on-device approval (never pass confirmed=true). "
+        "System intents report launched_confirmation, NOT completion of the external action. "
+        "Returns actual device result; waits at most 25 seconds. Cancellation cannot undo "
+        "a side effect already performed. Calendar times must include a timezone.",
+        {"type": "object", "oneOf": android_variants,
+         "properties": {"device_id": {"type": "string"}, "name": {"type": "string", "enum": list(android_fields)},
+                        "arguments": {"type": "object"}, "timeout_seconds": {"type": "number", "maximum": 25}},
+         "required": ["device_id", "name", "arguments"], "additionalProperties": False},
+    )
+    async def android_action(args: dict) -> dict:
+        from app.services import mobile_tools
+        if set(args) - {"device_id", "name", "arguments", "timeout_seconds"}:
+            return _ok({"error": "invalid_arguments"})
+        try:
+            return _ok(await mobile_tools.execute(
+                session_id, args.get("device_id"), args.get("name"), args.get("arguments"),
+                args.get("timeout_seconds", 25),
+            ))
+        except Exception:
+            return _ok({"error": "android_service_unavailable"})
+
+    all_tools.extend([android_devices, android_action])
+
+
     # ------------------------------------------------------------------
     # ScheduleWakeup — pause + resume session after a delay
     # ------------------------------------------------------------------
@@ -2485,6 +2549,8 @@ def create_builtin_tools_server(
 def get_builtin_tool_names() -> List[str]:
     """Return MCP tool names so they can be added to ``allowed_tools``."""
     names = [
+        "mcp__builtins__AndroidDevices",
+        "mcp__builtins__AndroidAction",
         "mcp__builtins__ScheduleWakeup",
         "mcp__builtins__Task",
         "mcp__builtins__NotifyDevices",

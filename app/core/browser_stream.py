@@ -897,6 +897,16 @@ class BrowserStreamHub:
                         "Page.navigatedWithinDocument",
                     ):
                         changed = self._handle_page_event(msg)
+                    elif method == "Page.frameResized":
+                        # Chromium can stop producing screencast frames after a
+                        # viewport change on a static page. Restart only the
+                        # capture on the existing attachment so both viewers
+                        # receive the new dimensions without changing control,
+                        # navigating, or reconnecting the CDP socket.
+                        await self._send_upstream(ws, "Page.stopScreencast")
+                        await self._send_upstream(
+                            ws, "Page.startScreencast", _SCREENCAST_PARAMS
+                        )
                     elif method is None:
                         continue
                     if changed:
