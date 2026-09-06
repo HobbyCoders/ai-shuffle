@@ -363,6 +363,15 @@ class HarnessAdapter(ProviderAdapter):
         # capture upstream usage/quota headers (see _usage_capture_http_client).
         # The fluid client does not own it, so disconnect() closes it.
         self._provider_http: Optional[httpx.AsyncClient] = None
+        # Running roll-up of THIS turn's per-call usage, summed off the fluid
+        # ``Usage`` events as they are translated and reset at each turn floor.
+        # It exists for the ErrorEvent branch: fluid's catch-all ErrorEvent
+        # carries neither ``usage`` nor ``cost_usd`` (only TurnComplete and
+        # Interrupted roll the turn up), so an errored turn billed the session
+        # $0 no matter how many calls it had already paid for. An audit found
+        # real spend missing across several errored turns in one session.
+        self._turn_usage_totals: Dict[str, float] = {}
+        self._turn_model_calls: int = 0
 
     # ─── Transition helper ────────────────────────────────────────────
 
@@ -1089,15 +1098,54 @@ class HarnessAdapter(ProviderAdapter):
                     pass
                 self._provider_http = None
             self._connected = False
+            # DROP the engine reference too. The fluid client still holds the
+            # httpx client we just closed, so an adapter that keeps its engine
+            # after teardown is a live-looking object whose very next request
+            # dies with RuntimeError('Cannot send a request, as the client has
+            # been closed.'). Nulling it means a half-torn-down adapter can
+            # never present as alive — every gate that reads is_alive() /
+            # is_connected() (query_engine's reuse gates, the idle reader) now
+            # rebuilds instead of reusing. connect() reassigns it, so an
+            # adapter that is disconnected and reconnected is unaffected.
+            self._engine = None
 
     def is_alive(self) -> bool:
-        """Whether the engine exists and hasn't been closed.
+        """Whether the engine exists, is connected, and can still send.
 
         fluid engines are in-process (native) or supervise a subprocess
-        (delegated). We treat "connected and not torn down" as alive; the
-        delegated subprocess health is managed internally by the engine.
+        (delegated). "Connected and not torn down" is necessary but NOT
+        sufficient: on a native leg the adapter injects its own
+        ``httpx.AsyncClient`` into the fluid provider client purely to capture
+        usage headers (``_build_provider_client``), and the fluid client reuses
+        that instance for the life of the engine with no liveness check of its
+        own. Once it is closed, httpx raises a bare ``RuntimeError`` — not an
+        ``httpx.TransportError`` — so fluid's transport-retry branch never sees
+        it, nothing retries, and the turn dies non-retriably with zero model
+        calls. Production lost whole overnight sessions to exactly that: an
+        unpark wake reused an adapter whose HTTP client had been closed under
+        it, and the user had to type "Resume" to recover.
+
+        So report a closed injected client as NOT alive. Every caller already
+        handles that correctly — the pool's reuse gates drop the state and
+        build a fresh adapter (which re-authenticates and rebuilds the client),
+        which is what the user-message path was doing all along. Mirrors the
+        rebuild-if-closed guard in ``app/core/http_client.py``.
+
+        ``_provider_http`` is legitimately None on the delegated leg and on
+        native legs that inject nothing (env-var credentials), so only a
+        PRESENT-and-closed client is a failure.
         """
-        return self._engine is not None and self._connected
+        if self._engine is None or not self._connected:
+            return False
+        http = self._provider_http
+        if http is not None and http.is_closed:
+            logger.warning(
+                "[HarnessAdapter] provider HTTP client is closed (kind=%s) — "
+                "reporting the adapter as not alive so the caller rebuilds it",
+                self._provider_kind,
+            )
+            return False
+        return True
 
     def is_connected(self) -> bool:
         return self._connected and self._engine is not None
@@ -1111,6 +1159,13 @@ class HarnessAdapter(ProviderAdapter):
         and user-message ordering. Fluid therefore records these completions with
         ``wake=False``: the app's already-claimed ``source=unpark`` turn is the
         continuation, so allowing Fluid to start another would double-run it.
+
+        ``report_path`` rides along. Fluid declares the field on the op and
+        forwards it onto every ``SubagentEvent`` it emits, but the app used to
+        omit it, so EVERY agent wake arrived with ``report_path: null`` and the
+        first act of the woken turn was a ``TaskGet`` round-trip purely to learn
+        the path of a report that already existed — one wasted model call per
+        agent completion, in every session.
         """
         if self._engine is None or self._is_delegated or not frames:
             return
@@ -1136,7 +1191,45 @@ class HarnessAdapter(ProviderAdapter):
                 summary=str(frame.get("summary") or "") or None,
                 worker_session_id=str(task_id),
                 wake=False,
+                report_path=self._frame_report_path(str(task_id), frame),
             ))
+
+    def _frame_report_path(
+        self, task_id: str, frame: Dict[str, Any]
+    ) -> Optional[str]:
+        """Where this terminal task's full report was written, or None.
+
+        Three sources, most specific first: the frame's own ``report_path``, the
+        task registry's record (``reportPath`` — what ``complete_task`` stamps on
+        a finished BACKGROUND agent worker and what ``TaskGet`` serves), and the
+        frame's ``output_file`` (the transcript/stdout path a CLI agent or a
+        backgrounded shell carries). Never raises: a path we cannot resolve just
+        keeps the old ``None``, which is no worse than before.
+        """
+        direct = frame.get("report_path") or frame.get("reportPath")
+        if direct:
+            return str(direct)
+        # The STAMPED app session id only (``query_options`` puts it there):
+        # ``_resolve_app_session_id``'s fallback leg is a blocking DB read, and
+        # this runs on the event loop at the head of every wake turn. The
+        # registry read below is pure in-memory.
+        opts = self._options
+        session_id = (opts.extra or {}).get("app_session_id") if opts is not None else None
+        if session_id:
+            try:
+                from app.core.task_registry import task_registry
+
+                record = task_registry.get_task(session_id, task_id) or {}
+                path = record.get("reportPath") or record.get("report_path")
+                if path:
+                    return str(path)
+            except Exception:  # noqa: BLE001 — a missing path is not a failure.
+                logger.debug(
+                    "[HarnessAdapter] report_path lookup failed for %s/%s",
+                    session_id, task_id, exc_info=True,
+                )
+        output_file = frame.get("output_file")
+        return str(output_file) if output_file else None
 
     async def send_query(self, prompt: str) -> None:
         if self._engine is None:
@@ -1239,6 +1332,9 @@ class HarnessAdapter(ProviderAdapter):
             except Exception:  # noqa: BLE001 — engines/test fakes without a bus
                 pass
         self._turn_floor = floor
+        # New turn → new usage roll-up (see _turn_usage_totals).
+        self._turn_usage_totals = {}
+        self._turn_model_calls = 0
 
     async def steer(
         self, text: str, *, id: Optional[str] = None, origin: str = "user"
@@ -2090,6 +2186,10 @@ class HarnessAdapter(ProviderAdapter):
             context_usage = getattr(event, "context_usage", None)
             if context_usage:
                 usage["context_usage"] = context_usage
+            # Roll this call into the turn total so an ErrorEvent terminal (which
+            # fluid emits with no usage and no cost at all) can still bill what
+            # the turn actually spent. Cheap: one dict walk per model call.
+            self._accumulate_turn_usage(usage)
             return [AssistantMessage(
                 content=[],
                 model=self._current_model
@@ -2292,8 +2392,25 @@ class HarnessAdapter(ProviderAdapter):
             # Same partial-usage/cost/model-call carry as the Interrupted branch
             # above (including the None → 0.0 coercion and the defensive
             # ``num_model_calls`` read).
+            #
+            # UNLIKE Interrupted, fluid's catch-all ErrorEvent rolls nothing up:
+            # it is constructed with a message and a call count and no usage or
+            # cost at all. ``_persist_turn_results`` bills the session off this
+            # ResultMessage, so an errored turn used to add $0 however many
+            # calls it had already paid for (one audited session was short
+            # unrecorded spend across several such turns). Fall back to the turn's own
+            # accumulated Usage roll-up, which is the same spend the durable
+            # ``turn.usage`` rows already record.
             cost = getattr(event, "cost_usd", None)
             calls = getattr(event, "num_model_calls", None)
+            usage = dict(getattr(event, "usage", None) or {})
+            rollup = self._turn_usage_snapshot()
+            if not usage and rollup:
+                usage = rollup
+            if not cost:
+                cost = rollup.get("cost_usd") or cost
+            if not isinstance(calls, int) or calls < self._turn_model_calls:
+                calls = self._turn_model_calls if self._turn_model_calls else calls
             return [
                 ResultMessage(
                     subtype="error_during_execution",
@@ -2302,14 +2419,45 @@ class HarnessAdapter(ProviderAdapter):
                     session_id=getattr(event, "session_id", "") or "",
                     result=event.message,
                     errors=[event.message],
-                    total_cost_usd=cost if cost is not None else 0.0,
-                    usage=dict(getattr(event, "usage", None) or {}),
+                    total_cost_usd=float(cost) if cost is not None else 0.0,
+                    usage=usage,
                     uuid=self._uuid(event),
                 )
             ]
 
         # Unknown / no-analog fluid event — skip.
         return []
+
+    # ─── Per-turn usage roll-up (ErrorEvent billing backstop) ─────────
+
+    #: Usage keys that SUM across a turn's model calls. Everything else on a
+    #: Usage record describes one call (``model_call_index``, the cache probe
+    #: fields, the context snapshot) and would be meaningless summed.
+    _ROLLUP_USAGE_KEYS = (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "cost_usd",
+    )
+
+    def _accumulate_turn_usage(self, usage: Dict[str, Any]) -> None:
+        """Add one model call's usage to this turn's roll-up. Never raises."""
+        try:
+            self._turn_model_calls += 1
+            for key in self._ROLLUP_USAGE_KEYS:
+                value = usage.get(key)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                self._turn_usage_totals[key] = (
+                    self._turn_usage_totals.get(key, 0) + value
+                )
+        except Exception:  # noqa: BLE001 — accounting never breaks a turn.
+            logger.debug("[HarnessAdapter] usage roll-up failed", exc_info=True)
+
+    def _turn_usage_snapshot(self) -> Dict[str, Any]:
+        """This turn's accumulated usage so far (a copy; zero keys dropped)."""
+        return {k: v for k, v in self._turn_usage_totals.items() if v}
 
     # ─── Internal builders ────────────────────────────────────────────
 
