@@ -87,12 +87,15 @@ async def _collect_metrics() -> dict:
     # exhaustion/leak indicator: if it sits at db_pool_max the next DB call
     # raises "connection pool exhausted".
     try:
-        from app.db.base import pool_stats
+        from app.db.base import pool_stats, pressure_stats
         db_stats = pool_stats()
         if db_stats is not None:
             metrics["db_pool_in_use"] = db_stats["in_use"]
             metrics["db_pool_idle"] = db_stats["idle"]
             metrics["db_pool_max"] = db_stats["max"]
+        pressure = pressure_stats()
+        if pressure is not None:
+            metrics.update({f"db_pool_{key}": value for key, value in pressure.items()})
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to collect DB pool metrics: {e}")
 

@@ -7,6 +7,8 @@ All domain modules import from here. Do NOT import domain modules from this file
 """
 
 import re
+from collections import deque
+import threading
 import time
 import logging
 from typing import Optional, List, Dict, Any
@@ -101,6 +103,162 @@ def parse_database_url(db_url: str) -> Dict[str, Any]:
     return _parse_legacy_database_url(db_url)
 
 
+class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
+    """Open the startup minimum, then retain healthy connections up to maxconn."""
+
+    def __init__(self, minconn, maxconn, *args, **kwargs):
+        # Separate lock: snapshots and sleeping acquirers never block on libpq.
+        self._available = threading.Condition()
+        self._waiters = deque()
+        self._generation = 0
+        self._pressure_lock = threading.Lock()
+        self._pressure = dict.fromkeys((
+            "connections_opened", "connections_discarded", "acquisitions",
+            "acquisition_waits", "acquisition_timeouts", "waiting", "waiting_peak", "holds",
+        ), 0)
+        self._pressure.update(dict.fromkeys((
+            "acquisition_seconds_total", "acquisition_seconds_max",
+            "wait_seconds_total", "wait_seconds_max",
+            "timeout_seconds_total", "timeout_seconds_max",
+            "hold_seconds_total", "hold_seconds_max",
+        ), 0.0))
+        # Only live physical connections and active checkouts; bounded by maxconn.
+        self._physical = set()
+        self._held_since = {}
+        super().__init__(minconn, maxconn, *args, **kwargs)
+        self.startup_minconn = self.minconn
+        # psycopg2 also uses minconn as its idle-retention limit in _putconn.
+        # Raise it only AFTER construction so we don't eagerly open maxconn.
+        # Inherit the driver's locking, rollback/discard and shutdown paths.
+        self.minconn = self.maxconn
+
+
+    def _notify_available(self):
+        with self._available:
+            self._generation += 1
+            self._available.notify_all()
+
+    @contextmanager
+    def _acquire(self):
+        """FIFO admission; direct driver calls retain their keyed semantics.
+
+        Never enter the driver under _available: returns notify under the
+        driver's lock. The generation closes the failed-getconn/wait race.
+        """
+        start = time.monotonic()
+        deadline = start + _POOL_ACQUIRE_MAX_WAIT_SECONDS
+        ticket = object()
+        waited = timed_out = False
+        with self._available:
+            self._waiters.append(ticket)
+        try:
+            while True:
+                with self._available:
+                    if self.closed:
+                        raise psycopg2.pool.PoolError("connection pool is closed")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timed_out = True
+                        raise psycopg2.pool.PoolError("connection pool exhausted")
+                    if self._waiters[0] is not ticket:
+                        if not waited:
+                            waited = True
+                            self._wait_started()
+                        self._available.wait(remaining)
+                        continue
+                    generation = self._generation
+                try:
+                    conn = self.getconn()
+                    break
+                except psycopg2.pool.PoolError:
+                    with self._available:
+                        if self.closed:
+                            raise
+                        if not waited:
+                            waited = True
+                            self._wait_started()
+                        if generation == self._generation:
+                            self._available.wait(max(0, deadline - time.monotonic()))
+            # Include setup in timing; advance the queue even if setup fails.
+            yield conn
+        finally:
+            with self._available:
+                self._waiters.remove(ticket)
+                self._available.notify_all()
+            self._acquisition_finished(time.monotonic() - start, waited, timed_out)
+
+    def pressure_stats(self):
+        with self._pressure_lock:
+            return dict(self._pressure)
+
+    def _duration(self, prefix, elapsed):
+        # Caller holds _pressure_lock.
+        self._pressure[prefix + "_seconds_total"] += elapsed
+        self._pressure[prefix + "_seconds_max"] = max(
+            self._pressure[prefix + "_seconds_max"], elapsed)
+
+    def _wait_started(self):
+        with self._pressure_lock:
+            self._pressure["waiting"] += 1
+            self._pressure["waiting_peak"] = max(
+                self._pressure["waiting_peak"], self._pressure["waiting"])
+            self._pressure["acquisition_waits"] += 1
+
+    def _acquisition_finished(self, elapsed, waited, timed_out):
+        with self._pressure_lock:
+            self._pressure["acquisitions"] += 1
+            self._duration("acquisition", elapsed)
+            if waited:
+                self._pressure["waiting"] -= 1
+                self._duration("wait", elapsed)
+            if timed_out:
+                self._pressure["acquisition_timeouts"] += 1
+                self._duration("timeout", elapsed)
+
+    def _connect(self, key=None):
+        conn = super()._connect(key)
+        with self._pressure_lock:
+            self._physical.add(id(conn))
+            self._pressure["connections_opened"] += 1
+        return conn
+
+    def _getconn(self, key=None):
+        conn = super()._getconn(key)
+        with self._pressure_lock:
+            self._held_since.setdefault(id(conn), time.monotonic())
+        return conn
+
+    def _returned(self, conn, discarded):
+        # Called under the driver's lock, including the force-reclaim path.
+        with self._pressure_lock:
+            started = self._held_since.pop(id(conn), None)
+            if started is not None:
+                self._pressure["holds"] += 1
+                self._duration("hold", time.monotonic() - started)
+            if discarded and id(conn) in self._physical:
+                self._physical.remove(id(conn))
+                self._pressure["connections_discarded"] += 1
+
+    def _putconn(self, conn, key=None, close=False):
+        try:
+            super()._putconn(conn, key, close)
+        finally:
+            try:
+                if id(conn) not in self._rused:
+                    self._returned(conn, conn not in self._pool)
+            finally:
+                self._notify_available()
+
+    def _closeall(self):
+        try:
+            super()._closeall()
+            # Discard means removed from service, even if socket close failed.
+            for conn in self._pool + list(self._used.values()):
+                self._returned(conn, True)
+        finally:
+            self._notify_available()
+
+
 def init_pool(min_conn: int = 2, max_conn: int = 10) -> None:
     """Initialize the PostgreSQL connection pool.
 
@@ -112,7 +270,7 @@ def init_pool(min_conn: int = 2, max_conn: int = 10) -> None:
         logger.warning("PostgreSQL pool already initialized, closing old pool")
         _pg_pool.closeall()
 
-    _pg_pool = psycopg2.pool.ThreadedConnectionPool(
+    _pg_pool = _RetainingThreadedConnectionPool(
         min_conn,
         max_conn,
         **parse_database_url(settings.get_database_url()),
@@ -171,70 +329,24 @@ class _PgDictConnection:
 # Connection management
 # =============================================================================
 
-# Bounded backpressure on pool acquisition. Multiple thread pools draw on the
-# single PG pool concurrently (asyncio's default executor, anyio's sync-dep
-# pool, the git pool), so a transient overlap can momentarily take every slot.
-# psycopg2's ThreadedConnectionPool.getconn() raises PoolError *immediately* on
-# exhaustion — no waiting — which turns a sub-second burst into a hard 500 on an
-# unrelated endpoint. Instead of failing outright, wait (with a short capped
-# backoff, bounded in total) for a slot to be returned. These run on worker
-# threads, so a plain time.sleep is correct here — never asyncio.
+# Application callers wait in FIFO order, bounded by the existing deadline.
 _POOL_ACQUIRE_MAX_WAIT_SECONDS = 2.0
-_POOL_ACQUIRE_BACKOFF_START_SECONDS = 0.01
-_POOL_ACQUIRE_BACKOFF_CAP_SECONDS = 0.1
 
 
 def _get_pg_connection() -> "_PgDictConnection":
-    """Acquire a PostgreSQL connection from the pool.
-
-    Returns a wrapper that defaults to RealDictCursor for dict-style row access.
-    On transient pool exhaustion, waits (short capped backoff, bounded to
-    ~``_POOL_ACQUIRE_MAX_WAIT_SECONDS`` total) for a slot to free rather than
-    raising PoolError immediately. A single warning is logged when a wait
-    actually happens so pool pressure is visible without per-retry log spam.
-    """
-    if _pg_pool is None:
+    """Acquire with bounded FIFO backpressure and aggregate pressure metrics."""
+    pool = _pg_pool
+    if pool is None:
         raise RuntimeError(
             "PostgreSQL connection pool not initialized. Call init_pool() first."
         )
-
-    start = time.monotonic()
-    deadline = start + _POOL_ACQUIRE_MAX_WAIT_SECONDS
-    backoff = _POOL_ACQUIRE_BACKOFF_START_SECONDS
-    waited = False
-    while True:
+    with pool._acquire() as conn:
         try:
-            conn = _pg_pool.getconn()
-            break
-        except psycopg2.pool.PoolError:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                # Bounded wait expired — surface the exhaustion as before, but
-                # now with visibility into how long we backpressured.
-                stats = pool_stats() or {}
-                logger.warning(
-                    "PG pool acquisition failed after %dms of backpressure — "
-                    "pool exhausted (in_use=%s max=%s)",
-                    round((time.monotonic() - start) * 1000),
-                    stats.get("in_use"),
-                    stats.get("max"),
-                )
-                raise
-            waited = True
-            time.sleep(min(backoff, remaining))
-            backoff = min(backoff * 2, _POOL_ACQUIRE_BACKOFF_CAP_SECONDS)
-
-    if waited:
-        stats = pool_stats() or {}
-        logger.warning(
-            "PG pool acquisition waited %dms for a free slot (pool pressure; "
-            "in_use=%s max=%s)",
-            round((time.monotonic() - start) * 1000),
-            stats.get("in_use"),
-            stats.get("max"),
-        )
-    conn.autocommit = False
-    return _PgDictConnection(conn)
+            conn.autocommit = False
+        except BaseException:
+            _close_connection(conn)
+            raise
+        return _PgDictConnection(conn)
 
 
 def get_connection():
@@ -296,6 +408,26 @@ def _close_connection(conn) -> None:
         raw_conn.close()
     except Exception:
         pass
+    finally:
+        if isinstance(_pg_pool, _RetainingThreadedConnectionPool):
+            with _pg_pool._lock:
+                try:
+                    _pg_pool._returned(raw_conn, True)
+                finally:
+                    _pg_pool._notify_available()
+
+
+def pressure_stats() -> Optional[Dict[str, Any]]:
+    """Per-pool aggregate counters and monotonic seconds; no connection labels.
+
+    Discards include shutdown and broken connections removed from service.
+    Hold durations include return/rollback cleanup, but not acquisition waits.
+    Snapshots are copies; a new pool starts fresh and shutdown returns None.
+    """
+    pool = _pg_pool
+    if isinstance(pool, _RetainingThreadedConnectionPool):
+        return pool.pressure_stats()
+    return None
 
 
 def pool_stats() -> Optional[Dict[str, int]]:
@@ -316,7 +448,7 @@ def pool_stats() -> Optional[Dict[str, int]]:
         return {
             "in_use": len(used),
             "idle": len(idle),
-            "min": getattr(_pg_pool, "minconn", 0),
+            "min": getattr(_pg_pool, "startup_minconn", getattr(_pg_pool, "minconn", 0)),
             "max": getattr(_pg_pool, "maxconn", 0),
         }
     except Exception:

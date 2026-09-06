@@ -523,6 +523,9 @@ class TurnRecorder:
         self._superseded = False
         self._superseded_dropped = 0
         self.on_superseded: Optional[Callable[[], None]] = None
+        self._recording_failed = False
+        self._recording_failed_dropped = 0
+        self.on_recording_failed: Optional[Callable[[], None]] = None
         # seq of this turn's FIRST appended event — the truncation point for
         # an empty-turn discard (record_empty_turn_discard, wired in a later
         # commit).
@@ -684,7 +687,7 @@ class TurnRecorder:
         first, exactly as any non-delta pump event would, so log order still
         mirrors stream order. Returns True when the append was made.
         """
-        if self._closed or self._superseded:
+        if self._closed or self._superseded or self._recording_failed:
             return False
         try:
             async with self._lock:
@@ -697,7 +700,7 @@ class TurnRecorder:
                     profile_id=profile_id,
                 ))
                 await self._append(events)
-            return True
+            return not (self._recording_failed or self._superseded)
         except Exception:
             logger.warning(
                 "[TurnRecorder] record_steered_user_message failed for %s",
@@ -722,7 +725,7 @@ class TurnRecorder:
         settle. Best-effort like every other append — never raises. Returns the
         number of events appended.
         """
-        if self._closed or self._superseded or not frames:
+        if self._closed or self._superseded or self._recording_failed or not frames:
             return 0
         try:
             events: List[Dict[str, Any]] = []
@@ -759,7 +762,7 @@ class TurnRecorder:
                 return 0
             async with self._lock:
                 await self._append(self._drain_buffered_events() + events)
-            return len(events)
+            return 0 if self._recording_failed or self._superseded else len(events)
         except Exception:
             logger.warning(
                 "[TurnRecorder] record_task_terminal failed for %s (%d frame(s))",
@@ -869,7 +872,7 @@ class TurnRecorder:
         the discard decision lands after the turn's run lease is released.
         Reached post-turn via module-level ``discard_empty_turn``. Never raises.
         """
-        if self._first_seq is None:
+        if self._first_seq is None or self._recording_failed:
             return
         try:
             await _append_unfenced(self.session_id, [_build_event(
@@ -887,6 +890,9 @@ class TurnRecorder:
     # ------------------------------------------------------------------
 
     async def _on_event_locked(self, event: Dict[str, Any]) -> None:
+        if self._recording_failed:
+            self._count_recording_drops(1)
+            return
         etype = event.get("type")
 
         if etype == "stream_delta":
@@ -1191,6 +1197,9 @@ class TurnRecorder:
         """Append a batch under the fence (or unfenced). Never raises."""
         if not events:
             return
+        if self._recording_failed:
+            self._count_recording_drops(len(events))
+            return
         if self._superseded:
             self._superseded_dropped += len(events)
             return
@@ -1210,10 +1219,40 @@ class TurnRecorder:
         except session_events_db.FenceViolation:
             self._mark_superseded(len(events))
         except Exception:
+            # The commit outcome is unknown. Never retry or retain this batch.
+            self._recording_failed = True
+            self._cancel_task(self._renew_task)
+            self._renew_task = None
+            self._count_recording_drops(len(events) + len(self._delta_buffers)
+                                        + int(self._pending_usage is not None))
+            self._delta_buffers.clear()
+            self._pending_usage = None
+            self._pending_context_usage = None
+            self._cancel_task(self._flush_task)
+            self._flush_task = None
             logger.warning(
-                "[TurnRecorder] append failed for %s (%d event(s) dropped)",
-                self.session_id, len(events), exc_info=True,
+                "[TurnRecorder] recording failed for %s run %s turn %s "
+                "(%d event(s) dropped; commit outcome unknown)",
+                self.session_id, self.run_id, self.turn_id, len(events), exc_info=True,
             )
+            if self.on_recording_failed is not None:
+                try:
+                    self.on_recording_failed()
+                except Exception:
+                    logger.warning("[TurnRecorder] on_recording_failed hook failed for %s",
+                                   self.session_id, exc_info=True)
+
+    def _count_recording_drops(self, count: int) -> None:
+        # Saturation bounds diagnostics even for a long-lived direct recorder.
+        self._recording_failed_dropped = min(2**31 - 1, self._recording_failed_dropped + count)
+
+    @property
+    def recording_failed(self) -> bool:
+        return self._recording_failed
+
+    @property
+    def recording_failed_dropped(self) -> int:
+        return self._recording_failed_dropped
 
     def _mark_superseded(self, dropped: int) -> None:
         """First fence violation: go silent, stop the heartbeat, tell the owner.
