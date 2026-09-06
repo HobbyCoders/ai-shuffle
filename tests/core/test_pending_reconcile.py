@@ -223,6 +223,9 @@ def test_boot_repair_writes_the_missing_terminal_events(mock_db, test_db):
     # no turn of its own.
     assert event["wake"] is False
     assert event["wake_disposition"] == "suppressed"
+    # Same shape a live retirement submits, so a replay drops it as host-owned
+    # rather than mirroring a second task card.
+    assert event["worker_session_id"] == "gone"
 
     # A rehydrate reading the repaired log now sees only the live task.
     assert pending_reconcile.orphan_pending_ids("ses_b") == ["live", "other"]

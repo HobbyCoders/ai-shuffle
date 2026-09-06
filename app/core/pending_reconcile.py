@@ -464,6 +464,11 @@ def repair_fluid_pending_log(
                 task_id=str(frame["task_id"]),
                 kind=kind,
                 summary=frame.get("summary"),
+                # Same shape ``prepare_background_completions`` submits, so a
+                # replay maps this row exactly as it maps a live retirement:
+                # a receipt carrying a worker session belongs to the host's own
+                # task cards and is not mirrored a second time.
+                worker_session_id=str(frame["task_id"]),
                 wake=False,
                 status=str(frame.get("status") or kind),
                 wake_disposition=WAKE_SUPPRESSED,
