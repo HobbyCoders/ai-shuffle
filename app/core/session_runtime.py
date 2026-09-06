@@ -1256,11 +1256,14 @@ class SessionRuntime:
 
     async def _terminalize_silent_turn(self, silent_for: float) -> None:
         """End a wedged turn the way a provider error would. Never raises."""
+        elapsed = (
+            f"{int(silent_for // 60)} minutes" if silent_for >= 60
+            else f"{silent_for:.0f} seconds"
+        )
         message = (
-            f"This turn stopped producing any output for "
-            f"{int(silent_for // 60)} minutes and was ended by the progress "
-            f"watchdog. A tool call most likely never returned; nothing after "
-            f"it ran."
+            f"This turn stopped producing any output for {elapsed} and was "
+            f"ended by the progress watchdog. A tool call most likely never "
+            f"returned; nothing after it ran."
         )
         logger.warning(
             "SessionRuntime: progress watchdog terminalizing %s turn %s "

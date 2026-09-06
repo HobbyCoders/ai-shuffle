@@ -1245,8 +1245,6 @@ class SessionPool:
         )
         return state
 
-    # ─── Idle eviction (tiered) ──────────────────────────────────────────
-
     # ─── Wake-pending / awaiting-input hold ──────────────────────────────
 
     #: Backstop TTL for a wake-pending hold. A wake that never claims the client
@@ -1327,6 +1325,8 @@ class SessionPool:
             return interaction_wait.has_waiters(session_id)
         except Exception:  # noqa: BLE001
             return False
+
+    # ─── Idle eviction (tiered) ──────────────────────────────────────────
 
     def _is_busy(self, session_id: str, state: SessionState) -> bool:
         """True when live work forbids evicting this session.
