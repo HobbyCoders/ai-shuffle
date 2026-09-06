@@ -302,15 +302,19 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				? (Date.now() - currentState.streamStartTime) / 1000
 				: undefined;
 
-			onNotifySessionComplete({
-				sessionId: sessionId || '',
-				sessionTitle: currentState.title ?? null,
-				durationSeconds,
-				totalCostUsd: metadata?.total_cost_usd as number | undefined,
-				tokensIn: metadata?.tokens_in as number | undefined,
-				tokensOut: metadata?.tokens_out as number | undefined,
-				model: metadata?.model as string | undefined,
-			});
+			// Runtime done frames carry the outcome after the background-work
+			// park gate. Legacy frames without an outcome remain compatible.
+			if (data.outcome == null || data.outcome === 'completed') {
+				onNotifySessionComplete({
+					sessionId: sessionId || '',
+					sessionTitle: currentState.title ?? null,
+					durationSeconds,
+					totalCostUsd: metadata?.total_cost_usd as number | undefined,
+					tokensIn: metadata?.tokens_in as number | undefined,
+					tokensOut: metadata?.tokens_out as number | undefined,
+					model: metadata?.model as string | undefined,
+				});
+			}
 
 			onPersistSession();
 		}

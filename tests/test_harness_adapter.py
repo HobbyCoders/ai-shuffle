@@ -6345,3 +6345,67 @@ async def test_recoverable_compaction_is_enabled_for_native_loops(monkeypatch, t
     assert compaction.trigger_tokens == 120_000
     assert compaction.headroom_tokens == 16_000
     assert compaction.target_ratio == 0.70
+
+
+@pytest.mark.asyncio
+async def test_connect_reconciles_the_engine_pending_set(monkeypatch):
+    """Rehydrate reconcile (2026-09-05 audit F1): fluid rebuilds its pending set
+    from the SubagentEvent log alone, so a completion that never reached the
+    engine is re-created as a phantom on every resume. Connect asks the freshly
+    rehydrated engine what it still counts pending, right after the wake turn's
+    own ``prepare_background_completions``."""
+    import types
+    from unittest.mock import AsyncMock
+
+    import app.core.pending_reconcile as pending_reconcile
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(
+        HarnessAdapter, "_build_store", staticmethod(lambda _o: MemoryStore())
+    )
+    reconcile = AsyncMock(return_value=["ghost"])
+    monkeypatch.setattr(pending_reconcile, "reconcile_engine_pending", reconcile)
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect_with_sdk_options(
+        types.SimpleNamespace(
+            model="claude-sonnet-4-5",
+            aih_provider_id=None,
+            aih_session_id="app-sess-reconcile",
+            aih_profile_id="profile-1",
+        )
+    )
+
+    reconcile.assert_awaited_once()
+    assert reconcile.await_args.args[0] == "app-sess-reconcile"
+    assert reconcile.await_args.kwargs["adapter"] is adapter
+
+
+@pytest.mark.asyncio
+async def test_a_failing_pending_reconcile_never_blocks_a_connect(monkeypatch):
+    import types
+
+    import app.core.pending_reconcile as pending_reconcile
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(
+        HarnessAdapter, "_build_store", staticmethod(lambda _o: MemoryStore())
+    )
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("reconcile exploded")
+
+    monkeypatch.setattr(pending_reconcile, "reconcile_engine_pending", _boom)
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect_with_sdk_options(
+        types.SimpleNamespace(
+            model="claude-sonnet-4-5",
+            aih_provider_id=None,
+            aih_session_id="app-sess-boom",
+            aih_profile_id="profile-1",
+        )
+    )
+    assert adapter.is_connected()

@@ -277,7 +277,7 @@ async def _auto_approve_plan_exit(
     planning) stayed on the user's screen with nobody coming to answer it, and
     the model reported "the plan is approved" as though someone had.
 
-    So this does three things the bare ``PermissionResultAllow`` did not:
+    So this does four things the bare ``PermissionResultAllow`` did not:
 
     1. **Retires the pending plan-approval row.** Every other mode sweeps the
        corpses just before opening its own gate; the bypass path skipped it and
@@ -288,11 +288,18 @@ async def _auto_approve_plan_exit(
        tool result as "ended by host policy — no user approval was collected";
        one that does not simply drops the key, which is why sending it today is
        safe.
-    3. **Logs at INFO.** A plan approved with no human in the loop is a fact
+    3. **Shows the plan.** The panel that would have rendered it never opens on
+       this path, so the plan markdown lived only inside fluid's own
+       ``QuestionRequest`` event and the user never saw it (audit F5). The
+       disclosure note carries it into the transcript along with the fact that
+       policy, not a person, approved it — which is also the app's durable
+       answer to a gate nobody was offered.
+    4. **Logs at INFO.** A plan approved with no human in the loop is a fact
        about the session, not a debug trace.
 
     Returns the ``updated_input`` for the allow result.
     """
+    from app.core import plan_disclosure
     from app.core.user_question_handler import FLUID_ANSWER_KEY
 
     await permission_handler.supersede_plan_approvals(session_id)
@@ -300,6 +307,10 @@ async def _auto_approve_plan_exit(
         "[WS] StopPlanning auto-approved by host policy for session %s "
         "(bypassPermissions) — no user approval was collected",
         session_id,
+    )
+    # Before the mode-switch note, so the transcript reads plan → decision.
+    plan_disclosure.disclose_auto_approved_plan(
+        session_id, tool_input, refs.get("adapter")
     )
     _sync_plan_mode_exited(refs)
     return {

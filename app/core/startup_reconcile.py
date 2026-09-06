@@ -15,6 +15,13 @@ previous run can still claim sessions are mid-flight:
   but a row that has drifted to a live-looking value (written by a different
   version, or by hand) would render as stuck forever, so those are
   defensively reset too.
+- the ENGINE's background-pending set is rebuilt from the durable
+  ``SubagentEvent`` log on every rehydrate and popped only by a terminal
+  event, so a completion that never reached the engine is re-created as a
+  phantom forever and listed on every ``SessionParked``. Nothing but a write
+  into that log clears one, which is why the repair
+  (``pending_reconcile.sweep_orphaned_engine_pending``) runs here and only for
+  ids the durable task rows prove are over.
 - CLI subprocesses are tracked in memory only (``app.core.session_pool``
   snapshots descendant trees per-eviction), so a mid-turn server death leaks
   them. Every spawn is env-marked with ``AI_SHUFFLE_MANAGED_BY=<instance id>``
@@ -238,6 +245,11 @@ async def settle_stale_background_task_rows(
                     reason="stale_reap", tool_use_id=tool_use_id,
                 )
             settled += 1
+            # The session may have been parked on exactly this row. Nothing
+            # else clears the marker between turns, so do it here (clear-only,
+            # and a no-op while other background work survives).
+            from app.core.turn_finalize import clear_parked_marker_if_idle
+            await clear_parked_marker_if_idle(session_id)
             logger.warning(
                 "Stale-task sweep: settled orphaned background task %s "
                 "(session %s) — row was non-terminal with no registry record",
@@ -248,7 +260,76 @@ async def settle_stale_background_task_rows(
                 "Stale-task sweep: settling %s/%s failed", session_id, task_id,
                 exc_info=True,
             )
+    # Same tick, same class of orphan: a marker left behind by a terminal this
+    # sweep did not have to make.
+    await sweep_stale_parked_markers()
     return settled
+
+
+async def sweep_stale_parked_markers() -> int:
+    """Clear ``parked_task_kind`` on sessions with nothing left to park on.
+
+    The backstop behind ``turn_finalize.clear_parked_marker_if_idle``. That
+    call rides the terminal-task callback, which covers terminals the idle
+    reader drains and the two settle paths above — but a task can also be
+    settled by ``stop_session_task``, by force cleanup, or by a worker
+    supervisor, none of which pass through the reader. Any marker those leave
+    behind is caught here on the ordinary 5-minute tick instead of surviving
+    until the next boot.
+
+    Only own-instance rows, and only when BOTH the in-memory registry and the
+    durable mirror agree there is nothing running — a session whose worker
+    outlived a registry eviction must keep its marker. Returns the number
+    cleared; never raises.
+    """
+    _ph = ph()
+    instance_id = settings.effective_instance_id
+    try:
+        rows = await asyncio.to_thread(_sessions_with_parked_marker, _ph, instance_id)
+    except Exception:  # noqa: BLE001 — a sweep failure must never break cleanup
+        logger.warning("Parked-marker sweep query failed", exc_info=True)
+        return 0
+    if not rows:
+        return 0
+
+    from app.core import pending_reconcile
+    from app.core.turn_finalize import clear_parked_marker_if_idle
+
+    cleared = 0
+    for row in rows:
+        session_id = _row_value(row, "id", 0)
+        if not session_id:
+            continue
+        try:
+            outstanding = await asyncio.to_thread(
+                pending_reconcile.nonterminal_agent_task_ids, session_id
+            )
+            if outstanding:
+                continue
+            if await clear_parked_marker_if_idle(session_id):
+                cleared += 1
+        except Exception:  # noqa: BLE001 — one bad row must not block the rest
+            logger.warning(
+                "Parked-marker sweep: clearing %s failed", session_id,
+                exc_info=True,
+            )
+    if cleared:
+        logger.info(
+            "Parked-marker sweep: cleared %d session(s) marked parked with no "
+            "background work left", cleared,
+        )
+    return cleared
+
+
+def _sessions_with_parked_marker(_ph: str, instance_id: str) -> Any:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""SELECT id FROM sessions
+                 WHERE instance_id = {_ph} AND parked_task_kind IS NOT NULL""",
+            (instance_id,),
+        )
+        return cursor.fetchall()
 
 
 PARK_WATCHDOG_REASON = "park_watchdog"
@@ -425,6 +506,18 @@ async def _force_stalled_park(
     except Exception:  # noqa: BLE001
         logger.debug("Park watchdog: settle_parked_turns failed", exc_info=True)
 
+    # Everything this session was parked on is terminal now; drop the durable
+    # marker too, or the session keeps rendering as parked after the watchdog
+    # has already broken the park.
+    try:
+        from app.core.turn_finalize import clear_parked_marker_if_idle
+
+        await clear_parked_marker_if_idle(session_id)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "Park watchdog: parked-marker clear failed", exc_info=True
+        )
+
     logger.warning(
         "Park watchdog: forced %d task frame(s) for session %s parked %ss "
         "with no wake (turn %s)", len(rows), session_id, parked_seconds, turn_id,
@@ -443,6 +536,40 @@ async def _force_stalled_park(
             "tasks": len(rows),
         },
     )
+
+
+async def _repair_orphaned_engine_pending() -> int:
+    """Clear phantom ids out of this install's engine pending sets (v-audit F1).
+
+    fluid's ``_background_pending`` is rebuilt from the ``SubagentEvent`` log on
+    every rehydrate and popped only by a terminal event, so a completion that
+    never reached the engine is re-created as a phantom for the life of the
+    session and listed on every ``SessionParked``. The round-6 retirement fix
+    stops new ones; it cannot undo a log that is already missing the terminal.
+
+    This appends the missing terminal events itself, for ids the durable
+    ``background_tasks`` rows prove are over. Records one error row when it
+    repairs anything so the damage is visible in the app's error UI. Returns
+    the number of task ids repaired; never raises.
+    """
+    from app.core import pending_reconcile
+
+    repaired = await pending_reconcile.sweep_orphaned_engine_pending()
+    if repaired:
+        logger.warning(
+            "Boot reconcile: repaired %d orphaned engine-pending task id(s)",
+            repaired,
+        )
+        record_error(
+            "backend",
+            f"Boot reconcile: {repaired} background task(s) were still listed "
+            "as pending by their session's engine although the app had already "
+            "recorded them finished; wrote the missing terminal events so those "
+            "sessions stop parking on dead work.",
+            level="WARNING",
+            context={"reconcile": "engine_pending", "tasks": repaired},
+        )
+    return repaired
 
 
 def _reset_orphaned_session_statuses() -> int:
@@ -616,6 +743,7 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
         "stray_cli_reaped": 0,
         "background_task_rows_killed": 0,
         "turns_reaped": 0,
+        "engine_pending_repaired": 0,
     }
 
     # V2 turns boot sweep: settle/requeue the previous process's dead-lease live
@@ -653,6 +781,24 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
             f"Boot reconcile failed while marking stale background-task rows: {exc}",
             detail=traceback.format_exc(),
             context={"reconcile": "background_tasks"},
+        )
+
+    # One-off pending-set repair (2026-09-05 audit F1). Runs AFTER the stale-row
+    # sweep above: that sweep is what settles this install's leftover
+    # non-terminal rows, and the repair only ever writes a terminal for an id
+    # the durable rows can prove is over. Sessions poisoned before the round-6
+    # retirement fix shipped carry their phantoms in the fluid event log, so
+    # nothing but a write into that log clears them — a session parked on a
+    # twenty-one-hour-dead task never repairs itself.
+    try:
+        counts["engine_pending_repaired"] = await _repair_orphaned_engine_pending()
+    except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
+        logger.exception("Boot reconcile: engine pending-set repair failed")
+        record_error(
+            "backend",
+            f"Boot reconcile failed while repairing engine pending sets: {exc}",
+            detail=traceback.format_exc(),
+            context={"reconcile": "engine_pending"},
         )
 
     try:

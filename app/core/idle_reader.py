@@ -89,20 +89,42 @@ async def _fire_on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Any:
     """Fire the terminal-task callback, if any, and RETURN its result. Never
     raises. The scheduler returns ``CLI_OWNED_WAKE_SIGNAL`` when it suppresses
     the app wake in favor of the CLI's own delayed wake; the reader uses that to
-    arm its grace window. Returns ``None`` when there is no hook or it raised."""
+    arm its grace window. Returns ``None`` when there is no hook or it raised.
+
+    Also settles the durable parked marker (see the comment below) — that runs
+    whether or not a hook is registered, because a terminal with no wake behind
+    it is exactly the case that used to leave the marker stuck."""
+    result = None
     hook = _on_task_terminal
-    if hook is None:
-        return None
+    if hook is not None:
+        try:
+            result = hook(session_id, frame)
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "idle_reader: on_task_terminal hook failed for %s", session_id,
+                exc_info=True,
+            )
+            result = None
+    # Settle the durable parked marker on the SAME terminal that the scheduler
+    # just judged. ``turn_finalize`` writes the marker at turn end and, until
+    # this call existed, only the NEXT turn end cleared it — so a session whose
+    # last worker settled between turns with no wake behind it stayed marked
+    # "parked on an agent" forever (2026-09-05 audit F3: two sessions sat that
+    # way with both their tasks terminal). Clear-only and idempotent: it does
+    # nothing while other background work is still running, and nothing when
+    # there is no marker to drop.
     try:
-        result = hook(session_id, frame)
-        if asyncio.iscoroutine(result):
-            result = await result
-        return result
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "idle_reader: on_task_terminal hook failed for %s", session_id, exc_info=True
+        from app.core.turn_finalize import clear_parked_marker_if_idle
+
+        await clear_parked_marker_if_idle(session_id)
+    except Exception:  # noqa: BLE001 — bookkeeping never disturbs the reader.
+        logger.debug(
+            "idle_reader: parked-marker settle failed for %s", session_id,
+            exc_info=True,
         )
-        return None
+    return result
 
 
 # ---------------------------------------------------------------------------

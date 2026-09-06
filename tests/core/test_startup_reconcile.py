@@ -12,6 +12,7 @@ Covers:
   idempotent column migration from a v50-shaped database).
 """
 
+import json
 import uuid
 
 import pytest
@@ -117,6 +118,7 @@ async def test_idle_sessions_untouched_and_nothing_reconciled(mock_db, test_db):
         "stray_cli_reaped": 0,
         "background_task_rows_killed": 0,
         "turns_reaped": 0,
+        "engine_pending_repaired": 0,
     }
     assert _session_row(test_db, session_id)["status"] == "active"
     assert _error_log_rows(test_db, session_id) == []
@@ -205,6 +207,7 @@ async def test_reconcile_db_failure_does_not_raise(mock_db, monkeypatch):
         "stray_cli_reaped": 0,
         "background_task_rows_killed": 0,
         "turns_reaped": 0,
+        "engine_pending_repaired": 0,
     }
 
 
@@ -474,3 +477,80 @@ def test_column_migration_from_v50_database(mock_db, test_db):
 
     # Idempotent: a second run must not fail on the existing column.
     _run_column_migrations(ShimCursor(test_db.cursor()))
+
+
+# =============================================================================
+# Engine pending-set repair (2026-09-05 audit F1)
+# =============================================================================
+
+def _seed_orphan_pending(test_db, session_id, fluid_id):
+    """A session whose fluid log has a ``started`` with no terminal after it —
+    the shape a rehydrate re-creates as a phantom on every resume."""
+    test_db.execute(
+        "UPDATE sessions SET sdk_session_id = ? WHERE id = ?",
+        (fluid_id, session_id),
+    )
+    test_db.execute(
+        "INSERT INTO fluid_session_events (session_id, seq, event) VALUES (?, ?, ?)",
+        (fluid_id, 1, json.dumps({
+            "_cls": "SubagentEvent", "_v": 1, "session_id": fluid_id,
+            "seq": 1, "task_id": "ghost", "kind": "started",
+        })),
+    )
+    test_db.execute(
+        "INSERT INTO background_tasks "
+        "(task_id, session_id, instance_id, kind, status) VALUES (?, ?, ?, ?, ?)",
+        ("ghost", session_id, settings.effective_instance_id, "agent", "running"),
+    )
+    test_db.commit()
+
+
+async def test_boot_repairs_a_poisoned_engine_pending_set(mock_db, test_db):
+    session_id = _make_session(test_db)
+    _seed_orphan_pending(test_db, session_id, "ses_boot")
+
+    counts = await reconcile_from_durable_truth()
+
+    # The stale-row sweep settles the durable row first; that is what makes the
+    # orphan provable, and the repair then writes the terminal event fluid's
+    # rehydrate needs to stop listing it.
+    assert counts["background_task_rows_killed"] == 1
+    assert counts["engine_pending_repaired"] == 1
+
+    from app.core import pending_reconcile
+    assert pending_reconcile.orphan_pending_ids("ses_boot") == []
+
+    errors = test_db.execute(
+        "SELECT message FROM error_log WHERE message LIKE ?",
+        ("%still listed as pending%",),
+    ).fetchall()
+    assert len(errors) == 1
+
+
+async def test_boot_leaves_a_clean_pending_set_alone(mock_db, test_db):
+    session_id = _make_session(test_db)
+    test_db.execute(
+        "UPDATE sessions SET sdk_session_id = ? WHERE id = ?", ("ses_clean", session_id)
+    )
+    test_db.executemany(
+        "INSERT INTO fluid_session_events (session_id, seq, event) VALUES (?, ?, ?)",
+        [
+            (
+                "ses_clean", seq,
+                json.dumps({
+                    "_cls": "SubagentEvent", "_v": 1, "session_id": "ses_clean",
+                    "seq": seq, "task_id": "done", "kind": kind,
+                }),
+            )
+            for seq, kind in ((1, "started"), (2, "finished"))
+        ],
+    )
+    test_db.commit()
+
+    counts = await reconcile_from_durable_truth()
+
+    assert counts["engine_pending_repaired"] == 0
+    rows = test_db.execute(
+        "SELECT seq FROM fluid_session_events WHERE session_id = ?", ("ses_clean",)
+    ).fetchall()
+    assert len(rows) == 2
