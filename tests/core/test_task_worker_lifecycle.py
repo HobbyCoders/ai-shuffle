@@ -1039,3 +1039,22 @@ class TestAbandonedRetryStillTellsTheParent:
         assert frame["task_id"] == "w-9"
         assert frame["status"] == "error"
         assert task_registry.get_task("owner-1", "w-9")["status"] == "error"
+
+
+class TestRateLimitMisclassification:
+    """Every failure message carries a session UUID; some contain "429"."""
+
+    def test_a_uuid_containing_429_is_not_a_rate_limit(self):
+        text = (
+            "The worker forwarded no output within 90s, so its provider "
+            "connection never opened. Its session is "
+            "d59fe8cf-d16d-429c-b22f-bcd47a15d6fc."
+        )
+        assert pa.looks_rate_limited(text) is False
+        assert pa._failure_summary("error", text, 0).startswith(
+            "worker failed to start:"
+        )
+
+    def test_a_real_429_still_reads_as_one(self):
+        assert pa.looks_rate_limited("HTTP 429 from the provider") is True
+        assert pa.looks_rate_limited("status=429, body=...") is True

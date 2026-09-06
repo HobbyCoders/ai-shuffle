@@ -1251,11 +1251,15 @@ _RATE_LIMIT_MARKERS = (
     "tokens per min",
     " tpm",
     "(tpm)",
-    "429",
     "quota exceeded",
     "over capacity",
     "overloaded",
 )
+
+#: The HTTP status, as its own token. A bare ``"429"`` substring is NOT safe
+#: here: every failure message carries the worker's session id, and a UUID
+#: containing ``-429c-`` made a first-frame timeout read as a rate limit.
+_HTTP_429_RE = re.compile(r"(?<![0-9A-Za-z])429(?![0-9A-Za-z])")
 
 
 def looks_rate_limited(text: Optional[str]) -> bool:
@@ -1269,7 +1273,9 @@ def looks_rate_limited(text: Optional[str]) -> bool:
     if not text:
         return False
     lowered = text.lower()
-    return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
+    if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
+        return True
+    return bool(_HTTP_429_RE.search(lowered))
 
 
 def rate_limit_retry_after(text: Optional[str]) -> Optional[float]:
