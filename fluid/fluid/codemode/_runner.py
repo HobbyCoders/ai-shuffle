@@ -34,6 +34,7 @@ import re
 import struct
 import sys
 import traceback
+import types
 
 # ``-I`` drops the script dir from sys.path; re-add it for the sibling imports.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -327,8 +328,24 @@ _UNQUOTED_HINT = (
     "Use a raw string (r\"...\") for regexes and Windows paths."
 )
 
+# The tail of the tool call's own JSON envelope, left on the last line of the
+# cell: ``print(r)"}``. The model closed the `code` string and the argument
+# object in the source it was writing. It is the cheapest SyntaxError to
+# diagnose and the one an audited session hit on its very first tool call, so
+# it is checked before the heredoc story and answered in one line.
+_ENVELOPE_TAIL_RE = re.compile(r"""["']\s*\}\s*,?\s*$""")
+
+_ENVELOPE_HINT = (
+    'Hint: the cell ends with the tool call\'s own argument envelope — a stray '
+    '`"}` after your last statement. Those characters belong to the request, '
+    "not to the code. Delete them and re-issue the cell otherwise unchanged."
+)
+
 _UNTERMINATED_HINT = (
-    "Hint: the string literal never closes. The usual causes are a shell "
+    "Hint: the string literal never closes. Check the END of the cell first: a "
+    'stray `"}` or `\'}` after the last statement is the tool call\'s own '
+    "argument envelope leaking into the source — delete it and re-issue the "
+    "cell unchanged. Otherwise the usual causes are a shell "
     "heredoc (<<'EOF') nested in a Python string and a long prose argument — "
     "a commit message, a PR body, a markdown report — whose own quotes, "
     '``` fences or """ run into the literal that holds it. Give the prose its '
@@ -350,6 +367,76 @@ _STR_RESULT_HINT = (
     "Hint: a tool call returns text (str / ResultRef), never a dict — parse it "
     "with json.loads(...) when the tool emits JSON, or slice it as a string."
 )
+
+
+def _missing_name(exc: BaseException, message: str) -> str:
+    """The unbound name behind a NameError, from the attribute or the text."""
+    name = getattr(exc, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    match = re.search(r"name '([^']+)' is not defined", message)
+    return match.group(1) if match else ""
+
+
+def _name_error_hint(name: str) -> str:
+    """A NameError against a mounted tool means the namespace was reset.
+
+    Python answers with ``Did you mean: 'hash'?`` — a suggestion that is never
+    right for ``Bash``, ``Note`` or ``Ledger``, and four audited sessions lost
+    a cell to it. The kernel knows which names it mounts, so it can say the one
+    thing that helps: the tool is here, this namespace just does not have it
+    bound any more, and a kernel restart between turns is why.
+    """
+    if not name:
+        return ""
+    if name in _SOURCES:
+        return (
+            f"Hint: `{name}` is a tool mounted in this kernel but not bound in "
+            f"this namespace — `from tools import {name}` first (Python's own "
+            "'Did you mean' suggestion above is a builtin, not your tool). If "
+            "you imported it in an earlier turn, the kernel has restarted "
+            "since: every name bound by earlier cells is gone, so re-import "
+            "the tools this cell uses."
+        )
+    if name in _SKILLS:
+        return (
+            f"Hint: `{name}` is a saved skill — `from skills import {name}`. A "
+            "kernel restart between turns drops earlier imports, so re-import "
+            "it before use."
+        )
+    if name in vfs.PRELUDE_MODULES:
+        return (
+            f"Hint: `{name}` is pre-bound in every fresh cell, so it is missing "
+            "only because a cell rebound or deleted it — `import "
+            f"{name}` to get the module back."
+        )
+    return ""
+
+
+def _shadowed_module_hint(attr: str) -> str:
+    """A stdlib module shadowed by a variable holding a tool result.
+
+    ``re = Read(...)`` seven hundred sequence numbers earlier, then ``re.match``
+    in a later cell: the persistent namespace makes that failure arbitrarily
+    far from its cause, and the generic dict-vs-str hint pointed at the wrong
+    problem entirely.
+    """
+    if not attr:
+        return ""
+    for name in vfs.PRELUDE_MODULES:
+        value = _NS.get(name)
+        if value is None or isinstance(value, types.ModuleType):
+            continue
+        module = sys.modules.get(name)
+        if module is None or not hasattr(module, attr):
+            continue
+        return (
+            f"Hint: `{name}` in this kernel is bound to a tool result, not the "
+            f"stdlib module — a cell assigned it (`{name} = SomeTool(...)`), "
+            f"which shadows the pre-imported `{name}`. Rename that variable, "
+            f"or `import {name}` to get the module back."
+        )
+    return ""
 
 
 def _stub_signature(name: str) -> str:
@@ -386,6 +473,8 @@ def _syntax_hint(exc: SyntaxError) -> str:
     if "'await' outside function" in message:
         return _AWAIT_HINT
     text = (getattr(exc, "text", None) or "")
+    if _ENVELOPE_TAIL_RE.search(text.rstrip()):
+        return _ENVELOPE_HINT
     match = _BARE_ARG_RE.search(text)
     if match is not None and not _QUOTED_START_RE.match(match.group(2).strip()):
         return _UNQUOTED_HINT
@@ -431,8 +520,20 @@ def _error_hint(exc: BaseException) -> str:
     if isinstance(exc, TypeError) and "required positional argument" in message:
         name = message.split("(", 1)[0].strip().rsplit(".", 1)[-1] or "the tool"
         return _signature_hint(name)
-    if isinstance(exc, AttributeError) and "'str' object has no attribute" in message:
-        return _STR_RESULT_HINT
+    if isinstance(exc, NameError):
+        return _name_error_hint(_missing_name(exc, message))
+    if isinstance(exc, AttributeError) and "object has no attribute" in message:
+        attr = getattr(exc, "name", None)
+        if not isinstance(attr, str) or not attr:
+            match = re.search(r"has no attribute '([^']+)'", message)
+            attr = match.group(1) if match else ""
+        # A shadowed stdlib module is a more specific diagnosis than "tools
+        # return text", and it is the one that names the actual mistake.
+        shadow = _shadowed_module_hint(attr)
+        if shadow:
+            return shadow
+        if "'str' object has no attribute" in message:
+            return _STR_RESULT_HINT
     return ""
 
 

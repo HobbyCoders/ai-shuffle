@@ -13,7 +13,13 @@ error reports exactly what survived and what didn't).
 Timeout accounting only charges *kernel compute* time: each read segment (the
 time the child spends running until it either finishes or asks for a tool) is
 deducted from the budget, but the time the host spends servicing a host call —
-which can be an arbitrarily long parked permission prompt — is not.
+which can be an arbitrarily long parked permission prompt — is not. A single
+host call is nonetheless bounded (``KernelConfig.host_call_timeout``, and never
+below the cell's own declared timeout): an audited cell declaring ``timeout:
+30`` sat three hours on a hung browser MCP call, with no ToolResult, no
+TurnComplete and a session that still presented as running. Time the host spent
+waiting on a *human* is credited back, so an approval nobody answers for ten
+minutes is never mistaken for a hung tool.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ import struct
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from fluid.codemode.kernel import HostCall, HostReply, KernelResult
 from fluid.codemode.vfs import DEFAULT_ALLOWLIST
@@ -75,6 +82,14 @@ class KernelConfig:
     # cells are not picklable and are reported as dropped).
     checkpoint: bool = True
     checkpoint_max_bytes: int = 8 * 1024 * 1024
+    # Wall-clock ceiling for ONE host call, minus any time spent waiting on a
+    # human. The effective bound is ``max(cell timeout, this)``, so a cell that
+    # asks for a longer timeout gets it; 0 or less restores the old unbounded
+    # behaviour. It has to clear the longest legitimate single tool call (a
+    # Bash command may run for ten minutes), which is why it is not simply the
+    # cell's declared timeout — but it must exist, or a hung MCP call holds the
+    # turn open until the session ends.
+    host_call_timeout: float = 900.0
     python: str = field(default_factory=lambda: sys.executable)
 
     def boot_payload(self) -> dict:
@@ -91,6 +106,30 @@ class KernelConfig:
         }
 
 
+def _restart_notice(detail: str) -> str:
+    """The "your kernel restarted" line stamped onto the next cell's result.
+
+    A restart between turns left no trace at all: the next cell just raised
+    ``NameError: name 'Note' is not defined. Did you mean: 'None'?`` for a name
+    that had worked one turn earlier, and the model — told by run_python's own
+    description that kernel state persists — had no way to read that as a
+    restart. Four audited sessions lost a cell to it, one of them re-billing a
+    52k-token uncached prefix twice on the way.
+    """
+    if "namespace lost" in detail:
+        return (
+            "[kernel restarted since your last cell and the namespace could "
+            "not be restored: every name bound in earlier cells is gone. "
+            "Re-import the tools this cell uses (`from tools import Read, "
+            "Bash`) and rebuild any variables you were relying on.]"
+        )
+    return (
+        f"[kernel restarted since your last cell{detail}. Functions and "
+        "classes defined in cells never survive a restart; if a name comes "
+        "back undefined, re-import the tool or redefine it.]"
+    )
+
+
 class SubprocessKernel:
     def __init__(self, config: KernelConfig | None = None) -> None:
         self.config = config or KernelConfig()
@@ -100,6 +139,11 @@ class SubprocessKernel:
         self._job_handle: int | None = None  # Windows Job Object (memory limit)
         self._ckpt_vars: dict[str, str] | None = None  # last namespace checkpoint
         self._ckpt_dropped: list[str] = []  # unpicklables at checkpoint time
+        # A restart the model has not been told about yet. Set on every
+        # restart, cleared once it has ridden out on a cell result — the exec
+        # paths that already inline it in their error clear it themselves.
+        self._restart_note = ""
+        self._ever_started = False
         # The child's stderr, drained as it arrives (a full pipe would block
         # the child) into a bounded tail kept for the death diagnostic.
         self._stderr_task: asyncio.Task | None = None
@@ -135,6 +179,7 @@ class SubprocessKernel:
             )
         await self._send({"kind": "boot", "config": self.config.boot_payload()})
         await self._read_frame()  # {"kind": "ready"}
+        self._ever_started = True
         if self._vfs_sources or self._skill_sources:
             await self._send_vfs()
 
@@ -270,9 +315,17 @@ class SubprocessKernel:
         """Restart the kernel and restore the last checkpoint.
 
         Returns the note appended to the exec error message, so the model
-        knows exactly what state survived.
+        knows exactly what state survived, and arms :attr:`_restart_note` for
+        the NEXT cell — a kernel recycled between turns produced no signal at
+        all, and four audited sessions lost a cell to a bare ``NameError: name
+        'Note' is not defined. Did you mean: 'None'?`` after a park.
         """
         await self._restart()
+        detail = await self._restore()
+        self._restart_note = _restart_notice(detail)
+        return detail
+
+    async def _restore(self) -> str:
         if not self.config.checkpoint or not self._ckpt_vars:
             return " (namespace lost)"
         try:
@@ -291,22 +344,90 @@ class SubprocessKernel:
         return note + ")"
 
     # ── exec ──
+    def _host_bound(self, timeout: float) -> float:
+        """Seconds one host call may take, 0 for unbounded."""
+        ceiling = float(self.config.host_call_timeout or 0)
+        if ceiling <= 0:
+            return 0.0
+        return max(float(timeout), ceiling)
+
+    async def _call_host(
+        self,
+        on_host_call: HostCall,
+        name: str,
+        kwargs: dict,
+        bound: float,
+        credit: Any,
+    ) -> HostReply:
+        """Await one host call under ``bound`` seconds of non-human wall clock.
+
+        On expiry the call is cancelled and a ``TimeoutError`` is raised; the
+        caller answers the child with an error reply, so the cell aborts with a
+        traceback and its committed-call manifest instead of the kernel being
+        torn down. Time already spent waiting on a human is credited back as it
+        accrues, which is what keeps an in-kernel AskUser or a parked
+        permission prompt from being cancelled as a hang.
+        """
+        if bound <= 0:
+            return await on_host_call(name, kwargs)
+        loop = asyncio.get_running_loop()
+        task = asyncio.ensure_future(on_host_call(name, kwargs))
+        deadline = loop.time() + bound
+        credited = 0.0
+        try:
+            while True:
+                wait_for = deadline - loop.time()
+                if wait_for > 0:
+                    done, _ = await asyncio.wait({task}, timeout=wait_for)
+                    if task in done:
+                        return task.result()
+                try:
+                    spent = float(credit() or 0.0) if credit is not None else 0.0
+                except Exception:  # noqa: BLE001 - a clock must never break a call
+                    spent = 0.0
+                if spent > credited:
+                    deadline += spent - credited
+                    credited = spent
+                    continue
+                raise TimeoutError
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await asyncio.wait({task}, timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+
     async def exec(
-        self, code: str, *, timeout: float, on_host_call: HostCall
+        self,
+        code: str,
+        *,
+        timeout: float,
+        on_host_call: HostCall,
+        host_wait_credit: Any = None,
     ) -> KernelResult:
         if self._proc is None or self._proc.returncode is not None:
-            await self._spawn()
+            # The kernel died between turns (eviction, an OOM kill, a host
+            # restart). This used to be a bare respawn: the checkpoint was
+            # never replayed, so the next cell met a fresh empty namespace and
+            # a NameError with no explanation. Restore it, and arm the notice.
+            if self._ever_started:
+                await self._restart_and_restore()
+            else:
+                await self._spawn()
         await self._send({"kind": "exec", "code": code})
 
         loop = asyncio.get_running_loop()
         host_calls = 0
         remaining = max(timeout, 0.001)
+        host_bound = self._host_bound(timeout)
         while True:
             started = loop.time()
             try:
                 frame = await asyncio.wait_for(self._read_frame(), remaining)
             except TimeoutError:
                 note = await self._restart_and_restore()
+                self._restart_note = ""  # said here; not repeated next cell
                 return KernelResult(
                     error=(
                         f"execution exceeded {timeout:.1f}s wall clock; "
@@ -323,6 +444,7 @@ class SubprocessKernel:
                         pass
                 reason = self._death_note(proc)
                 note = await self._restart_and_restore()
+                self._restart_note = ""
                 return KernelResult(
                     error=f"{reason}; restarted{note}", host_calls=host_calls
                 )
@@ -340,9 +462,29 @@ class SubprocessKernel:
             kind = frame.get("kind") if frame else None
             if kind == "host_call":
                 host_calls += 1
-                reply = await on_host_call(frame["name"], frame.get("kwargs") or {})
-                await self._send(_reply_frame(reply))  # host-service time is not charged
+                name = frame["name"]
+                try:
+                    reply = await self._call_host(
+                        on_host_call, name, frame.get("kwargs") or {},
+                        host_bound, host_wait_credit,
+                    )
+                except TimeoutError:
+                    reply = HostReply(error=(
+                        f"{name} did not return within {host_bound:.0f}s and "
+                        "was cancelled — that is this cell's ceiling for one "
+                        "tool call (time spent waiting on a human does not "
+                        "count). The tool is hung or the target is not "
+                        "responding: do not simply re-issue the same call. "
+                        "Try a different route, or run it under a Monitor so "
+                        "the wait happens outside the turn."
+                    ))
+                # Host-service time is not charged against the compute budget.
+                await self._send(_reply_frame(reply))
             elif kind == "done":
+                # Read the pending notice BEFORE checkpointing: a checkpoint
+                # that fails restarts the kernel, and that restart belongs to
+                # the NEXT cell's notice, not to this one's.
+                notes, self._restart_note = self._restart_note, ""
                 if self.config.checkpoint:
                     await self._take_checkpoint()
                 return KernelResult(
@@ -350,9 +492,11 @@ class SubprocessKernel:
                     value_repr=frame.get("value_repr", ""),
                     error=frame.get("error"),
                     host_calls=host_calls,
+                    notes=notes,
                 )
             else:  # unexpected EOF or malformed frame
                 note = await self._restart_and_restore()
+                self._restart_note = ""
                 return KernelResult(
                     error=f"kernel produced no result{note}", host_calls=host_calls
                 )

@@ -215,7 +215,10 @@ async def test_ledger_remove_takes_one_whole_entry(tmp_path) -> None:
         {"action": "remove", "section": "decisions", "text": "use postgres"}, ctx
     )
     assert not out.is_error
-    assert "removed 1 decisions entry" in out.text and "1 remain" in out.text
+    # Round 7: a delta with counts, not the whole ledger echoed back.
+    assert out.text == (
+        'removed 1 decisions entry ("use postgres") — 1 in decisions, 1 total'
+    )
     show = await ledger_handler({"action": "show"}, ctx)
     assert "use postgres" not in show.text and "use redis" in show.text
 

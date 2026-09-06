@@ -65,18 +65,30 @@ class KernelResult:
     holds a one-line exception summary if the cell raised. ``host_calls`` counts
     the tool calls made — used for the "task completed using ≥N tools" exit
     criterion and for observability.
+
+    ``notes`` is kernel-lifecycle news the cell itself cannot see: it carries
+    the "this kernel restarted since your last cell" notice, which is the only
+    warning a model gets that names bound in earlier turns may be gone. It
+    rides out even on a cell that succeeded.
     """
 
     stdout: str = ""
     value_repr: str = ""
     error: str | None = None
     host_calls: int = 0
+    notes: str = ""
 
 
-# The host-call callback: (tool_name, kwargs) -> HostReply. Awaited by the
-# kernel; may take arbitrarily long (e.g. parked on a permission prompt) without
-# counting against the exec wall-clock budget.
+# The host-call callback maps a tool name and arguments to HostReply. Its wait is outside the cell compute
+# budget but is still bounded by KernelConfig.host_call_timeout, so a hung MCP call cannot hold the turn
+# indefinitely.
 HostCall = Callable[[str, dict], Awaitable[HostReply]]
+
+# Seconds the host has spent so far in THIS cell waiting on a human (a parked
+# permission prompt, an MRTR question). The kernel credits it back against the
+# host-call bound, so an approval a user takes ten minutes to answer never
+# looks like a hung tool. Optional: without it, human waits are charged.
+HostWaitCredit = Callable[[], float]
 
 
 @runtime_checkable
@@ -84,7 +96,12 @@ class Kernel(Protocol):
     async def start(self) -> None: ...
 
     async def exec(
-        self, code: str, *, timeout: float, on_host_call: HostCall
+        self,
+        code: str,
+        *,
+        timeout: float,
+        on_host_call: HostCall,
+        host_wait_credit: HostWaitCredit | None = None,
     ) -> KernelResult: ...
 
     async def stop(self) -> None: ...

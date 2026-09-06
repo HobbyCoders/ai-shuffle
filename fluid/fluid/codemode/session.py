@@ -60,8 +60,13 @@ CODE_MODE_SOURCE = "codemode"
 SKILLS_SOURCE = "skills"
 
 _RUN_PYTHON_DESC = (
-    "Execute Python in a persistent per-session kernel (state survives across "
-    "calls). Discover tools with the list_tools/search_tools/read_tool_docs "
+    "Execute Python in a persistent per-session kernel: names you bind stay "
+    "bound from one cell to the next. Persistence is not a guarantee across "
+    "TURNS — the kernel can be recycled while a turn is parked, and when that "
+    "happens the next cell's result opens with a note saying so; a NameError "
+    "for a tool you imported earlier means exactly that, so re-import and "
+    "carry on rather than treating it as a mistake. "
+    "Discover tools with the list_tools/search_tools/read_tool_docs "
     "tools — they are separate top-level calls, not functions inside the "
     "kernel; from inside a cell, `dir(tools)` lists what is mounted. Then "
     "`from tools import Read, Edit` and call them as plain synchronous "
@@ -116,6 +121,52 @@ def _run_python_desc(stdout_cap: int = KernelConfig.stdout_cap) -> str:
         "to print is already in the kernel as a ResultRef, so slice it (or "
         "recover it from `_refs[N]`) rather than re-running the tool."
     )
+
+class _HumanWait:
+    """A stopwatch for the parts of a cell that are waiting on a person.
+
+    The kernel bounds a single host call, and a permission prompt or an
+    in-kernel AskUser is a host call that legitimately takes as long as the
+    user takes. Entering the context marks the wait; ``seconds`` reports the
+    total INCLUDING a wait still in flight, so the kernel can extend its
+    deadline while the prompt is still on screen rather than only afterwards.
+    """
+
+    def __init__(self) -> None:
+        self._total = 0.0
+        self._since: float | None = None
+        self._depth = 0
+
+    @staticmethod
+    def _now() -> float:
+        import asyncio
+
+        try:
+            return asyncio.get_running_loop().time()
+        except RuntimeError:  # pragma: no cover - always called inside a loop
+            import time
+
+            return time.monotonic()
+
+    def __enter__(self) -> _HumanWait:
+        if self._depth == 0:
+            self._since = self._now()
+        self._depth += 1
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self._depth -= 1
+        if self._depth <= 0:
+            self._depth = 0
+            if self._since is not None:
+                self._total += self._now() - self._since
+            self._since = None
+
+    def seconds(self) -> float:
+        if self._since is None:
+            return self._total
+        return self._total + (self._now() - self._since)
+
 
 # Journal previews are bounded so journal.jsonl (synthesis input) stays small.
 _JOURNAL_STDOUT_CAP = 1500
@@ -212,6 +263,10 @@ class CodeModeSession:
         # projection is rebuilt per call, so a later change takes effect at once
         # (and the VFS signature shift re-mounts the kernel's ``tools`` package).
         self.tool_filter: Callable[[str], bool] | None = tool_filter
+        # Tool names whose stub this session has already handed to the model.
+        # Not cleared per turn: the point is exactly to notice a re-fetch many
+        # turns later.
+        self._docs_served: set[str] = set()
         # "Is plan mode on right now?" — ``None`` for hosts with no plan mode.
         # Same live-predicate contract as ``tool_filter``: the engine stamps its
         # own flag in, the projection is rebuilt per call, and the VFS signature
@@ -299,6 +354,18 @@ class CodeModeSession:
         src = self._projection().docs(name)
         if src is None:
             return f"No such tool: {name!r}. Try list_tools or search_tools."
+        # Audited sessions re-fetched the same four browser stubs an hour
+        # apart with the first copy still in context, eight calls for four
+        # signatures. The docs are returned anyway — a compaction may have
+        # taken them — but the model is told it is probably already holding
+        # them.
+        if name in self._docs_served:
+            return (
+                f"(You already read {name}'s docs earlier in this session; "
+                "unless a compaction has since dropped them, this stub is "
+                "still in your context.)\n" + src
+            )
+        self._docs_served.add(name)
         return src
 
     # ── run_python (driven by the engine, not the registry) ──
@@ -350,13 +417,21 @@ class CodeModeSession:
             timeout = self._exec_timeout
         kernel = await self._ensure_kernel()
 
+        # Every second this cell spends waiting on a HUMAN. The kernel credits
+        # it back against the per-host-call ceiling, so a permission prompt or
+        # an in-kernel AskUser that a user answers in their own time is never
+        # cancelled as a hung tool — only a tool that is genuinely not
+        # answering is.
+        human_wait = _HumanWait()
+
         # Bridge: the JSON-path gate for in-kernel tool calls. Its ``ask`` verdict
         # is surfaced as an engine PermissionRequest (parking the turn until the
         # client answers) via on_permission.
         async def _on_permission(spec: ToolSpec, tool_input: dict) -> bool:
-            verdict, _message, _updated_input = await loop._await_permission(
-                sid, turn_id, spec.name, new_id("call"), tool_input, spec.risk
-            )
+            with human_wait:
+                verdict, _message, _updated_input = await loop._await_permission(
+                    sid, turn_id, spec.name, new_id("call"), tool_input, spec.risk
+                )
             return verdict == "allow"
 
         # MRTR round-trip: an in-kernel AskUser/StopPlanning (or an elicitating
@@ -371,7 +446,8 @@ class CodeModeSession:
             async def on_input_required(
                 name: str, tool_use_id: str | None, marker: Any
             ) -> dict | None:
-                return await collect(sid, turn_id, name, tool_use_id, marker)
+                with human_wait:
+                    return await collect(sid, turn_id, name, tool_use_id, marker)
 
         # No engine ⇒ allow-all, matching the JSON path (which skips gating when
         # ``permissions is None``).
@@ -471,7 +547,10 @@ class CodeModeSession:
             ))
             return reply
 
-        result = await kernel.exec(code, timeout=timeout, on_host_call=_host_call)
+        result = await kernel.exec(
+            code, timeout=timeout, on_host_call=_host_call,
+            host_wait_credit=human_wait.seconds,
+        )
         self._record_cell(code, result, called_tools)
 
         parts: list[str] = []
@@ -480,6 +559,10 @@ class CodeModeSession:
         if result.value_repr:
             parts.append(f"=> {result.value_repr}")
         text = "\n".join(parts) if parts else "(no output)"
+        # Kernel-lifecycle news leads: it reframes everything under it, and a
+        # NameError read without it looks like the model's own mistake.
+        if result.notes:
+            text = f"{result.notes}\n{text}"
         if result.error:
             text = (text + "\n" if parts else "") + f"Error: {result.error}"
             # A cell aborts at the first ToolError, so the mutations that
