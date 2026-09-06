@@ -882,7 +882,28 @@ async def _enqueue_context_wake(
     """Enqueue a fresh context-carrying wake turn for the OWN lane's fall-through
     enqueue. Reads the session's latest context turn for
     profile/project/worktree/parent linkage, attaches the ``frames`` and their
-    ``task_ids`` to the payload, and returns the enqueued turn."""
+    ``task_ids`` to the payload, and returns the enqueued turn.
+
+    Belt and braces on the round-7 Stop contract: the caller already refuses to
+    reach here for a user-stopped session, and this is the last gate before a
+    row is actually written, so it refuses too. Answers a turn-shaped dict with
+    ``id=None`` — the caller only logs the id and kicks — so a refusal enqueues
+    nothing and starts nothing."""
+    try:
+        from app.core.task_registry import task_registry
+
+        if task_registry.is_user_stopped(session_id):
+            logger.info(
+                "turn_scheduler: refusing a %s wake for %s — the user stopped "
+                "this session (tasks=%s)",
+                source, session_id, task_ids,
+            )
+            return {"id": None, "session_id": session_id, "source": source}
+    except Exception:  # noqa: BLE001 — the guard never breaks an enqueue.
+        logger.debug(
+            "turn_scheduler: stop-latch check failed for %s", session_id,
+            exc_info=True,
+        )
     context = await asyncio.to_thread(_latest_context_turn, session_id) or {}
     payload = _context_payload(context)
     # One task_id, one frame — the wake turn's payload is what a later merge
@@ -1281,6 +1302,20 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
         task_id = frame.get("task_id")
         from app.core.task_registry import task_registry
 
+        # STOP SEMANTICS (round 7). The user pressed Stop and has not messaged
+        # this session since, so NOTHING here schedules a turn — not a task the
+        # per-task suppression below never saw (a nested worker registered after
+        # the sweep, a shell whose watcher was mid-settle), not a late frame for
+        # one it did. The frame is still recorded everywhere else; only the wake
+        # decision is skipped. Cleared by the user's next message
+        # (``turn_manager._submit_blocking``).
+        if task_registry.is_user_stopped(session_id):
+            logger.info(
+                "turn_scheduler: wake suppressed for %s — the user stopped this "
+                "session (task %s, status %s)",
+                session_id, task_id, frame.get("status"),
+            )
+            return
         # An explicit Stop suppresses the canceled task before issuing provider
         # cancellation. Check at the entry point — ahead of both CLI-owned and
         # app-owned wake paths — so every terminal-frame race is a no-op.

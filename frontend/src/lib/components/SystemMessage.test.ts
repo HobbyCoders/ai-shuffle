@@ -141,6 +141,26 @@ describe('SystemMessage — task_updated / task_notification', () => {
 		expect(container.querySelector('.animate-spin')).toBeNull();
 	});
 
+	// A task somebody stopped on purpose — the user's Stop, or an agent's own
+	// TaskStop of a service it no longer needs — is neither a failure nor a
+	// success. It used to render the green tick (or, as `killed`, the red cross),
+	// so a deliberate stop of a healthy dev server read as a crash.
+	it.each(['cancelled', 'stopped'])('renders a stop square for a %s task', (status) => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'task_updated',
+					systemData: { task_id: 'stop0001', patch: { status, description: 'npm run dev' } }
+				})
+			}
+		});
+
+		expect(container.querySelector('.text-amber-500')).not.toBeNull();
+		expect(container.querySelector('.text-red-500')).toBeNull();
+		expect(container.querySelector('.text-green-500')).toBeNull();
+		expect(container.querySelector('.animate-spin')).toBeNull();
+	});
+
 	it('renders a green check for a completed task', () => {
 		const { container } = render(SystemMessage, {
 			props: {

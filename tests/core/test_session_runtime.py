@@ -710,8 +710,10 @@ async def test_interrupt_honors_durable_stop_background_on_owning_runner(mock_db
         )
 
     assert state == "aborted"
-    # Same shell-sparing semantics as the WebSocket Stop that set the bit.
-    stop_all.assert_awaited_once_with("s9-bg", include_shells=False)
+    # Same semantics as the WebSocket Stop that set the bit (round 7): kill ALL
+    # of the session's work and latch the session stopped, HERE — this is the
+    # runner that owns the tasks the foreign WebSocket cannot see.
+    stop_all.assert_awaited_once_with("s9-bg", user_stop=True)
 
 
 async def test_interrupt_cancels_pending_prompts_before_signalling_the_sdk(mock_db):

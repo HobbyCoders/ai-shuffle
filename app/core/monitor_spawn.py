@@ -560,10 +560,19 @@ def _cause_line(reason: str, recorded_summary: str, *, serves: bool) -> str:
             "Stopped: this serving task was left running while its session sat "
             "idle. It did not fail — start it again when you need it."
         )
-    from app.core.task_registry import SERVER_SHUTDOWN_REASON, USER_STOP_REASON
+    from app.core.task_registry import (
+        AGENT_STOP_REASON,
+        SERVER_SHUTDOWN_REASON,
+        USER_STOP_REASON,
+    )
 
     if reason == USER_STOP_REASON:
         who = "Stopped by the user."
+    elif reason == AGENT_STOP_REASON:
+        # The reason the reason-less branch below used to cover: the stop path
+        # now stamps it explicitly so the chip can tell a deliberate stop from
+        # a reap, and the wording it produced stays exactly the same.
+        who = "Stopped deliberately by the app or by an agent, not by a crash."
     elif reason == SERVER_SHUTDOWN_REASON:
         who = "Stopped because the server restarted."
     elif reason:
@@ -812,7 +821,13 @@ async def _enforce_deadline(
     try:
         from app.mcp.builtin_tools import stop_background_shell_task
 
-        await stop_background_shell_task(task.task_id, session_id)
+        # ``suppress_wake=False``: a task killed by its own time budget is the
+        # one deliberate stop the parent did NOT ask for, so its terminal frame
+        # must still reach the model. Every other caller of that function is a
+        # stop somebody chose and defaults to suppressing the notification.
+        await stop_background_shell_task(
+            task.task_id, session_id, suppress_wake=False,
+        )
     except Exception:  # noqa: BLE001 — a stop failure must not strand the wake
         logger.warning(
             "monitor_spawn: stopping timed-out task %s failed",

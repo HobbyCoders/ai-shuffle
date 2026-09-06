@@ -503,7 +503,12 @@ def _foreign_task_error(task_id: str, owner_session_id: Optional[str]) -> Dict[s
 
 
 async def stop_background_shell_task(
-    task_id: str, session_id: Optional[str] = None
+    task_id: str,
+    session_id: Optional[str] = None,
+    *,
+    summary: Optional[str] = None,
+    reason: Optional[str] = None,
+    suppress_wake: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Force-stop a Monitor shell background task by id.
 
@@ -520,6 +525,25 @@ async def stop_background_shell_task(
     ``netstat`` showed the port bound and the agent had to ``taskkill`` by
     hand. When descendants survive, this says so: ``running`` stays true and
     ``warning`` names the pids (and the ports they still hold).
+
+    ``summary``/``reason`` attribute the kill on the registry row (and so on the
+    terminal chip built from it). Optional and never destructive: an attribution
+    already on the record — the one ``monitor_spawn._enforce_deadline`` stamps
+    before it calls here, for instance — always wins, and a shell stopped with
+    no attribution at all falls back to a plain "stopped" line rather than the
+    blank one it used to get.
+
+    ``suppress_wake`` (ON by default, because every caller but one is a
+    DELIBERATE stop) means the terminal frame the watcher fires a moment from
+    now must not reach the model: no wake turn and no mid-turn steer. The
+    audited case is an agent stopping its own stale CI watcher and then being
+    interrupted twenty seconds later with a ``<task-notification>`` telling it
+    the thing it just stopped had stopped. The engine is still told the task is
+    terminal HERE, since the suppressed frame will not get that far — without
+    it fluid keeps the dead id in ``_background_pending`` and lists it on every
+    later ``SessionParked``. The deadline enforcer passes ``suppress_wake
+    =False``: a task killed by its own time budget is news the parent does not
+    have, and being woken with it is the point.
 
     Returns a small status dict when ``task_id`` is a known shell task, or
     ``None`` when no such shell task exists — letting callers fall through to
@@ -541,10 +565,38 @@ async def stop_background_shell_task(
     # running — the shell itself is gone and nothing would ever settle it — but
     # they are reported to the caller.
     if session_id:
-        from app.core.task_registry import task_registry
-        _registry_safe(
-            lambda: task_registry.complete_task(session_id, task_id, "killed")
+        from app.core.task_registry import (
+            AGENT_STOP_REASON,
+            AGENT_STOP_SUMMARY,
+            task_registry,
         )
+
+        # Default attribution: this function only ever runs because SOMEBODY
+        # asked for the stop, and by far the most common somebody is the model
+        # firing ``TaskStop`` at its own watcher or dev server. Saying so keeps
+        # that out of the failure vocabulary (the chip reads "cancelled", not a
+        # red cross) and out of the blank-summary bucket. Callers with a better
+        # answer pass one; an attribution ALREADY on the row always wins — the
+        # timeout path stamps its own before calling here and relies on this
+        # leaving it alone (``complete_task`` only overwrites what it is given).
+        recorded = task_registry.get_task(session_id, task_id) or {}
+        kill_summary = (
+            None if recorded.get("summary") else (summary or AGENT_STOP_SUMMARY)
+        )
+        kill_reason = (
+            None if recorded.get("reason") else (reason or AGENT_STOP_REASON)
+        )
+        _registry_safe(
+            lambda: task_registry.complete_task(
+                session_id, task_id, "killed",
+                summary=kill_summary, reason=kill_reason,
+            )
+        )
+        if suppress_wake:
+            _registry_safe(
+                lambda: task_registry.suppress_wake(session_id, task_id)
+            )
+            await _retire_stopped_shell(session_id, task_id)
     result: Dict[str, Any] = {
         "task_id": task_id,
         "kind": "shell",
@@ -558,6 +610,35 @@ async def stop_background_shell_task(
             "TaskStop left orphans for shell %s: %s", task_id, survivors
         )
     return result
+
+
+async def _retire_stopped_shell(session_id: str, task_id: str) -> None:
+    """Tell the ENGINE a deliberately-stopped shell is terminal. Never raises.
+
+    The wake-suppression above drops the watcher's terminal frame at the
+    scheduler's entry point, which is what stops the pointless notification —
+    but that frame is also what normally submits the ``BackgroundTaskFinished``
+    fluid needs to drop the id from ``_background_pending``. Submitting it here
+    keeps both properties: nothing wakes, and nothing is parked on a task that
+    is already dead. ``retire_task_terminals`` is ``wake=False`` by
+    construction, so this cannot start a turn.
+    """
+    try:
+        from app.core import turn_scheduler
+        from app.core.task_registry import task_registry
+
+        record = task_registry.get_task(session_id, task_id) or {}
+        await turn_scheduler.retire_task_terminals(session_id, [{
+            "task_id": task_id,
+            "status": record.get("status") or "killed",
+            "summary": record.get("summary") or "",
+            "kind": "shell",
+        }])
+    except Exception:  # noqa: BLE001 — bookkeeping never fails a stop.
+        logger.debug(
+            "engine retirement failed for stopped shell %s/%s",
+            session_id, task_id, exc_info=True,
+        )
 
 
 # Strong references to in-flight reap tasks so the fire-and-forget scheduler

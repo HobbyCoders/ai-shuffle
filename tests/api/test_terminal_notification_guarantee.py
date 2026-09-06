@@ -489,7 +489,10 @@ async def test_stop_session_task_live_agent_surfaces_terminal_exactly_once():
     await _drain_terminal_surface()
     rows = await _terminal_rows("t-once")
     assert len(rows) == 1, f"expected exactly ONE terminal surface, got {len(rows)}"
-    assert rows[0]["metadata"]["system_data"].get("status") == "killed"
+    # The ROW keeps the registry vocabulary; the CHIP says the stop was
+    # deliberate, so a task the user stopped does not read as a crash.
+    assert rows[0]["metadata"]["system_data"].get("status") == "cancelled"
+    assert rows[0]["metadata"]["system_data"].get("reason") == USER_STOP_REASON
     assert task_registry.get_task(SESSION, "t-once")["status"] == "killed"
 
 

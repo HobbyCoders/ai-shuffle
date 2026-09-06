@@ -875,6 +875,16 @@ class SessionRuntime:
             #     block the self-heal (that would re-introduce the stuck-parked
             #     stick this heal exists to clear). Best-effort: a settle failure
             #     must never delay/kill the turn.
+            #
+            #     "stale" is the exceptional case, not the common one: the
+            #     ORDINARY unpark passes through here with its parked row just
+            #     resolved, and settling it is the normal hand-off, not a
+            #     repair. (An audit read the old "self-healed N stale parked
+            #     turn(s)" line as evidence of a fault because it fires on
+            #     essentially every unpark.) The Stop path now settles parked
+            #     rows itself (``query_session_lifecycle.enter_user_stop``), so
+            #     a session the user stopped no longer waits for its next turn
+            #     to stop reporting itself parked.
             try:
                 from app.core.task_registry import task_registry
 
@@ -884,7 +894,7 @@ class SessionRuntime:
                     )
                     if settled:
                         logger.info(
-                            "SessionRuntime: self-healed %d stale parked turn(s) "
+                            "SessionRuntime: settled %d resolved parked turn(s) "
                             "for %s at turn %s start", settled, sid, tid,
                         )
             except Exception:
@@ -2271,11 +2281,18 @@ class SessionRuntime:
             if interrupted_row and interrupted_row.get("stop_background"):
                 from app.core.query_session_lifecycle import stop_all_background_tasks
 
-                # Same semantics as the WebSocket Stop that set the bit: end the
-                # turn's own background work, leave a healthy Monitor shell (the
-                # user's dev server) running. See handle_stop's STOP SEMANTICS
-                # note for why, and for what still kills shells.
-                await stop_all_background_tasks(sid, include_shells=False)
+                # Same semantics as the WebSocket Stop that set the bit (round
+                # 7): end ALL of the session's background work — sub-agents and
+                # their descendants, provider-lane workers, Monitor shells
+                # including serving tasks and watchers — and quiesce the session
+                # so nothing wakes it until the user's next message. Running it
+                # HERE as well as on the WebSocket is what makes that latch
+                # cross-runner correct: the WebSocket may live on an install
+                # whose in-memory registry cannot see this runner's tasks, and
+                # this is the runner that actually owns them. Deliberately
+                # idempotent — the second call finds no active tasks and simply
+                # re-asserts the latch. See handle_stop's STOP SEMANTICS note.
+                await stop_all_background_tasks(sid, user_stop=True)
         except Exception:
             logger.warning(
                 "SessionRuntime: background-task stop failed for %s", sid,
