@@ -676,7 +676,8 @@ class Settings(BaseSettings):
     # "Baseline tests are running. No files changed yet." and that interim
     # sentence became its report and its registry summary. Work still
     # outstanding when this expires fails the worker instead of booking an
-    # interim note as a result. 0 disables the drain.
+    # interim note as a result. 0 disables the WAIT, not the check: a worker
+    # that ends with live work then fails immediately.
     # Override via TASK_WORKER_BACKGROUND_SETTLE_SECONDS.
     task_worker_background_settle_seconds: float = 120.0
 

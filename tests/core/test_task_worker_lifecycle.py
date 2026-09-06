@@ -72,12 +72,22 @@ class _FakeTurnManager:
         self.interrupts = []
         #: Set by a test to stall ``wait_session_idle`` forever.
         self.hang = False
+        #: Called with the worker's session id on the FIRST idle wait — the
+        #: only hook a test has for "the worker's turn is under way", which is
+        #: where a worker would start a Monitor of its own.
+        self.on_wait = None
+        self.waits = 0
+        self._waited = False
 
     def submit(self, session_id, source, **kwargs):
         self.submitted.append({"session_id": session_id, "source": source})
         return "turn-1"
 
     async def wait_session_idle(self, session_id, timeout=300.0):
+        self.waits += 1
+        if self.on_wait is not None and not self._waited:
+            self._waited = True
+            self.on_wait(session_id)
         if self.hang:
             await asyncio.sleep(3600)
         return True
@@ -809,18 +819,16 @@ class TestWorkerEndsWithOutstandingWork:
         monkeypatch.setattr(
             cfg.settings, "task_worker_background_settle_seconds", 0.05, raising=False
         )
-        # The worker starts a Monitor and then ends its turn. Its session id is
-        # allocated by the dispatch, so register the shell from inside the
-        # outcome read — the last hook that runs before the report is built.
-        started = {}
-
-        def _final_text(sid):
-            if not started:
-                started["sid"] = sid
-                task_registry.start_task(sid, "mon-1", "shell", "pytest tests/core")
-            return "Baseline tests are running. No files changed yet."
-
-        monkeypatch.setattr(pa, "final_assistant_text", _final_text)
+        # The worker starts a Monitor and then ends its turn without waiting
+        # for it. Its session id is allocated by the dispatch, so the shell is
+        # registered from the idle-wait hook.
+        worker_env.tm.on_wait = lambda sid: task_registry.start_task(
+            sid, "mon-1", "shell", "pytest tests/core"
+        )
+        monkeypatch.setattr(
+            pa, "final_assistant_text",
+            lambda sid: "Baseline tests are running. No files changed yet.",
+        )
 
         outcome = _run(pa.dispatch_worker(
             parent_session_id="parent-1",
@@ -850,19 +858,18 @@ class TestWorkerEndsWithOutstandingWork:
         )
         state = {}
 
-        def _final_text(sid):
-            if "sid" not in state:
-                state["sid"] = sid
-                task_registry.start_task(sid, "mon-2", "shell", "npm test")
+        def _start_monitor(sid):
+            state["sid"] = sid
+            task_registry.start_task(sid, "mon-2", "shell", "npm test")
 
-                async def _finish():
-                    await asyncio.sleep(0.02)
-                    task_registry.complete_task(sid, "mon-2", "completed")
+            async def _finish():
+                await asyncio.sleep(0.02)
+                task_registry.complete_task(sid, "mon-2", "completed")
 
-                state["task"] = asyncio.ensure_future(_finish())
-            return "All 42 tests pass."
+            state["task"] = asyncio.ensure_future(_finish())
 
-        monkeypatch.setattr(pa, "final_assistant_text", _final_text)
+        worker_env.tm.on_wait = _start_monitor
+        monkeypatch.setattr(pa, "final_assistant_text", lambda sid: "All 42 tests pass.")
 
         outcome = _run(pa.dispatch_worker(
             parent_session_id="parent-1",
@@ -875,6 +882,10 @@ class TestWorkerEndsWithOutstandingWork:
         record = task_registry.get_task("parent-1", outcome.session_id)
         assert record["status"] == "completed"
         assert record["summary"] == "All 42 tests pass."
+        # The drain re-enters the idle wait, so a WAKE turn the settling work
+        # triggers is waited out and read as the worker's real final turn —
+        # rather than the interim text the first turn ended on.
+        assert worker_env.tm.waits > 1
         task_registry.clear_session(outcome.session_id)
 
     def test_a_clean_worker_pays_nothing_for_the_drain(self, worker_env, mock_db):

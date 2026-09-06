@@ -1036,55 +1036,21 @@ def _background_settle_seconds() -> float:
         return 0.0
 
 
-async def _drain_worker_background_work(
-    worker_session_id: str, grace_seconds: float
-) -> List[Dict[str, Any]]:
-    """Let a finished worker's OWN background work settle; report what didn't.
+def _force_settle_background_work(
+    worker_session_id: str, records: List[Dict[str, Any]]
+) -> None:
+    """Retire a dead worker's abandoned Monitor rows.
 
-    A worker has no wake seam — ending its turn ends it — so a worker that
-    launched a Monitor and then wrote "tests are running, I'll report when they
-    finish" is not describing a future. The audit caught one booked
-    ``completed`` with that sentence as its whole report, and another handing
-    its parent a Monitor id the parent could not resolve (Monitor records are
-    scoped to the session that made them).
-
-    So before the completion summary is written, wait up to ``grace_seconds``
-    for the worker's tasks to drain. Anything still running when that expires is
-    RETURNED — the caller fails the worker with it rather than booking an
-    interim note as a result — and its SHELL rows are force-settled in the
-    registry, because nothing else will ever settle a Monitor whose session is
-    about to stop existing. Child WORKER rows are left alone: their own
-    dispatch owns them and completes them properly.
-
-    ``grace_seconds <= 0`` skips the wait and only reports what is outstanding.
+    Nothing else ever will: a Monitor record is scoped to the session that made
+    it (``TaskGet`` resolves against the CALLER's session), so once its worker
+    is gone the row can only sit "running" forever, keeping the session's
+    background-work predicates true. Child WORKER rows are left alone — their
+    own dispatch owns them and completes them properly. Never raises.
     """
-    outstanding = _active_worker_background_work(worker_session_id)
-    if not outstanding:
-        return []
-    loop = asyncio.get_event_loop()
-    deadline = loop.time() + max(0.0, float(grace_seconds))
-    announced = False
-    while outstanding and loop.time() < deadline:
-        if not announced:
-            announced = True
-            logger.info(
-                "ProviderAgent: worker %s ended its turn with %d background "
-                "task(s) outstanding — draining before writing its report",
-                worker_session_id, len(outstanding),
-            )
-        await asyncio.sleep(min(PARK_RECHECK_SECONDS, max(0.05, deadline - loop.time())))
-        outstanding = _active_worker_background_work(worker_session_id)
-    if not outstanding:
-        return []
-    logger.warning(
-        "ProviderAgent: worker %s still has %d background task(s) after %.0fs "
-        "— failing it rather than reporting its interim text",
-        worker_session_id, len(outstanding), max(0.0, float(grace_seconds)),
-    )
     try:
         from app.core.task_registry import task_registry
 
-        for record in outstanding:
+        for record in records:
             task_id = _work_task_id(record)
             if record.get("kind") != "shell" or not task_id:
                 continue
@@ -1103,7 +1069,6 @@ async def _drain_worker_background_work(
             "ProviderAgent: force-settle of worker %s background work failed",
             worker_session_id, exc_info=True,
         )
-    return outstanding
 
 
 def _outstanding_work_error(
@@ -2019,30 +1984,58 @@ async def dispatch_worker(
             hard_deadline=hard_deadline,
         )
 
-        # A worker that PARKED on its own background work is idle but not
-        # finished (see ``_worker_still_working``). Keep waiting for the wake
-        # turn instead of booking a half-done brief as its report. Self-limiting:
-        # the moment the work it parked on is gone, so is the loop.
+        # An idle worker is not necessarily a finished one. Two shapes:
+        #
+        # 1. it PARKED on its own background work (``_worker_still_working``) —
+        #    a park is not an ending, so wait, unbounded, exactly as before;
+        # 2. its turn ENDED with background work still live. A worker has no
+        #    wake seam it can rely on, so "tests are running, I'll report when
+        #    they finish" is not describing a future — the audit found that
+        #    sentence booked as a worker's entire report. Give the work a
+        #    BOUNDED drain (``task_worker_background_settle_seconds``): if it
+        #    settles, whatever turn the worker ends on is its real report; if it
+        #    does not, the dispatch fails rather than reporting an interim note.
+        #
+        # Either way the loop re-enters ``_await_worker_idle``, so a wake turn
+        # the settling work triggers is waited out and read as the final turn.
         announced_park = False
+        announced_drain = False
+        settle_deadline: Optional[float] = None
+        settle_budget = _background_settle_seconds()
+        outstanding: List[Dict[str, Any]] = []
         while not wait_verdict and not supervised.torn_down:
-            if not await asyncio.to_thread(
-                _worker_still_working, worker_session_id
-            ):
-                break
-            if not announced_park:
-                announced_park = True
-                logger.info(
-                    "ProviderAgent: worker %s is parked on its own background "
-                    "work — waiting for it to finish rather than settling the "
-                    "task", worker_session_id,
-                )
+            if await asyncio.to_thread(_worker_still_working, worker_session_id):
+                if not announced_park:
+                    announced_park = True
+                    logger.info(
+                        "ProviderAgent: worker %s is parked on its own "
+                        "background work — waiting for it to finish rather "
+                        "than settling the task", worker_session_id,
+                    )
+            else:
+                outstanding = _active_worker_background_work(worker_session_id)
+                if not outstanding:
+                    break
+                now = asyncio.get_event_loop().time()
+                if settle_deadline is None:
+                    settle_deadline = now + settle_budget
+                if not announced_drain:
+                    announced_drain = True
+                    logger.info(
+                        "ProviderAgent: worker %s ended its turn with %d "
+                        "background task(s) still running — draining for up to "
+                        "%.0fs before writing its report",
+                        worker_session_id, len(outstanding), settle_budget,
+                    )
+                if now >= settle_deadline:
+                    break
             await asyncio.sleep(PARK_RECHECK_SECONDS)
             wait_verdict = await _await_worker_idle(
                 worker_session_id,
                 provider_id,
                 feed=feed,
-                # A worker that parked has streamed frames by definition, so
-                # the first-frame watchdog is spent; the hard cap is not.
+                # A worker that reached this loop has streamed frames, so the
+                # first-frame watchdog is spent; the hard cap is not.
                 first_frame_deadline=None,
                 hard_deadline=hard_deadline,
             )
@@ -2181,18 +2174,11 @@ async def dispatch_worker(
 
         report, truncated = bound_report(final_text)
 
-        # A worker has no wake seam: ending its turn ends it. So before its
-        # report is written, give its OWN background work a bounded chance to
-        # settle — and if it does not, fail the worker instead of booking its
-        # interim note as a result (2026-09-05 audit, E: one worker was marked
-        # ``completed`` with the whole report "Baseline tests are running. No
-        # files changed yet.", another handed its parent a Monitor id no other
-        # session can resolve). ``_drain_worker_background_work`` force-settles
-        # the abandoned Monitor rows on its way out.
-        outstanding = await _drain_worker_background_work(
-            worker_session_id, _background_settle_seconds()
-        )
+        # If this worker still has live background work after draining, its final note is interim rather than a
+        # finished report. Fail dispatch and retire abandoned Monitor rows that no other session can reach.
+        outstanding = _active_worker_background_work(worker_session_id)
         if outstanding:
+            _force_settle_background_work(worker_session_id, outstanding)
             error = _outstanding_work_error(worker_session_id, outstanding)
             preview = error
             status = "error"
