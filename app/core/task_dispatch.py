@@ -1554,11 +1554,10 @@ async def dispatch_task_tool(
             "have genuinely disjoint work — you will be woken with the report "
             "when it completes. Never re-derive the worker's brief yourself; "
             "mcp__builtins__TaskList and mcp__builtins__TaskGet are for "
-            "explicit inspection, not polling. Before fanning out on a bug the "
-            "user reported, resolve any ambiguity in their description that "
-            "would change this brief — ask them first; a worker sent on the "
-            "wrong premise returns a confident wrong answer, and you pay for "
-            "it twice."
+            "explicit inspection, not polling. Before the next fan-out, "
+            "resolve any ambiguity in the user's report that would change a "
+            "worker's brief — ask them; a worker sent on the wrong premise "
+            "returns a confident wrong answer you then pay to undo."
         )
         background_payload: Dict[str, Any] = {
             "ok": True,
