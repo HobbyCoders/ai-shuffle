@@ -65,6 +65,7 @@ interface LiveSnapshot {
 		cache_read_tokens?: number;
 	};
 	session_meta?: {
+		workspace_project_ids?: string[];
 		title?: string;
 		worktree_id?: string | null;
 		worktree_branch?: string | null;
@@ -352,6 +353,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			permissionModeOverride: state.permissionModeOverride,
 			effortLevelOverride: state.effortLevelOverride,
 			fastMode: state.fastMode,
+			workspaceProjectIds: state.workspaceProjectIds ?? [],
 			contextWindowChoice: state.contextWindowChoice,
 			worktreeIntent: state.worktreeIntent,
 			deviceIntent: state.deviceIntent,
@@ -413,6 +415,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			permissionModeOverride: state.permissionModeOverride,
 			effortLevelOverride: state.effortLevelOverride,
 			fastMode: state.fastMode,
+			workspaceProjectIds: state.workspaceProjectIds ?? [],
 			contextWindowChoice: state.contextWindowChoice,
 			worktreeIntent: state.worktreeIntent,
 			worktreeId: state.worktreeId,
@@ -648,6 +651,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// Cross-device hydration: the row carries the session's own fast-tier
 			// pick, so a chat opened elsewhere shows the tier it actually runs on.
 			fastMode: ephemeral?.fastMode ?? (row?.fast ?? false),
+			workspaceProjectIds: ephemeral?.workspaceProjectIds ?? row?.workspace_project_ids ?? [],
 			contextWindowChoice:
 				ephemeral?.contextWindowChoice ??
 				contextChoiceFromWindow(row?.context_window) ??
@@ -706,6 +710,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	 * session the user already left.
 	 */
 	async function applyMetadataSnapshot(sessionId: string, generation: number) {
+		const initialFolders = getState().workspaceProjectIds;
 		let snap: LiveSnapshot | null;
 		try {
 			// `include_messages=false`: the SSE feed is the transcript authority, so
@@ -753,6 +758,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		const meta = snap.session_meta;
 		if (meta) {
+			// An older chat may not be in the paginated session list. Hydrate its
+			// folders from /live, without overwriting an edit made during the fetch.
+			if (meta.workspace_project_ids && getState().workspaceProjectIds === initialFolders) {
+				patch.workspaceProjectIds = meta.workspace_project_ids;
+			}
 			if (meta.title) patch.title = meta.title;
 			if (meta.worktree_deleted !== undefined) patch.worktreeDeleted = meta.worktree_deleted;
 			if (meta.worktree_id !== undefined) patch.worktreeId = meta.worktree_id;
@@ -862,6 +872,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			permissionModeOverride: mode !== 'chat' ? getPersistedPermissionMode() : null,
 			effortLevelOverride: getPersistedEffort(),
 			fastMode: getPersistedFastMode(),
+			workspaceProjectIds: newChatEphemeral?.workspaceProjectIds ?? [],
 			contextWindowChoice: getPersistedContextWindowChoice(),
 			pendingPermissions: [],
 			deferredPermissions: [],

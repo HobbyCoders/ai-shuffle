@@ -1631,6 +1631,14 @@ def build_options_from_profile(
     # unreachable. Always register the notes dir so referenced notes (and their
     # attachments, stored beneath it) resolve from any session.
     merged_add_dirs: list = list(config.get("add_dirs") or [])
+    if session_mode != "chat":
+        from app.core.workspace_folders import workspace_directories
+        workspace_ids = overrides.get("workspace_project_ids")
+        if workspace_ids is None:
+            workspace_ids = (_binding_row or {}).get("workspace_project_ids")
+        for directory in workspace_directories(workspace_ids, (project or {}).get("id"), api_user_id):
+            if directory not in (str(d) for d in merged_add_dirs):
+                merged_add_dirs.append(directory)
     try:
         from app.core.note_files import get_notes_dir
         notes_dir = str(get_notes_dir())

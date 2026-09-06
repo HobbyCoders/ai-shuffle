@@ -10,6 +10,7 @@ import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
 import { appMode } from '../sessionMode.svelte';
+import { api } from '$lib/api/client';
 
 // session-switcher looks up the session row in appData to tailor the load-error
 // message for remote (cross-install) sessions (B4). Mock it so tests can seed the
@@ -158,6 +159,37 @@ function makeSwitcher(initial: ActiveSessionState) {
 }
 
 describe('session-switcher · switchSession isolation', () => {
+	it('hydrates folders for a chat outside the paginated session list', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { workspace_project_ids: ['docs'] } });
+		const { switcher, getState } = makeSwitcher(fullState());
+		await switcher.switchSession('older-chat');
+		await vi.waitFor(() => expect(getState().workspaceProjectIds).toEqual(['docs']));
+		switcher.destroy();
+	});
+
+	it('does not overwrite a folder edit with a late metadata response', async () => {
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState, deps } = makeSwitcher(fullState());
+		await switcher.switchSession('older-chat');
+		deps.update(state => ({ ...state, workspaceProjectIds: ['new-folder'] }));
+		resolve({ session_meta: { workspace_project_ids: ['old-folder'] } });
+		await Promise.resolve();
+		expect(getState().workspaceProjectIds).toEqual(['new-folder']);
+		switcher.destroy();
+	});
+
+	it('restores each chat\'s folders without leaking them into another chat or a fresh compose', async () => {
+		const { switcher, getState } = makeSwitcher(fullState({ workspaceProjectIds: ['docs'] }));
+		await switcher.switchSession('session-B');
+		expect(getState().workspaceProjectIds).toEqual([]);
+		await switcher.switchSession('session-A');
+		expect(getState().workspaceProjectIds).toEqual(['docs']);
+		switcher.newChat();
+		expect(getState().workspaceProjectIds).toEqual([]);
+		switcher.destroy();
+	});
+
 	it('resets per-session runtime state so the leaving session does not bleed in', async () => {
 		const { switcher, getState } = makeSwitcher(fullState());
 

@@ -193,6 +193,7 @@ def _submit_blocking(
                 permission_mode=overrides.get("permission_mode"),
                 context_window=overrides.get("context_window"),
                 fast=overrides.get("fast"),
+                workspace_project_ids=overrides.get("workspace_project_ids"),
             )
         except Exception:  # noqa: BLE001 — never let this break an enqueue.
             logger.exception(

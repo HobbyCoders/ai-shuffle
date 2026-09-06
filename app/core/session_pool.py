@@ -1719,6 +1719,11 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     ):
         return True
 
+    # Directory grants are fixed at connection time. Reconnect after either
+    # adding or removing a workspace so stale access never survives a turn.
+    if set(getattr(old, "add_dirs", None) or []) != set(getattr(new_options, "add_dirs", None) or []):
+        return True
+
     # The session's sidepanel lane. The chat lane's read fence is built INTO the
     # engine at connect time — a fluid permission rule on the native leg, a
     # withheld ``--allowed-tools`` grant on the delegated one — so a client

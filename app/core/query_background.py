@@ -742,6 +742,7 @@ async def start_background_query(
                 permission_mode=overrides.get("permission_mode"),
                 context_window=overrides.get("context_window"),
                 fast=overrides.get("fast"),
+                workspace_project_ids=overrides.get("workspace_project_ids"),
             )
         except Exception:
             logger.exception(

@@ -180,6 +180,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 							persisted.effortLevelOverride ?? (persisted.sessionId ? null : s.effortLevelOverride),
 						fastMode:
 							persisted.fastMode ?? (persisted.sessionId ? false : s.fastMode),
+						workspaceProjectIds: persisted.workspaceProjectIds ?? [],
 						contextWindowChoice:
 							persisted.contextWindowChoice ??
 							(persisted.sessionId ? DEFAULT_CONTEXT_WINDOW_CHOICE : s.contextWindowChoice),

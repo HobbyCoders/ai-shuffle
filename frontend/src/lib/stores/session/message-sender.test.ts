@@ -237,6 +237,15 @@ describe('message-sender session mode', () => {
 	});
 });
 
+describe('message-sender workspace folders', () => {
+	it.each([{ ids: ['docs', 'api'] }, { ids: [] }])('sends the current folder list, including removal of all folders ($ids)', async ({ ids }) => {
+		const { deps, wsConn } = makeDeps(baseState({ worktreeIntent: 'local', workspaceProjectIds: ids }));
+		await createMessageSender(deps).sendMessage('use these folders');
+		const frame = wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any;
+		expect(frame.overrides.workspace_project_ids).toEqual(ids);
+	});
+});
+
 describe('message-sender fast-mode override', () => {
 	it('sends fast: true when the session has fast mode on', async () => {
 		const { deps, wsConn } = makeDeps(baseState({
@@ -297,7 +306,7 @@ describe('message-sender context-window override', () => {
 		const frame = wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any;
 		// The backend still resolves its normal default model; context is explicitly
 		// applied to that same frontend-visible registry default.
-		expect(frame.overrides).toEqual({ context_window: 200_000 });
+		expect(frame.overrides).toEqual({ context_window: 200_000, workspace_project_ids: [] });
 	});
 
 	it('omits context_window for a model without a 1M choice', async () => {

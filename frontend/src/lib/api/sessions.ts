@@ -18,6 +18,7 @@ export interface SessionTag {
 }
 
 export interface Session {
+	workspace_project_ids?: string[];
 	id: string;
 	profile_id: string;
 	project_id: string | null;

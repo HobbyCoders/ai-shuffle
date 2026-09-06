@@ -892,6 +892,7 @@ def set_session_run_binding(
     permission_mode: Optional[str] = None,
     context_window: Optional[int] = None,
     fast: Optional[bool] = None,
+    workspace_project_ids: Optional[List[str]] = None,
     preserve_provider: bool = False,
 ) -> None:
     """Persist the run binding a turn actually used onto its session (v79).
@@ -950,6 +951,12 @@ def set_session_run_binding(
     if fast is not None:
         updates.append(f"fast = {_ph}")
         values.append(bool(fast))
+
+    # An empty list explicitly removes every additional folder.
+    if workspace_project_ids is not None:
+        from app.core.workspace_folders import normalize_workspace_project_ids
+        updates.append(f"workspace_project_ids = {_ph}")
+        values.append(json.dumps(normalize_workspace_project_ids(workspace_project_ids)))
 
     if not updates:
         return

@@ -248,7 +248,8 @@ def _safe_json(value):
 # 85 (2026-09-02): persist pull-request lifecycle on sessions so the sidepanel
 #     can show PR Opened / PR Merged without a live GitHub poll. Additive
 #     nullable pr_number / pr_url / pr_state; NULL on every pre-existing row.
-SCHEMA_VERSION = 85
+# 86: per-chat additional workspace projects, stored as project IDs.
+SCHEMA_VERSION = 86
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -2009,6 +2010,10 @@ def _run_column_migrations(cursor):
     if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "fast"):
         cursor.execute("ALTER TABLE sessions ADD COLUMN fast BOOLEAN")
         migrations_applied.append("sessions.fast")
+
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "workspace_project_ids"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN workspace_project_ids JSONB")
+        migrations_applied.append("sessions.workspace_project_ids")
 
     # Persisted PR lifecycle for the sidepanel (v85). NULL on every pre-existing
     # row = "no PR known"; the sidepanel then falls back to the open-PR poll.

@@ -14,6 +14,8 @@ import { writable } from 'svelte/store';
 type HeaderDropdownId =
 	| 'profile'
 	| 'branch'
+	| 'workspace-folders'
+	| 'sheet-workspace-folders'
 	// Mobile-sheet selectors have distinct ids because their CSS-hidden composer
 	// counterparts remain mounted and subscribe to this same coordinator.
 	| 'sheet-profile'

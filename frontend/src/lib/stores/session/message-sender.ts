@@ -166,9 +166,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		);
 	}
 
-	function buildOverrides(): Record<string, string | number | boolean> | undefined {
+	function buildOverrides(): Record<string, string | string[] | number | boolean> | undefined {
 		const _state = getState();
-		const overrides: Record<string, string | number | boolean> = {};
+		const overrides: Record<string, string | string[] | number | boolean> = {};
+		if (_state.mode !== 'chat') overrides.workspace_project_ids = [...(_state.workspaceProjectIds ?? [])];
 		if (_state.modelOverride) overrides.model = _state.modelOverride;
 		if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
 		if (_state.effortLevelOverride) overrides.effort = _state.effortLevelOverride;
@@ -539,6 +540,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const queryProfileId = _state.profile;
 			const branchName = _state.worktreeBranch;
 			const remoteOnly = !projectId && !!projectV2Id;
+			const overridesSnapshot = buildOverrides();
 
 			update(s => ({ ...s, isCreatingWorktree: true, worktreeError: null }));
 
@@ -583,6 +585,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							session_id: response.session_id,
 							profile: queryProfileId,
 							project: projectId,
+							overrides: overridesSnapshot,
 							upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
 						});
 					}
@@ -675,7 +678,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// so we want the POST to finish even if the user navigates away,
 			// locks their phone, or closes the tab. Using ``keepalive: true``
 			// lets the browser complete the POST in the background.
-			const overridesPayload: Record<string, string | number | boolean> = {};
+			const overridesPayload: Record<string, string | string[] | number | boolean> = {};
+			if (_state.mode !== 'chat') overridesPayload.workspace_project_ids = [...(_state.workspaceProjectIds ?? [])];
 			if (modelOverrideSnap) overridesPayload.model = modelOverrideSnap;
 			if (permissionModeOverrideSnap) overridesPayload.permission_mode = permissionModeOverrideSnap;
 			if (effortLevelOverrideSnap) overridesPayload.effort = effortLevelOverrideSnap;

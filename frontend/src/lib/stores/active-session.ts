@@ -17,6 +17,7 @@
  */
 
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest, Profile } from '$lib/api/client';
+import { api } from '$lib/api/client';
 import { acceptUserEvent } from '$lib/services/user-event-dedupe';
 import type { SessionAttention } from './session/ws-message-handlers';
 import type { SdkContextUsage } from '$lib/api/sessions';
@@ -182,6 +183,8 @@ export interface ActiveSessionState {
 	 *  a cleared prompt cache whenever it flips. Only offered on models that
 	 *  support it (`isFastModeCapable`); false everywhere else. */
 	fastMode: boolean;
+	/** Additional projects for this chat only. The main project remains its cwd. */
+	workspaceProjectIds?: string[];
 	/** Semantic 1M vs model-family standard-window choice for eligible GPT/Claude models. */
 	contextWindowChoice: ContextWindowChoice;
 	pendingPermissions: PermissionRequestType[];
@@ -281,6 +284,7 @@ export interface PersistedSession {
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
 	fastMode?: boolean;
+	workspaceProjectIds?: string[];
 	contextWindowChoice?: ContextWindowChoice;
 	worktreeIntent?: ExecutionMode;
 	worktreeId?: string | null;
@@ -339,6 +343,7 @@ function defaultState(): ActiveSessionState {
 		permissionModeOverride: getPersistedPermissionMode(),
 		effortLevelOverride: getPersistedEffort(),
 		fastMode: getPersistedFastMode(),
+		workspaceProjectIds: [],
 		contextWindowChoice: getPersistedContextWindowChoice(),
 		pendingPermissions: [],
 		deferredPermissions: [],
@@ -843,6 +848,7 @@ export const activeSession = {
 			...s,
 			project: projectId,
 			projectV2Id: nextV2,
+			workspaceProjectIds: (s.workspaceProjectIds ?? []).filter(id => id !== projectId),
 			// Keep the user's preferred mode; only the project-specific worktree
 			// selection below is reset since it doesn't apply to the new project.
 			worktreeIntent: getPersistedWorktreeIntent(),
@@ -886,6 +892,20 @@ export const activeSession = {
 	setPermissionModeOverride(mode: string | null) { _update(s => ({ ...s, permissionModeOverride: mode })); setPersistedRunBinding('permissionMode', mode); persistSession(); },
 	setEffortLevelOverride(level: string | null) { _update(s => ({ ...s, effortLevelOverride: level })); setPersistedRunBinding('effort', level); persistSession(); },
 	setFastMode(on: boolean) { _update(s => ({ ...s, fastMode: on })); setPersistedRunBinding('fastMode', on ? '1' : ''); persistSession(); },
+	async setWorkspaceProjectIds(ids: string[]) {
+		const owner = { sessionId: _state.sessionId, project: _state.project, projectV2Id: _state.projectV2Id };
+		let next = [...new Set(ids)].filter(id => id !== owner.project);
+		if (owner.sessionId) {
+			const saved = await api.put<{ workspace_project_ids: string[] }>(`/sessions/${owner.sessionId}/workspace-folders`, { workspace_project_ids: next });
+			next = saved.workspace_project_ids;
+			const cached = sessionEphemeralCache.restore(owner.sessionId);
+			if (cached) sessionEphemeralCache.save(owner.sessionId, { ...cached, workspaceProjectIds: next });
+		}
+		if (_state.sessionId === owner.sessionId && _state.project === owner.project && _state.projectV2Id === owner.projectV2Id) {
+			_update(s => ({ ...s, workspaceProjectIds: next }));
+			persistSession();
+		}
+	},
 	setContextWindowChoice(choice: ContextWindowChoice) { _update(s => ({ ...s, contextWindowChoice: choice })); setPersistedRunBinding('contextWindowChoice', choice); persistSession(); },
 
 	// ── Ephemeral UI State (delegated to draft-manager) ─────────────
