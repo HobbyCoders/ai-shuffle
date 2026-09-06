@@ -1752,6 +1752,24 @@ class SessionRuntime:
                 sid, exc_info=True,
             )
 
+        # Engine pending-set hygiene (2026-09-05 audit F1). fluid rebuilds its
+        # ``_background_pending`` from the SubagentEvent log alone and lists
+        # whatever is left on every ``SessionParked``, so a completion that
+        # never reached the engine is listed forever — seven such ids poisoned
+        # 35 of one session's 38 parks, one of them for twenty-one hours.
+        # Reconciling at turn end (cheap: fluid's rehydrate is latched, and
+        # nothing is submitted unless the app can prove a pending id is over)
+        # means the NEXT park names only work that is genuinely outstanding.
+        try:
+            from app.core import pending_reconcile
+
+            await pending_reconcile.reconcile_engine_pending(sid)
+        except Exception:
+            logger.debug(
+                "SessionRuntime: engine pending reconcile failed for %s", sid,
+                exc_info=True,
+            )
+
         # Park gate — the legacy predicate (chat_ws_handler :4461-4462), amended
         # 2026-08-08: the launch-set arm now counts only UNRESOLVED launches.
         # ``_background_launches`` itself stays CUMULATIVE and untouched (PR #765
@@ -1774,8 +1792,69 @@ class SessionRuntime:
         except Exception:
             logger.debug("SessionRuntime: park-gate read failed for %s", sid, exc_info=True)
 
-        if bg_work or has_unresolved_launches:
-            task_ids = [w.get("id") for w in bg_work if w.get("id")]
+        # Third arm (2026-09-05 audit F9): the durable mirror. The two arms
+        # above read the IN-MEMORY registry, so a sub-agent whose record never
+        # landed there — or was cleared out from under a live worker — ended
+        # the turn as a bare ``end_turn`` with a worker still running, and the
+        # audited session produced exactly that (an Explore outstanding, no
+        # park, while the same situation parked correctly three turns later).
+        # ``kind == "agent"`` only, deliberately: a Monitor shell can be a
+        # ``serves`` process meant to stay up, and parking on one of those
+        # would pin the session forever — the same exclusion fluid makes.
+        durable_agent_ids: List[str] = []
+        if not (bg_work or has_unresolved_launches):
+            try:
+                from app.core import pending_reconcile
+
+                durable_agent_ids = await asyncio.to_thread(
+                    pending_reconcile.nonterminal_agent_task_ids, sid
+                )
+                if durable_agent_ids:
+                    logger.info(
+                        "SessionRuntime: parking %s on durable sub-agent work "
+                        "the registry did not report: %s", sid, durable_agent_ids,
+                    )
+            except Exception:
+                logger.debug(
+                    "SessionRuntime: durable park-gate read failed for %s", sid,
+                    exc_info=True,
+                )
+
+        task_ids = [w.get("id") for w in bg_work if w.get("id")]
+        task_ids.extend(t for t in durable_agent_ids if t not in task_ids)
+        # Re-check against durable truth in the same breath as the park (audit
+        # F7): the registry's running view can be a beat behind a completion
+        # that has already written its row, and a park naming a task which
+        # settled four seconds ago buys a no-op wake turn when its terminal
+        # frame finally lands. Only ids with a durable TERMINAL row are
+        # dropped — an id with NO row at all is a task too young to have been
+        # persisted, not a settled one, so silence never narrows a park.
+        if task_ids:
+            try:
+                from app.core import pending_reconcile
+
+                settled_ids = await asyncio.to_thread(
+                    pending_reconcile.settled_task_ids, sid, list(task_ids)
+                )
+                if settled_ids:
+                    task_ids = [t for t in task_ids if t not in settled_ids]
+                    logger.info(
+                        "SessionRuntime: dropped %d already-settled task id(s) "
+                        "from the park for %s: %s",
+                        len(settled_ids), sid, sorted(settled_ids),
+                    )
+            except Exception:
+                logger.debug(
+                    "SessionRuntime: park settle re-check failed for %s", sid,
+                    exc_info=True,
+                )
+
+        # Park only on work that is actually outstanding. A gate armed solely
+        # by registry records whose durable rows have all settled would park on
+        # nothing — the stuck-parked shape the launch-set arm was narrowed to
+        # avoid. The unresolved-LAUNCH arm still parks with an empty list on
+        # purpose: that is the launched-but-not-yet-registered race.
+        if task_ids or has_unresolved_launches:
             parked = None
             try:
                 parked = await asyncio.to_thread(turns_db.park_turn, tid, task_ids)

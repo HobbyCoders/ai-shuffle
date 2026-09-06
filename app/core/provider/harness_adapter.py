@@ -1054,6 +1054,23 @@ class HarnessAdapter(ProviderAdapter):
         await self.prepare_background_completions(
             getattr(sdk_options, "aih_background_task_completions", None)
         )
+        # Rehydrate reconcile (2026-09-05 audit F1). Fluid rebuilds its pending
+        # set from the SubagentEvent log alone, so a completion that never
+        # reached the engine is re-created as a phantom on every resume and
+        # listed on every later park. Ask the freshly rehydrated engine what it
+        # still counts pending and retire whatever the app can prove is over.
+        # Best-effort: never fails a connect.
+        try:
+            from app.core import pending_reconcile
+
+            await pending_reconcile.reconcile_engine_pending(
+                str(app_session_id or self._resolve_app_session_id() or ""),
+                adapter=self,
+            )
+        except Exception:  # noqa: BLE001 — bookkeeping never blocks a connect.
+            logger.debug(
+                "[HarnessAdapter] engine pending reconcile failed", exc_info=True
+            )
 
     async def disconnect(
         self,

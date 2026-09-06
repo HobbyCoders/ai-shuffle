@@ -117,6 +117,7 @@ async def test_idle_sessions_untouched_and_nothing_reconciled(mock_db, test_db):
         "stray_cli_reaped": 0,
         "background_task_rows_killed": 0,
         "turns_reaped": 0,
+        "engine_pending_repaired": 0,
     }
     assert _session_row(test_db, session_id)["status"] == "active"
     assert _error_log_rows(test_db, session_id) == []
@@ -205,6 +206,7 @@ async def test_reconcile_db_failure_does_not_raise(mock_db, monkeypatch):
         "stray_cli_reaped": 0,
         "background_task_rows_killed": 0,
         "turns_reaped": 0,
+        "engine_pending_repaired": 0,
     }
 
 
