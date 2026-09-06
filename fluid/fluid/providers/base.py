@@ -50,10 +50,9 @@ class ProviderRequest:
     # requires a number, which its serializer resolves per model.
     max_tokens: int | None = None
     thinking: dict[str, Any] | None = None
-    # Reasoning-depth knob ("low" | "medium" | "high" | "xhigh" | "max").
-    # Each serializer maps it to its provider's shape: Anthropic
-    # output_config.effort (verbatim), OpenAI-shaped APIs reasoning.effort
-    # (clamped to their low/medium/high vocabulary).
+    # Model-specific reasoning effort, validated by the caller. Serializers
+    # preserve it in output_config.effort (Anthropic) or reasoning.effort
+    # (OpenAI-shaped APIs). Literal "none" disables reasoning; None omits it.
     effort: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 

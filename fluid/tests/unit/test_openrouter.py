@@ -604,24 +604,34 @@ async def test_first_event_in_time_disarms_the_watchdog(monkeypatch) -> None:
     assert any(c.kind == "text_delta" for c in chunks)
 
 
-def test_effort_clamped_into_reasoning() -> None:
-    request = ProviderRequest(
-        model="meta-llama/llama-4",
-        messages=[Message(role="user", content=[Text("hi")])],
-        effort="max",
-    )
-    body = build_request_body(request)
-    assert body["reasoning"] == {"effort": "high"}
+@pytest.mark.parametrize(("model", "efforts"), [
+    ("openai/gpt-6-astra", ["low", "medium", "high", "xhigh", "max"]),
+    ("openai/gpt-5.6-sol", ["none", "low", "medium", "high", "xhigh", "max"]),
+    ("z-ai/glm-5.3-flash", ["low", "high", "max"]),
+])
+@pytest.mark.parametrize("via_thinking", [False, True])
+def test_catalog_efforts_reach_openrouter_unchanged(model, efforts, via_thinking) -> None:
+    # https://openrouter.ai/api/v1/models — reasoning.supported_efforts
+    for effort in efforts:
+        request = ProviderRequest(
+            model=model,
+            messages=[Message(role="user", content=[Text("hi")])],
+            effort=None if via_thinking else effort,
+            thinking={"effort": effort} if via_thinking else {"effort": "medium"},
+        )
+        body = build_request_body(request)
+        assert body["reasoning"] == {"effort": effort}
 
 
-def test_effort_passthrough_low() -> None:
+@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+def test_unrestricted_catalog_effort_vocabulary(effort) -> None:
+    # A catalog supported_efforts:null accepts the full gateway vocabulary.
     request = ProviderRequest(
-        model="meta-llama/llama-4",
+        model="catalog-model-with-unrestricted-effort",
         messages=[Message(role="user", content=[Text("hi")])],
-        effort="low",
+        effort=effort,
     )
-    body = build_request_body(request)
-    assert body["reasoning"] == {"effort": "low"}
+    assert build_request_body(request)["reasoning"] == {"effort": effort}
 
 
 # ─── retries: a refused request retries, an ambiguous transport failure does not

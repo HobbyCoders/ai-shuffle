@@ -208,27 +208,20 @@ def _effort_from_budget(budget_tokens: int | None) -> str:
     return "high"
 
 
-# The harness effort vocabulary is Anthropic-shaped (low..max); the Responses
-# API only knows minimal/low/medium/high, so the top tiers clamp to high.
-_EFFORT_CLAMP = {
-    "minimal": "minimal",
-    "low": "low",
-    "medium": "medium",
-    "high": "high",
-    "xhigh": "high",
-    "max": "high",
-}
+# Model capability validation belongs to the caller; supported values must
+# reach the API unchanged, including upper tiers and explicit reasoning off.
+_EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 
 def _reasoning_config(
     thinking: dict[str, Any] | None, effort: str | None = None
 ) -> dict[str, Any] | None:
-    if effort and effort in _EFFORT_CLAMP:
-        return {"effort": _EFFORT_CLAMP[effort], "summary": "auto"}
+    if effort in _EFFORT_LEVELS:
+        return {"effort": effort, "summary": "auto"}
     if not thinking:
         return None
     thinking_effort = thinking.get("effort")
-    if thinking_effort not in ("minimal", "low", "medium", "high"):
+    if thinking_effort not in _EFFORT_LEVELS:
         thinking_effort = _effort_from_budget(thinking.get("budget_tokens"))
     return {"effort": thinking_effort, "summary": "auto"}
 

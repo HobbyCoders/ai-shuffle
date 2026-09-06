@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 from fluid.messages import Message, Reasoning, Text, ToolResultBlock, ToolUseBlock
 from fluid.providers._sse import sse_events
@@ -336,7 +337,9 @@ async def test_xai_auth_does_not_send_codex_headers() -> None:
     assert "chatgpt-account-id" not in headers
 
 
-def test_effort_overrides_thinking_and_clamps() -> None:
+@pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "xhigh", "max"])
+def test_sol_effort_overrides_thinking_without_clamping(effort: str) -> None:
+    # https://developers.openai.com/api/docs/models/gpt-5.6-sol.md
     from fluid.messages import Message as _Msg
     from fluid.messages import Text as _Text
 
@@ -344,23 +347,37 @@ def test_effort_overrides_thinking_and_clamps() -> None:
         model="gpt-5.6",
         messages=[_Msg(role="user", content=[_Text("hi")])],
         thinking={"budget_tokens": 1024},
-        effort="xhigh",
+        effort=effort,
     )
     body = build_request_body(request)
-    assert body["reasoning"] == {"effort": "high", "summary": "auto"}
+    assert body["reasoning"] == {"effort": effort, "summary": "auto"}
 
 
-def test_thinking_effort_still_honored_without_explicit_effort() -> None:
+@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"])
+def test_thinking_effort_still_honored_without_explicit_effort(effort: str) -> None:
     from fluid.messages import Message as _Msg
     from fluid.messages import Text as _Text
 
     request = ProviderRequest(
         model="gpt-5.6",
         messages=[_Msg(role="user", content=[_Text("hi")])],
-        thinking={"effort": "low"},
+        thinking={"effort": effort},
     )
     body = build_request_body(request)
-    assert body["reasoning"] == {"effort": "low", "summary": "auto"}
+    assert body["reasoning"] == {"effort": effort, "summary": "auto"}
+
+
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"])
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max", "ultra"])
+@pytest.mark.parametrize("via_thinking", [False, True])
+def test_codex_catalog_efforts_reach_responses_unchanged(model, effort, via_thinking) -> None:
+    request = ProviderRequest(
+        model=model,
+        messages=[Message(role="user", content=[Text("hi")])],
+        effort=None if via_thinking else effort,
+        thinking={"effort": effort} if via_thinking else {"effort": "medium"},
+    )
+    assert build_request_body(request)["reasoning"] == {"effort": effort, "summary": "auto"}
 
 
 # ─── prompt_cache_key: the session id, unless the host says otherwise ────────
