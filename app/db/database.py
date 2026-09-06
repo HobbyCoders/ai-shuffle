@@ -3013,7 +3013,9 @@ def get_paired_client_by_session_hash(token_hash):
         from app.core.account_hub import check_paired_client
         from fastapi import HTTPException
         try:
-            check_paired_client(client)
+            # Derived only after live local + hub authorization, never persisted
+            # in paired_clients or accepted from a request/scopes payload.
+            client['account_owner_admin'] = check_paired_client(client) is True
         except HTTPException:
             return None
     return client

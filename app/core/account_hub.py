@@ -131,6 +131,7 @@ def require_active(owner):
     if (result.get('active') is not True or result.get('account_id') != owner['account_id']
             or result.get('device_id') != owner['hub_device_id']):
         raise HTTPException(status_code=401, detail='Account authorization revoked')
+    return binding
 
 
 def mobile_hub_ownership(device):
@@ -141,17 +142,31 @@ def mobile_hub_ownership(device):
 
 
 def check_paired_client(client):
+    """Validate the device live and derive this installation owner's authority.
+
+    Only administrator-started managed connections delegate administration to
+    the hub's single owner account. Direct/controller-linked connections do not.
+    The result is request-local evidence, never a stored or caller-selected role.
+    """
     owner = store.ownership(paired_client_id=client['id'])
     if owner is None:
-        return
+        return False
     from app.db.mobile import get_mobile_device
     from datetime import datetime, timezone
     device = get_mobile_device(owner['device_id'])
-    if not device or device.get('revoked_at') or device.get('paired_client_id') != client['id']:
+    if (not device or device.get('revoked_at') or device.get('paired_client_id') != client['id']
+            or owner['paired_client_id'] != client['id']
+            or device.get('device_id') != owner['device_id']
+            or owner['device_id'] != client.get('device_id')
+            or owner['hub_device_id'] != owner['device_id']):
         raise HTTPException(status_code=401, detail='Mobile authorization revoked')
     expires = device.get('api_key_expires_at')
     if isinstance(expires, str):
         expires = datetime.fromisoformat(expires.replace('Z', '+00:00'))
     if not expires or expires <= datetime.now(timezone.utc):
         raise HTTPException(status_code=401, detail='Mobile authorization expired')
-    require_active(owner)
+    binding = require_active(owner)
+    from app.core.config import settings
+    return (binding['linked_by'] == 'managed:' + settings.effective_instance_id
+            and 'controller' in (client.get('scopes') or [])
+            and 'web:session' in (device.get('scopes') or []))

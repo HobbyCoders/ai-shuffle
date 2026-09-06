@@ -178,7 +178,7 @@ def hash_api_key(api_key: str) -> str:
 
 
 def get_paired_client_from_token(token: Optional[str], *, touch: bool = True) -> Optional[dict]:
-    """Resolve a scoped controller session without treating it as admin auth."""
+    """Resolve a live paired session, including verified managed-owner authority."""
     if not token:
         return None
     from app.core.pairing import PAIRED_SESSION_PREFIX, hash_controller_session
@@ -195,11 +195,12 @@ def get_paired_client_from_token(token: Optional[str], *, touch: bool = True) ->
 
 
 def _set_paired_request_state(request: Request, token: str, client: dict) -> str:
-    request.state.is_admin = False
+    owner_admin = client.get('account_owner_admin') is True
+    request.state.is_admin = owner_admin
     request.state.api_user = None
     request.state.paired_client = client
     request.state.auth_token = f"paired_client:{client['id']}"
-    request.state.user_info = (client.get("device_name") or "paired-device", client["id"], False)
+    request.state.user_info = (client.get("device_name") or "paired-device", client["id"], owner_admin)
     return f"paired_client:{client['id']}"
 
 
@@ -266,12 +267,22 @@ def require_auth(request: Request) -> str:
 
 
 def require_admin(request: Request) -> str:
-    """Dependency that requires admin authentication only"""
+    """Require the install administrator or its live-authorized managed owner.
+
+    A paired owner keeps its device-bound session and revocation path. Ordinary
+    API users, mobile keys and directly paired controllers never qualify.
+    """
     token = get_session_token(request)
-    if token and not get_paired_client_from_token(token, touch=False) and auth_service.validate_session(token):
-        request.state.is_admin = True
-        request.state.api_user = None
-        return token
+    candidate = token or get_api_key(request)
+    if candidate:
+        client = get_paired_client_from_token(candidate, touch=False)
+        if client:
+            if client.get('account_owner_admin') is True:
+                return _set_paired_request_state(request, candidate, client)
+        elif token and auth_service.validate_session(token):
+            request.state.is_admin = True
+            request.state.api_user = None
+            return token
 
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -344,6 +355,7 @@ async def get_auth_status(request: Request):
         paired_client = await run_sync(get_paired_client_from_token, token)
         if paired_client:
             is_paired_authenticated = True
+            is_admin_authenticated = paired_client.get('account_owner_admin') is True
             username = paired_client.get("device_name") or "Paired device"
         elif auth_service.validate_session(token):
             is_admin_authenticated = True

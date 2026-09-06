@@ -507,7 +507,7 @@ class TestRequireAdmin:
     def _request(session=None):
         from types import SimpleNamespace
         cookies = {"session": session} if session is not None else {}
-        return SimpleNamespace(cookies=cookies, state=SimpleNamespace())
+        return SimpleNamespace(cookies=cookies, headers={}, state=SimpleNamespace())
 
     def test_require_admin_no_session(self, mock_database):
         """require_admin should raise 403 when no session cookie is present."""

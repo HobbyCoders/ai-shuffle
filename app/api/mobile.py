@@ -442,8 +442,9 @@ async def create_web_session(request: Request, response: Response):
     WebView. The returned `session_token` is also injected into the WebView's
     CookieManager by the app.
 
-    The resulting controller session can operate the app but does not satisfy
-    admin-only dependencies such as credential, connector, or pairing changes.
+    The resulting session stays tied to this device. On an administrator-linked
+    managed worker, its live-verified owner account can administer the worker;
+    direct/legacy pairing remains restricted to controller capabilities.
     """
     # Validates expiry/revocation and bumps last_seen.
     device = get_device_with_scope(request, "web:session")
