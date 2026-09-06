@@ -2141,6 +2141,7 @@ async def dispatch_worker(
                 session_id=worker_session_id,
                 error=error,
                 usage=outcome["usage"],
+                frames_forwarded=feed.frames_forwarded,
             )
 
         final_text = final_assistant_text(worker_session_id)
@@ -2170,6 +2171,7 @@ async def dispatch_worker(
                 session_id=worker_session_id,
                 error=error,
                 usage=outcome["usage"],
+                frames_forwarded=feed.frames_forwarded,
             )
 
         report, truncated = bound_report(final_text)
@@ -2237,6 +2239,10 @@ async def dispatch_worker(
             ok=False,
             session_id=worker_session_id,
             error=f"Worker dispatch failed: {exc}",
+            # Same count the ``finally``'s retry predicate reads, so the caller
+            # and the wake-suppression decision cannot disagree about whether
+            # this worker ever started.
+            frames_forwarded=feed.frames_forwarded,
         )
     finally:
         # Turn-end teardown may have already settled this worker (card, registry
