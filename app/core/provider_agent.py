@@ -995,13 +995,26 @@ def _active_worker_background_work(worker_session_id: str) -> List[Dict[str, Any
         return []
 
 
+def _work_task_id(record: Mapping[str, Any]) -> Optional[str]:
+    """The task id off a registry record in EITHER shape.
+
+    ``get_active`` hands back the camelCase WIRE dict (``id``/``subject``), not
+    the internal record — reading ``task_id`` there is how the first cut of
+    this reported "Monitor ?".
+    """
+    value = record.get("id") or record.get("task_id")
+    return str(value) if value else None
+
+
 def _describe_background_work(records: List[Dict[str, Any]]) -> str:
-    """A short "Monitor abc123 'npm test'" list for a failure message."""
+    """A short "Monitor abc123 (npm test)" list for a failure message."""
     parts = []
     for record in records[:4]:
         kind = "Monitor" if record.get("kind") == "shell" else "worker"
-        title = " ".join(str(record.get("title") or "").split())[:60]
-        tid = str(record.get("task_id") or "?")
+        title = " ".join(
+            str(record.get("subject") or record.get("title") or "").split()
+        )[:60]
+        tid = _work_task_id(record) or "?"
         parts.append(f"{kind} {tid}" + (f" ({title})" if title else ""))
     if len(records) > 4:
         parts.append(f"and {len(records) - 4} more")
@@ -1072,11 +1085,12 @@ async def _drain_worker_background_work(
         from app.core.task_registry import task_registry
 
         for record in outstanding:
-            if record.get("kind") != "shell":
+            task_id = _work_task_id(record)
+            if record.get("kind") != "shell" or not task_id:
                 continue
             task_registry.complete_task(
                 worker_session_id,
-                str(record.get("task_id")),
+                task_id,
                 "killed",
                 summary=(
                     "Abandoned: the worker that started it ended first, so "
@@ -1411,7 +1425,19 @@ def _failure_summary(
         or "no error detail was recorded"
     if len(text) > _FAILURE_SUMMARY_CHARS:
         text = text[: _FAILURE_SUMMARY_CHARS - 1].rstrip() + "…"
-    prefix = "worker failed to start" if not frames_forwarded else "worker failed"
+    if not frames_forwarded:
+        # Say WHICH kind of "never started" this is. A capacity refusal is a
+        # queueing problem the harness has already retried; a parent that reads
+        # only the raw provider string ("Rate limit reached for gpt-5.6-luna in
+        # organization org-…") learns to work around the harness instead — an
+        # audited model started capping its own workers at three tool calls.
+        prefix = (
+            "worker failed to start (provider at capacity, already retried)"
+            if looks_rate_limited(text)
+            else "worker failed to start"
+        )
+    else:
+        prefix = "worker failed"
     return f"{prefix}: {text}"
 
 

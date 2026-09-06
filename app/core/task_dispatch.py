@@ -751,6 +751,40 @@ def _retry_backoff(kind: str, error_text: Optional[str], attempt: int, cap: floa
     return min(max(0.0, float(cap)), base * (2 ** max(0, attempt)) + 0.25)
 
 
+def _capacity_worded(outcome, reschedules: int):
+    """Re-word a final CAPACITY failure so it reads as capacity, not as a bug.
+
+    The provider's own string — "Rate limit reached for gpt-5.6-luna in
+    organization org-JTwK2… on tokens per min (TPM): Limit 500000, Used
+    494784…" — tells a parent nothing it can act on, and the audited models
+    responded to it by shrinking their own briefs ("MAX 3 tool calls to avoid
+    provider TPM failure"). Say what actually happened instead, and keep the
+    provider's text behind it.
+    """
+    from app.core import provider_agent
+    from dataclasses import replace
+
+    if outcome.ok or outcome.frames_forwarded:
+        return outcome
+    if not provider_agent.looks_rate_limited(outcome.error):
+        return outcome
+    tried = (
+        f" It was rescheduled {reschedules} time(s) and the provider is still "
+        "refusing."
+        if reschedules
+        else ""
+    )
+    return replace(
+        outcome,
+        error=(
+            "Provider capacity: this model provider's shared token-per-minute "
+            f"budget is saturated, so the worker was not started.{tried} Dispatch "
+            "fewer workers on this provider at once, or wait a minute and "
+            f"re-dispatch — the brief is fine. Provider said: {outcome.error}"
+        ),
+    )
+
+
 async def _dispatch_worker_with_retries(
     *,
     kwargs: Dict[str, Any],
@@ -842,7 +876,7 @@ async def _dispatch_worker_with_retries(
             start_max=start_max, rate_max=rate_max,
         )
         if kind is None:
-            return outcome
+            return _capacity_worded(outcome, used["rate"])
 
         delay = _retry_backoff(kind, outcome.error, used[kind], backoff_cap)
         used[kind] += 1
