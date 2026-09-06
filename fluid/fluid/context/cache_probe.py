@@ -23,6 +23,55 @@ Cost: one pass over the text already in memory, hashed with blake2b at 8 bytes
 per digest (~16 hex chars). Nothing is re-serialized that the provider
 serializer would not serialize anyway, and the whole payload attached to a
 ``Usage`` event is a dozen short strings.
+
+What ``prefix_grew_only`` turned out to mean
+--------------------------------------------
+
+A production day across 24 sessions on one ``openai_responses`` gateway
+(gpt-6-astra, 353 calls billing over 10k fresh input tokens, 164 of them with
+``cache_read == 0``) was measured against this diagnostic. The verdict on the
+unexplained misses is **provider-side**, and the evidence rules out the
+harness-side theories one at a time. Read this before spending another day on
+prefix discipline.
+
+* **The cached prefix demonstrably existed while it was being ignored.** In one
+  turn: call 3 read 49,536 cached tokens; call 4, five seconds later, on a
+  byte-identical superset of that prefix (checkpoints matched through m41),
+  read **0**; calls 5-9 also read 0; call 10, 90 seconds later and longer
+  still, read **49,536** again — the same entry. An append-only request cannot
+  invalidate a prefix and then re-validate it. Nothing fluid renders explains
+  that shape.
+* **Misses correlate across unrelated sessions.** Conditioned on another
+  session being active within 90 s, 81% of full misses coincided with a full
+  miss in a *different* session (different affinity key, different prefix,
+  different system prompt) against 37% for hits. Whole minutes went by where
+  every concurrent session missed and none hit.
+* **It is not the affinity key.** ``_sticky_poisoned`` never fired — zero
+  ``ProviderRetry`` events in the entire corpus — so every request carried
+  ``prompt_cache_key``. A session resumed onto a NEW fluid session id (hence a
+  new key) still read the cache on its very first call, so a new key does not
+  by itself partition anything; a stable host key (``NativeLoop(cache_key=…)``)
+  is worth having, but it is not the cure.
+* **It is not images.** The miss rate with a live image in context was *lower*
+  (40.5%) than without (56.4%), and the longest miss run in the corpus began
+  three calls before the session's first screenshot existed.
+* **It is not the first two calls being special.** Call 1 is unavoidable
+  (nothing to hit). Call 2 missed in 9 of 20 fresh sessions and hit in 7, on
+  the same request shape, with overlapping call-1-to-call-2 gaps in both groups
+  (a hit at 5.1 s, a miss at 23.4 s).
+* **A rewrite costs one call, and the provider often takes two.** After a
+  ``trigger`` compaction the next call is degraded in 83 of 87 cases — expected,
+  the prefix moved — but the call after it, which should read what the previous
+  one just wrote, is degraded again in 52 of those. That second one is on the
+  provider: fluid rewrote nothing between them.
+* **There is no breakpoint to place.** ``openai_responses`` reports
+  ``explicit_cache_breakpoints=False`` and its serializer has no field for one,
+  so :func:`diagnose_cache_miss` stops naming that suspect there.
+
+The one lever the harness does own is how often it rewrites an already-sent
+prefix. That is why image consumption is now gated on pressure and a turn
+boundary (see :mod:`fluid.context.trim`) — not because it caused the misses
+above, but because every avoidable rewrite pays the provider's warm-up twice.
 """
 
 from __future__ import annotations
