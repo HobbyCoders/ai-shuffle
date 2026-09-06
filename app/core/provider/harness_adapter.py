@@ -363,6 +363,9 @@ class HarnessAdapter(ProviderAdapter):
         # capture upstream usage/quota headers (see _usage_capture_http_client).
         # The fluid client does not own it, so disconnect() closes it.
         self._provider_http: Optional[httpx.AsyncClient] = None
+        # One-shot latch for the "provider HTTP client is closed" warning in
+        # is_alive(): the pool's sweeps call it in a loop.
+        self._reported_dead_http: bool = False
         # Running roll-up of THIS turn's per-call usage, summed off the fluid
         # ``Usage`` events as they are translated and reset at each turn floor.
         # It exists for the ErrorEvent branch: fluid's catch-all ErrorEvent
@@ -1139,11 +1142,15 @@ class HarnessAdapter(ProviderAdapter):
             return False
         http = self._provider_http
         if http is not None and http.is_closed:
-            logger.warning(
-                "[HarnessAdapter] provider HTTP client is closed (kind=%s) — "
-                "reporting the adapter as not alive so the caller rebuilds it",
-                self._provider_kind,
-            )
+            # Once per adapter: the pool sweeps call this in a loop, and a
+            # per-call warning would turn one dead client into a log flood.
+            if not self._reported_dead_http:
+                self._reported_dead_http = True
+                logger.warning(
+                    "[HarnessAdapter] provider HTTP client is closed (kind=%s) "
+                    "— reporting the adapter as not alive so the caller "
+                    "rebuilds it", self._provider_kind,
+                )
             return False
         return True
 
