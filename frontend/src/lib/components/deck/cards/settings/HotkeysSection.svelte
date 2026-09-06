@@ -10,7 +10,7 @@
 		<p>Dictation and the keyboard shortcut that triggers it.</p>
 	</div>
 	<div class="set-row">
-		<div class="lab"><h4>Global voice input</h4><p>Press the hotkey anywhere to start voice-to-text.</p></div>
+		<div class="lab"><h4>Global voice input</h4><p>Press the hotkey anywhere to start voice-to-text. It finishes automatically when you stop talking.</p></div>
 		<div class="ctl">
 			<button
 				type="button"

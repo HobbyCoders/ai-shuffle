@@ -45,6 +45,8 @@ export interface VoiceInputSink {
 }
 
 export interface GlobalSttState {
+	/** Which surface started this dictation and should display its controls. */
+	source: 'global' | 'composer';
 	isRecording: boolean;
 	isTranscribing: boolean;
 	isPreparing: boolean;
@@ -79,6 +81,7 @@ export interface GlobalSttAudio {
 // ============================================================================
 
 const initialState: GlobalSttState = {
+	source: 'global',
 	isRecording: false,
 	isTranscribing: false,
 	isPreparing: false,
@@ -121,7 +124,7 @@ let streamSession: SttStreamSession | null = null;
 // Audio level monitoring (batch path only — the live path meters in sttStream)
 let audioContext: AudioContext | null = null;
 let analyserNode: AnalyserNode | null = null;
-let audioLevelAnimationId: number | null = null;
+let audioMonitorTimer: ReturnType<typeof setInterval> | null = null;
 
 const MIN_RECORDING_DURATION = 500; // 500ms minimum
 
@@ -250,32 +253,37 @@ function getFileExtension(mimeType: string): string {
 // have said a word.
 let heardSpeech = false;
 
-async function initAudioMonitoring(stream: MediaStream): Promise<() => void> {
+async function initAudioMonitoring(stream: MediaStream, myRun: number): Promise<() => void> {
 	heardSpeech = false;
-	audioContext = new AudioContext();
-	analyserNode = audioContext.createAnalyser();
+	const context = new AudioContext();
+	audioContext = context;
+	if (context.state === 'suspended') await context.resume();
+	if (!isCurrentRun(myRun)) return () => {};
+	analyserNode = context.createAnalyser();
 	analyserNode.fftSize = 256;
 	analyserNode.smoothingTimeConstant = 0.8;
 
-	const source = audioContext.createMediaStreamSource(stream);
+	const source = context.createMediaStreamSource(stream);
 	source.connect(analyserNode);
 
 	const dataArray = new Uint8Array(analyserNode.frequencyBinCount);
+	const samples = new Float32Array(analyserNode.fftSize);
 	const bands = emptyBands();
 	const perBand = Math.floor(dataArray.length / BAND_COUNT) || 1;
 
 	function updateLevel() {
-		if (!analyserNode) return;
+		if (!analyserNode || !isCurrentRun(myRun)) return;
 
 		analyserNode.getByteFrequencyData(dataArray);
+		analyserNode.getFloatTimeDomainData(samples);
 
-		// Calculate RMS level
+		// Measure the waveform itself. Smoothed frequency bins are useful for
+		// drawing bars, but can keep reporting energy after speech has ended.
 		let sum = 0;
-		for (let i = 0; i < dataArray.length; i++) {
-			const normalized = dataArray[i] / 255;
-			sum += normalized * normalized;
+		for (const sample of samples) {
+			sum += sample * sample;
 		}
-		const rms = Math.sqrt(sum / dataArray.length);
+		const rms = Math.sqrt(sum / samples.length);
 
 		// Same band shape the live path publishes, so one waveform component
 		// drives both modes.
@@ -302,22 +310,21 @@ async function initAudioMonitoring(stream: MediaStream): Promise<() => void> {
 		} else if (heardSpeech && silenceTimer === null) {
 			armSilenceStop(SILENCE_AUTO_STOP_BATCH_MS);
 		}
-
-		audioLevelAnimationId = requestAnimationFrame(updateLevel);
 	}
 
-	// Return function to start the visualization loop (call exactly once)
+	// Speech detection must keep running when animation frames are paused (for
+	// example, in a background tab). Do not tie recording lifetime to rendering.
 	return () => {
-		if (audioLevelAnimationId === null) {
-			audioLevelAnimationId = requestAnimationFrame(updateLevel);
+		if (audioMonitorTimer === null) {
+			audioMonitorTimer = setInterval(updateLevel, 50);
 		}
 	};
 }
 
 function stopAudioMonitoring(): void {
-	if (audioLevelAnimationId !== null) {
-		cancelAnimationFrame(audioLevelAnimationId);
-		audioLevelAnimationId = null;
+	if (audioMonitorTimer !== null) {
+		clearInterval(audioMonitorTimer);
+		audioMonitorTimer = null;
 	}
 
 	if (audioContext) {
@@ -417,7 +424,7 @@ async function startLiveRecording(myRun: number): Promise<boolean> {
 				});
 			},
 			onSpeech: (active) => {
-				if (!isCurrentRun(myRun)) return;
+				if (!isCurrentRun(myRun) || !get(globalSttState).isRecording) return;
 				globalSttState.update((s) => ({ ...s, speechActive: active }));
 				// Server VAD is the authority on "are they still talking" — far
 				// better than an RMS threshold, so the live path defers to it.
@@ -540,7 +547,7 @@ async function stopLiveRecording(reason: 'user' | 'dropped' = 'user'): Promise<v
 // Recording Functions
 // ============================================================================
 
-async function startRecording(): Promise<void> {
+async function startRecording(source: GlobalSttState['source']): Promise<void> {
 	const state = get(globalSttState);
 
 	// Don't start if already recording or transcribing
@@ -550,9 +557,14 @@ async function startRecording(): Promise<void> {
 
 	audioChunks = [];
 	const myRun = ++runId;
+	if (source === 'global') {
+		outputSink = null;
+		liveSink = null;
+	}
 
 	globalSttState.update((s) => ({
 		...s,
+		source,
 		isPreparing: true,
 		error: null,
 		partial: '',
@@ -577,13 +589,18 @@ async function startRecording(): Promise<void> {
 				'Microphone requires a secure context (HTTPS or localhost). In Chrome, you can allow this origin at chrome://flags/#unsafely-treat-insecure-origin-as-secure'
 			);
 		}
-		mediaStream = await navigator.mediaDevices.getUserMedia({
+		const stream = await navigator.mediaDevices.getUserMedia({
 			audio: {
 				echoCancellation: true,
 				noiseSuppression: true,
 				autoGainControl: true
 			}
 		});
+		if (!isCurrentRun(myRun)) {
+			stream.getTracks().forEach((track) => track.stop());
+			return;
+		}
+		mediaStream = stream;
 
 		// Determine best supported mime type
 		currentMimeType = getSupportedMimeType();
@@ -592,7 +609,7 @@ async function startRecording(): Promise<void> {
 
 		// Collect audio chunks
 		recorder.ondataavailable = (event) => {
-			if (event.data.size > 0) {
+			if (isCurrentRun(myRun) && event.data.size > 0) {
 				audioChunks.push(event.data);
 			}
 		};
@@ -605,10 +622,10 @@ async function startRecording(): Promise<void> {
 		// Capture is live from this line, so the cue belongs here rather than
 		// after the meter setup below, which is another await away.
 		playEarcon('ready');
-		noSpeechTimer = setTimeout(autoStop, NO_SPEECH_AUTO_STOP_MS);
 
 		// Initialize audio monitoring
-		const startVisualization = await initAudioMonitoring(mediaStream);
+		const startVisualization = await initAudioMonitoring(mediaStream, myRun);
+		if (!isCurrentRun(myRun)) return;
 
 		// Show recording UI
 		globalSttState.update((s) => ({
@@ -619,7 +636,15 @@ async function startRecording(): Promise<void> {
 
 		// Start visualization loop
 		startVisualization();
+		noSpeechTimer = setTimeout(autoStop, NO_SPEECH_AUTO_STOP_MS);
 	} catch (error: unknown) {
+		if (!isCurrentRun(myRun)) return;
+		clearAutoStop();
+		stopAudioMonitoring();
+		if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+		mediaStream?.getTracks().forEach((track) => track.stop());
+		mediaRecorder = null;
+		mediaStream = null;
 		console.error('[GlobalSTT] Failed to start recording:', error);
 		const err = error as { name?: string; message?: string };
 
@@ -669,7 +694,7 @@ async function stopRecording(): Promise<void> {
 			...s,
 			isRecording: false,
 			mode: 'idle',
-			error: 'That was too short to transcribe — press the hotkey again to stop.'
+			error: 'That was too short to transcribe. Start again and speak for a little longer.'
 		}));
 		recorder.stop();
 		stream?.getTracks().forEach((track) => track.stop());
@@ -679,7 +704,7 @@ async function stopRecording(): Promise<void> {
 	}
 
 	const myRun = runId;
-	globalSttState.update((s) => ({ ...s, isRecording: false }));
+	globalSttState.update((s) => ({ ...s, isRecording: false, isTranscribing: true }));
 
 	try {
 		// Wait for the recorder to flush before assembling the blob.
@@ -711,15 +736,16 @@ async function stopRecording(): Promise<void> {
 			recorder.stop();
 		});
 
+		if (!isCurrentRun(myRun)) return;
 		mediaRecorder = null;
 		mediaStream = null;
-
-		if (!isCurrentRun(myRun)) return;
 		await transcribeAndOutput(audioBlob, myRun);
 	} catch (error: unknown) {
+		if (!isCurrentRun(myRun)) return;
 		const err = error as { message?: string };
 		globalSttState.update((s) => ({
 			...s,
+			isTranscribing: false,
 			mode: 'idle',
 			error: err.message || 'Failed to process recording'
 		}));
@@ -728,7 +754,7 @@ async function stopRecording(): Promise<void> {
 	}
 }
 
-async function toggleRecording(): Promise<void> {
+async function toggleRecording(source: GlobalSttState['source'] = 'global'): Promise<void> {
 	// Must be the first statement and must stay synchronous: this call runs
 	// inside the click/keydown, which is the only moment iOS lets an
 	// AudioContext start. By the time a cue is due we are several awaits away.
@@ -744,7 +770,7 @@ async function toggleRecording(): Promise<void> {
 		if (state.isRecording) {
 			await stopRecording();
 		} else if (!state.isTranscribing && !state.isPreparing) {
-			await startRecording();
+			await startRecording(source);
 		}
 	} finally {
 		isToggling = false;
@@ -842,6 +868,7 @@ async function transcribeAndOutput(audioBlob: Blob, myRun: number): Promise<void
 			}
 		}
 
+		if (!isCurrentRun(myRun)) return;
 		let response = await post(uploadBlob, filename);
 		if (!isCurrentRun(myRun)) return;
 
@@ -852,6 +879,7 @@ async function transcribeAndOutput(audioBlob: Blob, myRun: number): Promise<void
 		if (!response.ok && !converted) {
 			try {
 				const wav = await convertToWav(audioBlob);
+				if (!isCurrentRun(myRun)) return;
 				console.warn('[GlobalSTT] Native upload rejected, retrying as WAV');
 				response = await post(wav, 'recording.wav');
 				if (!isCurrentRun(myRun)) return;
@@ -920,6 +948,7 @@ async function outputText(text: string, myRun?: number): Promise<void> {
 		console.error('[GlobalSTT] Failed to copy to clipboard:', e);
 		// Continue anyway - we'll try to paste if possible
 	}
+	if (myRun !== undefined && !isCurrentRun(myRun)) return;
 
 	// Check if an input element is focused
 	const activeElement = document.activeElement;
@@ -1116,17 +1145,16 @@ export function triggerToggle(): void {
  * Toggle voice input on behalf of a UI button, delivering the finished text to
  * `sink` instead of the clipboard/caret.
  *
- * Both entry points share one capture stack and one overlay: the composer's
- * microphone is a trigger, not a second recorder, so live transcription behaves
- * identically however it was started.
+ * Both entry points share one capture stack and automatic end-of-speech stop.
  */
 export function toggleVoiceInput(
 	sink: (text: string) => void,
 	live?: VoiceInputSink
 ): void {
-	if (!get(globalSttState).isRecording) {
+	const state = get(globalSttState);
+	if (!isToggling && !state.isRecording && !state.isPreparing && !state.isTranscribing) {
 		outputSink = sink;
 		liveSink = live ?? null;
 	}
-	toggleRecording();
+	void toggleRecording('composer');
 }
