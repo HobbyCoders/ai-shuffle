@@ -322,7 +322,7 @@
 	let remoteChange = $state('');
 	let remoteBaseline = '';
 	function remoteSnapshot() { return JSON.stringify([formName, formDescription, formProjectId, formProfileIds, formIsActive, formModel, formEffort]); }
-	watchResources(['settings', 'agents', 'projects'], async () => {
+	watchResources(['api_users', 'settings', 'agents', 'projects'], async () => {
 		const selected = editingUser;
 		const before = remoteSnapshot();
 		await loadData();

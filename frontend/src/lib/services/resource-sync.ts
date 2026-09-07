@@ -2,7 +2,7 @@
  * Callbacks refresh lists, never replace editor buffers. Bursts during a request
  * schedule one subsequent refresh so the last mutation cannot be missed.
  */
-export const RESOURCE_NAMES = ['sessions', 'projects', 'agents', 'tags', 'notes', 'templates', 'settings', 'connectors', 'automations', 'plugins', 'hooks', 'mcp', 'notifications'] as const;
+export const RESOURCE_NAMES = ['sessions', 'projects', 'agents', 'tags', 'notes', 'templates', 'settings', 'connectors', 'automations', 'plugins', 'hooks', 'mcp', 'notifications', 'api_users'] as const;
 export type ResourceName = typeof RESOURCE_NAMES[number];
 type Subscriber = { names: readonly string[]; refresh: () => void | Promise<unknown>; dirty: boolean; running: boolean; alive: boolean };
 export class ResourceSync {

@@ -97,10 +97,8 @@
 		} catch { /* Storage failures must not interrupt editing. */ }
 	}
 
-	// A draft taken from an existing note is restored only while the server
-	// still holds the version it was taken from. Restoring it over a note that
-	// changed elsewhere would mark the stale body dirty and auto-save it on the
-	// next navigation, discarding the newer content.
+	// Conflicting/deleted server notes become independent drafts so neither
+	// the local text nor the newer server version can be overwritten.
 	async function restoreDraft() {
 		let draft: { note?: Note | null; title: string; content: string; tags: string[]; pinned?: boolean };
 		try {
@@ -111,16 +109,17 @@
 		if (typeof draft?.title !== 'string' || typeof draft.content !== 'string' || !Array.isArray(draft.tags)) return;
 		const generation = editorGeneration;
 		if (draft.note) {
-			let current: Note;
+			let current: Note | null;
 			try {
 				current = await getNote(draft.note.id);
-			} catch {
-				return;
+			} catch (error) {
+				if ((error as { status?: number }).status !== 404) return;
+				current = null;
 			}
 			if (generation !== editorGeneration) return;
-			if (current.updated_at !== draft.note.updated_at) {
-				try { sessionStorage.removeItem(DRAFT_KEY); } catch { /* ignore */ }
-				return;
+			if (!current || current.updated_at !== draft.note.updated_at) {
+				draft.note = null;
+				remoteChange = 'This note changed elsewhere. Your recovered text is kept as a new draft.';
 			}
 		}
 		editingNote = draft.note ?? null;
@@ -130,6 +129,7 @@
 		editorTags = draft.tags;
 		editorPinned = !!draft.pinned;
 		hasUnsavedChanges = true;
+		persistDraft();
 		if (editingNote) void loadAttachments(editingNote.id);
 	}
 

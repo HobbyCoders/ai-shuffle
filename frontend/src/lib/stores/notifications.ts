@@ -71,6 +71,13 @@ const HISTORY_CAP = 200;
 
 const _store = createStore<NotificationState>({ live: [], history: [] });
 const _timers = new Map<string, ReturnType<typeof setTimeout>>();
+const _pendingRemote = new Set<Promise<unknown>>();
+let _historyRequest = 0;
+
+function _trackRemote(promise: Promise<unknown>): void {
+	const settled = promise.catch(() => {}).finally(() => _pendingRemote.delete(settled));
+	_pendingRemote.add(settled);
+}
 
 function _scheduleAutoDismiss(id: string, ms: number) {
 	const t = setTimeout(() => dismissLive(id), ms);
@@ -90,7 +97,7 @@ function _persistRemote(n: AppNotification): void {
 	try {
 		if (typeof window === 'undefined') return;
 		if (!auth.current.status?.authenticated) return;
-		void api
+		_trackRemote(api
 			.post('/notifications', {
 				id: n.id,
 				severity: n.severity,
@@ -100,7 +107,7 @@ function _persistRemote(n: AppNotification): void {
 				message: n.message,
 				session_id: n.session_id,
 			})
-			.catch(() => {});
+			);
 	} catch {
 		// Notification persistence must never break the app.
 	}
@@ -224,18 +231,24 @@ export const notify = Object.assign(
 				action,
 			}),
 
-		/** Merge backend history with items received while the request was in flight. */
-		hydrate: (items: AppNotification[]) => {
-			_store.update((s) => ({
-				...s,
-				history: [...new Map(
-					[...items, ...s.history]
-						.filter((n) => !n.dismissed)
-						.map((n) => [n.id, { ...n, surface: 'notification' as const }])
-				).values()]
-					.sort((a, b) => b.created_at - a.created_at)
-					.slice(0, HISTORY_CAP),
-			}));
+		/** Reconcile the server snapshot while retaining changes made during its fetch. */
+		hydrate: (items: AppNotification[], baseline = _store.current.history) => {
+			_store.update((s) => {
+				const before = new Map(baseline.map(n => [n.id, n]));
+				const current = new Map(s.history.map(n => [n.id, n]));
+				const merged = new Map<string, AppNotification>();
+				for (const item of items) {
+					const local = current.get(item.id);
+					if (before.has(item.id) && !local) continue; // dismissed during fetch
+					if (local && before.get(item.id) !== local) { merged.set(item.id, local); continue; }
+					if (!item.dismissed) merged.set(item.id, { ...item, surface: 'notification',
+						action: local?.action, session_id: item.session_id ?? local?.session_id });
+				}
+				for (const local of s.history) {
+					if (!local.persist || before.get(local.id) !== local) merged.set(local.id, local);
+				}
+				return { ...s, history: [...merged.values()].sort((a, b) => b.created_at - a.created_at).slice(0, HISTORY_CAP) };
+			});
 		},
 
 		/**
@@ -249,7 +262,13 @@ export const notify = Object.assign(
 			try {
 				if (typeof window === 'undefined') return;
 				if (!auth.current.status?.authenticated) return;
+				const request = ++_historyRequest;
+				const owner = auth.current.status.preference_identity;
+				await Promise.allSettled([..._pendingRemote]);
+				if (request !== _historyRequest) return;
+				const baseline = _store.current.history;
 				const res = await api.get<{ notifications?: ServerNotificationRow[] }>('/notifications');
+				if (request !== _historyRequest || !auth.current.status?.authenticated || owner !== auth.current.status.preference_identity) return;
 				const rows = res?.notifications ?? [];
 				const items: AppNotification[] = rows.map((r) => ({
 					id: r.id,
@@ -266,7 +285,7 @@ export const notify = Object.assign(
 					created_at: typeof r.created_at === 'number' ? r.created_at : 0,
 					session_id: r.session_id ?? undefined,
 				}));
-				notify.hydrate(items);
+				notify.hydrate(items, baseline);
 			} catch {
 				// Never break startup on a notifications fetch failure.
 			}
@@ -308,6 +327,13 @@ export const notify = Object.assign(
 
 		/** Dismiss a live banner without touching history. */
 		dismissLive,
+		/** Account changes clear only local presentation, never the old account's history. */
+		resetLocal: () => {
+			_historyRequest++;
+			for (const id of _timers.keys()) _clearTimer(id);
+			_pendingRemote.clear();
+			_store.update(() => ({live:[], history:[]}));
+		},
 	}
 );
 
@@ -316,7 +342,7 @@ function _remote(fn: () => Promise<unknown>): void {
 	try {
 		if (typeof window === 'undefined') return;
 		if (!auth.current.status?.authenticated) return;
-		void fn().catch(() => {});
+		_trackRemote(fn());
 	} catch {
 		// never break the UI
 	}

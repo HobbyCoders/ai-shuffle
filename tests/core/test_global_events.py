@@ -102,7 +102,10 @@ def test_global_cookie_auth_and_optional_token():
     from app.api import ws_sync
     app = FastAPI()
     app.include_router(ws_sync.router, prefix="/api/v1")
-    auth = AsyncMock(return_value=(True, {"id": "alice"}))
+    async def authenticate(socket, token):
+        socket.state.mobile_tool_principal = {'kind':'api_user', 'principal_id':'alice'}
+        return True, {'id':'alice'}
+    auth = AsyncMock(side_effect=authenticate)
     with patch.object(ws_sync, "authenticate_websocket", auth):
         with TestClient(app) as client:
             with client.websocket_connect("/api/v1/ws/global?device_id=same") as first:
@@ -282,8 +285,8 @@ def test_paired_admin_global_identity_and_ping():
         with TestClient(app) as client:
             with client.websocket_connect("/ws/global?device_id=paired&token=" + token) as ws:
                 assert ws.receive_json() == {"type": "sync_ready"}
-                assert any(kind == "admin" and identity == "same" for kind, identity, _, _ in global_events.connections.values())
-                global_events.preference_changed("admin", "same", "theme")
+                assert any(kind == "paired" and identity == paired['id'] for kind, identity, _, _ in global_events.connections.values())
+                global_events.preference_changed("paired", paired['id'], "theme")
                 assert ws.receive_json() == {"type": "preferences_changed", "keys": ["theme"]}
                 ws.send_json({"type": "ping"})
                 assert ws.receive_json() == {"type": "pong"}

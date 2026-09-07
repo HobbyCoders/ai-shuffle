@@ -152,17 +152,18 @@ describe('Notes draft persistence', () => {
 		expect(updateNote).not.toHaveBeenCalled();
 	});
 
-	it('drops a draft whose note changed on the server instead of saving it back', async () => {
+	it('recovers a conflicting draft independently without overwriting the server note', async () => {
 		sessionStorage.setItem('ai-shuffle-note-draft', JSON.stringify({
 			note: note('A'), isCreatingNew: false, title: 'Note A', content: 'stale draft', tags: [], pinned: false
 		}));
 		vi.mocked(getNote).mockImplementation(async id => ({ ...note(id), content: 'edited elsewhere', updated_at: '2026-09-02' }));
 		render(NotesCard);
-		await waitFor(() => expect(sessionStorage.getItem('ai-shuffle-note-draft')).toBeNull());
-		expect(screen.queryByPlaceholderText(/Write your note/)).toBeNull();
+		await waitFor(() => expect(body().value).toBe('stale draft'));
+		expect(JSON.parse(sessionStorage.getItem('ai-shuffle-note-draft')!).note).toBeNull();
 		await fireEvent.click(await screen.findByRole('button', { name: /Note B content B/ }));
 		await waitFor(() => expect(title().value).toBe('Note B'));
 		expect(updateNote).not.toHaveBeenCalled();
+		expect(createNote).toHaveBeenCalledWith(expect.objectContaining({ content: 'stale draft' }));
 	});
 
 	it('restores an untitled draft after the feature panel is unmounted', async () => {

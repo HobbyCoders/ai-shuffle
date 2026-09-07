@@ -16,6 +16,22 @@ import { git } from '$lib/stores/git.svelte';
 import { isApiError } from '$lib/api/client';
 import { notify } from '$lib/stores/notifications';
 
+/** A persistent bell action must never operate on a newly selected checkout. */
+export function captureGitRetryGuard(): (retry: () => void) => void {
+	const identity = () => JSON.stringify([
+		git.current.projectId, git.current.worktreeId, git.current.sessionId,
+		git.current.contextKey, git.current.status?.current_branch
+	]);
+	const origin = identity();
+	return (retry) => {
+		if (origin !== identity()) {
+			notify('This Git action belongs to another checkout or branch. Return there and retry the operation.', { severity: 'warning' });
+			return;
+		}
+		retry();
+	};
+}
+
 /**
  * Run a user-initiated branch checkout and surface any failure to the user.
  *
@@ -35,6 +51,7 @@ async function runCheckout(
 	autoStash: boolean,
 	afterSwitch?: () => void | Promise<void>
 ): Promise<void> {
+	const guardRetry = captureGitRetryGuard();
 	try {
 		await git.checkout(ref, autoStash);
 		await afterSwitch?.();
@@ -58,7 +75,7 @@ async function runCheckout(
 				action: {
 					label: 'Stash & switch',
 					onClick: () => {
-						void runCheckout(ref, true, afterSwitch);
+						guardRetry(() => { void runCheckout(ref, true, afterSwitch); });
 					},
 				},
 			});

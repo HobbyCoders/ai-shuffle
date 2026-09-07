@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { captureGitRetryGuard } from '$lib/stores/gitCheckoutAction';
 	/**
 	 * MainPanel - Content area that renders the active view
 	 *
@@ -656,6 +657,7 @@
 
 	async function handlePush(opts: PushOptions = {}) {
 		if (gitActionsBlocked()) return;
+		const guardRetry = captureGitRetryGuard();
 		markGitActivity(); // user git action → responsive poll cadence
 		const force = opts.force ?? false;
 		gitOperations.begin(force ? 'Force push' : 'Push', []);
@@ -667,7 +669,7 @@
 			gitOperations.clear();
 			const detail = errText(e);
 			if (!force && isNonFastForward(detail)) {
-				notify(detail, { severity: 'error', action: { label: 'Pull first', onClick: () => handlePull() } });
+				notify(detail, { severity: 'error', action: { label: 'Pull first', onClick: () => guardRetry(() => { void handlePull(); }) } });
 			} else {
 				notify(detail, { severity: 'error' });
 			}
@@ -676,6 +678,7 @@
 
 	async function handlePull(opts: PullOptions = {}) {
 		if (gitActionsBlocked()) return;
+		const guardRetry = captureGitRetryGuard();
 		markGitActivity(); // user git action → responsive poll cadence
 		const prefs = gitActionPreferences.current;
 		const strategy = opts.strategy ?? prefs.pullStrategy;
@@ -698,7 +701,7 @@
 			const dirty = !autoStash && isApiError(e) && e.status === 409;
 			const detail = errText(e);
 			if (dirty) {
-				notify(detail, { severity: 'error', action: { label: 'Stash & pull', onClick: () => handlePull({ strategy, autoStash: true }) } });
+				notify(detail, { severity: 'error', action: { label: 'Stash & pull', onClick: () => guardRetry(() => { void handlePull({ strategy, autoStash: true }); }) } });
 			} else {
 				notify(detail, { severity: 'error' });
 			}

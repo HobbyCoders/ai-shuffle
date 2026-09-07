@@ -14,11 +14,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const mocks = vi.hoisted(() => ({
 	checkout: vi.fn(),
 	toastPush: vi.fn(),
+	current: { projectId: 'a', worktreeId: null, sessionId: 's', contextKey: 'a', status: { current_branch: 'main' } },
 }));
 
 vi.mock('$lib/stores/git.svelte', () => ({
 	git: {
 		checkout: mocks.checkout,
+		current: mocks.current,
 	},
 }));
 
@@ -35,12 +37,22 @@ function apiError(status: number, detail: string) {
 }
 
 beforeEach(() => {
+	mocks.current.projectId = 'a';
 	mocks.checkout.mockReset();
 	mocks.toastPush.mockReset();
 	vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 
 describe('checkoutBranchWithToast', () => {
+	it('expires the stored stash action after switching to another project', async () => {
+		mocks.checkout.mockRejectedValue(apiError(409, 'dirty'));
+		await checkoutBranchWithToast('feature');
+		const action = mocks.toastPush.mock.calls[0][1].action;
+		mocks.current.projectId = 'b';
+		action.onClick();
+		expect(mocks.checkout).toHaveBeenCalledTimes(1);
+		expect(mocks.toastPush).toHaveBeenLastCalledWith(expect.stringContaining('another checkout'), {severity:'warning'});
+	});
 	it('switches successfully and runs afterSwitch with no error toast', async () => {
 		mocks.checkout.mockResolvedValue({ success: true, message: "Checked out 'feature'" });
 		const afterSwitch = vi.fn();

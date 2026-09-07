@@ -570,7 +570,7 @@
 	let remoteChange = $state('');
 	let remoteBaseline = '';
 	function remoteSnapshot() { return JSON.stringify([formName, formApiUserId, formConfig, formEvents, [...selectedGuildIds], [...selectedChannelIds], prefixMode, customPrefix]); }
-	watchResources(['connectors'], async () => {
+	watchResources(['connectors', 'api_users'], async () => {
 		const selected = editingConnector;
 		const snapshot = remoteSnapshot();
 		await loadData(true);
