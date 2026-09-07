@@ -289,13 +289,17 @@ def _normalize_model_capabilities(models):
     return normalized
 
 
-def update_model_provider(provider_id: str, **kwargs: Any) -> Optional[ModelProviderRow]:
+def update_model_provider(
+    provider_id: str, *, expected_updated_at: Optional[str] = None, **kwargs: Any
+) -> Optional[ModelProviderRow]:
     """Partially update a provider by id and return the fresh row.
 
     Only the columns present in ``kwargs`` (and in ``_UPDATABLE_COLUMNS``) are
     written. ``auth_token`` is NEVER touched unless explicitly passed, so a
     metadata-only edit leaves the stored token intact. JSON columns accept
     either a serialized string or a Python list/dict.
+    ``expected_updated_at`` rejects an observation fetched before any concurrent
+    binding or capability edit, including writes made by another worker.
     """
     if "models_json" in kwargs:
         kwargs["models_json"] = _normalize_model_capabilities(kwargs["models_json"])
@@ -312,16 +316,19 @@ def update_model_provider(provider_id: str, **kwargs: Any) -> Optional[ModelProv
     updates.append("updated_at = %s")
     values.append(datetime.now(timezone.utc).isoformat())
     values.append(provider_id)
+    condition = " AND updated_at = %s" if expected_updated_at is not None else ""
+    if expected_updated_at is not None:
+        values.append(expected_updated_at)
 
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            f"UPDATE model_providers SET {', '.join(updates)} WHERE id = %s",
+            f"UPDATE model_providers SET {', '.join(updates)} WHERE id = %s{condition} RETURNING {_PUBLIC_COLUMNS}",
             values,
         )
-        if cursor.rowcount == 0:
-            return None
-    return get_model_provider(provider_id)
+        # Return this write's revision, not an unrelated edit committed between
+        # our UPDATE and a second SELECT (used by capability cooldown keys).
+        return _parse_json_columns(row_to_dict(cursor.fetchone()))
 
 
 def set_openai_billing_binding(provider_id: str, organization_id: str, instance_id: str) -> Optional[ModelProviderRow]:

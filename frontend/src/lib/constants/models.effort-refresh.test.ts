@@ -1,9 +1,10 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api: mocks }));
 import { hydrateModelRegistry, getProviders, isRegistryHydrated } from './models';
 import { effortRegistryFixture } from '$lib/test-stubs/effort-registry';
 const payload = (id: string, models: object[]) => ({ ...effortRegistryFixture, providers: [{ id, name: id, provider_type: 'openrouter', models }] });
+afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
 
 describe('capability migration hydration', () => {
  it('recovers canonical version-one null levels once without changing known model metadata', async () => {
@@ -64,7 +65,7 @@ describe('capability migration hydration', () => {
   await vi.waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(count + 1));
   expect(mocks.post).toHaveBeenCalledTimes(1); // even when refresh returned stale data
  });
- it('retains state on failure, does not retry automatically, and accepts an explicit later hydration', async () => {
+ it('retains state on failure without immediately looping, and accepts a later hydration', async () => {
   mocks.post.mockClear().mockRejectedValue(new Error('offline'));
   mocks.get.mockResolvedValue(payload('failure', [{ id: 'model', effort_levels: null }]));
   expect(await hydrateModelRegistry()).toBe(true);
@@ -102,5 +103,94 @@ describe('capability migration hydration', () => {
   mocks.get.mockResolvedValue(payload('race', [{ id: 'glm', effort_levels: [], effort_metadata_version: 0 }]));
   await hydrateModelRegistry();
   expect(getProviders()[0].models[0]).toMatchObject({ effort_levels: canonical.effort_levels, default_effort: 'max', effort_metadata_version: 1, reasoning_capabilities: canonical });
+ });
+});
+
+describe('bounded capability discovery recovery', () => {
+ it('allows a legitimate 30-second catalog instead of aborting at 15 seconds', async () => {
+  vi.useFakeTimers();
+  mocks.post.mockClear();
+  let finish!: (result: object) => void;
+  mocks.post.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  mocks.get.mockResolvedValue(payload('slow', [{ id: 'm' }]));
+  await hydrateModelRegistry();
+  const signal = mocks.post.mock.calls[0][2].signal as AbortSignal;
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(signal.aborted).toBe(false);
+  mocks.get.mockResolvedValue(payload('slow', [{ id: 'm', effort_metadata_version: 1, effort_levels: ['low'] }]));
+  finish({ refreshed: ['slow'], failed: [] });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(getProviders()[0].models[0].effort_levels).toEqual(['low']);
+ });
+ it('reconciles an abort, then retries with backoff rather than suppressing repair for the page', async () => {
+  vi.useFakeTimers();
+  mocks.post.mockClear().mockImplementation((_url, _body, options) => new Promise((_resolve, reject) => {
+   options.signal.addEventListener('abort', () => reject(new Error('aborted')));
+  }));
+  mocks.get.mockResolvedValue(payload('retry-timeout', [{ id: 'm' }]));
+  await hydrateModelRegistry();
+  const reads = mocks.get.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(45_000);
+  expect(mocks.get.mock.calls.length).toBe(reads + 1);
+  await hydrateModelRegistry();
+  expect(mocks.post).toHaveBeenCalledTimes(1);
+  mocks.post.mockResolvedValue({ refreshed: ['retry-timeout'], failed: [] });
+  await vi.advanceTimersByTimeAsync(59_999);
+  expect(mocks.post).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(mocks.post).toHaveBeenCalledTimes(2);
+ });
+ it('queues batches of four with a fresh deadline for each request', async () => {
+  vi.useFakeTimers();
+  mocks.post.mockClear();
+  const finishes: Array<() => void> = [];
+  mocks.post.mockImplementation((_url, body) => new Promise(resolve => {
+   finishes.push(() => resolve({ refreshed: body.provider_ids, failed: [] }));
+  }));
+  mocks.get.mockResolvedValue({ ...effortRegistryFixture, providers: Array.from({ length: 9 }, (_, i) => ({
+   id: `batch-${i}`, name: 'P', provider_type: 'custom', models: [{ id: 'm' }]
+  })) });
+  await hydrateModelRegistry();
+  expect(mocks.post).toHaveBeenCalledTimes(1);
+  expect(mocks.post.mock.calls[0][1].provider_ids).toHaveLength(4);
+  await vi.advanceTimersByTimeAsync(30_000);
+  finishes[0]();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(mocks.post).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect((mocks.post.mock.calls[1][2].signal as AbortSignal).aborted).toBe(false);
+  finishes[1]();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(mocks.post.mock.calls[2][1].provider_ids).toHaveLength(1);
+  finishes[2]();
+  await vi.advanceTimersByTimeAsync(0);
+ });
+ it('continues bounded backoff when the reconciliation read is also offline', async () => {
+  vi.useFakeTimers();
+  mocks.post.mockClear().mockRejectedValue(new Error('offline'));
+  mocks.get.mockResolvedValue(payload('offline-read', [{ id: 'm' }]));
+  await hydrateModelRegistry();
+  await vi.advanceTimersByTimeAsync(0);
+  mocks.get.mockRejectedValue(new Error('still offline'));
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(mocks.post).toHaveBeenCalledTimes(1);
+  mocks.get.mockResolvedValue(payload('offline-read', [{ id: 'm' }]));
+  mocks.post.mockResolvedValue({ refreshed: ['offline-read'], failed: [] });
+  await vi.advanceTimersByTimeAsync(120_000);
+  expect(mocks.post).toHaveBeenCalledTimes(2);
+ });
+ it('retries a changed provider revision despite prior successful unknown metadata', async () => {
+  vi.useFakeTimers();
+  mocks.post.mockClear().mockResolvedValue({ refreshed: ['changed-binding'], failed: [] });
+  const p = payload('changed-binding', [{ id: 'm' }]);
+  mocks.get.mockResolvedValue({ ...p, providers: [{ ...p.providers[0], capability_generation: 'old' }] });
+  await hydrateModelRegistry();
+  await vi.advanceTimersByTimeAsync(0);
+  await hydrateModelRegistry();
+  expect(mocks.post).toHaveBeenCalledTimes(1);
+  mocks.get.mockResolvedValue({ ...p, providers: [{ ...p.providers[0], capability_generation: 'new' }] });
+  await hydrateModelRegistry();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(mocks.post).toHaveBeenCalledTimes(2);
  });
 });

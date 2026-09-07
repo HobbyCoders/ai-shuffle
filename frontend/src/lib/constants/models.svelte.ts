@@ -602,6 +602,7 @@ interface RegistryModelPayload {
 
 interface RegistryProviderPayload {
 	id: string;
+	capability_generation?: string;
 	name: string;
 	provider_type: string;
 	models: ProviderModel[];
@@ -695,28 +696,87 @@ function warnOnDrift(hydrated: ModelOption[], baseline: readonly ModelOption[]):
  * empty payload or a failed fetch — the caller uses that to decide whether to
  * retry (see `ensureModelRegistryHydrated`).
  */
-const capabilityRefreshAttempted = new Set<string>();
+type CapabilityAttempt = {
+	generation?: string;
+	inFlight: boolean;
+	done: boolean;
+	failures: number;
+	nextAttemptAt: number;
+	timer?: ReturnType<typeof setTimeout>;
+};
+const capabilityAttempts = new Map<string, CapabilityAttempt>();
+let latestCapabilityProviders: RegistryProviderPayload[] = [];
+const needsCapabilities = (p: RegistryProviderPayload) => p.models?.some(m =>
+	(m.effort_metadata_version ?? 0) < 1 || m.effort_levels == null);
 
-/** Initial hydration never waits on capability discovery. Failed providers can be
- * retried by the existing explicit refresh in settings, not every hydration. */
+function retryCapabilities(id: string, attempt: CapabilityAttempt) {
+	attempt.failures++;
+	const delay = Math.min(60_000 * 2 ** (attempt.failures - 1), 600_000);
+	attempt.nextAttemptAt = Date.now() + delay;
+	if (attempt.failures <= 3) attempt.timer = setTimeout(async () => {
+		attempt.timer = undefined;
+		if (!await hydrateRegistry(true) && capabilityAttempts.get(id) === attempt) {
+			retryCapabilities(id, attempt);
+		}
+	}, delay);
+}
+
+/** Discovery never blocks initial hydration. Four-provider requests fit the
+ * server's concurrency budget and 40s total deadline (including queueing).
+ * Transient failures retry with backoff; later hydration can retry exhausted
+ * attempts after cooldown, without permanently suppressing repair for a page. */
 function refreshStaleCapabilities(providers: RegistryProviderPayload[]) {
-	const providerIds = providers.filter(p => p.models?.some(m =>
-		(m.effort_metadata_version ?? 0) < 1 || m.effort_levels == null)
-		&& !capabilityRefreshAttempted.has(p.id)).map(p => p.id);
-	if (!providerIds.length) return;
-	providerIds.forEach(id => capabilityRefreshAttempted.add(id));
-	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), 15_000);
-	const batches: string[][] = [];
-	for (let i = 0; i < providerIds.length; i += 100) batches.push(providerIds.slice(i, i + 100));
-	void Promise.all(batches.map(ids => Promise.resolve().then(() =>
-		api.post<{ refreshed: string[]; failed: string[] }>('/model-providers/refresh-capabilities', {
-			provider_ids: ids
-		}, { signal: controller.signal })
-	).catch(() => null))).then(results => {
-		if (results.some(result => result?.refreshed?.length)) return hydrateRegistry(false);
-	}).catch(() => { /* Keep the initial registry and saved effort pins. */ })
-		.finally(() => clearTimeout(timeout));
+	const pending: Array<[string, CapabilityAttempt]> = [];
+	for (const [id, attempt] of capabilityAttempts) {
+		if (!providers.some(p => p.id === id && needsCapabilities(p))) {
+			clearTimeout(attempt.timer);
+			capabilityAttempts.delete(id);
+		}
+	}
+	for (const provider of providers.filter(needsCapabilities)) {
+		let attempt = capabilityAttempts.get(provider.id);
+		if (attempt?.inFlight) continue;
+		if (attempt && attempt.generation !== provider.capability_generation) {
+			clearTimeout(attempt.timer);
+			attempt = undefined;
+		}
+		if (attempt?.done || (attempt && Date.now() < attempt.nextAttemptAt)) continue;
+		attempt ??= { generation: provider.capability_generation, inFlight: false, done: false, failures: 0, nextAttemptAt: 0 };
+		clearTimeout(attempt.timer);
+		attempt.inFlight = true;
+		capabilityAttempts.set(provider.id, attempt);
+		pending.push([provider.id, attempt]);
+	}
+	void (async () => {
+		for (let offset = 0; offset < pending.length; offset += 4) {
+			const batch = pending.slice(offset, offset + 4);
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), 45_000);
+			let result: { refreshed: string[]; failed: string[] } | null = null;
+			try {
+				result = await api.post('/model-providers/refresh-capabilities', {
+					provider_ids: batch.map(([id]) => id)
+				}, { signal: controller.signal });
+			} catch { /* Reconcile any work the server finished before disconnect. */ }
+			finally { clearTimeout(timeout); }
+			const hydrated = await hydrateRegistry(false);
+			for (const [id, attempt] of batch) {
+				if (capabilityAttempts.get(id) !== attempt) continue;
+				attempt.inFlight = false;
+				const current = latestCapabilityProviders.find(p => p.id === id);
+				if (hydrated && (!current || !needsCapabilities(current))) {
+					capabilityAttempts.delete(id);
+					continue;
+				}
+				if (hydrated && result?.refreshed?.includes(id)) {
+					attempt.done = true;
+					attempt.generation = current?.capability_generation;
+					continue;
+				}
+				retryCapabilities(id, attempt);
+			}
+		}
+	})();
 }
 
 export async function hydrateModelRegistry(): Promise<boolean> {
@@ -742,6 +802,7 @@ async function hydrateRegistry(refreshCapabilities: boolean): Promise<boolean> {
 			: [];
 		_registry.claude = mapPayloadClaude(payload.claude);
 		_registry.hydrated = true;
+		latestCapabilityProviders = payload.providers ?? [];
 		if (refreshCapabilities) refreshStaleCapabilities(payload.providers ?? []);
 		return true;
 	} catch (e) {

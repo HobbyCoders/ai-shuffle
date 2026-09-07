@@ -922,8 +922,9 @@ class RefreshCapabilitiesRequest(BaseModel):
 # Coalesce overlapping hydration requests and throttle retrying stale failures.
 # Bounded by existing enabled provider ids, not arbitrary caller input.
 _capability_locks: Dict[str, asyncio.Lock] = {}
-_capability_results: Dict[str, Tuple[float, bool]] = {}
+_capability_results: Dict[str, Tuple[float, bool, Optional[str]]] = {}
 _CAPABILITY_COOLDOWN = 60.0
+_CAPABILITY_REQUEST_TIMEOUT = _FETCH_TIMEOUT + 10
 _capability_semaphore = asyncio.Semaphore(4)
 
 
@@ -933,8 +934,12 @@ async def _refresh_provider_capabilities(provider_id: str) -> bool:
         return False
     lock = _capability_locks.setdefault(provider_id, asyncio.Lock())
     async with lock:
+        row = db.get_model_provider(provider_id)
+        if not row or not row.get("enabled"):
+            return False
+        generation = row.get("updated_at")
         prior = _capability_results.get(provider_id)
-        if prior and time.monotonic() - prior[0] < _CAPABILITY_COOLDOWN:
+        if prior and prior[2] == generation and time.monotonic() - prior[0] < _CAPABILITY_COOLDOWN:
             return prior[1]
         success = False
         try:
@@ -944,7 +949,7 @@ async def _refresh_provider_capabilities(provider_id: str) -> bool:
             fresh = {m["id"]: m for m in response.models}
             # Re-read after network I/O: preserve edits made while awaiting upstream.
             current = db.get_model_provider(provider_id)
-            if not current or not current.get("enabled"):
+            if not current or not current.get("enabled") or current.get("updated_at") != generation:
                 return False
             from app.core.model_effort import sanitize_effort_metadata
             merged = []
@@ -966,26 +971,31 @@ async def _refresh_provider_capabilities(provider_id: str) -> bool:
                 merged.append(updated)
             changed = merged != (current.get("models_json") or [])
             if changed:
-                if db.update_model_provider(provider_id, models_json=merged) is None:
+                saved = db.update_model_provider(provider_id, models_json=merged,
+                                                 expected_updated_at=generation)
+                if saved is None:
                     return False
+                generation = saved.get("updated_at")
             # Partial repairs still require clients to rehydrate persisted metadata.
             success = complete or changed
         except Exception:  # Catalog/auth details may contain secrets; expose ids only.
             logger.debug("Capability refresh failed for provider %s", provider_id)
         finally:
-            _capability_results[provider_id] = (time.monotonic(), success)
+            _capability_results[provider_id] = (time.monotonic(), success, generation)
         return success
 
 
 @router.post("/refresh-capabilities")
 async def refresh_capabilities(body: RefreshCapabilitiesRequest, token: str = Depends(require_auth)):
     refreshed, failed = [], []
-    # Small concurrency bound across one batch; per-provider locks dedupe batches.
-    semaphore = asyncio.Semaphore(4)
-
     async def refresh(provider_id):
-        async with semaphore:
-            return await _refresh_provider_capabilities(provider_id)
+        # Include global semaphore and single-flight waiting in the deadline.
+        # Clients may retry queued providers; no request waits indefinitely.
+        try:
+            return await asyncio.wait_for(_refresh_provider_capabilities(provider_id),
+                                          timeout=_CAPABILITY_REQUEST_TIMEOUT)
+        except TimeoutError:
+            return False
 
     ids = list(dict.fromkeys(body.provider_ids))
     results = await asyncio.gather(*(refresh(provider_id) for provider_id in ids))
