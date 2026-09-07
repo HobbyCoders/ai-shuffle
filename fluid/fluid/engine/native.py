@@ -972,6 +972,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Mid-turn user steers and peer messages awaiting the next tool
         # result (see the Steer and AgentMessage ops).
         self._pending_steers: list[Steer | AgentMessage | str] = []
+        # Once a terminal response is being published, this turn can no
+        # longer consume peer traffic. Refuse it explicitly in that small
+        # window instead of acknowledging a message which will be discarded.
+        self._peer_delivery_sealed = False
         # Set once a sticky-routed call comes back empty: this loop instance
         # never sends the routing key again (see _agent_loop).
         self._sticky_poisoned = False
@@ -1391,6 +1395,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             if self._turn_task and not self._turn_task.done():
                 raise RuntimeError("a turn is already running; Interrupt it first")
             self._interrupted.clear()
+            self._peer_delivery_sealed = False
             self._turn_task = asyncio.create_task(self._run_turn(op))
         elif isinstance(op, Interrupt):
             self._interrupted.set()
@@ -1425,13 +1430,18 @@ class NativeLoop(BackgroundLifecycleMixin):
             # which is what wakes a parked session.
             from fluid.tools.hardening import defang_harness_markers
 
+            if self._background_closed or self._interrupted.is_set():
+                raise RuntimeError("receiver is stopping; peer message was not delivered")
             text = defang_harness_markers(op.text)
             if self._turn_task is not None and not self._turn_task.done():
+                if self._peer_delivery_sealed:
+                    raise RuntimeError("receiver is finishing its turn; retry the peer message")
                 self._pending_steers.append(replace(op, text=text))
             else:
                 from fluid.context.peer import format_peer_message
 
                 self._interrupted.clear()
+                self._peer_delivery_sealed = False
                 self._turn_task = asyncio.create_task(self._run_turn(UserTurn(
                     content=format_peer_message(op.sender, text).strip(),
                 )))
@@ -1781,6 +1791,7 @@ class NativeLoop(BackgroundLifecycleMixin):
     # ─── Turn lifecycle ──────────────────────────────────────────────────
 
     async def _run_turn(self, op: UserTurn | Resume) -> None:
+        self._peer_delivery_sealed = False
         meta = await self._ensure_session()
         sid = meta.session_id
         turn_id = new_id("turn")
@@ -1914,6 +1925,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
             )
         finally:
+            self._peer_delivery_sealed = True
             if not cancelled and not self._turn_end_hook_fired:
                 # The loop left early: a provider error, an interrupt, a
                 # hook's stop, or an exception. The terminal event is already
@@ -1926,6 +1938,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                 except Exception:  # noqa: BLE001 — never mask the turn's own outcome
                     log.warning("TurnEnd hooks failed", exc_info=True)
             self._active_turn_id = None
+            # Interrupted/failed turns must not leave interjections attached
+            # to a later, unrelated user request. Normal completion already
+            # consumed peer messages before sealing admission.
+            self._pending_steers.clear()
 
     async def _connect_mcp_once(self, sid: str, turn_id: str) -> None:
         """Connect configured MCP servers on the first turn (idempotent).
@@ -2647,6 +2663,23 @@ class NativeLoop(BackgroundLifecycleMixin):
                 parent = nudge
                 continue
             if not dispatchable:
+                can_continue = (self.max_model_calls_per_turn is None
+                                or num_calls < self.max_model_calls_per_turn)
+                if not can_continue:
+                    self._peer_delivery_sealed = True
+                peer_node = await self._finish_peer_messages(sid, turn_id, parent)
+                if peer_node is not None:
+                    parent = peer_node
+                    if can_continue:
+                        continue
+                    # Preserve delivery in history without bypassing the
+                    # caller's model-call budget. A later turn can resume it.
+                    final_stop = "max_calls"
+                    break
+                # No await between the empty-queue check and this seal:
+                # submit either queues a message we consume or returns an
+                # explicit retry error during terminal publication.
+                self._peer_delivery_sealed = True
                 final_stop = result.stop_reason
                 reason = await self._stop_hook_continuation(
                     sid, turn_id, result, stop_hook_continuations
@@ -2663,6 +2696,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     )
                     await self.store.append(sid, nudge)
                     parent = nudge
+                    self._peer_delivery_sealed = False
                     continue
                 break
             call_cap_reached = (
@@ -2731,6 +2765,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                 ))
                 return
 
+        # A call-limit exit can follow a tool response instead of final text.
+        # Preserve any peers accepted while that last response was written,
+        # but never issue another model call beyond the configured limit.
+        self._peer_delivery_sealed = True
+        peer_node = await self._finish_peer_messages(sid, turn_id, parent)
+        if peer_node is not None:
+            parent = peer_node
         if result is not None:
             if self._codemode is not None:
                 # Episodic journal: the turn's final text (the acceptance /
@@ -2769,6 +2810,38 @@ class NativeLoop(BackgroundLifecycleMixin):
             stop_reason=final_stop or "end_turn", num_model_calls=num_calls,
             usage=dict(total_usage), cost_usd=cost_total,
         ))
+
+    async def _finish_peer_messages(
+        self, sid: str, turn_id: str, parent: SessionNode,
+    ) -> SessionNode | None:
+        """Deliver peers when a final text reply leaves no next tool result.
+
+        This remains within the current turn: hosts must not observe the
+        worker completing before its acknowledged messages are processed.
+        User steers retain their existing explicit turn-end fallback.
+        """
+        if self._interrupted.is_set() or self._background_closed:
+            return None
+        peers = [op for op in self._pending_steers if isinstance(op, AgentMessage)]
+        if not peers:
+            return None
+        self._pending_steers[:] = [
+            op for op in self._pending_steers if not isinstance(op, AgentMessage)
+        ]
+        delivered = [_steer_parts(op) for op in peers]
+        node = SessionNode(
+            node_id=new_id("node"), parent_id=parent.node_id,
+            message=Message(role="user", content=[Text("".join(
+                _render_interjection(text, sender, origin)
+                for _, text, sender, origin in delivered
+            ).strip())]),
+        )
+        await self.store.append(sid, node)
+        await self._emit(SteerDelivered(
+            session_id=sid, node_id=node.node_id, turn_id=turn_id,
+            steers=[_steer_receipt(*parts) for parts in delivered],
+        ))
+        return node
 
     def _estimate_request_input_tokens(self, history: list[Message]) -> int:
         """Cheap, conservative estimate of everything resent on the next call."""

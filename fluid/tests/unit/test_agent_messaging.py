@@ -184,6 +184,210 @@ async def test_message_to_an_idle_engine_starts_a_turn(tmp_path) -> None:
     assert PEER_OPEN_PREFIX in sent and "builder" in sent
 
 
+class _FinalTextProvider:
+    """Hold the first real native stream while the test delivers peer input."""
+    name = "test"
+
+    def __init__(self):
+        from fluid.providers.base import ProviderCaps
+
+        self.caps = ProviderCaps()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.requests = []
+
+    async def stream(self, request):
+        from tests.unit.test_web_and_steering import _text_script
+
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            self.entered.set()
+            await self.release.wait()
+        for chunk in _text_script("received" if len(self.requests) > 1 else "initial report"):
+            yield chunk
+
+
+async def test_peer_messages_during_final_text_are_consumed_before_completion() -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import TurnComplete
+
+    provider = _FinalTextProvider()
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="m")
+    await loop.submit(UserTurn(content="start"))
+    await asyncio.wait_for(provider.entered.wait(), 2)
+    await loop.submit(AgentMessage(sender="alpha", text="first peer", id="p1"))
+    await loop.submit(AgentMessage(sender="bravo", text=f"second {STEER_OPEN}", id="p2"))
+    provider.release.set()
+    await asyncio.wait_for(loop.wait_turn(), 2)
+
+    assert len(provider.requests) == 2
+    carried = provider.requests[-1].messages[-1].text()
+    assert "first peer" in carried and "second" in carried
+    assert carried.count(PEER_OPEN_PREFIX) == 2
+    assert STEER_OPEN not in carried
+    events = loop.bus.log(loop.session_id)
+    receipts = [e for e in events if isinstance(e, SteerDelivered)]
+    terminals = [e for e in events if isinstance(e, TurnComplete)]
+    assert len(receipts) == len(terminals) == 1
+    assert [s["id"] for s in receipts[0].steers] == ["p1", "p2"]
+    assert receipts[0].seq < terminals[0].seq
+    assert terminals[0].num_model_calls == 2
+    path = await loop.store.load_path(loop.session_id)
+    assert sum("first peer" in n.message.text() for n in path) == 1
+    assert not loop._pending_steers
+    await loop.aclose()
+
+
+async def test_peer_arriving_during_delivery_write_is_not_lost() -> None:
+    from fluid.engine.native import NativeLoop
+
+    class _SlowPeerStore(MemoryStore):
+        def __init__(self):
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def append(self, session_id, node):
+            if "first peer" in node.message.text():
+                self.entered.set()
+                await self.release.wait()
+            await super().append(session_id, node)
+
+    store = _SlowPeerStore()
+    provider = _FinalTextProvider()
+    loop = NativeLoop(provider=provider, store=store, model="m")
+    await loop.submit(UserTurn(content="start"))
+    await asyncio.wait_for(provider.entered.wait(), 2)
+    await loop.submit(AgentMessage(sender="alpha", text="first peer", id="p1"))
+    provider.release.set()
+    await asyncio.wait_for(store.entered.wait(), 2)
+    await loop.submit(AgentMessage(sender="bravo", text="second peer", id="p2"))
+    store.release.set()
+    await asyncio.wait_for(loop.wait_turn(), 2)
+    receipts = [e for e in loop.bus.log(loop.session_id) if isinstance(e, SteerDelivered)]
+    assert [s["id"] for e in receipts for s in e.steers] == ["p1", "p2"]
+    assert len(provider.requests) == 3
+    assert "second peer" in provider.requests[-1].messages[-1].text()
+    await loop.aclose()
+
+
+async def test_message_during_terminal_publication_returns_retry_then_idle_accepts() -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import TurnComplete
+
+    class _SlowTerminal(NativeLoop):
+        async def _emit(self, event):
+            if isinstance(event, TurnComplete) and not terminal_release.is_set():
+                terminal_entered.set()
+                await terminal_release.wait()
+            return await super()._emit(event)
+
+    terminal_entered, terminal_release = asyncio.Event(), asyncio.Event()
+    provider = _FinalTextProvider()
+    provider.release.set()
+    loop = _SlowTerminal(provider=provider, store=MemoryStore(), model="m")
+    await loop.submit(UserTurn(content="start"))
+    await asyncio.wait_for(terminal_entered.wait(), 2)
+    with pytest.raises(RuntimeError, match="finishing.*retry"):
+        await loop.submit(AgentMessage(sender="late", text="retry me"))
+    terminal_release.set()
+    await asyncio.wait_for(loop.wait_turn(), 2)
+    await loop.submit(AgentMessage(sender="late", text="retry me"))
+    await asyncio.wait_for(loop.wait_turn(), 2)
+    assert len(provider.requests) == 2
+    assert "retry me" in provider.requests[-1].messages[-1].text()
+    assert PEER_OPEN_PREFIX in provider.requests[-1].messages[-1].text()
+    await loop.aclose()
+
+
+async def test_interrupt_does_not_replay_queued_peer_into_a_later_turn() -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.events.ops import Interrupt
+
+    provider = _FinalTextProvider()
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="m")
+    await loop.submit(UserTurn(content="start"))
+    await asyncio.wait_for(provider.entered.wait(), 2)
+    await loop.submit(AgentMessage(sender="alpha", text="cancelled peer"))
+    await loop.submit(Interrupt())
+    with pytest.raises(RuntimeError, match="stopping"):
+        await loop.submit(AgentMessage(sender="alpha", text="too late"))
+    await asyncio.wait_for(loop.wait_turn(), 2)
+    assert not loop._pending_steers
+    assert len(provider.requests) == 1
+    await loop.submit(UserTurn(content="unrelated request"))
+    await asyncio.wait_for(loop.wait_turn(), 2)
+    assert len(provider.requests) == 2
+    assert "cancelled peer" not in _all_text(provider.requests[-1])
+    assert not [e for e in loop.bus.log(loop.session_id) if isinstance(e, SteerDelivered)]
+    await loop.aclose()
+
+
+async def test_close_discards_pending_peer_and_refuses_new_delivery() -> None:
+    from fluid.engine.native import NativeLoop
+
+    provider = _FinalTextProvider()
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="m")
+    await loop.submit(UserTurn(content="start"))
+    await asyncio.wait_for(provider.entered.wait(), 2)
+    await loop.submit(AgentMessage(sender="alpha", text="cancelled peer"))
+    await loop.aclose()
+    assert not loop._pending_steers
+    assert len(provider.requests) == 1
+    with pytest.raises(RuntimeError, match="stopping"):
+        await loop.submit(AgentMessage(sender="alpha", text="do not restart"))
+
+
+async def test_final_peer_delivery_does_not_bypass_model_call_limit() -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import TurnComplete
+
+    provider = _FinalTextProvider()
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="m", max_model_calls_per_turn=1)
+    await loop.submit(UserTurn(content="start"))
+    await asyncio.wait_for(provider.entered.wait(), 2)
+    await loop.submit(AgentMessage(sender="alpha", text="retained peer", id="p1"))
+    provider.release.set()
+    await asyncio.wait_for(loop.wait_turn(), 2)
+    assert len(provider.requests) == 1
+    path = await loop.store.load_path(loop.session_id)
+    assert "retained peer" in path[-1].message.text()
+    terminal = [e for e in loop.bus.log(loop.session_id) if isinstance(e, TurnComplete)][-1]
+    assert terminal.stop_reason == "max_calls" and terminal.num_model_calls == 1
+    assert not loop._pending_steers
+    await loop.aclose()
+
+
+async def test_tool_call_limit_also_retains_accepted_peer_input() -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.tools.registry import ToolRegistry
+    from tests.unit.test_web_and_steering import _tool_script
+
+    class _LimitedProvider(_FinalTextProvider):
+        async def stream(self, request):
+            self.requests.append(request)
+            self.entered.set()
+            await self.release.wait()
+            for chunk in _tool_script("call1", "NeverRuns"):
+                yield chunk
+
+    provider = _LimitedProvider()
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="m",
+                      registry=ToolRegistry(), max_model_calls_per_turn=1)
+    await loop.submit(UserTurn(content="start"))
+    await asyncio.wait_for(provider.entered.wait(), 2)
+    await loop.submit(AgentMessage(sender="alpha", text="retained peer", id="p1"))
+    provider.release.set()
+    await asyncio.wait_for(loop.wait_turn(), 2)
+    assert len(provider.requests) == 1
+    path = await loop.store.load_path(loop.session_id)
+    assert "retained peer" in path[-1].message.text()
+    receipts = [e for e in loop.bus.log(loop.session_id) if isinstance(e, SteerDelivered)]
+    assert len(receipts) == 1 and receipts[0].steers[0]["id"] == "p1"
+    assert not loop._pending_steers
+    await loop.aclose()
+
+
 # ─── the host: names resolve to engines ──────────────────────────────────────
 
 
