@@ -308,7 +308,7 @@ class TestRegistryPayloadProviders:
         entry = providers[0]
         assert entry == {
             "id": "prov-1",
-            "capability_generation": db.get_model_provider("prov-1")["updated_at"],
+            "capability_generation": db.get_model_provider("prov-1")["revision"],
             "name": "OpenRouter",
             "provider_type": "openrouter",
             # Display metadata: an API-key row, so no plan string.

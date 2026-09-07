@@ -230,9 +230,9 @@ def get_system_setting_revision(key: str) -> Optional[str]:
     """Opaque write generation, without disclosing the setting's value."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT updated_at FROM system_settings WHERE key = %s", (key,))
+        cursor.execute("SELECT revision FROM system_settings WHERE key = %s", (key,))
         row = cursor.fetchone()
-        return row["updated_at"] if row else None
+        return row["revision"] if row else None
 
 
 def set_system_setting(key: str, value: str) -> None:
@@ -241,12 +241,13 @@ def set_system_setting(key: str, value: str) -> None:
         cursor = conn.cursor()
         now = datetime.now(timezone.utc).isoformat()
         cursor.execute(
-            """INSERT INTO system_settings (key, value, updated_at)
-               VALUES (%s, %s, %s)
+            """INSERT INTO system_settings (key, value, updated_at, revision)
+               VALUES (%s, %s, %s, %s)
                ON CONFLICT(key) DO UPDATE SET
                    value = excluded.value,
-                   updated_at = excluded.updated_at""",
-            (key, value, now)
+                   updated_at = excluded.updated_at,
+                   revision = excluded.revision""",
+            (key, value, now, str(uuid4()))
         )
         if key == "fal_api_key":
             # Same transaction and lock order as conditional billing writes.
@@ -284,10 +285,10 @@ def get_or_create_system_setting(key: str, default_factory) -> str:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO system_settings (key, value, updated_at)
-               VALUES (%s, %s, %s)
+            """INSERT INTO system_settings (key, value, updated_at, revision)
+               VALUES (%s, %s, %s, %s)
                ON CONFLICT(key) DO NOTHING""",
-            (key, value, now),
+            (key, value, now, str(uuid4())),
         )
     # Re-read: another install may have won the insert race, so return the
     # value that actually landed rather than our candidate.

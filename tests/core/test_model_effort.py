@@ -189,7 +189,7 @@ async def test_refresh_preserves_curation_singleflight_and_failure(monkeypatch):
     release.set()
     assert await asyncio.gather(first, second) == [True, True]
     assert upstream.await_count == 1
-    assert list(writes[0]) == ["models_json", "expected_updated_at"]
+    assert list(writes[0]) == ["models_json", "expected_revision"]
     entry = row["models_json"][0]
     assert len(row["models_json"]) == 1
     assert entry["label"] == "Curated" and entry["context_window"] == 123
@@ -231,7 +231,7 @@ async def test_refresh_upgrades_legacy_ids_and_preserves_concurrent_curation(mon
         return row
     monkeypatch.setattr(api.db, "update_model_provider", update)
     assert await api._refresh_provider_capabilities("p")
-    assert writes == [{"expected_updated_at": None, "models_json": [{"id": "new-selection", "label": "new-selection",
+    assert writes == [{"expected_revision": None, "models_json": [{"id": "new-selection", "label": "new-selection",
         "reasoning_capabilities": {"version": 1, "effort_levels": ["low", "max"], "default_effort": "max"}}]}]
 
 

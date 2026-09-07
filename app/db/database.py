@@ -444,6 +444,21 @@ def _migrate_preference_revisions(cursor):
         )
 
 
+def _migrate_provider_revisions(cursor):
+    """Opaque binding generations must not depend on install clock resolution."""
+    from uuid import uuid4
+
+    for table, key in (("system_settings", "key"), ("model_providers", "id")):
+        if not table_exists(cursor, table):
+            continue
+        if not column_exists(cursor, table, "revision"):
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN revision TEXT")
+        cursor.execute(f"SELECT {key} FROM {table} WHERE revision IS NULL")
+        for row in cursor.fetchall():
+            cursor.execute(f"UPDATE {table} SET revision = %s WHERE {key} = %s AND revision IS NULL",
+                           (str(uuid4()), row[key]))
+
+
 def _run_column_migrations(cursor):
     """Run idempotent column migrations.
 
@@ -2197,6 +2212,8 @@ def _run_column_migrations(cursor):
             migrations_applied.append(
                 f"model_providers.media_scrub({scrubbed[0]} ids, {scrubbed[1]} rows)"
             )
+
+    _migrate_provider_revisions(cursor)
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")

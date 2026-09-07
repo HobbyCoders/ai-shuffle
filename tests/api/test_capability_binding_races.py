@@ -1,10 +1,12 @@
 """Catalog responses are observations of one DB revision, never another account."""
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
 from app.api import model_providers as api
 from app.db import database as db
+from app.db import model_providers as providers_db
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +30,13 @@ def models(level):
 
 
 async def test_response_cannot_cross_binding_edit_and_new_binding_bypasses_cooldown(mock_db, monkeypatch):
-    make_provider()
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 7, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(providers_db, 'datetime', FrozenClock)
+    before = make_provider()
     entered, release = asyncio.Event(), asyncio.Event()
     calls = []
 
@@ -45,6 +53,9 @@ async def test_response_cannot_cross_binding_edit_and_new_binding_bypasses_coold
     await entered.wait()
     db.update_model_provider("catalog-race", base_url="https://new.invalid", auth_token="new-dummy-key",
                              models_json=models("low"))
+    current = db.get_model_provider("catalog-race")
+    assert current["updated_at"] == before["updated_at"]
+    assert current["revision"] != before["revision"]
     release.set()
     assert await first is False
     assert db.get_model_provider("catalog-race")["models_json"][0]["reasoning_capabilities"]["effort_levels"] == ["low"]

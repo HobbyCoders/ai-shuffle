@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+from uuid import uuid4
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
@@ -69,6 +70,7 @@ class ModelProviderRow(TypedDict, total=False):
     openai_billing_instance_id: Optional[str]
     created_at: str
     updated_at: str
+    revision: Optional[str]
 
 
 # Columns exposed on a normal (non-token) read. ``auth_token`` and the two Codex
@@ -82,7 +84,7 @@ _PUBLIC_COLUMNS = (
     "max_output_tokens, enabled, auth_mode, codex_account_id, "
     "codex_id_token_expires_at, codex_last_refresh, needs_reauth, "
     "openai_billing_org_id, openai_billing_instance_id, "
-    "created_at, updated_at"
+    "created_at, updated_at, revision"
 )
 
 # The encrypted write-only token blobs, appended to the SELECT only when a caller
@@ -177,8 +179,8 @@ def create_model_provider(
                 (id, name, provider_type, base_url, api_dialect, auth_token,
                  models_json, default_model, small_fast_model, extra_env_json,
                  context_window, max_output_tokens, enabled,
-                 created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 created_at, updated_at, revision)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 provider_id,
@@ -196,6 +198,7 @@ def create_model_provider(
                 enabled,
                 now,
                 now,
+                str(uuid4()),
             ),
         )
     return get_model_provider(provider_id)
@@ -290,7 +293,7 @@ def _normalize_model_capabilities(models):
 
 
 def update_model_provider(
-    provider_id: str, *, expected_updated_at: Optional[str] = None, **kwargs: Any
+    provider_id: str, *, expected_revision: Optional[str] = None, **kwargs: Any
 ) -> Optional[ModelProviderRow]:
     """Partially update a provider by id and return the fresh row.
 
@@ -298,7 +301,7 @@ def update_model_provider(
     written. ``auth_token`` is NEVER touched unless explicitly passed, so a
     metadata-only edit leaves the stored token intact. JSON columns accept
     either a serialized string or a Python list/dict.
-    ``expected_updated_at`` rejects an observation fetched before any concurrent
+    ``expected_revision`` rejects an observation fetched before any concurrent
     binding or capability edit, including writes made by another worker.
     """
     if "models_json" in kwargs:
@@ -315,10 +318,12 @@ def update_model_provider(
 
     updates.append("updated_at = %s")
     values.append(datetime.now(timezone.utc).isoformat())
+    updates.append("revision = %s")
+    values.append(str(uuid4()))
     values.append(provider_id)
-    condition = " AND updated_at = %s" if expected_updated_at is not None else ""
-    if expected_updated_at is not None:
-        values.append(expected_updated_at)
+    condition = " AND revision = %s" if expected_revision is not None else ""
+    if expected_revision is not None:
+        values.append(expected_revision)
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -357,8 +362,8 @@ def set_openai_billing_binding(provider_id: str, organization_id: str, instance_
         except ValueError:
             return None
         cursor.execute(
-            "UPDATE model_providers SET openai_billing_org_id = %s, openai_billing_instance_id = %s, updated_at = %s WHERE id = %s",
-            (organization_id, instance_id, datetime.now(timezone.utc).isoformat(), provider_id),
+            "UPDATE model_providers SET openai_billing_org_id = %s, openai_billing_instance_id = %s, updated_at = %s, revision = %s WHERE id = %s",
+            (organization_id, instance_id, datetime.now(timezone.utc).isoformat(), str(uuid4()), provider_id),
         )
         cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
     return get_model_provider(provider_id)
@@ -377,8 +382,8 @@ def clear_openai_billing_binding(
         if not row or (expected_instance_id and row.get("openai_billing_instance_id") not in (None, expected_instance_id)):
             return None
         cursor.execute(
-            "UPDATE model_providers SET openai_billing_org_id = NULL, openai_billing_instance_id = NULL, updated_at = %s WHERE id = %s",
-            (datetime.now(timezone.utc).isoformat(), provider_id),
+            "UPDATE model_providers SET openai_billing_org_id = NULL, openai_billing_instance_id = NULL, updated_at = %s, revision = %s WHERE id = %s",
+            (datetime.now(timezone.utc).isoformat(), str(uuid4()), provider_id),
         )
         cursor.execute("SELECT raw FROM provider_usage_snapshots WHERE provider_id = %s", (provider_id,))
         snapshot = cursor.fetchone()
@@ -407,8 +412,8 @@ def set_model_provider_enabled(provider_id: str, enabled: bool) -> Optional[Mode
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE model_providers SET enabled = %s, updated_at = %s WHERE id = %s",
-            (enabled, now, provider_id),
+            "UPDATE model_providers SET enabled = %s, updated_at = %s, revision = %s WHERE id = %s",
+            (enabled, now, str(uuid4()), provider_id),
         )
         if cursor.rowcount == 0:
             return None
@@ -465,7 +470,8 @@ def set_codex_token_bundle(
                    codex_id_token_expires_at = %s,
                    codex_last_refresh = %s,
                    needs_reauth = %s,
-                   updated_at = %s
+                   updated_at = %s,
+                   revision = %s
              WHERE id = %s
             """,
             (
@@ -477,6 +483,7 @@ def set_codex_token_bundle(
                 last_refresh,
                 needs_reauth,
                 now,
+                str(uuid4()),
                 provider_id,
             ),
         )

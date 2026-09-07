@@ -180,9 +180,9 @@ def record_provider_usage_failure(
 def _lock_fal_generation(cursor, expected: Optional[str]) -> bool:
     # Lock the credential row until the usage write commits. Credential writes
     # and deletion take this same lock before invalidating the cached balance.
-    cursor.execute("SELECT updated_at FROM system_settings WHERE key = %s FOR UPDATE", ("fal_api_key",))
+    cursor.execute("SELECT revision FROM system_settings WHERE key = %s FOR UPDATE", ("fal_api_key",))
     row = cursor.fetchone()
-    return bool(expected and row and row["updated_at"] == expected)
+    return bool(expected and row and row["revision"] == expected)
 
 
 def get_all_provider_usage_snapshots() -> List[Dict[str, Any]]:
@@ -194,7 +194,7 @@ def get_all_provider_usage_snapshots() -> List[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT p.provider_id, p.provider_type, p.plan_type, p.windows, p.credits, "
-            "p.raw, p.fetched_at, s.updated_at AS fal_credential_generation "
+            "p.raw, p.fetched_at, s.revision AS fal_credential_generation "
             "FROM provider_usage_snapshots p LEFT JOIN system_settings s ON s.key = 'fal_api_key'"
         )
         rows = rows_to_list(cursor.fetchall())

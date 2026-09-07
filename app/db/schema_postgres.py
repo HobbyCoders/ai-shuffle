@@ -58,6 +58,7 @@ def create_postgres_schema(cursor) -> None:
         CREATE TABLE IF NOT EXISTS system_settings (
             key TEXT PRIMARY KEY,
             value TEXT,
+            revision TEXT,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
@@ -1293,6 +1294,7 @@ def create_postgres_schema(cursor) -> None:
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS model_providers (
             id TEXT PRIMARY KEY,
+            revision TEXT,
             name TEXT NOT NULL,
             provider_type TEXT NOT NULL,
             base_url TEXT NOT NULL,

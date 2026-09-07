@@ -937,7 +937,7 @@ async def _refresh_provider_capabilities(provider_id: str) -> bool:
         row = db.get_model_provider(provider_id)
         if not row or not row.get("enabled"):
             return False
-        generation = row.get("updated_at")
+        generation = row.get("revision")
         prior = _capability_results.get(provider_id)
         if prior and prior[2] == generation and time.monotonic() - prior[0] < _CAPABILITY_COOLDOWN:
             return prior[1]
@@ -949,7 +949,7 @@ async def _refresh_provider_capabilities(provider_id: str) -> bool:
             fresh = {m["id"]: m for m in response.models}
             # Re-read after network I/O: preserve edits made while awaiting upstream.
             current = db.get_model_provider(provider_id)
-            if not current or not current.get("enabled") or current.get("updated_at") != generation:
+            if not current or not current.get("enabled") or current.get("revision") != generation:
                 return False
             from app.core.model_effort import sanitize_effort_metadata
             merged = []
@@ -972,10 +972,10 @@ async def _refresh_provider_capabilities(provider_id: str) -> bool:
             changed = merged != (current.get("models_json") or [])
             if changed:
                 saved = db.update_model_provider(provider_id, models_json=merged,
-                                                 expected_updated_at=generation)
+                                                 expected_revision=generation)
                 if saved is None:
                     return False
-                generation = saved.get("updated_at")
+                generation = saved.get("revision")
             # Partial repairs still require clients to rehydrate persisted metadata.
             success = complete or changed
         except Exception:  # Catalog/auth details may contain secrets; expose ids only.

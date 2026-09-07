@@ -383,7 +383,7 @@ def _providers_payload() -> List[Dict[str, object]]:
             "id": row.get("id"),
             "name": row.get("name"),
             "provider_type": row.get("provider_type"),
-            "capability_generation": row.get("updated_at"),
+            "capability_generation": row.get("revision"),
             # Display metadata (brand + auth-kind subtext). ``auth_kind`` says
             # HOW the row authenticates; ``plan_type`` names the subscription
             # tier for subscription rows (null for API-key rows, and for a

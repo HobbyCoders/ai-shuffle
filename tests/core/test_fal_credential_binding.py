@@ -1,11 +1,14 @@
 """Real SQLite persistence plus fake HTTP; no billing/model service contacted."""
 import asyncio
+from datetime import datetime, timezone
+from uuid import UUID
 
 import httpx
 import pytest
 
 from app.core import provider_usage as usage
 from app.db import database as db
+from app.db import settings as settings_db
 
 
 @pytest.fixture(autouse=True)
@@ -40,6 +43,14 @@ async def test_failed_new_credential_never_retains_old_balance(monkeypatch):
 
 @pytest.mark.parametrize("replacement", [None, "dummy-account-b"])
 async def test_old_inflight_result_cannot_republish_after_disconnect_or_replacement(monkeypatch, replacement):
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 7, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(settings_db, "datetime", FrozenClock)
+    db.set_system_setting("fal_api_key", "dummy-account-a")
+    old_generation = db.get_system_setting_revision("fal_api_key")
     entered, release = asyncio.Event(), asyncio.Event()
 
     async def fetch(*args, **kwargs):
@@ -54,6 +65,7 @@ async def test_old_inflight_result_cannot_republish_after_disconnect_or_replacem
         db.delete_system_setting("fal_api_key")
     else:
         db.set_system_setting("fal_api_key", replacement)
+        assert db.get_system_setting_revision("fal_api_key") != old_generation
     release.set()
     await task
     assert snapshot() is None
@@ -93,3 +105,21 @@ def test_loader_hides_unbound_legacy_fal_balance():
             VALUES (%s, %s, %s, %s, %s)""",
             ("fal-ai", "fal", "[]", '{"balance_remaining": 123.45}', "legacy"))
     assert snapshot() is None
+
+
+def test_binding_revision_migration_preserves_data_and_is_idempotent():
+    db.create_model_provider("legacy-provider", "Legacy", "custom", "https://example.invalid")
+    with db.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("ALTER TABLE model_providers DROP COLUMN revision")
+        cursor.execute("ALTER TABLE system_settings DROP COLUMN revision")
+        db._migrate_provider_revisions(cursor)
+    first = db.get_model_provider("legacy-provider")
+    generation = db.get_system_setting_revision("fal_api_key")
+    UUID(first["revision"])
+    UUID(generation)
+    assert db.get_system_setting("fal_api_key") == "dummy-account-a"
+    with db.get_db() as conn:
+        db._migrate_provider_revisions(conn.cursor())
+    assert db.get_model_provider("legacy-provider")["revision"] == first["revision"]
+    assert db.get_system_setting_revision("fal_api_key") == generation
