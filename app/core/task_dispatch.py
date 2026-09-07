@@ -22,11 +22,10 @@ What this module adds on top of raw ``dispatch_worker``:
   is about what is running on this box under one human's session, and a
   worker's worker is still a worker. (What nested dispatch no longer spends on
   the root is its NOTIFICATION lanes — see "root routing" below.);
-* provider-org admission — session ceilings say nothing about a credential's
-  token throughput, and the 2026-09-05 audit lost eleven workers to one org's
-  500k tokens-per-minute limit. A dispatch bound to a provider row also has to
-  fit under ``settings.task_worker_max_per_provider``; over that it QUEUES
-  (and the receipt says so) rather than being refused;
+* optional provider-row admission — an administrator can set
+  ``settings.task_worker_max_per_provider`` to queue excess workers. This is
+  a Shuffle concurrency policy, not a provider token quota. It is disabled by
+  default; actual rate-limit feedback and resource guards still apply;
 * worker liveness — a worker that never streams a frame has not started, and
   is failed at ``settings.task_worker_first_frame_seconds`` with the existing
   "worker failed to start" summary rather than after fifteen silent minutes.
@@ -195,10 +194,12 @@ _ADMISSION_POLL_SECONDS = 0.5
 #: dropped as soon as its session is really pooled, and expires regardless.
 _ADMISSION_RESERVATION_SECONDS = 180.0
 
-# Provider-org admission: session counts alone do not prevent token-window oversubscription. Until dispatch has
-# prompt-size estimates and per-credential rolling windows, queue excess workers behind
-# settings.task_worker_max_per_provider for each provider row. A provider row represents one credential and
-# quota. The provider-less delegated subscription leg retains the CLI backoff policy.
+# ── optional provider-row admission ────────────────────────────────────────
+# A positive ``settings.task_worker_max_per_provider`` is an administrator's
+# concurrency policy, not a measurement of the provider's token quota. It is
+# disabled by default. Actual 429 responses retain their existing retry/backoff
+# path; host memory, session and subprocess guards remain active independently.
+# The provider-less delegated Claude leg has no provider-row limit here.
 
 
 @dataclass(frozen=True)
@@ -207,15 +208,15 @@ class _Reservation:
 
     ``lane`` decides which ceiling this reservation counts against (only a
     delegated one holds a subprocess slot); ``parent`` is the session whose
-    fan-out budget it is spending; ``provider`` is the provider row whose org
-    throughput budget it is spending (``None`` on the delegated Claude leg,
-    which has no per-org ceiling here).
+    fan-out budget it is spending; ``provider`` is the row whose optional
+    concurrency policy applies (``None`` on the provider-less Claude leg).
     """
 
     expires: float
     lane: str = DELEGATED_LANE
     parent: Optional[str] = None
     provider: Optional[str] = None
+    root: Optional[str] = None
 
 
 #: worker session id -> its admission reservation.
@@ -352,6 +353,7 @@ def _pending_admission_count(
     lane: Optional[str] = None,
     parent: Optional[str] = None,
     provider: Optional[str] = None,
+    root: Optional[str] = None,
 ) -> int:
     """Dispatches admitted here that the pool has not counted yet.
 
@@ -363,7 +365,7 @@ def _pending_admission_count(
     ``lane``, ``parent`` and ``provider`` narrow the count to the reservations
     that gate the ceiling being checked: the subprocess cap only sees delegated
     reservations, a parent's fan-out budget only sees its own, and a provider
-    org's throughput budget only sees dispatches bound to that provider row.
+    row's optional concurrency limit only sees dispatches bound to that row.
     """
     if not _PENDING_ADMISSIONS:
         return 0
@@ -386,6 +388,7 @@ def _pending_admission_count(
         if (lane is None or reservation.lane == lane)
         and (parent is None or reservation.parent == parent)
         and (provider is None or reservation.provider == provider)
+        and (root is None or (reservation.root or reservation.parent) == root)
     )
 
 
@@ -409,10 +412,9 @@ def _live_worker_count_for_parent(parent_session_id: Optional[str]) -> int:
 def _live_worker_count_for_provider(provider_id: Optional[str]) -> int:
     """Live workers anywhere on this box bound to ``provider_id``.
 
-    A provider row is a credential is an org quota, so this is deliberately
-    process-wide rather than per-session: two unrelated sessions fanning out on
-    the same key share one tokens-per-minute window, which is exactly how the
-    audited day put five workers into a 500k budget and lost four of them.
+    The optional row policy is process-wide rather than per-session, so two
+    unrelated sessions sharing this configured provider also share the limit.
+    It does not measure provider quotas, which can span rows or installations.
     """
     if not provider_id:
         return 0
@@ -434,7 +436,7 @@ def _live_worker_count_for_provider(provider_id: Optional[str]) -> int:
 
 
 def _provider_worker_limit() -> int:
-    """Concurrent workers allowed per provider org (0 = disabled)."""
+    """Administrator's worker limit per provider row (0 = disabled)."""
     try:
         from app.core.config import settings
 
@@ -456,7 +458,7 @@ def _sync_cap_seconds() -> float:
 
 
 def _provider_queue_seconds() -> float:
-    """How long a dispatch queues on the provider-org ceiling before refusing."""
+    """How long a dispatch queues on a configured provider-row limit."""
     try:
         from app.core.config import settings
 
@@ -505,6 +507,13 @@ def _fanout_limit() -> int:
         return 0
 
 
+def _root_worker_limit() -> int:
+    """The shared budget for a root session and all descendant workers."""
+    from app.core.config import settings
+
+    return int(getattr(settings, "task_tool_max_workers", 64) or 64)
+
+
 async def _reserve_admission(
     worker_session_id: str,
     *,
@@ -531,16 +540,10 @@ async def _reserve_admission(
     * NATIVE — no subprocess cap; the resource guards (host memory, descendant
       processes, tree RSS, native soft cap) and the per-parent fan-out limit.
 
-    The per-parent limit applies to BOTH lanes: a parent with that many workers
-    already running is fanning out faster than it can use the answers, whatever
-    they cost. So does the PROVIDER-ORG limit — see the block comment above
-    ``_Reservation``: session ceilings say nothing about a credential's
-    tokens-per-minute budget, and that budget is what actually killed workers.
-    A dispatch held only by the provider ceiling gets the much longer
-    ``task_worker_provider_queue_seconds`` budget, because a saturated TPM
-    window empties in about a minute and a sibling worker's turn is minutes —
-    "wait" is nearly always the right answer there, and refusing instead is how
-    a model learns to cap its own workers at three tool calls.
+    The per-parent limit applies to BOTH lanes, as does an explicitly configured
+    provider-row limit. These are Shuffle policies, not provider token quotas.
+    A dispatch held only by the optional provider-row ceiling gets the longer
+    ``task_worker_provider_queue_seconds`` budget to let siblings finish.
 
     A refusal is deliberately a REAL error rather than a queued receipt. A
     receipt is a promise the parent will be woken, and nothing outside this
@@ -554,10 +557,13 @@ async def _reserve_admission(
     budget = _ADMISSION_WAIT_SECONDS if wait_seconds is None else wait_seconds
     budget = max(0.0, float(budget))
     fanout_limit = _fanout_limit()
+    root_session_id = (
+        (await asyncio.to_thread(caller_chain, parent_session_id))[1]
+        if parent_session_id else None
+    )
+    root_limit = _root_worker_limit() if root_session_id else 0
     provider_limit = _provider_worker_limit() if provider_id else 0
-    # A dispatch queued ONLY behind the provider org's throughput ceiling waits
-    # far longer than one queued behind a full box: the box does not empty on a
-    # timer, a token window does.
+    # An explicitly configured provider-row limit gets its own queue budget.
     provider_budget = max(budget, _provider_queue_seconds()) if provider_limit else budget
     lock = _admission_lock()
     waited = False
@@ -580,6 +586,13 @@ async def _reserve_admission(
                     parent_session_id
                 ) + _pending_admission_count(parent=parent_session_id)
                 over_fanout = siblings >= fanout_limit
+            root_workers = 0
+            over_root = False
+            if root_limit > 0:
+                root_workers = _live_worker_count_for_root(
+                    root_session_id
+                ) + _pending_admission_count(root=root_session_id)
+                over_root = root_workers >= root_limit
             on_provider = 0
             over_provider = False
             if provider_limit > 0:
@@ -591,6 +604,7 @@ async def _reserve_admission(
                 snapshot.refusal is None
                 and not at_cap
                 and not over_fanout
+                and not over_root
                 and not over_provider
             ):
                 _PENDING_ADMISSIONS[worker_session_id] = _Reservation(
@@ -598,6 +612,7 @@ async def _reserve_admission(
                     lane=lane,
                     parent=parent_session_id,
                     provider=provider_id,
+                    root=root_session_id,
                 )
                 queued_for = time.monotonic() - started
                 if waited:
@@ -611,13 +626,14 @@ async def _reserve_admission(
                     )
                 return None, queued_for
             # The applicable deadline depends on WHICH ceiling is holding this
-            # dispatch: a box ceiling gets the short budget, a provider-org one
+            # dispatch: a box ceiling gets the short budget, a provider-row one
             # the long queue budget.
             only_provider = (
                 over_provider
                 and snapshot.refusal is None
                 and not at_cap
                 and not over_fanout
+                and not over_root
             )
             deadline_budget = provider_budget if only_provider else budget
             if snapshot.refusal is not None:
@@ -633,12 +649,16 @@ async def _reserve_admission(
                     f"{siblings} worker(s) already running for this session "
                     f"(limit {fanout_limit})"
                 )
+            elif over_root:
+                reason = (
+                    f"{root_workers} worker(s) already running in this session tree "
+                    f"(Shuffle's configured TASK_TOOL_MAX_WORKERS limit {root_limit})"
+                )
             else:
                 reason = (
                     f"{on_provider} worker(s) already running on this model "
-                    f"provider (limit {provider_limit}) — its token-per-minute "
-                    "budget is shared, so a sixth concurrent worker does not "
-                    "run faster, it fails"
+                    f"provider (Shuffle's configured TASK_WORKER_MAX_PER_PROVIDER "
+                    f"limit {provider_limit})"
                 )
             if time.monotonic() - started >= deadline_budget:
                 logger.warning(
@@ -1443,7 +1463,7 @@ async def dispatch_task_tool(
             "ok": False,
             "error": f"Nesting limit reached ({max_depth} levels of agent-invokes-agent).",
         }
-    max_workers = int(getattr(settings, "task_tool_max_workers", 8) or 8)
+    max_workers = int(getattr(settings, "task_tool_max_workers", 64) or 64)
     if _live_worker_count_for_root(root_session_id) >= max_workers:
         return {
             "ok": False,
@@ -1573,14 +1593,11 @@ async def dispatch_task_tool(
             "description": label,
         }
         if queued_seconds >= 1.0:
-            # Visible capacity, not a mystery delay: the model asked for a
-            # worker and got one, after queueing behind this provider's own
-            # throughput ceiling. Saying so is what stops it from inventing
-            # workarounds (an audited model started capping its workers at
-            # three tool calls to dodge the failure this queue replaces).
+            # This wait can come from any Shuffle admission guard; it does
+            # not establish a provider-side throughput or concurrency limit.
             background_payload["queued_seconds"] = round(queued_seconds, 1)
             note = (
-                f"Queued {queued_seconds:.0f}s behind provider capacity before "
+                f"Queued {queued_seconds:.0f}s behind Shuffle capacity before "
                 "starting — this is normal backpressure, not a failure. " + note
             )
         if ignored_mode:

@@ -469,3 +469,44 @@ async def test_no_pool_yet_admits_immediately(agents, monkeypatch):
         payload = await _dispatch({"agent": "helper", "prompt": "go", "mode": "sync"})
 
     assert payload["ok"] is True
+
+
+@pytest.mark.parametrize("live_existing", [0, 1])
+async def test_root_budget_counts_pending_and_live_workers_across_parents(
+    agents, monkeypatch, live_existing,
+):
+    """Concurrent branches share a root budget before workers register."""
+    from app.core import config as cfg, provider_agent_supervisor as sup
+
+    parents = ["branch-a", "branch-b", "branch-c"]
+    for parent in parents:
+        agents.create_session(
+            session_id=parent, profile_id="helper", title=parent,
+            parent_session_id="s-root",
+        )
+    monkeypatch.setattr(td, "_is_worker_session", lambda key: key in parents)
+    monkeypatch.setattr(cfg.settings, "task_tool_max_workers", 2)
+    monkeypatch.setattr(cfg.settings, "subagent_max_concurrent_per_session", 1)
+    monkeypatch.setattr(sup, "_LIVE", {"s-root": {"already-running": object()}} if live_existing else {})
+    monkeypatch.setattr(td, "_ADMISSION_POLL_SECONDS", 0.005)
+    _install_pool(monkeypatch, _FakePool())
+
+    jobs = [asyncio.create_task(td._reserve_admission(
+        f"new-{i}", lane="native", parent_session_id=parent, wait_seconds=1,
+    )) for i, parent in enumerate(parents)]
+    try:
+        await asyncio.sleep(0.08)
+        assert sum(job.done() for job in jobs) == 2 - live_existing
+        assert td._pending_admission_count(root="s-root") == 2 - live_existing
+        assert all(record.root == "s-root" for record in td._PENDING_ADMISSIONS.values())
+        # Release each admitted slot; every waiting branch then gets a turn.
+        for _ in parents:
+            for i, job in enumerate(jobs):
+                if job.done():
+                    td._release_admission(f"new-{i}")
+            await asyncio.sleep(0.03)
+        assert all(refusal is None for refusal, _ in await asyncio.gather(*jobs))
+    finally:
+        for job in jobs:
+            job.cancel()
+        await asyncio.gather(*jobs, return_exceptions=True)
