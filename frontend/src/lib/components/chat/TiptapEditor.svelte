@@ -178,6 +178,7 @@
 	 * JSON strings preserve file chips across session switches.
 	 */
 	export function setContent(content: string) {
+		liveDictation?.commit();
 		if (!editor) return;
 		if (!content) {
 			editor.commands.setContent('');
@@ -302,6 +303,10 @@
 	/** Release transcript ownership before starting another dictation. */
 	export function commitDictation() {
 		liveDictation?.commit();
+	}
+
+	export function discardDictation() {
+		liveDictation?.discard();
 	}
 </script>
 

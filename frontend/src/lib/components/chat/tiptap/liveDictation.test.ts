@@ -13,6 +13,23 @@ function setup(content = '<p>Draft</p>') {
 afterEach(() => editors.splice(0).forEach((editor) => editor.destroy()));
 
 describe('live dictation ownership', () => {
+	it('discard removes speech and preserves the draft and edits inside speech', () => {
+		const { editor, dictation } = setup();
+		dictation.write('private words');
+		editor.commands.insertContentAt(1, 'My ');
+		editor.commands.insertContentAt(15, '(manual)');
+		dictation.discard();
+		expect(editor.getText()).toBe('My Draft(manual)');
+		dictation.discard();
+		expect(editor.getText()).toBe('My Draft(manual)');
+	});
+	it('discard preserves manual replacements of dictated characters', () => {
+		const { editor, dictation } = setup('<p></p>');
+		dictation.write('hello world');
+		editor.commands.insertContentAt({ from: 7, to: 12 }, 'friend');
+		dictation.discard();
+		expect(editor.getText()).toBe('friend');
+	});
 	it('renders interim text immediately, reconciles final and starts a fresh run', () => {
 		const { editor, dictation } = setup();
 		dictation.write('hello wor');

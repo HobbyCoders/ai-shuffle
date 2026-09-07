@@ -71,5 +71,12 @@ export function createLiveDictation(editor: Editor) {
 		try { editor.view.dispatch(tr); } finally { writing = false; }
 	}
 
-	return { write, commit, destroy() { editor.off('transaction', mapEdits); commit(); } };
+	function discard() {
+		// Reconcile to empty using the same mapped character ownership as a final
+		// correction. Restoring a draft snapshot would erase intervening user edits.
+		write('');
+		commit();
+	}
+
+	return { write, commit, discard, destroy() { editor.off('transaction', mapEdits); commit(); } };
 }

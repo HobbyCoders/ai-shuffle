@@ -36,7 +36,6 @@ export async function verifyComposerSuggestions() {
 	const heights = () => ['.chat-input-container', '.tiptap-editor', '.ProseMirror'].map(
 		selector => document.querySelector(selector).getBoundingClientRect().height
 	);
-	const emptyHeights = heights();
 	const placeholderStyle = getComputedStyle(editor().querySelector('p'), '::before');
 	const originalColor = placeholderStyle.color;
 	await offer();
@@ -44,9 +43,10 @@ export async function verifyComposerSuggestions() {
 	check(placeholder() === f.literal, 'suggestion uses existing placeholder');
 	check(getComputedStyle(editor().querySelector('p'), '::before').color === originalColor,
 		'suggestion matches placeholder color');
-	check(heights().every((height, index) => height === emptyHeights[index]), 'suggestion leaves empty composer height unchanged');
-	check(!document.querySelector('[aria-label="Use suggested reply"], [aria-label="Dismiss suggested reply"], .suggestion-actions'), 'no suggestion action buttons');
-	check(![...document.querySelectorAll('.chat-input-container button')].some(button => /Use reply|Dismiss|Delete/.test(button.textContent)), 'no suggestion action button text');
+	const useReply = () => [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Use reply');
+	const dismiss = () => [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Dismiss');
+	check(!!useReply() && !!dismiss(), 'touch-accessible suggestion actions');
+	const suggestionHeights = heights();
 	check(
 		!editor().textContent && !f.draft.includes('Keep this literal'),
 		'ghost absent from editor and draft'
@@ -77,6 +77,19 @@ export async function verifyComposerSuggestions() {
 			`Enter guard ${Object.keys(extra)[0]}`
 		);
 	}
+	await offer();
+	await key('Enter', { keyCode: 229 });
+	check(editor().textContent !== f.literal, 'IME Enter does not accept or send');
+	// A synthetic IME Enter can become ordinary editor input in Chromium and
+	// invalidate the hint. The touch path must work without keyboard events.
+	await offer();
+	useReply().click();
+	await flush();
+	check(editor().textContent === f.literal && f.sends === 0, 'button accepts without keyboard or sending');
+	await offer();
+	dismiss().click();
+	await flush();
+	check(!ghost() && !editor().textContent, 'button dismisses without changing draft');
 	await offer();
 	await key('Escape');
 	check(!ghost(), 'Escape dismisses');
@@ -138,7 +151,7 @@ export async function verifyComposerSuggestions() {
 	await f.offer(longReply);
 	await flush();
 	check(placeholder() === longReply && !editor().textContent && !f.draft.includes(longReply), 'long multiline suggestion stays outside draft');
-	check(heights().every((height, index) => height === emptyHeights[index]), 'long suggestion leaves empty composer height unchanged');
+	check(heights().every((height, index) => height === suggestionHeights[index]), 'long suggestion does not increase preview height');
 	const style = getComputedStyle(editor().querySelector('p'), '::before');
 	check(style.whiteSpace === 'nowrap' && style.overflowX === 'hidden' && style.textOverflow === 'ellipsis', 'long suggestion clipped to one placeholder line');
 	await key('Tab');

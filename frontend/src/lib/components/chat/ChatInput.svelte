@@ -22,6 +22,7 @@
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { composerSuggestion, suggestionKey, hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
+	import { cancelVoiceInput, globalSttState } from '$lib/services/globalStt';
 	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import { anyCredential } from '$lib/stores/auth.svelte';
@@ -216,6 +217,12 @@
 	$effect(() => {
 		const newSessionId = $activeSession.sessionId;
 		if (newSessionId !== prevSessionId) {
+			// Keep speech already visible in its original draft, then invalidate
+			// pending interim/final callbacks before the shared editor changes owner.
+			if (get(globalSttState).source === 'composer') {
+				editorRef?.commitDictation();
+				cancelVoiceInput({ discard: false });
+			}
 			// Persist the LEAVING session's draft from the live editor before we
 			// overwrite it. Reading the editor directly (not the debounced store
 			// draft) guarantees the text follows the session it was typed in,
@@ -803,6 +810,11 @@
 		inputValue = editorRef?.getText() ?? '';
 	}
 
+	function handleLiveDiscard() {
+		editorRef?.discardDictation();
+		inputValue = editorRef?.getText() ?? '';
+	}
+
 	// Drag and drop file upload with errors shown by the composer.
 	let isDragging = $state(false);
 
@@ -1001,6 +1013,12 @@
 								else scheduleMobileComposerReconciliation();
 							}}
 						/>
+						{#if ghostReply}
+							<div class="flex gap-2" aria-label="Reply suggestion actions">
+								<button type="button" class="min-h-11 px-3 text-sm" onclick={acceptSuggestion}>Use reply</button>
+								<button type="button" class="min-h-11 px-3 text-sm" onclick={() => composerSuggestion.invalidate()}>Dismiss</button>
+							</div>
+						{/if}
 					</div>
 
 					<!-- Send cluster (mockup `.send`): the return glyph on the right
@@ -1066,6 +1084,8 @@
 							onTranscription={handleTranscription}
 							onLiveText={handleLiveText}
 							onLiveCommit={handleLiveCommit}
+							onLiveDiscard={handleLiveDiscard}
+							getOwner={() => get(activeSession).sessionId}
 							disabled={!$anyCredential || isUploading}
 							bind:isRecording
 							bind:isTranscribing

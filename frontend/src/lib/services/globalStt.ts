@@ -42,6 +42,7 @@ export type GlobalSttMode = 'idle' | 'live' | 'batch';
 export interface VoiceInputSink {
 	onText: (text: string) => void;
 	onCommit: () => void;
+	onDiscard?: () => void;
 }
 
 export interface GlobalSttState {
@@ -1089,7 +1090,8 @@ export function clearError(): void {
 }
 
 /**
- * Abandon whatever voice input is in flight and keep none of it.
+ * Abandon voice input in flight. Explicit Discard removes owned speech;
+ * navigation may retain the already-visible words with `discard: false`.
  *
  * Bumping the run id is the load-bearing part. Resetting the store would not be
  * enough: `stopRecording` and `stopLiveRecording` hold local references to the
@@ -1100,12 +1102,13 @@ export function clearError(): void {
  * `startSttStream` cannot be aborted from outside, so instead it is left to
  * resolve into a stale run that immediately tears its own session down.
  */
-export function cancelVoiceInput(): void {
+export function cancelVoiceInput({ discard = true }: { discard?: boolean } = {}): void {
 	if (!browser) return;
 
 	runId++;
 	clearAutoStop();
-	liveSink?.onCommit();
+	if (discard) liveSink?.onDiscard?.();
+	else liveSink?.onCommit();
 	liveSink = null;
 	outputSink = null;
 

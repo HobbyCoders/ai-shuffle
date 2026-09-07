@@ -30,6 +30,9 @@
 		onLiveText?: (text: string) => void;
 		/** Dictation finished; release whatever span `onLiveText` was writing to. */
 		onLiveCommit?: () => void;
+		onLiveDiscard?: () => void;
+		/** Read synchronously so navigation invalidates callbacks before effects run. */
+		getOwner?: () => unknown;
 		disabled?: boolean;
 		isRecording?: boolean;
 		isTranscribing?: boolean;
@@ -39,6 +42,8 @@
 		onTranscription,
 		onLiveText,
 		onLiveCommit,
+		onLiveDiscard,
+		getOwner,
 		disabled = false,
 		isRecording = $bindable(false),
 		isTranscribing = $bindable(false)
@@ -79,9 +84,12 @@
 			toggleVoiceInput(onTranscription);
 			return;
 		}
-		toggleVoiceInput(onTranscription, onLiveText ? {
-			onText: (text) => onLiveText?.(text),
-			onCommit: () => onLiveCommit?.()
+		const owner = getOwner?.();
+		const isCurrent = () => !getOwner || getOwner() === owner;
+		toggleVoiceInput((text) => { if (isCurrent()) onTranscription(text); }, onLiveText ? {
+			onText: (text) => { if (isCurrent()) onLiveText?.(text); },
+			onCommit: () => { if (isCurrent()) onLiveCommit?.(); },
+			onDiscard: () => { if (isCurrent()) onLiveDiscard?.(); }
 		} : undefined);
 	}
 
@@ -107,11 +115,12 @@
 	});
 
 	// A recording left running when the composer goes away would hold the
-	// microphone open with nowhere to put its text.
+	// microphone open with nowhere to put its text. Navigation keeps words
+	// already visible in the draft; only the explicit Discard action removes them.
 	onDestroy(() => {
 		const state = $globalSttState;
 		if (state.source === 'composer' && (state.isRecording || state.isPreparing || state.isTranscribing)) {
-			cancelVoiceInput();
+			cancelVoiceInput({ discard: false });
 		}
 	});
 </script>

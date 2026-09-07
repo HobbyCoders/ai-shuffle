@@ -20,6 +20,28 @@ describe('composer live transcription delivery', () => {
 		mocks.start.mockImplementation(async (callbacks: SttStreamHandlers) => { handlers = callbacks; callbacks.onCapture?.(); return session; });
 	});
 	afterEach(() => { cancelVoiceInput(); vi.useRealTimers(); vi.clearAllMocks(); });
+	it('Discard invokes removal, never commits, and rejects late speech', async () => {
+		const onText = vi.fn(); const onCommit = vi.fn(); const onDiscard = vi.fn();
+		toggleVoiceInput(vi.fn(), { onText, onCommit, onDiscard });
+		await vi.advanceTimersByTimeAsync(0);
+		handlers.onTranscript?.('private words');
+		cancelVoiceInput();
+		handlers.onTranscript?.('late private words');
+		expect(onDiscard).toHaveBeenCalledOnce();
+		expect(onCommit).not.toHaveBeenCalled();
+		expect(onText).toHaveBeenCalledTimes(1);
+	});
+	it('navigation settles visible speech into the old draft and rejects pending final', async () => {
+		const onText = vi.fn(); const onCommit = vi.fn(); const onDiscard = vi.fn();
+		toggleVoiceInput(vi.fn(), { onText, onCommit, onDiscard });
+		await vi.advanceTimersByTimeAsync(0);
+		handlers.onTranscript?.('original session');
+		cancelVoiceInput({ discard: false });
+		handlers.onTranscript?.('destination must not receive');
+		expect(onCommit).toHaveBeenCalledOnce();
+		expect(onDiscard).not.toHaveBeenCalled();
+		expect(onText).toHaveBeenCalledExactlyOnceWith('original session');
+	});
 	it('delivers interim words while recording, settles final once, never appends a duplicate', async () => {
 		const final = vi.fn(); const onText = vi.fn(); const onCommit = vi.fn();
 		toggleVoiceInput(final, { onText, onCommit });

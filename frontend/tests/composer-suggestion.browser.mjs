@@ -55,6 +55,15 @@ try {
 			await window.suggestionFixture.clear();
 			await window.suggestionFixture.offer();
 		});
+		const useReply = page.getByRole('button', { name: 'Use reply', exact: true });
+		if (width === 390) await useReply.tap();
+		else await useReply.click();
+		assert.equal(await editor.textContent(), await page.evaluate(() => window.suggestionFixture.literal));
+		assert.equal(await page.evaluate(() => window.suggestionFixture.sends), 0);
+		await page.evaluate(async () => {
+			await window.suggestionFixture.clear();
+			await window.suggestionFixture.offer();
+		});
 		await editor.focus();
 		await page.keyboard.type('My own reply');
 		assert.equal(await page.locator('[data-testid="composer-suggestion"]').count(), 0);
