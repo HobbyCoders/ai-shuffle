@@ -24,7 +24,7 @@ Client -> server:
 
 Server -> client (always JSON text):
 
-* ``ready`` - upstream is open, start sending audio
+* ``ready`` - upstream accepted the model configuration, start sending audio
 * ``speech_started`` / ``speech_stopped`` - server VAD edges, for the UI
 * ``delta`` - more text for the in-flight segment
 * ``final`` - the segment's finished transcript
@@ -98,6 +98,7 @@ MAX_FRAME_BYTES = 256 * 1024
 DRAIN_TIMEOUT_SECONDS = 6.0
 
 UPSTREAM_CONNECT_TIMEOUT = 12.0
+SESSION_CONFIG_TIMEOUT = 12.0
 
 # WebSocket close codes the client reads to decide whether to fall back to the
 # batch path (4003 = "this model cannot stream") or surface an error.
@@ -133,6 +134,7 @@ def _resolve_capability() -> Dict[str, Any]:
             "partials": False,
             "sample_rate": SAMPLE_RATE,
             "accepts_compressed": accepts_compressed,
+            "realtime_only": bool(entry.get("realtime_only")),
             "reason": (
                 f"{display} transcribes uploaded audio only. Pick an OpenAI STT "
                 f"model in Settings > Audio for live transcription."
@@ -147,6 +149,7 @@ def _resolve_capability() -> Dict[str, Any]:
             "partials": False,
             "sample_rate": SAMPLE_RATE,
             "accepts_compressed": accepts_compressed,
+            "realtime_only": bool(entry.get("realtime_only")),
             "reason": (
                 "No OpenAI provider with a stored API key is configured. "
                 "Add one in Settings > Providers."
@@ -160,6 +163,7 @@ def _resolve_capability() -> Dict[str, Any]:
         "partials": info["partials"],
         "sample_rate": SAMPLE_RATE,
         "accepts_compressed": accepts_compressed,
+        "realtime_only": bool(entry.get("realtime_only")),
         "reason": None,
     }
 
@@ -347,20 +351,11 @@ async def transcribe_stream(
             await upstream.send(json.dumps(_session_update_ga(model_name, language)))
         except Exception as exc:  # noqa: BLE001
             logger.warning("STT stream: initial session.update failed: %s", exc)
-
-        # Audio may flow immediately: 24 kHz mono PCM16 is the realtime default,
-        # so even an unacknowledged session.update leaves the format correct and
-        # the buffer accepting. Waiting for the ack would only add latency.
-        await _send_client(
-            websocket,
-            {
-                "type": "ready",
-                "model": model_id,
-                "model_name": capability["model_name"],
-                "partials": capability["partials"],
-                "sample_rate": SAMPLE_RATE,
-            },
-        )
+            await _send_client(websocket, {
+                "type": "error", "message": "Could not configure live transcription.", "fatal": True,
+            })
+            await websocket.close(code=CLOSE_UPSTREAM, reason="Session configuration failed")
+            return
 
         async def pump_client_to_upstream() -> None:
             """Browser audio and control frames -> upstream buffer appends."""
@@ -420,6 +415,8 @@ async def transcribe_stream(
                     control = json.loads(text)
                 except ValueError:
                     continue
+                if not isinstance(control, dict):
+                    continue
 
                 kind = control.get("type")
                 if kind == "commit":
@@ -443,12 +440,28 @@ async def transcribe_stream(
         async def pump_upstream_to_client() -> None:
             """Upstream realtime events -> the small client protocol."""
             nonlocal input_drained
-            async for raw in upstream:
+            events = upstream.__aiter__()
+            deadline = time.monotonic() + SESSION_CONFIG_TIMEOUT
+            while True:
+                try:
+                    raw = await asyncio.wait_for(
+                        anext(events),
+                        timeout=None if state["configured"] else max(0, deadline - time.monotonic()),
+                    )
+                except StopAsyncIteration:
+                    return
+                except TimeoutError:
+                    await _send_client(websocket, {
+                        "type": "error", "message": "Live transcription configuration timed out.", "fatal": True,
+                    })
+                    return
                 if isinstance(raw, bytes):
                     continue
                 try:
                     event = json.loads(raw)
                 except ValueError:
+                    continue
+                if not isinstance(event, dict):
                     continue
 
                 kind = event.get("type") or ""
@@ -516,7 +529,15 @@ async def transcribe_stream(
                     "session.updated",
                     "transcription_session.updated",
                 ):
-                    state["configured"] = True
+                    if not state["configured"]:
+                        state["configured"] = True
+                        # An open socket does not mean this account/model accepted
+                        # the session. Do not start capture on a rejected config.
+                        await _send_client(websocket, {
+                            "type": "ready", "model": model_id,
+                            "model_name": capability["model_name"],
+                            "partials": capability["partials"], "sample_rate": SAMPLE_RATE,
+                        })
 
                 elif kind == "error":
                     error = event.get("error") or {}

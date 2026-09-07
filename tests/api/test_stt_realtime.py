@@ -263,6 +263,7 @@ class _FakeUpstream:
         answer_clear=True,
         stop_error=None,
         configured=True,
+        config_events=(),
     ):
         import asyncio
 
@@ -275,6 +276,7 @@ class _FakeUpstream:
         self.answer_clear = answer_clear
         self.stop_error = stop_error
         self.configured = configured
+        self.config_events = config_events
         self._queue = asyncio.Queue()
         self._tasks = []
         self.entered = False
@@ -296,6 +298,9 @@ class _FakeUpstream:
         message = json.loads(data)
         if message.get("type") == "session.update" and self.configured:
             await self._queue.put(json.dumps({"type": "session.updated"}))
+        if message.get("type") == "session.update":
+            for event in self.config_events:
+                await self._queue.put(json.dumps(event))
         if message.get("type") == "input_audio_buffer.clear" and self.answer_clear:
             await self._queue.put(json.dumps({"type": "input_audio_buffer.cleared"}))
         if message.get("type") == "input_audio_buffer.append":
@@ -461,8 +466,7 @@ def test_stream_stop_does_not_wait_out_the_drain_ceiling(stream_client):
 
 
 
-@pytest.mark.parametrize("configured", [True, False])
-def test_stop_after_vad_final_closes_without_error_or_settle_timer(stream_client, monkeypatch, configured):
+def test_stop_after_vad_final_closes_without_error_or_settle_timer(stream_client, monkeypatch):
     import time
 
     client, created = stream_client
@@ -471,7 +475,6 @@ def test_stop_after_vad_final_closes_without_error_or_settle_timer(stream_client
         {"type": "input_audio_buffer.committed", "item_id": "item_1"},
         {"type": "conversation.item.input_audio_transcription.completed", "item_id": "item_1", "transcript": "already finished"},
     ], "stop_error": "input_audio_buffer_commit_empty"}
-    created["kwargs"]["configured"] = configured
 
     with client.websocket_connect("/api/v1/settings/transcribe/stream") as ws:
         assert ws.receive_json()["type"] == "ready"
@@ -626,3 +629,51 @@ def test_stream_rejects_a_model_that_cannot_stream(stream_client, capability_env
             ws.receive_json()
 
     assert excinfo.value.code == stt_realtime.CLOSE_UNSUPPORTED
+
+
+def test_live_model_rejection_never_announces_ready_or_retries_legacy(stream_client, capability_env):
+    client, created = stream_client
+    capability_env['model'] = 'openai/gpt-live-transcribe'
+    created['kwargs'] = {'configured': False, 'config_events': [
+        {'type': 'error', 'error': {'code': 'model_not_found', 'message': 'GPT Live Transcribe is unavailable'}},
+    ]}
+    with client.websocket_connect('/api/v1/settings/transcribe/stream') as ws:
+        assert ws.receive_json() == {'type': 'error', 'message': 'GPT Live Transcribe is unavailable', 'fatal': True}
+        assert ws.receive_json() == {'type': 'closed'}
+    sent = [json.loads(raw) for raw in created['upstream'].sent]
+    assert [frame['type'] for frame in sent] == ['session.update']
+    assert sent[0]['session']['audio']['input']['transcription']['model'] == 'gpt-live-transcribe'
+
+
+def test_live_model_configuration_timeout_is_terminal(stream_client, capability_env, monkeypatch):
+    client, created = stream_client
+    capability_env['model'] = 'openai/gpt-live-transcribe'
+    created['kwargs'] = {'configured': False}
+    monkeypatch.setattr(stt_realtime, 'SESSION_CONFIG_TIMEOUT', 0.01)
+    with client.websocket_connect('/api/v1/settings/transcribe/stream') as ws:
+        error = ws.receive_json()
+        assert error['type'] == 'error' and error['fatal'] is True
+        assert 'timed out' in error['message']
+        assert ws.receive_json() == {'type': 'closed'}
+
+
+def test_live_model_streams_partial_then_final_and_recovers_failed_turn(stream_client, capability_env):
+    client, created = stream_client
+    capability_env['model'] = 'openai/gpt-live-transcribe'
+    created['kwargs'] = {'audio_events': [
+        {'type': 'input_audio_buffer.speech_started', 'item_id': 'live'},
+        {'type': 'conversation.item.input_audio_transcription.delta', 'item_id': 'live', 'delta': 'Hello'},
+        {'type': 'conversation.item.input_audio_transcription.failed', 'item_id': 'live', 'error': {'message': 'Try again'}},
+        {'type': 'conversation.item.input_audio_transcription.completed', 'item_id': 'next', 'transcript': 'Recovered.'},
+    ]}
+    with client.websocket_connect('/api/v1/settings/transcribe/stream') as ws:
+        assert ws.receive_json()['model'] == 'openai/gpt-live-transcribe'
+        ws.send_bytes(b'\x00\x00' * 2400)
+        assert ws.receive_json() == {'type': 'item_started', 'item_id': 'live'}
+        assert ws.receive_json()['type'] == 'speech_started'
+        assert ws.receive_json() == {'type': 'delta', 'item_id': 'live', 'text': 'Hello'}
+        assert ws.receive_json() == {'type': 'error', 'message': 'Try again', 'fatal': False}
+        assert ws.receive_json() == {'type': 'final', 'item_id': 'next', 'text': 'Recovered.'}
+        ws.send_json({'type': 'stop'})
+        assert ws.receive_json()['type'] == 'final'
+        assert ws.receive_json()['type'] == 'closed'

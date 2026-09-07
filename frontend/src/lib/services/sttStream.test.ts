@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { startSttStream } from './sttStream';
+import { startSttStream, SttUnsupportedError } from './sttStream';
 
 vi.mock('$app/environment', () => ({ browser: true }));
 class FakeSocket {
@@ -21,6 +21,48 @@ class FakeAudioContext {
 	close = vi.fn().mockResolvedValue(undefined);
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+describe('GPT Live Transcribe startup failures', () => {
+	function setup(getUserMedia: () => Promise<unknown>) {
+		vi.stubGlobal('WebSocket', FakeSocket);
+		vi.stubGlobal('AudioContext', FakeAudioContext);
+		vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
+		vi.stubGlobal('requestAnimationFrame', vi.fn());
+		vi.stubGlobal('cancelAnimationFrame', vi.fn());
+	}
+	it('releases a late microphone and preserves the model rejection after an early ready', async () => {
+		let openMic!: (value: unknown) => void;
+		const stop = vi.fn();
+		setup(() => new Promise(resolve => { openMic = resolve; }));
+		const onCapture = vi.fn();
+		const started = startSttStream({ onCapture });
+		const rejection = expect(started).rejects.toThrow('GPT Live Transcribe is unavailable');
+		await Promise.resolve();
+		FakeSocket.last.emit({ type: 'error', fatal: true, message: 'GPT Live Transcribe is unavailable' });
+		FakeSocket.last.emit({ type: 'closed' });
+		await rejection;
+		openMic({ getTracks: () => [{ stop }] });
+		await Promise.resolve();
+		expect(stop).toHaveBeenCalledOnce();
+		expect(onCapture).not.toHaveBeenCalled();
+	});
+	it('retains the typed batch fallback when the socket rejects an unsupported model', async () => {
+		setup(async () => ({ getTracks: () => [{ stop: vi.fn() }] }));
+		const started = startSttStream();
+		FakeSocket.last.onclose?.({ code: 4003, reason: 'Batch-only model' });
+		await expect(started).rejects.toBeInstanceOf(SttUnsupportedError);
+	});
+	it('closes capture immediately on a fatal model event even if the peer stays open', async () => {
+		const stop = vi.fn();
+		setup(async () => ({ getTracks: () => [{ stop }] }));
+		const onClosed = vi.fn();
+		const session = await startSttStream({ onClosed });
+		FakeSocket.last.emit({ type: 'error', fatal: true, message: 'Model unavailable' });
+		expect(stop).toHaveBeenCalledOnce();
+		expect(onClosed).toHaveBeenCalledOnce();
+		await expect(session.stop()).rejects.toThrow('Model unavailable');
+	});
+});
 
 describe('stream session stop drain', () => {
 	it('publishes words before stopping and waits past the first final for all tail turns', async () => {

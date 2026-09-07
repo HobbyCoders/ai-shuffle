@@ -20,6 +20,20 @@ describe('composer live transcription delivery', () => {
 		mocks.start.mockImplementation(async (callbacks: SttStreamHandlers) => { handlers = callbacks; callbacks.onCapture?.(); return session; });
 	});
 	afterEach(() => { cancelVoiceInput(); vi.useRealTimers(); vi.clearAllMocks(); });
+	it('does not record a doomed batch upload for a live-only model without credentials', async () => {
+		mocks.capability.mockResolvedValue({ supported: false, realtime_only: true,
+			model_name: 'GPT Live Transcribe', reason: 'Add an OpenAI API key in Providers.' });
+		const getUserMedia = vi.fn();
+		vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
+		try {
+			toggleVoiceInput(vi.fn(), { onText: vi.fn(), onCommit: vi.fn() });
+			await vi.advanceTimersByTimeAsync(0);
+			expect(mocks.start).not.toHaveBeenCalled();
+			expect(getUserMedia).not.toHaveBeenCalled();
+			expect(get(globalSttState)).toMatchObject({ mode: 'idle', isPreparing: false,
+				isRecording: false, error: 'Add an OpenAI API key in Providers.' });
+		} finally { vi.unstubAllGlobals(); }
+	});
 	it('Discard invokes removal, never commits, and rejects late speech', async () => {
 		const onText = vi.fn(); const onCommit = vi.fn(); const onDiscard = vi.fn();
 		toggleVoiceInput(vi.fn(), { onText, onCommit, onDiscard });

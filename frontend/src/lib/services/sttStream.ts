@@ -34,13 +34,15 @@ export interface SttCapability {
 	/** Whether this model accepts the browser's native recording container, so
 	 *  the batch path can upload Opus instead of re-encoding to 16 kHz WAV. */
 	accepts_compressed?: boolean;
+	/** Live-only models cannot recover through the recorded-file endpoint. */
+	realtime_only?: boolean;
 }
 
 export interface SttStreamHandlers {
 	/** Full reconciled dictation, including all settled and in-flight turns. */
 	onTranscript?: (text: string) => void;
-	/** The proxy has an upstream session open. This is NOT the moment recording
-	 *  starts — the microphone has not been touched yet. Use `onCapture`. */
+	/** The upstream accepted the model configuration. Microphone acquisition
+	 *  runs concurrently; use `onCapture` for the recording-start signal. */
 	onReady?: (info: { model: string; modelName: string; partials: boolean }) => void;
 	/** The audio graph is connected and samples are flowing. This is the only
 	 *  honest "you can talk now" signal, and the one the UI and earcon fire on. */
@@ -290,7 +292,10 @@ export async function startSttStream(
 	}
 
 	function finish(): void {
-		if (closed) return;
+		if (closed) {
+			teardownAudio();
+			return;
+		}
 		closed = true;
 		teardownAudio();
 		try {
@@ -312,13 +317,14 @@ export async function startSttStream(
 		let settled = false;
 
 		socket!.onmessage = (event) => {
-			if (typeof event.data !== 'string') return;
+			if (closed || typeof event.data !== 'string') return;
 			let message: Record<string, unknown>;
 			try {
 				message = JSON.parse(event.data);
 			} catch {
 				return;
 			}
+			if (!message || typeof message !== 'object' || Array.isArray(message)) return;
 
 			switch (message.type) {
 				case 'item_started':
@@ -381,10 +387,15 @@ export async function startSttStream(
 						settled = true;
 						reject(new Error(detail));
 					}
+					if (message.fatal) finish();
 					break;
 				}
 
 				case 'closed':
+					if (!settled) {
+						settled = true;
+						reject(new Error(fatalError || 'Live transcription stream closed.'));
+					}
 					finish();
 					break;
 			}
@@ -431,34 +442,21 @@ export async function startSttStream(
 			noiseSuppression: true,
 			autoGainControl: true
 		}
+	}).then((opened) => {
+		// A permission prompt may outlive a rejected model session. Its result
+		// remains owned here even after startSttStream has already rejected.
+		if (closed) opened.getTracks().forEach((track) => track.stop());
+		else stream = opened;
+		return opened;
 	});
-	// Claim the rejection now; it is inspected below. Without this the browser
-	// reports it as unhandled while the handshake is still in flight.
-	micPromise.catch(() => {});
-
-	const [readyResult, micResult] = await Promise.allSettled([ready, micPromise]);
-
-	// A microphone opened for a session that will not happen still has to be
-	// released, or the OS recording indicator stays lit for the life of the tab.
-	if (micResult.status === 'fulfilled' && readyResult.status === 'rejected') {
-		micResult.value.getTracks().forEach((track) => track.stop());
-	}
-
-	if (micResult.status === 'rejected') {
-		finish();
-		throw describeMicError(micResult.reason);
-	}
-	if (readyResult.status === 'rejected') {
-		finish();
-		// Rethrown unchanged on purpose: the caller keys the batch fallback off
-		// `error instanceof SttUnsupportedError`, so wrapping it here would
-		// strand fal models with no transcription at all.
-		throw readyResult.reason;
-	}
-
-	stream = micResult.value;
 
 	try {
+		const [, opened] = await Promise.race([
+			Promise.all([ready, micPromise]),
+			closedPromise.then(() => { throw new Error(fatalError || 'Live transcription stream closed.'); })
+		]);
+		if (closed) throw new Error(fatalError || 'Live transcription stopped before capture began.');
+		stream = opened;
 		// Pinning the context to 24 kHz makes the browser resample in native
 		// code. Not every engine honours it, hence the rate check below.
 		try {
@@ -505,6 +503,7 @@ export async function startSttStream(
 				sourceNode.connect(workletNode);
 				usingWorklet = true;
 			} catch (workletError) {
+				if (closed) throw new Error(fatalError || 'Live transcription stopped before capture began.');
 				console.warn('[SttStream] AudioWorklet unavailable, falling back:', workletError);
 				workletNode = null;
 			}
@@ -553,8 +552,7 @@ export async function startSttStream(
 		// Capture is genuinely live now: the graph is connected on both the
 		// worklet and the ScriptProcessor branch, and the meter is running.
 		// Announced here rather than on the socket's `ready` — that arrives
-		// before getUserMedia has even been called, so anything the user said on
-		// that cue was never recorded at all.
+		// while getUserMedia or the audio worklet may still be starting.
 		handlers.onCapture?.();
 	} catch (error) {
 		finish();
@@ -571,7 +569,10 @@ export async function startSttStream(
 		getText,
 
 		async stop() {
-			if (closed) return getText();
+			if (closed) {
+				if (fatalError && !getText()) throw new Error(fatalError);
+				return getText();
+			}
 
 			// Silence the microphone first so the tail commit covers exactly what
 			// was spoken, then let the backend drain the last segment.

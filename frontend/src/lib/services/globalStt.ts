@@ -380,7 +380,12 @@ async function startLiveRecording(myRun: number): Promise<boolean> {
 	// unsupported model is exactly the case that falls through to batch.
 	sttAcceptsCompressed = capability.accepts_compressed === true;
 
-	if (!capability.supported) return false;
+	if (!capability.supported) {
+		if (!capability.realtime_only) return false;
+		globalSttState.update((s) => ({ ...s, mode: 'idle', isPreparing: false,
+			isRecording: false, error: capability.reason || 'This model requires live transcription.' }));
+		return true;
+	}
 
 	globalSttState.update((s) => ({
 		...s,
@@ -455,7 +460,7 @@ async function startLiveRecording(myRun: number): Promise<boolean> {
 		if (!isCurrentRun(myRun)) return true;
 		streamSession = null;
 
-		if (error instanceof SttUnsupportedError) {
+		if (error instanceof SttUnsupportedError && !capability.realtime_only) {
 			// The backend says this model can't stream — batch handles it.
 			globalSttState.update((s) => ({ ...s, mode: 'idle' }));
 			return false;

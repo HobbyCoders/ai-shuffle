@@ -31,6 +31,9 @@ class MockSocket {
 }
 window.WebSocket = MockSocket as unknown as typeof WebSocket;
 window.EventSource = MockSocket as unknown as typeof EventSource;
+if (new URLSearchParams(location.search).has('stt')) {
+	(await import('./stt-live-fixture')).installSttFixture();
+}
 localStorage.clear();
 sessionStorage.clear();
 const [
