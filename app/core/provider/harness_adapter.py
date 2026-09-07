@@ -415,6 +415,10 @@ class HarnessAdapter(ProviderAdapter):
         kind = await asyncio.to_thread(_decide_provider_kind, options)
         self._is_delegated = kind == "delegated"
         self._provider_kind = kind
+        if not self._is_delegated and options.permission_mode == 'auto':
+            # Legacy Auto selections on native routes use Ask. Only the
+            # delegated Claude CLI implements the classifier-backed mode.
+            options.permission_mode = 'default'
         options.effort = await asyncio.to_thread(_effective_effort, options, options.effort, kind)
 
         self._registry = await self._build_registry(options, native=not self._is_delegated)
@@ -1804,6 +1808,8 @@ class HarnessAdapter(ProviderAdapter):
             self._engine.model = model
 
     async def set_permission_mode(self, mode: str) -> None:
+        if not self._is_delegated and mode == 'auto':
+            mode = 'default'
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
         # BEFORE the submit: fluid routes a plan-mode flip through the injected

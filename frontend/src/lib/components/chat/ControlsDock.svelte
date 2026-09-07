@@ -44,6 +44,7 @@
 	import {
 		getModelLabel,
 		getDefaultModel,
+		supportsAutoPermission,
 		isFastModeCapable,
 		isReroute
 	} from '$lib/constants/models';
@@ -156,7 +157,8 @@
 	// seeded from whatever they picked last — and may change it mid-session;
 	// every send carries it, and the backend stores it on the session row.
 	const effortValue = $derived($activeSession.effortLevelOverride);
-	const permissionValue = $derived($activeSession.permissionModeOverride ?? 'default');
+	const autoPermission = $derived(supportsAutoPermission($activeSession.modelOverride || $activeSession.liveRequestedModel || $activeSession.liveModel || getDefaultModel()));
+	const permissionValue = $derived($activeSession.permissionModeOverride === 'auto' && !autoPermission ? 'default' : $activeSession.permissionModeOverride ?? 'default');
 	// Chat and voice are projectless, web-only lanes with a fixed tool surface
 	// (decided server-side), so there is no access to grant.
 	const isCodeLane = $derived($activeSession.mode !== 'chat'); // voice shares code controls
@@ -320,13 +322,13 @@
 		}
 	});
 
-	const permissionModes = [
+	const permissionModes = $derived([
 		{ value: 'default', label: 'Ask', description: 'Confirm before tools' },
-		{ value: 'auto', label: 'Auto', description: 'Model classifier decides per tool call' },
+		...(autoPermission ? [{ value: 'auto', label: 'Auto', description: 'Claude Code evaluates tool calls automatically' }] : []),
 		{ value: 'acceptEdits', label: 'Accept Edits', description: 'Auto-approve edits' },
 		{ value: 'plan', label: 'Plan Only', description: 'Plan without executing' },
 		{ value: 'bypassPermissions', label: 'Bypass', description: 'Execute all tools' }
-	];
+	]);
 
 	const effortModel = $derived(resolveEffortModel(
 		$activeSession.modelOverride, liveModel, liveRequestedModel, $activeSession.liveProvider

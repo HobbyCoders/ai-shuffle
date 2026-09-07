@@ -14,6 +14,7 @@ export type {
 	DecodedProviderModel
 } from './models.svelte';
 export {
+	supportsAutoPermission,
 	INHERIT_VALUE,
 	CUSTOM_VALUE,
 	NATIVE_PROVIDER_KEY,

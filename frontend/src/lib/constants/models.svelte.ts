@@ -22,6 +22,7 @@ import type { ReasoningCapabilities } from '$lib/api/model-providers';
 export type ModelFamily = 'haiku' | 'sonnet' | 'opus' | 'fable';
 
 export interface ModelOption {
+	auto_permission_supported?: boolean;
 	/** Model identifier (an Agent SDK shorthand alias) persisted to storage and sent to the backend/SDK. */
 	value: string;
 	/** Human-facing label for dropdowns and badges. */
@@ -202,6 +203,7 @@ export type ProviderAuthKind = 'subscription' | 'api';
  * carries the encrypted auth token — see `app/db/model_providers.py`).
  */
 export interface ProviderEntry {
+	auto_permission_supported?: boolean;
 	id: string;
 	name: string;
 	provider_type: string;
@@ -262,6 +264,13 @@ const _registry = $state<RegistryState>({
 /** Ordered list of selectable models. Reactive in Svelte component contexts. */
 export function getModels(): readonly ModelOption[] {
 	return _registry.models;
+}
+
+/** Only a verified delegated Claude route advertises classifier-based tool approval. */
+export function supportsAutoPermission(value: string | null | undefined): boolean {
+	const composite = decodeProviderModel(value);
+	if (composite) return _registry.providers.find(p => p.id === composite.providerId)?.auto_permission_supported === true;
+	return _registry.models.find(m => m.value === normalizeModel(value || getDefaultModel()))?.auto_permission_supported === true;
 }
 
 /** Default model used when nothing is configured yet. Reactive. */
@@ -590,6 +599,7 @@ export function getModelBadgeClass(value: string | null | undefined): string {
 // ---------------------------------------------------------------------------
 
 interface RegistryModelPayload {
+	auto_permission_supported?: boolean;
 	value: string;
 	label: string;
 	family: ModelFamily;
@@ -601,6 +611,7 @@ interface RegistryModelPayload {
 }
 
 interface RegistryProviderPayload {
+	auto_permission_supported?: boolean;
 	id: string;
 	capability_generation?: string;
 	name: string;
@@ -627,6 +638,7 @@ interface RegistryPayload {
 
 function mapPayloadModel(m: RegistryModelPayload): ModelOption {
 	return { ...STATIC_MODELS.find(baseline => baseline.value === m.value),
+		...(typeof m.auto_permission_supported === 'boolean' ? {auto_permission_supported: m.auto_permission_supported} : {}),
 		value: m.value, label: m.label, family: m.family, context_window: m.context_window,
 		...(m.effort_metadata_version !== undefined ? { effort_metadata_version: m.effort_metadata_version } : {}),
 		...(m.reasoning_capabilities !== undefined ? { reasoning_capabilities: m.reasoning_capabilities } : {}),
@@ -642,6 +654,7 @@ function mapPayloadModel(m: RegistryModelPayload): ModelOption {
  */
 function mapPayloadProvider(p: RegistryProviderPayload): ProviderEntry {
 	return {
+		...(typeof p.auto_permission_supported === 'boolean' ? {auto_permission_supported: p.auto_permission_supported} : {}),
 		id: p.id,
 		name: p.name,
 		provider_type: p.provider_type,

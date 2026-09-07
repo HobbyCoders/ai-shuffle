@@ -166,7 +166,7 @@ def test_registry_payload_shape():
     models = payload["models"]
     assert isinstance(models, list)
     assert "supports_1m" not in models[0]
-    assert {"value", "label", "family", "context_window", "effort_levels", "default_effort", "effort_metadata_version"} == set(models[0])
+    assert {"value", "label", "family", "context_window", "effort_levels", "default_effort", "effort_metadata_version", "auto_permission_supported"} == set(models[0])
     # Claude windows travel to the frontend so the context meter is right.
     by_value = {entry["value"]: entry for entry in models}
     assert by_value["sonnet"]["context_window"] == 1_000_000
@@ -309,6 +309,7 @@ class TestRegistryPayloadProviders:
         assert entry == {
             "id": "prov-1",
             "capability_generation": db.get_model_provider("prov-1")["revision"],
+            "auto_permission_supported": False,
             "name": "OpenRouter",
             "provider_type": "openrouter",
             # Display metadata: an API-key row, so no plan string.

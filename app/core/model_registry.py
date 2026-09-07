@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
 
 from app.core.model_catalog_presets import preset_context_window, preset_kind_for
 from app.core.model_effort import effort_capabilities
+from app.core.provider.capabilities import supports_auto_permission
 
 if TYPE_CHECKING:  # pragma: no cover — annotation-only, avoids an import cycle
     from app.db.model_providers import ModelProviderRow
@@ -383,6 +384,7 @@ def _providers_payload() -> List[Dict[str, object]]:
             "id": row.get("id"),
             "name": row.get("name"),
             "provider_type": row.get("provider_type"),
+            "auto_permission_supported": supports_auto_permission(row.get('default_model') or DEFAULT_MODEL, row),
             "capability_generation": row.get("revision"),
             # Display metadata (brand + auth-kind subtext). ``auth_kind`` says
             # HOW the row authenticates; ``plan_type`` names the subscription
@@ -465,6 +467,7 @@ def registry_payload() -> Dict[str, object]:
                 "value": m.value,
                 "label": m.label,
                 "family": m.family,
+                "auto_permission_supported": supports_auto_permission(m.value),
                 "context_window": m.context_window,
                 **effort_capabilities(m.value, route="delegated"),
             }
