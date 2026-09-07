@@ -315,7 +315,12 @@ def test_deleted_branch_restored_from_recorded_head_sha(
         project["id"], RUNNER, str(dest_hint),
         branch="feat/resume", head_sha=sha, status="archived",
     )
+    other = projects_v2.upsert_project("git:other-repo", name="Other Repo")
+    checkouts_db.upsert_checkout(project["id"], "peer-runner", str(base_checkout))
+    checkouts_db.upsert_checkout(other["id"], RUNNER, str(base_checkout))
     _git(base_checkout, "branch", "-D", "feat/resume")
+    # Recovery must use the known runner/project row, with no reflog escape hatch.
+    _git(base_checkout, "reflog", "expire", "--expire=now", "--all")
 
     path = checkout_manager.ensure_checkout(
         project, branch="feat/resume", runner_id=RUNNER
@@ -356,7 +361,46 @@ def test_deleted_branch_restored_from_pull_ref(project, tmp_path, workspace_root
 
     assert path is not None
     assert (Path(path) / "pr.txt").read_text(encoding="utf-8") == "pr-tip\n"
-    lookup.assert_called()
+    lookup.assert_called_once_with("feat/pr-head", project["id"])
+
+
+def test_deleted_branch_restored_from_exact_reflog_source_tip(
+    project, base_checkout, workspace_root,
+):
+    default = _current_branch(base_checkout)
+    _git(base_checkout, "checkout", "-b", "feat/reflog")
+    (base_checkout / "recovered.txt").write_text("latest branch tip\n", encoding="utf-8")
+    _git(base_checkout, "add", "-A")
+    _git(base_checkout, "commit", "-m", "work after switching")
+    _git(base_checkout, "checkout", default)
+    _git(base_checkout, "branch", "-D", "feat/reflog")
+
+    path = checkout_manager.ensure_checkout(project, branch="feat/reflog", runner_id=RUNNER)
+    assert path is not None
+    assert (Path(path) / "recovered.txt").read_text(encoding="utf-8") == "latest branch tip\n"
+
+
+@pytest.mark.parametrize("mention", ["feat/missing-suffix", "unrelated", "Feat/Missing"])
+def test_reflog_substrings_and_commit_messages_cannot_fabricate_branch(
+    project, base_checkout, workspace_root, mention,
+):
+    _git(base_checkout, "commit", "--allow-empty", "-m", "discuss feat/missing")
+    _git(base_checkout, "checkout", "-b", mention)
+    assert checkout_manager.ensure_checkout(project, branch="feat/missing", runner_id=RUNNER) is None
+
+
+def test_recorded_tip_without_runner_identity_is_not_used_for_a_different_runner(
+    project, base_checkout, workspace_root,
+):
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=base_checkout, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    checkouts_db.upsert_checkout(
+        project["id"], "", str(base_checkout / "old-unowned-worktree"),
+        branch="feat/unowned", head_sha=sha, status="archived",
+    )
+    assert checkout_manager.ensure_checkout(project, branch="feat/unowned", runner_id=RUNNER) is None
 
 
 def test_create_new_branch_honors_base_and_skips_recovery(

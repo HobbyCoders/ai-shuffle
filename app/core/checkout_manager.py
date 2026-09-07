@@ -148,6 +148,9 @@ def _branch_plan(
     branch: str,
     base_branch: Optional[str] = None,
     create_new_branch: bool = False,
+    *,
+    project_id: Optional[str] = None,
+    runner_id: Optional[str] = None,
 ) -> Optional[Tuple[bool, Optional[str]]]:
     """Decide new-branch vs existing-branch for ``git worktree add``.
 
@@ -167,7 +170,9 @@ def _branch_plan(
     if create_new_branch:
         return True, base_branch
     try:
-        return resolve_rebound_branch_plan(git_service, base_dir, branch)
+        return resolve_rebound_branch_plan(
+            git_service, base_dir, branch, project_id=project_id, runner_id=runner_id,
+        )
     except WorktreeError as e:
         logger.warning(
             "checkout_manager: branch %r not materializable on this runner: %s",
@@ -547,7 +552,8 @@ def _ensure_branch_checkout(
         return legacy_path
 
     plan = _branch_plan(
-        base_path, branch, base_branch=base_branch, create_new_branch=create_new_branch
+        base_path, branch, base_branch=base_branch, create_new_branch=create_new_branch,
+        project_id=project_id, runner_id=runner_id,
     )
     if plan is None:
         # Branch not local, not on origin, and not an intentional new branch —

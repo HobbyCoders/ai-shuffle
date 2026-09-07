@@ -120,7 +120,8 @@ def fetch_repo_cached(git_service_obj, main_dir: str, *, force: bool = False) ->
 
 
 def resolve_rebound_branch_plan(
-    git_service_obj, main_dir: str, branch_name: str
+    git_service_obj, main_dir: str, branch_name: str, *,
+    project_id: Optional[str] = None, runner_id: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
     """Decide how to materialize ``branch_name`` on a sibling clone after a
     cross-device rebind.
@@ -175,7 +176,9 @@ def resolve_rebound_branch_plan(
     # Merge cleanup deletes the worktree and the local branch; GitHub often
     # deletes the remote too. Restore the branch from a recorded tip, the PR
     # head ref, or reflog so the session can rematerialize on the next send.
-    if _try_restore_deleted_branch(git_service_obj, main_dir, branch_name):
+    if _try_restore_deleted_branch(
+        git_service_obj, main_dir, branch_name, project_id=project_id, runner_id=runner_id,
+    ):
         return False, None
 
     raise WorktreeError(
@@ -200,25 +203,36 @@ def _sha_from_reflog(git_service_obj, main_dir: str, branch_name: str) -> Option
     try:
         result = git_service_obj._run_git(
             main_dir,
-            ["reflog", "--all", "--format=%H %gs", "-n", "200"],
+            ["reflog", "show", "--format=%H %gs", "-n", "201", "HEAD"],
             timeout=10,
         )
     except Exception:
         return None
     if result.returncode != 0 or not result.stdout:
         return None
-    needle = branch_name.lower()
-    for line in result.stdout.splitlines():
-        if needle not in line.lower():
+    entries = [line.split(" ", 1) for line in result.stdout.splitlines()]
+    for index, entry in enumerate(entries[:200]):
+        if len(entry) != 2:
             continue
-        sha = line.split(None, 1)[0].strip()
-        if sha:
-            return sha
+        sha, message = entry
+        # Only exact HEAD transitions identify a branch. A commit message or
+        # another branch containing its name is not evidence of ownership.
+        prefix = "checkout: moving from "
+        if not message.startswith(prefix):
+            continue
+        source, separator, destination = message[len(prefix):].partition(" to ")
+        if separator and destination == branch_name:
+            return sha.strip() or None
+        # %H records the destination commit. The preceding HEAD value (the
+        # next, older entry) is the tip of the branch we checked away from.
+        if separator and source == branch_name and index + 1 < len(entries):
+            return entries[index + 1][0].strip() or None
     return None
 
 
 def _try_restore_deleted_branch(
-    git_service_obj, main_dir: str, branch_name: str
+    git_service_obj, main_dir: str, branch_name: str, *,
+    project_id: Optional[str] = None, runner_id: Optional[str] = None,
 ) -> bool:
     """Recreate ``branch_name`` locally after cleanup deleted it.
 
@@ -226,9 +240,12 @@ def _try_restore_deleted_branch(
     branch now exists locally at a recovered tip.
     """
     try:
-        base_row = checkouts_db.get_checkout_by_path(main_dir)
-        project_id = (base_row or {}).get("project_id")
-        runner_id = (base_row or {}).get("runner_id") or settings.effective_instance_id
+        base_row = checkouts_db.get_checkout_by_path(
+            main_dir, project_id=project_id, runner_id=runner_id,
+        )
+        project_id = project_id or (base_row or {}).get("project_id")
+        if runner_id is None:
+            runner_id = (base_row or {}).get("runner_id") or settings.effective_instance_id
 
         pr_number = None
         try:
@@ -254,7 +271,7 @@ def _try_restore_deleted_branch(
 
         sha = None
         if project_id:
-            brow = checkouts_db.get_checkout_with_legacy_fallback(
+            brow = checkouts_db.get_checkout(
                 project_id, runner_id, branch=branch_name
             )
             if brow and brow.get("head_sha"):
