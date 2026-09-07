@@ -290,6 +290,9 @@ def _pump(events):
 def _pump_env(pump):
     """Everything the runtime touches around the pump, stubbed."""
     registry = MagicMock(name="task_registry")
+    registry.is_user_stopped.return_value = False
+    registry.stop_generation.return_value = 0
+    registry.stop_invalidated.return_value = False
     registry.get_active_background_work.return_value = []
     registry.get_background_launches.return_value = set()
     registry.has_unresolved_background_launches.return_value = False
