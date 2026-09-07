@@ -94,6 +94,7 @@ def _tool_result(tool_use_id, name, output, is_error=False):
         "output": output,
         "is_error": is_error,
         "ui": None,
+        "images": [],
     }
 
 
@@ -405,6 +406,28 @@ def test_event_fixture_matches_real_fluid_serialization():
         session_id="ses_code", turn_id="turn_1", tool_use_id="c1",
         name="Grep", output="app/main.py:12", is_error=False,
     )) == _tool_result("c1", "Grep", "app/main.py:12")
+
+
+def test_legacy_tool_result_without_images_still_replays():
+    pytest.importorskip("fluid")
+    from fluid.events.model import ToolResult, event_from_dict
+
+    legacy_result = _tool_result("c1", "Grep", "app/main.py:12")
+    legacy_result.pop("images")
+    restored = event_from_dict(legacy_result)
+    assert isinstance(restored, ToolResult)
+    assert restored.images == []
+
+    calls = fluid_transcript._inner_calls_by_block([
+        {"seq": 1, "event": _tool_use("rp1", "run_python", CELL_CODE)},
+        {"seq": 2, "event": _tool_use("c1", "Grep", {"pattern": "needle"})},
+        {"seq": 3, "event": legacy_result},
+        {"seq": 4, "event": _tool_result("rp1", "run_python", "done")},
+    ], {"rp1"})
+    assert calls == {"rp1": [{
+        "id": "c1", "name": "Grep", "input": {"pattern": "needle"},
+        "output": "app/main.py:12", "is_error": False,
+    }]}
 
 
 def test_fork_at_head_preserves_inner_calls(mock_db):
