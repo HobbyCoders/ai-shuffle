@@ -348,3 +348,129 @@ def test_direct_phone_deletion_revokes_derived_cookie(setup):
     assert get_paired_client_from_token(token) is None
 
 
+
+
+def _verdict_settings(monkeypatch, ttl, grace):
+    monkeypatch.setattr(account_hub.settings, 'mobile_account_hub_verify_ttl_seconds', ttl)
+    monkeypatch.setattr(account_hub.settings, 'mobile_account_hub_grace_seconds', grace)
+
+
+def test_verdict_reused_within_ttl(setup, monkeypatch):
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    hub = Mock(side_effect=active)
+    monkeypatch.setattr(account_hub, 'call', hub)
+    _verdict_settings(monkeypatch, ttl=60, grace=0)
+    for _ in range(5):
+        assert account_hub.require_active(owner)['server_id'] == SERVER
+    assert hub.call_count == 1
+    _verdict_settings(monkeypatch, ttl=0, grace=0)
+    account_hub.require_active(owner)
+    assert hub.call_count == 2
+
+
+def test_outage_keeps_recently_confirmed_device(setup, monkeypatch):
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    monkeypatch.setattr(account_hub, 'call', active)
+    _verdict_settings(monkeypatch, ttl=0, grace=600)
+    account_hub.require_active(owner)
+    outage = Mock(side_effect=HTTPException(503, 'Account hub is rate limiting this worker'))
+    monkeypatch.setattr(account_hub, 'call', outage)
+    assert account_hub.require_active(owner)['server_id'] == SERVER
+    assert outage.call_count == 1  # the hub is still asked; only the failure is forgiven
+    _verdict_settings(monkeypatch, ttl=0, grace=0)
+    with pytest.raises(HTTPException) as failure:
+        account_hub.require_active(owner)
+    assert failure.value.status_code == 503
+
+
+def test_outage_without_prior_verdict_still_fails(setup, monkeypatch):
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    _verdict_settings(monkeypatch, ttl=60, grace=600)
+    monkeypatch.setattr(account_hub, 'call', Mock(side_effect=HTTPException(503, 'unavailable')))
+    with pytest.raises(HTTPException) as failure:
+        account_hub.require_active(owner)
+    assert failure.value.status_code == 503
+
+
+def test_revocation_is_not_masked_by_cache_or_grace(setup, monkeypatch):
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    _verdict_settings(monkeypatch, ttl=0, grace=600)
+    monkeypatch.setattr(account_hub, 'call', active)
+    account_hub.require_active(owner)
+    monkeypatch.setattr(account_hub, 'call', lambda *a, **k: {'active': False, 'account_id': ACCOUNT, 'device_id': DEVICE})
+    with pytest.raises(HTTPException) as failure:
+        account_hub.require_active(owner)
+    assert failure.value.status_code == 401
+    # The revoked answer cleared the memory: an outage now fails instead of
+    # reviving the device from the earlier confirmation.
+    monkeypatch.setattr(account_hub, 'call', Mock(side_effect=HTTPException(503, 'unavailable')))
+    with pytest.raises(HTTPException) as failure:
+        account_hub.require_active(owner)
+    assert failure.value.status_code == 503
+
+
+def test_binding_deactivation_bypasses_cache(setup, monkeypatch):
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    _verdict_settings(monkeypatch, ttl=600, grace=600)
+    monkeypatch.setattr(account_hub, 'call', active)
+    account_hub.require_active(owner)
+    store.disconnect()
+    with pytest.raises(HTTPException) as failure:
+        account_hub.require_active(owner)
+    assert failure.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_websocket_handshake_survives_hub_outage(setup, monkeypatch):
+    from app.api.ws_auth import authenticate_websocket
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    token = pairing.generate_controller_session()
+    database.set_paired_client_session(owner['paired_client_id'], pairing.hash_controller_session(token), datetime.now(timezone.utc) + timedelta(days=1))
+    _verdict_settings(monkeypatch, ttl=0, grace=600)
+    monkeypatch.setattr(account_hub, 'call', active)
+    assert await authenticate_websocket(Mock(cookies={}), token) == (True, None)
+    monkeypatch.setattr(account_hub, 'call', Mock(side_effect=HTTPException(503, 'unavailable')))
+    assert await authenticate_websocket(Mock(cookies={}), token) == (True, None)
+
+
+def test_hub_rate_limit_reported_distinctly(setup, monkeypatch, caplog):
+    bind()
+
+    class Response:
+        status = 429
+
+        def read(self, n):
+            return b'{"error":"Too many requests"}'
+
+    class Connection:
+        def __init__(self, *a, **k):
+            pass
+
+        def request(self, *a, **k):
+            pass
+
+        def getresponse(self):
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(account_hub, '_PinnedHTTPS', Connection)
+    with pytest.raises(HTTPException) as failure:
+        account_hub.call(store.get_binding(), 'GET', 'devices/' + DEVICE)
+    assert failure.value.status_code == 503
+    assert 'rate limiting' in failure.value.detail
+    assert 'HTTP 429' in caplog.text
+    assert 'Too many requests' not in caplog.text

@@ -7,16 +7,64 @@ per connection with every address checked before connecting to a pinned IP.
 import http.client
 import ipaddress
 import json
+import logging
 import re
 import socket
 import ssl
+import threading
+import time
 from urllib.parse import urlsplit
 from fastapi import HTTPException
 from app.core.managed_credentials import secret_for
 from app.core.config import settings
 from app.db import mobile_hub as store
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_HUB = 'https://shuffle-account-hub.example.workers.dev'
+
+# Recent positive device verdicts: (server_id, hub_device_id, account_id) -> monotonic
+# time of the last hub confirmation. Every paired-client request (middleware,
+# route dependency, WebSocket handshake) used to make its own live hub call, and
+# the hub caps a source IP at 120 requests a minute, so one busy phone session
+# rate-limited this worker and every request failed 503. The cache bounds hub
+# traffic to one call per device per TTL and lets a hub outage ride on the last
+# confirmation for a grace window. Only positive verdicts are stored; a revoked
+# answer drops the entry immediately. Local checks (binding active, device row,
+# key expiry) still run on every request.
+_VERDICT_LOCK = threading.Lock()
+_verdicts: dict = {}
+_VERDICT_CAP = 2048
+
+
+def _verdict_key(owner):
+    return (owner['server_id'], owner['hub_device_id'], owner['account_id'])
+
+
+def _verdict_age(key):
+    with _VERDICT_LOCK:
+        confirmed_at = _verdicts.get(key)
+    return None if confirmed_at is None else time.monotonic() - confirmed_at
+
+
+def _record_verdict(key):
+    with _VERDICT_LOCK:
+        _verdicts[key] = time.monotonic()
+        if len(_verdicts) > _VERDICT_CAP:
+            oldest = sorted(_verdicts.items(), key=lambda item: item[1])
+            for stale, _ in oldest[:len(_verdicts) - _VERDICT_CAP]:
+                _verdicts.pop(stale, None)
+
+
+def _forget_verdict(key):
+    with _VERDICT_LOCK:
+        _verdicts.pop(key, None)
+
+
+def reset_verification_cache():
+    """Drop every remembered hub verdict (sign-out, tests)."""
+    with _VERDICT_LOCK:
+        _verdicts.clear()
 
 
 def configured_origin():
@@ -69,6 +117,7 @@ class _PinnedHTTPS(http.client.HTTPSConnection):
 def call(binding, method, suffix, body=None, *, credential=None):
     """Bounded, nonredirecting request; never include hub bodies or secrets in errors."""
     conn = None
+    detail = 'Account hub authorization unavailable'
     try:
         origin = trusted_origin(binding['hub_url'])
         server = identifier(binding['server_id'])
@@ -82,7 +131,9 @@ def call(binding, method, suffix, body=None, *, credential=None):
         if response.status != 200:
             if suffix.startswith('browser-logins') and response.status in (401, 403):
                 raise HTTPException(response.status, 'Account sign-in expired or authorization was rejected.')
-            raise ValueError('Hub refused authorization')
+            if response.status == 429:
+                detail = 'Account hub is rate limiting this worker'
+            raise ValueError(f'hub answered HTTP {response.status}')
         raw = response.read(16385)
         if len(raw) > 16384:
             raise ValueError('Oversize hub response')
@@ -92,8 +143,12 @@ def call(binding, method, suffix, body=None, *, credential=None):
         return result
     except HTTPException:
         raise
-    except Exception:
-        raise HTTPException(status_code=503, detail='Account hub authorization unavailable') from None
+    except Exception as exc:
+        # The reason is the exception class plus its own message (socket, TLS,
+        # JSON, or the status line above); hub bodies and credentials never
+        # appear in it.
+        logger.warning('Account hub %s %s failed: %s: %s', method, suffix, type(exc).__name__, exc)
+        raise HTTPException(status_code=503, detail=detail) from None
     finally:
         if conn:
             conn.close()
@@ -125,16 +180,38 @@ def worker_link_call(action, body):
 
 
 def require_active(owner):
-    """Live, uncached hub check. None means a legacy/direct-paired credential."""
+    """Hub check for a device, at most one live call per verify TTL.
+
+    None means a legacy/direct-paired credential. The local binding is checked
+    on every call. The hub is asked again once the remembered verdict is older
+    than ``mobile_account_hub_verify_ttl_seconds``; if the hub is unreachable
+    or rate limiting, a verdict younger than
+    ``mobile_account_hub_grace_seconds`` keeps the device authorized. A
+    revoked answer, or an outage with no verdict to lean on, fails as before.
+    """
     if owner is None:
         return
     binding = store.get_binding()
     if not binding or not binding['active'] or owner['server_id'] != binding['server_id']:
         raise HTTPException(status_code=401, detail='Account authorization revoked')
-    result = call(binding, 'GET', 'devices/' + identifier(owner['hub_device_id']))
+    suffix = 'devices/' + identifier(owner['hub_device_id'])
+    key = _verdict_key(owner)
+    age = _verdict_age(key)
+    if age is not None and age < settings.mobile_account_hub_verify_ttl_seconds:
+        return binding
+    try:
+        result = call(binding, 'GET', suffix)
+    except HTTPException as exc:
+        if exc.status_code >= 500 and age is not None and age < settings.mobile_account_hub_grace_seconds:
+            logger.warning('%s; keeping device %s authorized on a verdict %.0fs old',
+                           exc.detail, owner['hub_device_id'], age)
+            return binding
+        raise
     if (result.get('active') is not True or result.get('account_id') != owner['account_id']
             or result.get('device_id') != owner['hub_device_id']):
+        _forget_verdict(key)
         raise HTTPException(status_code=401, detail='Account authorization revoked')
+    _record_verdict(key)
     return binding
 
 

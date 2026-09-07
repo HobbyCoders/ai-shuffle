@@ -518,6 +518,27 @@ def isolate_fluid_projects_dir(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def live_hub_verdicts(monkeypatch):
+    """Ask the hub on every check unless a test opts into the verdict cache.
+
+    ``account_hub.require_active`` remembers positive hub verdicts for a TTL
+    and honors them through hub outages. Existing tests flip the mocked hub
+    answer mid-test and expect the next request to see it, so the cache and
+    grace are zeroed here and the memory is cleared between tests. Cache
+    tests set the two settings themselves.
+    """
+    try:
+        from app.core import account_hub
+        from app.core.config import settings
+        account_hub.reset_verification_cache()
+        monkeypatch.setattr(settings, "mobile_account_hub_verify_ttl_seconds", 0.0)
+        monkeypatch.setattr(settings, "mobile_account_hub_grace_seconds", 0.0)
+    except Exception:
+        pass
+    yield
+
+
+@pytest.fixture(autouse=True)
 def reset_shutdown_flag():
     """Clear ``startup.is_shutting_down`` before each test.
 

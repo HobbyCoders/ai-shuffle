@@ -2651,7 +2651,12 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
             try:
                 # Postgres VACUUM cannot run inside a transaction block
                 conn.autocommit = True
-                conn.cursor().execute("VACUUM ANALYZE")
+                cursor = conn.cursor()
+                # Parallel index vacuum allocates dynamic shared memory; on a
+                # container with a small /dev/shm it fails with "could not
+                # resize shared memory segment". A serial vacuum needs none.
+                cursor.execute("SET max_parallel_maintenance_workers = 0")
+                cursor.execute("VACUUM ANALYZE")
                 results["vacuum"] = "ok"
             finally:
                 # Always reset autocommit before returning to pool,
