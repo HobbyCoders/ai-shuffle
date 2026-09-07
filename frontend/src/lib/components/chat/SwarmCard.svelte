@@ -1,6 +1,7 @@
 <script lang="ts">
  import { swarms } from '$lib/stores/swarms';
  import { isSwarmActive, parseSwarm, resolveSwarm, swarmStages } from '$lib/utils/swarm';
+ import { openSessionLink } from '$lib/services/session-navigation';
  let { sessionId, input, result, status }: {
   sessionId?: string | null; input?: Record<string, unknown>; result?: string;
   status: 'running' | 'complete' | 'error';
@@ -69,7 +70,7 @@
           {#if task.result}<div class="result"><span class="detail-label">Result</span><pre>{task.result}</pre></div>
           {:else if task.status === 'completed'}<p>Completed without a text result.</p>{/if}
           {#if task.worker_session_id}
-           <a class="text-button" href={`/?session=${encodeURIComponent(task.worker_session_id)}`} data-sveltekit-reload>Open {task.agent} session <span aria-hidden="true">↗</span></a>
+           <a class="text-button" href={`/?session=${encodeURIComponent(task.worker_session_id)}`} onclick={(event) => openSessionLink(event, task.worker_session_id!)} data-sveltekit-reload>Open {task.agent} session <span aria-hidden="true">↗</span></a>
           {/if}
          </div>
         </details>
