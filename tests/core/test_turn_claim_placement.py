@@ -153,6 +153,9 @@ def _blocking_pump(pump_entered: asyncio.Event, release: asyncio.Event):
 @contextmanager
 def _runtime_env(*, pump):
     registry = MagicMock(name="task_registry")
+    registry.is_user_stopped.return_value = False
+    registry.stop_generation.return_value = 0
+    registry.stop_invalidated.return_value = False
     registry.get_active_background_work.return_value = []
     registry.get_background_launches.return_value = set()
     # Park gate (amended 2026-08-08) reads has_unresolved_background_launches, and
