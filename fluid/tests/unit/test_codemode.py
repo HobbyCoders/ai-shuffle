@@ -446,9 +446,11 @@ async def test_image_results_ride_out_on_the_cell_outcome() -> None:
         assert outcome.images == (ToolImage(media_type="image/png", data="AAAA"),)
         # the kernel still only ever saw the caption
         assert "[image: x.png]" in outcome.text
-        # and the inner ToolResult event stays text-only (no base64 on the bus)
+        # Output remains a caption; image payloads are separate for live clients
+        # and durable event replay, without flooding the textual tool result.
         inner = next(e for e in loop.events if isinstance(e, ToolResult) and e.name == "shot")
         assert inner.output == "[image: x.png]"
+        assert inner.images == [{"media_type": "image/png", "data": "AAAA"}]
     finally:
         await session.aclose()
 

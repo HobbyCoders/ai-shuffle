@@ -189,6 +189,7 @@ class ToolResult(Event):
     output: Any
     is_error: bool = False
     ui: Any = None  # dual output: structured payload for clients, never sent to the model
+    images: list[dict[str, str]] = field(default_factory=list)  # live clients and durable replay
 
 
 @dataclass(frozen=True, kw_only=True)

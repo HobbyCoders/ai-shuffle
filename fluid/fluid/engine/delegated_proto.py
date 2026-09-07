@@ -86,6 +86,7 @@ from fluid.events.model import (
     Usage,
 )
 from fluid.messages import (
+    Image,
     Message,
     Reasoning,
     Text,
@@ -130,7 +131,7 @@ def flatten_tool_content(content: Any) -> str:
             if isinstance(c, dict):
                 if c.get("type") == "text":
                     parts.append(c.get("text", ""))
-                else:
+                elif c.get("type") != "image":
                     parts.append(json.dumps(c, default=str))
             else:
                 parts.append(str(c))
@@ -471,9 +472,19 @@ class StreamJsonMapper:
             name = self._tool_names.get(tid, "unknown")
             raw_content = block.get("content")
             text = flatten_tool_content(raw_content)
+            result_blocks: list[Any] = [Text(text)] if text else []
+            for item in raw_content if isinstance(raw_content, list) else []:
+                if not isinstance(item, dict) or item.get('type') != 'image':
+                    continue
+                source = item.get('source') or item
+                if isinstance(source, dict) and source.get('data'):
+                    result_blocks.append(Image(
+                        media_type=source.get('media_type') or source.get('mimeType') or 'image/png',
+                        data=source['data'],
+                    ))
             is_error = bool(block.get("is_error"))
             content.append(ToolResultBlock(
-                tool_use_id=tid, content=[Text(text)], is_error=is_error,
+                tool_use_id=tid, content=result_blocks, is_error=is_error,
             ))
             events.append(ToolResult(
                 session_id=self.session_id, turn_id=self.turn_id,

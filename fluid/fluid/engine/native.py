@@ -4213,6 +4213,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         await self._emit(ToolResult(
             session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id, name=name,
             output=outcome.text, is_error=outcome.is_error, ui=outcome.ui,
+            images=[{"media_type": image.media_type, "data": image.data} for image in outcome.images],
         ))
         if delivered:
             # Receipt, ordered after the result that carries the markers: the

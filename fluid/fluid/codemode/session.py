@@ -544,6 +544,7 @@ class CodeModeSession:
             await loop._emit(ToolResult(
                 session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
                 name=name, output=out, is_error=is_error,
+                images=[{"media_type": image.media_type, "data": image.data} for image in reply.images],
             ))
             return reply
 
