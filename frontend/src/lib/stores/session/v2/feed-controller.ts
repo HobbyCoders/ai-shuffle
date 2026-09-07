@@ -30,6 +30,7 @@ import type { SdkContextUsage } from '$lib/api/sessions';
 import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
 import { pendingQueue } from '../pending-queue';
+import { swarms } from '../../swarms';
 
 /** MCP browser-tool prefix — a live `tool.use` for one auto-opens the panel. */
 const BROWSER_TOOL_PREFIX = 'mcp__browser__';
@@ -714,6 +715,7 @@ export const feedController: FeedController = {
 			fromSeq: resumeFromSeq,
 			onOpen: () => {
 				if (generation !== feedGeneration) return;
+				swarms.refreshKnown(sessionId);
 				// Initial hydration remains atomic until the backend's `caught_up`
 				// sentinel, floored by the idle fallback. Reconnects after that
 				// point resume at lastSeq and keep live cadence; they never reset
@@ -790,6 +792,7 @@ export const feedController: FeedController = {
 				// remaining history frame repaints individually — the transcript
 				// visibly rebuilding message by message.
 				if (caughtUp && sentinelPending) caughtUp = false;
+				if (ev.type === 'swarm.updated') swarms.receive(ev.swarm, sessionId);
 				reducerState = reduce(reducerState, ev);
 				eventsReduced++;
 				// A frame just arrived while still batching: the stream is alive,

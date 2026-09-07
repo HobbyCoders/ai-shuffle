@@ -22,7 +22,8 @@
 	import { goto } from '$app/navigation';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { appMode, normalizeSessionMode } from '$lib/stores/sessionMode.svelte';
+	import { appMode } from '$lib/stores/sessionMode.svelte';
+	import { openSession as handleOpenSession } from '$lib/services/session-navigation';
 	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data.svelte';
 
 	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
@@ -97,49 +98,6 @@
 			requestAnimationFrame(() => layout.openChat(null));
 		} else {
 			layout.openChat(null);
-		}
-	}
-
-	/**
-	 * Open an existing session by ID
-	 */
-	function handleOpenSession(sessionId: string) {
-		// Look up the session's project and worktree state so switchSession can
-		// set them immediately, avoiding state bleed from the leaving session.
-		const session = $sessions.find(s => s.id === sessionId);
-		const sessionProjectId = session?.project_id;
-		const sessionProjectV2Id = session?.project_v2_id ?? null;
-
-		// Build worktree info from the session list data so the switcher can
-		// use server-authoritative values instead of stale in-memory state.
-		// A v2 branch session carries only `branch` (no legacy worktree_id/
-		// worktree_branch); fall back to it so branch mode restores on switch.
-		const worktreeInfo = session?.worktree_id || session?.worktree_branch || session?.branch ? {
-			worktreeId: session.worktree_id ?? null,
-			worktreeBranch: session.worktree_branch ?? session.branch ?? '',
-			worktreeDeleted: session.worktree_deleted ?? false,
-			worktreeIntent: 'worktree' as const,
-		} : null;
-
-		const sessionTitle = session?.title || null;
-
-		// Follow the session into its lane. A deep link (/?session=<id>), a
-		// notification tap or a spotlight hit can name a session from a lane the
-		// sidepanel is not showing; without this the session opens in the main
-		// panel while the list beside it does not contain it. Unknown/absent
-		// `mode` normalizes to 'code', which is what every pre-modes row is.
-		appMode.set(normalizeSessionMode(session?.mode), false);
-
-		const openChat = () => {
-			activeSession.switchSession(sessionId, sessionProjectId, worktreeInfo, sessionTitle, sessionProjectV2Id);
-			layout.openChat(sessionId);
-		};
-
-		if ($sidebarOverlay && !$sidebarCollapsed) {
-			layout.setSidebarCollapsed(true);
-			requestAnimationFrame(openChat);
-		} else {
-			openChat();
 		}
 	}
 

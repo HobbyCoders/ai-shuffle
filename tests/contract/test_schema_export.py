@@ -122,6 +122,41 @@ def test_round_trip_discriminated_dispatch():
         assert round_tripped.model_dump() == model.model_dump()
 
 
+@pytest.mark.asyncio
+async def test_swarm_coordinator_snapshot_round_trips_in_event_contract():
+    from fluid.swarm import SwarmCoordinator
+    from fluid.tools.registry import ToolCtx
+
+    emitted = []
+
+    async def publish(snapshot):
+        emitted.append(snapshot)
+
+    async def dispatch(data, ctx):
+        return "Verified task output"
+
+    async def cancel_worker(task_id):
+        pass
+
+    async def finished(*args):
+        pass
+
+    coordinator = SwarmCoordinator("s1", dispatch, cancel_worker, publish, finished)
+    snapshot, _ = await coordinator.start({"title": "Contract workflow", "tasks": [
+        {"id": "check", "agent": "reviewer", "prompt": "Check the output"},
+    ]}, ToolCtx(cwd=".", session_id="s1"))
+    await coordinator.jobs[snapshot["id"]]
+    adapter = TypeAdapter(SessionEvent)
+    for seq, swarm in enumerate(emitted, 1):
+        event = adapter.validate_python({
+            "type": "swarm.updated", "id": f"e{seq}", "session_id": "s1",
+            "seq": seq, "created_at": swarm["updated_at"], "swarm": swarm,
+        })
+        assert adapter.validate_json(event.model_dump_json()) == event
+    assert emitted[-1]["tasks"][0]["result"] == "Verified task output"
+    assert emitted[-1]["status"] == "completed"
+
+
 def test_unknown_type_raises():
     with pytest.raises(ValidationError):
         TypeAdapter(SessionEvent).validate_python(

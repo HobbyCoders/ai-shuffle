@@ -22,6 +22,7 @@ export type SessionEvent =
   | TeamMemberProgress
   | TeamMemberCompleted
   | TaskUpdated
+  | SwarmUpdated
   | SystemNote
   | SystemCompactionBoundary
   | InteractionRequested
@@ -283,71 +284,97 @@ export type Id21 = string;
 export type RunId21 = string | null;
 export type Seq21 = number;
 export type SessionId21 = string;
-export type Subtype2 = string;
-export type Timestamp4 = string | null;
-export type TurnId21 = string | null;
-export type Type21 = 'system.note';
-export type CommandId22 = string | null;
 export type CreatedAt22 = string;
 export type Id22 = string;
+export type SessionId22 = string;
+export type Status2 = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+export type Agent = string;
+export type DependsOn = string[];
+export type Error = string | null;
+export type FinishedAt = string | null;
+export type Id23 = string;
+export type Result = string | null;
+export type StartedAt = string | null;
+export type Status3 = 'queued' | 'running' | 'completed' | 'failed' | 'blocked' | 'cancelled' | 'interrupted';
+export type TaskId4 = string | null;
+export type Title = string;
+export type WorkerSessionId = string | null;
+export type Tasks = SwarmTask[];
+export type Title1 = string;
+export type UpdatedAt = string;
+export type TurnId21 = string | null;
+export type Type21 = 'swarm.updated';
+export type CommandId22 = string | null;
+export type CreatedAt23 = string;
+export type Id24 = string;
 export type RunId22 = string | null;
 export type Seq22 = number;
-export type SessionId22 = string;
+export type SessionId23 = string;
+export type Subtype2 = string;
+export type Timestamp4 = string | null;
 export type TurnId22 = string | null;
-export type Type22 = 'system.compaction_boundary';
+export type Type22 = 'system.note';
 export type CommandId23 = string | null;
-export type CreatedAt23 = string;
-export type Id23 = string;
+export type CreatedAt24 = string;
+export type Id25 = string;
+export type RunId23 = string | null;
+export type Seq23 = number;
+export type SessionId24 = string;
+export type TurnId23 = string | null;
+export type Type23 = 'system.compaction_boundary';
+export type CommandId24 = string | null;
+export type CreatedAt25 = string;
+export type Id26 = string;
 export type InteractionId = string;
 export type Kind5 = 'permission' | 'question';
 export type RequestId = string | null;
-export type RunId23 = string | null;
-export type Seq23 = number;
-export type SessionId23 = string;
-export type TurnId23 = string | null;
-export type Type23 = 'interaction.requested';
-export type CommandId24 = string | null;
-export type CreatedAt24 = string;
-export type Id24 = string;
-export type InteractionId1 = string;
-export type RequestId1 = string | null;
 export type RunId24 = string | null;
 export type Seq24 = number;
-export type SessionId24 = string;
+export type SessionId25 = string;
 export type TurnId24 = string | null;
-export type Type24 = 'interaction.answered';
+export type Type24 = 'interaction.requested';
 export type CommandId25 = string | null;
-export type CreatedAt25 = string;
-export type Id25 = string;
+export type CreatedAt26 = string;
+export type Id27 = string;
+export type InteractionId1 = string;
+export type RequestId1 = string | null;
+export type RunId25 = string | null;
+export type Seq25 = number;
+export type SessionId26 = string;
+export type TurnId25 = string | null;
+export type Type25 = 'interaction.answered';
+export type CommandId26 = string | null;
+export type CreatedAt27 = string;
+export type Id28 = string;
 export type InteractionId2 = string;
 export type Reason1 = string | null;
 export type RequestId2 = string | null;
-export type RunId25 = string | null;
-export type Seq25 = number;
-export type SessionId25 = string;
-export type TurnId25 = string | null;
-export type Type25 = 'interaction.expired';
-export type CommandId26 = string | null;
-export type CreatedAt26 = string;
-export type FromSeq = number;
-export type Id26 = string;
 export type RunId26 = string | null;
 export type Seq26 = number;
-export type SessionId26 = string;
+export type SessionId27 = string;
 export type TurnId26 = string | null;
-export type Type26 = 'transcript.rewound';
+export type Type26 = 'interaction.expired';
 export type CommandId27 = string | null;
-export type CreatedAt27 = string;
-export type Filename = string | null;
-export type Hash = string;
-export type Id27 = string;
-export type Mime = string | null;
+export type CreatedAt28 = string;
+export type FromSeq = number;
+export type Id29 = string;
 export type RunId27 = string | null;
 export type Seq27 = number;
-export type SessionId27 = string;
-export type Size = number;
+export type SessionId28 = string;
 export type TurnId27 = string | null;
-export type Type27 = 'artifact.created';
+export type Type27 = 'transcript.rewound';
+export type CommandId28 = string | null;
+export type CreatedAt29 = string;
+export type Filename = string | null;
+export type Hash = string;
+export type Id30 = string;
+export type Mime = string | null;
+export type RunId28 = string | null;
+export type Seq28 = number;
+export type SessionId29 = string;
+export type Size = number;
+export type TurnId28 = string | null;
+export type Type28 = 'artifact.created';
 
 export interface TurnQueued {
   command_id?: CommandId;
@@ -674,47 +701,83 @@ export interface TaskUpdated {
   type?: Type20;
   [k: string]: unknown;
 }
-export interface SystemNote {
+export interface SwarmUpdated {
   command_id?: CommandId21;
   created_at: CreatedAt21;
-  data?: Data;
   id: Id21;
   run_id?: RunId21;
   seq: Seq21;
   session_id: SessionId21;
-  subtype: Subtype2;
-  timestamp?: Timestamp4;
+  swarm: SwarmSnapshot;
   turn_id?: TurnId21;
   type?: Type21;
+  [k: string]: unknown;
+}
+export interface SwarmSnapshot {
+  created_at: CreatedAt22;
+  id: Id22;
+  session_id: SessionId22;
+  status: Status2;
+  tasks: Tasks;
+  title: Title1;
+  updated_at: UpdatedAt;
+  [k: string]: unknown;
+}
+export interface SwarmTask {
+  agent: Agent;
+  depends_on?: DependsOn;
+  error?: Error;
+  finished_at?: FinishedAt;
+  id: Id23;
+  result?: Result;
+  started_at?: StartedAt;
+  status: Status3;
+  task_id?: TaskId4;
+  title: Title;
+  worker_session_id?: WorkerSessionId;
+  [k: string]: unknown;
+}
+export interface SystemNote {
+  command_id?: CommandId22;
+  created_at: CreatedAt23;
+  data?: Data;
+  id: Id24;
+  run_id?: RunId22;
+  seq: Seq22;
+  session_id: SessionId23;
+  subtype: Subtype2;
+  timestamp?: Timestamp4;
+  turn_id?: TurnId22;
+  type?: Type22;
   [k: string]: unknown;
 }
 export interface Data {
   [k: string]: unknown;
 }
 export interface SystemCompactionBoundary {
-  command_id?: CommandId22;
-  created_at: CreatedAt22;
-  id: Id22;
-  run_id?: RunId22;
-  seq: Seq22;
-  session_id: SessionId22;
-  turn_id?: TurnId22;
-  type?: Type22;
+  command_id?: CommandId23;
+  created_at: CreatedAt24;
+  id: Id25;
+  run_id?: RunId23;
+  seq: Seq23;
+  session_id: SessionId24;
+  turn_id?: TurnId23;
+  type?: Type23;
   [k: string]: unknown;
 }
 export interface InteractionRequested {
-  command_id?: CommandId23;
-  created_at: CreatedAt23;
-  id: Id23;
+  command_id?: CommandId24;
+  created_at: CreatedAt25;
+  id: Id26;
   interaction_id: InteractionId;
   kind: Kind5;
   request?: Request;
   request_id?: RequestId;
-  run_id?: RunId23;
-  seq: Seq23;
-  session_id: SessionId23;
-  turn_id?: TurnId23;
-  type?: Type23;
+  run_id?: RunId24;
+  seq: Seq24;
+  session_id: SessionId25;
+  turn_id?: TurnId24;
+  type?: Type24;
   [k: string]: unknown;
 }
 export interface Request {
@@ -722,59 +785,59 @@ export interface Request {
 }
 export interface InteractionAnswered {
   answer?: Answer;
-  command_id?: CommandId24;
-  created_at: CreatedAt24;
-  id: Id24;
+  command_id?: CommandId25;
+  created_at: CreatedAt26;
+  id: Id27;
   interaction_id: InteractionId1;
   request_id?: RequestId1;
-  run_id?: RunId24;
-  seq: Seq24;
-  session_id: SessionId24;
-  turn_id?: TurnId24;
-  type?: Type24;
+  run_id?: RunId25;
+  seq: Seq25;
+  session_id: SessionId26;
+  turn_id?: TurnId25;
+  type?: Type25;
   [k: string]: unknown;
 }
 export interface Answer {
   [k: string]: unknown;
 }
 export interface InteractionExpired {
-  command_id?: CommandId25;
-  created_at: CreatedAt25;
-  id: Id25;
+  command_id?: CommandId26;
+  created_at: CreatedAt27;
+  id: Id28;
   interaction_id: InteractionId2;
   reason?: Reason1;
   request_id?: RequestId2;
-  run_id?: RunId25;
-  seq: Seq25;
-  session_id: SessionId25;
-  turn_id?: TurnId25;
-  type?: Type25;
-  [k: string]: unknown;
-}
-export interface TranscriptRewound {
-  command_id?: CommandId26;
-  created_at: CreatedAt26;
-  from_seq: FromSeq;
-  id: Id26;
   run_id?: RunId26;
   seq: Seq26;
-  session_id: SessionId26;
+  session_id: SessionId27;
   turn_id?: TurnId26;
   type?: Type26;
   [k: string]: unknown;
 }
-export interface ArtifactCreated {
+export interface TranscriptRewound {
   command_id?: CommandId27;
-  created_at: CreatedAt27;
-  filename?: Filename;
-  hash: Hash;
-  id: Id27;
-  mime?: Mime;
+  created_at: CreatedAt28;
+  from_seq: FromSeq;
+  id: Id29;
   run_id?: RunId27;
   seq: Seq27;
-  session_id: SessionId27;
-  size: Size;
+  session_id: SessionId28;
   turn_id?: TurnId27;
   type?: Type27;
+  [k: string]: unknown;
+}
+export interface ArtifactCreated {
+  command_id?: CommandId28;
+  created_at: CreatedAt29;
+  filename?: Filename;
+  hash: Hash;
+  id: Id30;
+  mime?: Mime;
+  run_id?: RunId28;
+  seq: Seq28;
+  session_id: SessionId29;
+  size: Size;
+  turn_id?: TurnId28;
+  type?: Type28;
   [k: string]: unknown;
 }

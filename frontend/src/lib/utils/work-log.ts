@@ -15,6 +15,7 @@
  */
 import type { ChatMessage } from '$lib/stores/types';
 import { displayToolName } from './tool-icons';
+import { isSwarmTool } from './swarm';
 
 export interface WorkLogEntry {
 	message: ChatMessage;
@@ -144,6 +145,7 @@ export function isGroupableSystem(msg: ChatMessage): boolean {
 /** Dedicated/decision-bearing tools retain their own presentation. */
 function isSpecialTool(msg: ChatMessage): boolean {
 	return (
+		isSwarmTool(msg.toolName ?? '') ||
 		msg.toolName === 'TodoWrite' ||
 		msg.toolName === 'Task' ||
 		msg.toolName === 'Agent' ||

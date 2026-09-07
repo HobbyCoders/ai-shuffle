@@ -1247,6 +1247,255 @@
       "title": "SubagentStarted",
       "type": "object"
     },
+    "SwarmSnapshot": {
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "tasks": {
+          "items": {
+            "$ref": "#/$defs/SwarmTask"
+          },
+          "title": "Tasks",
+          "type": "array"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "session_id",
+        "title",
+        "status",
+        "created_at",
+        "updated_at",
+        "tasks"
+      ],
+      "title": "SwarmSnapshot",
+      "type": "object"
+    },
+    "SwarmTask": {
+      "properties": {
+        "agent": {
+          "title": "Agent",
+          "type": "string"
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finished At"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "completed",
+            "failed",
+            "blocked",
+            "cancelled",
+            "interrupted"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task Id"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "worker_session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Session Id"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "agent",
+        "status"
+      ],
+      "title": "SwarmTask",
+      "type": "object"
+    },
+    "SwarmUpdated": {
+      "properties": {
+        "command_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Id"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "swarm": {
+          "$ref": "#/$defs/SwarmSnapshot"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "swarm.updated",
+          "default": "swarm.updated",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "session_id",
+        "seq",
+        "created_at",
+        "swarm"
+      ],
+      "title": "SwarmUpdated",
+      "type": "object"
+    },
     "SystemCompactionBoundary": {
       "properties": {
         "command_id": {
@@ -2904,6 +3153,7 @@
       "subagent.completed": "#/$defs/SubagentCompleted",
       "subagent.progress": "#/$defs/SubagentProgress",
       "subagent.started": "#/$defs/SubagentStarted",
+      "swarm.updated": "#/$defs/SwarmUpdated",
       "system.compaction_boundary": "#/$defs/SystemCompactionBoundary",
       "system.note": "#/$defs/SystemNote",
       "task.updated": "#/$defs/TaskUpdated",
@@ -2987,6 +3237,9 @@
     },
     {
       "$ref": "#/$defs/TaskUpdated"
+    },
+    {
+      "$ref": "#/$defs/SwarmUpdated"
     },
     {
       "$ref": "#/$defs/SystemNote"

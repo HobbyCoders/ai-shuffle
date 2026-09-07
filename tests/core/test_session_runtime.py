@@ -180,6 +180,81 @@ async def test_recording_failure_aborts_and_cleans_up(mock_db, phase, background
 
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("repair", [False, True])
+@pytest.mark.parametrize("snapshot_status", ["running", "completed"])
+async def test_pooled_swarm_resume_repairs_after_claim_before_pump(mock_db, monkeypatch, repair, snapshot_status):
+    """Real lease + pooled NativeLoop receipts + boot-produced terminal proof.
+
+    Disabling only the new boundary reproduces the old pre-pump phantom,
+    despite the unrelated end-of-turn pending reconciliation still existing.
+    """
+    from types import SimpleNamespace
+    from fluid.engine.native import NativeLoop
+    from fluid.store.base import MemoryStore
+    from fluid.tools.registry import BackgroundTaskReceipt
+    from app.core import swarm, session_pool
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from app.db.background_tasks import upsert_background_task, mark_stale_background_tasks_killed
+    from app.db.session_events import append_events
+
+    sid, key = "pooled-swarm", "swarm_dead"
+    snapshot = dict(id=key, session_id=sid, status=snapshot_status, tasks=[
+        dict(id="done", status="completed", result="keep me"),
+        dict(id="lost", status="running" if snapshot_status == "running" else "completed"),
+    ])
+    append_events(sid, [{"type": "swarm.updated", "payload": {"swarm": snapshot}}])
+    upsert_background_task(dict(task_id=key, session_id=sid, kind="agent", status="running"))
+    assert any(row["task_id"] == key for row in mark_stale_background_tasks_killed())
+    store = MemoryStore()
+    previous = NativeLoop(provider=MagicMock(), store=store, model="fake")
+    await previous._background_task_started(BackgroundTaskReceipt(task_id=key))
+    meta = await previous._ensure_session()
+    await previous.aclose()
+    engine = NativeLoop(provider=MagicMock(), store=store, model="fake", session_id=meta.session_id)
+    engine.ctx.extra["recover_background"] = swarm.make_recovery(lambda: sid)
+    adapter = HarnessAdapter()
+    adapter._engine = engine
+    adapter._connected = True
+    pool = SimpleNamespace(peek=lambda session_id: SimpleNamespace(adapter=adapter) if session_id == sid else None)
+    monkeypatch.setattr(session_pool, "get_session_pool", lambda: pool)
+    original = swarm.reconcile_owned_pending
+    seen = []
+
+    async def boundary(session_id, run_id, fence_token):
+        active = runs_db.get_active_run(sid)
+        assert active["id"] == run_id and active["fence_token"] == fence_token
+        assert active["runner_id"] == session_runtime.settings.effective_instance_id
+        # The engine callback cannot authorize itself under this new lease.
+        assert await swarm.make_recovery(lambda: sid)((key,)) == []
+        seen.append("claimed")
+        if repair:
+            assert await original(session_id, run_id, fence_token) == [key]
+
+    monkeypatch.setattr(swarm, "reconcile_owned_pending", boundary)
+
+    async def pump(**kwargs):
+        assert seen == ["claimed"]
+        async with engine._background_lock:
+            await engine._rehydrate_background_lifecycle_unlocked()
+        assert (key not in engine._background_pending) is repair
+        rows = await swarm.snapshots(sid)
+        expected = "interrupted" if repair and snapshot_status == "running" else snapshot_status
+        assert rows[0]["status"] == expected
+        assert rows[0]["tasks"][0] == snapshot["tasks"][0]
+        assert rows[0]["tasks"][1]["status"] == expected
+        seen.append("pumped")
+        yield {"type": "done", "metadata": {}}
+
+    turn = turns_db.enqueue_turn(sid, "resume", prompt="resume")
+    try:
+        with _runtime_env(pump=pump) as env:
+            env["registry"].get_task.return_value = None
+            assert await session_runtime.SessionRuntime(turn).execute() == "completed"
+        assert seen == ["claimed", "pumped"]
+    finally:
+        await engine.aclose()
+
+
 async def test_execute_requires_run_claim(mock_db):
     """No run claim (another runner owns the session) → the turn stays queued and
     execute returns None without ever starting it."""

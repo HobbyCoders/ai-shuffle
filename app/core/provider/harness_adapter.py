@@ -67,8 +67,8 @@ HONORED:
 
   * ``effort``               → delegated: CLI ``--effort``; native: fluid
     serializers map it per provider (Anthropic ``output_config.effort``
-    verbatim, OpenAI-shaped ``reasoning.effort`` with xhigh/max clamped to
-    high). Validated app-side (``_valid_effort``); changes force reconnect.
+    verbatim, OpenAI-shaped ``reasoning.effort`` verbatim). Model/route
+    capabilities are validated app-side; changes force reconnect.
 
   * ``disallowed_tools``     → native ``NativeLoop(disallowed_tools=...)``, which
     filters the tool at the provider schema, the deferred/ToolSearch catalog and
@@ -531,9 +531,17 @@ class HarnessAdapter(ProviderAdapter):
             # for every fresh native session. The supplier resolves the id at
             # dispatch time instead — see _resolve_app_session_id.
             native_ctx = ToolCtx(cwd=options.cwd or ".", session_id=fluid_session_id)
+            # This ctx also accompanies delayed Swarm dependency launches. Keep
+            # their originating engine effort, even after a later parent turn.
+            native_ctx.extra["app_caller_effort"] = options.effort
             try:
                 from app.core.task_dispatch import make_fluid_dispatcher
 
+                from app.core.swarm import make_handler, make_message, make_roster, make_recovery
+                native_ctx.extra["swarm"] = make_handler(self._resolve_app_session_id)
+                native_ctx.extra["recover_background"] = make_recovery(self._resolve_app_session_id)
+                native_ctx.extra["agent_roster"] = make_roster(self._resolve_app_session_id)
+                native_ctx.extra["agent_message"] = make_message(self._resolve_app_session_id)
                 native_ctx.extra["task_dispatch"] = make_fluid_dispatcher(
                     self._resolve_app_session_id,
                     profile_id=(options.extra or {}).get("profile_id"),
@@ -1099,7 +1107,11 @@ class HarnessAdapter(ProviderAdapter):
         if engine is None:
             return
         try:
-            await asyncio.wait_for(engine.aclose(), timeout=grace_period)
+            from app.core.swarm import close
+            try:
+                await close(self._resolve_app_session_id())
+            finally:
+                await asyncio.wait_for(engine.aclose(), timeout=grace_period)
         except asyncio.TimeoutError:
             logger.warning("[HarnessAdapter] engine.aclose() timed out after %.1fs", grace_period)
         except Exception as exc:  # never let teardown raise

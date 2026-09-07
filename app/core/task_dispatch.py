@@ -157,6 +157,7 @@ _REPORT_DIR_PARTS = (".fluid", "task-reports")
 # effective turn provider must be able to pass it distinctly from callers that
 # omitted provider context and need the session-row compatibility fallback.
 _PROVIDER_UNSET = object()
+_EFFORT_UNSET = object()
 
 # ── session-pool admission, checked BEFORE any receipt is returned ───────────
 # A worker is a new pooled session, so it is subject to
@@ -519,6 +520,7 @@ async def _reserve_admission(
     *,
     lane: str = DELEGATED_LANE,
     parent_session_id: Optional[str] = None,
+    context_session_id: Optional[str] = None,
     provider_id: Optional[str] = None,
     wait_seconds: Optional[float] = None,
 ) -> Tuple[Optional[str], float]:
@@ -567,11 +569,44 @@ async def _reserve_admission(
     provider_budget = max(budget, _provider_queue_seconds()) if provider_limit else budget
     lock = _admission_lock()
     waited = False
+    from fluid.swarm import current_launch
+
+    launch = current_launch.get()
+
+    def cancelled() -> bool:
+        return bool(
+            launch is not None
+            # The actual caller can be a nested worker. Supervisor/root budget
+            # identity is shared by its siblings and grants no cancellation
+            # authority over their separate Swarms.
+            and launch.coordinator.session_id == (context_session_id or parent_session_id)
+            and (
+                launch.coordinator.closed
+                or launch.swarm_id in launch.coordinator.cancelled
+            )
+        )
+
     while True:
         async with lock:
+            # Swarm Stop latches cancellation without discarding an atomic
+            # spawn acknowledgement. A worker still waiting for admission has
+            # not spawned: settle it promptly without reserving a slot. Read
+            # only the trusted host launch context, never model arguments.
+            if cancelled():
+                return (
+                    "Swarm cancelled before admission; the worker was NOT started.",
+                    time.monotonic() - started,
+                )
             # Off the loop, like every other admission_check caller: the
             # ceiling checks can walk the process tree with psutil.
             snapshot = await asyncio.to_thread(pool_module.admission_snapshot, lane)
+            # Stop may arrive during the asynchronous resource measurement.
+            # There is no await between this guard and the reservation below.
+            if cancelled():
+                return (
+                    "Swarm cancelled before admission; the worker was NOT started.",
+                    time.monotonic() - started,
+                )
             # Only DELEGATED reservations hold a subprocess slot.
             pending = _pending_admission_count(lane=DELEGATED_LANE)
             at_cap = (
@@ -896,6 +931,8 @@ async def _dispatch_worker_with_retries(
             ) is not None
 
         try:
+            from app.core.swarm import bind_worker
+            await bind_worker(worker_id, attempt_kwargs.get("context_session_id"))
             outcome = await dispatcher(
                 background=background,
                 suppress_caller_wake=_will_retry if background else None,
@@ -960,6 +997,7 @@ async def _dispatch_worker_with_retries(
             retry_worker_id,
             lane=lane,
             parent_session_id=parent_session_id,
+            context_session_id=kwargs.get("context_session_id"),
             provider_id=provider_id,
         )
         if stopped():
@@ -1362,6 +1400,7 @@ async def dispatch_task_tool(
     caller_session_id: str,
     caller_profile_id: Optional[str] = None,
     caller_provider_id: Any = _PROVIDER_UNSET,
+    caller_effort: Any = _EFFORT_UNSET,
     launch_tool_use_id: Optional[str] = None,
     agent_registry: Optional[Dict[str, Any]] = None,
     roster: Optional[Sequence[Any]] = None,
@@ -1409,6 +1448,12 @@ async def dispatch_task_tool(
         }
 
     caller_row = _session_row(caller_session_id) or {}
+    # Resolve before the first admission await. Queuing/retries must not inherit
+    # a later parent turn's settings. Native callers supply their engine binding.
+    selected_effort = (
+        provider_agent._caller_effort(caller_row)
+        if caller_effort is _EFFORT_UNSET else caller_effort
+    )
     caller_pid = caller_profile_id or caller_row.get("profile_id")
     if not caller_pid:
         return {
@@ -1510,6 +1555,7 @@ async def dispatch_task_tool(
         profile_id=profile_id,
         provider_id=effective_provider_id,
         model_id=model_id,
+        inherited_effort=selected_effort,
         prompt=prompt,
         label=label,
         agent_name=target_name,
@@ -1542,6 +1588,7 @@ async def dispatch_task_tool(
         worker_id,
         lane=lane,
         parent_session_id=root_session_id,
+        context_session_id=caller_session_id,
         provider_id=effective_provider_id,
     )
     if task_registry.stop_invalidated(root_session_id, stop_generation):
@@ -1567,6 +1614,8 @@ async def dispatch_task_tool(
                 stop_generation=stop_generation,
             )
         )
+        from app.core.swarm import register_job
+        register_job(worker_id, task, caller_session_id)
         _BACKGROUND_TASKS.add(task)
         task_registry.supervise_until_stop(root_session_id, task)
         task.add_done_callback(_BACKGROUND_TASKS.discard)
@@ -1861,8 +1910,10 @@ def make_fluid_dispatcher(
         # sequential). Absent on the delegated leg's bridged mcp tool.
         launch_tool_use_id = None
         agent_registry = None
+        caller_effort = _EFFORT_UNSET
         try:
             extra = getattr(ctx, "extra", None) or {}
+            caller_effort = extra.get("app_caller_effort", _EFFORT_UNSET)
             candidate = extra.get("tool_use_id")
             if isinstance(candidate, str) and candidate:
                 launch_tool_use_id = candidate
@@ -1880,6 +1931,7 @@ def make_fluid_dispatcher(
             caller_session_id=str(caller_session_id),
             caller_profile_id=profile_id,
             caller_provider_id=provider_id,
+            caller_effort=caller_effort,
             launch_tool_use_id=launch_tool_use_id,
             agent_registry=agent_registry,
         )

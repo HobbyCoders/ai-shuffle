@@ -1332,6 +1332,10 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
     empty notification is never enqueued (#690)."""
     try:
         task_id = frame.get("task_id")
+        from app.core.swarm import workers as swarm_workers
+        launch = swarm_workers.get(task_id)
+        if launch is not None and launch.coordinator.session_id == session_id:
+            return  # Only the aggregate owns a wake, including supervisor races.
         from app.core.task_registry import task_registry
 
         # STOP SEMANTICS (round 7). The user pressed Stop and has not messaged

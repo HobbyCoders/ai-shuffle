@@ -88,6 +88,8 @@ import {
 	cachedTranscriptCount,
 } from './feed-controller';
 import { pendingQueue } from '../pending-queue';
+import { swarms } from '../../swarms';
+import { get } from 'svelte/store';
 import { browserPanel } from '../../browser-panel.svelte';
 import type { ActiveSessionState } from '../../active-session';
 
@@ -860,6 +862,22 @@ describe('feedController revive (half-open feed healing)', () => {
 // tasks strip, the spinner overlay and the StopButton all hang off the RUNNING
 // task.updated frame. A provider-lane worker that emitted only its terminal
 // frame never appeared in any of them.
+
+describe('feedController Swarm updates', () => {
+ it('routes a durable update before a tool result and rejects another session', () => {
+  const deps = makeDeps({ sessionId: 'swarm-feed-session' });
+  feedController.attach(deps);
+  feedController.start('swarm-feed-session');
+  const swarm = { id: 'swarm-feed-test', session_id: 'swarm-feed-session', title: 'Review', status: 'running',
+   created_at: '2026-09-07T10:00:00Z', updated_at: '2026-09-07T10:00:00Z', tasks: [] };
+  hoisted.onEvent!({ id: 'swarm-event', seq: 1, type: 'swarm.updated', session_id: 'swarm-feed-session', swarm });
+  expect(get(swarms).bySession[swarm.session_id][swarm.id].status).toBe('running');
+  hoisted.onEvent!({ id: 'swarm-wrong', seq: 2, type: 'swarm.updated', session_id: 'swarm-feed-session', swarm: { ...swarm, session_id: 'other', status: 'failed' } });
+  expect(get(swarms).bySession.other?.[swarm.id]).toBeUndefined();
+  hoisted.onEvent!({ id: 'swarm-done', seq: 3, type: 'swarm.updated', session_id: 'swarm-feed-session', swarm: { ...swarm, status: 'completed', updated_at: '2026-09-07T10:01:00Z' } });
+  expect(get(swarms).bySession[swarm.session_id][swarm.id].status).toBe('completed');
+ });
+});
 
 describe('feedController activeTasks', () => {
 	it('a running task.updated puts the task on the strip; the terminal frame clears it', () => {

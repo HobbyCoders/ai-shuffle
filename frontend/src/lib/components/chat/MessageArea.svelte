@@ -1998,6 +1998,7 @@
 			result={message.toolResult}
 			status={message.toolStatus || 'running'}
 			streaming={message.streaming}
+			sessionId={$activeSession.sessionId}
 			serverSide={message.serverSide ?? message.server_side ?? false}
 			screenshot={message.toolScreenshot}
 		/>

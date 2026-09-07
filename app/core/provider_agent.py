@@ -64,6 +64,7 @@ from typing import (
 )
 
 from app.core import rate_limit_breaker
+from app.core.model_effort import EFFORT_LEVELS
 
 if TYPE_CHECKING:  # pragma: no cover — annotation-only; the DB imports in this
     # module are all lazy (inside functions), and ``from __future__ import
@@ -697,6 +698,46 @@ def _parent_cwd(parent_row: Optional[Mapping[str, Any]]) -> Optional[str]:
     except Exception:  # noqa: BLE001 — best-effort inheritance
         logger.debug("ProviderAgent: parent cwd resolution failed", exc_info=True)
         return None
+
+
+_EFFORT_UNSET = object()
+
+
+def _caller_effort(caller_row: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Snapshot the direct caller's selected effort, before a worker queues.
+
+    The running turn overrides the session binding; voice uses its live binding.
+    Legacy caller profiles are only a fallback. Target-model validation stays
+    in the adapter, since a worker may run on a different model or provider.
+    """
+    from app.db import database, turns
+
+    row = caller_row or {}
+    if row.get("id") and row.get("mode") != "voice":
+        try:
+            turn = turns.get_live_turn(str(row["id"]))
+            if turn is None:
+                turn = turns.get_latest_turn(str(row["id"])) or {}
+                # A queued user message has not configured an engine yet.
+                if turn.get("state") == "queued":
+                    turn = {}
+            value = (turn.get("overrides") or {}).get("effort")
+            if isinstance(value, str) and value in EFFORT_LEVELS:
+                return value
+        except Exception:  # noqa: BLE001 — legacy/session fallback
+            logger.debug("ProviderAgent: caller effort turn read failed", exc_info=True)
+    value = row.get("effort")
+    if isinstance(value, str) and value in EFFORT_LEVELS:
+        return value
+    if row.get("profile_id") and not row.get("is_worker"):
+        try:
+            profile = database.get_profile(row["profile_id"]) or {}
+            value = (profile.get("config") or {}).get("effort")
+            if isinstance(value, str) and value in EFFORT_LEVELS:
+                return value
+        except Exception:  # noqa: BLE001 — no legacy binding
+            logger.debug("ProviderAgent: caller effort profile read failed", exc_info=True)
+    return None
 
 
 def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional[str]:
@@ -1507,6 +1548,9 @@ async def _notify_caller_terminal(
     Never raises — a wake failure must not change how the worker's dispatch
     reports.
     """
+    from app.core.swarm import owns_terminal
+    if owns_terminal(parent_session_id):
+        return  # The retry-wrapper settles Swarm; only its aggregate wakes.
     try:
         from app.db import database
 
@@ -1573,6 +1617,8 @@ async def dispatch_worker(
     profile_id: str,
     provider_id: Optional[str] = None,
     model_id: Optional[str] = None,
+    effort: Optional[str] = None,
+    inherited_effort: Any = _EFFORT_UNSET,
     prompt: str,
     label: Optional[str] = None,
     tool_use_id: Optional[str] = None,
@@ -1718,6 +1764,13 @@ async def dispatch_worker(
             parent_row = None
 
         project_id = (parent_row or {}).get("project_id")
+        # Task snapshots this before admission, including a deliberate None.
+        # Direct callers retain the same inheritance without consulting globals.
+        selected_effort = (
+            effort if isinstance(effort, str) and effort in EFFORT_LEVELS
+            else _caller_effort(parent_row) if inherited_effort is _EFFORT_UNSET
+            else inherited_effort
+        )
         project_v2_id = (parent_row or {}).get("project_v2_id")
         branch = (parent_row or {}).get("branch")
         target_instance_id = (parent_row or {}).get("instance_id")
@@ -1746,6 +1799,7 @@ async def dispatch_worker(
                 provider_id=provider_id,
                 derive_provider_from_profile=False,
                 model=model_id,
+                effort=selected_effort,
                 hidden=True,
                 # Materialized flag backing the sidebar's worker filter.
                 # `hidden` alone still hides this row, but stamping it here
@@ -1762,7 +1816,7 @@ async def dispatch_worker(
             create_error = exc
         return (
             parent_row, project_id, worktree_id, worktree_branch,
-            worktree_path, provider_tag, create_error,
+            worktree_path, provider_tag, create_error, selected_effort,
         )
 
     (
@@ -1773,6 +1827,7 @@ async def dispatch_worker(
         worktree_path,
         provider_tag,
         create_error,
+        selected_effort,
     ) = await run_sync(_prepare_worker_blocking)
     if create_error is not None:
         return WorkerOutcome(
@@ -1807,6 +1862,8 @@ async def dispatch_worker(
         overrides["provider"] = provider_id
     if model_id:
         overrides["model"] = model_id
+    if selected_effort is not None:
+        overrides["effort"] = selected_effort
     cwd = _parent_cwd(parent_row)
     if cwd:
         overrides["cwd"] = cwd
@@ -1817,7 +1874,7 @@ async def dispatch_worker(
     if inherited_mode:
         overrides["permission_mode"] = inherited_mode
     if (parent_row or {}).get("mode") == "voice":
-        for key in ("effort", "context_window", "fast"):
+        for key in ("context_window", "fast"):
             value = parent_row.get(key)
             if value is not None:
                 overrides[key] = value

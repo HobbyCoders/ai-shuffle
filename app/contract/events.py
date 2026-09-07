@@ -236,6 +236,35 @@ class InteractionExpired(EventBase):
     reason: str | None = None
 
 
+class SwarmTask(BaseModel):
+    id: str
+    title: str
+    agent: str
+    depends_on: list[str] = Field(default_factory=list)
+    status: Literal["queued", "running", "completed", "failed", "blocked", "cancelled", "interrupted"]
+    task_id: str | None = None
+    worker_session_id: str | None = None
+    result: str | None = None
+    error: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class SwarmSnapshot(BaseModel):
+    id: str
+    session_id: str
+    title: str
+    status: Literal["queued", "running", "completed", "failed", "cancelled", "interrupted"]
+    created_at: datetime
+    updated_at: datetime
+    tasks: list[SwarmTask]
+
+
+class SwarmUpdated(EventBase):
+    type: Literal["swarm.updated"] = "swarm.updated"
+    swarm: SwarmSnapshot
+
+
 class TranscriptRewound(EventBase):
     type: Literal["transcript.rewound"] = "transcript.rewound"
     from_seq: int
@@ -272,6 +301,7 @@ SessionEvent = Annotated[
         TeamMemberProgress,
         TeamMemberCompleted,
         TaskUpdated,
+        SwarmUpdated,
         SystemNote,
         SystemCompactionBoundary,
         InteractionRequested,
@@ -305,6 +335,7 @@ EVENT_TYPES: tuple[str, ...] = (
     "team.member_progress",
     "team.member_completed",
     "task.updated",
+    "swarm.updated",
     "system.note",
     "system.compaction_boundary",
     "interaction.requested",
