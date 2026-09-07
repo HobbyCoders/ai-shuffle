@@ -1,25 +1,9 @@
 <script lang="ts">
-	import { browser } from '$app/environment';
 	import { pwa, isInstallable } from '$lib/stores/pwa.svelte';
-
-	const DISMISS_KEY = 'ai-shuffle-install-dismissed';
-	const PERMANENT_DISMISS_KEY = 'ai-shuffle-install-never';
+	import { installPromptPreference } from '$lib/stores/install-prompt-preference.svelte';
 
 	let showPrompt = $state(false);
-	let isDismissed = $state(false);
-
-	// Check localStorage on init
-	if (browser) {
-		if (localStorage.getItem(PERMANENT_DISMISS_KEY)) {
-			isDismissed = true;
-		} else {
-			const dismissed = localStorage.getItem(DISMISS_KEY);
-			if (dismissed) {
-				const daysSince = (Date.now() - parseInt(dismissed, 10)) / (1000 * 60 * 60 * 24);
-				if (daysSince < 7) isDismissed = true;
-			}
-		}
-	}
+	const isDismissed = $derived(installPromptPreference.isSuppressed());
 
 	// Show the prompt with a delay to not be intrusive
 	$effect(() => {
@@ -41,15 +25,13 @@
 	}
 
 	function handleDismiss() {
-		isDismissed = true;
 		showPrompt = false;
-		localStorage.setItem(DISMISS_KEY, Date.now().toString());
+		installPromptPreference.snooze();
 	}
 
 	function handleNeverShow() {
-		isDismissed = true;
 		showPrompt = false;
-		localStorage.setItem(PERMANENT_DISMISS_KEY, '1');
+		installPromptPreference.neverShow();
 	}
 </script>
 

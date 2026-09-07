@@ -33,8 +33,8 @@
 	 *
 	 * Styled with the app's existing theme tokens, not the mockup palette.
 	 */
-	import { browser } from '$app/environment';
 	import { untrack, onMount } from 'svelte';
+	import { buildPreference, type BuildSub } from '$lib/stores/build-preference.svelte';
 	import { Users, Server, Puzzle, Webhook } from 'lucide-svelte';
 	import { appData, profiles } from '$lib/stores/app-data.svelte';
 	import { mcp, globalMcpServers } from '$lib/stores/mcp.svelte';
@@ -45,8 +45,6 @@
 		createLazyComponent,
 		type LazyComponentHandle
 	} from '$lib/components/deck/lazy/lazy-component';
-
-	type BuildSub = 'profile' | 'mcp' | 'plugins' | 'hooks';
 
 	// Each sub-tab is its own chunk. ProfileCard/McpManagerCard/HooksCard drag in
 	// their editors, forms and validation; loading all four to show one of them
@@ -76,9 +74,6 @@
 	}
 	let { requestedSub, requestedItemId }: Props = $props();
 
-	const STORAGE_KEY = 'ai-shuffle-build-subtab';
-	const SUBS: BuildSub[] = ['profile', 'mcp', 'plugins', 'hooks'];
-
 	const items: { id: BuildSub; label: string; icon: typeof Users }[] = [
 		{ id: 'profile', label: 'Agents', icon: Users },
 		{ id: 'mcp', label: 'MCP Servers', icon: Server },
@@ -89,17 +84,7 @@
 	// Every section is now a native, header-less UI (scroll inside the page body).
 	const NATIVE = new Set<BuildSub>(['profile', 'mcp', 'plugins', 'hooks']);
 
-	function loadStored(): BuildSub {
-		if (!browser) return 'profile';
-		try {
-			const v = localStorage.getItem(STORAGE_KEY);
-			return v && SUBS.includes(v as BuildSub) ? (v as BuildSub) : 'profile';
-		} catch {
-			return 'profile';
-		}
-	}
-
-	let sub = $state<BuildSub>(untrack(() => requestedSub) ?? loadStored());
+	let sub = $state<BuildSub>(untrack(() => requestedSub ?? buildPreference.current));
 	// True while a section shows a full-canvas detail/editor (e.g. profile form),
 	// in which case we hide the page heading + sub-nav so the editor takes over.
 	let detail = $state(false);
@@ -109,21 +94,21 @@
 		if (requestedSub) {
 			sub = requestedSub;
 			detail = false;
+			untrack(() => buildPreference.set(requestedSub!));
 		}
 	});
 
-	// Remember the last-open tool so the top-bar "Build" tab reopens it.
+	// A remote choice can update the list, but cannot unmount an open editor.
 	$effect(() => {
-		const current = sub;
-		if (browser) {
-			try { localStorage.setItem(STORAGE_KEY, current); } catch { /* ignore */ }
-		}
+		const preferred = buildPreference.current;
+		if (!detail && !requestedItemId) sub = preferred;
 	});
 
 	function select(next: BuildSub) {
 		if (next === sub) return;
 		sub = next;
 		detail = false;
+		buildPreference.set(next);
 	}
 
 	/** Prefetch a sub-tab's chunk on hover/focus so the click is instant. */

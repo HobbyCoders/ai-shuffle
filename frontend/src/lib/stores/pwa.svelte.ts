@@ -8,6 +8,8 @@
 import { browser } from '$app/environment';
 import { untrack } from 'svelte';
 import { createSubscribers } from './store-utils';
+import { installPromptPreference } from './install-prompt-preference.svelte';
+import { sessionOwnerEpoch } from './session-owner';
 
 interface PWAState {
 	isInstalled: boolean;
@@ -140,18 +142,6 @@ async function registerServiceWorker() {
 	}
 }
 
-function wasRecentlyDismissed(): boolean {
-	if (!browser) return false;
-	if (localStorage.getItem('ai-shuffle-install-never')) return true;
-
-	const dismissed = localStorage.getItem('ai-shuffle-install-dismissed');
-	if (!dismissed) return false;
-
-	const dismissedTime = parseInt(dismissed, 10);
-	const daysSinceDismissed = (Date.now() - dismissedTime) / (1000 * 60 * 60 * 24);
-	return daysSinceDismissed < 7;
-}
-
 // ============================================================================
 // Subscribe shim (centralized via store-utils)
 // ============================================================================
@@ -189,7 +179,8 @@ function _handleFocus() {
 
 function _handleBeforeInstallPrompt(e: Event) {
 	e.preventDefault();
-	if (wasRecentlyDismissed()) return;
+	// Retain this device's capability even while the account suppresses its UI.
+	// A later preference reset must not need a new browser install event.
 
 	_update((s) => ({
 		...s,
@@ -264,6 +255,7 @@ export const pwa = {
 
 	async promptInstall(): Promise<boolean> {
 		if (!_state.installPromptEvent) return false;
+		const ownerEpoch = sessionOwnerEpoch();
 
 		try {
 			await _state.installPromptEvent.prompt();
@@ -277,7 +269,7 @@ export const pwa = {
 					installPromptEvent: null
 				}));
 			} else {
-				localStorage.setItem('ai-shuffle-install-dismissed', Date.now().toString());
+				if (ownerEpoch === sessionOwnerEpoch()) installPromptPreference.snooze();
 				_update((s) => ({ ...s, installPromptEvent: null, isInstallable: false }));
 			}
 			_notifySubscribers();

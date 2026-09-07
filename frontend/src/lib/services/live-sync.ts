@@ -10,6 +10,8 @@ import '$lib/stores/groups.svelte';
 import '$lib/stores/layout.svelte';
 import '$lib/stores/sidebar-prefs.svelte';
 import '$lib/stores/expansion-preferences';
+import '$lib/stores/build-preference.svelte';
+import '$lib/stores/install-prompt-preference.svelte';
 import '$lib/stores/sessionMode.svelte';
 import '$lib/stores/browser-panel.svelte';
 import './notificationSound';
