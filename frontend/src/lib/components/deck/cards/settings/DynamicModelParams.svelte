@@ -46,7 +46,7 @@
 		const id = endpointId;
 		const key = persistKey;
 		const context = JSON.stringify([id, key]);
-		if (!id || context === loadedFor || !isCurrent()) return;
+		if (!id || (context === loadedFor && !loading) || !isCurrent()) return;
 		const generation = ++loadGeneration;
 		if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
 		loading = true;

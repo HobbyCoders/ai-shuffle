@@ -111,6 +111,21 @@ describe('settings editor ownership', () => {
   expect(mocks.patch).toHaveBeenCalledWith('/settings/integrations/model-params', { key: 'image_model', params: { enabled: true } });
  });
 
+ it('recovers when returning to the previous context while another load is pending', async () => {
+  const view = render(DynamicModelParams, { endpointId: 'model', persistKey: 'image_model' });
+  await screen.findByRole('checkbox');
+  let releaseOther!: (value: unknown) => void;
+  mocks.get.mockImplementationOnce(() => new Promise(r => { releaseOther = r; }));
+  await view.rerender({ endpointId: 'model', persistKey: 'tts_model' });
+  expect(screen.queryByRole('checkbox')).toBeNull();
+  mocks.get.mockResolvedValue({ params: { enabled: true } });
+  await view.rerender({ endpointId: 'model', persistKey: 'image_model' });
+  expect((await screen.findByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+  releaseOther({ params: { enabled: false } });
+  await tick();
+  expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+ });
+
  it('does not send model-reset followups after the account changes during a save', async () => {
   let resolve!: (value: unknown) => void;
   mocks.patch.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
