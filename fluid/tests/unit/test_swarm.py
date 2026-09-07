@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
-from fluid.swarm import SwarmCoordinator, current_launch, recover, validate
+from fluid.swarm import MAX_TASKS, SwarmCoordinator, current_launch, recover, validate
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome
 
 
@@ -14,7 +14,7 @@ def spec(key, deps=()):
     {"tasks": [spec("a", ["missing"])]}, {"tasks": [spec("a", ["a"])]},
     {"tasks": [spec("a", ["b"]), spec("b", ["a"])]},
     {"tasks": [spec("a")], "max_parallel": 0},
-    {"tasks": [spec("a")], "max_parallel": 9},
+    {"tasks": [spec("a")], "max_parallel": MAX_TASKS + 1},
     {"tasks": [spec("a")], "max_parallel": True},
     {"tasks": [{"id": "a", "agent": "helper", "prompt": ""}]},
 ])
@@ -25,6 +25,90 @@ async def test_validation_before_spawn(data):
         await c.start(data, ToolCtx())
     dispatch.assert_not_called()
     assert not c.jobs
+
+
+def test_parallel_schema_matches_validation_and_graph_default():
+    from fluid.tools.builtins.swarm import SPEC
+
+    properties = SPEC.input_schema["properties"]
+    limit = properties["max_parallel"]
+    assert limit["minimum"] == 1
+    assert limit["maximum"] == properties["tasks"]["maxItems"] == MAX_TASKS
+    assert "default" not in limit  # The default depends on the graph size.
+    for count in (1, 10, MAX_TASKS):
+        tasks = [spec(str(i)) for i in range(count)]
+        assert validate({"tasks": tasks})[1] == count
+    for cap in (1, 3, 8, 9, 10, MAX_TASKS):
+        assert validate({"tasks": [spec("a")], "max_parallel": cap})[1] == cap
+
+
+@pytest.mark.parametrize("max_parallel", [None, 10])
+async def test_ten_ready_tasks_start_before_any_completes(max_parallel):
+    all_started, release = asyncio.Event(), asyncio.Event()
+    live = peak = completed = 0
+
+    async def dispatch(data, ctx):
+        nonlocal live, peak, completed
+        live += 1
+        peak = max(peak, live)
+        if live == 10:
+            all_started.set()
+        await release.wait()
+        live -= 1
+        completed += 1
+        current_launch.get().finish("finished", "ok")
+        return BackgroundTaskReceipt(task_id=data["label"])
+
+    finished = AsyncMock()
+    c = SwarmCoordinator("main", dispatch, AsyncMock(), AsyncMock(), finished)
+    data = {"tasks": [spec(str(i)) for i in range(10)]}
+    if max_parallel is not None:
+        data["max_parallel"] = max_parallel
+    _, receipt = await c.start(data, ToolCtx())
+    try:
+        await asyncio.wait_for(all_started.wait(), 5)
+        assert completed == 0
+        assert peak == live == 10
+    finally:
+        release.set()
+        await asyncio.wait_for(c.jobs[receipt.task_id], 5)
+    assert completed == 10
+    assert c.snapshot(receipt.task_id)["status"] == "completed"
+    finished.assert_awaited_once()
+
+
+@pytest.mark.parametrize("max_parallel, expected", [(2, 2), (None, 10)])
+async def test_cancel_preserves_spawn_receipts_and_parallel_limit(max_parallel, expected):
+    admitted, release = asyncio.Event(), asyncio.Event()
+    launches = {}
+
+    async def dispatch(data, ctx):
+        launches[data["label"]] = current_launch.get()
+        if len(launches) == expected:
+            admitted.set()
+        # Hold the spawn acknowledgement, including across Stop.
+        await release.wait()
+        return BackgroundTaskReceipt(task_id=data["label"])
+
+    async def stop(key):
+        launches[key].finish("cancelled", "stopped")
+
+    cancel = AsyncMock(side_effect=stop)
+    c = SwarmCoordinator("main", dispatch, cancel, AsyncMock(), AsyncMock())
+    data = {"tasks": [spec(str(i)) for i in range(10)]}
+    if max_parallel is not None:
+        data["max_parallel"] = max_parallel
+    _, receipt = await c.start(data, ToolCtx())
+    try:
+        await asyncio.wait_for(admitted.wait(), 5)
+        assert len(launches) == expected
+        await c.cancel(receipt.task_id)
+    finally:
+        release.set()
+        await asyncio.wait_for(c.jobs[receipt.task_id], 5)
+    assert len(launches) == expected
+    assert cancel.await_count == expected
+    assert {row["status"] for row in c.snapshot(receipt.task_id)["tasks"]} == {"cancelled"}
 
 async def test_concurrency_dependencies_failure_and_early_completion():
     live, peak, prompts = 0, 0, {}
@@ -151,6 +235,64 @@ async def test_cli_producer_real_child_and_aggregate_wake(tmp_path):
     assert "child report" in provider.child_requests[1].messages[0].text()
     events = [e for sid in store._sessions for e in await store.events_since(sid, -1) if isinstance(e, SwarmUpdated)]
     assert events[-1].swarm["status"] == "completed"
+    assert "[woken]" in out.getvalue()
+
+
+async def test_cli_runs_ten_child_engines_concurrently_with_scripted_provider(tmp_path):
+    import io, json
+    from fluid.cli.__main__ import run_once
+    from fluid.events.model import SwarmUpdated
+    from fluid.store.base import MemoryStore
+    from tests.unit.test_cli_host import RoutingProvider, _config, _allow, _system_text
+    from tests.unit.test_tool_loop import _tool, _text
+
+    agents = tmp_path / ".agents" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "helper.md").write_text("---\nname: helper\ndescription: helper\n---\nSWARM-HELPER\n")
+    all_started, release = asyncio.Event(), asyncio.Event()
+
+    class ConcurrentProvider(RoutingProvider):
+        """Real NativeLoop children, offline model responses held at a barrier."""
+
+        active = peak = 0
+
+        async def stream(self, request):
+            child = self.marker in _system_text(request)
+            if child:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+                if self.active == 10:
+                    all_started.set()
+            try:
+                if child:
+                    await release.wait()
+                async for chunk in super().stream(request):
+                    yield chunk
+            finally:
+                if child:
+                    self.active -= 1
+
+    provider = ConcurrentProvider(
+        parent=[_tool("sw", "Swarm", json.dumps({"action": "start",
+                 "tasks": [spec(str(i)) for i in range(10)]})),
+                _text("waiting"), _text("finished")],
+        child=[_text("child report")], child_marker="SWARM-HELPER")
+    store, out = MemoryStore(), io.StringIO()
+    run = asyncio.create_task(run_once(_config(tmp_path), store, "go",
+                                      provider=provider, out=out, on_permission=_allow))
+    try:
+        await asyncio.wait_for(all_started.wait(), 5)
+        assert provider.active == provider.peak == 10
+        assert provider.child_calls == 0
+    finally:
+        release.set()
+        rc = await asyncio.wait_for(run, 5)
+    assert rc == 0
+    assert provider.child_calls == 10
+    events = [e for sid in store._sessions for e in await store.events_since(sid, -1)
+              if isinstance(e, SwarmUpdated)]
+    assert events[-1].swarm["status"] == "completed"
+    assert len(events[-1].swarm["tasks"]) == 10
     assert "[woken]" in out.getvalue()
 
 async def test_cli_peer_scope_and_no_resume():

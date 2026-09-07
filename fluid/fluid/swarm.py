@@ -29,11 +29,14 @@ def now():
 
 def validate(data):
     tasks = data.get("tasks")
-    cap = data.get("max_parallel", 3)
-    if type(cap) is not int or not 1 <= cap <= 8:
-        raise ValueError("max_parallel must be an integer from 1 to 8")
     if not isinstance(tasks, list) or not 1 <= len(tasks) <= MAX_TASKS:
         raise ValueError("tasks must contain 1..64 tasks")
+    # A graph is already bounded by MAX_TASKS. Admit every ready task unless
+    # the caller explicitly requests a smaller batch; the host still owns
+    # provider/resource backpressure and cancellation of the actual workers.
+    cap = data.get("max_parallel", len(tasks))
+    if type(cap) is not int or not 1 <= cap <= MAX_TASKS:
+        raise ValueError(f"max_parallel must be an integer from 1 to {MAX_TASKS}")
     ids = set()
     for task in tasks:
         if not isinstance(task, dict):

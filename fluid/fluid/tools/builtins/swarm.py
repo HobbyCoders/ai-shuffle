@@ -10,7 +10,8 @@ SPEC = ToolSpec(name="Swarm", description=(
     input_schema={"type": "object", "properties": {
         "action": {"type": "string", "enum": ["start", "status", "cancel"]},
         "title": {"type": "string"}, "swarm_id": {"type": "string"},
-        "max_parallel": {"type": "integer", "minimum": 1, "maximum": 8, "default": 3},
+        "max_parallel": {"type": "integer", "minimum": 1, "maximum": 64,
+            "description": "Optional limit on simultaneous tasks. Omit to run all dependency-ready tasks, subject to host resource limits."},
         "tasks": {"type": "array", "minItems": 1, "maxItems": 64, "items": {
             "type": "object", "properties": {
                 "id": {"type": "string"}, "title": {"type": "string"},
