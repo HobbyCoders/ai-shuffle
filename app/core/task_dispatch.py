@@ -567,11 +567,41 @@ async def _reserve_admission(
     provider_budget = max(budget, _provider_queue_seconds()) if provider_limit else budget
     lock = _admission_lock()
     waited = False
+    from fluid.swarm import current_launch
+
+    launch = current_launch.get()
+
+    def cancelled() -> bool:
+        return bool(
+            launch is not None
+            and launch.coordinator.session_id == root_session_id
+            and (
+                launch.coordinator.closed
+                or launch.swarm_id in launch.coordinator.cancelled
+            )
+        )
+
     while True:
         async with lock:
+            # Swarm Stop latches cancellation without discarding an atomic
+            # spawn acknowledgement. A worker still waiting for admission has
+            # not spawned: settle it promptly without reserving a slot. Read
+            # only the trusted host launch context, never model arguments.
+            if cancelled():
+                return (
+                    "Swarm cancelled before admission; the worker was NOT started.",
+                    time.monotonic() - started,
+                )
             # Off the loop, like every other admission_check caller: the
             # ceiling checks can walk the process tree with psutil.
             snapshot = await asyncio.to_thread(pool_module.admission_snapshot, lane)
+            # Stop may arrive during the asynchronous resource measurement.
+            # There is no await between this guard and the reservation below.
+            if cancelled():
+                return (
+                    "Swarm cancelled before admission; the worker was NOT started.",
+                    time.monotonic() - started,
+                )
             # Only DELEGATED reservations hold a subprocess slot.
             pending = _pending_admission_count(lane=DELEGATED_LANE)
             at_cap = (
