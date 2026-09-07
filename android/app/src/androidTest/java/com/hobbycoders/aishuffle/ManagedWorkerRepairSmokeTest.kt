@@ -105,7 +105,7 @@ class ManagedWorkerRepairSmokeTest {
             val field = ApiClient::class.java.getDeclaredField("client\$delegate").apply { isAccessible = true }
             val original = field.get(null)
             field.set(null, lazyOf(OkHttpClient.Builder().addInterceptor { chain ->
-                check(chain.request().url.encodedPath == "/api/v1/mobile/web-session")
+                check(chain.request().url.encodedPath == "/api/v1/mobile/web-session/reservations")
                 PresenceFixture.response(chain.request(), 401, "{\"detail\":\"Revoked fixture credential\"}")
             }.build()))
             try {

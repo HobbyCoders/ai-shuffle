@@ -66,6 +66,9 @@ class ChatCapabilitiesSmokeTest {
             .protocol(Protocol.HTTP_1_1).code(200).message("Fixture").body(text.toResponseBody(mime.toMediaType())).build()
         val sessions = java.util.concurrent.atomic.AtomicInteger()
         val api = OkHttpClient.Builder().addInterceptor { chain ->
+            if (chain.request().url.encodedPath == "/api/v1/mobile/web-session/reservations")
+                return@addInterceptor Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(404).message("Legacy fixture")
+                    .header("Content-Type", "application/json").body("{\"detail\":\"Not Found\"}".toResponseBody("application/json".toMediaType())).build()
             check(chain.request().url.encodedPath == "/api/v1/mobile/web-session")
             beforeSession(sessions.incrementAndGet())
             response(chain.request(), "{\"session_token\":\"fixture-cookie\"}", "application/json")

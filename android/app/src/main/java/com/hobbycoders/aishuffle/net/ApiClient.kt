@@ -1,6 +1,7 @@
 package com.hobbycoders.aishuffle.net
 
 import com.hobbycoders.aishuffle.model.Server
+import com.hobbycoders.aishuffle.account.PairingInput
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -11,6 +12,7 @@ import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.time.Instant
 import java.util.concurrent.TimeUnit
 
 /** Result of an [ApiClient] call. Never throws to the caller. */
@@ -32,6 +34,11 @@ data class RegistrationResult(
     val expiresAt: String?,
 )
 
+internal sealed class WebSessionReservation {
+    class Ready(val token: String, val expiresAt: Instant, val deadlineMillis: Long) : WebSessionReservation()
+    object Unsupported : WebSessionReservation()
+}
+
 /**
  * Thin OkHttp wrapper around the AI Shuffle mobile API. Every call is suspending
  * and runs on [Dispatchers.IO]; callers must never touch the main thread for
@@ -51,6 +58,7 @@ object ApiClient {
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS)
             .followRedirects(false)
             .followSslRedirects(false)
             .build()
@@ -111,12 +119,65 @@ object ApiClient {
      */
     enum class SessionPurpose(val value: String) { WEB("web"), NATIVE("native") }
 
-    internal fun webSessionRequest(server: Server, purpose: SessionPurpose = SessionPurpose.WEB): Request = Request.Builder()
-        .url("${server.baseUrl}/api/v1/mobile/web-session")
-        .header("Authorization", "Bearer ${server.apiKey}")
-        .cfAccess(server.cfAccessClientId, server.cfAccessClientSecret)
-        .post(JSONObject().put("purpose", purpose.value).toString().toRequestBody(JSON_MEDIA.toMediaType()))
-        .build()
+    internal const val WEB_RESERVATION_HEADER = "X-Shuffle-Web-Session-Reservation"
+    private val reservationFormat = Regex("wsm_[A-Za-z0-9_-]{43}")
+
+    internal fun webSessionRequest(server: Server, purpose: SessionPurpose = SessionPurpose.WEB, reservation: String? = null): Request {
+        require(reservation == null || purpose == SessionPurpose.WEB && reservationFormat.matches(reservation))
+        return Request.Builder().url("${server.baseUrl}/api/v1/mobile/web-session")
+            .header("Authorization", "Bearer ${server.apiKey}")
+            .cfAccess(server.cfAccessClientId, server.cfAccessClientSecret)
+            .apply { reservation?.let { header(WEB_RESERVATION_HEADER, it) } }
+            .post(JSONObject().put("purpose", purpose.value).toString().toRequestBody(JSON_MEDIA.toMediaType())).build()
+    }
+
+    internal fun webReservationRequest(server: Server): Request {
+        require(PairingInput.origin(server.baseUrl) == server.baseUrl)
+        return Request.Builder().url("${server.baseUrl}/api/v1/mobile/web-session/reservations")
+            .header("Authorization", "Bearer ${server.apiKey}")
+            .cfAccess(server.cfAccessClientId, server.cfAccessClientSecret)
+            .header("Cache-Control", "no-store")
+            .post("{}".toRequestBody(JSON_MEDIA.toMediaType())).build()
+    }
+
+    internal fun monotonicMillis(): Long = TimeUnit.NANOSECONDS.toMillis(System.nanoTime())
+
+    internal fun parseWebReservation(code: Int, contentType: String?, raw: String,
+        startedAt: Long = monotonicMillis(), receivedAt: Long = monotonicMillis()): ApiResult<WebSessionReservation> {
+        if (raw.toByteArray(Charsets.UTF_8).size > 8192) return ApiResult.Failure("The worker returned an invalid session reservation.", code)
+        val json = if (contentType?.substringBefore(';')?.trim()?.equals("application/json", true) == true)
+            runCatching { JSONObject(raw) }.getOrNull() else null
+        if ((code == 404 && json?.opt("detail") == "Not Found") ||
+            (code == 405 && json?.opt("detail") == "Method Not Allowed")) return ApiResult.Success(WebSessionReservation.Unsupported)
+        if (code != 200) return ApiResult.Failure(errorMessage(code, raw), code)
+        return try {
+            val token = json?.opt("reservation") as? String ?: error("Missing reservation")
+            val expiry = Instant.parse(json.opt("expires_at") as? String ?: error("Missing expiry"))
+            val lifetime = json.opt("expires_in")
+            require(reservationFormat.matches(token) && lifetime is Int && lifetime in 1..120)
+            val deadline = startedAt + lifetime * 1000L
+            require(receivedAt < deadline)
+            ApiResult.Success(WebSessionReservation.Ready(token, expiry, deadline))
+        } catch (_: Exception) { ApiResult.Failure("The worker returned an invalid session reservation.", code) }
+    }
+
+    internal suspend fun reserveWebSession(server: Server): ApiResult<WebSessionReservation> = withContext(Dispatchers.IO) {
+        val startedAt = monotonicMillis()
+        try {
+            client.newCall(webReservationRequest(server)).execute().use { response ->
+                if (isCfAccessChallenge(response)) return@withContext ApiResult.NeedsCfAccess
+                val source = response.body?.source() ?: return@withContext ApiResult.Failure("The worker returned an invalid session reservation.", response.code)
+                source.request(8193)
+                if (source.buffer.size > 8192) return@withContext ApiResult.Failure("The worker returned an invalid session reservation.", response.code)
+                parseWebReservation(response.code, response.header("Content-Type"), source.buffer.readUtf8(), startedAt)
+            }
+        } catch (_: IOException) { ApiResult.Failure("Cannot reach this server. Check your HTTPS address and connection, then retry.") }
+        catch (_: Exception) { ApiResult.Failure("The worker returned an invalid session reservation.") }
+    }
+
+    internal suspend fun commitWebSession(server: Server, reservation: WebSessionReservation.Ready): ApiResult<String> = withContext(Dispatchers.IO) {
+        execute(webSessionRequest(server, SessionPurpose.WEB, reservation.token), hasCfCreds = server.hasCfAccess) { it.getString("session_token") }
+    }
 
     suspend fun createWebSession(server: Server, purpose: SessionPurpose = SessionPurpose.WEB): ApiResult<String> =
         withContext(Dispatchers.IO) {

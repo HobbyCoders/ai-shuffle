@@ -47,6 +47,8 @@ class ChatActivity : NativeScreen() {
     private lateinit var web: WebView
     private var sessionJob: Job? = null
     private var sessionAttempt = 0
+    private lateinit var sessionOwner: ChatSessionOwner
+    private var sharedAttempt: WebSessionBootstrap.Attempt? = null
     private var needsSession = true
     private lateinit var repairButton: MaterialButton
     private lateinit var downloads: ChatDownloads
@@ -81,6 +83,7 @@ class ChatActivity : NativeScreen() {
         super.onCreate(savedInstanceState)
         server = ServerStore.get(this).getById(intent.getStringExtra(EXTRA_SERVER_ID).orEmpty()) ?: run { finish(); return }
         try { PairingInput.origin(server.baseUrl) } catch (_: Exception) { heading("HTTPS required", "Pair this server again using its HTTPS address. Existing insecure credentials will not be sent."); return }
+        sessionOwner = ChatSessionOwner(this, server)
         if (!authorized()) { finish(); return }
         web = WebView(this)
         chatLayout()
@@ -163,7 +166,6 @@ class ChatActivity : NativeScreen() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() { if (web.canGoBack()) web.goBack() else finish() }
         })
-        startSession()
     }
     private fun chatLayout() {
         navigation(server.name)
@@ -212,12 +214,7 @@ class ChatActivity : NativeScreen() {
         }
         setContentView(shell)
     }
-    private fun authorized(): Boolean {
-        val saved = ServerStore.get(this).getById(server.id) ?: return false
-        if (saved.baseUrl != server.baseUrl || saved.apiKey != server.apiKey || saved.deviceId != server.deviceId ||
-            saved.accountId != server.accountId || saved.hubUrl != server.hubUrl) return false
-        return server.accountId == null || AccountStore(this).session()?.let { it.accountId == server.accountId && it.hub == server.hubUrl } == true
-    }
+    private fun authorized() = ::sessionOwner.isInitialized && sessionOwner.current()
     private fun validDocument() = ::web.isInitialized && !isFinishing && !isDestroyed &&
         ChatAccessPolicy.document(server.baseUrl, web.url, authorized())
     private fun validMicrophone(request: PermissionRequest) = validDocument() &&
@@ -249,6 +246,7 @@ class ChatActivity : NativeScreen() {
         if (!microphoneDialogOpen) { microphone?.deny(); microphone = null; microphoneReady = false }
         if (::web.isInitialized) { DeviceToolsRuntime.detach(this); web.onPause() }
         sessionAttempt++
+        WebSessionBootstrap.cancel(sharedAttempt)
         sessionJob?.cancel()
         super.onStop()
     }
@@ -259,29 +257,39 @@ class ChatActivity : NativeScreen() {
             else {
                 web.onResume(); nativeVoice.resumed(); web.post { completeMicrophonePermission() }
                 DeviceToolsRuntime.attach(this, server)
-                if (needsSession) startSession()
+                web.post { if (needsSession && !isFinishing && authorized()) startSession() }
             }
         }
     }
     override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (hasFocus && ::web.isInitialized) completeMicrophonePermission() }
     private fun startSession() {
-        if (sessionJob?.isActive == true) return
+        if (sessionJob?.isActive == true || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
         needsSession = true
         val attempt = ++sessionAttempt
+        val shared = WebSessionBootstrap.begin(server.baseUrl).also { sharedAttempt = it }
+        fun owns() = !isFinishing && !isDestroyed && authorized() && attempt == sessionAttempt &&
+            lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
         sessionJob = lifecycleScope.launch {
             repairButton.visibility = View.GONE
             status.text = "Opening a secure chat…"
-            if (server.hasCfAccess) ApiClient.fetchCfAuthorizationCookie(server)?.let { CookieManager.getInstance().setCookie(server.baseUrl, "$it; Path=/; Secure; HttpOnly; SameSite=Strict") }
-            when (val result = ApiClient.createWebSession(server)) {
+            if (server.hasCfAccess) ApiClient.fetchCfAuthorizationCookie(server)?.let { cookie ->
+                val saved = WebSessionBootstrap.installCookie(shared, ::owns) { done ->
+                    CookieManager.getInstance().setCookie(server.baseUrl, "$cookie; Path=/; Secure; HttpOnly; SameSite=Strict", done)
+                }
+                if (!saved) { status.text = "The secure chat cookie could not be saved. Refresh chat to try again."; return@launch }
+            }
+            when (val result = WebSessionBootstrap.mint(server, shared, ::owns)) {
                 is ApiResult.Success -> {
-                    if (!authorized() || attempt != sessionAttempt) return@launch
-                    require(!result.data.contains(';') && !result.data.contains('\n') && !result.data.contains('\r'))
-                    CookieManager.getInstance().setCookie(server.baseUrl, "session=${result.data}; Path=/; Secure; HttpOnly; SameSite=Strict") {
-                        if (!isFinishing && authorized() && attempt == sessionAttempt) {
-                            needsSession = false
-                            CookieManager.getInstance().flush(); web.loadUrl(server.baseUrl + "/")
-                        }
+                    if (!result.data.matches(Regex("[A-Za-z0-9_-]{1,4096}"))) {
+                        status.text = "The worker returned an invalid chat authorization. Update the worker and retry."
+                        return@launch
                     }
+                    val saved = WebSessionBootstrap.installCookie(shared, ::owns) { done ->
+                        CookieManager.getInstance().setCookie(server.baseUrl, "session=${result.data}; Path=/; Secure; HttpOnly; SameSite=Strict", done)
+                    }
+                    if (!saved) { status.text = "The secure chat cookie could not be saved. Refresh chat to try again."; return@launch }
+                    needsSession = false
+                    CookieManager.getInstance().flush(); web.loadUrl(server.baseUrl + "/")
                 }
                 is ApiResult.Failure -> {
                     status.text = result.message
@@ -291,10 +299,10 @@ class ChatActivity : NativeScreen() {
                             snapshot.check()
                             ManagedWorkerRepair.verify(server)
                             snapshot.check()
-                            if (attempt == sessionAttempt && !isFinishing) repairButton.visibility = View.VISIBLE
+                            if (owns() && WebSessionBootstrap.current(shared)) repairButton.visibility = View.VISIBLE
                         } catch (error: CancellationException) { throw error }
                         catch (error: Exception) {
-                            if (attempt == sessionAttempt && !isFinishing) status.text = result.message + "\n" +
+                            if (owns() && WebSessionBootstrap.current(shared)) status.text = result.message + "\n" +
                                 ((error as? WorkerRepairFailure)?.message ?: "This worker could not be verified for repair. Refresh your workers and try again.")
                         }
                     }
@@ -304,6 +312,7 @@ class ChatActivity : NativeScreen() {
         }
     }
     override fun onDestroy() {
+        WebSessionBootstrap.cancel(sharedAttempt)
         cancelPagePermissions()
         if (::downloads.isInitialized) downloads.close()
         if (::nativeVoice.isInitialized) nativeVoice.close()
