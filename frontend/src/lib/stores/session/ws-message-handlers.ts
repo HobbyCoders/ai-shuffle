@@ -23,6 +23,7 @@ import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
 import { pendingQueue } from './pending-queue';
 import { composerSuggestion } from './composer-suggestion';
+import { swarms } from '../swarms';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -391,6 +392,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 		const state = getState();
 		const eventSessionId = data.session_id as string | undefined;
+		if (msgType === 'swarm.updated' || eventType === 'swarm.updated') {
+			swarms.receive(data.swarm ?? data.payload, eventSessionId);
+			return;
+		}
 		if (msgType === 'composer_suggestion') {
 			composerSuggestion.receive(data);
 			return;

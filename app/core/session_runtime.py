@@ -957,6 +957,18 @@ class SessionRuntime:
             #    parity) without cancelling execute() itself.
             try:
                 async with get_reader_lock(sid):
+                    # Pooled engines do not reconnect. Their Swarm recovery
+                    # callback correctly refuses this newly claimed active run;
+                    # repair only here, with its live local ownership proof.
+                    try:
+                        from app.core.swarm import reconcile_owned_pending
+
+                        await reconcile_owned_pending(sid, run_id, fence_token)
+                    except Exception:
+                        logger.warning(
+                            "SessionRuntime: owned Swarm recovery failed for %s",
+                            sid, exc_info=True,
+                        )
                     pump = asyncio.create_task(self._run_pump(recorder))
                     self._pump_task = pump
                     self._start_progress_watchdog()

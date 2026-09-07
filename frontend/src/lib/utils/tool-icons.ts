@@ -47,7 +47,7 @@ export const TOOL_ICON_MAP: Record<string, IconType> = {
 	// Web
 	WebFetch: 'globe', WebSearch: 'globe',
 	// Agent / Skills
-	Task: 'bot', Skill: 'bot', Agent: 'bot',
+	Task: 'bot', Skill: 'bot', Agent: 'bot', Swarm: 'branch',
 	// Todo
 	TodoWrite: 'list',
 	// Plan mode / Questions

@@ -671,6 +671,8 @@ async def stop_all_workers(parent_session_id: str) -> Dict[str, Any]:
     rows, so the retained ``/live`` row reads as a deliberate stop rather than a
     mystery failure. Returns ``{"stopped": N, "workers": [...]}``.
     """
+    from app.core.swarm import cancel_all
+    await cancel_all(parent_session_id)
     results = await _teardown(
         parent_session_id,
         reason=STOP_ALL_REASON,

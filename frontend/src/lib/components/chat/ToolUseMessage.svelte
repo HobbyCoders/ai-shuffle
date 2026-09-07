@@ -13,6 +13,8 @@
 	 */
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import ToolScreenshot from './ToolScreenshot.svelte';
+	import SwarmCard from './SwarmCard.svelte';
+	import { isSwarmTool } from '$lib/utils/swarm';
 	import ToolIcon from './ToolIcon.svelte';
 	import { displayToolName } from '$lib/utils/tool-icons';
 	import { liveToolLabel, toolPreview, toolStateLabel } from '$lib/utils/tool-preview';
@@ -22,6 +24,7 @@
 
 	interface Props {
 		name: string;
+		sessionId?: string | null;
 		input?: Record<string, unknown>;
 		partialInput?: string;
 		result?: string;
@@ -32,7 +35,7 @@
 		screenshot?: string;
 	}
 
-	let { name, input, partialInput, result, status, streaming = false, serverSide = false, screenshot }: Props = $props();
+	let { name, sessionId, input, partialInput, result, status, streaming = false, serverSide = false, screenshot }: Props = $props();
 
 	const prefs = $derived(chatPreferences.current);
 
@@ -96,6 +99,9 @@
 	}
 </script>
 
+{#if isSwarmTool(name)}
+	<SwarmCard {sessionId} {input} {result} {status} />
+{:else}
 <div class="wl-item">
 	<button
 		type="button"
@@ -197,6 +203,7 @@
 		<ToolScreenshot {screenshot} {name} />
 	{/if}
 </div>
+{/if}
 
 <style>
 	.wl-item {

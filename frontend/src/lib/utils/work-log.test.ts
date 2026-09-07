@@ -79,6 +79,14 @@ function collapsedVisibleMessages(items: DisplayItem[]): ChatMessage[] {
 const SETTLED = { isStreaming: false, groupingEnabled: true };
 const LIVE = { isStreaming: true, groupingEnabled: true };
 
+describe('Swarm workflow visibility', () => {
+ it.each(['Swarm', 'mcp__fluid__Swarm'])('keeps %s outside settled work folds', (toolName) => {
+  const workflow = tool({ toolName });
+  const messages = [user('Review release'), tool(), workflow, text('Agents are working.')];
+  expect(collapsedVisibleMessages(buildDisplayItems(messages, SETTLED))).toContain(workflow);
+ });
+});
+
 describe('buildDisplayItems — settled turns', () => {
 	it('folds non-final commentary and routine work while keeping the final answer visible', () => {
 		const messages = [

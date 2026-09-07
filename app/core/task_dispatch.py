@@ -859,6 +859,8 @@ async def _dispatch_worker_with_retries(
             ) is not None
 
         try:
+            from app.core.swarm import bind_worker
+            await bind_worker(worker_id, attempt_kwargs.get("context_session_id"))
             outcome = await dispatcher(
                 background=background,
                 suppress_caller_wake=_will_retry if background else None,
@@ -1513,6 +1515,8 @@ async def dispatch_task_tool(
                 dispatcher=provider_agent.dispatch_worker,
             )
         )
+        from app.core.swarm import register_job
+        register_job(worker_id, task, caller_session_id)
         _BACKGROUND_TASKS.add(task)
         task.add_done_callback(_BACKGROUND_TASKS.discard)
         # The reservation stops counting once the worker is pooled (or ages

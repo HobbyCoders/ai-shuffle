@@ -137,6 +137,8 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 router.include_router(export_router)
 router.include_router(fork_router)
 router.include_router(worktree_router)
+from app.api.swarms import router as swarm_router
+router.include_router(swarm_router)
 
 
 # ============================================================================

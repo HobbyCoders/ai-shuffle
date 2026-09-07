@@ -1489,6 +1489,9 @@ async def _notify_caller_terminal(
     Never raises — a wake failure must not change how the worker's dispatch
     reports.
     """
+    from app.core.swarm import owns_terminal
+    if owns_terminal(parent_session_id):
+        return  # The retry-wrapper settles Swarm; only its aggregate wakes.
     try:
         from app.db import database
 
