@@ -5,13 +5,42 @@ import android.content.res.ColorStateList
 import android.os.Bundle
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.TextView
+import android.view.View
+import android.graphics.drawable.GradientDrawable
 import androidx.appcompat.widget.PopupMenu
+import androidx.lifecycle.lifecycleScope
 import com.hobbycoders.aishuffle.R
 import com.hobbycoders.aishuffle.account.AccountRepository
 import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.voice.VoiceCallActivity
+import com.hobbycoders.aishuffle.model.Server
+import com.hobbycoders.aishuffle.presence.PresenceState
+import com.hobbycoders.aishuffle.presence.WorkerPresence
+import com.hobbycoders.aishuffle.presence.WorkerPresenceMonitor
 
 class ServerListActivity : NativeScreen() {
+    private class StatusRow(val server: Server, val label: TextView, val dot: View)
+    private val statusRows = mutableMapOf<String, StatusRow>()
+    private val presence by lazy { WorkerPresenceMonitor(this, lifecycleScope, ::updatePresence) }
+    private fun updatePresence(server: Server, observed: WorkerPresence) {
+        val row = statusRows[server.id]?.takeIf { it.server == server } ?: return
+        val affiliation = if (server.accountId == null) "This phone" else "Your account"
+        val description = "$affiliation. ${observed.description(server.name)}"
+        if (row.label.contentDescription == description) return
+        row.label.text = "$affiliation · ${observed.state.label}"
+        row.label.contentDescription = description
+        row.dot.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(color(when (observed.state) {
+                PresenceState.ONLINE -> R.color.worker_online
+                PresenceState.OFFLINE -> R.color.worker_offline
+                else -> R.color.slate
+            }))
+        }
+    }
+    private fun refreshPresence() { presence.start(statusRows.values.map { it.server }, AccountRepository(this).store.session()) }
+    override fun onStop() { presence.stop(); super.onStop() }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent) }
     override fun onResume() {
         super.onResume()
@@ -26,6 +55,8 @@ class ServerListActivity : NativeScreen() {
     private fun openAccount(mode: String) { startActivity(Intent(this, AccountActivity::class.java).putExtra("mode", mode)) }
     private fun addWorker() { startActivity(Intent(this, AddServerActivity::class.java)) }
     private fun render() {
+        presence.stop()
+        statusRows.clear()
         val repo = AccountRepository(this)
         val account = repo.store.session()
         if (account == null && repo.store.hasStoredSession()) {
@@ -61,8 +92,9 @@ class ServerListActivity : NativeScreen() {
         }
         navigation("Workers", back = false)
         navigationAction(R.drawable.ic_settings, "Settings") { startActivity(Intent(this, SettingsActivity::class.java)) }
-        if (account != null) navigationAction(R.drawable.ic_refresh, "Refresh workers") {
-            runWork { repo.sync(); render(); status.text = "Workers are up to date." }
+        navigationAction(R.drawable.ic_refresh, "Refresh workers") {
+            refreshPresence()
+            if (account != null) runWork { repo.sync(); render(); status.text = "Workers are up to date." }
         }
         navigationAction(R.drawable.ic_add, "Add worker") { addWorker() }
         content.removeAllViews(); status.text = ""
@@ -79,9 +111,19 @@ class ServerListActivity : NativeScreen() {
             }
         }
         for (server in servers) {
-            val workerRow = row(server.name, "${server.host}\n${if (server.accountId == null) "This phone" else "Your account"}", R.drawable.ic_worker) {
+            val workerRow = row(server.name, server.host, R.drawable.ic_worker) {
                 startActivity(Intent(this, ChatActivity::class.java).putExtra("server_id", server.id))
             }
+            val labels = workerRow.getChildAt(1) as LinearLayout
+            // Keep the existing row and its options; status has text as well as a color indicator.
+            val stateLine = LinearLayout(this).apply { gravity = android.view.Gravity.CENTER_VERTICAL; setPadding(0, dp(4), 0, 0) }
+            val dot = View(this).apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+            val label = TextView(this).apply { textSize = 12f; setTextColor(color(R.color.slate)) }
+            stateLine.addView(dot, LinearLayout.LayoutParams(dp(7), dp(7)).apply { marginEnd = dp(6) })
+            stateLine.addView(label, LinearLayout.LayoutParams(0, -2, 1f))
+            labels.addView(stateLine)
+            statusRows[server.id] = StatusRow(server, label, dot)
+            updatePresence(server, WorkerPresence())
             workerRow.removeViewAt(workerRow.childCount - 1)
             val more = iconButton(R.drawable.ic_more, "Options for ${server.name}") {}
             more.background = rounded(R.color.card)
@@ -114,5 +156,6 @@ class ServerListActivity : NativeScreen() {
             row("Sign in to Shuffle", "Bring your workers to every device.", R.drawable.ic_account) { openAccount("login") }
             link("Use another device") { openAccount("pair") }
         }
+        refreshPresence()
     }
 }

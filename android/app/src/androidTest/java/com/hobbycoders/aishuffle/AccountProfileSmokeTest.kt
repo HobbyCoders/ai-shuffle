@@ -25,6 +25,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Before
+import org.junit.After
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.time.Instant
@@ -37,13 +38,16 @@ class AccountProfileSmokeTest {
     private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val store get() = AccountStore(context)
+    private var presenceFixture: PresenceFixture? = null
     @Before fun clearLocalState() {
+        presenceFixture = PresenceFixture()
         instrumentation.runOnMainSync {
             com.hobbycoders.aishuffle.tools.DeviceToolsRuntime.stop()
             store.clear()
             ServerStore.get(context).apply { getAll().forEach { remove(it.id) } }
         }
     }
+    @After fun restorePresenceTransport() { presenceFixture?.close() }
     private fun awaitText(text: String) = kotlinx.coroutines.runBlocking {
         kotlinx.coroutines.withTimeout(8_000) {
             while (runCatching { onView(withText(text)).check(matches(isDisplayed())) }.isFailure) kotlinx.coroutines.delay(50)

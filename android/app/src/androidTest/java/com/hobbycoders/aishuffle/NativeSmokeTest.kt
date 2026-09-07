@@ -39,7 +39,9 @@ import org.json.JSONObject
 class NativeSmokeTest {
     private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
+    private var presenceFixture: PresenceFixture? = null
     @Before fun clearLocalState() {
+        presenceFixture = PresenceFixture()
         instrumentation.runOnMainSync {
             DeviceToolsRuntime.stop(); ToolApprovals.cancelAll(); ToolsPreferences(context).setEnabled(false)
             AccountStore(context).apply { clear(); hub = AccountStore.DEFAULT_HUB }
@@ -47,7 +49,7 @@ class NativeSmokeTest {
             AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
         }
     }
-    @After fun stopRuntime() { instrumentation.runOnMainSync { DeviceToolsRuntime.stop(); AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO) } }
+    @After fun stopRuntime() { instrumentation.runOnMainSync { DeviceToolsRuntime.stop(); AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO) }; presenceFixture?.close() }
 
     private fun <T : android.app.Activity> awaitFocused(scenario: ActivityScenario<T>) {
         awaitCondition("Activity never became resumed and focused") {

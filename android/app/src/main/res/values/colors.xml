@@ -8,4 +8,6 @@
     <color name="on_primary">#FFFFFF</color>
     <color name="container">#E9EEEA</color>
     <color name="outline">#DDDFDC</color>
+    <color name="worker_online">#24774C</color>
+    <color name="worker_offline">#B43D3D</color>
 </resources>
