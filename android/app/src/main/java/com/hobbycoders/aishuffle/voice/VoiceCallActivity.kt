@@ -122,6 +122,10 @@ class VoiceCallActivity : AppCompatActivity() {
             finish()
             return
         }
+        if (VoiceCallState.isActive) {
+            startIssued = true // Reopening this active call has satisfied the foreground request.
+            return
+        }
         if (!VoiceCallState.isActive && !startIssued) {
             startIssued = true
             VoiceCallService.start(this, serverId, SessionMode.CHAT, sessionId)
