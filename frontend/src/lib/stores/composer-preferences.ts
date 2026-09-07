@@ -1,6 +1,7 @@
 /** Account-scoped defaults. Session transcripts and existing run bindings stay local to their session. */
 import { preferenceSync } from '$lib/services/preferences';
 import type { ClusterProject } from '$lib/api/installs';
+import { sessionOwnerEpoch } from './session-owner';
 
 type ProjectPick = { projectId: string; projectV2Id: string | null };
 type CheckoutPick = ProjectPick & ({kind:'existing'; worktreeId:string; branch:string}
@@ -19,6 +20,20 @@ const defaults: Picks = {profile:'', project:{projectId:'',projectV2Id:null}, ch
  model:null, effort:null, permissionMode:null, contextWindowChoice:null, fastMode:null, worktreeIntent:'local'};
 const values = {...defaults};
 const listeners = new Set<() => void>();
+let pendingNotificationEpoch: number | null = null;
+function notifyRemote() {
+ const epoch = sessionOwnerEpoch();
+ if (pendingNotificationEpoch === epoch) return;
+ pendingNotificationEpoch = epoch;
+ // A snapshot applies its registered keys synchronously. Publish the complete
+ // selection once, before a restored branch starts protecting that draft.
+ queueMicrotask(() => {
+  if (pendingNotificationEpoch !== epoch) return;
+  pendingNotificationEpoch = null;
+  if (sessionOwnerEpoch() !== epoch) return;
+  for (const listener of listeners) listener();
+ });
+}
 const projectPick = (v: unknown): v is ProjectPick => !!v && typeof v === 'object'
  && typeof (v as ProjectPick).projectId === 'string'
  && ((v as ProjectPick).projectV2Id === null || typeof (v as ProjectPick).projectV2Id === 'string');
@@ -55,7 +70,7 @@ for (const key of Object.keys(defaults) as (keyof Picks)[]) {
  } catch { /* SSR or unavailable storage */ }
  preferenceSync.register(`composer.${key}`, {
   read: () => values[key],
-  apply(value) { store(key, value); for (const listener of listeners) listener(); }
+  apply(value) { store(key, value); notifyRemote(); }
  });
 }
 export const composerPreferences = {
