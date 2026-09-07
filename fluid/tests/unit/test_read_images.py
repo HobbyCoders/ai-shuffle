@@ -1,0 +1,141 @@
+"""Read tool image/binary/truncation paths + image plumbing through the stack."""
+
+import base64
+
+from fluid.tools.builtins import register_builtins
+from fluid.tools.builtins.read import DEFAULT_LINE_LIMIT, MAX_LINE_CHARS
+from fluid.tools.mcp.client import _map_call_result
+from fluid.tools.registry import ToolCtx, ToolRegistry
+
+# Smallest valid PNG header + a NUL-bearing payload — enough to exercise the
+# base64 path without shipping a real image fixture.
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+def _registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    register_builtins(registry)
+    return registry
+
+
+async def test_read_image_returns_base64_not_text(tmp_path) -> None:
+    f = tmp_path / "shot.png"
+    f.write_bytes(PNG_BYTES)
+    ctx = ToolCtx(cwd=str(tmp_path))
+
+    out = await _registry().dispatch("Read", {"file_path": str(f)}, ctx)
+
+    assert not out.is_error
+    assert len(out.images) == 1
+    img = out.images[0]
+    assert img.media_type == "image/png"
+    assert base64.b64decode(img.data) == PNG_BYTES
+    # The model-facing text is a short label, never decoded binary.
+    assert "shot.png" in out.text and len(out.text) < 200
+    assert str(f) in ctx.read_files
+
+
+async def test_read_image_too_large_is_error(tmp_path, monkeypatch) -> None:
+    import fluid.tools.builtins.read as read_mod
+
+    monkeypatch.setattr(read_mod, "MAX_IMAGE_BYTES", 16)
+    f = tmp_path / "big.png"
+    f.write_bytes(PNG_BYTES)
+
+    out = await _registry().dispatch("Read", {"file_path": str(f)}, ToolCtx(cwd=str(tmp_path)))
+    assert out.is_error and "too large" in out.text and not out.images
+
+
+async def test_read_non_image_binary_refused(tmp_path) -> None:
+    f = tmp_path / "blob.bin"
+    f.write_bytes(b"\x00\x01\x02" * 100)
+
+    out = await _registry().dispatch("Read", {"file_path": str(f)}, ToolCtx(cwd=str(tmp_path)))
+    assert out.is_error and "binary file" in out.text
+
+
+async def test_read_text_default_line_limit_and_continuation(tmp_path) -> None:
+    f = tmp_path / "big.log"
+    f.write_text("\n".join(f"line{i}" for i in range(1, DEFAULT_LINE_LIMIT + 100)))
+
+    out = await _registry().dispatch("Read", {"file_path": str(f)}, ToolCtx(cwd=str(tmp_path)))
+    body = out.text.splitlines()
+    assert body[0] == "1\tline1"
+    assert body[DEFAULT_LINE_LIMIT - 1] == f"{DEFAULT_LINE_LIMIT}\tline{DEFAULT_LINE_LIMIT}"
+    assert f"offset={DEFAULT_LINE_LIMIT + 1}" in body[-1]  # continuation hint
+
+
+async def test_read_text_long_lines_truncated(tmp_path) -> None:
+    f = tmp_path / "wide.txt"
+    f.write_text("x" * (MAX_LINE_CHARS * 3) + "\nshort\n")
+
+    out = await _registry().dispatch("Read", {"file_path": str(f)}, ToolCtx(cwd=str(tmp_path)))
+    first, second = out.text.splitlines()[:2]
+    assert first.endswith("[line truncated]")
+    assert len(first) < MAX_LINE_CHARS + 100
+    assert second == "2\tshort"
+
+
+async def test_read_offset_limit_window(tmp_path) -> None:
+    f = tmp_path / "n.txt"
+    f.write_text("\n".join(f"l{i}" for i in range(1, 51)))
+
+    out = await _registry().dispatch(
+        "Read", {"file_path": str(f), "offset": 10, "limit": 3}, ToolCtx(cwd=str(tmp_path))
+    )
+    lines = out.text.splitlines()
+    assert lines[:3] == ["10\tl10", "11\tl11", "12\tl12"]
+    assert "offset=13" in lines[-1]
+
+
+async def test_normalize_keeps_sdk_envelope_images() -> None:
+    from fluid.tools.registry import _normalize
+
+    out = _normalize({
+        "content": [
+            {"type": "text", "text": "screenshot taken"},
+            {"type": "image", "mimeType": "image/jpeg", "data": "aGk="},
+        ]
+    })
+    assert out.text == "screenshot taken"
+    assert out.images[0].media_type == "image/jpeg" and out.images[0].data == "aGk="
+
+
+def test_mcp_map_call_result_keeps_images() -> None:
+    result = {
+        "content": [
+            {"type": "text", "text": "ok"},
+            {"type": "image", "mimeType": "image/png", "data": "aGk="},
+        ],
+        "isError": False,
+    }
+    mapped = _map_call_result(result)
+    assert mapped["text"] == "ok"
+    assert mapped["images"] == [{"media_type": "image/png", "data": "aGk="}]
+
+
+def test_trimmer_counts_and_trims_image_results() -> None:
+    from fluid.context.trim import ToolResultTrimmer, TrimConfig, _block_chars
+    from fluid.messages import Image, Message, Text, ToolResultBlock
+    from fluid.store.base import SessionNode
+
+    block = ToolResultBlock(
+        tool_use_id="t1",
+        content=[Text("[image]"), Image(media_type="image/png", data="aGk=")],
+    )
+    assert _block_chars(block) >= 6_000  # image weight makes it trim-eligible
+
+    nodes = [
+        SessionNode(
+            node_id=f"n{i}", parent_id=None,
+            message=Message(role="user", content=[block]),
+        )
+        for i in range(3)
+    ]
+    trimmer = ToolResultTrimmer(config=TrimConfig(keep_recent_tool_results=1))
+    assert trimmer.force_trim(nodes)
+    rendered = trimmer.view(nodes)
+    assert not any(
+        isinstance(c, Image)
+        for b in rendered[0].content for c in getattr(b, "content", [])
+    )
