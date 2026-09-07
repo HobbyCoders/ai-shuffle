@@ -1024,6 +1024,23 @@ class VoiceBridge:
         if self._greet:
             await self._inject(GREETING_PROMPT)
 
+        # Only a successful attach restores the durable working-set flag. A
+        # finished call may be rejoined without creating a fresh session row.
+        if not self._stopped:
+            row = await run_sync(database.set_session_active, self.session_id, True)
+            if row:
+                try:
+                    from app.core.sync_engine import sync_engine
+                    await sync_engine.broadcast_user_session_updated(
+                        user_id=row.get("api_user_id") or "admin",
+                        session_id=self.session_id,
+                        updates={"is_active": True},
+                        source_device_id=None,
+                    )
+                except Exception:
+                    logger.warning("Voice: active-state broadcast failed for %s",
+                                   self.session_id, exc_info=True)
+
     async def stop(self, reason: str = "hangup") -> None:
         """Close the sideband and settle the bridge. Idempotent; never raises."""
         if self._stopped:

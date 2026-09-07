@@ -35,6 +35,16 @@ VOICE_ROOT = "/api/v1/voice"
 RAW_KEY = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_native_services(monkeypatch):
+    """The API client runs lifespan; it must not probe or launch host Chrome."""
+    from unittest.mock import AsyncMock
+    from app.core import native_chrome, cluster
+
+    monkeypatch.setattr(native_chrome, "ensure_started", AsyncMock())
+    monkeypatch.setattr(cluster, "_primary_lan_ip", lambda: "127.0.0.1")
+
+
 def _unlock(mock_db):
     encryption.set_encryption_key("test-password", db)
 
@@ -938,16 +948,24 @@ class TestVoiceCallAttach:
         # Still fully fetchable and attachable — list-visibility only.
         assert db.get_session(SESSION_ID) is not None
         assert len(sidebands) == 1
-        assert broadcasts == [("admin", SESSION_ID, {"hidden": True})]
+        assert broadcasts == [
+            ("admin", SESSION_ID, {"hidden": True}),
+            ("admin", SESSION_ID, {"is_active": True}),
+        ]
 
         # A reconnect re-declaring "command" finds the row already hidden —
-        # no redundant write, no repeat broadcast.
+        # no redundant hidden write/broadcast. Successful attaches still
+        # refresh active membership for connected devices.
         resp = authenticated_client.post(
             f"{VOICE_ROOT}/sessions/{SESSION_ID}/call",
             json={"call_id": "rtc_2", "session_mode": "command"},
         )
         assert resp.status_code == 200, resp.text
-        assert broadcasts == [("admin", SESSION_ID, {"hidden": True})]
+        assert broadcasts == [
+            ("admin", SESSION_ID, {"hidden": True}),
+            ("admin", SESSION_ID, {"is_active": True}),
+            ("admin", SESSION_ID, {"is_active": True}),
+        ]
 
         authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
 

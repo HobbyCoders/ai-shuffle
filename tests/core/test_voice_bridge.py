@@ -2473,6 +2473,38 @@ async def test_hangup_clears_is_active(mock_db, fake_sockets, registry):
     assert bool(_session_row()["is_active"]) is False
 
 
+async def test_successful_rejoin_restores_active_and_notifies_owner(
+    mock_db, fake_sockets, registry, monkeypatch
+):
+    from unittest.mock import AsyncMock
+    from app.core.sync_engine import sync_engine
+
+    _mk_session()
+    notify = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", notify)
+    await registry.attach(SID, "first", api_key=KEY, model=MODEL, max_call_minutes=60)
+    await registry.detach(SID)
+    assert not _session_row()["is_active"]
+    notify.reset_mock()
+    bridge = await registry.attach(SID, "rejoin", api_key=KEY, model=MODEL, max_call_minutes=60)
+    assert bridge.connected
+    assert _session_row()["is_active"]
+    notify.assert_awaited_once_with(user_id="admin", session_id=SID,
+                                   updates={"is_active": True}, source_device_id=None)
+
+
+async def test_failed_rejoin_does_not_restore_active(mock_db, registry, monkeypatch):
+    async def fail(*args):
+        raise RuntimeError("transport unavailable")
+
+    _mk_session()
+    sessions_db.set_session_active(SID, False)
+    monkeypatch.setattr(vb, "_open_sideband", fail)
+    with pytest.raises(RuntimeError, match="transport unavailable"):
+        await registry.attach(SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=60)
+    assert not _session_row()["is_active"]
+
+
 async def test_shutdown_and_cap_clear_is_active(mock_db, fake_sockets, registry):
     from app.db import database
 
