@@ -224,76 +224,74 @@
 	   the git actions in a horizontal touch-scroll rail filling the rest
 	   (omitted in chat mode).
 	   =================================================================== */
-	/* Mobile breakpoint: 1080px covers phones AND unfolded foldables (Z Fold 6/7
-	   inner ~1028–1040px). Kept in sync with AppLayout's isMobile width cutoff. */
-	@media (max-width: 1080px) {
-		.page-header {
-			flex-direction: row;
-			align-items: center;
-			min-height: 44px;
-			padding: 0 8px;
-			gap: 8px;
-			/* Only the git rail (.hdr-right) scrolls. */
-			overflow: visible;
-		}
+	/* The mobile shell is the Android WebView (see docs/mobile-desktop-ui-split.md),
+	   stamped as html[data-platform='mobile'] before first paint — not a width. */
+	:global(html[data-platform='mobile']) .page-header {
+		flex-direction: row;
+		align-items: center;
+		min-height: 44px;
+		padding: 0 8px;
+		gap: 8px;
+		/* Only the git rail (.hdr-right) scrolls. */
+		overflow: visible;
+	}
 
-		/* Flatten both wrappers so every item shares the single row (as on desktop). */
-		.hdr-row1,
-		.hdr-row2 {
-			display: contents;
-		}
+	/* Flatten both wrappers so every item shares the single row (as on desktop). */
+	:global(html[data-platform='mobile']) .hdr-row1,
+	:global(html[data-platform='mobile']) .hdr-row2 {
+		display: contents;
+	}
 
-		/* Chat name is shown in the global app bar on mobile. */
-		.header-title {
-			display: none;
-		}
+	/* Chat name is shown in the global app bar on mobile. */
+	:global(html[data-platform='mobile']) .header-title {
+		display: none;
+	}
 
-		/* Pinned, non-scrolling meta actions such as download. */
-		.hdr-meta {
-			order: 1;
-			flex-shrink: 0;
-			margin: 0;
-		}
+	/* Pinned, non-scrolling meta actions such as download. */
+	:global(html[data-platform='mobile']) .hdr-meta {
+		order: 1;
+		flex-shrink: 0;
+		margin: 0;
+	}
 
-		.hdr-profile {
-			order: 2;
-			flex-shrink: 0;
-			margin: 0;
-		}
+	:global(html[data-platform='mobile']) .hdr-profile {
+		order: 2;
+		flex-shrink: 0;
+		margin: 0;
+	}
 
-		/* Git actions: horizontal touch-scroll rail filling the remaining width.
-		   Editable-prompt popovers inside it switch to position:fixed on mobile,
-		   so this overflow doesn't clip them. */
-		.hdr-right {
-			order: 3;
-			flex: 1 1 auto;
-			min-width: 0;
-			flex-wrap: nowrap;
-			/* Reset the desktop `flex-end`: with flex-end + overflow-x the content
-			   overflows past the START (left) edge, which is unreachable by scroll —
-			   so the git actions slide under the pinned meta-actions cluster
-			   instead of scrolling. flex-start sends the overflow to the END so the
-			   rail scrolls left→right and never overlaps the meta cluster. */
-			justify-content: flex-start;
-			margin: 0;
-			overflow-x: auto;
-			overflow-y: hidden;
-			-webkit-overflow-scrolling: touch;
-			scrollbar-width: none; /* Firefox */
-		}
+	/* Git actions: horizontal touch-scroll rail filling the remaining width.
+	   Editable-prompt popovers inside it switch to position:fixed on mobile,
+	   so this overflow doesn't clip them. */
+	:global(html[data-platform='mobile']) .hdr-right {
+		order: 3;
+		flex: 1 1 auto;
+		min-width: 0;
+		flex-wrap: nowrap;
+		/* Reset the desktop `flex-end`: with flex-end + overflow-x the content
+		   overflows past the START (left) edge, which is unreachable by scroll —
+		   so the git actions slide under the pinned meta-actions cluster
+		   instead of scrolling. flex-start sends the overflow to the END so the
+		   rail scrolls left→right and never overlaps the meta cluster. */
+		justify-content: flex-start;
+		margin: 0;
+		overflow-x: auto;
+		overflow-y: hidden;
+		-webkit-overflow-scrolling: touch;
+		scrollbar-width: none; /* Firefox */
+	}
 
-		.hdr-right::-webkit-scrollbar {
-			display: none;
-		}
+	:global(html[data-platform='mobile']) .hdr-right::-webkit-scrollbar {
+		display: none;
+	}
 
-		.hdr-right > :global(*) {
-			flex-shrink: 0;
-		}
+	:global(html[data-platform='mobile']) .hdr-right > :global(*) {
+		flex-shrink: 0;
+	}
 
-		.header-btn {
-			width: 36px;
-			height: 36px;
-		}
+	:global(html[data-platform='mobile']) .header-btn {
+		width: 36px;
+		height: 36px;
 	}
 
 	/* Reduced motion */

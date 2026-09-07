@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import WorkspaceSelector from './WorkspaceSelector.svelte';
+import { platform } from '$lib/stores/platform.svelte';
 import '../../test-stubs/composer-dom';
 
 vi.hoisted(() => vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) })));
@@ -18,6 +19,9 @@ vi.mock('$lib/stores/app-data.svelte', async () => {
 const originalWidth = window.innerWidth;
 const originalHeight = window.innerHeight;
 beforeEach(() => {
+	// The popup is a mobile-shell affordance; the viewport numbers stay because
+	// the popup measures the viewport to place and size itself.
+	platform.set('mobile');
 	window.innerWidth = 390;
 	window.innerHeight = 600;
 	vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
@@ -25,7 +29,7 @@ beforeEach(() => {
 		return { x: 35, y: popup ? 0 : 430, left: 35, right: 355, top: popup ? 0 : 430, bottom: popup ? 300 : 470, width: 320, height: popup ? 300 : 40, toJSON() {} };
 	});
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); platform.set('desktop'); });
 afterAll(() => { window.innerWidth = originalWidth; window.innerHeight = originalHeight; vi.unstubAllGlobals(); });
 
 describe('mobile workspace popup', () => {
@@ -64,7 +68,7 @@ describe('mobile workspace popup', () => {
 		expect(screen.queryByText('Select your workspace')).toBeNull();
 	});
 
-	it('fits the popup inside a short viewport and restores desktop positioning on resize', async () => {
+	it('fits the popup inside a short viewport and restores desktop positioning when the shell is desktop', async () => {
 		const { container } = render(WorkspaceSelector, { selectedProject: null, onSelectProject: vi.fn() });
 		await fireEvent.click(screen.getByRole('button', { name: 'your project' }));
 		const popup = container.querySelector('.picker-dropdown') as HTMLElement;
@@ -72,6 +76,7 @@ describe('mobile workspace popup', () => {
 		expect(top).toBeGreaterThanOrEqual(12);
 		expect(top + 300).toBeLessThanOrEqual(588);
 		expect(parseFloat(popup.style.getPropertyValue('--selector-scroll-height'))).toBeGreaterThan(0);
+		platform.set('desktop');
 		window.innerWidth = 1280;
 		await fireEvent.resize(window);
 		expect(popup.classList.contains('mobile-popup')).toBe(false);

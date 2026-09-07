@@ -12,9 +12,8 @@
 	 *   profile, branch, and git-action popovers (single-open-at-a-time).
 	 * - Desktop: the panel is right-anchored under the button (the bell sits in the
 	 *   top-bar right cluster) so it expands leftward and can't clip off-screen.
-	 * - Outside-click + Escape to close. On mobile (≤1080px — the foldable-aware
-	 *   header breakpoint) the panel is `position: fixed` so the right-edge anchor
-	 *   can't clip it.
+	 * - Outside-click + Escape to close. On the mobile shell the panel is
+	 *   `position: fixed` so the right-edge anchor can't clip it.
 	 */
 	import { onDestroy } from 'svelte';
 	import {
@@ -473,10 +472,10 @@
 		outline-offset: -2px;
 	}
 
-	/* Mobile / foldable (≤1080px, coarse pointer): the header reflows and an
-	   absolutely-positioned panel anchored to this button would clip. Pin it as a
-	   fixed near-full-width panel below the header. */
-	@media (max-width: 1080px) and (pointer: coarse) {
+	/* Mobile shell: the header reflows and an absolutely-positioned panel anchored
+	   to this button would clip. Pin it as a fixed near-full-width panel below the
+	   header. */
+	:global(html[data-platform='mobile']) {
 		.notif-btn {
 			width: 36px;
 			height: 36px;

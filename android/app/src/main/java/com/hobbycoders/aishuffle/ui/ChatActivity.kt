@@ -104,6 +104,8 @@ class ChatActivity : NativeScreen() {
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             javaScriptCanOpenWindowsAutomatically = false; setSupportMultipleWindows(false)
             mediaPlaybackRequiresUserGesture = true
+            // Tells the frontend to render its mobile shell; see WebUserAgent.
+            userAgentString = WebUserAgent.decorate(userAgentString, appVersionName())
         }
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, false)
         web.webChromeClient = object : WebChromeClient() {
@@ -167,6 +169,8 @@ class ChatActivity : NativeScreen() {
             override fun handleOnBackPressed() { if (web.canGoBack()) web.goBack() else finish() }
         })
     }
+    private fun appVersionName(): String? =
+        runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()
     private fun chatLayout() {
         navigation(server.name)
         val toolbar = findViewById<LinearLayout>(R.id.screenToolbar)

@@ -6,6 +6,7 @@
 	import { activeSession, activeWsConnected } from '$lib/stores/active-session';
 	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
 	import { notify } from '$lib/stores/notifications';
+	import { platform } from '$lib/stores/platform.svelte';
 	import { createConnectionBannerGrace } from '$lib/stores/session/connection-banner-grace';
 	import Banner from '$lib/components/Banner.svelte';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
@@ -76,7 +77,7 @@
 	let surfaceHeight = $state(0);
 	let composerHeight = $state(0);
 	$effect(() => {
-		if (showEmptyHero && surfaceHeight > 0 && composerHeight > surfaceHeight && window.innerWidth <= 1080) {
+		if (showEmptyHero && surfaceHeight > 0 && composerHeight > surfaceHeight && platform.isMobile) {
 			void tick().then(() => {
 				const focused = document.activeElement;
 				if (focused instanceof HTMLElement && focused.closest('.empty-input-layout')) {
@@ -475,30 +476,28 @@
 		max-width: 768px;
 	}
 
-	@media (max-width: 1080px) {
-		/* The invitation stays at its natural size and a fixed top inset. The
-		   whole empty surface scrolls; the workspace popup uses the top layer. */
-		.chat-view.is-empty { overflow-y: auto; }
-		.is-empty .empty-hero {
-			flex: 0 0 auto;
-			justify-content: flex-start;
-			padding-top: 1rem;
-		}
-		.is-empty .empty-hero-content { flex-shrink: 0; }
-		.is-empty .empty-bottom-spacer { display: none; }
-		.chat-view.is-empty .input-slot.empty-input-layout {
-			position: sticky;
-			bottom: 0;
-			z-index: 10;
-			background: var(--background);
-			margin-top: 0;
-		}
-		/* An oversized dock must scroll normally, not pin its editor offscreen.
-		   Do not clip the slot: its anchored popovers extend outside the dock. */
-		.chat-view.is-empty .input-slot.empty-input-layout.composer-overflow { position: static; }
-		/* Short expanded panels must not permanently cover the invitation. */
-		.chat-view.is-empty .input-slot.empty-input-layout:global([data-panel-flow]) { position: static; }
+	/* The invitation stays at its natural size and a fixed top inset. The
+	   whole empty surface scrolls; the workspace popup uses the top layer. */
+	:global(html[data-platform='mobile']) .chat-view.is-empty { overflow-y: auto; }
+	:global(html[data-platform='mobile']) .is-empty .empty-hero {
+		flex: 0 0 auto;
+		justify-content: flex-start;
+		padding-top: 1rem;
 	}
+	:global(html[data-platform='mobile']) .is-empty .empty-hero-content { flex-shrink: 0; }
+	:global(html[data-platform='mobile']) .is-empty .empty-bottom-spacer { display: none; }
+	:global(html[data-platform='mobile']) .chat-view.is-empty .input-slot.empty-input-layout {
+		position: sticky;
+		bottom: 0;
+		z-index: 10;
+		background: var(--background);
+		margin-top: 0;
+	}
+	/* An oversized dock must scroll normally, not pin its editor offscreen.
+	   Do not clip the slot: its anchored popovers extend outside the dock. */
+	:global(html[data-platform='mobile']) .chat-view.is-empty .input-slot.empty-input-layout.composer-overflow { position: static; }
+	/* Short expanded panels must not permanently cover the invitation. */
+	:global(html[data-platform='mobile']) .chat-view.is-empty .input-slot.empty-input-layout:global([data-panel-flow]) { position: static; }
 
 	/* A composer-free surface can center its hero on desktop. */
 	.empty-hero.hero-only {

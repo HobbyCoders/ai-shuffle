@@ -2,10 +2,12 @@
 	/**
 	 * AppTopBar - compact mobile app bar + navigation drawer.
 	 *
-	 * Rendered only at ≤1080px (phones AND unfolded foldables); AppLayout owns
-	 * that width decision. The bar carries ☰ menu + current-page title, and
-	 * every navigation destination lives in the slide-in drawer, which hosts the
-	 * same Sidebar component the desktop shell shows beside the main panel.
+	 * Rendered only on the mobile shell (the Android app's WebView); AppLayout
+	 * owns that platform decision — never a viewport width, so a narrow desktop
+	 * browser keeps the desktop shell. The bar carries ☰ menu + current-page
+	 * title, and every navigation destination lives in the slide-in drawer,
+	 * which hosts the same Sidebar component the desktop shell shows beside the
+	 * main panel.
 	 *
 	 * The notification bell moved into that sidebar's header, so on this bar it
 	 * is represented by a dot on the ☰ while the drawer is closed. Unread state

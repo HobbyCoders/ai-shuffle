@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import type { SettingsImportPreview } from '$lib/api/settings-import';
+import { platform } from '$lib/stores/platform.svelte';
 
 const mocks = vi.hoisted(() => ({
 	preview: vi.fn(),
@@ -121,10 +122,13 @@ beforeEach(() => {
 		overwrite_existing: false
 	});
 	mocks.loadProjects.mockResolvedValue(undefined);
-	Object.defineProperty(window, 'innerWidth', { value: 1280, writable: true, configurable: true });
+	platform.set('desktop');
 });
 
-afterEach(cleanup);
+afterEach(() => {
+	platform.set('desktop');
+	cleanup();
+});
 
 describe('SettingsImportDialog', () => {
 	it('selects providers before preview and exposes paths, provenance, inventory, and diagnostics', async () => {

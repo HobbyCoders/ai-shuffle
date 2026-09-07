@@ -7,6 +7,7 @@
 	 * Uses GroupedSelector for group-aware project selection.
 	 */
 	import { ChevronDown, FolderClosed } from 'lucide-svelte';
+	import { isMobileUi } from '$lib/stores/platform.svelte';
 	import { appData, clusterProjects, profiles, projects } from '$lib/stores/app-data.svelte';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
@@ -30,14 +31,15 @@
 	let groupedSelector = $state<ReturnType<typeof GroupedSelector> | null>(null);
 	const pickerId = $props.id();
 
-	// On phones use the top layer so neither the chat surface nor the keyboard
-	// can clip this popup. Desktop keeps its existing anchored dropdown.
+	// On the mobile shell use the top layer so neither the chat surface nor the
+	// keyboard can clip this popup. The desktop shell keeps its anchored dropdown
+	// at every width.
 	function mobilePopup(node: HTMLDivElement) {
 		const viewport = window.visualViewport;
 		const scrollport = dropdownRef?.closest<HTMLElement>('.chat-view');
 		let topLayer = false;
 		function position() {
-			if (window.innerWidth > 1080) {
+			if (!isMobileUi()) {
 				if (topLayer) node.hidePopover();
 				topLayer = false;
 				node.removeAttribute('popover');

@@ -15,7 +15,7 @@
 	} from 'lucide-svelte';
 	import { git, changedFiles, changedFilesLoading } from '$lib/stores/git.svelte';
 	import type { FileChangeInfo } from '$lib/api/git';
-	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
+	import { platform } from '$lib/stores/platform.svelte';
 	import DiffViewer from './DiffViewer.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { notify } from '$lib/stores/notifications';
@@ -324,25 +324,21 @@
 		}
 	}
 
-	// ── Mobile detection ────────────────────────────────────────────────
-	// Fullscreen below the app-wide mobile cutoff (1080px), which is wider than
-	// the 640px `sm` breakpoint so unfolded foldables (Galaxy Z Fold inner
-	// screen ≈ 884px) get a fullscreen panel rather than a partial drawer.
-	function computeIsMobile(): boolean {
-		return typeof window !== 'undefined' && isPanelFullscreenWidth(window.innerWidth);
-	}
+	// ── Shell ───────────────────────────────────────────────────────────
+	// Fullscreen on the mobile shell (the Android WebView). The desktop shell
+	// keeps the resizable side drawer at every window width; CSS clamps it to
+	// the viewport so a narrow browser window never overflows.
+	const isMobile = $derived(platform.isMobile);
 
-	// ── Resize logic ────────────────────────────────────────────────────
+	// ── Resize logic (desktop shell only) ───────────────────────────────
 	let panelWidth = $state(
-		computeIsMobile()
-			? window.innerWidth
-			: Math.min((typeof window !== 'undefined' ? window.innerWidth : 0) * 0.6 || 800, 1100)
+		Math.min((typeof window !== 'undefined' ? window.innerWidth : 0) * 0.6 || 800, 1100)
 	);
 	let isResizing = $state(false);
 	let panelElement: HTMLElement | undefined = $state(undefined);
 
 	function startResize(e: PointerEvent) {
-		if (computeIsMobile()) return; // no resize on mobile (panel is fullscreen)
+		if (platform.isMobile) return; // no resize on mobile (panel is fullscreen)
 		e.preventDefault();
 		isResizing = true;
 		const startX = e.clientX;
@@ -364,13 +360,6 @@
 		window.addEventListener('pointerup', onUp);
 	}
 
-	let isMobile = $state(computeIsMobile());
-
-	function handleResize() {
-		isMobile = computeIsMobile();
-		if (isMobile) panelWidth = window.innerWidth;
-	}
-
 	// Reset state when panel closes
 	$effect(() => {
 		if (!open) {
@@ -381,7 +370,7 @@
 	});
 </script>
 
-<svelte:window onkeydown={handleKeydown} onresize={handleResize} />
+<svelte:window onkeydown={handleKeydown} />
 
 {#snippet statusIcon(status: string)}
 	<span class={`shrink-0 ${statusColor(status)}`}>
@@ -838,6 +827,8 @@
 		right: 0;
 		bottom: 0;
 		width: 360px;
+		/* Desktop shell stays a side drawer at every width — clamp, never overflow. */
+		max-width: 100vw;
 		z-index: 95;
 		display: flex;
 		flex-direction: column;
@@ -897,15 +888,11 @@
 		height: 64px;
 	}
 
-	/* Fullscreen at the app-wide mobile cutoff (1080px) rather than the 640px
-	   `sm` breakpoint, so unfolded foldables (Galaxy Z Fold inner screen
-	   ≈ 884px) open fullscreen instead of as a partial-width drawer. Backstops
+	/* Mobile shell (Android WebView): the panel is always fullscreen. Backstops
 	   the JS-driven .panel-mobile class before hydration. */
-	@media (max-width: 1080px) {
-		.panel {
-			width: 100% !important;
-			border-left: none;
-		}
+	:global(html[data-platform='mobile']) .panel {
+		width: 100% !important;
+		border-left: none;
 	}
 
 	/* ── Header ──────────────────────────────────────────────────────── */
@@ -1417,12 +1404,13 @@
 
 	.file-row:hover .file-actions { display: flex; }
 
-	/* Touch / mobile-width: actions can't be hover-revealed — keep them visible.
-	   (hover: none) covers real touch devices incl. unfolded foldables; 1080px
-	   matches the app-wide mobile cutoff so the desktop resize-test path works too. */
-	@media (hover: none), (max-width: 1080px) {
+	/* Touch / mobile shell: actions can't be hover-revealed — keep them visible.
+	   (hover: none) covers real touch devices, including touch laptops. */
+	@media (hover: none) {
 		.file-actions { display: flex; }
 	}
+
+	:global(html[data-platform='mobile']) .file-actions { display: flex; }
 
 	.action-btn {
 		width: 28px;

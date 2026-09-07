@@ -135,6 +135,7 @@ import { appMode } from '$lib/stores/sessionMode.svelte';
 // assert. Module-level state, hence the reset in beforeEach.
 import { sidebarWorkspace } from '$lib/stores/sidebar-prefs.svelte';
 import Sidebar from './Sidebar.svelte';
+import { platform } from '$lib/stores/platform.svelte';
 
 function session(
 	id: string,
@@ -238,7 +239,10 @@ beforeEach(() => {
 	]);
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+	cleanup();
+	platform.set('desktop');
+});
 
 describe('Sidebar session groups', () => {
 	it('shares collapsed groups with a mounted sidebar and resets them on account change', async () => {
@@ -725,17 +729,9 @@ describe('Sidebar open-PR refresh (R8)', () => {
 });
 
 describe('Sidebar delegated card menus (R15)', () => {
-	beforeEach(() => {
-		Object.defineProperty(window, 'matchMedia', {
-			writable: true,
-			configurable: true,
-			value: vi.fn().mockImplementation(() => ({
-				matches: true,
-				addEventListener: vi.fn(),
-				removeEventListener: vi.fn(),
-			})),
-		});
-	});
+	// Swipe-to-reveal is the mobile shell's gesture: the cards render their
+	// swipe layout because the platform is mobile, not because of a width.
+	beforeEach(() => platform.set('mobile'));
 
 	function openActions(id: string) {
 		const frame = document.querySelector(`[data-session-card="${id}"]`) as HTMLElement;

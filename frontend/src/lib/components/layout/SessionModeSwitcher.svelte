@@ -163,9 +163,12 @@
 
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 
-	@media (hover: none), (max-width: 1080px) {
+	/* Touch sizing: the mobile shell, plus any touch-only pointer. */
+	@media (hover: none) {
 		.mode { height: 40px; }
 	}
+
+	:global(html[data-platform='mobile']) .mode { height: 40px; }
 
 	@media (prefers-reduced-motion: reduce) {
 		.mode, .thumb { transition: none; }

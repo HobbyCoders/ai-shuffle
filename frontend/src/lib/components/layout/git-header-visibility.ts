@@ -62,8 +62,8 @@ export interface HeaderGitActionsInput {
 	/**
 	 * Session's own lane ('code' | 'chat' | 'voice').
 	 * Chat-lane sessions have no repository; hide the git rail for them.
-	 * Code and voice keep it on every width — including mobile, where Finish
-	 * must remain reachable when a PR is open. Omitted values fail open.
+	 * Code and voice keep it on both shells — including the mobile shell, where
+	 * Finish must remain reachable when a PR is open. Omitted values fail open.
 	 */
 	sessionMode?: string;
 }
@@ -75,8 +75,8 @@ export interface HeaderGitActionsInput {
  * Remote-placed sessions never show local git actions — their repo lives on the
  * owning install, so the local status is meaningless (and would surface a bogus
  * "Init Repo"). Chat-lane sessions have no repo, so the rail is hidden for
- * them. Code (and voice) keep Commit/Push/Finish on desktop AND mobile —
- * never gate on viewport width.
+ * them. Code (and voice) keep Commit/Push/Finish on the desktop AND mobile
+ * shells — never gate on viewport width or platform.
  *
  * Deliberately independent of GitHub auth: a `gh` blip must never blank the
  * local git UI (G10c).

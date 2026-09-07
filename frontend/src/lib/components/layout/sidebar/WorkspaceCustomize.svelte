@@ -279,11 +279,16 @@
 
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 
-	@media (hover: none), (max-width: 1080px) {
+	/* Touch sizing: the mobile shell, plus any touch-only pointer. */
+	@media (hover: none) {
 		.crow { height: 44px; }
 		.cb { width: 20px; height: 20px; }
 		.grip { padding: 10px 6px; }
 	}
+
+	:global(html[data-platform='mobile']) .crow { height: 44px; }
+	:global(html[data-platform='mobile']) .cb { width: 20px; height: 20px; }
+	:global(html[data-platform='mobile']) .grip { padding: 10px 6px; }
 
 	@media (prefers-reduced-motion: reduce) {
 		.veil, .custom { animation: none; }

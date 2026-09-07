@@ -26,7 +26,7 @@
 		type SettingsImportProvider
 	} from '$lib/api/settings-import';
 	import { appData } from '$lib/stores/app-data.svelte';
-	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
+	import { platform } from '$lib/stores/platform.svelte';
 
 	interface Props {
 		onClose: () => void;
@@ -66,8 +66,9 @@
 
 	let dialogEl = $state<HTMLDivElement | null>(null);
 	let cardEl = $state<HTMLDivElement | null>(null);
-	let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280);
-	let fullscreen = $derived(isPanelFullscreenWidth(viewportWidth));
+	/* Fullscreen on the mobile shell; a centred card, clamped to the viewport,
+	   on the desktop shell at every width. */
+	const fullscreen = $derived(platform.isMobile);
 	let busy = $derived(previewing || applying);
 	let items = $derived(preview?.categories.flatMap((category) => category.items) ?? []);
 	let selectedItems = $derived(items.filter((item) => selectedIds.has(item.id)));
@@ -82,10 +83,7 @@
 	});
 
 	onMount(() => {
-		const onResize = () => (viewportWidth = window.innerWidth);
-		window.addEventListener('resize', onResize);
 		queueMicrotask(() => dialogEl?.focus());
-		return () => window.removeEventListener('resize', onResize);
 	});
 
 	function requestClose(): void {

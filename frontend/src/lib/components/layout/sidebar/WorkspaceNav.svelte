@@ -12,7 +12,8 @@
 	 * it grew past the visible rows. The flyout is therefore `position: fixed`
 	 * with coordinates measured from the More row at open time: to the RIGHT of
 	 * the sidebar plane on desktop (where there is room beside the panel) and
-	 * BELOW the row, spanning the panel, when the panel is fullscreen-width.
+	 * BELOW the row, spanning the panel, when the panel is fullscreen (the
+	 * mobile shell's drawer).
 	 * Because the coordinates are a snapshot, the host closes the flyout on
 	 * scroll rather than tracking it — which is also what the mockup does.
 	 *
@@ -35,7 +36,8 @@
 		/** Intent prefetch for the lazy panel chunk behind a destination. */
 		onPreload: (id: WorkspaceItemId) => void;
 		onCustomize: () => void;
-		/** Panel is fullscreen-width (≤1080px): drop the flyout below the row. */
+		/** Panel is fullscreen — the mobile shell's drawer: drop the flyout
+		 *  below the row instead of beside the panel. */
 		fullscreen?: boolean;
 		open?: boolean;
 	}
@@ -251,12 +253,16 @@
 
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 
-	/* The same rows serve the desktop sidebar and the mobile drawer; on handheld
-	   widths enlarge them toward the 44px touch minimum. */
-	@media (hover: none), (max-width: 1080px) {
+	/* The same rows serve the desktop sidebar and the mobile drawer; on the
+	   mobile shell — and on any touch-only pointer — enlarge them toward the
+	   44px touch minimum. */
+	@media (hover: none) {
 		.ghostrow { height: 40px; }
 		.mi { height: 40px; }
 	}
+
+	:global(html[data-platform='mobile']) .ghostrow { height: 40px; }
+	:global(html[data-platform='mobile']) .mi { height: 40px; }
 
 	@media (prefers-reduced-motion: reduce) {
 		.ghostrow, .mi { transition: none; }

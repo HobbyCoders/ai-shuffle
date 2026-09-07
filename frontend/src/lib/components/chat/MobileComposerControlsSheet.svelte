@@ -2,6 +2,7 @@
 	import { tick } from 'svelte';
 	import { NO_ADJUSTABLE_EFFORT } from '$lib/constants/model-effort';
 	import { attachPanelDismiss } from './mobile-panel-gesture';
+	import { isMobileUi } from '$lib/stores/platform.svelte';
 	import { ArrowLeft, ChevronRight, Zap } from 'lucide-svelte';
 	import ContextPillBar from './ContextPillBar.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
@@ -107,7 +108,7 @@
 		}
 		function measure() {
 			if (!surface || !slot || !reveal) return;
-			if (!expanded || window.innerWidth > 1080 || !surface.classList.contains('is-empty')) {
+			if (!expanded || !isMobileUi() || !surface.classList.contains('is-empty')) {
 				node.style.removeProperty('--empty-panel-limit');
 				slot.removeAttribute('data-panel-flow');
 				return;
@@ -242,9 +243,8 @@
 
 <style>
 	.mobile-composer-controls { display: none; }
-	@media (max-width: 1080px) {
-		.mobile-composer-controls { display: block; min-width: 0; }
-	}
+	/* The integrated controls sheet exists only in the mobile shell. */
+	:global(html[data-platform='mobile']) .mobile-composer-controls { display: block; min-width: 0; }
 	.panel-reveal { overflow: hidden; transition: height 280ms cubic-bezier(0.22, 1, 0.36, 1); border-radius: 0 0 20px 20px; background: var(--popover); }
 	.panel-reveal[aria-hidden='false'] { box-shadow: inset 0 1px 0 var(--border); }
 	.panel-reveal.dragging { transition: none; }

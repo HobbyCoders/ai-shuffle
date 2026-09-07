@@ -513,31 +513,28 @@ li.autocomplete-section-header {
    Responsive Adjustments
    ======================================== */
 
-/* Composer pop-up cutoff: 1080px matches PANEL_FULLSCREEN_MAX_WIDTH
-   (frontend/src/lib/utils/viewport.ts), the width at which the app shell
-   switches to mobile UI. This file is imported by CommandAutocomplete and
-   FileAutocomplete, whose own panel breakout gates sit at 1080px — keep the
-   three in step. */
-@media (max-width: 1080px) {
-  .autocomplete-panel {
-    border-radius: var(--radius-md, calc(var(--radius, 0.75rem) * 0.833));
-  }
+/* Composer pop-up sizing for the mobile shell (the Android WebView), stamped on
+   <html> before first paint by src/app.html. This file is imported by
+   CommandAutocomplete and FileAutocomplete, whose own panel breakout gates use
+   the same platform selector — keep the three in step. */
+html[data-platform='mobile'] .autocomplete-panel {
+  border-radius: var(--radius-md, calc(var(--radius, 0.75rem) * 0.833));
+}
 
-  .autocomplete-item {
-    padding: var(--space-2, 8px);
-    padding-left: calc(var(--space-2, 8px) - 3px);
-    gap: var(--space-2, 8px);
-  }
+html[data-platform='mobile'] .autocomplete-item {
+  padding: var(--space-2, 8px);
+  padding-left: calc(var(--space-2, 8px) - 3px);
+  gap: var(--space-2, 8px);
+}
 
-  .autocomplete-header,
-  .autocomplete-footer {
-    padding: var(--space-2, 8px);
-  }
+html[data-platform='mobile'] .autocomplete-header,
+html[data-platform='mobile'] .autocomplete-footer {
+  padding: var(--space-2, 8px);
+}
 
-  .autocomplete-badge {
-    font-size: 0.5625rem;
-    padding: 1px 6px;
-  }
+html[data-platform='mobile'] .autocomplete-badge {
+  font-size: 0.5625rem;
+  padding: 1px 6px;
 }
 
 /* Touch device adjustments */

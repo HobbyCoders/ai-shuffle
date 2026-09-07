@@ -41,6 +41,7 @@
 	import { git } from '$lib/stores/git.svelte';
 	import { sessionGitState } from '$lib/stores/session-git-state.svelte';
 	import { notify } from '$lib/stores/notifications';
+	import { platform } from '$lib/stores/platform.svelte';
 	import {
 		GIT_STAGE_LABELS,
 		GIT_STAGE_TONES,
@@ -354,18 +355,21 @@
 		horizontalDrag = false;
 	}
 
+	// Swipe-to-reveal has two independent triggers, mirrored by the styles at the
+	// bottom of this file: the mobile shell (fixed for the life of the page), and
+	// a touch-only pointer anywhere else — a touch laptop still swipes.
 	onMount(() => {
+		if (platform.isMobile) {
+			swipeLayout = true;
+			return;
+		}
 		if (typeof window.matchMedia !== 'function') {
-			const syncWidth = () => {
-				swipeLayout = window.innerWidth <= 1080;
-				if (!swipeLayout) closeActions();
-			};
-			syncWidth();
-			window.addEventListener('resize', syncWidth);
-			return () => window.removeEventListener('resize', syncWidth);
+			swipeLayout = false;
+			closeActions();
+			return;
 		}
 
-		const query = window.matchMedia('(hover: none), (max-width: 1080px)');
+		const query = window.matchMedia('(hover: none)');
 		const syncLayout = () => {
 			swipeLayout = query.matches;
 			if (!swipeLayout) closeActions();
@@ -791,7 +795,10 @@
 	.row-action:disabled { opacity: 0.45; cursor: not-allowed; }
 	.row-action:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
-	@media (hover: none), (max-width: 1080px) {
+	/* Swipe layout. Two independent triggers, matching `swipeLayout` in the
+	   script: a touch-only pointer (still true on a touch laptop), and the
+	   mobile shell regardless of pointer. */
+	@media (hover: none) {
 		.scard-frame {
 			overflow: hidden;
 			touch-action: pan-y;
@@ -842,6 +849,57 @@
 		.card-actions > *:hover {
 			background: color-mix(in oklch, var(--sidebar-accent-active) 88%, transparent);
 		}
+	}
+
+	:global(html[data-platform='mobile']) .scard-frame {
+		overflow: hidden;
+		touch-action: pan-y;
+		background: color-mix(in oklch, var(--sidebar-accent-active) 84%, var(--sidebar));
+	}
+	:global(html[data-platform='mobile']) .scard {
+		background: var(--sidebar);
+		padding: 7px 8px 8px;
+		transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 130ms ease;
+		will-change: transform;
+	}
+	/* The swipe track sits behind the card, so the card surface has to be
+	   opaque or the revealed actions bleed through the accent tint. */
+	:global(html[data-platform='mobile']) .scard.active {
+		background:
+			linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
+			var(--sidebar);
+	}
+	:global(html[data-platform='mobile']) .scard-frame.actions-open .scard { transform: translateX(-44px); }
+	:global(html[data-platform='mobile']) .scard-frame.dragging .scard { transition: none; }
+	:global(html[data-platform='mobile']) .scard-frame:hover .scard { background: var(--sidebar); }
+	:global(html[data-platform='mobile']) .scard-frame:hover .scard.active {
+		background:
+			linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
+			var(--sidebar);
+	}
+
+	:global(html[data-platform='mobile']) .card-actions {
+		top: 0;
+		right: 0;
+		bottom: 0;
+		width: 44px;
+		justify-content: flex-end;
+		gap: 0;
+		padding-left: 0;
+		background: none;
+		opacity: 1;
+		z-index: 1;
+		pointer-events: none;
+	}
+	:global(html[data-platform='mobile']) .scard-frame.actions-open .card-actions { pointer-events: auto; }
+	:global(html[data-platform='mobile']) .card-actions > * {
+		width: 44px;
+		height: 100%;
+		min-height: 44px;
+		border-radius: 0;
+	}
+	:global(html[data-platform='mobile']) .card-actions > *:hover {
+		background: color-mix(in oklch, var(--sidebar-accent-active) 88%, transparent);
 	}
 
 	@media (prefers-reduced-motion: reduce) {

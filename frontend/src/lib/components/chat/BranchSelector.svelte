@@ -479,22 +479,20 @@
 		}
 	}
 
-	/* Mobile: keep the dropdown within the viewport. */
-	@media (max-width: 1080px) {
-		.branch-name {
-			max-width: min(120px, 30vw);
-		}
+	/* Mobile shell: keep the dropdown within the viewport. */
+	:global(html[data-platform='mobile']) .branch-name {
+		max-width: min(120px, 30vw);
+	}
 
-		.branch-selector {
-			position: static;
-		}
+	:global(html[data-platform='mobile']) .branch-selector {
+		position: static;
+	}
 
-		.branch-dropdown {
-			left: 12px;
-			right: 12px;
-			min-width: 0;
-			max-width: none;
-		}
+	:global(html[data-platform='mobile']) .branch-dropdown {
+		left: 12px;
+		right: 12px;
+		min-width: 0;
+		max-width: none;
 	}
 
 	@media (prefers-reduced-motion: reduce) {
