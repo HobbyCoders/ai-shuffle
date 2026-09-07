@@ -1,6 +1,7 @@
 package com.hobbycoders.aishuffle
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.Instrumentation
 import android.content.Intent
 import android.view.View
@@ -174,23 +175,49 @@ class ManagedWorkerRepairSmokeTest {
 
     @Test fun stoppedRepairCannotSaveAfterAccountOrWorkerChanges() {
         for (changeAccount in listOf(true, false)) {
-            val started = CountDownLatch(1); val release = CountDownLatch(1)
+            val started = CountDownLatch(1); val release = CountDownLatch(1); val responseBuilt = CountDownLatch(1)
             fixture({ request ->
                 if (request.method == "POST") { started.countDown(); check(release.await(8, TimeUnit.SECONDS)) }
-                PresenceFixture.response(request, 200, if (request.method == "GET") support().toString() else credential().toString())
+                PresenceFixture.response(request, 200, if (request.method == "GET") support().toString() else credential().toString()).also {
+                    if (request.method == "POST") responseBuilt.countDown()
+                }
             }) {
+                val launches = AtomicInteger()
+                val monitor = object : Instrumentation.ActivityMonitor() {
+                    override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
+                        if (intent.component?.className != ChatActivity::class.java.name) return null
+                        launches.incrementAndGet()
+                        return Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null)
+                    }
+                }
+                instrumentation.addMonitor(monitor)
                 try {
                     form().use { scenario ->
+                        lateinit var task: ActivityManager.AppTask
+                        scenario.onActivity { activity ->
+                            task = activity.getSystemService(ActivityManager::class.java).appTasks.single { it.taskInfo.taskId == activity.taskId }
+                        }
                         submit(); assertTrue(started.await(5, TimeUnit.SECONDS))
                         scenario.moveToState(Lifecycle.State.CREATED)
-                        if (changeAccount) AccountStore(context).save(AccountSession(session.hub, "changed-token", session.expiresAt, phoneId, session.accountId, "tester", true))
-                        else ServerStore.get(context).update(server.copy(baseUrl = "https://changed-repair.example"))
+                        assertEquals(Lifecycle.State.CREATED, scenario.state)
+                        val savedSession = requireNotNull(AccountStore(context).session())
+                        val expectedSession = if (changeAccount) AccountSession(savedSession.hub, "changed-token", savedSession.expiresAt,
+                            savedSession.deviceId, savedSession.accountId, savedSession.username, savedSession.profileComplete) else savedSession
+                        val expectedServer = if (changeAccount) server else server.copy(baseUrl = "https://changed-repair.example")
+                        if (changeAccount) AccountStore(context).save(expectedSession)
+                        else ServerStore.get(context).update(expectedServer)
                         release.countDown()
-                        scenario.moveToState(Lifecycle.State.RESUMED)
-                        assertEquals(server.apiKey, ServerStore.get(context).getById(server.id)!!.apiKey)
+                        assertTrue("Held repair response was not released", responseBuilt.await(5, TimeUnit.SECONDS))
+                        // Resumption must close the stale form, so do not require a stable RESUMED state.
+                        task.moveToFront()
+                        waitFor("Repair form did not close after its identity changed") { scenario.state == Lifecycle.State.DESTROYED }
+                        instrumentation.waitForIdleSync()
+                        assertEquals(expectedServer, ServerStore.get(context).getById(server.id))
                         assertEquals(other, ServerStore.get(context).getById(other.id))
+                        assertEquals(expectedSession.json().toString(), requireNotNull(AccountStore(context).session()).json().toString())
+                        assertEquals(0, launches.get())
                     }
-                } finally { release.countDown() }
+                } finally { release.countDown(); instrumentation.removeMonitor(monitor) }
             }
         }
     }

@@ -130,6 +130,12 @@ class WorkerPresenceSmokeTest {
             try {
                 ActivityScenario.launch(ServerListActivity::class.java).use { scenario ->
                     waitFor("Initial direct probe was not online") { description(scenario, server.name, "Online") }
+                    waitFor("Worker screen did not become resumed and focused") {
+                        var ready = false
+                        scenario.onActivity { ready = it.lifecycle.currentState == Lifecycle.State.RESUMED && it.hasWindowFocus() }
+                        ready
+                    }
+                    instrumentation.uiAutomation.waitForIdle(500, 5_000)
                     for (expected in listOf("Unknown", "Offline", "Online")) {
                         androidx.test.espresso.Espresso.onView(androidx.test.espresso.matcher.ViewMatchers.withContentDescription("Refresh workers"))
                             .perform(androidx.test.espresso.action.ViewActions.click())

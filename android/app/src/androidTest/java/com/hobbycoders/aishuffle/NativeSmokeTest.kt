@@ -285,6 +285,8 @@ class NativeSmokeTest {
         store.save(session)
         ServerStore.get(context).add(com.hobbycoders.aishuffle.model.Server.create("Home workstation", "https://worker.example.com", "test-only").copy(accountId = session.accountId, hubUrl = session.hub))
         ActivityScenario.launch(ServerListActivity::class.java).use { scenario ->
+            awaitFocused(scenario)
+            instrumentation.uiAutomation.waitForIdle(500, 5_000)
             onView(withText("Workers")).check(matches(isDisplayed()))
             onView(withText("Home workstation")).check(matches(isDisplayed()))
             onView(withContentDescription("Options for Home workstation")).perform(click())
