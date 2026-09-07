@@ -157,6 +157,8 @@ def enroll(identity, info, key_hash, expires_at, scopes, *, session_token_hash=N
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         c = conn.cursor()
+        from app.db.device_identity import lock_device_identity
+        lock_device_identity(c, device_id)
         if login_proof:
             from app.core.config import settings
             c.execute('''DELETE FROM owner_browser_requests WHERE proof_hash=%s

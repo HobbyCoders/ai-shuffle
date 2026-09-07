@@ -59,6 +59,7 @@ def endpoint_identity(request: Request):
     if not binding or not binding['active']:
         raise HTTPException(404, 'Worker connection unavailable')
     return JSONResponse({'server_id': binding['server_id'], 'ready': True,
+                         'account_repair': 'scoped-v1',
                          'protected_ingress': request.scope.get('shuffle.ingress') == 'remote'},
                         headers={'Cache-Control': 'no-store'})
 

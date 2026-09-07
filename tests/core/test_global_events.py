@@ -270,14 +270,17 @@ def test_paired_admin_global_identity_and_ping():
     from app.api import ws_sync
     from app.core.auth import auth_service
     from app.core.pairing import PAIRED_SESSION_PREFIX, hash_controller_session
-    from app.db import pairing
+    from app.db import pairing, mobile
     from datetime import datetime, timedelta, timezone
     from starlette.websockets import WebSocketDisconnect
     app = FastAPI()
     app.include_router(ws_sync.router)
     # Both initial authentication and the live principal check read the actual
     # paired session. Mocking only the facade hid this second authorization read.
-    paired = pairing.ensure_paired_client_for_mobile({"device_id": "global-controller", "scopes": ["controller"]})
+    device = mobile.create_mobile_device('global-controller', 'Controlled device', 'android',
+        'controlled-api-key-hash', {}, scopes=['controller'],
+        api_key_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5))
+    paired = pairing.ensure_paired_client_for_mobile(device)
     token = PAIRED_SESSION_PREFIX + "global-test"
     pairing.set_paired_client_session(paired["id"], hash_controller_session(token),
                                       datetime.now(timezone.utc) + timedelta(minutes=5))

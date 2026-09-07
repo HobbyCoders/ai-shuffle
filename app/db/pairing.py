@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list
+from app.db.device_identity import lock_device_identity
 
 
 class PairingGrantRow(TypedDict, total=False):
@@ -156,9 +157,11 @@ def revoke_pairing_grant(grant_id: str) -> bool:
 
 
 def _consume_grant(
-    cursor: Any, token_hash: str, expected_purpose: str
+    cursor: Any, token_hash: str, expected_purpose: str, *, target_install_id: Optional[str] = None
 ) -> Optional[PairingGrantRow]:
     """Atomically consume a live grant, returning it to the winner only."""
+    target_clause = " AND target_install_id = %s" if target_install_id is not None else ""
+    params = (token_hash, expected_purpose) + ((target_install_id,) if target_install_id is not None else ())
     cursor.execute(
         """
         UPDATE pairing_grants
@@ -169,9 +172,8 @@ def _consume_grant(
           AND revoked_at IS NULL
           AND expires_at > NOW()
           AND attempt_count < max_attempts
-        RETURNING *
-        """,
-        (token_hash, expected_purpose),
+        """ + target_clause + " RETURNING *",
+        params,
     )
     row = cursor.fetchone()
     if row is not None:
@@ -187,8 +189,8 @@ def _consume_grant(
             ELSE max_attempts
         END
         WHERE token_hash = %s AND purpose = %s AND consumed_at IS NULL
-        """,
-        (token_hash, expected_purpose),
+        """ + target_clause,
+        params,
     )
     return None
 
@@ -202,13 +204,21 @@ def exchange_grant_for_client(
     client_type: str,
     session_token_hash: str,
     session_expires_at: datetime,
+    target_install_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Consume a grant and enroll/rotate a browser controller atomically."""
     now = datetime.now(timezone.utc).isoformat()
     client_id = f"pcl_{uuid.uuid4().hex[:20]}"
     with get_db() as conn:
         cursor = conn.cursor()
-        grant = _consume_grant(cursor, token_hash, "controller")
+        # A browser exchange cannot turn a retained mobile account identity
+        # into a browser controller or bypass its explicit repair flow.
+        lock_device_identity(cursor, device_id)
+        for table in ('mobile_worker_authorizations', 'mobile_hub_authorizations'):
+            cursor.execute(f'SELECT device_id FROM {table} WHERE device_id = %s', (device_id,))
+            if cursor.fetchone() is not None:
+                return None
+        grant = _consume_grant(cursor, token_hash, "controller", target_install_id=target_install_id)
         if grant is None:
             return None
         # The same one-time grant can enroll a native mobile client, but a
@@ -268,6 +278,8 @@ def exchange_grant_for_mobile(
     capabilities: Dict[str, Any],
     api_key_hash: str,
     api_key_expires_at: datetime,
+    managed_repair: Optional[Dict[str, Any]] = None,
+    target_install_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Consume a grant and create its paired-client/mobile rows atomically.
 
@@ -279,6 +291,7 @@ def exchange_grant_for_mobile(
     mobile_id = uuid.uuid4().hex[:8]
     with get_db() as conn:
         cursor = conn.cursor()
+        lock_device_identity(cursor, device_id)
         cursor.execute(
             "SELECT id FROM mobile_devices WHERE device_id = %s",
             (device_id,),
@@ -286,7 +299,43 @@ def exchange_grant_for_mobile(
         if cursor.fetchone() is not None:
             return {"duplicate": True}
 
-        grant = _consume_grant(cursor, token_hash, "controller")
+        # A retained account tombstone cannot be bypassed with generic direct
+        # registration, even after administration removes its mobile row.
+        owners = []
+        for table in ('mobile_worker_authorizations', 'mobile_hub_authorizations'):
+            cursor.execute(f'SELECT * FROM {table} WHERE device_id = %s FOR UPDATE', (device_id,))
+            found = cursor.fetchone()
+            if found is not None:
+                owners.append(dict(found))
+        if owners or managed_repair is not None:
+            if managed_repair is None:
+                return {'managed_repair_required': True}
+            expected = managed_repair['owner']
+            fields = ('device_id', 'paired_client_id', 'account_id', 'hub_device_id', 'server_id')
+            if len(owners) != 1 or any(owners[0].get(key) != expected.get(key) for key in fields):
+                return {'repair_invalid': True}
+            owner = owners[0]
+            from app.db.mobile_hub import local_device_id
+            if owner['device_id'] != local_device_id(owner['server_id'], owner['hub_device_id']):
+                return {'repair_invalid': True}
+            if target_install_id is not None and target_install_id != managed_repair['instance_id']:
+                return {'repair_invalid': True}
+            target_install_id = managed_repair['instance_id']
+            if not target_install_id:
+                return {'repair_invalid': True}
+            # Lock binding and client until key replacement commits, fencing
+            # concurrent logout, changed ownership and another worker.
+            cursor.execute('''SELECT server_id, active FROM mobile_worker_bindings
+                WHERE instance_id = %s FOR SHARE''', (target_install_id,))
+            binding = cursor.fetchone()
+            cursor.execute('SELECT device_id, revoked_at FROM paired_clients WHERE id = %s FOR UPDATE',
+                           (owner['paired_client_id'],))
+            client = cursor.fetchone()
+            if (not binding or not binding['active'] or binding['server_id'] != owner['server_id']
+                    or not client or not client['revoked_at'] or client['device_id'] != device_id):
+                return {'repair_invalid': True}
+
+        grant = _consume_grant(cursor, token_hash, "controller", target_install_id=target_install_id)
         if grant is None:
             return None
         scopes = grant.get("scopes") or [
@@ -326,6 +375,7 @@ def exchange_grant_for_mobile(
         client = _client(cursor.fetchone())
         if client is None:
             raise RuntimeError("Paired mobile client upsert returned no row")
+        cursor.execute('DELETE FROM paired_client_native_sessions WHERE client_id = %s', (client['id'],))
         cursor.execute(
             """
             INSERT INTO mobile_devices
@@ -438,7 +488,7 @@ def rename_paired_client(client_id: str, device_name: str) -> Optional[PairedCli
         return client
 
 
-def ensure_paired_client_for_mobile(device: Dict[str, Any]) -> PairedClientRow:
+def ensure_paired_client_for_mobile(device: Dict[str, Any]) -> Optional[PairedClientRow]:
     """Return/create the generic paired-client row for a legacy mobile row."""
     linked = device.get("paired_client_id")
     if linked:
@@ -453,6 +503,14 @@ def ensure_paired_client_for_mobile(device: Dict[str, Any]) -> PairedClientRow:
     ]
     with get_db() as conn:
         cursor = conn.cursor()
+        lock_device_identity(cursor, device['device_id'])
+        cursor.execute('SELECT id FROM paired_clients WHERE device_id = %s FOR UPDATE', (device['device_id'],))
+        cursor.fetchone()
+        cursor.execute('''SELECT id FROM mobile_devices WHERE id = %s AND device_id = %s
+            AND api_key_hash = %s AND revoked_at IS NULL FOR UPDATE''',
+            (device.get('id'), device['device_id'], device.get('api_key_hash')))
+        if cursor.fetchone() is None:
+            return None
         cursor.execute(
             """
             INSERT INTO paired_clients
@@ -464,8 +522,8 @@ def ensure_paired_client_for_mobile(device: Dict[str, Any]) -> PairedClientRow:
                 platform = EXCLUDED.platform,
                 client_type = 'mobile',
                 scopes = EXCLUDED.scopes,
-                revoked_at = NULL,
                 updated_at = EXCLUDED.updated_at
+            WHERE paired_clients.revoked_at IS NULL
             RETURNING *
             """,
             (
@@ -482,7 +540,7 @@ def ensure_paired_client_for_mobile(device: Dict[str, Any]) -> PairedClientRow:
         )
         client = _client(cursor.fetchone())
         if client is None:
-            raise RuntimeError("Legacy mobile client upsert returned no row")
+            return None
         cursor.execute(
             "UPDATE mobile_devices SET paired_client_id = %s WHERE device_id = %s",
             (client["id"], device["device_id"]),
@@ -491,12 +549,38 @@ def ensure_paired_client_for_mobile(device: Dict[str, Any]) -> PairedClientRow:
 
 
 def set_paired_client_session(
-    client_id: str, token_hash: str, expires_at: datetime, *, purpose: str = 'web'
+    client_id: str, token_hash: str, expires_at: datetime, *, purpose: str = 'web',
+    mobile_device: Optional[Dict[str, Any]] = None,
 ) -> Optional[PairedClientRow]:
     if purpose not in ('web', 'native'):
         raise ValueError('Unknown session purpose')
     with get_db() as conn:
         cursor = conn.cursor()
+        if mobile_device is not None:
+            # Lock client before mobile row, matching revocation/deletion. A
+            # request authenticated before repair must still hold the current
+            # credential when its session is persisted, for either purpose.
+            cursor.execute('SELECT id FROM paired_clients WHERE id = %s AND revoked_at IS NULL FOR UPDATE',
+                           (client_id,))
+            if cursor.fetchone() is None:
+                return None
+            cursor.execute('''SELECT * FROM mobile_devices WHERE id = %s AND device_id = %s
+                AND paired_client_id = %s AND api_key_hash = %s AND revoked_at IS NULL FOR SHARE''',
+                (mobile_device.get('id'), mobile_device['device_id'], client_id, mobile_device.get('api_key_hash')))
+            current = cursor.fetchone()
+            if current is None:
+                return None
+            current = dict(current)
+            expiry = current.get('api_key_expires_at') or current.get('created_at')
+            if isinstance(expiry, str):
+                expiry = datetime.fromisoformat(expiry.replace('Z', '+00:00'))
+            if expiry is not None and current.get('api_key_expires_at') is None:
+                from datetime import timedelta
+                expiry += timedelta(days=365)
+            if expiry is None or expiry <= datetime.now(timezone.utc):
+                return None
+            if current.get('scopes') and 'web:session' not in _json_list(current['scopes']):
+                return None
         if purpose == 'native':
             cursor.execute("SELECT * FROM paired_clients WHERE id=%s AND revoked_at IS NULL FOR UPDATE",
                            (client_id,))
