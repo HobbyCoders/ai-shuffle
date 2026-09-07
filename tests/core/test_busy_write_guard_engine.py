@@ -74,7 +74,7 @@ class _StubPool:
     def admission_check(self, lane="delegated"):
         return None
 
-    async def evict_if_needed(self):
+    async def evict_if_needed(self, incoming_lane="delegated"):
         return None
 
     async def remove(self, session_id):
@@ -155,6 +155,28 @@ async def _collect(agen):
     async for ev in agen:
         events.append(ev)
     return events
+
+
+async def test_native_chat_admission_passes_its_lane_to_eviction(tmp_path):
+    from app.core.session_pool import SessionPool
+    pool = _StubPool()
+    busy_pool = SessionPool(max_size=1)
+    busy_pool.put("busy-one", _fake_state(is_streaming=True))
+    busy_pool.put("busy-two", _fake_state(is_streaming=True))
+    lanes = []
+    async def evict(lane):
+        lanes.append(lane)
+        return await busy_pool.evict_if_needed(lane)
+    pool.evict_if_needed = evict
+    with ExitStack() as stack:
+        options = _chat_patches(stack, pool)
+        options.cwd = str(tmp_path / "missing-cwd-stops-before-connect")
+        stack.enter_context(patch.object(qe, "memory_leg_for_options", return_value="native"))
+        # The missing CWD stops at the next boundary, before adapter creation.
+        stack.enter_context(patch("app.core.hook_service.attach_hooks_to_options", return_value=None))
+        await _collect(qe.stream_to_websocket("fixture", "new-native", "claude-code"))
+    assert lanes == ["native"]
+    assert "busy-one" in busy_pool and "busy-two" in busy_pool
 
 
 # ─── stream_to_websocket (chat gate) ────────────────────────────────────────

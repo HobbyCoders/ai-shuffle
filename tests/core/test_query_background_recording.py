@@ -91,7 +91,7 @@ class _StubPool:
     def admission_check(self, lane="delegated"):
         return None
 
-    async def evict_if_needed(self):
+    async def evict_if_needed(self, incoming_lane="delegated"):
         return None
 
     async def remove(self, session_id):
