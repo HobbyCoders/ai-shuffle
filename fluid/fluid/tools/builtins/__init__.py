@@ -26,6 +26,7 @@ from fluid.tools.builtins import (
     session_view,
     skill,
     task,
+    swarm,
     tool_search,
     web,
     write,
@@ -36,7 +37,7 @@ _MODULES = (
     read, grep, glob, write, edit, bash, skill, note, task, monitor,
     tool_search, history_expand, history_search, ledger,
     session_search, session_view, ask_user, web, plan, remember, recall,
-    list_agents, send_message,
+    list_agents, send_message, swarm,
 )
 
 # Tools whose descriptions specialize to the session's permitted surface —

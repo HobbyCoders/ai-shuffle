@@ -85,6 +85,7 @@ CAPABILITY_TOOL_REASONS: dict[str, str] = {
     "SessionSearch": "no session search capability",
     "SessionView": "no session view capability",
     "StopPlanning": "no plan-mode control",
+    "Swarm": "no swarm coordinator or task dispatch capability",
     "Task": "no task dispatch capability",
     "ToolSearch": "no tool registry capability",
 }
@@ -93,7 +94,7 @@ CAPABILITY_TOOL_REASONS: dict[str, str] = {
 # reason, and the kernel cannot tell which — so the message says both rather
 # than asserting the wrong one.
 PLAN_MODE_WITHHELD = frozenset({
-    "Bash", "Edit", "Monitor", "SendMessage", "Task", "WebFetch", "Write",
+    "Bash", "Edit", "Monitor", "SendMessage", "Swarm", "Task", "WebFetch", "Write",
 })
 
 

@@ -60,7 +60,7 @@ BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "Read", "Grep", "Glob", "Write", "Edit", "Bash", "Skill", "Note", "Task",
     "Monitor", "ToolSearch", "HistoryExpand", "HistorySearch", "Ledger",
     "AskUser", "SessionSearch", "SessionView", "WebFetch", "WebSearch",
-    "Plan", "StopPlanning", "Remember", "Recall", "ListAgents", "SendMessage",
+    "Plan", "StopPlanning", "Remember", "Recall", "ListAgents", "SendMessage", "Swarm",
 )
 
 _FULL_TOOLSET = frozenset(BUILTIN_TOOL_NAMES)
@@ -69,7 +69,7 @@ _FULL_TOOLSET = frozenset(BUILTIN_TOOL_NAMES)
 # destructive risk. A literal, like the names above; the regression test
 # checks it against ``plan_mode_blocks`` over the real registry.
 PLAN_MODE_LEAVES: tuple[str, ...] = (
-    "Bash", "Edit", "Monitor", "SendMessage", "Task", "WebFetch", "Write",
+    "Bash", "Edit", "Monitor", "SendMessage", "Swarm", "Task", "WebFetch", "Write",
 )
 
 # Builtins only the native loop can serve. Each needs a host capability that
@@ -100,6 +100,7 @@ TOOL_CAPABILITIES: dict[str, tuple[str, ...]] = {
     "Recall": ("recall_store",),
     "Remember": ("continual_journal",),
     "SendMessage": ("agent_message",),
+    "Swarm": ("swarm", "task_dispatch"),
     "SessionSearch": ("session_search",),
     "SessionView": ("session_view",),
     "Task": ("task_dispatch",),

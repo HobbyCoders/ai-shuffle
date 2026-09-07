@@ -147,6 +147,7 @@ class Worker:
     # subagent). Kept so a resume rebuilds the same worker — same prompt, same
     # tool restriction, same model — over its stored session.
     definition: Any = None
+    swarm_launch: Any = None
     task: asyncio.Task | None = None
     process: asyncio.subprocess.Process | None = None
     worker_session_id: str | None = None
@@ -249,6 +250,9 @@ class CliHost:
         self.engine: Any | None = None
         self.workers: dict[str, Worker] = {}
         self._closed = False
+        self._swarm = None
+        self._swarm_lock = asyncio.Lock()
+        self.swarm_id = None
 
     # ── wiring ──
 
@@ -261,6 +265,8 @@ class CliHost:
         ctx.extra["monitor_spawn"] = self.monitor_spawn
         if not self.nested:
             ctx.extra["task_dispatch"] = self.task_dispatch
+            ctx.extra["swarm"] = self.swarm
+            ctx.extra["recover_background"] = self._recover_swarms
         # Messaging is wired in a worker too — that is the leg that lets one
         # talk back to the conversation that started it.
         ctx.extra["agent_roster"] = self.agent_roster
@@ -269,6 +275,85 @@ class CliHost:
         if self.provider is None:
             self.provider = getattr(engine, "provider", None)
         return self
+
+    async def _recover_swarms(self, pending):
+        import json
+        from fluid.events.model import SwarmUpdated
+        from fluid.swarm import recover
+        session_id = self.engine.ctx.session_id
+        latest = {}
+        for event in await self.store.events_since(session_id, -1):
+            if isinstance(event, SwarmUpdated):
+                latest[event.swarm["id"]] = event.swarm
+        completions = []
+        for key in pending:
+            if not key.startswith("swarm_"):
+                continue
+            if self._swarm and key in self._swarm.jobs and not self._swarm.jobs[key].done():
+                continue
+            snapshot = latest.get(key)
+            if snapshot:
+                restored = recover(snapshot)
+                if restored != snapshot:
+                    await self.engine._emit(SwarmUpdated(session_id=session_id, swarm=restored))
+                summary = json.dumps({"swarm": restored})
+            else:
+                summary = "Swarm interrupted by host restart; no tasks were relaunched."
+            completions.append(BackgroundTaskFinished(task_id=key, status="failed", summary=summary, wake=False))
+        return completions
+
+    async def swarm(self, input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+        import json
+        from fluid.swarm import SwarmCoordinator, recover, validate
+        from fluid.events.model import SwarmUpdated
+
+        async with self._swarm_lock:
+            if self._swarm is None:
+                async def publish(snapshot):
+                    await self.engine._emit(SwarmUpdated(session_id=ctx.session_id, swarm=snapshot))
+
+                async def finished(key, status, summary):
+                    await self.engine.submit(BackgroundTaskFinished(
+                        task_id=key, status="finished" if status == "completed" else "cancelled" if status == "cancelled" else "failed",
+                        summary=summary))
+
+                self._swarm = SwarmCoordinator(ctx.session_id, self.task_dispatch,
+                    self.cancel, publish, finished)
+                for event in await self.store.events_since(ctx.session_id, -1):
+                    if isinstance(event, SwarmUpdated):
+                        self._swarm.swarms[event.swarm["id"]] = event.swarm
+                for key, snapshot in list(self._swarm.swarms.items()):
+                    restored = recover(snapshot)
+                    self._swarm.swarms[key] = restored
+                    if restored != snapshot:
+                        await self._swarm.emit(key)
+        try:
+            receipt = None
+            action = input.get("action")
+            if action == "start":
+                tasks, _ = validate(input)
+                for task in tasks:
+                    if self._find_agent(task["agent"], ctx) is None:
+                        raise ValueError(f"Unknown agent: {task['agent']}")
+                snapshot, receipt = await self._swarm.start(input, ctx)
+            elif action == "status":
+                snapshot = self._swarm.snapshot(input["swarm_id"])
+            elif action == "cancel":
+                snapshot = await self._swarm.cancel(input["swarm_id"])
+            else:
+                raise ValueError("action must be start, status or cancel")
+            payload = {"swarm": snapshot}
+            return ToolOutcome(text=json.dumps(payload), ui=payload, background_task=receipt)
+        except (KeyError, ValueError) as exc:
+            return ToolOutcome(text=str(exc), is_error=True)
+
+    def _message_workers(self):
+        workers = list(self.workers.values())
+        if self.parent is not None and self.swarm_id is not None:
+            workers.extend(w for w in self.parent.workers.values()
+                if w.swarm_launch is not None and w.swarm_launch.swarm_id == self.swarm_id
+                and w.engine is not self.engine)
+        return workers
 
     def running(self) -> list[Worker]:
         """Workers still running, serving processes included."""
@@ -285,7 +370,7 @@ class CliHost:
 
     def busy(self) -> bool:
         """True while a job runs or a completion still awaits its wake turn."""
-        if self.pending():
+        if self.pending() or (self._swarm and any(not job.done() for job in self._swarm.jobs.values())):
             return True
         pending_wake = getattr(self.engine, "_background_completions", None)
         return bool(pending_wake)
@@ -294,12 +379,17 @@ class CliHost:
         """Block until every job has delivered its completion."""
         while True:
             tasks = [w.task for w in self.pending() if w.task is not None]
+            if self._swarm:
+                tasks.extend(job for job in self._swarm.jobs.values() if not job.done())
             if not tasks:
                 return
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def cancel(self, task_id: str) -> bool:
         """Stop one worker and report ``status="cancelled"`` to the parent."""
+        if self._swarm and task_id in self._swarm.swarms:
+            await self._swarm.cancel(task_id)
+            return True
         worker = self.workers.get(task_id)
         if worker is None or worker.done:
             return False
@@ -309,6 +399,8 @@ class CliHost:
         return True
 
     async def aclose(self) -> None:
+        if self._swarm:
+            await self._swarm.aclose()
         self._closed = True
         live = [w for w in self.workers.values() if not w.done]
         for worker in live:
@@ -323,6 +415,10 @@ class CliHost:
         the completion being queued for a wake.
         """
         worker.summary = summary
+        if worker.swarm_launch is not None:
+            worker.status = status
+            worker.swarm_launch.finish(status, summary)
+            return
         try:
             if self.engine is not None and not self._closed:
                 await self.engine.submit(BackgroundTaskFinished(
@@ -413,9 +509,12 @@ class CliHost:
         agent_name = str(input.get("agent") or "").strip()
         definition = self._find_agent(agent_name, ctx)
         label = input.get("label") or agent_name or "subagent"
+        from fluid.swarm import current_launch
+        launch = current_launch.get()
         worker = Worker(
             task_id=new_id("task"), kind="task", description=str(label),
             name=str(label), definition=definition,
+            swarm_launch=launch if launch and launch.coordinator is self._swarm else None,
         )
         try:
             child = await self._build_child(definition, worker)
@@ -500,7 +599,7 @@ class CliHost:
                 "kind": "parent",
             })
         running_only = bool(input.get("running_only"))
-        for worker in reversed(list(self.workers.values())):
+        for worker in reversed(self._message_workers()):
             if worker.kind != "task":
                 continue
             if running_only and worker.done:
@@ -636,7 +735,7 @@ class CliHost:
             return _Target(name="main", engine=self.parent.engine), None
 
         matches = [
-            w for w in self.workers.values()
+            w for w in self._message_workers()
             if w.kind == "task" and (
                 w.task_id == to
                 or (w.name or w.description) == name
@@ -672,6 +771,8 @@ class CliHost:
             )
         worker = candidates[-1]
         display = worker.name or worker.description
+        if worker.done and worker.swarm_launch is not None:
+            return None, "Swarm worker has finished; it cannot be resumed by a peer message."
         if worker.done:
             # No engine: agent_message resumes it over its stored session.
             return _Target(name=display, worker=worker), None
@@ -808,12 +909,14 @@ class CliHost:
         )
         if definition is not None and definition.model:
             child.model = definition.model
-        CliHost(
+        child_host = CliHost(
             self.config, self.store,
             provider=self.provider, provider_name=self.provider_name,
             permission_responder=self.permission_responder, nested=True,
             parent=self, identity=worker.name or worker.description,
         ).attach(child)
+        if worker.swarm_launch is not None:
+            child_host.swarm_id = worker.swarm_launch.swarm_id
         return child
 
     def _learner(self) -> Any | None:

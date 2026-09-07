@@ -476,6 +476,11 @@ class UnknownEvent(Event):
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, kw_only=True)
+class SwarmUpdated(Event):
+    swarm: dict[str, Any] = field(default_factory=dict)
+
+
 # ─── Durable event codec ─────────────────────────────────────────────────────
 #
 # The EventBus keeps an in-process log; durable replay across restarts belongs
@@ -496,7 +501,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         PermissionRequest, QuestionRequest, HandoffCreated,
         ContextCompaction, Usage, RateLimit, ProviderRetry, SubagentEvent, HookEvent,
         CacheMissAlert,
-        ContinualUpdate, DelegatedSurface,
+        ContinualUpdate, DelegatedSurface, SwarmUpdated,
     )
 }
 

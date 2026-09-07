@@ -121,6 +121,12 @@ class BackgroundLifecycleMixin:
                 op = self._background_early.pop(task_id)
                 await self._finalize_background_task_unlocked(op)
 
+        recover_host = self.ctx.extra.get("recover_background")
+        if recover_host is not None:
+            for op in await recover_host(tuple(self._background_pending)):
+                if op.task_id in self._background_pending:
+                    await self._finalize_background_task_unlocked(op)
+
     def _park_pending_ids(self) -> tuple[str, ...]:
         """The pending task ids a park is actually WAITING on.
 
