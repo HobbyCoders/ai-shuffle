@@ -38,6 +38,7 @@ export interface SessionInitDeps {
 		loadPersistedSession: () => Promise<import('../active-session').PersistedSession | null>;
 		getPersistedProfile: () => string;
 		getPersistedProject: () => string;
+		refreshSessionMetadata: (sessionId: string) => Promise<void>;
 		destroy: () => void;
 	};
 	appData: {
@@ -207,6 +208,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 					// sse-feed itself closes any earlier reader for the same session.
 					if (persisted.sessionId) {
 						feedController.start(persisted.sessionId);
+						void switcher.refreshSessionMetadata(persisted.sessionId);
 					}
 				} else {
 					update(s => ({ ...s, profile: defaultProfile, project: defaultProject }));

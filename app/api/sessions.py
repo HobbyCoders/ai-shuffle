@@ -1125,7 +1125,12 @@ async def get_live_session(
     # paths so the frontend can correct any stale state on switch.
     from app.core.workspace_folders import normalize_workspace_project_ids
     session_meta = {
-        "workspace_project_ids": normalize_workspace_project_ids(session.get("workspace_project_ids"))
+        "workspace_project_ids": normalize_workspace_project_ids(session.get("workspace_project_ids")),
+        # Hidden workers and older chats need not be in the sidebar's page.
+        # Their composer still restores this session's own execution binding.
+        "model": session.get("model") or session.get("launched_model"),
+        "provider_id": session.get("provider_id"),
+        "effort": session.get("effort"),
     }
 
     # Always include the title so the frontend header stays in sync

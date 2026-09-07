@@ -195,6 +195,21 @@ async def test_include_messages_false_keeps_the_metadata_fields():
     assert result["is_streaming"] is False
 
 
+async def test_metadata_only_snapshot_includes_hidden_worker_run_binding():
+    session = {"id": "hidden-worker", "hidden": True, "model": "gpt-5.6-terra",
+               "provider_id": "openai", "effort": "high"}
+    probe = []
+    result, legacy = await _poll_live(
+        session, store_result=([], {}), legacy_result=([], False),
+        include_messages=False, store_probe=probe,
+    )
+    assert result["session_meta"]["model"] == "gpt-5.6-terra"
+    assert result["session_meta"]["provider_id"] == "openai"
+    assert result["session_meta"]["effort"] == "high"
+    probe[0].assert_not_called()
+    legacy.assert_not_called()
+
+
 async def test_include_messages_defaults_to_the_full_transcript():
     """The param is opt-out only: every existing caller keeps its wire shape."""
     session = {"id": "default-sess", "title": "Default", "sdk_session_id": "sdk-def-1"}

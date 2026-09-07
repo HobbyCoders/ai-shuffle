@@ -158,6 +158,80 @@ function makeSwitcher(initial: ActiveSessionState) {
 	return { switcher, getState, ephemeralStore, deps };
 }
 
+describe('session-switcher · authoritative binding hydration', () => {
+	beforeEach(() => {
+		_mockSessions.current = [];
+		vi.mocked(api.get).mockReset().mockResolvedValue(null);
+	});
+
+	it('hydrates a hidden worker outside the sidebar with its provider and effort', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { model: 'gpt-5.6-terra', provider_id: 'openai', effort: 'high' } });
+		const { switcher, getState } = makeSwitcher(fullState());
+		await switcher.switchSession('hidden-child');
+		await vi.waitFor(() => expect(getState().effortLevelOverride).toBe('high'));
+		expect(getState().modelOverride).toBe('prov:openai:gpt-5.6-terra');
+		expect(_mockSessions.current).toEqual([]);
+		switcher.destroy();
+	});
+
+	it('fills missing persisted bindings on reload without changing the open session', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { model: 'prov:openai:gpt-5.6-terra', provider_id: 'openai', effort: 'high' } });
+		const { switcher, getState } = makeSwitcher(fullState({ modelOverride: null, effortLevelOverride: null }));
+		await switcher.refreshSessionMetadata('session-A');
+		expect(getState()).toMatchObject({ sessionId: 'session-A', modelOverride: 'prov:openai:gpt-5.6-terra', effortLevelOverride: 'high' });
+		switcher.destroy();
+	});
+
+	it('keeps edits made while the binding snapshot is in flight', async () => {
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState, deps } = makeSwitcher(fullState());
+		await switcher.switchSession('hidden-child');
+		deps.update(s => ({ ...s, modelOverride: 'opus', effortLevelOverride: 'low' }));
+		resolve({ session_meta: { model: 'gpt-5.6-terra', provider_id: 'openai', effort: 'high' } });
+		await Promise.resolve();
+		expect(getState()).toMatchObject({ modelOverride: 'opus', effortLevelOverride: 'low' });
+		switcher.destroy();
+	});
+
+	it('never applies an old child snapshot to a newer selection', async () => {
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState } = makeSwitcher(fullState());
+		await switcher.switchSession('hidden-child');
+		_mockSessions.current = [{ id: 'session-C', model: 'opus', effort: 'low' }];
+		await switcher.switchSession('session-C');
+		resolve({ session_meta: { model: 'gpt-5.6-terra', provider_id: 'openai', effort: 'high' } });
+		await Promise.resolve();
+		expect(getState()).toMatchObject({ sessionId: 'session-C', modelOverride: 'opus', effortLevelOverride: 'low' });
+		switcher.destroy();
+	});
+
+	it('invalidates a pending restore when its owner is destroyed', async () => {
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState } = makeSwitcher(fullState({ modelOverride: null, effortLevelOverride: null }));
+		const pending = switcher.refreshSessionMetadata('session-A');
+		switcher.destroy();
+		resolve({ session_meta: { model: 'opus', effort: 'high' } });
+		await pending;
+		expect(getState()).toMatchObject({ modelOverride: null, effortLevelOverride: null });
+	});
+
+	it('retains unsent picks while restoring metadata and canonicalizes sidebar models', async () => {
+		_mockSessions.current = [{ id: 'child', model: 'gpt-5.6-terra', provider_id: 'openai', effort: 'high' }];
+		const { switcher, getState, deps } = makeSwitcher(fullState());
+		await switcher.switchSession('child');
+		expect(getState().modelOverride).toBe('prov:openai:gpt-5.6-terra');
+		deps.update(s => ({ ...s, modelOverride: 'opus', effortLevelOverride: 'low' }));
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { model: 'gpt-5.6-terra', provider_id: 'openai', effort: 'high' } });
+		await switcher.refreshSessionMetadata('child');
+		expect(getState()).toMatchObject({ modelOverride: 'opus', effortLevelOverride: 'low' });
+		switcher.destroy();
+		_mockSessions.current = [];
+	});
+});
+
 describe('session-switcher · switchSession isolation', () => {
 	it('hydrates folders for a chat outside the paginated session list', async () => {
 		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { workspace_project_ids: ['docs'] } });

@@ -73,6 +73,7 @@ function makeInit(
 			loadPersistedSession,
 			getPersistedProfile: () => 'profile-1',
 			getPersistedProject: () => 'proj-1',
+			refreshSessionMetadata: vi.fn(async () => {}),
 			destroy: vi.fn(),
 		},
 		appData: { loadSessions: vi.fn() },
@@ -87,6 +88,12 @@ function makeInit(
 describe('session-init · isRestoringSession on persisted restore', () => {
 	beforeEach(() => {
 		sessionStorage.clear();
+	});
+
+	it('hydrates the restored session binding even when no session switch occurs', async () => {
+		const { init, deps } = makeInit({ sessionId: 'restored-parent', modelOverride: null, effortLevelOverride: null } as PersistedSession);
+		await init();
+		expect(deps.switcher.refreshSessionMetadata).toHaveBeenCalledWith('restored-parent');
 	});
 
 	it('explicitly reactivates transport after each owner remount', async () => {

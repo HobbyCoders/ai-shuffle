@@ -21,6 +21,7 @@ import { appData } from '../app-data.svelte';
 import { feedController } from './v2/feed-controller';
 import { resolveNewChatProject, resolveSessionProject } from './session-project';
 import { appMode, normalizeSessionMode, type SessionMode } from '../sessionMode.svelte';
+import { encodeProviderModel } from '$lib/constants/models.svelte';
 import {
 	contextChoiceFromWindow,
 	DEFAULT_CONTEXT_WINDOW_CHOICE,
@@ -65,6 +66,9 @@ interface LiveSnapshot {
 		cache_read_tokens?: number;
 	};
 	session_meta?: {
+		model?: string | null;
+		provider_id?: string | null;
+		effort?: string | null;
 		workspace_project_ids?: string[];
 		title?: string;
 		worktree_id?: string | null;
@@ -87,6 +91,7 @@ export interface SessionWorktreeInfo {
 
 interface SessionSwitcher {
 	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) => Promise<void>;
+	refreshSessionMetadata: (sessionId: string) => Promise<void>;
 	newChat: () => void;
 	persistSession: () => void;
 	loadPersistedSession: () => Promise<PersistedSession | null>;
@@ -215,6 +220,15 @@ function newChatModeState(
 export function getPersistedModel(): string | null {
 	if (typeof window === 'undefined') return null;
 	return localStorage.getItem('aihub_lastModel') || null;
+}
+
+/** A worker stores a bare model id alongside its provider; the picker uses both. */
+function sessionModelBinding(row: { model?: string | null; provider_id?: string | null } | undefined): string | null {
+	const model = row?.model;
+	if (!model) return null;
+	return row?.provider_id && !model.startsWith('prov:')
+		? encodeProviderModel(row.provider_id, model)
+		: model;
 }
 
 export function getPersistedEffort(): string | null {
@@ -645,7 +659,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// currently showing. A pre-modes row has mode NULL, which normalizes
 			// to 'code'.
 			mode: normalizeSessionMode(row?.mode),
-			modelOverride: ephemeral?.modelOverride ?? row?.model ?? null,
+			modelOverride: ephemeral?.modelOverride ?? sessionModelBinding(row),
 			permissionModeOverride: ephemeral?.permissionModeOverride ?? row?.permission_mode ?? null,
 			effortLevelOverride: ephemeral?.effortLevelOverride ?? row?.effort ?? null,
 			// Cross-device hydration: the row carries the session's own fast-tier
@@ -711,6 +725,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	 */
 	async function applyMetadataSnapshot(sessionId: string, generation: number) {
 		const initialFolders = getState().workspaceProjectIds;
+		const initialModel = getState().modelOverride;
+		const initialEffort = getState().effortLevelOverride;
 		let snap: LiveSnapshot | null;
 		try {
 			// `include_messages=false`: the SSE feed is the transcript authority, so
@@ -758,6 +774,15 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		const meta = snap.session_meta;
 		if (meta) {
+			// No sidebar row (hidden child/deep link), or a reload whose saved
+			// binding predates hydration. Fill holes without replacing an unsent
+			// selection or an edit made while this request was in flight.
+			if (initialModel == null && getState().modelOverride === initialModel && meta.model !== undefined) {
+				patch.modelOverride = sessionModelBinding(meta);
+			}
+			if (initialEffort == null && getState().effortLevelOverride === initialEffort && meta.effort !== undefined) {
+				patch.effortLevelOverride = meta.effort;
+			}
 			// An older chat may not be in the paginated session list. Hydrate its
 			// folders from /live, without overwriting an edit made during the fetch.
 			if (meta.workspace_project_ids && getState().workspaceProjectIds === initialFolders) {
@@ -912,6 +937,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	}
 
 	function destroy() {
+		++_switchGeneration;
 		if (selectionSyncTimeout) {
 			clearTimeout(selectionSyncTimeout);
 			selectionSyncTimeout = null;
@@ -924,6 +950,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	return {
 		switchSession,
+		refreshSessionMetadata: (sessionId: string) => applyMetadataSnapshot(sessionId, _switchGeneration),
 		newChat,
 		persistSession,
 		loadPersistedSession,
