@@ -19,6 +19,7 @@ import androidx.test.espresso.matcher.ViewMatchers.withContentDescription
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.google.android.material.button.MaterialButton
 import com.hobbycoders.aishuffle.account.AccountStore
 import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.model.Server
@@ -93,7 +94,7 @@ class ChatToolbarSmokeTest {
                     scenario.onActivity { activity ->
                         val status = activity.findViewById<TextView>(R.id.screenStatus)
                         val shell = status.parent as LinearLayout
-                        val web = shell.getChildAt(shell.childCount - 1) as WebView
+                        val web = (0 until shell.childCount).map { shell.getChildAt(it) }.filterIsInstance<WebView>().single()
                         ready = activity.hasWindowFocus() && activity.resources.configuration.orientation == orientation &&
                             status.visibility == View.GONE && web.url == server.baseUrl + "/" && web.height > 0
                     }
@@ -105,8 +106,12 @@ class ChatToolbarSmokeTest {
                         val toolbar = activity.findViewById<LinearLayout>(R.id.screenToolbar)
                         val status = activity.findViewById<TextView>(R.id.screenStatus)
                         val shell = toolbar.parent as LinearLayout
-                        val web = shell.getChildAt(2) as WebView
-                        assertEquals(3, shell.childCount)
+                        val children = (0 until shell.childCount).map { shell.getChildAt(it) }
+                        val web = children.filterIsInstance<WebView>().single()
+                        val repair = children.filterIsInstance<MaterialButton>().single()
+                        assertEquals("Reconnect this worker", repair.text.toString())
+                        assertEquals(View.GONE, repair.visibility)
+                        assertEquals(listOf(toolbar, web), children.filter { it.visibility == View.VISIBLE })
                         assertEquals((56 * density).toInt(), toolbar.height)
                         assertEquals(View.GONE, status.visibility)
                         assertEquals(shell.height - toolbar.height, web.height)
