@@ -29,6 +29,7 @@ from app.api.auth import require_admin, get_api_key, hash_api_key
 from app.core.config import settings
 from app.core import pairing
 from app.db import database as db
+from app.db.mobile_hub import public_device_id
 from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
@@ -198,14 +199,14 @@ async def update_capabilities(
     device = get_device_with_scope(request, "controller")
 
     # Verify device_id matches
-    if device["device_id"] != caps_request.device_id:
+    if public_device_id(device) != caps_request.device_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Device ID mismatch"
         )
 
     capabilities_dict = caps_request.capabilities.model_dump()
-    updated = db.update_mobile_device_capabilities(caps_request.device_id, capabilities_dict)
+    updated = db.update_mobile_device_capabilities(device['device_id'], capabilities_dict)
 
     if not updated:
         raise HTTPException(
@@ -326,13 +327,13 @@ async def register_push_token(
     device = get_device_with_scope(request, "mobile:notifications")
 
     # Verify device_id matches
-    if device["device_id"] != token_request.device_id:
+    if public_device_id(device) != token_request.device_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Device ID mismatch"
         )
 
-    updated = db.update_mobile_device_fcm_token(token_request.device_id, token_request.fcm_token)
+    updated = db.update_mobile_device_fcm_token(device['device_id'], token_request.fcm_token)
 
     if not updated:
         raise HTTPException(
@@ -358,14 +359,14 @@ async def register_unifiedpush_endpoint(
     """
     device = get_device_with_scope(request, "mobile:notifications")
 
-    if device["device_id"] != up_request.device_id:
+    if public_device_id(device) != up_request.device_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Device ID mismatch"
         )
 
     updated = db.update_mobile_device_unifiedpush_endpoint(
-        up_request.device_id, up_request.endpoint
+        device['device_id'], up_request.endpoint
     )
 
     if not updated:

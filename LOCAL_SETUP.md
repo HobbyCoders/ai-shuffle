@@ -102,6 +102,32 @@ Visit http://127.0.0.1:8000 in your browser. On first launch, you'll be guided t
 
 ## Configuration
 
+### Remote access
+
+Native setup and startup install a checksum-verified Cloudflare tunnel client
+under `downloads/cloudflared/` in the Shuffle folder. A client already on PATH
+is reused. No service or tunnel is started until you link the worker in Devices.
+If the download fails, local access still works. Retry the install with
+`python -m app.core.cloudflared` from the Shuffle folder.
+
+Each worker signs in to and out of its own Shuffle account connection, including
+workers sharing a database. Sign in with the same account on your phone to see
+all of those workers. LAN device authorization is separate from account sign-in.
+Signing out of a worker stops its tunnel and removes its account registration;
+other workers and local network connections remain available.
+
+### Credential storage locked after an upgrade
+
+If another install (for example Unraid) has already initialized the shared
+database's credential key, this machine also needs that key. Export a portable
+recovery package from the working install, stop this local app, then import it
+with `venv\Scripts\python.exe -m scripts.credential_keys import <recovery-file>`.
+The commands prompt privately for the recovery passphrase. Restart Shuffle
+after `venv\Scripts\python.exe -m scripts.credential_keys status` reports ready.
+See [credential key recovery](docs/credential-key-recovery.md) for the export
+steps. Changing the old admin password or signing into an account does not
+restore a missing key.
+
 ### Environment Variables
 
 Create a `.env` file in the project root (copy from `.env.example`):

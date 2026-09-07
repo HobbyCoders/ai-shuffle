@@ -66,7 +66,7 @@ class _PinnedHTTPS(http.client.HTTPSConnection):
             raise
 
 
-def call(binding, method, suffix, body=None):
+def call(binding, method, suffix, body=None, *, credential=None):
     """Bounded, nonredirecting request; never include hub bodies or secrets in errors."""
     conn = None
     try:
@@ -76,7 +76,7 @@ def call(binding, method, suffix, body=None):
         conn = _PinnedHTTPS(urlsplit(origin).hostname, timeout=timeout, context=ssl.create_default_context())
         conn.request(method, f'/v1/servers/{server}/{suffix}',
                      body=json.dumps(body) if body is not None else None,
-                     headers={'Authorization': 'Bearer ' + secret_for(binding),
+                     headers={'Authorization': 'Bearer ' + (credential if credential is not None else secret_for(binding)),
                               'Content-Type': 'application/json', 'Accept': 'application/json'})
         response = conn.getresponse()
         if response.status != 200:
@@ -162,7 +162,7 @@ def check_paired_client(client):
             or owner['paired_client_id'] != client['id']
             or device.get('device_id') != owner['device_id']
             or owner['device_id'] != client.get('device_id')
-            or owner['hub_device_id'] != owner['device_id']):
+            or not store.valid_device_identity(owner)):
         raise HTTPException(status_code=401, detail='Mobile authorization revoked')
     expires = device.get('api_key_expires_at')
     if isinstance(expires, str):

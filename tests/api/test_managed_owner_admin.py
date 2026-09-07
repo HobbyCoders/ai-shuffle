@@ -133,7 +133,7 @@ def test_copied_owner_session_loses_admin_on_any_failed_ownership_proof(owner_ap
             'local_device_expired': "UPDATE mobile_devices SET api_key_expires_at='2020-01-01T00:00:00+00:00'",
             'paired_revoked': "UPDATE paired_clients SET revoked_at='2026-01-01'",
             'session_expired': "UPDATE paired_clients SET session_expires_at='2020-01-01T00:00:00+00:00'",
-            'inactive_binding': 'UPDATE mobile_hub_binding SET active=FALSE',
+            'inactive_binding': 'UPDATE mobile_worker_bindings SET active=FALSE',
             'wrong_server': f"UPDATE mobile_hub_authorizations SET server_id='{OTHER}'",
             'wrong_client_device': f"UPDATE paired_clients SET device_id='{OTHER}'",
             'wrong_authorization_device': f"UPDATE mobile_hub_authorizations SET hub_device_id='{OTHER}'",

@@ -72,7 +72,8 @@ def authorized_device_ids(session_id):
             if value['kind'] == 'admin':
                 allowed = owner is None  # install admin is not a global hub admin
             elif value.get('account_id'):
-                allowed = bool(owner and owner['account_id'] == value['account_id'])
+                allowed = bool(owner and owner['account_id'] == value['account_id']
+                               and owner['server_id'] == membership['server_id'])
             else:
                 allowed = owner is None and device.get('paired_client_id') == value['principal_id']
             if allowed:

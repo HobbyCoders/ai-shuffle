@@ -9,14 +9,13 @@ import http.client
 import json
 import os
 import secrets
-import shutil
 import ssl
 import threading
 import time
 import uuid
 from urllib.parse import urlsplit
 from fastapi import HTTPException
-from app.core import account_hub
+from app.core import account_hub, cloudflared, encryption
 from app.core.config import settings
 from app.core.encryption import encrypt_value, decrypt_value
 from app.db import database, mobile_hub
@@ -27,7 +26,8 @@ _process = None
 _state = 'disconnected'
 _error = None
 _url = None
-_offer_lock = threading.Lock()
+_offer_lock = threading.RLock()
+_generation = 0
 
 
 def _key():
@@ -44,13 +44,26 @@ def _pending():
 
 
 def status():
+    binding = mobile_hub.get_binding()
+    common = {'signed_in': bool(binding), 'server_id': binding['server_id'] if binding else None}
+    if not encryption.is_encryption_ready():
+        return {**common, 'status': 'locked', 'error': encryption.credential_storage_error(),
+                'url': None, 'code': None, 'expires_at': None}
+    if not cloudflared.find_executable():
+        return {**common, 'status': 'unavailable', 'error': _missing_connector_message(),
+                'url': None, 'code': None, 'expires_at': None}
     try:
         pending = _pending()
     except (RuntimeError, ValueError):
-        return {'status': 'locked', 'error': 'Restore the server credential key to unlock this connection.',
+        return {**common, 'status': 'locked', 'error': 'Restore the server credential key to unlock this connection.',
                 'url': None, 'code': None, 'expires_at': None}
     valid = pending and pending['expires'] > time.time()
-    return {'status': _state, 'error': _error, 'url': _url,
+    state = _state if binding or valid else 'disconnected'
+    if state == 'disconnected' and binding:
+        state = 'connecting'
+    if valid and not binding:
+        state = 'waiting'
+    return {**common, 'status': state, 'error': _error, 'url': _url,
             'code': pending['code'] if valid and _state != 'connected' else None,
             'expires_at': pending['expires'] if valid else None}
 
@@ -61,17 +74,24 @@ def begin(name):
         return _begin(name)
 
 
+def _missing_connector_message():
+    return ('Remote access needs cloudflared. Run python -m app.core.cloudflared '
+            'in the Shuffle folder, then try again.')
+
+
 def _begin(name):
     global _state, _error
     name = name.strip()
     if not 1 <= len(name) <= 80 or any(ord(c) < 32 or ord(c) == 127 for c in name):
         raise HTTPException(400, 'Enter a worker name')
-    if not shutil.which('cloudflared'):
-        raise HTTPException(503, 'Install the current Shuffle build with automatic remote access support')
+    if not encryption.is_encryption_ready():
+        raise HTTPException(503, encryption.credential_storage_error())
+    if not cloudflared.find_executable():
+        raise HTTPException(503, _missing_connector_message())
     binding = mobile_hub.get_binding()
     if binding:
         if binding['linked_by'] != _owner():
-            raise HTTPException(409, 'This deployment is already linked. Manage its existing account connection.')
+            raise HTTPException(409, 'Sign out of this worker’s existing account connection before linking it again.')
         return status()
     pending = _pending()
     if not pending or pending['expires'] <= time.time():
@@ -107,6 +127,11 @@ def _protected_listener_ready():
 
 def _credentials():
     """Called in the DB worker thread. Never returns a connector token to an API."""
+    with _offer_lock:
+        return _load_credentials()
+
+
+def _load_credentials():
     binding = mobile_hub.get_binding()
     if not binding:
         pending = _pending()
@@ -138,9 +163,51 @@ def _credentials():
     if (parsed.scheme != 'https' or not parsed.hostname or parsed.port not in (None, 443)
             or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ('','/')):
         raise ValueError('Invalid connector address')
-    mobile_hub.activate()
+    mobile_hub.activate(binding['server_id'])
     database.set_system_setting(_key(), '')
     return token, url
+
+
+def _disconnect_local():
+    global _state, _error, _url, _generation
+    with _offer_lock:
+        binding = mobile_hub.get_binding()
+        credential = None
+        try:
+            if binding:
+                credential = account_hub.secret_for(binding)
+            else:
+                pending = _pending()
+                if pending:
+                    binding = {'hub_url': account_hub.configured_origin(), 'server_id': pending['id']}
+                    credential = pending['secret']
+        except Exception:
+            # Local sign-out must work even if key storage or the hub is down.
+            pass
+        mobile_hub.disconnect()
+        _generation += 1
+        _state, _error, _url = 'disconnected', None, None
+        return binding, credential, _generation
+
+
+async def disconnect():
+    global _error
+    binding, credential, generation = await run_sync(_disconnect_local)
+    await _stop()
+    error = None
+    if binding:
+        try:
+            if not credential:
+                raise ValueError('Credential unavailable')
+            result = await run_sync(lambda: account_hub.call(binding, 'DELETE', 'connection', credential=credential))
+            if result.get('ok') is not True:
+                raise ValueError('Sign-out unavailable')
+        except Exception:
+            error = ('Signed out on this worker. The account service could not remove its listing; '
+                     'remove this worker from your Shuffle account when the service is available.')
+    if generation == _generation:
+        _error = error
+    return status()
 
 
 def _check_authorized():
@@ -196,10 +263,11 @@ async def supervise():
                     _state, _error = ('connected' if ready else 'connecting'), None
                     delay = 30 if ready else 5
                 else:
+                    generation = _generation
                     credentials = await run_sync(_credentials)
-                    if credentials:
+                    if credentials and generation == _generation:
                         token, _url = credentials
-                        executable = shutil.which('cloudflared')
+                        executable = cloudflared.find_executable()
                         if not executable:
                             raise ValueError('Connector unavailable')
                         # Keep all application/provider secrets out of the child environment.
@@ -207,6 +275,9 @@ async def supervise():
                         child_env.update(TUNNEL_TOKEN=token, TUNNEL_LOGLEVEL='error')
                         _process = await asyncio.create_subprocess_exec(executable,'tunnel','--no-autoupdate','run',
                             env=child_env,stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL)
+                        if generation != _generation:
+                            await _stop()
+                            continue
                         _state, _error = 'connecting', None
                         delay = 3
             except asyncio.CancelledError:

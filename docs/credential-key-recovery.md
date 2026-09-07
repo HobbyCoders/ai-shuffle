@@ -39,6 +39,21 @@ Run these commands as the application's OS user with the intended DATA_DIR and
 PostgreSQL configuration. They print only readiness and a database identity.
 Passphrases are prompted, never accepted in command-line arguments.
 
+In the Docker/Unraid container console, the shell may start as `root` while
+Shuffle runs as `appuser`. The key owner must match the process user, so even
+root receives a recovery error when reading an appuser-owned key. Run the
+commands through the same user switch as the container entrypoint:
+
+```sh
+setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+  python -m scripts.credential_keys status
+setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+  python -m scripts.credential_keys export /tmp/shuffle-key-recovery.json
+```
+
+An export can run while the source app is running. Keep the destination app
+stopped during import. Preserve the key's ownership and permissions.
+
 ```sh
 python -m scripts.credential_keys status
 python -m scripts.credential_keys export /private/shuffle-key-recovery.json

@@ -211,7 +211,7 @@ def test_browser_signin_is_cookie_bound_one_use_and_uses_live_device_proof(app, 
     token = c.cookies.get('session')
     assert token.startswith('shc_')
     assert database.get_auth_session(token) is None
-    row = mobile.get_mobile_device(DEVICE)
+    row = mobile.get_mobile_device(mobile_hub.local_device_id(SERVER, DEVICE))
     assert row['platform'] == 'browser' and row['scopes'] == ['controller', 'web:session']
     assert test_db.execute('SELECT COUNT(*) FROM owner_browser_requests').fetchone()[0] == 0
     assert c.post('/api/v1/auth/account/poll', json={}).status_code == 401
@@ -237,7 +237,7 @@ def test_browser_status_only_poll_reports_denial_but_cannot_enroll(app, monkeypa
     response = c.post('/api/v1/auth/account/poll', json={})
     assert response.status_code == (403 if hub_result == 'denied' else 401)
     assert not c.cookies.get('session')
-    assert test_db.execute('SELECT COUNT(*) FROM mobile_hub_authorizations').fetchone()[0] == 0
+    assert test_db.execute('SELECT COUNT(*) FROM mobile_worker_authorizations').fetchone()[0] == 0
     assert test_db.execute('SELECT COUNT(*) FROM owner_browser_requests').fetchone()[0] == 1
 
 
@@ -256,7 +256,7 @@ def test_browser_transaction_fails_closed(app, monkeypatch, test_db, failure):
     response = c.post('/api/v1/auth/account/poll', json={'completion_secret': 'c' * 43},
                       headers={'Origin': 'https://attacker.example'} if failure == 'bad_origin' else {})
     assert response.status_code in (401, 403)
-    assert test_db.execute('SELECT COUNT(*) FROM mobile_hub_authorizations').fetchone()[0] == 0
+    assert test_db.execute('SELECT COUNT(*) FROM mobile_worker_authorizations').fetchone()[0] == 0
 
 
 def test_console_recovery_is_one_use_loopback_only_and_short_lived(app, monkeypatch, test_db):

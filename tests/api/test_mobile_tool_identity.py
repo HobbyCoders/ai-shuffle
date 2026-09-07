@@ -115,6 +115,13 @@ def test_direct_desktop_and_api_never_gain_global_access(world):
     assert identity.authorized_device_ids('direct') == ['one']
 
 
+def test_phone_on_other_worker_does_not_disable_this_workers_tools(world):
+    create('current-worker', identity.principal('paired', 'one', 'shc_one'))
+    world[1]['two']['server_id'] = 'another-worker'
+    world[3].add('two')
+    assert identity.authorized_device_ids('current-worker') == ['one']
+
+
 def test_legacy_missing_and_explicit_admin_claim(world):
     create('old')
     assert identity.authorized_device_ids('old') == []

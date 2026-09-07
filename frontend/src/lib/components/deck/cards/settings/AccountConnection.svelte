@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { Smartphone, Check, Copy } from 'lucide-svelte';
-	type Connection = { authorization_url?: string | null; status: string; code: string | null; qr_svg: string | null; error: string | null };
+	type Connection = { authorization_url?: string | null; signed_in: boolean; status: string; code: string | null; qr_svg: string | null; error: string | null };
 	let connection = $state<Connection | null>(null);
 	let name = $state('My worker');
 	let busy = $state(false);
@@ -12,7 +12,7 @@
 	let stopped = false;
 	let poll: ReturnType<typeof setTimeout>;
 	async function refresh() {
-		try { connection = await api.get<Connection>('/mobile/hub/connection'); error = ''; }
+		try { const next = await api.get<Connection>('/mobile/hub/connection'); if (!busy) connection = next; }
 		catch (e) { error = getErrorMessage(e); }
 		if (!stopped) poll = setTimeout(refresh, 4000);
 	}
@@ -30,12 +30,18 @@
 		try { await navigator.clipboard.writeText(connection?.code ?? ''); copied = true; }
 		catch { error = 'Select the code to copy it.'; }
 	}
+	async function disconnect() {
+		busy = true; error = ''; showPairingCode = false;
+		try { const result = await api.delete<Connection>('/mobile/hub/connection'); if (result) connection = result; }
+		catch (e) { error = getErrorMessage(e); }
+		finally { busy = false; }
+	}
 </script>
 
 <section class="account-connection" aria-label="Account connection">
 	<div class="intro"><Smartphone size={20} /><div>
 		<h4>Remote access</h4>
-		<p>Optional: link this worker to your Shuffle account to reach it from outside your local network.</p>
+		<p>Sign in to your Shuffle account on each worker. Sign in with the same account on your phone to access all your workers from anywhere.</p>
 	</div></div>
 	{#if connection?.status === 'connected'}
 		<p class="connected" role="status"><Check size={16} /> Connected to your account</p>
@@ -54,9 +60,17 @@
 		{/if}
 	{:else if connection?.status === 'connecting' || connection?.status === 'reconnecting'}
 		<p role="status">Connecting your worker… Shuffle will retry automatically.</p>
+	{:else if connection?.status === 'locked' || connection?.status === 'unavailable'}
+		<p>Remote access is unavailable until the issue below is resolved.</p>
 	{:else}
 		<label>Worker name<input class="input" bind:value={name} maxlength={80} placeholder="My worker" /></label>
-		<button class="btn btn-primary" disabled={busy || !name.trim()} onclick={connect}>{busy ? 'Preparing…' : 'Connect to my account'}</button>
+		{#if !connection?.signed_in}
+		<button class="btn btn-primary" disabled={busy || !name.trim()} onclick={connect}>{busy ? 'Preparing…' : 'Sign in to Shuffle'}</button>
+		{/if}
+	{/if}
+	{#if connection?.signed_in || connection?.code}
+		<button class="btn" disabled={busy} onclick={disconnect}>{busy ? 'Signing out…' : connection.signed_in ? 'Sign out of this worker' : 'Cancel sign-in'}</button>
+		{#if connection.signed_in}<p class="hint">Signing out removes this worker from your account. Your other workers and local network connections stay connected.</p>{/if}
 	{/if}
 	{#if error || connection?.error}<p class="error" role="alert">{error || connection?.error}</p>{/if}
 </section>

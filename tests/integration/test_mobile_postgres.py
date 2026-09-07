@@ -241,5 +241,5 @@ def test_concurrent_immutable_bind_preserves_winners_secret(pg):
     assert first == second == pg.hub.get_binding()
     winner = next(args for args in candidates if args[1] == first["server_id"])
     assert (first["hub_url"], first["server_id"], first["encrypted_secret"], first["linked_by"]) == winner
-    assert len(pg.rows("mobile_hub_binding")) == len(pg.rows("system_settings")) == 1
+    assert len(pg.rows("mobile_worker_bindings")) == len(pg.rows("system_settings")) == 1
     assert pg.hub.bind("https://third.invalid", "server-third", "enc:fake-third", "other") == first

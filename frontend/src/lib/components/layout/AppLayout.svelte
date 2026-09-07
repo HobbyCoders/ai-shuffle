@@ -18,6 +18,7 @@
 	import MainPanel from './MainPanel.svelte';
 	import AppTopBar from './AppTopBar.svelte';
 	import Sidebar from './Sidebar.svelte';
+	import CredentialStorageBanner from '../CredentialStorageBanner.svelte';
 
 	interface Props {
 		isAdmin?: boolean;
@@ -103,6 +104,7 @@
 </script>
 
 <div class="app-shell" class:mobile={isMobile}>
+	<CredentialStorageBanner />
 	{#if isMobile}
 		<AppTopBar
 			{isAdmin}

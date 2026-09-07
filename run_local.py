@@ -110,7 +110,26 @@ def check_prerequisites():
     """Report prerequisites without installing software or changing the host."""
     ok = check_node_version()
     check_prerequisite("GitHub CLI (optional, for GitHub features)", "gh", "https://cli.github.com/")
+    from app.core.cloudflared import find_executable
+    if not find_executable():
+        print_status("Remote access client missing; setup or normal startup will install cloudflared.", "warning")
     return ok
+
+
+def setup_remote_access():
+    """Optional remote support must not prevent offline/local use of Shuffle."""
+    from app.core.cloudflared import find_executable, install
+    if find_executable():
+        return True
+    print_status("Installing cloudflared for optional remote access...", "info")
+    try:
+        install()
+    except Exception as error:
+        print_status(f"Remote access client could not be installed: {error}", "warning")
+        print_status("Retry with: python -m app.core.cloudflared", "info")
+        return False
+    print_status("Remote access client installed", "success")
+    return True
 
 
 def get_venv_python() -> Path:
@@ -469,6 +488,8 @@ def run_setup(*, configure_db: bool = True):
     if configure_db:
         configure_database()
 
+    setup_remote_access()
+
     # Browser automation uses the bundled browser-mcp server + a local Chrome or
     # Edge in headless mode, always auto-launched by the backend over CDP. No
     # Claude account, browser extension, or Playwright Chromium download is
@@ -642,6 +663,8 @@ def start_server(host: str, port: int, open_browser: bool):
         sys.exit(1)
 
     url = f"http://{host}:{port}"
+    # Existing native installs also need dependencies added after their setup.
+    setup_remote_access()
     print_status(f"Server starting at {url}", "info")
     print_status("Press Ctrl+C to stop", "info")
 

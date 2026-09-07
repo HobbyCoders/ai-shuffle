@@ -132,7 +132,7 @@ def preference_identity():
 
 def require_key():
     if not encryption.is_encryption_ready():
-        raise HTTPException(503, 'Credential storage requires local recovery.')
+        raise HTTPException(503, encryption.credential_storage_error())
 
 
 def storage_status():
@@ -323,7 +323,7 @@ def poll_browser(proof, completion_secret=None):
     mobile_hub.enroll(identity, SimpleNamespace(platform='browser', capabilities=DeviceCapabilities()),
                       digest(secrets.token_hex(32)), expiry,
                       ['controller', 'web:session'], session_token_hash=pairing.hash_controller_session(token),
-                      login_proof=digest(proof))
+                      login_proof=digest(proof), scoped=True)
     preference_identity()
     return token, expiry
 

@@ -27,6 +27,18 @@ def credential_key_status() -> dict:
     return {**_credential_status, 'ready': is_encryption_ready()}
 
 
+def credential_storage_error() -> str:
+    """Actionable recovery guidance without exposing paths or key material."""
+    if _credential_status.get('state') == 'legacy_unlock_required':
+        action = 'Stop Shuffle and adopt the existing credentials with the original encryption password, then restart.'
+    elif _credential_status.get('state') == 'recovery_required':
+        action = ('Restore the matching credential key from a backup or the Shuffle install '
+                  'that initialized this database, then restart Shuffle.')
+    else:
+        action = 'Check credential storage with python -m scripts.credential_keys status on this machine.'
+    return 'Credential storage is locked; local recovery is required on this install. ' + action
+
+
 def initialize_server_key(db_module, legacy_password=None) -> bool:
     """Initialize local-first storage, without an account or normal password login.
 
@@ -175,7 +187,7 @@ def encrypt_value(plaintext: str) -> str:
         RuntimeError: If encryption key is not loaded
     """
     if not _encryption_key:
-        raise RuntimeError("Credential storage is locked; local recovery is required.")
+        raise RuntimeError(credential_storage_error())
 
     f = Fernet(_encryption_key)
     encrypted = f.encrypt(plaintext.encode())
@@ -198,7 +210,7 @@ def decrypt_value(encrypted: str) -> str:
         ValueError: If decryption fails (wrong key or corrupted data)
     """
     if not _encryption_key:
-        raise RuntimeError("Credential storage is locked; local recovery is required.")
+        raise RuntimeError(credential_storage_error())
 
     if not encrypted.startswith("enc:"):
         # Not encrypted, return as-is (for migration compatibility)
@@ -595,7 +607,7 @@ def encrypt_existing_plaintext_keys(db_module) -> int:
         Number of keys encrypted
     """
     if not _encryption_key:
-        raise RuntimeError("Credential storage is locked; local recovery is required.")
+        raise RuntimeError(credential_storage_error())
 
     sensitive_settings = [
         "openai_api_key",

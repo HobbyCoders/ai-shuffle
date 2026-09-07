@@ -80,6 +80,12 @@ def connect_account(body: ManagedLinkRequest, _admin=Depends(require_admin)):
     return _connection_response(managed_connection.begin(body.name.strip()))
 
 
+@router.delete('/connection')
+async def disconnect_account(_admin=Depends(require_admin)):
+    from app.core import managed_connection
+    return _connection_response(await managed_connection.disconnect())
+
+
 class LinkRequest(BaseModel):
     hub_url: str = Field(min_length=1, max_length=2048)
     server_id: str = Field(pattern=r'^[a-f0-9-]{36}$')
@@ -121,7 +127,7 @@ def link(body: LinkRequest, request: Request):
     # and exact binding can retry. Never roll back into a mutable trust root.
     if account_hub.call(binding, 'POST', 'activate', {}).get('ok') is not True:
         raise HTTPException(503, 'Hub activation unavailable')
-    store.activate()
+    store.activate(server_id)
     return {'ok': True}
 
 
@@ -148,12 +154,14 @@ def enroll(body: EnrollRequest):
     expires = datetime.now(timezone.utc) + timedelta(days=365)
     scopes = list(pairing.DEFAULT_MOBILE_SCOPES)
     try:
-        device_id = store.enroll(identity, body.device_info, hashlib.sha256(key.encode()).hexdigest(), expires, scopes)
+        store.enroll(identity, body.device_info, hashlib.sha256(key.encode()).hexdigest(), expires, scopes, scoped=True)
     except ValueError:
         raise HTTPException(409, 'Device already authorized; use a fresh installation identity') from None
     except Exception:
         # Includes uniqueness races: never leak database statements or key hashes.
         raise HTTPException(409, 'Device enrollment unavailable; obtain a new ticket') from None
-    return JSONResponse({'api_key': key, 'device_id': device_id,
+    # Android keeps its account identity on the wire; rows and credentials are
+    # distinct per worker even when both workers share the same database.
+    return JSONResponse({'api_key': key, 'device_id': identity['device_id'],
                          'expires_at': expires.isoformat(), 'scopes': scopes},
                         headers={'Cache-Control': 'no-store'})

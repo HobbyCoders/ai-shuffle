@@ -150,12 +150,12 @@ def test_enroll_fresh_key_hash_and_duplicate_no_overwrite(setup, monkeypatch, te
     assert response.status_code == 200, response.text
     result = response.json()
     assert result['api_key'].startswith('aim_')
-    row = database.get_mobile_device(DEVICE)
+    row = database.get_mobile_device(store.local_device_id(SERVER, DEVICE))
     assert row['api_key_hash'] == hash_api_key(result['api_key'])
     assert row['device_name'] == 'Phone'
-    assert store.ownership(DEVICE)['account_id'] == ACCOUNT
+    assert store.ownership(row["device_id"])['account_id'] == ACCOUNT
     assert setup.post('/api/v1/mobile/hub/enroll', json=body).status_code == 409
-    assert database.get_mobile_device(DEVICE)['api_key_hash'] == row['api_key_hash']
+    assert database.get_mobile_device(store.local_device_id(SERVER, DEVICE))['api_key_hash'] == row['api_key_hash']
 
 
 def test_enroll_identity_mismatch_consumed_but_not_saved(setup, monkeypatch):
@@ -239,7 +239,7 @@ def test_password_rotation_discovers_hub_secret(setup):
     new_key = encryption.Fernet.generate_key()
     plan, failures = encryption.build_reencryption_plan(old_key, new_key, database)
     assert not failures
-    items = [item for item in plan if item.ref == 'mobile_account_hub_secret']
+    items = [item for item in plan if item.ref == store.secret_key()]
     assert len(items) == 1
     encryption.apply_reencryption_plan(items, database)
     encryption._encryption_key = new_key
@@ -259,9 +259,9 @@ def test_two_installs_get_independent_keys_and_owner_bindings(setup, monkeypatch
     second = setup.post('/api/v1/mobile/hub/enroll', json={'ticket': 'second', 'device_info': info(current['device_id']).model_dump()}).json()
     assert first['api_key'] != second['api_key']
     assert first['device_id'] != second['device_id']
-    assert database.get_mobile_device_by_api_key_hash(hash_api_key(first['api_key']))['device_id'] == first['device_id']
-    assert database.get_mobile_device_by_api_key_hash(hash_api_key(second['api_key']))['device_id'] == second['device_id']
-    assert store.ownership(first['device_id'])['account_id'] == store.ownership(second['device_id'])['account_id']
+    assert database.get_mobile_device_by_api_key_hash(hash_api_key(first['api_key']))['device_id'] == store.local_device_id(SERVER, first['device_id'])
+    assert database.get_mobile_device_by_api_key_hash(hash_api_key(second['api_key']))['device_id'] == store.local_device_id(SERVER, second['device_id'])
+    assert store.ownership(store.local_device_id(SERVER, first['device_id']))['account_id'] == store.ownership(store.local_device_id(SERVER, second['device_id']))['account_id']
 
 
 def test_account_key_cannot_list_all_devices_or_relink(setup, monkeypatch):

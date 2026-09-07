@@ -151,7 +151,7 @@ def test_password_rotation_preserves_both_credential_paths():
     new_key = encryption.Fernet.generate_key()
     plan, failures = encryption.build_reencryption_plan(encryption._encryption_key, new_key, database)
     assert not failures
-    assert any(item.ref == 'mobile_account_hub_secret' for item in plan)
+    assert any(item.ref == mobile_hub.secret_key() for item in plan)
     assert all(item.ref != managed_credentials._setting_key() for item in plan)
     encryption.apply_reencryption_plan(plan, database)
     encryption._encryption_key = new_key
@@ -277,7 +277,7 @@ def setting_write(key, value):
     assert key == managed_connection._key() and value == ''
 database.set_system_setting = setting_write
 mobile_hub.get_binding = lambda: state['binding']
-mobile_hub.activate = lambda: None
+mobile_hub.activate = lambda server_id: None
 class Connection:
     status = 200
     def __init__(self, *args, **kwargs): pass
