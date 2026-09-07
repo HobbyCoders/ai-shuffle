@@ -222,18 +222,21 @@ def preferences_client():
 
 
 class TestPreferencesOffload:
-    def test_get_all_preferences_is_one_off_loop_hop(self, preferences_client):
+    @pytest.mark.parametrize('revision', [None, '550e8400-e29b-41d4-a716-446655440000'])
+    def test_get_all_preferences_is_one_off_loop_hop(self, preferences_client, revision):
         client, mock_db = preferences_client
         threads: list[int] = []
         mock_db.get_all_user_preferences.side_effect = recorder(
-            threads, [{"key": "openTabs", "value": ["a"]}]
+            threads, [{"key": "openTabs", "value": ["a"], "revision": revision}]
         )
 
         with OffloadTracker(preferences_module) as tracker:
             response = client.get("/api/v1/preferences/all")
 
         assert response.status_code == 200
-        assert response.json() == {"preferences": {"openTabs": ["a"]}}
+        assert response.json() == {
+            "preferences": {"openTabs": ["a"]}, "versions": {"openTabs": revision},
+        }
         tracker.assert_single_hop()
         assert threads and set(threads).isdisjoint(tracker.loop_threads)
 

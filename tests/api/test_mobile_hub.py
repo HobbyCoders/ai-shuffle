@@ -2,7 +2,7 @@ import socket
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocketException
 from fastapi.testclient import TestClient
 from app.api import mobile, mobile_hub
 from app.api.auth import get_paired_client_from_token, hash_api_key
@@ -177,11 +177,11 @@ def test_existing_different_authorization_never_overwritten(setup, test_db):
     assert test_db.execute('SELECT count(*) FROM paired_clients').fetchone()[0] == 0
 
 
-def test_hub_revocation_rechecked_on_every_aim_and_web_request(setup, monkeypatch):
+@pytest.mark.parametrize('hub_status', [401, 503])
+def test_hub_revocation_rechecked_on_every_aim_and_web_request(setup, monkeypatch, hub_status):
     bind()
     insert()
-    call = Mock(side_effect=[active(), active(), HTTPException(503, 'revoked'), HTTPException(503, 'revoked')])
-    # Mock side_effect exceptions model revoked/recovery/server/unavailable response.
+    call = Mock(side_effect=[active(), active(), HTTPException(hub_status, 'authorization failed'), HTTPException(hub_status, 'authorization failed')])
     monkeypatch.setattr(account_hub, 'call', call)
     request = Mock()
     request.headers = {'Authorization': 'Bearer aim_test'}
@@ -191,10 +191,21 @@ def test_hub_revocation_rechecked_on_every_aim_and_web_request(setup, monkeypatc
     token = pairing.generate_controller_session()
     database.set_paired_client_session(owner['paired_client_id'], pairing.hash_controller_session(token), datetime.now(timezone.utc) + timedelta(days=1))
     assert get_paired_client_from_token(token)
-    with pytest.raises(HTTPException):
+    with pytest.raises(HTTPException) as failure:
         mobile.get_device_from_api_key(request)
-    assert get_paired_client_from_token(token) is None
+    assert failure.value.status_code == hub_status
+    if hub_status == 503:
+        # An unavailable hub must not turn a valid session into a revoked login.
+        with pytest.raises(HTTPException) as failure:
+            get_paired_client_from_token(token)
+        assert failure.value.status_code == 503
+    else:
+        assert get_paired_client_from_token(token) is None
     assert call.call_count == 4
+    if hub_status == 503:
+        call.side_effect = None
+        call.return_value = active()
+        assert get_paired_client_from_token(token)
 
 
 def test_deleted_local_mobile_revokes_derived_session(setup, monkeypatch):
@@ -301,16 +312,22 @@ def test_schema_migration_idempotent(setup, test_db):
 
 
 @pytest.mark.asyncio
-async def test_revoked_hub_websocket_handshake_denied(setup, monkeypatch):
+@pytest.mark.parametrize('hub_status', [401, 503])
+async def test_revoked_hub_websocket_handshake_denied(setup, monkeypatch, hub_status):
     from app.api.ws_auth import authenticate_websocket
     bind()
     insert()
     owner = store.ownership(DEVICE)
     token = pairing.generate_controller_session()
     database.set_paired_client_session(owner['paired_client_id'], pairing.hash_controller_session(token), datetime.now(timezone.utc) + timedelta(days=1))
-    monkeypatch.setattr(account_hub, 'call', Mock(side_effect=HTTPException(503, 'revoked')))
+    monkeypatch.setattr(account_hub, 'call', Mock(side_effect=HTTPException(hub_status, 'authorization failed')))
     websocket = Mock(cookies={})
-    assert await authenticate_websocket(websocket, token) == (False, None)
+    if hub_status == 503:
+        with pytest.raises(WebSocketException) as failure:
+            await authenticate_websocket(websocket, token)
+        assert failure.value.code == 1013
+    else:
+        assert await authenticate_websocket(websocket, token) == (False, None)
 
 
 def test_direct_phone_deletion_revokes_derived_cookie(setup):
