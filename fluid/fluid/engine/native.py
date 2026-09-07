@@ -973,6 +973,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Mid-turn user steers and peer messages awaiting the next tool
         # result (see the Steer and AgentMessage ops).
         self._pending_steers: list[Steer | AgentMessage | str] = []
+        # An append can raise after advancing the store's cached head, or
+        # after actually committing. A retry must keep the exact same node
+        # and parent rather than build a duplicate under that uncertain head.
+        self._pending_peer_write: tuple[SessionNode, list[AgentMessage]] | None = None
         # Once a terminal response is being published, this turn can no
         # longer consume peer traffic. Refuse it explicitly in that small
         # window instead of acknowledging a message which will be discarded.
@@ -1799,7 +1803,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             # is written. Acknowledging a peer during publication would let
             # turn cleanup discard it after the sender has reported success.
             self._peer_delivery_sealed = True
-            if (
+            while (
                 not isinstance(event, Interrupted)
                 and not self._interrupted.is_set()
                 and not self._background_closed
@@ -1815,12 +1819,26 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
                 if peer_node is not None:
                     event = replace(event, node_id=peer_node.node_id)
+                else:
+                    break  # interrupt/close arrived while reading the head
         # Keep background park/wake serialization and completion delivery in
         # the shared lifecycle. A subsequent explicit or wake turn reopens
         # peer admission normally.
         return await super()._emit_terminal_with_park(event)
 
     async def _run_turn(self, op: UserTurn | Resume) -> None:
+        try:
+            await self._run_turn_inner(op)
+        finally:
+            # Covers early hook/Resume exits and cancellation before the
+            # agent loop starts, as well as its normal terminal paths. Stop
+            # must never leave queued peers or a failed write to a later turn.
+            self._peer_delivery_sealed = True
+            self._pending_steers.clear()
+            self._pending_peer_write = None
+            self._active_turn_id = None
+
+    async def _run_turn_inner(self, op: UserTurn | Resume) -> None:
         self._peer_delivery_sealed = False
         meta = await self._ensure_session()
         sid = meta.session_id
@@ -2852,18 +2870,24 @@ class NativeLoop(BackgroundLifecycleMixin):
         """
         if self._interrupted.is_set() or self._background_closed:
             return None
-        peers = [op for op in self._pending_steers if isinstance(op, AgentMessage)]
-        if not peers:
-            return None
-        delivered = [_steer_parts(op) for op in peers]
-        node = SessionNode(
-            node_id=new_id("node"), parent_id=parent_id,
-            message=Message(role="user", content=[Text("".join(
-                _render_interjection(text, sender, origin)
-                for _, text, sender, origin in delivered
-            ).strip())]),
-        )
+        if self._pending_peer_write is None:
+            peers = [op for op in self._pending_steers if isinstance(op, AgentMessage)]
+            if not peers:
+                return None
+            delivered = [_steer_parts(op) for op in peers]
+            node = SessionNode(
+                node_id=new_id("node"), parent_id=parent_id,
+                message=Message(role="user", content=[Text("".join(
+                    _render_interjection(text, sender, origin)
+                    for _, text, sender, origin in delivered
+                ).strip())]),
+            )
+            self._pending_peer_write = (node, peers)
+        else:
+            node, peers = self._pending_peer_write
+            delivered = [_steer_parts(op) for op in peers]
         await self.store.append(sid, node)
+        self._pending_peer_write = None
         # Remove only the persisted batch, after its write succeeds. A peer
         # arriving during that await belongs to the next batch, even when its
         # fields equal an earlier message. Receipt failure must not reappend

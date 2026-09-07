@@ -463,6 +463,169 @@ async def test_peer_batch_is_retained_when_its_first_history_write_fails() -> No
         await loop.aclose()
 
 
+@pytest.mark.parametrize("write_before_error", [False, True])
+async def test_peer_write_retry_reopens_without_duplicate_or_orphan(
+    write_before_error, tmp_path,
+) -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import ErrorEvent
+    from fluid.store.jsonl import JsonlStore
+
+    class _FailingJsonlStore(JsonlStore):
+        def __init__(self):
+            super().__init__(tmp_path)
+            self.entered, self.release = asyncio.Event(), asyncio.Event()
+            self.failed = False
+            self.attempts = []
+
+        async def append(self, session_id, node):
+            if "first peer" in node.message.text() and not self.failed:
+                self.entered.set()
+                await self.release.wait()
+            await super().append(session_id, node)
+
+        def _append_line(self, path, record):
+            if record.get("t") == "node" and "first peer" in json.dumps(record):
+                self.attempts.append(record["node"])
+                if not self.failed:
+                    self.failed = True
+                    if write_before_error:
+                        super()._append_line(path, record)
+                    raise OSError("ambiguous peer write failure")
+            super()._append_line(path, record)
+
+    provider = _FinalTextProvider()
+    store = _FailingJsonlStore()
+    loop = NativeLoop(provider=provider, store=store, model="m")
+    try:
+        await loop.submit(UserTurn(content="start"))
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        await loop.submit(AgentMessage(sender="alpha", text="first peer", id="p1"))
+        provider.release.set()
+        await asyncio.wait_for(store.entered.wait(), 2)
+        # This peer is accepted after the first batch was captured, before
+        # the failing adapter write returns to terminal recovery.
+        await loop.submit(AgentMessage(sender="bravo", text="second peer", id="p2"))
+        store.release.set()
+        await asyncio.wait_for(loop.wait_turn(), 2)
+        assert len(provider.requests) == 1
+        fresh = JsonlStore(tmp_path)
+        reopened = await fresh.load_path(loop.session_id)
+        cached = await store.load_path(loop.session_id)
+        assert [n.node_id for n in cached] == [n.node_id for n in reopened]
+        assert sum("first peer" in n.message.text() for n in reopened) == 1
+        assert sum("second peer" in n.message.text() for n in reopened) == 1
+        for previous, node in zip(reopened, reopened[1:]):
+            assert node.parent_id == previous.node_id
+        assert len(store.attempts) == 2
+        assert store.attempts[0] == store.attempts[1]
+        events = await fresh.events_since(loop.session_id, 0)
+        receipts = [e for e in events if isinstance(e, SteerDelivered)]
+        assert [s["id"] for e in receipts for s in e.steers] == ["p1", "p2"]
+        assert all(any(n.node_id == e.node_id for n in reopened) for e in receipts)
+        terminals = [e for e in events if isinstance(e, ErrorEvent)]
+        assert len(terminals) == 1 and "ambiguous peer write failure" in terminals[0].message
+        assert terminals[0].node_id == reopened[-1].node_id
+        assert not loop._pending_steers
+        assert loop._pending_peer_write is None
+        fresh.close()
+    finally:
+        provider.release.set()
+        store.release.set()
+        await loop.aclose()
+        store.close()
+
+
+@pytest.mark.parametrize("stop", ["interrupt", "close"])
+async def test_stop_during_turn_start_does_not_leak_peer_to_later_turn(stop) -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.events.ops import Interrupt
+    from fluid.hooks.bus import HookBus, HookDecision, TURN_START
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def deny(event, payload):
+        entered.set()
+        await release.wait()
+        return HookDecision(action="deny", note="blocked prompt")
+
+    hooks = HookBus()
+    hooks.on(TURN_START, deny)
+    provider = _FinalTextProvider()
+    provider.release.set()
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="m", hooks=hooks)
+    try:
+        await loop.submit(UserTurn(content="blocked prompt"))
+        await asyncio.wait_for(entered.wait(), 2)
+        await loop.submit(AgentMessage(sender="alpha", text="discarded peer", id="p1"))
+        if stop == "interrupt":
+            await loop.submit(Interrupt())
+            release.set()
+            await asyncio.wait_for(loop.wait_turn(), 2)
+        else:
+            await loop.aclose()
+        assert not loop._pending_steers
+        assert loop._pending_peer_write is None
+        assert not provider.requests
+        assert not [e for e in loop.bus.log(loop.session_id) if isinstance(e, SteerDelivered)]
+        if stop == "interrupt":
+            loop.hooks = None
+            await loop.submit(UserTurn(content="unrelated request"))
+            await asyncio.wait_for(loop.wait_turn(), 2)
+            assert len(provider.requests) == 1
+            assert "discarded peer" not in _all_text(provider.requests[-1])
+    finally:
+        release.set()
+        await loop.aclose()
+
+
+@pytest.mark.parametrize("stop", ["interrupt", "close"])
+async def test_stop_discards_an_inflight_peer_write_batch(stop) -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.events.ops import Interrupt
+
+    class _BlockedPeerWrite(MemoryStore):
+        def __init__(self):
+            super().__init__()
+            self.entered, self.release = asyncio.Event(), asyncio.Event()
+
+        async def append(self, session_id, node):
+            if "discarded peer" in node.message.text():
+                self.entered.set()
+                await self.release.wait()
+                raise OSError("peer write cancelled before commit")
+            await super().append(session_id, node)
+
+    provider = _FinalTextProvider()
+    store = _BlockedPeerWrite()
+    loop = NativeLoop(provider=provider, store=store, model="m")
+    try:
+        await loop.submit(UserTurn(content="start"))
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        await loop.submit(AgentMessage(sender="alpha", text="discarded peer", id="p1"))
+        provider.release.set()
+        await asyncio.wait_for(store.entered.wait(), 2)
+        assert loop._pending_peer_write is not None
+        if stop == "interrupt":
+            await loop.submit(Interrupt())
+            store.release.set()
+            await asyncio.wait_for(loop.wait_turn(), 2)
+        else:
+            await loop.aclose()
+        assert loop._pending_peer_write is None
+        assert not loop._pending_steers
+        assert not [e for e in loop.bus.log(loop.session_id) if isinstance(e, SteerDelivered)]
+        if stop == "interrupt":
+            await loop.submit(UserTurn(content="unrelated request"))
+            await asyncio.wait_for(loop.wait_turn(), 2)
+            assert len(provider.requests) == 2
+            assert "discarded peer" not in _all_text(provider.requests[-1])
+    finally:
+        store.release.set()
+        provider.release.set()
+        await loop.aclose()
+
+
 async def test_message_during_terminal_publication_returns_retry_then_idle_accepts() -> None:
     from fluid.engine.native import NativeLoop
     from fluid.events.model import TurnComplete
