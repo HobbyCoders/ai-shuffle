@@ -1165,8 +1165,9 @@ class TestCommandConstants:
                 result = get_all_commands(tmpdir)
 
                 model_cmd = next((c for c in result if c["name"] == "model"), None)
-                assert model_cmd is not None
-                assert model_cmd["argument_hint"] == "<model>"
+                # Model selection belongs to the app's controls; the CLI's
+                # terminal-only settings command must not be advertised here.
+                assert model_cmd is None
 
                 compact_cmd = next((c for c in result if c["name"] == "compact"), None)
                 assert compact_cmd is not None

@@ -24,6 +24,7 @@ from app.api.sessions import check_session_access
 from app.core.config import settings
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.api.common import resolve_project_path
+from app.api.command_context import command_context, command_provider_kind
 from app.core.slash_commands import (
     get_command_by_name, get_all_commands,
     is_interactive_command, is_rest_api_command, get_rest_api_command_info,
@@ -66,7 +67,7 @@ class CommandInfo(BaseModel):
     display: str
     description: str
     argument_hint: Optional[str] = None
-    type: str  # "custom" or "interactive"
+    type: str  # custom, sdk_builtin, plugin, skill, or interactive
     source: Optional[str] = None  # "project" or "user" for custom commands
     namespace: Optional[str] = None
 
@@ -136,18 +137,26 @@ def get_working_dir_for_project(
 
 @router.get("/", response_model=CommandListResponse)
 async def list_commands(
-    project_id: Optional[str] = Query(None, description="Project ID to get commands for"),
-    worktree_id: Optional[str] = Query(None, description="Worktree ID (overrides project path when in worktree mode)"),
-    session_id: Optional[str] = Query(None, description="Session ID — resolves a v2 branch session's own checkout"),
+    project_id: Optional[str] = None,
+    worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    model: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    mode: Optional[str] = None,
+    http_request: Request = None,
 ):
     """
     List all available slash commands.
 
-    Returns both custom commands from the project's .claude/commands/
-    directory and built-in interactive commands like /rewind.
+    Includes discovered custom/plugin/skill commands and the noninteractive
+    built-ins supported by the selected runtime. Does not connect to a model.
     """
-    working_dir = get_working_dir_for_project(project_id, worktree_id, session_id)
-    commands = get_all_commands(working_dir)
+    def _list():
+        working_dir, session = command_context(http_request, project_id, worktree_id, session_id)
+        kind = command_provider_kind(http_request, session, model, profile_id, mode)
+        return get_all_commands(working_dir, provider_kind=kind)
+
+    commands = await run_sync(_list)
 
     return CommandListResponse(
         commands=[CommandInfo(**cmd) for cmd in commands],
@@ -158,15 +167,19 @@ async def list_commands(
 @router.get("/{command_name}", response_model=CommandDetailResponse)
 async def get_command(
     command_name: str,
-    project_id: Optional[str] = Query(None, description="Project ID"),
-    worktree_id: Optional[str] = Query(None, description="Worktree ID (overrides project path when in worktree mode)"),
-    session_id: Optional[str] = Query(None, description="Session ID — resolves a v2 branch session's own checkout"),
+    project_id: Optional[str] = None,
+    worktree_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    http_request: Request = None,
 ):
     """
     Get detailed information about a specific command.
 
     The command_name should not include the leading slash.
     """
+    working_dir, _ = await run_sync(
+        command_context, http_request, project_id, worktree_id, session_id
+    )
     # Check if it's an interactive command
     if is_interactive_command(command_name):
         from app.core.slash_commands import INTERACTIVE_COMMANDS
@@ -181,8 +194,7 @@ async def get_command(
             )
 
     # Look for custom command
-    working_dir = get_working_dir_for_project(project_id, worktree_id, session_id)
-    cmd = get_command_by_name(working_dir, command_name)
+    cmd = await run_sync(get_command_by_name, working_dir, command_name)
 
     if not cmd:
         raise HTTPException(status_code=404, detail=f"Command not found: {command_name}")
@@ -232,6 +244,10 @@ async def execute_command(request: ExecuteCommandRequest, http_request: Request 
     if not command_name:
         raise HTTPException(status_code=400, detail="Invalid command format")
 
+    working_dir, _ = await run_sync(
+        command_context, http_request, None, None, request.session_id
+    )
+
     # Check if it's an interactive command (like /resume)
     if is_interactive_command(command_name):
         return ExecuteCommandResponse(
@@ -250,21 +266,7 @@ async def execute_command(request: ExecuteCommandRequest, http_request: Request 
             is_interactive=False
         )
 
-    # Get session to find project, resolve its checkout and load the command
-    # definition — all synchronous (DB read + project resolution + a scan of
-    # the command files on disk), so they run as ONE off-loop hop.
-    def _load_command():
-        session = database.get_session(request.session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        if http_request is not None:
-            check_session_access(http_request, session)
-
-        working_dir = get_working_dir_for_project(session.get("project_id"))
-        return get_command_by_name(working_dir, command_name)
-
-    cmd = await run_sync(_load_command)
+    cmd = await run_sync(get_command_by_name, working_dir, command_name)
     if not cmd:
         raise HTTPException(status_code=404, detail=f"Command not found: {command_name}")
 

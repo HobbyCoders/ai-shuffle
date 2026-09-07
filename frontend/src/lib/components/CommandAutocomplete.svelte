@@ -15,17 +15,21 @@
     projectId?: string;
     worktreeId?: string;
     sessionId?: string;
+    model?: string;
+    profileId?: string;
+    mode?: string;
     onSelect: (command: Command, andSubmit?: boolean) => void;
     onClose: () => void;
     visible: boolean;
   }
 
-  let { inputValue, projectId, worktreeId, sessionId, onSelect, onClose, visible }: Props = $props();
+  let { inputValue, projectId, worktreeId, sessionId, model, profileId, mode, onSelect, onClose, visible }: Props = $props();
 
   let commands = $state<Command[]>([]);
   let filteredCommands = $state<Command[]>([]);
   let selectedIndex = $state(0);
   let loading = $state(false);
+  let loaded = $state(false);
   let listElement = $state<HTMLUListElement | null>(null);
 
   // Current query for match highlighting
@@ -52,10 +56,23 @@
     return breaks;
   });
 
-  // Fetch commands on mount and when projectId changes
+  // A response belongs to the exact checkout/model selection that requested it.
+  let requestGeneration = 0;
   $effect(() => {
     if (visible) {
-      fetchCommands();
+      const params = new URLSearchParams();
+      if (projectId) params.set('project_id', projectId);
+      if (worktreeId) params.set('worktree_id', worktreeId);
+      if (sessionId) params.set('session_id', sessionId);
+      if (model) params.set('model', model);
+      if (profileId) params.set('profile_id', profileId);
+      if (mode) params.set('mode', mode);
+      const controller = new AbortController();
+      const generation = ++requestGeneration;
+      commands = [];
+      loaded = false;
+      void fetchCommands(params, controller.signal, generation);
+      return () => { ++requestGeneration; controller.abort(); };
     }
   });
 
@@ -104,32 +121,21 @@
     selectedIndex = 0;
   });
 
-  async function fetchCommands() {
+  async function fetchCommands(params: URLSearchParams, signal: AbortSignal, generation: number) {
     loading = true;
     try {
-      const params = new URLSearchParams();
-      if (projectId) {
-        params.set('project_id', projectId);
-      }
-      if (worktreeId) {
-        params.set('worktree_id', worktreeId);
-      }
-      if (sessionId) {
-        params.set('session_id', sessionId);
-      }
-
       const response = await fetch(`/api/v1/commands/?${params}`, {
-        credentials: 'include'
+        credentials: 'include', signal
       });
 
       if (response.ok) {
         const data = await response.json();
-        commands = data.commands;
+        if (generation === requestGeneration) { commands = data.commands; loaded = true; }
       }
     } catch (error) {
-      console.error('Failed to fetch commands:', error);
+      if (!signal.aborted) console.error('Failed to fetch commands:', error);
     } finally {
-      loading = false;
+      if (generation === requestGeneration) loading = false;
     }
   }
 
@@ -272,7 +278,7 @@
       <span><kbd class="autocomplete-kbd">Esc</kbd> <span class="autocomplete-hint-text">close</span></span>
     </div>
   </div>
-{:else if visible && filteredCommands.length === 0 && !loading && commands.length > 0}
+{:else if visible && filteredCommands.length === 0 && !loading && loaded}
   <div class="autocomplete-panel command-autocomplete-panel">
     <div class="autocomplete-header">
       <span class="autocomplete-count">0 commands</span>
@@ -281,7 +287,7 @@
       <svg class="autocomplete-empty-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
       </svg>
-      <span>No matching commands</span>
+      <span>{commands.length ? 'No matching commands' : 'No slash commands available for this runtime'}</span>
     </div>
     <div class="autocomplete-footer">
       <span><kbd class="autocomplete-kbd">Esc</kbd> <span class="autocomplete-hint-text">close</span></span>

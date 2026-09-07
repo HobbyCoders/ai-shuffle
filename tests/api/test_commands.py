@@ -30,7 +30,9 @@ def mock_database():
     lookups the helper makes are observable and never hit a real pool.
     """
     with patch("app.api.commands.database") as mock_db, \
-            patch("app.api.common.database", mock_db):
+            patch("app.api.common.database", mock_db), \
+            patch("app.api.command_context.database", mock_db), \
+            patch("app.core.project_resolver.resolve_existing_cwd", return_value="/workspace/session-checkout"):
         yield mock_db
 
 
@@ -44,6 +46,7 @@ def mock_settings():
     """
     with patch("app.api.commands.settings") as mock_settings, \
             patch("app.api.common.settings", mock_settings), \
+            patch("app.api.command_context.settings", mock_settings), \
             patch("app.core.project_utils.settings", mock_settings):
         mock_settings.workspace_dir = MagicMock()
         mock_settings.workspace_dir.__truediv__ = lambda self, x: MagicMock(__str__=lambda s: f"/workspace/{x}")

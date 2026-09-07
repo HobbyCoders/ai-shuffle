@@ -313,8 +313,8 @@ REST_API_COMMANDS = {
     }
 }
 
-# SDK built-in commands that are shown in the popup autocomplete
-# These are passed directly to the SDK and handled internally
+# Known Claude CLI commands. The autocomplete exposes only the supported
+# noninteractive subset below, and only on the delegated runtime.
 SDK_BUILTIN_COMMANDS = {
     "compact": {
         "description": "Compact conversation history to free up context space",
@@ -669,13 +669,25 @@ def discover_skills(working_dir: str) -> List[Dict[str, Any]]:
     return skills
 
 
-def get_all_commands(working_dir: str) -> List[Dict[str, Any]]:
+NONINTERACTIVE_SDK_COMMANDS = frozenset({
+    "compact", "context", "cost", "review", "init", "security-review",
+    "pr-comments",
+})
+
+
+def get_all_commands(working_dir: str, *, provider_kind: str = "delegated") -> List[Dict[str, Any]]:
     """
     Get all available commands for the popup autocomplete.
 
     Returns list of command info dicts for autocomplete.
     Note: /resume and /rewind are excluded as they are handled separately.
     """
+    # NativeLoop receives literal user text; the app does not run Fluid's CLI
+    # dispatcher or expand custom/plugin/skill slash invocations on that path.
+    # Keep discovery/explicit expansion available to their existing callers,
+    # but do not advertise a raw slash action the selected runtime cannot run.
+    if provider_kind != "delegated":
+        return []
     commands = []
 
     # Add custom commands from .claude/commands/
@@ -688,8 +700,12 @@ def get_all_commands(working_dir: str) -> List[Dict[str, Any]]:
             "type": "custom"
         })
 
-    # Add SDK built-in commands (like /compact, /cost, /model, etc.)
+    # The app submits directly to NativeLoop, not Fluid's CLI slash dispatcher.
+    # Only the delegated Claude CLI handles these commands. Its interactive
+    # terminal/settings commands have no connected UI action in this composer.
     for name, info in SDK_BUILTIN_COMMANDS.items():
+        if name not in NONINTERACTIVE_SDK_COMMANDS:
+            continue
         commands.append({
             "name": name,
             "display": f"/{name}",
