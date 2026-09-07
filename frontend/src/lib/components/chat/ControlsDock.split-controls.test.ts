@@ -146,7 +146,8 @@ describe('ControlsDock split controls', () => {
 		await fireEvent.click(screen.getByRole('button', { name: /^permission mode:/i }));
 
 		const menu = screen.getByRole('menu', { name: /tool access/i });
-		expect(menu.querySelectorAll('[role="menuitemradio"]')).toHaveLength(5);
+		expect(menu.querySelectorAll('[role="menuitemradio"]')).toHaveLength(4);
+		expect(screen.queryByRole('menuitemradio', { name: /^auto\b/i })).toBeNull();
 		expect(screen.getByRole('menuitemradio', { name: /bypass/i })).toBeTruthy();
 	});
 
