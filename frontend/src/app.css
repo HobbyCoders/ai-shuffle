@@ -1431,3 +1431,118 @@ button.ctx-chip:disabled {
 	flex-shrink: 0;
 }
 
+
+/* ============================================================
+   DESKTOP APP CHROME
+   The desktop shell (desktop/) is a frameless Electron window whose
+   OS window controls are overlaid on the page. `html.desktop` is set by
+   $lib/services/desktop.ts. Chromium's Window Controls Overlay reports
+   the area the controls leave free through env(titlebar-area-*):
+   on macOS the traffic lights take the left edge, on Windows and Linux
+   the caption buttons take the right edge. The top strip of the layout
+   (sidebar brand row + top bar) becomes the drag handle; anything
+   clickable inside it opts back out with no-drag.
+   ============================================================ */
+html.desktop {
+	--titlebar-left: env(titlebar-area-x, 0px);
+	--titlebar-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
+	/* The strip that doubles as the window title bar: Sidebar `.sb-head`
+	   (48px) and the two top bars (52px) share this height. */
+	--titlebar-height: env(titlebar-area-height, 52px);
+}
+
+html.desktop .sb-head,
+html.desktop .topbar {
+	-webkit-app-region: drag;
+	app-region: drag;
+	user-select: none;
+}
+html.desktop .sb-head :is(button, a, input, [role='button'], [role='menu'], [role='menuitem'], .tb-right),
+html.desktop .topbar :is(button, a, input, [role='button'], [role='menu'], [role='menuitem'], .tb-right) {
+	-webkit-app-region: no-drag;
+	app-region: no-drag;
+}
+
+/* Keep the drag strips exactly as tall as the OS title-bar area so
+   double-click-to-maximise and drag hit the same band everywhere. */
+html.desktop .sb-head {
+	height: var(--titlebar-height);
+}
+html.desktop .topbar {
+	height: var(--titlebar-height);
+}
+
+/* macOS: traffic lights sit over whichever pane is leftmost. */
+html.desktop-darwin .sidebar-slot .sb-head {
+	padding-left: calc(var(--titlebar-left) + 2px);
+}
+html.desktop-darwin .app-body > .main-panel:first-child .topbar,
+html.desktop-darwin .app-shell.mobile .topbar-mobile {
+	padding-left: calc(var(--titlebar-left) + 4px);
+}
+html.desktop-darwin.desktop-fullscreen .sidebar-slot .sb-head,
+html.desktop-darwin.desktop-fullscreen .app-body > .main-panel:first-child .topbar,
+html.desktop-darwin.desktop-fullscreen .app-shell.mobile .topbar-mobile {
+	padding-left: 4px;
+}
+
+/* Windows and Linux: caption buttons sit over the right end of the top bar. */
+html.desktop-win32 .topbar,
+html.desktop-linux .topbar {
+	padding-right: calc(var(--titlebar-right) + 10px);
+}
+html.desktop-win32.desktop-fullscreen .topbar,
+html.desktop-linux.desktop-fullscreen .topbar {
+	padding-right: 14px;
+}
+/* The mobile-width top bar has nothing on its right; give the caption
+   buttons the spacer's width instead of the title. */
+html.desktop-win32 .topbar-mobile .tb-spacer,
+html.desktop-linux .topbar-mobile .tb-spacer {
+	width: calc(var(--titlebar-right) + 8px);
+}
+
+/* Dim the top strip slightly when the window is in the background, the
+   way native title bars do. */
+html.desktop.desktop-blurred :is(.sb-head, .topbar) {
+	opacity: 0.85;
+}
+
+/* ---- Unified strip -------------------------------------------------------
+   The sidebar's black plane continues across the whole window: the main
+   panel's top bar takes the sidebar colours, the vertical divider between
+   sidebar and panel starts below the strip, and the strip's only edge is
+   the hairline over the (lighter) main panel. The strip holds what the two
+   headers already held: brand, search and bell on the left; sidebar toggle,
+   breadcrumb, the current page's actions and the account badge on the
+   right. Nothing else moves up here. */
+html.desktop .topbar {
+	background: var(--sidebar);
+	color: var(--sidebar-foreground);
+	border-bottom-color: var(--sidebar-border);
+}
+html.desktop .topbar .tb-icon:hover {
+	background: var(--sidebar-accent);
+}
+html.desktop .topbar .tb-sep {
+	background: var(--sidebar-border);
+}
+html.desktop .sidebar-slot:not(.floating) {
+	border-right-color: transparent;
+}
+html.desktop .sidebar-slot:not(.floating)::after {
+	content: '';
+	position: absolute;
+	top: var(--titlebar-height);
+	bottom: 0;
+	right: -1px;
+	width: 1px;
+	background: var(--sidebar-border);
+	pointer-events: none;
+}
+/* Page actions lent to the strip keep their own button styles; only the
+   spacing is normalised so pages with a primary button and pages with a
+   search field sit on the same line. */
+html.desktop .topbar .page-actions > :is(button, a) {
+	height: 30px;
+}

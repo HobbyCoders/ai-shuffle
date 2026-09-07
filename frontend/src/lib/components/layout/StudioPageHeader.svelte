@@ -6,8 +6,18 @@
 	 * Matches the Build page heading and the mockup's `.phead`, giving the content
 	 * surfaces (Files / Notes) the same framing as Sessions and Build. Theme tokens
 	 * only — no mockup palette.
+	 *
+	 * DESKTOP APP. Inside the desktop shell the window's top strip is the page
+	 * header: it already names the page in its breadcrumb, so this component
+	 * hands its actions to that strip (see $lib/stores/page-header.svelte) and
+	 * renders nothing, giving the page the vertical space back. That happens
+	 * only while the page is the feature panel on screen; a kept-alive page
+	 * off screen neither claims the slot nor draws a header.
 	 */
-	import type { Snippet } from 'svelte';
+	import { getContext, type Snippet } from 'svelte';
+	import { desktop } from '$lib/services/desktop';
+	import { pageHeader } from '$lib/stores/page-header.svelte';
+	import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from './feature-panel-context';
 
 	interface Props {
 		/** Small uppercase line above the title. */
@@ -21,19 +31,31 @@
 	}
 
 	let { eyebrow, title, accent, actions }: Props = $props();
+
+	const panel = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
+	const token = Symbol('page-header');
+	const lifted = $derived(desktop !== null && panel !== undefined && panel.active);
+
+	$effect(() => {
+		if (!lifted) return;
+		pageHeader.claim(token, actions ?? null);
+		return () => pageHeader.release(token);
+	});
 </script>
 
-<header class="sph">
-	<div class="sph-text">
-		{#if eyebrow}<div class="sph-eyebrow">{eyebrow}</div>{/if}
-		<h1 class="sph-title">
-			{#if title}{title}{/if}{#if title && accent}{' '}{/if}{#if accent}<span class="sph-accent">{accent}</span>{/if}
-		</h1>
-	</div>
-	{#if actions}
-		<div class="sph-actions">{@render actions()}</div>
-	{/if}
-</header>
+{#if !lifted}
+	<header class="sph">
+		<div class="sph-text">
+			{#if eyebrow}<div class="sph-eyebrow">{eyebrow}</div>{/if}
+			<h1 class="sph-title">
+				{#if title}{title}{/if}{#if title && accent}{' '}{/if}{#if accent}<span class="sph-accent">{accent}</span>{/if}
+			</h1>
+		</div>
+		{#if actions}
+			<div class="sph-actions">{@render actions()}</div>
+		{/if}
+	</header>
+{/if}
 
 <style>
 	.sph {

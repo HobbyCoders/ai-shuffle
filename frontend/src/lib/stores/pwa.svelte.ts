@@ -10,6 +10,7 @@ import { untrack } from 'svelte';
 import { createSubscribers } from './store-utils';
 import { installPromptPreference } from './install-prompt-preference.svelte';
 import { sessionOwnerEpoch } from './session-owner';
+import { isDesktop } from '$lib/services/desktop';
 
 interface PWAState {
 	isInstalled: boolean;
@@ -114,6 +115,12 @@ function checkInstallState() {
 
 async function registerServiceWorker() {
 	if (!browser || !('serviceWorker' in navigator)) {
+		return null;
+	}
+	// The desktop app has no install prompt and takes its updates from the
+	// shell, so the worker would only add a cache layer that Chromium's
+	// app partition does not always honour.
+	if (isDesktop) {
 		return null;
 	}
 

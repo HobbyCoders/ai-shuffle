@@ -6,6 +6,7 @@
 	import { exchangePairingGrant } from '$lib/api/pairing';
 	import { getErrorMessage } from '$lib/api/client';
 	import { auth, isAdmin } from '$lib/stores/auth.svelte';
+	import { desktop } from '$lib/services/desktop';
 
 	const DEVICE_ID_KEY = 'shuffle-paired-device-id';
 	let code = $state('');
@@ -15,6 +16,10 @@
 	let linkSupplied = $state(false);
 
 	function platformName(): string {
+		if (desktop) {
+			const os = desktop.platform === 'darwin' ? 'macos' : desktop.platform === 'win32' ? 'windows' : 'linux';
+			return `${os}-desktop`;
+		}
 		const ua = navigator.userAgent.toLowerCase();
 		if (ua.includes('android')) return 'android-browser';
 		if (ua.includes('iphone') || ua.includes('ipad')) return 'ios-browser';
@@ -25,7 +30,8 @@
 	}
 
 	function defaultDeviceName(): string {
-		const platform = platformName().replace('-browser', '');
+		const platform = platformName().replace(/-(browser|desktop)$/, '');
+		if (desktop) return `AI Shuffle Desktop on ${platform.charAt(0).toUpperCase()}${platform.slice(1)}`;
 		const browser = navigator.userAgent.includes('Firefox')
 			? 'Firefox'
 			: navigator.userAgent.includes('Edg/')

@@ -1,0 +1,184 @@
+/**
+ * The one application window.
+ *
+ * The window is frameless with the OS window controls overlaid, so the web
+ * UI's own top strip doubles as the title bar. Chromium exposes the controls'
+ * geometry to the page through the Window Controls Overlay API
+ * (`navigator.windowControlsOverlay`, `env(titlebar-area-*)`), and the page
+ * marks the strip draggable with `-webkit-app-region: drag`.
+ *
+ * Only two kinds of document ever load here: the bundled connect screen
+ * (file://) and the chosen worker's own web UI at its real origin. Loading the
+ * worker's origin directly keeps every request same-origin, so the server's
+ * CSRF and WebSocket origin checks behave exactly as they do in a browser.
+ */
+import { app, BrowserWindow, nativeTheme, shell } from 'electron';
+import path from 'node:path';
+import { attachNavigationPolicy } from './navigation';
+import type { SavedServer } from './servers';
+import { WindowStateStore } from './state';
+
+export const PARTITION = 'persist:shuffle';
+export const TITLE_BAR_HEIGHT = 52;
+
+export interface TitleBarTheme {
+	background: string;
+	symbol: string;
+}
+
+const DARK_TITLE_BAR: TitleBarTheme = { background: '#000000', symbol: '#e9e9ec' };
+const LIGHT_TITLE_BAR: TitleBarTheme = { background: '#ffffff', symbol: '#1d1d1f' };
+
+export interface ConnectOptions {
+	/** A message to show above the worker list, e.g. why the last load failed. */
+	error?: string;
+	serverId?: string;
+}
+
+export class MainWindow {
+	private win: BrowserWindow | null = null;
+	private current: SavedServer | null = null;
+	private readonly stateStore: WindowStateStore;
+
+	constructor(private readonly userData: string) {
+		this.stateStore = new WindowStateStore(path.join(userData, 'window-state.json'));
+	}
+
+	get browserWindow(): BrowserWindow | null {
+		return this.win && !this.win.isDestroyed() ? this.win : null;
+	}
+
+	get server(): SavedServer | null {
+		return this.current;
+	}
+
+	isOwnSender(webContentsId: number): boolean {
+		return this.browserWindow?.webContents.id === webContentsId;
+	}
+
+	async ensure(): Promise<BrowserWindow> {
+		const existing = this.browserWindow;
+		if (existing) return existing;
+
+		const state = await this.stateStore.load();
+		const initialTheme = nativeTheme.shouldUseDarkColors ? DARK_TITLE_BAR : LIGHT_TITLE_BAR;
+		const isMac = process.platform === 'darwin';
+
+		const win = new BrowserWindow({
+			width: state.bounds?.width ?? 1440,
+			height: state.bounds?.height ?? 900,
+			x: state.bounds?.x,
+			y: state.bounds?.y,
+			minWidth: 900,
+			minHeight: 560,
+			show: false,
+			backgroundColor: initialTheme.background,
+			title: 'AI Shuffle',
+			titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
+			trafficLightPosition: isMac ? { x: 18, y: 18 } : undefined,
+			titleBarOverlay: {
+				color: initialTheme.background,
+				symbolColor: initialTheme.symbol,
+				height: TITLE_BAR_HEIGHT
+			},
+			autoHideMenuBar: true,
+			webPreferences: {
+				preload: path.join(__dirname, '../preload/index.js'),
+				partition: PARTITION,
+				contextIsolation: true,
+				sandbox: true,
+				nodeIntegration: false,
+				spellcheck: true
+			}
+		});
+		this.win = win;
+		this.stateStore.track(win);
+		attachNavigationPolicy(win, () => this.current?.url ?? null, (message) => this.showConnect({ error: message, serverId: this.current?.id }));
+
+		win.once('ready-to-show', () => {
+			if (state.maximized) win.maximize();
+			win.show();
+		});
+		win.on('closed', () => {
+			this.win = null;
+		});
+		const broadcast = () => this.send('desktop:window-state', this.windowState());
+		win.on('maximize', broadcast);
+		win.on('unmaximize', broadcast);
+		win.on('enter-full-screen', broadcast);
+		win.on('leave-full-screen', broadcast);
+		win.on('focus', broadcast);
+		win.on('blur', broadcast);
+		win.webContents.on('page-title-updated', (event) => {
+			// The document title is the session title; keep the OS title short.
+			event.preventDefault();
+			win.setTitle(this.current ? `${this.current.name} · AI Shuffle` : 'AI Shuffle');
+		});
+		return win;
+	}
+
+	windowState(): { maximized: boolean; fullscreen: boolean; focused: boolean } {
+		const win = this.browserWindow;
+		return {
+			maximized: win?.isMaximized() ?? false,
+			fullscreen: win?.isFullScreen() ?? false,
+			focused: win?.isFocused() ?? false
+		};
+	}
+
+	async loadServer(server: SavedServer): Promise<void> {
+		const win = await this.ensure();
+		this.current = server;
+		win.setTitle(`${server.name} · AI Shuffle`);
+		await win.loadURL(server.url).catch(() => {
+			/* did-fail-load routes to the connect screen. */
+		});
+	}
+
+	async showConnect(options: ConnectOptions = {}): Promise<void> {
+		const win = await this.ensure();
+		this.current = null;
+		win.setTitle('AI Shuffle');
+		const query: Record<string, string> = {};
+		if (options.error) query.error = options.error;
+		if (options.serverId) query.server = options.serverId;
+		await win.loadFile(path.join(app.getAppPath(), 'src/connect/index.html'), { query });
+	}
+
+	setTitleBarTheme(theme: TitleBarTheme): void {
+		const win = this.browserWindow;
+		if (!win) return;
+		win.setBackgroundColor(theme.background);
+		if (process.platform !== 'darwin') {
+			try {
+				win.setTitleBarOverlay({ color: theme.background, symbolColor: theme.symbol, height: TITLE_BAR_HEIGHT });
+			} catch {
+				/* Not every Linux window manager honours the overlay. */
+			}
+		}
+	}
+
+	send(channel: string, payload?: unknown): void {
+		const win = this.browserWindow;
+		if (win) win.webContents.send(channel, payload);
+	}
+
+	focus(): void {
+		const win = this.browserWindow;
+		if (!win) return;
+		if (win.isMinimized()) win.restore();
+		win.show();
+		win.focus();
+	}
+
+	openExternal(url: string): void {
+		try {
+			const parsed = new URL(url);
+			if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:') {
+				void shell.openExternal(parsed.href);
+			}
+		} catch {
+			/* Ignore malformed links. */
+		}
+	}
+}

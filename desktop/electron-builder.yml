@@ -1,0 +1,86 @@
+# electron-builder configuration for the AI Shuffle desktop app.
+#
+# Installers land in desktop/release/. The update metadata files
+# (latest.yml, latest-mac.yml, latest-linux.yml) are generated next to them
+# because a publish provider is configured, even when `--publish never` is
+# used; the release workflow uploads everything to the GitHub release for the
+# same v* tag that ships the server packages, which is where electron-updater
+# looks for updates.
+appId: com.hobbycoders.aishuffle.desktop
+productName: AI Shuffle
+copyright: Copyright © 2026 HobbyCoders
+artifactName: AI-Shuffle-Desktop-${version}-${os}-${arch}.${ext}
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - src/connect/**/*
+  - package.json
+
+asar: true
+compression: normal
+
+publish:
+  provider: github
+  owner: HobbyCoders
+  repo: ai-shuffle
+  releaseType: release
+
+protocols:
+  - name: AI Shuffle
+    schemes:
+      - aishuffle
+
+win:
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+  icon: build/icon.png
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  shortcutName: AI Shuffle
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]
+  icon: build/icon.png
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: AI Shuffle uses the microphone for voice input and voice sessions.
+    NSCameraUsageDescription: AI Shuffle uses the camera only when a page you open asks for it.
+
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+linux:
+  category: Development
+  maintainer: HobbyCoders
+  icon: build/icon.png
+  target:
+    - target: AppImage
+      arch: [x64, arm64]
+    - target: deb
+      arch: [x64]
+  desktop:
+    entry:
+      StartupWMClass: ai-shuffle-desktop

@@ -51,6 +51,8 @@
 	import ChatView from './ChatView.svelte';
 	import PageHeader from './PageHeader.svelte';
 	import StudioTopBar from './StudioTopBar.svelte';
+	import FeaturePanelHost from './FeaturePanelHost.svelte';
+	import { pageHeader } from '$lib/stores/page-header.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import { shouldShowHeaderGitActions } from './git-header-visibility';
 	import { chatHeaderTitle } from './chat-empty-state';
@@ -922,6 +924,11 @@
 			{#snippet actions()}
 				{@render downloadAction()}
 				{@render headerActions()}
+				{#if pageHeader.actions}
+					<!-- Desktop app: the page on screen lends its header actions to
+					     the strip (see StudioPageHeader). -->
+					<div class="page-actions">{@render pageHeader.actions()}</div>
+				{/if}
 			{/snippet}
 		</StudioTopBar>
 	{/if}
@@ -970,6 +977,7 @@
 		-->
 		{#each mountedPanels as key (key)}
 			<div class="feature-panel" class:is-inactive={key !== featureKey} inert={key !== featureKey}>
+				<FeaturePanelHost active={key === featureKey}>
 				{#if key === 'build'}
 					<LazyPanel
 						handle={panelForKey('build')}
@@ -999,6 +1007,7 @@
 						label="Documentation"
 					/>
 				{/if}
+				</FeaturePanelHost>
 			</div>
 		{/each}
 	{:else}
@@ -1089,6 +1098,12 @@
 	}
 
 	/* Anchor for the git progress popover so it drops under the header actions. */
+	.page-actions {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
 	.git-actions-host {
 		position: relative;
 		display: flex;

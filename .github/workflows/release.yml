@@ -435,3 +435,53 @@ jobs:
             ---
 
             **Docker users**: Use `ghcr.io/hobbycoders/ai-shuffle:${{ env.VERSION }}` instead.
+
+  # Job 4: Desktop installers. Built after the release exists so the
+  # installers and their electron-updater metadata land on the same release
+  # as the server packages, which is where the app looks for updates.
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    timeout-minutes: 45
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop
+    env:
+      # No signing certificates are configured; do not let electron-builder
+      # look for one and fail the macOS build.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install desktop dependencies
+        run: npm ci
+
+      - name: Stamp version from the release tag
+        shell: bash
+        run: npm version --no-git-tag-version "${VERSION#v}"
+
+      - name: Build installers
+        run: npm run dist
+
+      - name: Upload installers to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          files=(release/*.exe release/*.dmg release/*.zip release/*.AppImage release/*.deb release/*.blockmap release/latest*.yml)
+          ls -la release/
+          gh release upload "$VERSION" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"

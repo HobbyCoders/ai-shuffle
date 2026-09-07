@@ -1,0 +1,31 @@
+/** Tray / menu-bar icon with the handful of actions that matter when the window is hidden. */
+import { app, Menu, nativeImage, Tray } from 'electron';
+import path from 'node:path';
+
+export interface TrayActions {
+	show(): void;
+	switchWorker(): void;
+	checkForUpdates(): void;
+}
+
+export function installTray(actions: TrayActions): Tray | null {
+	const iconPath = path.join(app.getAppPath(), 'build', 'icon.png');
+	let image = nativeImage.createFromPath(iconPath);
+	if (image.isEmpty()) return null;
+	const size = process.platform === 'darwin' ? 18 : 16;
+	image = image.resize({ width: size, height: size });
+	const tray = new Tray(image);
+	tray.setToolTip('AI Shuffle');
+	tray.setContextMenu(
+		Menu.buildFromTemplate([
+			{ label: 'Open AI Shuffle', click: () => actions.show() },
+			{ label: 'Switch Worker…', click: () => actions.switchWorker() },
+			{ type: 'separator' },
+			{ label: 'Check for Updates…', click: () => actions.checkForUpdates() },
+			{ type: 'separator' },
+			{ role: 'quit' }
+		])
+	);
+	tray.on('click', () => actions.show());
+	return tray;
+}

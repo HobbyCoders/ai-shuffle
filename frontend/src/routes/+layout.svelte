@@ -20,7 +20,9 @@
 	import { installGlobalErrorHandlers } from '$lib/services/error-reporter';
 	import { bindVisualViewport } from '$lib/utils/visual-viewport';
 	import { startLiveSync } from '$lib/services/live-sync';
+	import { initDesktop } from '$lib/services/desktop';
 	let teardownLiveSync: (() => void) | undefined;
+	let teardownDesktop: (() => void) | null = null;
 
 	let { children }: { children: Snippet } = $props();
 
@@ -117,6 +119,8 @@
 
 		// Initialize theme on mount (applies from localStorage immediately to prevent flash)
 		theme.init();
+		// Desktop shell bridge (no-op in a browser): title-bar colours, menu commands.
+		teardownDesktop = initDesktop();
 		teardownLiveSync = startLiveSync();
 
 		// Initialize PWA features
@@ -135,6 +139,8 @@
 	});
 
 	onDestroy(() => {
+		teardownDesktop?.();
+		teardownDesktop = null;
 		teardownLiveSync?.();
 		stopAuthPoll();
 		document.removeEventListener('visibilitychange', handleAuthVisibility);

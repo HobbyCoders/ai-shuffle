@@ -1,0 +1,79 @@
+name: Desktop CI
+
+# Desktop shell (desktop/). Path-filtered like the other CI workflows. The
+# release build that publishes installers lives in release.yml.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/desktop.yml'
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/desktop.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck and unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  package:
+    name: Package (${{ matrix.os }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - name: Build unpacked app
+        run: npm run pack
+      - name: Smoke-run the shell headless
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb > /dev/null
+          mkdir -p "$RUNNER_TEMP/profile"
+          SHUFFLE_DESKTOP_USER_DATA="$RUNNER_TEMP/profile" \
+          SHUFFLE_DESKTOP_SHOT="$RUNNER_TEMP/connect.png" \
+          SHUFFLE_DESKTOP_SHOT_DELAY=3000 \
+          xvfb-run --auto-servernum npx electron . --no-sandbox
+          test -s "$RUNNER_TEMP/connect.png"
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: desktop-connect-screenshot
+          path: ${{ runner.temp }}/connect.png
