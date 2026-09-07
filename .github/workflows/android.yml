@@ -1,14 +1,27 @@
 name: Android CI
 
+# Android app (android/) and the Cloudflare account hub (android/hub). Paths-
+# filtered like the other CI workflows: a PR that touches nothing under
+# android/ never starts it. The push-to-main leg keeps producing the signed
+# release APK artifact that the standalone android repo used to publish.
 on:
   push:
-    branches: [ main, feat/add-cross-device-auth-sharing ]
-  pull_request:
     branches: [ main ]
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
+  pull_request:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   account-hub:
@@ -16,14 +29,14 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: hub
+        working-directory: android/hub
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: hub/package-lock.json
+          cache-dependency-path: android/hub/package-lock.json
       - run: npm install --global npm@11
       - run: npm ci
       - run: npm run typecheck
@@ -32,6 +45,9 @@ jobs:
   build:
     name: Build signed release APK
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
 
     steps:
       - name: Checkout
@@ -61,8 +77,8 @@ jobs:
         with:
           name: android-instrumentation-apks
           path: |
-            app/build/outputs/apk/debug/app-debug.apk
-            app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
           if-no-files-found: error
 
       - name: Decode release keystore
@@ -93,7 +109,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ai-shuffle-release-apk
-          path: app/build/outputs/apk/release/app-release.apk
+          path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
   android-ui:
@@ -101,17 +117,22 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: android
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: android-instrumentation-apks
-          path: instrumentation-apks
+          # run-android-ui-tests.sh installs from instrumentation-apks/ relative
+          # to android/, its working directory.
+          path: android/instrumentation-apks
       - uses: android-actions/setup-android@v3
       - name: Check emulator readiness and instrumentation result parsers
         run: |
-          python3 .github/scripts/test-emulator-readiness.py
-          python3 .github/scripts/test-instrumentation-parser.py
+          python3 ci/test-emulator-readiness.py
+          python3 ci/test-instrumentation-parser.py
       - name: Enable emulator acceleration
         run: sudo chmod 666 /dev/kvm
       # The emulator action catches launch-hook errors and still attempts boot.
@@ -123,8 +144,8 @@ jobs:
           mkdir -p "$ANDROID_AVD_HOME"
           avdmanager create avd --force --name test --package 'system-images;android-34;default;x86_64' --device pixel_6 <<< no
           printf '\ndisk.dataPartition.size=6144M\n' >> "$ANDROID_AVD_HOME/test.avd/config.ini"
-          bash .github/scripts/emulator-diagnostics.sh before-boot
-          bash .github/scripts/emulator-storage.sh check
+          bash ci/emulator-diagnostics.sh before-boot
+          bash ci/emulator-storage.sh check
       - name: Exercise native onboarding and tool permissions
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -132,21 +153,22 @@ jobs:
           target: default
           arch: x86_64
           profile: pixel_6
+          working-directory: android
           # Reuse the AVD whose filesystem passed the standalone preflight.
           force-avd-creation: false
           # API 24+ first boot enforces 6 GiB regardless of smaller requests.
           disk-size: 6144M
           disable-animations: true
-          pre-emulator-launch-script: bash .github/scripts/emulator-diagnostics.sh before-boot
+          pre-emulator-launch-script: bash ci/emulator-diagnostics.sh before-boot
           # Persist startup errors and guest logcat even if boot fails before script runs.
           emulator-options: >-
             -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
             -camera-back emulated -no-snapshot -memory 2048 -cores 2
             -logcat '*:I' > "$RUNNER_TEMP/android-emulator/emulator.log" 2>&1
-          script: bash .github/scripts/run-android-ui-tests.sh
+          script: bash ci/run-android-ui-tests.sh
       - name: Collect emulator host diagnostics
         if: always()
-        run: bash .github/scripts/emulator-diagnostics.sh after-emulator
+        run: bash ci/emulator-diagnostics.sh after-emulator
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -154,8 +176,8 @@ jobs:
           name: android-ui-verification
           path: |
             ${{ runner.temp }}/android-emulator/
-            app/build/reports/androidTests/
-            app/build/outputs/androidTest-results/
-            app/build/outputs/ui-screenshots/
-            app/build/outputs/connected_android_test_additional_output/
+            android/app/build/reports/androidTests/
+            android/app/build/outputs/androidTest-results/
+            android/app/build/outputs/ui-screenshots/
+            android/app/build/outputs/connected_android_test_additional_output/
           if-no-files-found: warn
