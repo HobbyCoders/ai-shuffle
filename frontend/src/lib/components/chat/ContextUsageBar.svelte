@@ -9,7 +9,7 @@
 	 * percentage rides on the button's aria-label. It is ALWAYS visible.
 	 *
 	 * The popover is a wide, compact panel. It stacks, top → bottom:
-	 *   1. Context window — a collapsible header (persisted in localStorage under
+	 *   1. Context window — a collapsible header (synced per account, cached under
 	 *      `aihub.contextBreakdownOpen`, default expanded) over ONE segmented bar.
 	 *      Expanded: a contiguous segment per category (the bare track tail is the
 	 *      free space), plus per-category rows (swatch + label + tokens + percent)
@@ -37,6 +37,7 @@
 	 * click and mobile tap (tap-away closes).
 	 */
 	import { onMount, tick } from 'svelte';
+	import { contextBreakdown, usageSections } from '$lib/stores/expansion-preferences';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getContextMaxForModel } from '$lib/constants/chat';
 	import {
@@ -287,50 +288,12 @@
 		loadedSessionId = sid;
 	});
 
-	// ── Category breakdown collapse state (persisted, default expanded) ────
-	const BREAKDOWN_OPEN_KEY = 'aihub.contextBreakdownOpen';
-	function loadBreakdownOpen(): boolean {
-		try {
-			// Absent → expanded; only an explicit '0' collapses.
-			return localStorage.getItem(BREAKDOWN_OPEN_KEY) !== '0';
-		} catch {
-			return true;
-		}
-	}
-	let breakdownOpen = $state(loadBreakdownOpen());
-	function toggleBreakdown() {
-		breakdownOpen = !breakdownOpen;
-		try {
-			localStorage.setItem(BREAKDOWN_OPEN_KEY, breakdownOpen ? '1' : '0');
-		} catch {
-			// best-effort persistence
-		}
-	}
-
-	// ── Per-account usage-section collapse state (persisted, default expanded) ──
-	// One entry per section id: the literal `'plan'` for the resolved Claude
-	// install, and `provider:<id>` for each provider bucket. Mirrors the
-	// context-breakdown collapse pattern — absent/any non-'0' value → expanded,
-	// only an explicit '0' collapses. The record is the reactive cache; a toggle
-	// writes it (and best-effort persists), so reads prefer it over localStorage.
-	const SECTION_OPEN_PREFIX = 'aihub.usageSectionOpen:';
-	let sectionOpen = $state<Record<string, boolean>>({});
-	function isSectionOpen(id: string): boolean {
-		if (id in sectionOpen) return sectionOpen[id];
-		try {
-			return localStorage.getItem(SECTION_OPEN_PREFIX + id) !== '0';
-		} catch {
-			return true;
-		}
-	}
+	// Expansion choices are shared across mounted instances and account devices.
+	const breakdownOpen = $derived($contextBreakdown);
+	function toggleBreakdown() { contextBreakdown.set(!breakdownOpen); }
+	function isSectionOpen(id: string): boolean { return $usageSections[id] !== false; }
 	function toggleSection(id: string) {
-		const next = !isSectionOpen(id);
-		sectionOpen[id] = next;
-		try {
-			localStorage.setItem(SECTION_OPEN_PREFIX + id, next ? '1' : '0');
-		} catch {
-			// best-effort persistence
-		}
+		usageSections.set({ ...$usageSections, [id]: !isSectionOpen(id) });
 	}
 
 	// ── Plan usage limits (resolved install's rate-limit windows) ─────────

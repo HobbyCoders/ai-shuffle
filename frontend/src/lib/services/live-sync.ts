@@ -9,6 +9,7 @@ import '$lib/stores/files.svelte';
 import '$lib/stores/groups.svelte';
 import '$lib/stores/layout.svelte';
 import '$lib/stores/sidebar-prefs.svelte';
+import '$lib/stores/expansion-preferences';
 import '$lib/stores/sessionMode.svelte';
 import '$lib/stores/browser-panel.svelte';
 import './notificationSound';

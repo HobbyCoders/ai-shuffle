@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import type { PreferenceAdapter } from '$lib/services/preference-sync';
+import { sidebarGroups } from '$lib/stores/expansion-preferences';
 
 const mocks = vi.hoisted(() => {
 	function store<T>(initial: T) {
@@ -20,6 +22,8 @@ const mocks = vi.hoisted(() => {
 	}
 
 	return {
+		adapters: new Map<string, PreferenceAdapter>(),
+		save: vi.fn(),
 		sessions: store<unknown[]>([]),
 		sessionsHasMore: store(false),
 		sessionsLoadingMore: store(false),
@@ -33,6 +37,10 @@ const mocks = vi.hoisted(() => {
 		getPullRequests: vi.fn(),
 	};
 });
+
+vi.mock('$lib/services/preferences', () => ({ preferenceSync: {
+ register: (key: string, adapter: PreferenceAdapter) => mocks.adapters.set(key, adapter), save: mocks.save
+} }));
 
 vi.mock('$lib/stores/app-data.svelte', () => ({
 	sessions: mocks.sessions,
@@ -198,6 +206,8 @@ function cardFrame(title: string): HTMLElement {
 
 beforeEach(() => {
 	localStorage.clear();
+	mocks.adapters.get('sidebar_collapsed_groups')!.apply(undefined);
+	mocks.save.mockClear();
 	appMode.set('code');
 	sidebarWorkspace.reset();
 	vi.mocked(sessionTimestamp).mockClear();
@@ -231,6 +241,23 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('Sidebar session groups', () => {
+	it('shares collapsed groups with a mounted sidebar and resets them on account change', async () => {
+		const { container } = render(Sidebar);
+		const header = () => Array.from(container.querySelectorAll<HTMLButtonElement>('.grouplabel'))
+			.find(button => button.textContent?.includes('Settled'))!;
+		await fireEvent.click(header());
+		expect(sidebarGroups.current.settled).toBe(true);
+		expect(mocks.save).toHaveBeenCalledWith('sidebar_collapsed_groups', { settled: true });
+		mocks.save.mockClear();
+		mocks.adapters.get('sidebar_collapsed_groups')!.apply({ settled: false, active: true });
+		await tick();
+		expect(header().getAttribute('aria-expanded')).toBe('true');
+		mocks.adapters.get('sidebar_collapsed_groups')!.apply(undefined);
+		await tick();
+		expect(sidebarGroups.current).toEqual({});
+		expect(mocks.save).not.toHaveBeenCalled();
+	});
+
 	it('groups sessions into Active and Settled by is_active', () => {
 		render(Sidebar, {
 			props: {

@@ -13,6 +13,8 @@ import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ContextUsageBar from './ContextUsageBar.svelte';
 import { rateLimit } from '$lib/stores/rate-limit';
+import { contextBreakdown, usageSections } from '$lib/stores/expansion-preferences';
+import type { PreferenceAdapter } from '$lib/services/preference-sync';
 
 // The breakdown now fetches on session load and the pill prefers the rich data, so
 // the tests need to drive both the active session state and the /context-usage
@@ -53,6 +55,8 @@ const mocks = vi.hoisted(() => {
 		};
 	}
 	return {
+		adapters: new Map<string, PreferenceAdapter>(),
+		save: vi.fn(),
 		DEFAULT,
 		activeSession: store({ ...DEFAULT }),
 		getContextUsage: vi.fn(),
@@ -62,6 +66,10 @@ const mocks = vi.hoisted(() => {
 		claudeAuth: { auth_kind: null as string | null, plan_type: null as string | null },
 	};
 });
+
+vi.mock('$lib/services/preferences', () => ({ preferenceSync: {
+ register: (key: string, adapter: PreferenceAdapter) => mocks.adapters.set(key, adapter), save: mocks.save
+} }));
 
 vi.mock('$lib/stores/active-session', async (importOriginal) => {
 	const actual = await importOriginal<Record<string, unknown>>();
@@ -86,6 +94,9 @@ function openPopover(container: HTMLElement) {
 
 beforeEach(() => {
 	localStorage.clear();
+	mocks.adapters.get('context_breakdown_open')!.apply(undefined);
+	mocks.adapters.get('context_usage_sections')!.apply(undefined);
+	mocks.save.mockClear();
 	// Full reset: clears every bucket AND the per-install generation guard.
 	rateLimit.__resetForTests();
 	mocks.activeSession.set({ ...mocks.DEFAULT });
@@ -96,6 +107,21 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('ContextUsageBar — popover positioning', () => {
+	it('updates mounted expansion controls from remote preferences without closing the popover or echoing', async () => {
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		mocks.adapters.get('context_breakdown_open')!.apply(false);
+		mocks.adapters.get('context_usage_sections')!.apply({ plan: false });
+		await waitFor(() => expect(container.querySelector('.ctx-header')?.getAttribute('aria-expanded')).toBe('false'));
+		expect(container.querySelector('.usage-popover')).not.toBeNull();
+		expect(container.querySelector('.sec-header')?.getAttribute('aria-expanded')).toBe('false');
+		expect(mocks.save).not.toHaveBeenCalled();
+		mocks.adapters.get('context_breakdown_open')!.apply(undefined);
+		mocks.adapters.get('context_usage_sections')!.apply(undefined);
+		await waitFor(() => expect(container.querySelector('.ctx-header')?.getAttribute('aria-expanded')).toBe('true'));
+		expect(container.querySelector('.sec-header')?.getAttribute('aria-expanded')).toBe('true');
+	});
+
 	it('keeps translated bounds stable through repeated desktop and mobile resizes', async () => {
 		const originalWidth = window.innerWidth;
 		let unshiftedLeft = 1201;
@@ -333,8 +359,8 @@ describe('ContextUsageBar — context breakdown', () => {
 		expect(localStorage.getItem('aihub.contextBreakdownOpen')).toBe('0');
 	});
 
-	it('starts collapsed when localStorage says so (default is expanded)', async () => {
-		localStorage.setItem('aihub.contextBreakdownOpen', '0');
+	it('starts collapsed when the shared preference says so (default is expanded)', async () => {
+		contextBreakdown.set(false);
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.querySelector('.ctx-header')?.getAttribute('aria-expanded')).toBe('false');
@@ -1008,7 +1034,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 	});
 
 	it('shows high OpenAI subscription quota remaining without warning or danger color', async () => {
-		localStorage.setItem('aihub.usageSectionOpen:provider:codex-91', '0');
+		usageSections.set({ 'provider:codex-91': false });
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -1105,7 +1131,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 	});
 
 	it('summarizes a collapsed Grok section with the least quota remaining', async () => {
-		localStorage.setItem('aihub.usageSectionOpen:provider:grok-2', '0');
+		usageSections.set({ 'provider:grok-2': false });
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -1301,7 +1327,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 
 	it('collapsed credits-only provider (no windows) shows a compact credits summary on the header', async () => {
 		// Persisted-collapsed before render so the header renders in its collapsed state.
-		localStorage.setItem('aihub.usageSectionOpen:provider:or-credits', '0');
+		usageSections.set({ 'provider:or-credits': false });
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -1382,7 +1408,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 	});
 
 	it('collapsed balance provider shows a compact "$X left" chip', async () => {
-		localStorage.setItem('aihub.usageSectionOpen:provider:or-balance-collapsed', '0');
+		usageSections.set({ 'provider:or-balance-collapsed': false });
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -1424,7 +1450,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 	});
 
 	it('collapsed provider WITH windows keeps the % chip (not the credits summary)', async () => {
-		localStorage.setItem('aihub.usageSectionOpen:provider:or-both', '0');
+		usageSections.set({ 'provider:or-both': false });
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
