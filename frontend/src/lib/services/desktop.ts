@@ -162,6 +162,28 @@ function resolveHex(cssColor: string, fallback: string): string {
 	}
 }
 
+/**
+ * A downloaded update is announced once, in the bell, with a button that
+ * restarts into it. The item is local to this window (not persisted to the
+ * worker), because it is about this computer's app, not the worker.
+ */
+let announcedUpdateVersion: string | null = null;
+
+async function announceUpdate(state: DesktopUpdateState): Promise<void> {
+	if (!desktop || state.phase !== 'ready') return;
+	const version = state.version ?? 'new';
+	if (announcedUpdateVersion === version) return;
+	announcedUpdateVersion = version;
+	const { notify } = await import('$lib/stores/notifications');
+	const shell = desktop;
+	notify.info(`AI Shuffle Desktop ${version} has downloaded. Restart to finish installing it.`, {
+		title: 'Update ready',
+		category: 'desktop-update',
+		persist: false,
+		action: { label: 'Restart and update', onClick: () => shell.updates.install() }
+	});
+}
+
 function syncTitleBarTheme(): void {
 	if (!desktop) return;
 	const styles = getComputedStyle(document.documentElement);
@@ -185,6 +207,8 @@ export function initDesktop(): () => void {
 	void desktop.window.getState().then(applyWindowState);
 	const offState = desktop.window.onStateChange(applyWindowState);
 	const offCommand = desktop.shell.onCommand((command) => void runCommand(command));
+	void desktop.updates.getState().then((state) => void announceUpdate(state));
+	const offUpdates = desktop.updates.onState((state) => void announceUpdate(state));
 
 	// Tokens settle after the theme store applies its class and preset styles;
 	// re-sync whenever the theme changes.
@@ -200,6 +224,7 @@ export function initDesktop(): () => void {
 		disposed = true;
 		offState();
 		offCommand();
+		offUpdates();
 		unsubscribeTheme?.();
 	};
 }
