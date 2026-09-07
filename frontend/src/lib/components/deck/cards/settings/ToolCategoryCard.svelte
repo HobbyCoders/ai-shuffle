@@ -10,6 +10,8 @@
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
 	import { api, getErrorMessage } from '$lib/api/client';
+	import { onDestroy } from 'svelte';
+	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import type {
 		ToolCategory,
 		ToolDefinition,
@@ -41,6 +43,15 @@
 		catalogModelsByTool = {},
 		onchange,
 	}: Props = $props();
+	const owner = sessionOwnerEpoch();
+	let destroyed = false;
+	let feedbackTimer: ReturnType<typeof setTimeout> | null = null;
+	const isCurrent = () => !destroyed && owner === sessionOwnerEpoch();
+	onDestroy(() => {
+		destroyed = true;
+		if (sliderDebounceTimer) clearTimeout(sliderDebounceTimer);
+		if (feedbackTimer) clearTimeout(feedbackTimer);
+	});
 
 	// Total models available (curated + unique catalog)
 	let totalModels = $derived.by(() => {
@@ -62,8 +73,10 @@
 	let feedbackMsg = $state<{ type: 'success' | 'error'; text: string } | null>(null);
 
 	function showFeedback(type: 'success' | 'error', text: string) {
+		if (!isCurrent()) return;
+		if (feedbackTimer) clearTimeout(feedbackTimer);
 		feedbackMsg = { type, text };
-		setTimeout(() => feedbackMsg = null, 2500);
+		feedbackTimer = setTimeout(() => { if (isCurrent()) feedbackMsg = null; }, 2500);
 	}
 
 	function getSelectedModel(tool: ToolDefinition): AnyModel | undefined {
@@ -113,9 +126,11 @@
 
 	// Model change handler
 	async function handleModelChange(tool: ToolDefinition, modelId: string) {
+		if (!isCurrent()) return;
 		savingTool = tool.id;
 		try {
 			await api.patch<{ success: boolean }>(tool.modelEndpoint, { model: modelId });
+			if (!isCurrent()) return;
 
 			// Clear stored schema-driven params so the new model starts from its
 			// own defaults rather than inheriting the previous model's values.
@@ -127,6 +142,7 @@
 			} catch {
 				// Non-critical
 			}
+			if (!isCurrent()) return;
 
 			// The live-transcription probe caches whether the current STT model can
 			// stream; a model swap invalidates that answer immediately.
@@ -156,6 +172,7 @@
 					}
 				}
 			}
+			if (!isCurrent()) return;
 
 			// For TTS: auto-select first voice of new model
 			if (tool.id === 'tts') {
@@ -175,12 +192,13 @@
 		} catch (e: unknown) {
 			showFeedback('error', getErrorMessage(e, 'Failed to update'));
 		} finally {
-			savingTool = null;
+			if (isCurrent()) savingTool = null;
 		}
 	}
 
 	// Setting change handlers
 	async function handlePillChange(tool: ToolDefinition, setting: ToolSetting, value: string) {
+		if (!isCurrent()) return;
 		const currentValue = settingValues[setting.settingKey];
 		if (value === currentValue) return;
 		onchange(setting.settingKey, value);
@@ -194,6 +212,7 @@
 	}
 
 	async function handleSelectChange(tool: ToolDefinition, setting: ToolSetting, value: string) {
+		if (!isCurrent()) return;
 		const currentValue = settingValues[setting.settingKey];
 		if (value === currentValue) return;
 		onchange(setting.settingKey, value);
@@ -209,9 +228,12 @@
 	let sliderDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function handleSliderInput(tool: ToolDefinition, setting: ToolSetting, value: number) {
+		if (!isCurrent()) return;
 		onchange(setting.settingKey, value);
 		if (sliderDebounceTimer) clearTimeout(sliderDebounceTimer);
 		sliderDebounceTimer = setTimeout(async () => {
+			sliderDebounceTimer = null;
+			if (!isCurrent()) return;
 			if (tool.settingsEndpoint) {
 				try {
 					await api.patch(tool.settingsEndpoint, { [setting.key]: value });

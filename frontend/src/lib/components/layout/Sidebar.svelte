@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { sidebarGroups } from '$lib/stores/expansion-preferences';
 	/**
 	 * Sidebar - Studio Noir session navigator.
 	 *
@@ -144,27 +145,9 @@
 	const SHOW_MORE_STEP = 50;
 	const ARCHIVED_LIMIT = 30;
 
-	// --- collapsible groups (persisted) -------------------------------------
-	const GROUPS_KEY = 'sidebar-collapsed-groups';
-
-	function loadCollapsedGroups(): Record<string, boolean> {
-		if (typeof localStorage === 'undefined') return {};
-		try {
-			return JSON.parse(localStorage.getItem(GROUPS_KEY) || '{}');
-		} catch {
-			return {};
-		}
-	}
-
-	let collapsedGroups = $state<Record<string, boolean>>(loadCollapsedGroups());
-
+	const collapsedGroups = $derived($sidebarGroups);
 	function toggleGroup(name: string) {
-		collapsedGroups = { ...collapsedGroups, [name]: !collapsedGroups[name] };
-		try {
-			localStorage.setItem(GROUPS_KEY, JSON.stringify(collapsedGroups));
-		} catch {
-			// Storage full or blocked — the toggle still works for this session.
-		}
+		sidebarGroups.set({ ...collapsedGroups, [name]: !collapsedGroups[name] });
 	}
 
 	// ---------------------------------------------------------------- clock

@@ -16,11 +16,13 @@
  * remount on every tab switch and the new-chat Voice pill is evaluated on every
  * empty-state render — a per-mount fetch would both hammer the endpoint and
  * risk snapping a half-typed field back to the server value (the preference
- * store typing-race documented for the git-actions section). `force` is the
- * single escape hatch, used after a successful PUT.
+ * store typing-race documented for the git-actions section). Resource changes
+ * and account boundaries invalidate that cache; mounted editors refresh safely.
  */
 
 import { api, type ApiError } from './client';
+import { resourceSync } from '$lib/services/resource-sync';
+import { sessionOwnerBoundary, sessionOwnerEpoch } from '$lib/stores/session-owner';
 
 // ============================================================================
 // Types
@@ -171,18 +173,36 @@ async function optional<T>(what: string, run: () => Promise<T>): Promise<T | nul
 // ============================================================================
 
 let settingsCache: Promise<VoiceSettings> | null = null;
+let settingsRevision = 0;
+
+function invalidateVoiceSettings() {
+	settingsRevision++;
+	settingsCache = null;
+}
+
+resourceSync.subscribe(['settings'], invalidateVoiceSettings);
+sessionOwnerBoundary.subscribe(invalidateVoiceSettings);
+
+function expiredSettingsRequest(): Error {
+	return new Error('Voice settings request expired. Reload the current settings.');
+}
 
 /**
- * Read the voice settings, memoised for the lifetime of the page.
+ * Read voice settings until a settings change or account boundary invalidates them.
  *
  * @param force Re-fetch and replace the cache (used after a PUT).
  */
 export function loadVoiceSettings(force = false): Promise<VoiceSettings> {
-	if (force || !settingsCache) {
-		settingsCache = api.get<VoiceSettings>('/settings/voice').catch((e) => {
+	if (force) invalidateVoiceSettings();
+	if (!settingsCache) {
+		const revision = settingsRevision, owner = sessionOwnerEpoch();
+		settingsCache = api.get<VoiceSettings>('/settings/voice').then(value => {
+			if (owner !== sessionOwnerEpoch() || revision !== settingsRevision) throw expiredSettingsRequest();
+			return value;
+		}).catch((e) => {
 			// Never poison the cache with a rejected promise — the next caller
-			// should be able to retry.
-			settingsCache = null;
+			// should retry, but an old read must not discard a newer request.
+			if (owner === sessionOwnerEpoch() && revision === settingsRevision) settingsCache = null;
 			throw e;
 		});
 	}
@@ -191,7 +211,14 @@ export function loadVoiceSettings(force = false): Promise<VoiceSettings> {
 
 /** Partial update; the response is the full settled settings object. */
 export async function saveVoiceSettings(patch: VoiceSettingsUpdate): Promise<VoiceSettings> {
+	invalidateVoiceSettings();
+	const revision = settingsRevision, owner = sessionOwnerEpoch();
 	const updated = await api.put<VoiceSettings>('/settings/voice', patch);
+	if (owner !== sessionOwnerEpoch()) throw expiredSettingsRequest();
+	// A peer may have committed while this write's response was in flight.
+	// Its invalidation can also trigger a GET before our PUT commits; discard
+	// that precommit read rather than treating it as the settled write result.
+	if (revision !== settingsRevision) return loadVoiceSettings(true);
 	settingsCache = Promise.resolve(updated);
 	return updated;
 }

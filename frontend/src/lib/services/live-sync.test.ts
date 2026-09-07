@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const m = vi.hoisted(() => ({ listener: undefined as undefined | ((s: any)=>void), start:vi.fn(),stop:vi.fn(),reconnect:vi.fn(),refresh:vi.fn(),invalidate:vi.fn(),clear:vi.fn(),handle:vi.fn(),unsubscribe:vi.fn(),check:vi.fn().mockResolvedValue(undefined),loadProjects:vi.fn(),loadClusterProjects:vi.fn(),loadSessions:vi.fn() }));
+const m = vi.hoisted(() => ({ bindings:new Set<string>(),listener: undefined as undefined | ((s: any)=>void), start:vi.fn(),stop:vi.fn(),reconnect:vi.fn(),refresh:vi.fn(),invalidate:vi.fn(),clear:vi.fn(),handle:vi.fn(),unsubscribe:vi.fn(),check:vi.fn().mockResolvedValue(undefined),loadProjects:vi.fn(),loadClusterProjects:vi.fn(),loadSessions:vi.fn() }));
 vi.mock('$lib/stores/auth.svelte',()=>({auth:{subscribe:(fn:(s:any)=>void)=>{m.listener=fn;return m.unsubscribe;},checkAuth:m.check}}));
-vi.mock('./preferences',()=>({preferenceSync:{start:m.start,stop:m.stop,reconnect:m.reconnect,refresh:m.refresh,register:vi.fn()}}));
+vi.mock('./preferences',()=>({preferenceSync:{start:m.start,stop:m.stop,reconnect:m.reconnect,refresh:m.refresh,register:(key:string)=>m.bindings.add(key)}}));
 vi.mock('./resource-sync',()=>({resourceSync:{subscribe:vi.fn(()=>vi.fn()),invalidate:m.invalidate,clear:m.clear}}));
 vi.mock('$lib/stores/active-session',()=>({handleGlobalUserEvent:m.handle,activeSession:{current:{sessionId:null},applyComposerDefaults:vi.fn(),resetForAccountChange:vi.fn()}}));
 vi.mock('$lib/stores/app-data.svelte',()=>({appData:{loadProjects:m.loadProjects,loadClusterProjects:m.loadClusterProjects,loadSessions:m.loadSessions}}));
@@ -38,6 +38,11 @@ function account(username:string|null) {m.listener?.({loading:false,status:{auth
 beforeEach(()=>{vi.useFakeTimers();vi.clearAllMocks();Socket.all=[];localStorage.clear();sessionStorage.clear();vi.stubGlobal('WebSocket',Socket);});
 afterEach(()=>{stop?.();vi.useRealTimers();vi.unstubAllGlobals();});
 describe('root authenticated live-sync lifecycle',()=>{
+ it('registers Build and install choices before authentication starts the first snapshot',()=>{
+  expect(m.bindings.has('build_subtab')).toBe(true);
+  expect(m.bindings.has('install_prompt')).toBe(true);
+  expect(m.start).not.toHaveBeenCalled();
+ });
  it('retires the old session before preference resets and clears stale tab restores',()=>{
   stop=startLiveSync();account('alice');
   sessionStorage.setItem(TAB_ACTIVE_SESSION_KEY, '{"sessionId":"private"}');

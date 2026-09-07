@@ -6,7 +6,7 @@
 	 * the enable flag, the realtime model, the agent's voice (with a preview
 	 * of the selected one, VM21), which OpenAI API-key provider row funds
 	 * calls, whether the agent may manage app configuration directly, and a
-	 * cap on total call length. Load once, PUT on change — the PUT is a
+	 * cap on total call length. Refresh on shared settings changes; the PUT is a
 	 * partial update, and an explicit `null` provider clears the pin.
 	 *
 	 * The section also shows which agents a call can dispatch. That roster is
@@ -17,8 +17,8 @@
 	 * Two traps this section is written around:
 	 *
 	 * * A settings section under `{#if activeTab === …}` REMOUNTS on every tab
-	 *   switch, so it must not re-fetch shared state on mount. `loadVoiceSettings`
-	 *   is memoised at module scope, so the mount read is free after the first.
+	 *   switch. `loadVoiceSettings` shares the last read until a settings change
+	 *   or account boundary invalidates it.
 	 * * The one free-form field (max call minutes) is one-way bound, so a fetch
 	 *   resolving mid-typing would snap it back. `pendingMinutes` holds the local
 	 *   edit and is the only thing rendered while an edit is outstanding; the
@@ -26,6 +26,8 @@
 	 *   caret.
 	 */
 	import { onDestroy, onMount } from 'svelte';
+	import { watchResources } from '$lib/services/watch-resources';
+	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { AudioLines, Bot, Play, Square, Wrench } from 'lucide-svelte';
 	import {
 		VOICE_MODELS,
@@ -48,6 +50,10 @@
 	let saving = $state(false);
 	let error = $state('');
 	let success = $state('');
+	const owner = sessionOwnerEpoch();
+	let alive = true;
+	let request = 0;
+	const current = () => alive && owner === sessionOwnerEpoch();
 
 	// Free-text guard: non-null means the user is mid-edit and owns the field.
 	let pendingMinutes = $state<string | null>(null);
@@ -58,19 +64,30 @@
 	const selectedModel = $derived(VOICE_MODELS.find((m) => m.id === settings?.voice_model));
 	const selectedVoice = $derived(VOICE_VOICES.find((v) => v.id === settings?.voice_voice));
 
-	onMount(async () => {
+	async function refreshSettings() {
+		const generation = ++request;
 		try {
-			settings = await loadVoiceSettings();
+			const value = await loadVoiceSettings();
+			if (current() && generation === request && !saving) {
+				settings = value;
+				error = '';
+			}
 		} catch (e: any) {
-			error = e?.detail || 'Failed to load voice settings';
+			if (current() && generation === request) error = e?.detail || 'Failed to load voice settings';
 		} finally {
-			loading = false;
+			if (current() && generation === request) loading = false;
 		}
+	}
+	watchResources(['settings'], refreshSettings);
+	onMount(async () => {
+		await refreshSettings();
+		if (!current()) return;
 		// Both lists are non-fatal: a failed read just shows the setup pointer.
 		const [providerList, agentList] = await Promise.allSettled([
 			getVoiceProviders(),
 			getVoiceAgents(),
 		]);
+		if (!current()) return;
 		if (providerList.status === 'fulfilled') providers = providerList.value;
 		else console.warn('[voice] could not list eligible providers', providerList.reason);
 		if (agentList.status === 'fulfilled') agents = agentList.value;
@@ -79,17 +96,24 @@
 	});
 
 	async function save(patch: Parameters<typeof saveVoiceSettings>[0]) {
+		if (!current()) return;
+		++request;
 		saving = true;
 		error = '';
 		success = '';
 		try {
-			settings = await saveVoiceSettings(patch);
+			const updated = await saveVoiceSettings(patch);
+			if (!current()) return;
+			settings = updated;
 			success = 'Saved';
 			setTimeout(() => (success = ''), 2000);
 		} catch (e: any) {
-			error = e?.detail || 'Failed to save voice settings';
+			if (current()) error = e?.detail || 'Failed to save voice settings';
 		} finally {
-			saving = false;
+			if (current()) {
+				saving = false;
+				void refreshSettings();
+			}
 		}
 	}
 
@@ -159,6 +183,8 @@
 	}
 
 	onDestroy(() => {
+		alive = false;
+		++request;
 		stopPreview();
 		for (const url of previewCache.values()) URL.revokeObjectURL(url);
 		previewCache.clear();
