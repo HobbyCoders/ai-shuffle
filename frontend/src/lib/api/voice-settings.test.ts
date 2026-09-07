@@ -82,6 +82,25 @@ describe('voice settings synchronization', () => {
   expect((await result).voice_max_call_minutes).toBe(90);
  });
 
+ it('discards a precommit refresh cached during a write and reads after commit', async () => {
+  vi.useFakeTimers();
+  const voice = await import('./voice');
+  const { resourceSync } = await import('$lib/services/resource-sync');
+  const write = deferred<ReturnType<typeof settings>>();
+  const beforeCommit = deferred<ReturnType<typeof settings>>();
+  transport.put.mockReturnValueOnce(write.promise);
+  transport.get.mockReturnValueOnce(beforeCommit.promise).mockResolvedValueOnce(settings('cedar', 90));
+  const result = voice.saveVoiceSettings({voice_voice:'cedar'});
+  resourceSync.invalidate(['settings']); await vi.advanceTimersByTimeAsync(100);
+  const refresh = voice.loadVoiceSettings();
+  beforeCommit.resolve(settings('marin', 90));
+  expect((await refresh).voice_voice).toBe('marin');
+  write.resolve(settings('cedar', 90));
+  expect((await result).voice_voice).toBe('cedar');
+  expect((await voice.loadVoiceSettings()).voice_voice).toBe('cedar');
+  expect(transport.get).toHaveBeenCalledTimes(2);
+ });
+
  it('retries a failed read', async () => {
   const voice = await import('./voice');
   transport.get.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(settings());

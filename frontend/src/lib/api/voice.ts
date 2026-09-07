@@ -216,7 +216,9 @@ export async function saveVoiceSettings(patch: VoiceSettingsUpdate): Promise<Voi
 	const updated = await api.put<VoiceSettings>('/settings/voice', patch);
 	if (owner !== sessionOwnerEpoch()) throw expiredSettingsRequest();
 	// A peer may have committed while this write's response was in flight.
-	if (revision !== settingsRevision) return loadVoiceSettings();
+	// Its invalidation can also trigger a GET before our PUT commits; discard
+	// that precommit read rather than treating it as the settled write result.
+	if (revision !== settingsRevision) return loadVoiceSettings(true);
 	settingsCache = Promise.resolve(updated);
 	return updated;
 }
