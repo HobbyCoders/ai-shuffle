@@ -96,7 +96,7 @@ describe('session-init · isRestoringSession on persisted restore', () => {
 		await init();
 		expect(deps.wsConn.activate).toHaveBeenCalledTimes(2);
 		expect(deps.wsConn.connect).toHaveBeenCalledTimes(2);
-		expect(deps.wsConn.activate).toHaveBeenCalledBefore(deps.wsConn.connect);
+		expect(deps.wsConn.activate).toHaveBeenCalledBefore(vi.mocked(deps.wsConn.connect));
 	});
 
 	it('does not reactivate or restore state when an initialization finishes after destruction', async () => {
