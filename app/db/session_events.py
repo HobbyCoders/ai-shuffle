@@ -245,6 +245,20 @@ def get_events(
     return rows
 
 
+def get_latest_system_note(session_id: str, subtype: str) -> Optional[Dict[str, Any]]:
+    """Read the last note of a subtype, including across runtime restarts."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT payload FROM session_events "
+            "WHERE session_id = %s AND event_type = 'system.note' "
+            "AND payload ->> 'subtype' = %s ORDER BY seq DESC LIMIT 1",
+            (session_id, subtype),
+        )
+        row = cursor.fetchone()
+    return _parse_payload(row["payload"]) if row else None
+
+
 def get_events_multi(
     cursors: Dict[str, int], limit: int = 500
 ) -> List[Dict[str, Any]]:

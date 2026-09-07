@@ -2562,6 +2562,24 @@ class SessionRuntime:
             row = await asyncio.to_thread(database_mod.get_session, sid)
             if row is None:
                 return
+            stored = row.get("working_set_ref")
+            if stored:
+                # Restore leaves an unresolved foreign snapshot recoverable.
+                # A turn on this dirty checkout must not replace that same
+                # scratch ref with its own changes. Leave both sets intact.
+                try:
+                    snapshot = json.loads(stored)
+                except (ValueError, TypeError):
+                    snapshot = None
+                if (
+                    not isinstance(snapshot, dict)
+                    or snapshot.get("runner_id") != settings.effective_instance_id
+                ):
+                    logger.info(
+                        "SessionRuntime: preserving unresolved working-set snapshot for %s; local changes remain on disk",
+                        sid,
+                    )
+                    return
             cwd = await asyncio.to_thread(
                 project_resolver.resolve_existing_cwd, row
             )
@@ -2610,11 +2628,36 @@ class SessionRuntime:
             )
             if note:
                 from app.core.turn_recorder import record_drained_event
+                from app.db import session_events
+                import hashlib
+
+                # An unresolved snapshot is deliberately retried every turn.
+                # Keep its first warning in the durable transcript, without
+                # appending it again on every retry (or runtime restart). A new
+                # snapshot, destination, or recovery outcome merits a new note.
+                notice_key = hashlib.sha256(json.dumps(
+                    [stored, settings.effective_instance_id,
+                     str(Path(cwd).resolve()), note],
+                    ensure_ascii=True,
+                ).encode()).hexdigest()
+                try:
+                    previous = await asyncio.to_thread(
+                        session_events.get_latest_system_note, sid, "working_set"
+                    )
+                except Exception:
+                    # A failed history lookup must not hide a recovery warning.
+                    previous = None
+                    logger.warning(
+                        "SessionRuntime: working-set notice lookup failed for %s",
+                        sid, exc_info=True,
+                    )
+                if (previous or {}).get("data", {}).get("notice_key") == notice_key:
+                    return
 
                 await record_drained_event(sid, {
                     "type": "system",
                     "subtype": "working_set",
-                    "data": {"content": note},
+                    "data": {"content": note, "notice_key": notice_key},
                 })
         except Exception:
             logger.warning(

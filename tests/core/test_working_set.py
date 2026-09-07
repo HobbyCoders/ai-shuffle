@@ -365,7 +365,9 @@ async def test_hooks_invoke_working_set_when_flag_on(monkeypatch):
     monkeypatch.setattr(ws, "restore_in", rest_stub)
 
     rt = session_runtime.SessionRuntime({"session_id": "s", "id": "t"})
+    fresh_row["working_set_ref"] = None
     await rt._snapshot_working_set("s")
+    fresh_row["working_set_ref"] = FRESH_STORED
     await rt._restore_working_set("s")
 
     runner = settings.effective_instance_id
@@ -443,3 +445,106 @@ def test_snapshot_out_malicious_id_logs_and_noops(env, ref_store, caplog):
     assert any(
         "snapshot_out failed" in r.getMessage() for r in caplog.records
     )
+
+async def test_repeated_working_set_warning_is_durable_and_recovery_still_runs(
+    env, ref_store, monkeypatch
+):
+    """Two turns/recreated runtimes warn once; a later clean checkout recovers."""
+    from app.core import session_runtime, project_resolver
+    from app.db import database, session_events
+
+    clone = _clone(env.url, env.tmp / 'other-runner')
+    (env.work / 'README.md').write_text('recover this work\n', encoding='utf-8')
+    working_set.snapshot_out(SID, env.work, 'previous-runner', False)
+    stored = ref_store.value
+    blocker = clone / 'local-file.txt'
+    blocker.write_text('keep my local work', encoding='utf-8')
+    (clone / 'README.md').write_text('local tracked work\n', encoding='utf-8')
+    monkeypatch.setattr(database, 'get_session', lambda sid: {
+        'id': SID, 'working_set_ref': ref_store.value,
+    })
+    monkeypatch.setattr(project_resolver, 'resolve_existing_cwd', lambda row: clone)
+    monkeypatch.setattr(project_resolver, 'resolve_project_v2', lambda row: None)
+    calls = []
+    restore = working_set.restore_in
+    def tracked_restore(*args):
+        calls.append(args)
+        return restore(*args)
+    monkeypatch.setattr(working_set, 'restore_in', tracked_restore)
+
+    for _ in range(2):
+        runtime = session_runtime.SessionRuntime({'session_id': SID, 'id': SID})
+        await runtime._restore_working_set(SID)
+        await runtime._snapshot_working_set(SID)
+    notes = session_events.get_events(SID)
+    assert len(notes) == 1
+    assert 'local changes' in notes[0]['payload']['data']['content']
+    assert len(calls) == 2  # Deduplication never suppresses a recovery attempt.
+    assert ref_store.value == stored
+    assert len(ref_store.calls) == 1  # No local snapshot replaced the foreign ref.
+    assert _git(env.origin, 'rev-parse', REF).stdout.strip() == json.loads(stored)['sha']
+    assert (clone / 'README.md').read_text(encoding='utf-8') == 'local tracked work\n'
+    assert blocker.read_text(encoding='utf-8') == 'keep my local work'
+
+    blocker.unlink()  # Disposable fixture checkout only.
+    (clone / 'README.md').write_text('hello\n', encoding='utf-8')
+    await runtime._restore_working_set(SID)
+    notes = session_events.get_events(SID)
+    assert len(notes) == 2
+    assert notes[-1]['payload']['data']['content'].startswith('Applied in-progress')
+    assert (clone / 'README.md').read_text(encoding='utf-8') == 'recover this work\n'
+    assert ref_store.value is None
+
+
+async def test_working_set_warning_changes_and_new_snapshots_remain_visible(monkeypatch, tmp_path):
+    from app.core import session_runtime, project_resolver
+    from app.db import database, session_events
+
+    row = {'id': SID, 'working_set_ref': json.dumps({'sha':'first','runner_id':'other'})}
+    outcome = ['Changes could not be fetched.']
+    monkeypatch.setattr(database, 'get_session', lambda sid: row)
+    monkeypatch.setattr(project_resolver, 'resolve_existing_cwd', lambda row: tmp_path)
+    monkeypatch.setattr(project_resolver, 'resolve_project_v2', lambda row: None)
+    monkeypatch.setattr(working_set, 'restore_in', lambda *a: outcome[0])
+    runtime = session_runtime.SessionRuntime({'session_id':SID,'id':SID})
+    await runtime._restore_working_set(SID)
+    # Unrelated events neither defeat dedupe nor replace this subtype's history.
+    session_events.append_events(SID, [{'type':'system.note','payload':{'subtype':'other'}}])
+    await runtime._restore_working_set(SID)
+    assert len(session_events.get_events(SID)) == 2
+    outcome[0] = 'Checkout has local changes.'
+    await runtime._restore_working_set(SID)
+    row['working_set_ref'] = json.dumps({'sha':'new-snapshot','runner_id':'other'})
+    await runtime._restore_working_set(SID)
+    assert len(session_events.get_events(SID)) == 4
+    assert session_events.get_latest_system_note('another-session', 'working_set') is None
+    assert session_events.get_latest_system_note(SID,'working_set')['data']['content'] == outcome[0]
+
+@pytest.mark.parametrize('stored_kind,expected_calls', [('own',1),('foreign',0),('malformed',0),('empty',1)])
+async def test_snapshot_hook_preserves_unresolved_foreign_work(monkeypatch, tmp_path, stored_kind, expected_calls):
+    from app.core import session_runtime, project_resolver
+    from app.core.config import settings
+    from app.db import database
+    refs = {'own':json.dumps({'runner_id':settings.effective_instance_id,'sha':'ours'}),
+            'foreign':json.dumps({'runner_id':'previous-runner','sha':'theirs'}),
+            'malformed':'{broken', 'empty':None}
+    monkeypatch.setattr(database, 'get_session', lambda sid: {'working_set_ref':refs[stored_kind]})
+    monkeypatch.setattr(project_resolver, 'resolve_existing_cwd', lambda row: tmp_path)
+    monkeypatch.setattr(project_resolver, 'resolve_project_v2', lambda row: None)
+    calls=[]
+    monkeypatch.setattr(working_set,'snapshot_out',lambda *a:calls.append(a))
+    await session_runtime.SessionRuntime({'session_id':SID,'id':SID})._snapshot_working_set(SID)
+    assert len(calls) == expected_calls
+
+async def test_working_set_history_lookup_failure_does_not_hide_warning(monkeypatch, tmp_path):
+    from app.core import session_runtime, project_resolver
+    from app.db import database, session_events
+    monkeypatch.setattr(database,'get_session',lambda sid: {'working_set_ref':'snapshot'})
+    monkeypatch.setattr(project_resolver,'resolve_existing_cwd',lambda row: tmp_path)
+    monkeypatch.setattr(project_resolver,'resolve_project_v2',lambda row: None)
+    monkeypatch.setattr(working_set,'restore_in',lambda *a: 'Saved work requires recovery.')
+    def failed_lookup(*args):
+        raise RuntimeError('temporary lookup failure')
+    monkeypatch.setattr(session_events,'get_latest_system_note',failed_lookup)
+    await session_runtime.SessionRuntime({'session_id':SID,'id':SID})._restore_working_set(SID)
+    assert session_events.get_events(SID)[0]['payload']['data']['content'] == 'Saved work requires recovery.'
