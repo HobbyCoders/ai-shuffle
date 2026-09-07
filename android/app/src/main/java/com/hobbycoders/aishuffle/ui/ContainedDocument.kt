@@ -7,6 +7,7 @@ import com.hobbycoders.aishuffle.model.Server
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.ByteArrayInputStream
+import java.io.FilterInputStream
 import java.util.concurrent.TimeUnit
 
 /** Adds a native-enforced CSP before a document can run script or open a socket.
@@ -25,9 +26,10 @@ internal object ContainedDocument {
                     header("CF-Access-Client-Secret", server.cfAccessClientSecret!!)
                 }
             }.build()
-            http.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return blocked("Chat could not open. Return to Shuffle and refresh your session, or pair the server again.")
-                val body = response.body ?: return blocked()
+            val response = http.newCall(request).execute()
+            try {
+                if (!response.isSuccessful) { response.close(); return blocked("Chat could not open. Return to Shuffle and refresh your session, or pair the server again.") }
+                val body = response.body ?: run { response.close(); return blocked() }
                 val type = body.contentType()
                 val mime = type?.let { "${it.type}/${it.subtype}" } ?: "text/html"
                 val headers = response.headers.toMap().toMutableMap()
@@ -36,8 +38,13 @@ internal object ContainedDocument {
                 headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' $socket; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'"
                 headers["Referrer-Policy"] = "no-referrer"
                 headers["Cache-Control"] = "no-store"
-                WebResourceResponse(mime, type?.charset()?.name() ?: "UTF-8", response.code, "OK", headers, ByteArrayInputStream(body.bytes()))
-            }
+                // WebView may identify this document as an attachment. Do not buffer the
+                // entire file before DownloadListener can route it to bounded native storage.
+                val stream = object : FilterInputStream(body.byteStream()) {
+                    override fun close() { try { super.close() } finally { response.close() } }
+                }
+                WebResourceResponse(mime, type?.charset()?.name() ?: "UTF-8", response.code, "OK", headers, stream)
+            } catch (error: Exception) { response.close(); throw error }
         } catch (_: Exception) { blocked("Cannot reach this server. Check your connection and tap Refresh chat.") }
     }
     private fun blocked(message: String = "This content is blocked.") = WebResourceResponse("text/plain", "UTF-8", 403, "Blocked", mapOf("Cache-Control" to "no-store"), ByteArrayInputStream(message.toByteArray()))

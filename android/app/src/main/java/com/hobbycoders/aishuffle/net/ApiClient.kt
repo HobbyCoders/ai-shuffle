@@ -109,14 +109,18 @@ object ApiClient {
      * authenticate the WebView. Requires the aim_ key (and the CF Access service
      * token, if the server is behind Access).
      */
-    suspend fun createWebSession(server: Server): ApiResult<String> =
+    enum class SessionPurpose(val value: String) { WEB("web"), NATIVE("native") }
+
+    internal fun webSessionRequest(server: Server, purpose: SessionPurpose = SessionPurpose.WEB): Request = Request.Builder()
+        .url("${server.baseUrl}/api/v1/mobile/web-session")
+        .header("Authorization", "Bearer ${server.apiKey}")
+        .cfAccess(server.cfAccessClientId, server.cfAccessClientSecret)
+        .post(JSONObject().put("purpose", purpose.value).toString().toRequestBody(JSON_MEDIA.toMediaType()))
+        .build()
+
+    suspend fun createWebSession(server: Server, purpose: SessionPurpose = SessionPurpose.WEB): ApiResult<String> =
         withContext(Dispatchers.IO) {
-            val request = Request.Builder()
-                .url("${server.baseUrl}/api/v1/mobile/web-session")
-                .header("Authorization", "Bearer ${server.apiKey}")
-                .cfAccess(server.cfAccessClientId, server.cfAccessClientSecret)
-                .post(ByteArray(0).toRequestBody(JSON_MEDIA.toMediaType()))
-                .build()
+            val request = webSessionRequest(server, purpose)
 
             execute(request, hasCfCreds = server.hasCfAccess) { json ->
                 json.getString("session_token")

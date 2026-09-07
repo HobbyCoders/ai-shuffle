@@ -1,11 +1,13 @@
 package com.hobbycoders.aishuffle.ui
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.net.Uri
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.text.TextUtils
 import android.view.View
@@ -29,19 +31,39 @@ import com.hobbycoders.aishuffle.net.ApiClient
 import com.hobbycoders.aishuffle.net.ApiResult
 import com.hobbycoders.aishuffle.tools.DeviceToolsRuntime
 import com.hobbycoders.aishuffle.voice.VoiceCallActivity
+import com.hobbycoders.aishuffle.voice.VoiceCallService
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.io.ByteArrayInputStream
 
-/** No JavascriptInterface: even a trusted page's frames cannot call native code. */
+/** Native capabilities are restricted to the connected HTTPS document; no JavascriptInterface. */
 class ChatActivity : NativeScreen() {
     private lateinit var server: Server
     private lateinit var web: WebView
     private var sessionJob: Job? = null
+    private lateinit var downloads: ChatDownloads
+    private lateinit var nativeVoice: NativeVoiceBridge
+    private var document = 0
+    private var fileDocument = -1
+    private var fileChooserOpen = false
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private val fileChooser = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { result ->
-        fileCallback?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data))
+        fileChooserOpen = false
+        val callback = fileCallback
         fileCallback = null
+        val uris = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+        callback?.onReceiveValue(uris?.takeIf { fileDocument == document && validDocument() &&
+            it.size in 1..32 && it.all { uri -> uri.scheme == "content" } })
+    }
+    private var microphone: PermissionRequest? = null
+    private var microphoneDocument = -1
+    private var microphoneDialogOpen = false
+    private var microphoneReady = false
+    private val microphonePermission = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { granted ->
+        microphoneDialogOpen = false
+        microphoneReady = granted
+        if (!granted) { microphone?.deny(); microphone = null }
+        else completeMicrophonePermission()
     }
     private val signedOut = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) { web.stopLoading(); web.loadUrl("about:blank"); finish() }
@@ -54,6 +76,13 @@ class ChatActivity : NativeScreen() {
         if (!authorized()) { finish(); return }
         web = WebView(this)
         chatLayout()
+        downloads = ChatDownloads(this, web, server, ::authorized) { status.text = it }
+        downloads.install()
+        nativeVoice = NativeVoiceBridge(this, web, server.baseUrl, ::authorized) { sessionId ->
+            startActivity(Intent(this, VoiceCallActivity::class.java)
+                .putExtra(VoiceCallService.EXTRA_SERVER_ID, server.id).putExtra("session_id", sessionId))
+        }
+        nativeVoice.install()
         with(web.settings) {
             javaScriptEnabled = true; domStorageEnabled = true
             allowFileAccess = false; allowContentAccess = false
@@ -65,13 +94,28 @@ class ChatActivity : NativeScreen() {
         web.webChromeClient = object : WebChromeClient() {
             override fun onConsoleMessage(message: ConsoleMessage?) = true
             override fun onShowFileChooser(view: WebView, callback: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean {
-                if (!PairingInput.sameOrigin(server.baseUrl, view.url.orEmpty()) || !authorized()) return false
-                fileCallback?.onReceiveValue(null)
+                if (!validDocument() || fileChooserOpen) { callback.onReceiveValue(null); return true }
                 fileCallback = callback
-                return try { fileChooser.launch(params.createIntent()); true }
-                catch (_: Exception) { fileCallback = null; callback.onReceiveValue(null); true }
+                fileDocument = document
+                return try { fileChooserOpen = true; fileChooser.launch(params.createIntent()); true }
+                catch (_: Exception) { fileChooserOpen = false; fileCallback = null; callback.onReceiveValue(null); true }
             }
-            override fun onPermissionRequest(request: PermissionRequest) { request.deny() }
+            override fun onPermissionRequest(request: PermissionRequest) {
+                if (!validMicrophone(request) || microphoneDialogOpen || !microphoneForeground()) { request.deny(); return }
+                if (ContextCompat.checkSelfPermission(this@ChatActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                    request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+                } else {
+                    microphone?.deny()
+                    microphone = request
+                    microphoneDocument = document
+                    microphoneReady = false
+                    microphoneDialogOpen = true
+                    microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            }
+            override fun onPermissionRequestCanceled(request: PermissionRequest) {
+                if (microphone === request) microphone = null
+            }
         }
         web.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -91,6 +135,10 @@ class ChatActivity : NativeScreen() {
                 return if (request.isForMainFrame) ContainedDocument.load(server, request.url.toString(), request.requestHeaders["User-Agent"].orEmpty()) else null
             }
             override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                document++
+                downloads.navigating()
+                nativeVoice.navigating()
+                cancelPagePermissions()
                 if (!PairingInput.sameOrigin(server.baseUrl, url)) { view.stopLoading(); return }
             }
             override fun onPageFinished(view: WebView, url: String) { if (PairingInput.sameOrigin(server.baseUrl, url)) status.text = "" }
@@ -98,8 +146,7 @@ class ChatActivity : NativeScreen() {
                 handler.cancel(); status.text = "HTTPS verification failed. Fix the server certificate before reconnecting."
             }
         }
-        // Downloads never forward session cookies into Android's redirect-following DownloadManager.
-        web.setDownloadListener { _, _, _, _, _ -> status.text = "For downloads, open this server in your browser and sign in there." }
+        web.setDownloadListener(downloads::fromUrl)
         ContextCompat.registerReceiver(this, signedOut, IntentFilter(AccountRepository.ACTION_CLEARED), ContextCompat.RECEIVER_NOT_EXPORTED)
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() { if (web.canGoBack()) web.goBack() else finish() }
@@ -143,17 +190,47 @@ class ChatActivity : NativeScreen() {
         }
         setContentView(shell)
     }
-    private fun authorized(): Boolean = server.accountId == null || AccountStore(this).session()?.let { it.accountId == server.accountId && it.hub == server.hubUrl } == true
+    private fun authorized(): Boolean {
+        val saved = ServerStore.get(this).getById(server.id) ?: return false
+        if (saved.baseUrl != server.baseUrl || saved.apiKey != server.apiKey || saved.deviceId != server.deviceId ||
+            saved.accountId != server.accountId || saved.hubUrl != server.hubUrl) return false
+        return server.accountId == null || AccountStore(this).session()?.let { it.accountId == server.accountId && it.hub == server.hubUrl } == true
+    }
+    private fun validDocument() = ::web.isInitialized && !isFinishing && !isDestroyed &&
+        ChatAccessPolicy.document(server.baseUrl, web.url, authorized())
+    private fun validMicrophone(request: PermissionRequest) = validDocument() &&
+        ChatAccessPolicy.microphone(server.baseUrl, web.url, request.origin.toString(), request.resources, authorized())
+    private fun microphoneForeground() = hasWindowFocus() && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+    private fun completeMicrophonePermission() {
+        val request = microphone ?: return
+        if (microphoneDocument != document || !validMicrophone(request)) {
+            request.deny(); microphone = null; microphoneReady = false
+        } else if (microphoneReady && microphoneForeground()) {
+            microphone = null; microphoneReady = false
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+                request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+            else request.deny()
+        }
+    }
+    private fun cancelPagePermissions() {
+        microphone?.deny(); microphone = null; microphoneReady = false
+        fileCallback?.onReceiveValue(null); fileCallback = null
+    }
     override fun onPause() {
         if (::web.isInitialized) DeviceToolsRuntime.detach(this)
         super.onPause()
     }
     override fun onStop() {
+        if (::downloads.isInitialized) downloads.background()
+        // The Android permission UI can stop this activity. Keep its request until
+        // the result, then recheck both the document generation and account.
+        if (!microphoneDialogOpen) { microphone?.deny(); microphone = null; microphoneReady = false }
         if (::web.isInitialized) { DeviceToolsRuntime.detach(this); web.onPause() }
         sessionJob?.cancel()
         super.onStop()
     }
-    override fun onResume() { super.onResume(); if (::web.isInitialized) { if (!authorized()) finish() else { web.onResume(); DeviceToolsRuntime.attach(this, server) } } }
+    override fun onResume() { super.onResume(); if (::web.isInitialized) { if (!authorized()) finish() else { web.onResume(); nativeVoice.resumed(); web.post { completeMicrophonePermission() }; DeviceToolsRuntime.attach(this, server) } } }
+    override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (hasFocus && ::web.isInitialized) completeMicrophonePermission() }
     private fun startSession() {
         if (sessionJob?.isActive == true) return
         sessionJob = lifecycleScope.launch {
@@ -173,7 +250,9 @@ class ChatActivity : NativeScreen() {
         }
     }
     override fun onDestroy() {
-        fileCallback?.onReceiveValue(null); fileCallback = null
+        cancelPagePermissions()
+        if (::downloads.isInitialized) downloads.close()
+        if (::nativeVoice.isInitialized) nativeVoice.close()
         if (::web.isInitialized) { runCatching { unregisterReceiver(signedOut) }; web.stopLoading(); web.clearHistory(); web.destroy() }
         super.onDestroy()
     }
