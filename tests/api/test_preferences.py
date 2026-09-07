@@ -151,52 +151,27 @@ def mock_request():
 # =============================================================================
 
 class TestGetUserIdentity:
-    """Test the get_user_identity helper function."""
+    """The API uses the same verified principal as global preference sync."""
 
-    def test_get_user_identity_api_user(self, mock_request):
-        """Should return api_user type when request has API user."""
+    @pytest.mark.parametrize("identity", [
+        ("api_user", "api-user-123"),
+        ("admin", "local-owner"),
+        ("paired", "paired-device-123"),
+        ("account", "https://hub.example#account-123"),
+    ])
+    def test_delegates_to_verified_principal(self, mock_request, identity):
         from app.api.preferences import get_user_identity
 
-        with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-            mock_get_api_user.return_value = {
-                "id": "api-user-123",
-                "username": "testuser"
-            }
+        with patch("app.api.preferences.request_preference_identity", return_value=identity) as resolve:
+            assert get_user_identity(mock_request) == identity
+        resolve.assert_called_once_with(mock_request)
 
-            user_type, user_id = get_user_identity(mock_request)
-
-        assert user_type == "api_user"
-        assert user_id == "api-user-123"
-
-    def test_get_user_identity_admin_user(self, mock_request):
-        """Should return admin type when request is from admin."""
+    def test_missing_principal_does_not_fall_back_to_admin(self, mock_request):
         from app.api.preferences import get_user_identity
 
-        with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-            mock_get_api_user.return_value = None
-
-            with patch("app.api.preferences.auth_service") as mock_auth:
-                mock_auth.get_admin_username.return_value = "admin_user"
-
-                user_type, user_id = get_user_identity(mock_request)
-
-        assert user_type == "admin"
-        assert user_id == "admin_user"
-
-    def test_get_user_identity_admin_fallback(self, mock_request):
-        """Should use 'admin' as fallback when no username."""
-        from app.api.preferences import get_user_identity
-
-        with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-            mock_get_api_user.return_value = None
-
-            with patch("app.api.preferences.auth_service") as mock_auth:
-                mock_auth.get_admin_username.return_value = None
-
-                user_type, user_id = get_user_identity(mock_request)
-
-        assert user_type == "admin"
-        assert user_id == "admin"
+        with patch("app.api.preferences.request_preference_identity", side_effect=PermissionError("Authenticated identity required")):
+            with pytest.raises(PermissionError):
+                get_user_identity(mock_request)
 
 
 # =============================================================================
@@ -212,11 +187,8 @@ class TestGetPreference:
         from app.api.preferences import get_preference
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.get_user_preference.return_value = {
                     "key": "openTabs",
                     "value": ["session-1", "session-2"],
@@ -243,11 +215,8 @@ class TestGetPreference:
         from app.api.preferences import get_preference
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.get_user_preference.return_value = None
 
                 result = await get_preference(
@@ -264,21 +233,19 @@ class TestGetPreference:
         from app.api.preferences import get_preference
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                with patch("app.api.preferences.auth_service") as mock_auth_service:
-                    mock_get_api_user.return_value = None
-                    mock_auth_service.get_admin_username.return_value = "myadmin"
-                    mock_database.get_user_preference.return_value = {
-                        "key": "theme",
-                        "value": "dark",
-                        "updated_at": "2024-01-01T00:00:00"
-                    }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("admin", "myadmin")
+                mock_database.get_user_preference.return_value = {
+                    "key": "theme",
+                    "value": "dark",
+                    "updated_at": "2024-01-01T00:00:00"
+                }
 
-                    result = await get_preference(
-                        request=mock_request,
-                        key="theme",
-                        token="test-token"
-                    )
+                result = await get_preference(
+                    request=mock_request,
+                    key="theme",
+                    token="test-token"
+                )
 
         assert result is not None
         assert result.key == "theme"
@@ -293,11 +260,8 @@ class TestGetPreference:
         from app.api.preferences import get_preference
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.get_user_preference.return_value = {
                     "key": "uiState",
                     "value": {
@@ -325,11 +289,8 @@ class TestGetPreference:
         from app.api.preferences import get_preference
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.get_user_preference.return_value = {
                     "key": "simple",
                     "value": "test"
@@ -347,22 +308,20 @@ class TestGetPreference:
         assert result.updated_at is None
 
     @pytest.mark.asyncio
-    async def test_get_preference_admin_fallback(self, mock_request):
-        """Should use 'admin' as fallback when no admin username."""
+    async def test_get_preference_default_owner_identity(self, mock_request):
+        """Should use the verified default owner identity."""
         from app.api.preferences import get_preference
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                with patch("app.api.preferences.auth_service") as mock_auth_service:
-                    mock_get_api_user.return_value = None
-                    mock_auth_service.get_admin_username.return_value = None
-                    mock_database.get_user_preference.return_value = None
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("admin", "admin")
+                mock_database.get_user_preference.return_value = None
 
-                    result = await get_preference(
-                        request=mock_request,
-                        key="somePref",
-                        token="test-token"
-                    )
+                result = await get_preference(
+                    request=mock_request,
+                    key="somePref",
+                    token="test-token"
+                )
 
         mock_database.get_user_preference.assert_called_once_with(
             "admin", "admin", "somePref"
@@ -382,11 +341,8 @@ class TestSetPreference:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.set_user_preference.return_value = {
                     "key": "openTabs",
                     "value": ["session-1", "session-2", "session-3"],
@@ -418,11 +374,8 @@ class TestSetPreference:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.set_user_preference.return_value = {
                     "key": "theme",
                     "value": "dark",
@@ -446,11 +399,8 @@ class TestSetPreference:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.set_user_preference.return_value = {
                     "key": "fontSize",
                     "value": 16,
@@ -474,11 +424,8 @@ class TestSetPreference:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.set_user_preference.return_value = {
                     "key": "showSidebar",
                     "value": False,
@@ -502,11 +449,8 @@ class TestSetPreference:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.set_user_preference.return_value = {
                     "key": "selectedItem",
                     "value": None,
@@ -530,11 +474,8 @@ class TestSetPreference:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 complex_value = {
                     "layout": {
                         "sidebar": {"width": 300, "collapsed": False},
@@ -569,23 +510,21 @@ class TestSetPreference:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                with patch("app.api.preferences.auth_service") as mock_auth_service:
-                    mock_get_api_user.return_value = None
-                    mock_auth_service.get_admin_username.return_value = "superadmin"
-                    mock_database.set_user_preference.return_value = {
-                        "key": "adminSetting",
-                        "value": "secret",
-                        "updated_at": "2024-01-02T00:00:00"
-                    }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("admin", "superadmin")
+                mock_database.set_user_preference.return_value = {
+                    "key": "adminSetting",
+                    "value": "secret",
+                    "updated_at": "2024-01-02T00:00:00"
+                }
 
-                    body = PreferenceValue(key="adminSetting", value="secret")
-                    result = await set_preference(
-                        request=mock_request,
-                        key="adminSetting",
-                        body=body,
-                        token="test-token"
-                    )
+                body = PreferenceValue(key="adminSetting", value="secret")
+                result = await set_preference(
+                    request=mock_request,
+                    key="adminSetting",
+                    body=body,
+                    token="test-token"
+                )
 
         mock_database.set_user_preference.assert_called_once_with(
             "admin", "superadmin", "adminSetting", "secret", only_if_missing=False
@@ -597,11 +536,8 @@ class TestSetPreference:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.set_user_preference.return_value = {
                     "key": "simple",
                     "value": "test"
@@ -625,11 +561,8 @@ class TestSetPreference:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 # Simulate an update (set_user_preference handles upsert)
                 mock_database.set_user_preference.return_value = {
                     "key": "existingKey",
@@ -653,11 +586,8 @@ class TestSetPreference:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.set_user_preference.return_value = {
                     "key": "emptyValue",
                     "value": "",
@@ -680,11 +610,8 @@ class TestSetPreference:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.set_user_preference.return_value = {
                     "key": "emptyList",
                     "value": [],
@@ -707,11 +634,8 @@ class TestSetPreference:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.set_user_preference.return_value = {
                     "key": "emptyObj",
                     "value": {},
@@ -734,11 +658,8 @@ class TestSetPreference:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 large_value = {"items": [f"item-{i}" for i in range(1000)]}
                 mock_database.set_user_preference.return_value = {
                     "key": "largeData",
@@ -774,11 +695,8 @@ class TestSetPreferencePost:
         from app.api.preferences import set_preference_post, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.set_user_preference.return_value = {
                     "key": "theme_settings",
                     "value": {"preset": "dark", "customColors": []},
@@ -810,11 +728,8 @@ class TestSetPreferencePost:
         from app.api.preferences import set_preference_post, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 # Simulates the kind of data sendBeacon would send on page unload
                 complex_value = {
                     "openTabs": ["tab-1", "tab-2"],
@@ -844,23 +759,21 @@ class TestSetPreferencePost:
         from app.api.preferences import set_preference_post, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                with patch("app.api.preferences.auth_service") as mock_auth_service:
-                    mock_get_api_user.return_value = None
-                    mock_auth_service.get_admin_username.return_value = "admin_user"
-                    mock_database.set_user_preference.return_value = {
-                        "key": "admin_setting",
-                        "value": "value",
-                        "updated_at": "2024-01-02T00:00:00"
-                    }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("admin", "admin_user")
+                mock_database.set_user_preference.return_value = {
+                    "key": "admin_setting",
+                    "value": "value",
+                    "updated_at": "2024-01-02T00:00:00"
+                }
 
-                    body = PreferenceValue(key="admin_setting", value="value")
-                    result = await set_preference_post(
-                        request=mock_request,
-                        key="admin_setting",
-                        body=body,
-                        token="test-token"
-                    )
+                body = PreferenceValue(key="admin_setting", value="value")
+                result = await set_preference_post(
+                    request=mock_request,
+                    key="admin_setting",
+                    body=body,
+                    token="test-token"
+                )
 
         mock_database.set_user_preference.assert_called_once_with(
             "admin", "admin_user", "admin_setting", "value", only_if_missing=False
@@ -872,11 +785,8 @@ class TestSetPreferencePost:
         from app.api.preferences import set_preference, set_preference_post, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 expected_result = {
                     "key": "test_key",
                     "value": {"data": "test"},
@@ -921,11 +831,8 @@ class TestDeletePreference:
         from app.api.preferences import delete_preference
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.delete_user_preference.return_value = True
 
                 result = await delete_preference(
@@ -945,11 +852,8 @@ class TestDeletePreference:
         from app.api.preferences import delete_preference
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.delete_user_preference.return_value = False
 
                 result = await delete_preference(
@@ -966,17 +870,15 @@ class TestDeletePreference:
         from app.api.preferences import delete_preference
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                with patch("app.api.preferences.auth_service") as mock_auth_service:
-                    mock_get_api_user.return_value = None
-                    mock_auth_service.get_admin_username.return_value = "admin123"
-                    mock_database.delete_user_preference.return_value = True
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("admin", "admin123")
+                mock_database.delete_user_preference.return_value = True
 
-                    result = await delete_preference(
-                        request=mock_request,
-                        key="adminPref",
-                        token="test-token"
-                    )
+                result = await delete_preference(
+                    request=mock_request,
+                    key="adminPref",
+                    token="test-token"
+                )
 
         assert result["deleted"] is True
         mock_database.delete_user_preference.assert_called_once_with(
@@ -984,22 +886,20 @@ class TestDeletePreference:
         )
 
     @pytest.mark.asyncio
-    async def test_delete_preference_admin_fallback(self, mock_request):
-        """Should use 'admin' as fallback when no username."""
+    async def test_delete_preference_default_owner_identity(self, mock_request):
+        """Should use the verified default owner identity."""
         from app.api.preferences import delete_preference
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                with patch("app.api.preferences.auth_service") as mock_auth_service:
-                    mock_get_api_user.return_value = None
-                    mock_auth_service.get_admin_username.return_value = None
-                    mock_database.delete_user_preference.return_value = True
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("admin", "admin")
+                mock_database.delete_user_preference.return_value = True
 
-                    result = await delete_preference(
-                        request=mock_request,
-                        key="somePref",
-                        token="test-token"
-                    )
+                result = await delete_preference(
+                    request=mock_request,
+                    key="somePref",
+                    token="test-token"
+                )
 
         mock_database.delete_user_preference.assert_called_once_with(
             "admin", "admin", "somePref"
@@ -1019,11 +919,8 @@ class TestPreferencesEdgeCases:
         from app.api.preferences import get_preference
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.get_user_preference.return_value = {
                     "key": "ui.settings.theme",
                     "value": "dark",
@@ -1047,11 +944,8 @@ class TestPreferencesEdgeCases:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.set_user_preference.return_value = {
                     "key": "zoomLevel",
                     "value": 1.75,
@@ -1074,11 +968,8 @@ class TestPreferencesEdgeCases:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 mock_database.set_user_preference.return_value = {
                     "key": "offset",
                     "value": -100,
@@ -1101,11 +992,8 @@ class TestPreferencesEdgeCases:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                mock_get_api_user.return_value = {
-                    "id": "test-api-user-id",
-                    "username": "test-user"
-                }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                mock_identity.return_value = ("api_user", "test-api-user-id")
                 nested_value = {
                     "matrix": [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
                     "tags": [["a", "b"], ["c", "d"]]
@@ -1141,9 +1029,9 @@ class TestUserIsolation:
         from app.api.preferences import get_preference
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
                 # First user
-                mock_get_api_user.return_value = {"id": "user-1", "username": "user1"}
+                mock_identity.return_value = ("api_user", "user-1")
                 mock_database.get_user_preference.return_value = {
                     "key": "theme",
                     "value": "dark"
@@ -1161,7 +1049,7 @@ class TestUserIsolation:
                 )
 
                 # Second user
-                mock_get_api_user.return_value = {"id": "user-2", "username": "user2"}
+                mock_identity.return_value = ("api_user", "user-2")
                 mock_database.get_user_preference.return_value = {
                     "key": "theme",
                     "value": "light"
@@ -1184,43 +1072,41 @@ class TestUserIsolation:
         from app.api.preferences import set_preference, PreferenceValue
 
         with patch("app.api.preferences.database") as mock_database:
-            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
-                with patch("app.api.preferences.auth_service") as mock_auth_service:
-                    # API user request
-                    mock_get_api_user.return_value = {"id": "api-user-1", "username": "apiuser"}
-                    mock_database.set_user_preference.return_value = {
-                        "key": "theme",
-                        "value": "dark",
-                        "updated_at": "2024-01-01T00:00:00"
-                    }
+            with patch("app.api.preferences.request_preference_identity") as mock_identity:
+                # API user request
+                mock_identity.return_value = ("api_user", "api-user-1")
+                mock_database.set_user_preference.return_value = {
+                    "key": "theme",
+                    "value": "dark",
+                    "updated_at": "2024-01-01T00:00:00"
+                }
 
-                    body = PreferenceValue(key="theme", value="dark")
-                    await set_preference(
-                        request=mock_request,
-                        key="theme",
-                        body=body,
-                        token="test-token"
-                    )
+                body = PreferenceValue(key="theme", value="dark")
+                await set_preference(
+                    request=mock_request,
+                    key="theme",
+                    body=body,
+                    token="test-token"
+                )
 
-                    first_call = mock_database.set_user_preference.call_args
-                    assert first_call[0][0] == "api_user"
-                    assert first_call[0][1] == "api-user-1"
+                first_call = mock_database.set_user_preference.call_args
+                assert first_call[0][0] == "api_user"
+                assert first_call[0][1] == "api-user-1"
 
-                    # Admin user request
-                    mock_get_api_user.return_value = None
-                    mock_auth_service.get_admin_username.return_value = "admin"
+                # Admin user request
+                mock_identity.return_value = ("admin", "admin")
 
-                    body = PreferenceValue(key="theme", value="light")
-                    await set_preference(
-                        request=mock_request,
-                        key="theme",
-                        body=body,
-                        token="test-token"
-                    )
+                body = PreferenceValue(key="theme", value="light")
+                await set_preference(
+                    request=mock_request,
+                    key="theme",
+                    body=body,
+                    token="test-token"
+                )
 
-                    second_call = mock_database.set_user_preference.call_args
-                    assert second_call[0][0] == "admin"
-                    assert second_call[0][1] == "admin"
+                second_call = mock_database.set_user_preference.call_args
+                assert second_call[0][0] == "admin"
+                assert second_call[0][1] == "admin"
 
 
 # =============================================================================
