@@ -17,7 +17,6 @@ Path pattern:
   .git/info/exclude. The absolute path is stored in the DB.)
 """
 
-import hashlib
 import logging
 import os
 import uuid

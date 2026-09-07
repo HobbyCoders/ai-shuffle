@@ -7,8 +7,7 @@ Provides endpoints for:
 - Executing non-interactive custom commands
 - Rewind operations (list checkpoints, execute rewind)
 
-V2 Rewind: Uses direct JSONL manipulation instead of PTY-based CLI bridge.
-This is bulletproof - no terminal parsing, no race conditions.
+Rewind uses persisted transcript/checkpoint services rather than terminal parsing.
 """
 
 import asyncio
@@ -21,8 +20,6 @@ from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth
 from app.api.sessions import check_session_access
-from app.core.config import settings
-from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.api.common import resolve_project_path
 from app.api.command_context import command_context, command_provider_kind
 from app.core.slash_commands import (
@@ -30,7 +27,7 @@ from app.core.slash_commands import (
     is_interactive_command, is_rest_api_command, get_rest_api_command_info,
     parse_command_input
 )
-# New V2 rewind services - direct JSONL manipulation
+# Legacy JSONL fallback and checkpoint-backed rewind services.
 from app.core.jsonl_rewind import jsonl_rewind_service
 from app.core.pg_session_store import (
     RewindTargetNotFound,
