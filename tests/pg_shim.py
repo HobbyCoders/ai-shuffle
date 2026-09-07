@@ -273,6 +273,9 @@ def translate_sql(sql: str) -> str:
         s,
         flags=re.I,
     )
+    # Advisory serialization is exercised against disposable PostgreSQL. This
+    # single-connection shim only models the functional query contract.
+    s = re.sub(r"pg_advisory_xact_lock\(\?\)", "?", s, flags=re.I)
     # Row-lock clauses (`FOR SHARE` / `FOR UPDATE`) — no-ops on SQLite's single
     # writer; strip them so the SELECT parses.
     s = re.sub(r"\bFOR\s+SHARE\b", "", s, flags=re.I)

@@ -145,6 +145,23 @@ async def register_device(request: MobileDeviceRegisterRequest):
             detail="Device already registered. Use /api/v1/mobile/devices/{device_id} DELETE to unregister first."
         )
 
+    repair = None
+    if request.account_repair is not None:
+        from app.core import account_hub
+        from app.db import mobile_hub as hub_store
+        owner = await run_sync(hub_store.ownership, device_info.device_id)
+        if (not owner or owner['device_id'] != hub_store.local_device_id(
+                owner['server_id'], owner['hub_device_id'])):
+            raise HTTPException(409, 'This saved worker authorization cannot be repaired.')
+        # Local administration must first unregister this one device. A live
+        # account check alone never overrides a worker's revocation decision.
+        binding = await run_sync(account_hub.require_active, owner)
+        client = await run_sync(db.get_paired_client, owner['paired_client_id'])
+        if (not binding or not client or not client.get('revoked_at')
+                or client.get('device_id') != owner['device_id']):
+            raise HTTPException(409, 'Unregister this phone from this worker before reconnecting.')
+        repair = {'owner': owner, 'instance_id': settings.effective_instance_id}
+
     # Generate API key
     api_key = generate_mobile_api_key()
     api_key_hash = hash_api_key(api_key)
@@ -165,7 +182,13 @@ async def register_device(request: MobileDeviceRegisterRequest):
         api_key_hash=api_key_hash,
         capabilities=capabilities_dict,
         api_key_expires_at=expires_at,
+        target_install_id=settings.effective_instance_id,
+        **({'managed_repair': repair} if repair is not None else {}),
     )
+    if result and result.get('managed_repair_required'):
+        raise HTTPException(409, 'Use this worker’s account reconnect flow with a new pairing code.')
+    if result and result.get('repair_invalid'):
+        raise HTTPException(409, 'Worker authorization changed. Create a new code on this worker.')
     if result and result.get("duplicate"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -179,12 +202,16 @@ async def register_device(request: MobileDeviceRegisterRequest):
 
     logger.debug(f"Registered mobile device: {device_info.device_name} ({device_info.platform})")
 
-    return MobileDeviceRegisterResponse(
+    registration = MobileDeviceRegisterResponse(
         api_key=api_key,
         device_id=device_info.device_id,
         expires_at=expires_at,
         scopes=result["client"].get("scopes") or pairing.DEFAULT_MOBILE_SCOPES,
     )
+    if repair is not None:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(registration.model_dump(mode='json'), headers={'Cache-Control': 'no-store'})
+    return registration
 
 
 @router.post("/capabilities")
@@ -477,6 +504,8 @@ async def create_web_session(
     device = get_device_with_scope(request, "web:session")
 
     client = await run_sync(db.ensure_paired_client_for_mobile, device)
+    if client is None:
+        raise HTTPException(status_code=401, detail="Mobile device credential changed; pair this device again")
     token = pairing.generate_controller_session()
     expires_at = datetime.now(timezone.utc) + timedelta(days=settings.session_expire_days)
     stored = await run_sync(
@@ -485,6 +514,7 @@ async def create_web_session(
         pairing.hash_controller_session(token),
         expires_at,
         purpose=purpose,
+        mobile_device=device,
     )
     if stored is None:
         raise HTTPException(status_code=401, detail="Paired device has been revoked")

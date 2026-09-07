@@ -1342,6 +1342,7 @@ class MobileDeviceRegisterRequest(BaseModel):
     """Request to register a mobile device"""
     device_info: DeviceInfo
     pairing_code: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    account_repair: Optional[Literal["scoped-v1"]] = None
 
 
 class MobileDeviceRegisterResponse(BaseModel):

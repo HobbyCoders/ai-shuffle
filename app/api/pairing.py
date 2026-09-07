@@ -158,6 +158,7 @@ async def exchange_grant(
         client_type=body.client_type,
         session_token_hash=pairing.hash_controller_session(session_token),
         session_expires_at=expires_at,
+        target_install_id=settings.effective_instance_id,
     )
     if not result:
         raise HTTPException(

@@ -47,7 +47,7 @@ def pg(monkeypatch):
 
     # Even if invoked outside the dedicated workflow, do not read any .env.
     monkeypatch.setattr(DotEnvSettingsSource, "_read_env_files", lambda self: {})
-    from app.db import mobile_hub as hub, mobile_tools as queue
+    from app.db import mobile_hub as hub, mobile_tools as queue, pairing
 
     schema = "mobile_test_" + uuid.uuid4().hex
 
@@ -81,6 +81,7 @@ def pg(monkeypatch):
 
     monkeypatch.setattr(hub, "get_db", transaction)
     monkeypatch.setattr(queue, "get_db", transaction)
+    monkeypatch.setattr(pairing, "get_db", transaction)
     with transaction() as conn:
         c = conn.cursor()
         c.execute("SELECT current_database() AS db, current_user AS usr, "
@@ -98,6 +99,8 @@ def pg(monkeypatch):
                 device_name TEXT NOT NULL, platform TEXT NOT NULL,
                 client_type TEXT NOT NULL DEFAULT 'browser',
                 scopes JSONB NOT NULL DEFAULT '["controller"]',
+                session_token_hash TEXT, session_expires_at TIMESTAMPTZ,
+                revoked_at TIMESTAMPTZ, last_seen TIMESTAMPTZ,
                 paired_at TIMESTAMPTZ DEFAULT NOW(),
                 created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());
             CREATE TABLE mobile_devices (
@@ -107,7 +110,14 @@ def pg(monkeypatch):
                 paired_client_id TEXT, api_key_expires_at TIMESTAMPTZ,
                 scopes JSONB NOT NULL DEFAULT '["controller"]',
                 paired_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW(),
-                last_seen TIMESTAMPTZ);
+                last_seen TIMESTAMPTZ, revoked_at TIMESTAMPTZ);
+            CREATE TABLE paired_client_native_sessions (
+                client_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL);
+            CREATE TABLE pairing_grants (
+                id TEXT PRIMARY KEY, token_hash TEXT UNIQUE, purpose TEXT, scopes JSONB,
+                target_install_id TEXT, endpoint_url TEXT, device_label TEXT, created_by TEXT,
+                created_at TIMESTAMPTZ, expires_at TIMESTAMPTZ, consumed_at TIMESTAMPTZ,
+                revoked_at TIMESTAMPTZ, attempt_count INTEGER, max_attempts INTEGER);
         """)
         hub.create_schema(c)
     queue.init_schema()
@@ -133,7 +143,7 @@ def pg(monkeypatch):
         return [value for _, value in results]
 
     # Leave only our UUID schema behind; the disposable service owns cleanup.
-    return SimpleNamespace(hub=hub, queue=queue, transaction=transaction,
+    return SimpleNamespace(hub=hub, queue=queue, pairing=pairing, transaction=transaction,
                            rows=rows, race=race, integrity_error=psycopg2.IntegrityError)
 
 
@@ -243,3 +253,75 @@ def test_concurrent_immutable_bind_preserves_winners_secret(pg):
     assert (first["hub_url"], first["server_id"], first["encrypted_secret"], first["linked_by"]) == winner
     assert len(pg.rows("mobile_worker_bindings")) == len(pg.rows("system_settings")) == 1
     assert pg.hub.bind("https://third.invalid", "server-third", "enc:fake-third", "other") == first
+
+
+@pytest.mark.parametrize('first', ['account', 'direct'])
+@pytest.mark.parametrize('kind', ['browser', 'mobile'])
+def test_account_enrollment_and_direct_exchange_serialize_before_identity_checks(pg, monkeypatch, first, kind):
+    from app.db import device_identity
+
+    expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+    pg.pairing.create_pairing_grant(token_hash='controlled-grant', purpose='controller',
+        scopes=['controller', 'web:session'], target_install_id='worker-one',
+        endpoint_url=None, device_label=None, created_by='fixture', expires_at=expiry)
+    held = threading.Event()
+    attempted = threading.Event()
+    acquired_second = threading.Event()
+    release = threading.Event()
+    local = threading.local()
+    real_lock = device_identity.lock_device_identity
+
+    def controlled_lock(cursor, device):
+        if local.role != first:
+            attempted.set()
+        real_lock(cursor, device)
+        if local.role == first:
+            held.set()
+            assert release.wait(timeout=10)
+        else:
+            acquired_second.set()
+
+    monkeypatch.setattr(device_identity, 'lock_device_identity', controlled_lock)
+    monkeypatch.setattr(pg.pairing, 'lock_device_identity', controlled_lock)
+
+    def run(role):
+        local.role = role
+        if role == 'account':
+            return attempt_enroll(pg)
+        shared = dict(token_hash='controlled-grant', device_id='device-one',
+                      device_name='Controlled direct client', platform=kind, target_install_id='worker-one')
+        if kind == 'browser':
+            return pg.pairing.exchange_grant_for_client(**shared, client_type='browser',
+                session_token_hash='direct-session', session_expires_at=expiry)
+        return pg.pairing.exchange_grant_for_mobile(**shared, capabilities={},
+            api_key_hash='direct-mobile-key', api_key_expires_at=expiry)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        winner = executor.submit(run, first)
+        try:
+            assert held.wait(timeout=5)
+            loser = executor.submit(run, 'direct' if first == 'account' else 'account')
+            assert attempted.wait(timeout=5)
+            # A real second PostgreSQL transaction cannot pass the identity
+            # lock while the first has not yet written any ownership row.
+            assert not acquired_second.wait(timeout=0.2)
+        finally:
+            release.set()
+        winner_result, loser_result = winner.result(timeout=10), loser.result(timeout=10)
+    assert acquired_second.is_set()
+    clients = pg.rows('paired_clients')
+    assert len(clients) == 1
+    auth = pg.rows('mobile_hub_authorizations')
+    if first == 'account':
+        assert winner_result == 'device-one'
+        assert loser_result is None if kind == 'browser' else loser_result == {'duplicate': True}
+        assert clients[0]['client_type'] == 'mobile'
+        assert clients[0]['session_token_hash'] is None
+        assert len(auth) == 1 and auth[0]['paired_client_id'] == clients[0]['id']
+        assert pg.rows('mobile_devices')[0]['api_key_hash'] == 'test-key-hash'
+        assert pg.rows('pairing_grants')[0]['consumed_at'] is None
+    else:
+        assert winner_result and loser_result == 'rejected'
+        assert auth == []
+        assert clients[0]['client_type'] == kind
+        assert pg.rows('pairing_grants')[0]['consumed_at'] is not None
