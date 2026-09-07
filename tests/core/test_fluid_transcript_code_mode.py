@@ -83,6 +83,7 @@ def _tool_use(tool_use_id, name, input_):
 def _tool_result(tool_use_id, name, output, is_error=False):
     return {
         "_cls": "ToolResult",
+        "images": [],
         "_v": 1,
         "session_id": "ses_code",
         "node_id": None,

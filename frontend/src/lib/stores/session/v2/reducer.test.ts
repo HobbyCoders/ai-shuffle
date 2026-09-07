@@ -936,6 +936,23 @@ describe('tool cards', () => {
 	// ── Screenshot artifacts (tool.result artifact_hashes → inline render) ──
 	const HASH = 'a'.repeat(64);
 
+	it('binds screenshot artifact requests to the session in the durable event envelope', () => {
+		const s = fold([
+			ev('tool.use', { tool_use_id: 'scoped', name: 'Read' }),
+			ev('tool.result', { tool_use_id: 'scoped', artifact_hashes: [HASH], session_id: 'my session' }),
+		]);
+		expect(s.messages.find(m => m.toolId === 'scoped')?.toolScreenshot)
+			.toBe(`/api/v1/artifacts/${HASH}?session_id=my%20session`);
+	});
+
+	it('binds backfilled artifact URLs to their own session too', () => {
+		const s = fold([
+			ev('tool.use', { tool_use_id: 'scoped', name: 'Read', screenshot: `/api/v1/artifacts/${HASH}`, session_id: 'second session' }),
+		]);
+		expect(s.messages.find(m => m.toolId === 'scoped')?.toolScreenshot)
+			.toBe(`/api/v1/artifacts/${HASH}?session_id=second%20session`);
+	});
+
 	it('tool.result with an artifact hash surfaces the screenshot serve URL', () => {
 		const s = fold([
 			ev('tool.use', { tool_use_id: 't1', name: 'mcp__browser__browser_screenshot' }),
@@ -946,7 +963,7 @@ describe('tool cards', () => {
 			}),
 		]);
 		const card = s.messages.find((m) => m.toolId === 't1')!;
-		expect(card.toolScreenshot).toBe(`/api/v1/artifacts/${HASH}`);
+		expect(card.toolScreenshot).toBe(`/api/v1/artifacts/${HASH}?session_id=s1`);
 		expect(card.toolStatus).toBe('complete');
 	});
 
@@ -1068,7 +1085,7 @@ describe('subagent cards', () => {
 		expect(card.agentChildren![0]).toMatchObject({
 			toolId: 'c1',
 			toolStatus: 'complete',
-			toolScreenshot: `/api/v1/artifacts/${HASH}`,
+			toolScreenshot: `/api/v1/artifacts/${HASH}?session_id=s1`,
 		});
 	});
 

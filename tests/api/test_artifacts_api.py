@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app.api import artifacts as artifacts_mod
@@ -36,10 +36,16 @@ def artifacts_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client(artifacts_dir):
+def client(artifacts_dir, mock_db):
+    from app.db import api_users, sessions
+    api_users.create_api_user('fixture-user', 'Fixture user', 'fixture-hash')
+    sessions.create_session('s', 'default', api_user_id='fixture-user')
     app = FastAPI()
     app.include_router(router)
-    app.dependency_overrides[_require_auth_or_signed] = lambda: "test-token"
+    def authenticate(request: Request):
+        request.state.api_user = {'id': request.headers.get('x-fixture-user', 'fixture-user')}
+        return 'test-token'
+    app.dependency_overrides[_require_auth_or_signed] = authenticate
     with TestClient(app) as c:
         yield c
 
@@ -70,6 +76,46 @@ def test_download_returns_bytes_and_mime(mock_db, client):
     assert resp.status_code == 200
     assert resp.content == data
     assert resp.headers["content-type"].startswith("text/plain")
+
+
+@pytest.mark.parametrize('reference_type', ['artifact.created', 'tool.use'])
+def test_shared_hash_requires_accessible_session_with_durable_reference(mock_db, client, reference_type):
+    from app.db import api_users, sessions, session_events
+    api_users.create_api_user('second-user', 'Second user', 'second-hash')
+    sessions.create_session('second-session', 'default', api_user_id='second-user')
+    sessions.create_session('unrelated-session', 'default', api_user_id='second-user')
+    row = artifact_store.store_bytes(b'shared screenshot', mime='image/png', created_by_session='s')
+    digest = row['hash']
+    url = f'/api/v1/artifacts/{digest}'
+    headers = {'x-fixture-user': 'second-user'}
+    assert client.get(url, headers=headers).status_code == 404
+    assert client.get(url + '?session_id=second-session', headers=headers).status_code == 404
+    payload = {'hash': digest} if reference_type == 'artifact.created' else {'screenshot': url}
+    session_events.append_events('second-session', [{'type': reference_type, 'payload': payload}])
+    assert client.get(url + '?session_id=second-session', headers=headers).content == b'shared screenshot'
+    assert client.get(url + '?session_id=unrelated-session', headers=headers).status_code == 404
+    assert client.get(url + '?session_id=second-session').status_code == 404
+    assert client.get(url).content == b'shared screenshot'
+
+
+def test_paired_account_cannot_read_another_accounts_screenshot(mock_db, artifacts_dir, monkeypatch):
+    from app.db import sessions, mobile_tool_identity
+    from app.core import artifact_access
+    sessions.create_session('account-image', 'default')
+    mobile_tool_identity.bind('account-image', dict(owner='account:account-A', kind='paired',
+        principal_id='phone-A', account_id='account-A', credential_hash='fixture'), new=True)
+    row = artifact_store.store_bytes(b'private account image', mime='image/png', created_by_session='account-image')
+    monkeypatch.setattr(artifact_access.mobile_hub, 'ownership', lambda **kw: {'account_id': kw['paired_client_id']})
+    app = FastAPI()
+    app.include_router(router)
+    def authenticate(request: Request):
+        request.state.paired_client = {'id': request.headers.get('x-fixture-account')}
+        return 'test-token'
+    app.dependency_overrides[_require_auth_or_signed] = authenticate
+    with TestClient(app) as c:
+        url = f"/api/v1/artifacts/{row['hash']}?session_id=account-image"
+        assert c.get(url, headers={'x-fixture-account': 'account-A'}).status_code == 200
+        assert c.get(url, headers={'x-fixture-account': 'account-B'}).status_code == 404
 
 
 def test_unknown_valid_hash_is_404(mock_db, client):

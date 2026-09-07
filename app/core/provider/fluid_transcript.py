@@ -278,10 +278,12 @@ def _block_to_transcript(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             for b in inner
             if isinstance(b, dict) and b.get("kind") == "text"
         )
+        from app.core.provider.tool_media import tool_result_content
+        content = tool_result_content(text, [b for b in inner if isinstance(b, dict) and b.get('kind') == 'image'])
         return {
             "type": "tool_result",
             "tool_use_id": block.get("tool_use_id") or "",
-            "content": text,
+            "content": content,
             "is_error": bool(block.get("is_error")),
         }
     if kind == "image":
@@ -414,7 +416,8 @@ def _inner_calls_by_block(
             record = records.get(tool_use_id)
             if record is None:
                 continue
-            record["output"] = event.get("output")
+            from app.core.provider.tool_media import tool_result_content
+            record["output"] = tool_result_content(event.get("output"), event.get('images'), event.get('ui'))
             record["is_error"] = bool(event.get("is_error"))
 
     return calls
@@ -506,7 +509,7 @@ def _splice_inner_calls(
                     {
                         "type": "tool_result",
                         "tool_use_id": record["id"],
-                        "content": str(record["output"]),
+                        "content": record["output"],
                         "is_error": bool(record["is_error"]),
                     },
                     entry, model,

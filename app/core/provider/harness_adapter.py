@@ -2120,9 +2120,11 @@ class HarnessAdapter(ProviderAdapter):
             ]
 
         if cls == "ToolResult":
+            from app.core.provider.tool_media import tool_result_content
             output = event.output
             if output is not None and not isinstance(output, (str, list)):
                 output = str(output)
+            output = tool_result_content(output, getattr(event, 'images', ()), getattr(event, 'ui', None))
             return [
                 UserMessage(
                     content=[

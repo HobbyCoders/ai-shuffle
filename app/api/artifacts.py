@@ -131,13 +131,19 @@ async def _proxy_holder_bytes(target: str, hash: str, runner_id: str) -> bytes:
 
 
 @router.get("/{hash}")
-async def download_artifact(hash: str, token: str = Depends(_require_auth_or_signed)):
+async def download_artifact(hash: str, request: Request, session_id: Optional[str] = None,
+                            token: str = Depends(_require_auth_or_signed)):
     """Serve an artifact's bytes by content hash, or proxy/redirect to its holder."""
     if not _HASH_RE.match(hash):
         # Invalid format and missing are indistinguishable by design.
         raise _not_found()
 
     row = await asyncio.to_thread(get_artifact, hash)
+    if row is None:
+        raise _not_found()
+    if token != 'cluster-signed':
+        from app.core.artifact_access import authorize_session_artifact
+        await asyncio.to_thread(authorize_session_artifact, request, row, hash, session_id)
     path = artifact_path(hash)
 
     if path is not None:
@@ -145,9 +151,6 @@ async def download_artifact(hash: str, token: str = Depends(_require_auth_or_sig
         media_type = (row.get("mime") if row else None) or "application/octet-stream"
         filename = (row.get("filename") if row else None) or hash
         return FileResponse(path, media_type=media_type, filename=filename)
-
-    if row is None:
-        raise _not_found()
 
     # Bytes are not on this install's disk. Fetch (or, with the flag off,
     # 307) from the holder if it is a different, online install with a

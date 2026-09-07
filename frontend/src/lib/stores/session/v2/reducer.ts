@@ -474,10 +474,16 @@ function str(v: unknown): string {
  * Returns undefined unless the first hash is a well-formed sha256 hex digest —
  * the only shape the artifact route serves.
  */
-function artifactScreenshotUrl(v: unknown): string | undefined {
+function artifactScreenshotUrl(v: unknown, sessionId?: string): string | undefined {
 	if (!Array.isArray(v)) return undefined;
 	const hash = v.find((h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h));
-	return hash ? `/api/v1/artifacts/${hash}` : undefined;
+	return hash ? `/api/v1/artifacts/${hash}${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}` : undefined;
+}
+
+function scopedScreenshot(v: unknown, sessionId?: string): string | undefined {
+	const screenshot = str(v);
+	const artifact = screenshot?.match(/^\/api\/v1\/artifacts\/([0-9a-f]{64})(?:\?[^#]*)?$/);
+	return artifact ? artifactScreenshotUrl([artifact[1]], sessionId) : screenshot;
 }
 
 // ─── Copy-on-publish ownership ────────────────────────────────────────────────
@@ -599,7 +605,7 @@ function accumulateProgressChild(
 	if (kind === 'tool_result') {
 		const resultText = str(payload.output ?? payload.content ?? event.note);
 		const targetToolId = str(payload.tool_use_id ?? payload.id);
-		const screenshotUrl = artifactScreenshotUrl(payload.artifact_hashes);
+		const screenshotUrl = artifactScreenshotUrl(payload.artifact_hashes, event.session_id);
 		const out = [...children];
 		if (targetToolId) {
 			for (let i = out.length - 1; i >= 0; i--) {
@@ -1388,7 +1394,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// A tool use means the model is acting → stop watching for an "ok" ack.
 			let next = { ...closeOpen(state), pendingPumpAck: null, pumpAckBuffer: '' };
 			const input = obj(event.input);
-			const screenshot = str(event.screenshot);
+			const screenshot = scopedScreenshot(event.screenshot, event.session_id);
 			const existing = findByToolId(next.messages, toolUseId, next.messageOriginSeq);
 			if (existing) {
 				// Card already created by an earlier input_delta — fill in name/input.
@@ -1515,7 +1521,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// a backfilled data URI stamped on tool.use) if one is already set.
 			const screenshotUrl = existing.toolScreenshot
 				? undefined
-				: artifactScreenshotUrl(event.artifact_hashes);
+				: artifactScreenshotUrl(event.artifact_hashes, event.session_id);
 			return {
 				...state,
 				messages: replaceById(state.messages, existing.id, {
@@ -1619,7 +1625,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			} else if (kind === 'tool_result') {
 				const resultText = str(payload.output ?? payload.content ?? event.note);
 				const targetToolId = str(payload.tool_use_id ?? payload.id);
-				const screenshotUrl = artifactScreenshotUrl(payload.artifact_hashes);
+				const screenshotUrl = artifactScreenshotUrl(payload.artifact_hashes, event.session_id);
 				// Merge into the matching tool_use child when identifiable.
 				let merged = false;
 				if (targetToolId) {
