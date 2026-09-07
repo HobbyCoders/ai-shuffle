@@ -17,6 +17,34 @@ function fixture(initial: Record<string, unknown> = { theme: 'server' }) {
  return { sync, transport, server, apply, value: () => value, edit: (next: unknown) => { value=next; sync.save('theme', next); } };
 }
 describe('authoritative preference coordination', () => {
+ it('serializes a versioned migration before the user edit made during its response', async () => {
+  const f=fixture({});
+  f.transport.allWithVersions=async()=>({preferences:{},versions:{}});
+  const migration=deferred<{value:unknown;version:string}>();
+  f.transport.put=vi.fn().mockReturnValueOnce(migration.promise).mockResolvedValue({value:'new-pick',version:'v2'});
+  f.transport.get=async()=>({value:'new-pick',version:'v2'});
+  const ready=f.sync.reconnect(); await settle();
+  f.edit('new-pick');
+  expect(f.transport.put).toHaveBeenCalledTimes(1);
+  migration.resolve({value:'legacy',version:'v1'}); await ready;
+  expect(f.transport.put).toHaveBeenLastCalledWith('theme','new-pick',false,'v1');
+  expect(f.value()).toBe('new-pick');
+ });
+ it('reconciles a stale offline edit instead of overwriting another device', async () => {
+  const f=fixture(); let version='v1';
+  f.transport.allWithVersions=async()=>({preferences:{...f.server},versions:{theme:version}});
+  f.transport.get=async()=>({value:f.server.theme,version:version});
+  f.transport.put=vi.fn(async (_key,value,_missing,expected)=>{
+   if (expected !== version) throw {status:409};
+   f.server.theme=value; version='v2'; return {value,version:version};
+  });
+  await f.sync.reconnect();
+  // Other device commits, before this device observes its invalidation.
+  f.server.theme='other-device'; version='other-version';
+  f.edit('stale-local'); await settle();
+  expect(f.transport.put).toHaveBeenCalledWith('theme','stale-local',false,'v1');
+  expect(f.server.theme).toBe('other-device'); expect(f.value()).toBe('other-device');
+ });
  it('applies remote values and deletions without echo saves', async () => {
   const f=fixture(); await f.sync.reconnect(); expect(f.value()).toBe('server');
   f.server.theme='remote'; await f.sync.refresh('theme'); expect(f.value()).toBe('remote');

@@ -47,6 +47,7 @@ import { createDraftManager } from './session/draft-manager';
 import { sessionEphemeralCache } from './session-cache';
 import { getOrCreateDeviceId } from './device-id';
 import { appData } from './app-data.svelte';
+import { composerPreferences, resolveComposerProject } from './composer-preferences';
 import { appMode, type SessionMode } from './sessionMode.svelte';
 import { git } from './git.svelte';
 import { untrack } from 'svelte';
@@ -700,13 +701,26 @@ feedController.attach({
 
 // ─── Exported Store ──────────────────────────────────────────────────────────
 
+function rememberBranchIntent() {
+	composerPreferences.set('checkout', _state.worktreeBranch ? {
+		kind:'branch', projectId:_state.project, projectV2Id:_state.projectV2Id,
+		branch:_state.worktreeBranch, baseBranch:_state.worktreeBaseBranch,
+		createNew:_state.worktreeCreateNewBranch,
+	} : null);
+}
+
 export const activeSession = {
 	get current() { return _state; },
 
 	subscribe: _subscribe,
 
-	init: sessionInitModule.init,
+	init: async () => { await sessionInitModule.init(); activeSession.applyComposerDefaults(); },
 	destroy: sessionInitModule.destroy,
+	resetForAccountChange() {
+		bumpInitGeneration();
+		setSkipRestore(false);
+		sessionInitModule.destroy();
+	},
 
 	// ── Session Navigation (delegated to session-switcher) ─────────
 
@@ -721,7 +735,8 @@ export const activeSession = {
 	newChat: () => {
 		setSkipRestore(true);
 		bumpInitGeneration();
-		switcher.newChat();
+		const restoredDraft = switcher.newChat();
+		if (!restoredDraft) activeSession.applyComposerDefaults();
 	},
 
 	// ── Messaging (delegated to message-sender) ─────────────────────
@@ -771,7 +786,7 @@ export const activeSession = {
 
 	setProfile(profileId: string) {
 		_update(s => ({ ...s, profile: profileId }));
-		switcher.saveSelectionToBackend(profileId, _state.project);
+		composerPreferences.set('profile', profileId);
 		persistSession();
 	},
 
@@ -785,13 +800,14 @@ export const activeSession = {
 	 *   2. First available profile
 	 *   3. Empty string if the list is empty (UI will show "Profile" fallback)
 	 *
-	 * Persists the correction through `setProfile` so it survives reloads.
-	 * No-op when the current selection is valid or unset.
+	 * Catalog validation is local presentation, not a new account-wide choice.
+	 * Existing sessions retain their own binding even if a catalog is unavailable.
 	 */
 	validateSelectedProfile(profilesList: Profile[]): boolean {
 		const current = _state.profile;
 		if (!current) return false;
 		if (profilesList.some(p => p.id === current)) return false;
+		if (_state.sessionId) return false;
 
 		const fallback =
 			profilesList.find(p => p.is_builtin)?.id ??
@@ -802,7 +818,7 @@ export const activeSession = {
 			`[ActiveSession] Selected profile "${current}" no longer exists. ` +
 			`Falling back to "${fallback || '(none)'}".`
 		);
-		activeSession.setProfile(fallback);
+		_update(s => ({...s, profile:fallback}));
 		return true;
 	},
 
@@ -839,9 +855,11 @@ export const activeSession = {
 			console.warn('[ActiveSession] Cannot change project after session has started');
 			return;
 		}
-		const nextV2 = projectV2Id === undefined ? _state.projectV2Id : projectV2Id;
+		const nextV2 = projectV2Id === undefined
+			? appData.current.clusterProjects.find(p => p.local_project_id === projectId)?.project_v2_id ?? null
+			: projectV2Id;
+		composerPreferences.set('project', {projectId, projectV2Id:nextV2});
 		if (_state.project === projectId && _state.projectV2Id === nextV2) {
-			if (projectId) switcher.saveSelectionToBackend(_state.profile, projectId);
 			return;
 		}
 		_update(s => ({
@@ -863,8 +881,7 @@ export const activeSession = {
 			isCreatingWorktree: false,
 			worktreeError: null,
 		}));
-		// Remote-only compose has no legacy id to persist as the default project.
-		if (projectId) switcher.saveSelectionToBackend(_state.profile, projectId);
+		composerPreferences.set('checkout', null);
 		persistSession();
 	},
 
@@ -956,21 +973,51 @@ export const activeSession = {
 		_update(s => ({ ...s, deviceIntent: intent }));
 	},
 
-	setWorktreeBranch(branch: string) { _update(s => ({ ...s, worktreeBranch: branch })); },
-	setWorktreeBaseBranch(branch: string) { _update(s => ({ ...s, worktreeBaseBranch: branch })); },
-	setWorktreeMode(mode: 'new' | 'existing') { _update(s => ({ ...s, worktreeMode: mode })); },
-	setWorktreeCreateNewBranch(val: boolean) { _update(s => ({ ...s, worktreeCreateNewBranch: val })); },
+	setWorktreeBranch(branch: string) { _update(s => ({ ...s, worktreeBranch: branch })); rememberBranchIntent(); },
+	setWorktreeBaseBranch(branch: string) { _update(s => ({ ...s, worktreeBaseBranch: branch })); if (_state.worktreeBranch) rememberBranchIntent(); },
+	setWorktreeMode(mode: 'new' | 'existing') { _update(s => ({ ...s, worktreeMode: mode })); if (mode === 'new') rememberBranchIntent(); },
+	setWorktreeCreateNewBranch(val: boolean) { _update(s => ({ ...s, worktreeCreateNewBranch: val })); if (_state.worktreeBranch) rememberBranchIntent(); },
 
 	selectWorktreeBranch(branch: string, worktreeId: string) {
-		_update(s => ({ ...s, worktreeId, selectedWorktreeBranch: branch, worktreeMode: 'existing' as const }));
+		composerPreferences.set('checkout', {kind:'existing',projectId:_state.project, projectV2Id:_state.projectV2Id, worktreeId, branch});
+		_update(s => ({ ...s, worktreeId, worktreeBranch:'', selectedWorktreeBranch: branch, worktreeMode: 'existing' as const }));
 	},
 
 	clearWorktreeSelection() {
+		composerPreferences.set('checkout', null);
 		_update(s => ({ ...s, worktreeId: null, selectedWorktreeBranch: null, worktreeBranch: '', worktreeMode: 'new' as const }));
 	},
 
 	markWorktreeDeleted() {
 		_update(s => ({ ...s, worktreeDeleted: true }));
+	},
+
+	/** Remote defaults may update an idle composer, never an existing session or typed draft. */
+	applyComposerDefaults() {
+		if (_state.sessionId || _state.draft || _state.worktreeBranch || _state.isStreaming || _state.optimisticStreaming || _state.isCreatingWorktree || _state.isRestoringSession || internal.awaitingNewSession) return;
+		const picks = composerPreferences.current;
+		const project = resolveComposerProject(picks.project, appData.current.projects, appData.current.clusterProjects);
+		const code = _state.mode !== 'chat';
+		const checkout = code && picks.worktreeIntent === 'worktree' && picks.checkout
+			&& (picks.checkout.projectV2Id ? picks.checkout.projectV2Id === project.projectV2Id : picks.checkout.projectId === project.project)
+			? picks.checkout : null;
+		// A legacy worktree ID belongs to its original checkout. Never transplant
+		// it into a different runner's clone, even when both share a Git origin.
+		const existing = checkout?.kind === 'existing' ? checkout : null;
+		const branch = checkout?.kind === 'branch' ? checkout : null;
+		const localCheckout = existing && existing.projectId === project.project && !!project.project;
+		_update(s => ({...s,
+			profile:picks.profile, modelOverride:picks.model, effortLevelOverride:picks.effort,
+			permissionModeOverride:code ? picks.permissionMode : null, fastMode:picks.fastMode === '1',
+			contextWindowChoice:getPersistedContextWindowChoice(),
+			...(code ? project : {project:'', projectV2Id:null}),
+			worktreeIntent:code ? picks.worktreeIntent : 'local',
+			worktreeId:localCheckout ? existing!.worktreeId : null,
+			selectedWorktreeBranch:existing?.branch ?? null,
+			worktreeBranch:branch?.branch ?? '', worktreeBaseBranch:branch?.baseBranch ?? 'main',
+			worktreeCreateNewBranch:branch?.createNew ?? false, worktreeMode:existing ? 'existing' : 'new',
+			worktreeError:existing && !localCheckout ? 'The selected worktree belongs to another device. Select an available worktree to continue.' : null,
+		}));
 	},
 
 	createWorktree: (prompt?: string, pendingUploadPaths?: string[]) =>
@@ -1085,3 +1132,5 @@ export const activeSessionUsage = createDerived(
 	}),
 	shallowEqual
 );
+
+composerPreferences.onRemote(() => activeSession.applyComposerDefaults());

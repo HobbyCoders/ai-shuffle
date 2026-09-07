@@ -12,6 +12,7 @@ import type { ContextWindowChoice } from '$lib/constants/model-context';
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface SessionEphemeral {
+	profile?: string;
 	title: string;
 	draft: string;
 	scrollTop: number;
@@ -34,6 +35,7 @@ export interface SessionEphemeral {
 	worktreeBaseBranch: string;
 	selectedWorktreeBranch: string | null;
 	worktreeMode: 'new' | 'existing';
+	worktreeCreateNewBranch?: boolean;
 	worktreeDeleted: boolean;
 }
 

@@ -266,6 +266,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 			// Worktree setup on first message
 			if (!options?.skipWorktreeSetup && _state.worktreeIntent === 'worktree' && !_state.sessionId && _state.messages.length === 0) {
+				if (_state.worktreeMode === 'existing' && !_state.worktreeId) {
+					update(s => ({...s, worktreeError:'Please select an available existing worktree before sending.'}));
+					return false;
+				}
 				if (_state.worktreeMode === 'existing' && _state.worktreeId) {
 					await startSessionOnExistingWorktree(prompt, options?.pendingUploadPaths);
 					return true;

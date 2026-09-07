@@ -159,6 +159,23 @@ function makeSwitcher(initial: ActiveSessionState) {
 }
 
 describe('session-switcher · switchSession isolation', () => {
+	it.each(['typed draft', ''])('restores the complete staged branch draft (%j) after visiting a session', async (draft) => {
+		appMode.set('code');
+		const {switcher, getState} = makeSwitcher(fullState({
+			sessionId:null, draft, profile:'draft-profile', project:'draft-project', projectV2Id:'draft-v2',
+			modelOverride:'draft-model', permissionModeOverride:'acceptEdits',
+			worktreeBranch:'feature/draft', worktreeBaseBranch:'develop', worktreeCreateNewBranch:true,
+		}));
+		await switcher.switchSession('another-session');
+		localStorage.setItem('aihub_last_profile', 'new-global-profile');
+		expect(switcher.newChat()).toBe(true);
+		expect(getState()).toMatchObject({sessionId:null, draft, profile:'draft-profile',
+			project:'draft-project',projectV2Id:'draft-v2',modelOverride:'draft-model',
+			permissionModeOverride:'acceptEdits',worktreeBranch:'feature/draft',
+			worktreeBaseBranch:'develop',worktreeCreateNewBranch:true});
+		switcher.destroy();
+	});
+
 	it('hydrates folders for a chat outside the paginated session list', async () => {
 		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { workspace_project_ids: ['docs'] } });
 		const { switcher, getState } = makeSwitcher(fullState());

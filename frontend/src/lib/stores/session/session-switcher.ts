@@ -14,6 +14,7 @@ import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
 import type { ExecutionMode, Task } from '../types';
 import { api } from '$lib/api/client';
+import { composerPreferences, resolveComposerProject } from '../composer-preferences';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
 import { appData } from '../app-data.svelte';
@@ -31,7 +32,6 @@ import {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const PERSIST_DEBOUNCE_MS = 500;
-const SELECTION_SYNC_DEBOUNCE_MS = 1000;
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -87,7 +87,7 @@ export interface SessionWorktreeInfo {
 
 interface SessionSwitcher {
 	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) => Promise<void>;
-	newChat: () => void;
+	newChat: () => boolean;
 	persistSession: () => void;
 	loadPersistedSession: () => Promise<PersistedSession | null>;
 	getPersistedProfile: () => string;
@@ -100,17 +100,12 @@ interface SessionSwitcher {
 // ─── Module-Level Selection Helpers ──────────────────────────────────────────
 
 export function getPersistedProfile(): string {
-	if (typeof window !== 'undefined') {
-		return localStorage.getItem('aihub_selectedProfile') || '';
-	}
-	return '';
+	return typeof window !== 'undefined' ? localStorage.getItem('aihub_selectedProfile') || '' : '';
 }
 
 export function getPersistedProject(): string {
-	if (typeof window !== 'undefined') {
-		return localStorage.getItem('aihub_selectedProject') || '';
-	}
-	return '';
+	if (!composerPreferences.current.project.projectV2Id) return typeof window !== 'undefined' ? localStorage.getItem('aihub_selectedProject') || '' : '';
+	return resolveComposerProject(composerPreferences.current.project, appData.current.projects, appData.current.clusterProjects).project;
 }
 
 /**
@@ -133,6 +128,7 @@ export function getPersistedWorktreeIntent(): ExecutionMode {
 }
 
 export function setPersistedWorktreeIntent(mode: ExecutionMode): void {
+	composerPreferences.set('worktreeIntent', mode);
 	if (typeof window !== 'undefined') {
 		localStorage.setItem('aihub_executionMode', mode);
 	}
@@ -244,6 +240,7 @@ export function setPersistedRunBinding(
 	key: 'model' | 'effort' | 'permissionMode' | 'contextWindowChoice' | 'fastMode',
 	value: string | null
 ): void {
+	composerPreferences.set(key, value);
 	if (typeof window === 'undefined') return;
 	const storageKey = {
 		model: 'aihub_lastModel',
@@ -257,28 +254,9 @@ export function setPersistedRunBinding(
 }
 
 async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; selectedProject: string } | null> {
-	if (typeof window === 'undefined') return null;
-	try {
-		const deviceId = getOrCreateDeviceId();
-		const prefKey = `selection:${deviceId}`;
-		const response = await fetch(`/api/v1/preferences/${encodeURIComponent(prefKey)}`, { credentials: 'include' });
-		if (response.ok) {
-			const data = await response.json();
-			if (data?.value) {
-				const sel = data.value as { selectedProfile?: string; selectedProject?: string };
-				const selectedProfile = sel.selectedProfile || '';
-				const selectedProject = sel.selectedProject || '';
-				if (selectedProfile) localStorage.setItem('aihub_selectedProfile', selectedProfile);
-				if (selectedProject) localStorage.setItem('aihub_selectedProject', selectedProject);
-				return { selectedProfile, selectedProject };
-			}
-		}
-	} catch (e) {
-		console.warn('[ActiveSession] Failed to load selection from backend:', e);
-	}
-	return null;
+ await composerPreferences.hydrate();
+ return {selectedProfile: getPersistedProfile(), selectedProject: getPersistedProject()};
 }
-
 /**
  * Which snapshot fields may still be applied (finding W7).
  *
@@ -336,14 +314,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	const { update, getState, wsSend, internal, sessionEphemeralCache, onPersistTimerChanged } = deps;
 
 	let persistTimer: ReturnType<typeof setTimeout> | null = null;
-	let pendingSelection: { profile: string; project: string } | null = null;
-	let selectionSyncTimeout: ReturnType<typeof setTimeout> | null = null;
 	let _switchGeneration = 0;
 
 	// ── Helpers ──────────────────────────────────────────────────────────
 
 	function buildEphemeral(state: ActiveSessionState): SessionEphemeral {
 		return {
+			profile: state.profile,
 			title: state.title,
 			draft: state.draft,
 			scrollTop: state.scrollTop,
@@ -362,39 +339,16 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			worktreeBaseBranch: state.worktreeBaseBranch,
 			selectedWorktreeBranch: state.selectedWorktreeBranch,
 			worktreeMode: state.worktreeMode,
+			worktreeCreateNewBranch: state.worktreeCreateNewBranch,
 			worktreeDeleted: state.worktreeDeleted,
 		};
 	}
 
 	function saveSelectionToBackend(profile: string, project: string) {
-		const effectiveProfile = profile || getPersistedProfile();
-		const effectiveProject = project || getPersistedProject();
-
-		if (typeof window !== 'undefined') {
-			if (effectiveProfile) localStorage.setItem('aihub_selectedProfile', effectiveProfile);
-			if (effectiveProject) localStorage.setItem('aihub_selectedProject', effectiveProject);
-		}
-
-		pendingSelection = { profile: effectiveProfile, project: effectiveProject };
-
-		if (selectionSyncTimeout) clearTimeout(selectionSyncTimeout);
-		selectionSyncTimeout = setTimeout(async () => {
-			if (!pendingSelection) return;
-			try {
-				const deviceId = getOrCreateDeviceId();
-				const prefKey = `selection:${deviceId}`;
-				await api.put(`/preferences/${encodeURIComponent(prefKey)}`, {
-					key: prefKey,
-					value: { selectedProfile: pendingSelection.profile, selectedProject: pendingSelection.project },
-				});
-			} catch (e) {
-				console.error('[ActiveSession] Failed to sync selection to backend:', e);
-			}
-			pendingSelection = null;
-			selectionSyncTimeout = null;
-		}, SELECTION_SYNC_DEBOUNCE_MS);
+		composerPreferences.set('profile', profile);
+		const v2 = appData.current.clusterProjects.find(p => p.local_project_id === project)?.project_v2_id ?? getState().projectV2Id;
+		composerPreferences.set('project', {projectId:project, projectV2Id:v2});
 	}
-
 	// ── Persistence ─────────────────────────────────────────────────────
 
 	/** The active-session snapshot persisted to both the server (device key) and
@@ -817,6 +771,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// Restore new chat draft if one was saved earlier
 		const newChatEphemeral = sessionEphemeralCache.restore('__new_chat__');
+		const savedDraft = newChatEphemeral && (newChatEphemeral.draft || newChatEphemeral.worktreeBranch || newChatEphemeral.worktreeId)
+			? newChatEphemeral : null;
 
 		// A new session is created into whichever lane the sidepanel is showing.
 		const mode = appMode.current;
@@ -904,18 +860,34 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			sessionLockedBy: undefined,
 		}));
 
+		// Typed text and its execution context are one draft. New account-wide
+		// defaults must not reroute a restored draft into a different checkout.
+		if (savedDraft) update(s => ({...s,
+			profile:savedDraft.profile ?? s.profile,
+			modelOverride:savedDraft.modelOverride, effortLevelOverride:savedDraft.effortLevelOverride,
+			permissionModeOverride:mode === 'chat' ? null : savedDraft.permissionModeOverride,
+			fastMode:savedDraft.fastMode ?? false,
+			contextWindowChoice:savedDraft.contextWindowChoice ?? DEFAULT_CONTEXT_WINDOW_CHOICE,
+			...(mode === 'chat' ? {} : {
+				project:savedDraft.project, projectV2Id:savedDraft.projectV2Id,
+				worktreeIntent:savedDraft.worktreeIntent, worktreeId:savedDraft.worktreeId,
+				worktreeBranch:savedDraft.worktreeBranch, worktreeBaseBranch:savedDraft.worktreeBaseBranch,
+				selectedWorktreeBranch:savedDraft.selectedWorktreeBranch, worktreeMode:savedDraft.worktreeMode,
+				worktreeCreateNewBranch:savedDraft.worktreeCreateNewBranch ?? false,
+			}),
+		}));
 		const afterState = getState();
 		// newChat complete
 
 		// Persist immediately (not debounced)
 		persistSessionImmediate();
+		return savedDraft !== null;
 	}
 
 	function destroy() {
-		if (selectionSyncTimeout) {
-			clearTimeout(selectionSyncTimeout);
-			selectionSyncTimeout = null;
-		}
+		_switchGeneration++;
+		internal.worktreeCreationGeneration++;
+		internal.awaitingNewSession = false;
 		if (persistTimer) {
 			clearTimeout(persistTimer);
 			persistTimer = null;
