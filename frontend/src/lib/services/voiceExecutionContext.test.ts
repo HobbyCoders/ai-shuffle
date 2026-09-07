@@ -7,12 +7,17 @@ import type { ActiveSessionState } from '$lib/stores/active-session';
 describe('voice execution context', () => {
 	it('does not replace inherited agent permissions with default', () => {
 		const state = { permissionModeOverride: null } as ActiveSessionState;
-		expect(voiceContextFor(state).permission_mode).toBeUndefined();
-		expect(JSON.stringify(voiceContextFor(state))).not.toContain('permission_mode');
+		expect(voiceContextFor(state).permission_mode).toBeNull();
+		expect(JSON.stringify(voiceContextFor(state))).toContain('"permission_mode":null');
 		state.permissionModeOverride = 'bypassPermissions';
 		expect(voiceContextFor(state).permission_mode).toBe('bypassPermissions');
 		state.permissionModeOverride = 'default';
 		expect(voiceContextFor(state).permission_mode).toBe('default');
+	});
+	it('explicitly clears inherited effort and inapplicable model context', () => {
+		const context = voiceContextFor({ modelOverride: 'unknown-model', effortLevelOverride: null, contextWindowChoice: '1m' } as unknown as ActiveSessionState);
+		expect(context.effort).toBeNull();
+		expect(context.context_window).toBeNull();
 	});
 	it('deduplicates identical settings', async () => {
 		const before = update.mock.calls.length;

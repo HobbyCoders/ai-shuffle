@@ -9,9 +9,9 @@ export function voiceContextFor(state: ActiveSessionState): VoiceExecutionContex
 	const model = state.modelOverride || getDefaultModel();
 	return {
 		model,
-		effort: state.effortLevelOverride || undefined,
-		permission_mode: state.permissionModeOverride || undefined,
-		context_window: contextWindowForChoice(model, state.contextWindowChoice) || undefined,
+		effort: state.effortLevelOverride || null,
+		permission_mode: state.permissionModeOverride || null,
+		context_window: contextWindowForChoice(model, state.contextWindowChoice) ?? null,
 		fast: state.fastMode
 	};
 }

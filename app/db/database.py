@@ -2690,6 +2690,7 @@ from app.db.sessions import (  # noqa: F401
     update_session,
     set_session_context_usage,
     set_session_run_binding,
+    patch_voice_session_context,
     get_session_context_usage_snapshot,
     delete_session,
     set_session_active,

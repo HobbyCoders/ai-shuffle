@@ -126,6 +126,24 @@ def test_sparse_patch_leaves_omitted_fields_unchanged(context_client, monkeypatc
     }
 
 
+def test_explicit_null_clears_pins_without_rebinding_realtime(context_client):
+    session_id = _session(fast=True, context_window=1_000_000)
+    fields = ("model", "effort", "permission_mode", "context_window", "fast")
+    response = context_client.patch(PATH.format(session_id), json=dict.fromkeys(fields))
+    assert response.status_code == 200, response.text
+    assert all(response.json()[field] is None for field in fields)
+    assert db.get_session(session_id)["provider_id"] == "realtime-provider"
+
+
+def test_ordinary_turn_binding_none_still_preserves_existing_pins(mock_db):
+    session_id = _session(fast=True)
+    db.set_session_run_binding(session_id, effort=None, context_window=None, fast=None)
+    row = db.get_session(session_id)
+    assert row["effort"] == "medium"
+    assert row["context_window"] == 200_000
+    assert row["fast"]
+
+
 @pytest.mark.parametrize(
     "payload,detail",
     [

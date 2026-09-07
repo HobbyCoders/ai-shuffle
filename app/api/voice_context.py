@@ -96,7 +96,7 @@ def _validate_patch(body: VoiceContextPatch) -> None:
 def _persist_patch(session_id: str, body: VoiceContextPatch) -> dict:
     """Persist supplied fields and return a fresh row.
 
-    ``preserve_provider`` is essential for voice rows: ``provider_id`` funds the
+    ``provider_id`` is preserved for voice rows: it funds the
     OpenAI Realtime call, while ``model`` selects the text worker dispatched by
     that call. A provider/model composite must therefore not rebind the voice
     row's realtime provider as it does for an ordinary code session.
@@ -112,11 +112,7 @@ def _persist_patch(session_id: str, body: VoiceContextPatch) -> dict:
         kwargs["permission_mode"] = kwargs["permission_mode"].strip()
 
     if kwargs:
-        database.set_session_run_binding(
-            session_id,
-            preserve_provider=True,
-            **kwargs,
-        )
+        database.patch_voice_session_context(session_id, kwargs)
     return database.get_session(session_id) or {}
 
 
