@@ -25,6 +25,9 @@ import com.hobbycoders.aishuffle.R
 import com.hobbycoders.aishuffle.account.AccountRepository
 import com.hobbycoders.aishuffle.account.AccountStore
 import com.hobbycoders.aishuffle.account.PairingInput
+import com.hobbycoders.aishuffle.account.ManagedWorkerRepair
+import com.hobbycoders.aishuffle.account.WorkerRepairFailure
+import com.hobbycoders.aishuffle.account.WorkerRepairSnapshot
 import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.model.Server
 import com.hobbycoders.aishuffle.net.ApiClient
@@ -33,7 +36,9 @@ import com.hobbycoders.aishuffle.tools.DeviceToolsRuntime
 import com.hobbycoders.aishuffle.voice.VoiceCallActivity
 import com.hobbycoders.aishuffle.voice.VoiceCallService
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import com.google.android.material.button.MaterialButton
 import java.io.ByteArrayInputStream
 
 /** Native capabilities are restricted to the connected HTTPS document; no JavascriptInterface. */
@@ -43,6 +48,7 @@ class ChatActivity : NativeScreen() {
     private var sessionJob: Job? = null
     private var sessionAttempt = 0
     private var needsSession = true
+    private lateinit var repairButton: MaterialButton
     private lateinit var downloads: ChatDownloads
     private lateinit var nativeVoice: NativeVoiceBridge
     private var document = 0
@@ -192,6 +198,16 @@ class ChatActivity : NativeScreen() {
             orientation = LinearLayout.VERTICAL; setBackgroundColor(color(R.color.surface))
             addView(toolbar, LinearLayout.LayoutParams(-1, dp(56)))
             addView(status, LinearLayout.LayoutParams(-1, -2))
+            repairButton = MaterialButton(this@ChatActivity).apply {
+                text = "Reconnect this worker"; isAllCaps = false; visibility = View.GONE
+                setTextColor(color(R.color.on_primary))
+                backgroundTintList = android.content.res.ColorStateList.valueOf(color(R.color.primary))
+                com.hobbycoders.aishuffle.tools.guardConsentTouch(this)
+                setOnClickListener {
+                    if (authorized()) startActivity(Intent(this@ChatActivity, WorkerRepairActivity::class.java).putExtra(EXTRA_SERVER_ID, server.id))
+                }
+            }
+            addView(repairButton, LinearLayout.LayoutParams(-1, -2).apply { marginStart = dp(16); marginEnd = dp(16) })
             addView(web, LinearLayout.LayoutParams(-1, 0, 1f))
         }
         setContentView(shell)
@@ -253,6 +269,7 @@ class ChatActivity : NativeScreen() {
         needsSession = true
         val attempt = ++sessionAttempt
         sessionJob = lifecycleScope.launch {
+            repairButton.visibility = View.GONE
             status.text = "Opening a secure chat…"
             if (server.hasCfAccess) ApiClient.fetchCfAuthorizationCookie(server)?.let { CookieManager.getInstance().setCookie(server.baseUrl, "$it; Path=/; Secure; HttpOnly; SameSite=Strict") }
             when (val result = ApiClient.createWebSession(server)) {
@@ -266,7 +283,22 @@ class ChatActivity : NativeScreen() {
                         }
                     }
                 }
-                is ApiResult.Failure -> status.text = result.message
+                is ApiResult.Failure -> {
+                    status.text = result.message
+                    if (result.statusCode == 401 && server.accountId != null) {
+                        try {
+                            val snapshot = WorkerRepairSnapshot(this@ChatActivity, server)
+                            snapshot.check()
+                            ManagedWorkerRepair.verify(server)
+                            snapshot.check()
+                            if (attempt == sessionAttempt && !isFinishing) repairButton.visibility = View.VISIBLE
+                        } catch (error: CancellationException) { throw error }
+                        catch (error: Exception) {
+                            if (attempt == sessionAttempt && !isFinishing) status.text = result.message + "\n" +
+                                ((error as? WorkerRepairFailure)?.message ?: "This worker could not be verified for repair. Refresh your workers and try again.")
+                        }
+                    }
+                }
                 is ApiResult.NeedsCfAccess -> status.text = "Cloudflare Access rejected this device. Pair the server again with a valid service token."
             }
         }

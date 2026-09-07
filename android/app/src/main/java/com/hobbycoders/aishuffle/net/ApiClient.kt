@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
 /** Result of an [ApiClient] call. Never throws to the caller. */
 sealed class ApiResult<out T> {
     data class Success<T>(val data: T) : ApiResult<T>()
-    data class Failure(val message: String) : ApiResult<Nothing>()
+    data class Failure(val message: String, val statusCode: Int? = null) : ApiResult<Nothing>()
 
     /**
      * The server is behind Cloudflare Access and no (valid) service token was
@@ -225,7 +225,7 @@ object ApiClient {
 
                 val raw = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    return ApiResult.Failure(errorMessage(response.code, raw))
+                    return ApiResult.Failure(errorMessage(response.code, raw), response.code)
                 }
                 // A 200 carrying HTML means a proxy/login page slipped through.
                 if (raw.trimStart().startsWith("<")) {
