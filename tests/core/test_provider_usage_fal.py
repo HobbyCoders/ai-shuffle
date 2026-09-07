@@ -112,6 +112,12 @@ def monitor():
     return ProviderUsageMonitor()
 
 
+@pytest.fixture(autouse=True)
+def _credential_generation(mock_db):
+    from app.db import database as db
+    db.set_system_setting("fal_api_key", _KEY)
+
+
 _RealAsyncClient = httpx.AsyncClient
 
 
@@ -194,7 +200,7 @@ class TestPollFal:
         assert len(seen) == 1
 
     @pytest.mark.asyncio
-    async def test_missing_key_deletes_snapshot(self, monitor):
+    async def test_missing_key_does_not_publish_a_snapshot(self, monitor):
         delete = MagicMock(return_value=True)
         upsert = MagicMock()
         with patch(
@@ -204,7 +210,8 @@ class TestPollFal:
         ):
             await monitor._poll_fal()
 
-        delete.assert_called_once_with(FAL_USAGE_PROVIDER_ID)
+        # Removal invalidates in the credential transaction, not a delayed poll.
+        delete.assert_not_called()
         upsert.assert_not_called()
 
     @pytest.mark.asyncio

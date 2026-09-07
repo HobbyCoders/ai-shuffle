@@ -209,6 +209,15 @@ def get_system_setting_cached(
     return value
 
 
+def get_system_setting_revision(key: str) -> Optional[str]:
+    """Opaque write generation, without disclosing the setting's value."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT updated_at FROM system_settings WHERE key = %s", (key,))
+        row = cursor.fetchone()
+        return row["updated_at"] if row else None
+
+
 def set_system_setting(key: str, value: str) -> None:
     """Set a system setting (upsert)"""
     with get_db() as conn:
@@ -222,6 +231,9 @@ def set_system_setting(key: str, value: str) -> None:
                    updated_at = excluded.updated_at""",
             (key, value, now)
         )
+        if key == "fal_api_key":
+            # Same transaction and lock order as conditional billing writes.
+            cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", ("fal-ai",))
     # Explicit invalidation: the memo must never outlive a write we made.
     invalidate_system_setting_memo(key)
 
@@ -232,6 +244,8 @@ def delete_system_setting(key: str) -> bool:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM system_settings WHERE key = %s", (key,))
         deleted = cursor.rowcount > 0
+        if key == "fal_api_key":
+            cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", ("fal-ai",))
     invalidate_system_setting_memo(key)
     return deleted
 

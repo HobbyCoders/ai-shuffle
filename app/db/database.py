@@ -2781,6 +2781,7 @@ from app.db.settings import (  # noqa: F401
     delete_user_preference,
     get_all_user_preferences,
     get_system_setting,
+    get_system_setting_revision,
     get_system_setting_cached,
     invalidate_system_setting_memo,
     set_system_setting,

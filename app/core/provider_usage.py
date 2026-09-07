@@ -1669,21 +1669,29 @@ class ProviderUsageMonitor:
         """Fetch fal.ai account credits and upsert the synthetic snapshot. Never raises.
 
         Fal is an integration key (``fal_api_key``), not a model-provider row.
-        A missing key deletes any previous ``fal-ai`` snapshot so the popover
-        cannot keep a stale balance after the user removes the key.
+        Credential mutations invalidate ``fal-ai`` inside their transaction;
+        every result is conditionally committed against the captured revision.
 
         Ordinary keys 403 on the documented admin billing endpoint; we then
         fall back to ``rest.alpha.fal.ai/billing/user_balance``.
         """
         from app.db import database as db
 
+        generation = None
         try:
             from app.api.settings_crypto import get_decrypted_api_key
 
+            generation = await run_sync(db.get_system_setting_revision, "fal_api_key")
             key = await run_sync(get_decrypted_api_key, "fal_api_key")
-            if not key:
-                await run_sync(db.delete_provider_usage_snapshot, FAL_USAGE_PROVIDER_ID)
+            if generation != await run_sync(db.get_system_setting_revision, "fal_api_key"):
                 return
+            if not key:
+                return
+
+            async def failed(kind="unavailable"):
+                await run_sync(db.record_provider_usage_failure, FAL_USAGE_PROVIDER_ID,
+                               FAL_USAGE_PROVIDER_TYPE, kind,
+                               expected_credential_generation=generation)
 
             headers = {
                 "Authorization": _fal_auth_header(key),
@@ -1725,6 +1733,7 @@ class ProviderUsageMonitor:
                     logger.debug(
                         "fal.ai user_balance returned HTTP %s", resp.status_code
                     )
+                    await failed("billing_access_denied" if resp.status_code in (401, 403) else "unavailable")
                     return
                 try:
                     body = resp.json()
@@ -1736,6 +1745,7 @@ class ProviderUsageMonitor:
                     raw["current_balance"] = credits["balance_remaining"]
 
             if not credits:
+                await failed()
                 return
             # Poll recovered: forget the suppressed-failure state so the
             # next failure is reported at ERROR straight away.
@@ -1749,10 +1759,18 @@ class ProviderUsageMonitor:
                 credits,
                 raw,
                 int(time.time() * 1000),
+                expected_credential_generation=generation,
             )
         except Exception as e:
             # Never include the Key credential here.
             _log_poll_failure("fal-credits-poll", "fal.ai credits poll failed: %s", e)
+            if generation:
+                try:
+                    await run_sync(db.record_provider_usage_failure, FAL_USAGE_PROVIDER_ID,
+                                   FAL_USAGE_PROVIDER_TYPE, "unavailable",
+                                   expected_credential_generation=generation)
+                except Exception:
+                    logger.debug("Could not persist fal.ai billing failure")
 
 
 provider_usage_monitor = ProviderUsageMonitor()
