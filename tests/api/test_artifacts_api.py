@@ -118,6 +118,59 @@ def test_paired_account_cannot_read_another_accounts_screenshot(mock_db, artifac
         assert c.get(url, headers={'x-fixture-account': 'account-B'}).status_code == 404
 
 
+def test_local_session_image_follows_verified_paired_owner_continuation(mock_db, artifacts_dir, monkeypatch):
+    from app.db import sessions, mobile_tool_identity
+    from app.core import mobile_tool_identity as identity
+    sessions.create_session('local-image', 'default')
+    local = dict(owner='install-admin', kind='admin', principal_id='install', account_id=None, credential_hash='local')
+    mobile_tool_identity.bind('local-image', local, new=True)
+    paired = dict(owner='account:owner-A', kind='paired', principal_id='controller-A', account_id='owner-A', credential_hash='paired')
+    monkeypatch.setattr(identity.pairing, 'get_paired_client', lambda _id: {'id': _id})
+    monkeypatch.setattr(identity.mobile_hub, 'ownership', lambda **kw: {'account_id': 'owner-A'})
+    monkeypatch.setattr(identity.account_hub, 'check_paired_client', lambda client: client['id'] == 'controller-A')
+    # Actual existing continuation helper accepts this principal without transferring provenance.
+    mobile_tool_identity.bind('local-image', paired)
+    assert mobile_tool_identity.read('local-image')['owner'] == 'install-admin'
+    row = artifact_store.store_bytes(b'local screenshot', mime='image/png', created_by_session='local-image')
+    app = FastAPI()
+    app.include_router(router)
+    def authenticate(request: Request):
+        request.state.paired_client = {'id': request.headers.get('x-fixture-client', 'controller-A')}
+        return 'test-token'
+    app.dependency_overrides[_require_auth_or_signed] = authenticate
+    with TestClient(app) as c:
+        url = f"/api/v1/artifacts/{row['hash']}?session_id=local-image"
+        assert c.get(url).status_code == 200
+        assert c.get(url, headers={'x-fixture-client': 'unrelated-controller'}).status_code == 404
+        with monkeypatch.context() as remote_worker:
+            remote_worker.setattr(settings, 'instance_id', 'different-worker')
+            assert c.get(url).status_code == 404
+        monkeypatch.setattr(identity.pairing, 'get_paired_client', lambda _id: {'id': _id, 'revoked_at': 'now'})
+        assert c.get(url).status_code == 404
+
+
+@pytest.mark.parametrize('event_type', ['subagent.progress', 'team.member_progress'])
+def test_nested_worker_image_requires_exact_authorized_parent_reference(mock_db, client, event_type):
+    from app.db import api_users, sessions, session_events
+    api_users.create_api_user('child-owner', 'Child owner', 'child-key')
+    sessions.create_session('child-image', 'default', api_user_id='child-owner')
+    row = artifact_store.store_bytes(b'child screenshot', mime='image/png', created_by_session='child-image')
+    digest = row['hash']
+    url = f'/api/v1/artifacts/{digest}?session_id=s'
+    # Merely naming an accessible parent does not authorize arbitrary child hashes.
+    assert client.get(url).status_code == 404
+    session_events.append_events('s', [{'type': event_type, 'payload': {
+        'kind': 'chunk', 'payload': {'artifact_hashes': [digest]}}}])
+    assert client.get(url).status_code == 404
+    session_events.append_events('s', [{'type': event_type, 'payload': {
+        'kind': 'tool_result', 'payload': {'artifact_hashes': [{'forged': digest}]}}}])
+    assert client.get(url).status_code == 404
+    session_events.append_events('s', [{'type': event_type, 'payload': {
+        'kind': 'tool_result', 'payload': {'artifact_hashes': [digest]}}}])
+    assert client.get(url).content == b'child screenshot'
+    assert client.get(url, headers={'x-fixture-user': 'child-owner'}).status_code == 404
+
+
 def test_unknown_valid_hash_is_404(mock_db, client):
     resp = client.get(f"/api/v1/artifacts/{'a' * 64}")
     assert resp.status_code == 404
