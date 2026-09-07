@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import math
 import time
 import uuid
@@ -14,6 +15,12 @@ TTL = 60
 COMMAND_TTL = 30
 MAX_PENDING = 128
 MAX_BODY = 262144
+
+
+def poll_response_size(commands):
+    """Match the HTTP JSON envelope and the bridge's UTF-8 response ceiling."""
+    return len(json.dumps({'commands': commands}, ensure_ascii=False,
+                          separators=(',', ':'), allow_nan=False).encode('utf-8'))
 
 
 class ControlError(ValueError):
@@ -278,12 +285,16 @@ class Broker:
                 except asyncio.TimeoutError:
                     pass
             self.check(runtime_id)
-            commands, self.queue = self.queue[:16], self.queue[16:]
-            return [
-                c
-                for c in commands
-                if c["id"] in self.pending and c["expires_at"] > time.time() * 1000
-            ]
+            commands = []
+            while self.queue and len(commands) < 16:
+                candidate = self.queue[0]
+                if candidate['id'] not in self.pending or candidate['expires_at'] <= time.time() * 1000:
+                    self.queue.pop(0)
+                    continue
+                if poll_response_size([*commands, candidate]) > MAX_BODY:
+                    break  # Leave undelivered commands queued in their original order.
+                commands.append(self.queue.pop(0))
+            return commands
         finally:
             if self.polling == runtime_id:
                 self.polling = None
@@ -396,6 +407,8 @@ class Broker:
             "args": copy.deepcopy(args),
             "expires_at": time.time() * 1000 + COMMAND_TTL * 1000,
         }
+        if poll_response_size([command]) > MAX_BODY:
+            raise ControlError('Browser command exceeds delivery byte limit')
         if op == "takeover":
             self.reserved_viewer = viewer_id
         self.pending[command_id] = command

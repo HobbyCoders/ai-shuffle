@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { browserTextChunks } from '$lib/browser-panel/text-chunks';
 	/**
 	 * BrowserLiveView — draws the screencast frames into a letterboxed,
 	 * aspect-preserving canvas and forwards user input (mouse / wheel / keyboard)
@@ -325,17 +326,8 @@
 
 	function commitText(text: string) {
 		if (!keyboardEnabled || inspecting || !keyboardOpen) return;
-		// Bound each socket message without separating a UTF-16 surrogate pair.
-		const maxTextUnits = 16384;
-		for (let start = 0; start < text.length;) {
-			let end = Math.min(start + maxTextUnits, text.length);
-			const last = text.charCodeAt(end - 1);
-			const next = text.charCodeAt(end);
-			if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff)
-				end--;
-			onInput({ type: 'input', kind: 'text', text: text.slice(start, end) });
-			start = end;
-		}
+		for (const chunk of browserTextChunks(text))
+			onInput({ type: 'input', kind: 'text', text: chunk });
 	}
 
 	function bridgeCompositionEnd(e: CompositionEvent) {

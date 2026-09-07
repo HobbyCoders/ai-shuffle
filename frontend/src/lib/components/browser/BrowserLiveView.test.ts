@@ -267,6 +267,8 @@ describe('native remote-browser keyboard bridge', () => {
 	it.each([
 		'a'.repeat(16384),
 		'a'.repeat(16384 * 2 + 7),
+		'漢'.repeat(12000),
+		'\n\u0000\\"'.repeat(12000),
 		'a'.repeat(16383) + '😀' + 'b'.repeat(16382) + '🚀',
 	])(
 		'chunks a long paste without duplicate text or split surrogate pairs (%#)',
@@ -284,10 +286,12 @@ describe('native remote-browser keyboard bridge', () => {
 				return payload.text as string;
 			});
 			expect(chunks.join('')).toBe(value);
-			expect(chunks.length).toBe(Math.ceil(value.length / 16384));
 			for (const chunk of chunks) {
 				expect(chunk.length).toBeGreaterThan(0);
 				expect(chunk.length).toBeLessThanOrEqual(16384);
+				expect(new TextEncoder().encode(JSON.stringify({ type: 'input', kind: 'text', text: chunk,
+					id: '𐐀'.repeat(128), runtime_id: '𐐀'.repeat(128), tab_id: '𐐀'.repeat(128)
+				})).length).toBeLessThanOrEqual(32768);
 				expect(chunk).not.toMatch(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u);
 			}
 			expect(input.value).toBe('');

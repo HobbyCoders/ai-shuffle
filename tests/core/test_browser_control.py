@@ -72,6 +72,26 @@ async def test_no_redelivery_immediate_results_and_stale_revision(broker):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('text', ['a' * 16384, '漢' * 16384, '\x00' * 16384, '😀' * 16384],
+                         ids=['ascii', 'cjk', 'escaped-control', 'emoji'])
+async def test_poll_bounds_actual_response_bytes_without_losing_queued_text(broker, text):
+    from starlette.responses import JSONResponse
+    await broker.report('runtime', state(revision=1, viewer='viewer'), [])
+    for index in range(16):
+        await broker.submit('viewer', command(str(index), 'input', {
+            'method': 'Input.insertText', 'params': {'text': text}}), internal=True)
+    delivered = []
+    while broker.queue:
+        batch = await broker.poll('runtime')
+        assert batch
+        assert len(JSONResponse({'commands': batch}).body) <= control.MAX_BODY
+        delivered.extend(item['id'] for item in batch)
+        assert len(broker.queue) == 16 - len(delivered)
+    assert delivered == [str(index) for index in range(16)]
+    assert len(broker.pending) == 16  # Delivery still waits for explicit execution ACK.
+
+
+@pytest.mark.asyncio
 async def test_replacement_retires_identity_and_clears_pending(broker):
     await broker.submit("viewer", command())
     await broker.register("replacement")
