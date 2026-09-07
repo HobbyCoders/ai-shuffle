@@ -146,8 +146,11 @@ describe('ControlsDock split controls', () => {
 		await fireEvent.click(screen.getByRole('button', { name: /^permission mode:/i }));
 
 		const menu = screen.getByRole('menu', { name: /tool access/i });
-		expect(menu.querySelectorAll('[role="menuitemradio"]')).toHaveLength(4);
+		// Ask, Accept Edits, Bypass. Auto needs a model that supports it, and the
+		// dedicated planning mode was removed.
+		expect(menu.querySelectorAll('[role="menuitemradio"]')).toHaveLength(3);
 		expect(screen.queryByRole('menuitemradio', { name: /^auto\b/i })).toBeNull();
+		expect(screen.queryByRole('menuitemradio', { name: /plan/i })).toBeNull();
 		expect(screen.getByRole('menuitemradio', { name: /bypass/i })).toBeTruthy();
 	});
 

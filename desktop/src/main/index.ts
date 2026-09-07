@@ -109,11 +109,22 @@ function installScreenshotHook(window: MainWindow): void {
 				await win.webContents.executeJavaScript(script, true);
 				await new Promise((resolve) => setTimeout(resolve, 2000));
 			}
-			const image = await win.webContents.capturePage();
-			await import('node:fs/promises').then((fs) => fs.writeFile(target, image.toPNG()));
-			console.log(`screenshot written to ${target}`);
+			const fs = await import('node:fs/promises');
+			try {
+				const image = await win.webContents.capturePage();
+				await fs.writeFile(target, image.toPNG());
+				console.log(`screenshot written to ${target}`);
+			} catch (error) {
+				// Headless CI (xvfb, no GPU) sometimes cannot composite a capture.
+				// Record what loaded instead so the smoke run still proves the
+				// shell booted and rendered the page.
+				const title = await win.webContents.executeJavaScript('document.title', true).catch(() => '');
+				const report = [`capture failed: ${String(error)}`, `url: ${win.webContents.getURL()}`, `title: ${title}`, ''];
+				await fs.writeFile(`${target}.txt`, report.join('\n'));
+				console.log(`screenshot unavailable, wrote ${target}.txt`);
+			}
 		} catch (error) {
-			console.error('screenshot failed', error);
+			console.error('screenshot hook failed', error);
 		} finally {
 			app.quit();
 		}
