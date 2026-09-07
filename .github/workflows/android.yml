@@ -26,7 +26,7 @@ concurrency:
 jobs:
   account-hub:
     name: Account hub Worker and D1 tests
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
       run:
         working-directory: android/hub
@@ -47,7 +47,7 @@ jobs:
 
   build:
     name: Build signed release APK
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
       run:
         working-directory: android
@@ -118,7 +118,7 @@ jobs:
   android-ui:
     name: Android emulator verification
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     defaults:
       run:
