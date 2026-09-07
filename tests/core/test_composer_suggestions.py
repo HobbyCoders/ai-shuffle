@@ -11,7 +11,13 @@ from tests.core.test_turn_scheduler import mock_db, test_db, _settled_turn
 
 
 @pytest.fixture(autouse=True)
-def clean_state():
+def clean_state(monkeypatch):
+    from app.mcp.computer_use import abort
+
+    # Runtime-backed unpark tests stop their synthetic session's computer-use
+    # controller. Keep those flags local instead of leaking them to later tests.
+    monkeypatch.setattr(abort, "_HALTED", {})
+    monkeypatch.setattr(abort, "_GENERATIONS", {})
     cs._seen.clear()
     cs._tasks.clear()
     yield
