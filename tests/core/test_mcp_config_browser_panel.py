@@ -165,6 +165,17 @@ def test_loopback_host_survives_a_socket_that_refuses_to_probe(monkeypatch):
     assert "BROWSER_LOOPBACK_HOST" not in mcp_config._build_browser_server_env({}, session_id=None)
 
 
-def test_own_address_is_routable_or_absent():
-    address = mcp_config._own_routable_address()
-    assert address is None or not address.startswith(("127.", "::1", "fe80"))
+@pytest.mark.parametrize('host,expected', [
+    ('192.168.20.2', '192.168.20.2'),
+    ('127.0.0.1', None),
+    ('::1', None),
+    ('fe80::1', None),
+])
+def test_own_address_is_routable_or_absent(monkeypatch, host, expected):
+    from unittest.mock import MagicMock
+
+    sock = MagicMock()
+    sock.getsockname.return_value = (host, 1234)
+    monkeypatch.setattr('socket.socket', lambda *args, **kwargs: sock)
+    assert mcp_config._own_routable_address() == expected
+    sock.close.assert_called()

@@ -22,6 +22,8 @@ we patch that single boundary and let the rest run against on-disk config.
 
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 import app.core.query_options as qo
 from app.core.builtin_mcp_servers import (
     get_builtin_servers,
@@ -40,6 +42,18 @@ from app.core.mcp_service import (
 
 def _profile():
     return {"id": "t", "config": {"model": "opus", "tools_preset": "claude_code"}}
+
+
+@pytest.fixture(autouse=True)
+def _browser_configuration(monkeypatch):
+    """Exercise configured availability independently of the host's Chrome flag.
+
+    These tests inspect config only; they never launch a browser or an MCP server.
+    The explicit disabled-configuration test overrides this value itself.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "start_chrome", True)
 
 
 class TestBuiltinShape:

@@ -79,8 +79,8 @@ async def worker_async(pipe, barrier, source_env, runtime, database, worker_id):
     sockets = [Socket() for _ in range(4)]
     principals = [('api_user', 'alice'), ('api_user', 'alice'),
                   ('api_user', 'bob'), ('admin', 'alice')]
-    for socket, principal in zip(sockets, principals):
-        hub.register(socket, *principal)
+    for client_socket, principal in zip(sockets, principals):
+        hub.register(client_socket, *principal)
     try:
         deadline = time.monotonic() + 12
         while not gateway.is_connected():
