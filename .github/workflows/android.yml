@@ -41,6 +41,9 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: Chat download bridge tests
+        working-directory: android
+        run: node --test app/src/test/js/chat-downloads.test.cjs
 
   build:
     name: Build signed release APK
