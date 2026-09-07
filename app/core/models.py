@@ -117,7 +117,7 @@ class ProfileConfig(BaseModel):
     # legacy provider/model pair above remains the default top-level chat
     # binding.
     provider_models: Optional[Dict[str, str]] = None
-    permission_mode: Optional[str] = None  # default, auto, acceptEdits, plan, bypassPermissions
+    permission_mode: Optional[str] = None  # default, auto, acceptEdits, bypassPermissions
     thinking_mode: Optional[str] = "default"  # default, disabled, adaptive, think, think_harder, ultra_think
     # Opus 4.6+ uses effort-based reasoning instead of token budgets
     # effort: low, medium, high, max, xhigh (xhigh only for Opus 4.7+)
@@ -616,7 +616,7 @@ class QueryOverrides(BaseModel):
     """Optional overrides for a query"""
     model: Optional[str] = None
     workspace_project_ids: Optional[List[str]] = Field(None, max_length=50)
-    permission_mode: Optional[str] = None  # default, auto, acceptEdits, plan, bypassPermissions
+    permission_mode: Optional[str] = None  # default, auto, acceptEdits, bypassPermissions
     system_prompt_append: Optional[str] = None
     max_turns: Optional[int] = None
     thinking_mode: Optional[str] = None  # default, disabled, adaptive, think, think_harder, ultra_think
@@ -996,7 +996,7 @@ class AgentExportData(BaseModel):
     description: Optional[str] = None
     model: Optional[str] = None
     provider_models: Optional[Dict[str, str]] = None
-    permission_mode: Optional[str] = None  # default, acceptEdits, plan, bypassPermissions
+    permission_mode: Optional[str] = None  # default, acceptEdits, bypassPermissions
     effort: Optional[str] = None  # low | medium | high | xhigh | max — harness-honored reasoning depth
     max_turns: Optional[int] = None  # per-turn model-call cap (native legs)
     system_prompt_content: Optional[str] = None

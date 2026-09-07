@@ -131,20 +131,6 @@ _STREAM_DEBUG = bool(
     os.environ.get("STREAM_DEBUG") or os.environ.get("AIHUB_DEBUG_STREAM")
 )
 
-# Marker the host attaches beside ``FLUID_ANSWER_KEY`` when an approval gate is
-# closed by policy rather than by a person. ``FLUID_ANSWER_KEY`` itself has to
-# stay a string the engine reads as approval ("approve"), so the provenance
-# cannot live there — the tool result would otherwise be indistinguishable from
-# one a user clicked through, and the model says so out loud ("the plan is
-# approved"). Its own key can be read by an engine that wants to word the
-# result honestly; an engine that does not know it drops it, which is why this
-# is safe to send today.
-HOST_AUTO_APPROVED_KEY = "_host_auto_approved"
-HOST_AUTO_APPROVED_NOTE = (
-    "ended by host policy (bypassPermissions) — no user approval was collected"
-)
-
-
 def _rate_limit_event_dict(rli: Any, session_id: str) -> Dict[str, Any]:
     """Build the ``rate_limit`` WS frame from an SDK ``RateLimitInfo``.
 
@@ -232,92 +218,6 @@ def _task_update_terminal_status(message: Any) -> Optional[str]:
         return None
     raw = raw.value if hasattr(raw, "value") else str(raw)
     return raw if raw in _TASK_UPDATE_TERMINAL_STATUS_MAP else None
-
-
-def _sync_plan_mode_exited(refs: Dict[str, Any]) -> Optional[str]:
-    """Sync app state after an APPROVED plan exit (ExitPlanMode / StopPlanning).
-
-    The delegated (claude CLI) leg flips its own internal plan flag but has no
-    callback that reaches app state, so approving the plan panel used to leave
-    ``sessions.permission_mode`` still bound to ``plan`` and
-    ``callback_refs["permission_mode"]`` reading ``plan`` for every later turn —
-    each send re-resolved plan mode and the session looked permanently stuck.
-    The native leg's PlanModeControl wrapper handles its own sync; this is a
-    no-op there (the adapter sees a non-``plan`` options mode or already-restored
-    state) and does the full restore on the delegated leg.
-
-    Updates ``refs["permission_mode"]`` so THIS turn's remaining tool calls are
-    gated by the restored mode, not by the stale plan one, and returns the
-    restored mode (``None`` when there was nothing to restore).
-    """
-    adapter = refs.get("adapter")
-    notify = getattr(adapter, "notify_plan_mode_exited", None)
-    if not callable(notify):
-        return None
-    try:
-        restored = notify()
-    except Exception:
-        logger.warning(
-            "[WS] plan-mode exit sync failed", exc_info=True,
-        )
-        return None
-    if restored:
-        refs["permission_mode"] = restored
-    return restored
-
-
-async def _auto_approve_plan_exit(
-    session_id: str, tool_input: Dict[str, Any], refs: Dict[str, Any]
-) -> Dict[str, Any]:
-    """Close a ``StopPlanning`` gate on policy, and say so.
-
-    ``bypassPermissions`` approves the plan exit without asking anyone — in the
-    audited sessions, about seven milliseconds after the tool call. Nothing
-    else about that moment was honest: a Plan Approval panel (Approve / Keep
-    planning) stayed on the user's screen with nobody coming to answer it, and
-    the model reported "the plan is approved" as though someone had.
-
-    So this does four things the bare ``PermissionResultAllow`` did not:
-
-    1. **Retires the pending plan-approval row.** Every other mode sweeps the
-       corpses just before opening its own gate; the bypass path skipped it and
-       left one looking answerable after the decision had already been made.
-    2. **Marks the answer's provenance.** ``FLUID_ANSWER_KEY`` has to stay a
-       string the engine reads as approval, so the marker rides its own key
-       (:data:`HOST_AUTO_APPROVED_KEY`). An engine that reads it can word the
-       tool result as "ended by host policy — no user approval was collected";
-       one that does not simply drops the key, which is why sending it today is
-       safe.
-    3. **Shows the plan.** The panel that would have rendered it never opens on
-       this path, so the plan markdown lived only inside fluid's own
-       ``QuestionRequest`` event and the user never saw it (audit F5). The
-       disclosure note carries it into the transcript along with the fact that
-       policy, not a person, approved it — which is also the app's durable
-       answer to a gate nobody was offered.
-    4. **Logs at INFO.** A plan approved with no human in the loop is a fact
-       about the session, not a debug trace.
-
-    Returns the ``updated_input`` for the allow result.
-    """
-    from app.core import plan_disclosure
-    from app.core.user_question_handler import FLUID_ANSWER_KEY
-
-    await permission_handler.supersede_plan_approvals(session_id)
-    logger.info(
-        "[WS] StopPlanning auto-approved by host policy for session %s "
-        "(bypassPermissions) — no user approval was collected",
-        session_id,
-    )
-    # Before the mode-switch note, so the transcript reads plan → decision.
-    plan_disclosure.disclose_auto_approved_plan(
-        session_id, tool_input, refs.get("adapter")
-    )
-    _sync_plan_mode_exited(refs)
-    return {
-        **tool_input,
-        FLUID_ANSWER_KEY: "approve",
-        HOST_AUTO_APPROVED_KEY: HOST_AUTO_APPROVED_NOTE,
-    }
 
 
 def _record_task_message(session_id: Optional[str], message: Any) -> None:
@@ -2334,9 +2234,6 @@ async def _stream_to_websocket_impl(
                     "config": config,
                     "session_id": session_id,
                     "user_id": user_id,
-                    # Always the LIVE pooled adapter — an approved plan exit must
-                    # sync through it even when this turn reused the client.
-                    "adapter": state.adapter,
                     # Reset the outstanding-prompt counter at the start of each turn so a
                     # prior turn that was hard-cancelled mid-prompt (its finally clear
                     # interrupted) can't leave a leaked count that pins the indicator on.
@@ -2423,10 +2320,6 @@ async def _stream_to_websocket_impl(
             "config": config,
             "session_id": session_id,
             "user_id": user_id,
-            # Filled in with the live adapter after connect() below; the
-            # can_use_tool closure reads it for approved plan-exit sync
-            # (_sync_plan_mode_exited).
-            "adapter": None,
             # Reference count of prompts (questions + permissions) this session is
             # currently blocked on. Drives the user-level "awaiting input" indicator.
             "attention_count": 0,
@@ -2570,12 +2463,11 @@ async def _stream_to_websocket_impl(
                     finally:
                         await _bump_attention(-1, "permission")
 
-                # Handle AskUserQuestion (SDK) and AskUser / StopPlanning (fluid)
-                # specially — all three park the turn on the UserQuestion modal.
+                # Handle AskUserQuestion (SDK) and AskUser (fluid)
+                # specially — both park the turn on the UserQuestion modal.
                 from app.core.user_question_handler import (
                     FLUID_ANSWER_KEY,
                     FLUID_QUESTION_TOOLS,
-                    HOST_USER_ANSWERED_KEY,
                     QUESTION_TOOLS,
                     fluid_answer_from_envelope,
                     questions_from_tool_input,
@@ -2585,62 +2477,6 @@ async def _stream_to_websocket_impl(
                     questions = questions_from_tool_input(tool_input)
                     if not questions:
                         return PermissionResultAllow(updated_input=tool_input)
-
-                    # StopPlanning is an approval, not a general question. Match
-                    # the SDK ExitPlanMode contract: bypass auto-approves; every
-                    # other live chip mode uses the durable permission queue and
-                    # purple Plan Approval panel. RespondQuestion still needs a
-                    # string, so translate allow/deny into approve/keep-planning.
-                    if tool_name == "StopPlanning":
-                        if _perm_mode == "bypassPermissions":
-                            return PermissionResultAllow(
-                                updated_input=await _auto_approve_plan_exit(
-                                    _sid, tool_input, refs
-                                )
-                            )
-                        # A plan gate parked by a turn that died (process
-                        # restart, abandoned run) stays ``pending`` for the rest
-                        # of its 300s TTL. The session resumes still in plan
-                        # mode, the model presents its plan again — and the
-                        # user's "proceed" landed on the DEAD request while this
-                        # one waited out its own TTL. Retire the corpses first
-                        # so the session never has two answerable plan gates.
-                        await permission_handler.supersede_plan_approvals(_sid)
-                        request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
-                        logger.debug(
-                            f"[WS] StopPlanning requires approval in {_perm_mode} mode: {request_id}"
-                        )
-                        result = await _request_permission(
-                            request_id=request_id,
-                            session_id=_sid,
-                            profile_id=_profile_id,
-                            tool_name=tool_name,
-                            tool_input=tool_input,
-                            broadcast_func=_broadcast,
-                            tool_use_id=_ctx_tool_use_id,
-                            agent_id=_ctx_agent_id,
-                            title="Plan Approval",
-                            display_name="Approve Plan",
-                            description="Review the plan before leaving plan mode.",
-                        )
-                        approved = not isinstance(result, _DeferSentinel) and getattr(
-                            result, "behavior", None
-                        ) != "deny"
-                        if approved:
-                            # The MRTR second leg flips the ENGINE flag via the
-                            # PlanModeControl wrapper; this syncs the APP side
-                            # (persisted binding, chip note, permission refs).
-                            _sync_plan_mode_exited(refs)
-                        # A person clicked the panel: say so, so the engine
-                        # can credit the user with the approval. The bypass
-                        # path above deliberately does not.
-                        return PermissionResultAllow(
-                            updated_input={
-                                **tool_input,
-                                FLUID_ANSWER_KEY: "approve" if approved else "keep planning",
-                                **({HOST_USER_ANSWERED_KEY: True} if approved else {}),
-                            }
-                        )
 
                     request_id = f"question-{_sid}-{uuid.uuid4().hex[:8]}"
                     logger.debug(f"[WS] {tool_name} canUseTool triggered: {request_id} with {len(questions)} questions (tool_use_id={_ctx_tool_use_id}, agent_id={_ctx_agent_id})")
@@ -2677,10 +2513,9 @@ async def _stream_to_websocket_impl(
                     # AskUserQuestion tool accepts, so resolve the pending tool
                     # call by denying it — the SDK turns the deny message into
                     # the tool_result, which is exactly the outcome we want the
-                    # model to read. Fluid AskUser / StopPlanning have no deny
+                    # model to read. Fluid AskUser have no deny
                     # path: they wait on RespondQuestion, so a dismiss is an
-                    # empty answer (AskUser records "(no answer)"; StopPlanning
-                    # treats it as a reject and stays in plan mode).
+                    # empty answer (AskUser records "(no answer)").
                     # (Per-question SKIPS are not this: they come back as
                     # ordinary answer strings and flow through below.)
                     from app.core.user_question_handler import (
@@ -2702,39 +2537,6 @@ async def _stream_to_websocket_impl(
                         updated[FLUID_ANSWER_KEY] = fluid_answer_from_envelope(answers)
                     return PermissionResultAllow(updated_input=updated)
 
-                # ExitPlanMode handling — show approval modal in default mode
-                # only. In bypass mode, auto-approve so fire-and-forget
-                # workflows aren't blocked waiting for user input.
-                if tool_name == "ExitPlanMode":
-                    if _perm_mode != "bypassPermissions":
-                        request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
-                        logger.debug(f"[WS] ExitPlanMode requires approval in {_perm_mode} mode: {request_id}")
-
-                        result = await _request_permission(
-                            request_id=request_id,
-                            session_id=_sid,
-                            profile_id=_profile_id,
-                            tool_name=tool_name,
-                            tool_input=tool_input,
-                            broadcast_func=_broadcast,
-                            tool_use_id=_ctx_tool_use_id,
-                            agent_id=_ctx_agent_id,
-                            title=_ctx_title,
-                            display_name=_ctx_display_name,
-                            description=_ctx_description,
-                            decision_reason=_ctx_decision_reason,
-                            blocked_path=_ctx_blocked_path,
-                        )
-                        if isinstance(result, _DeferSentinel):
-                            # Deferred ExitPlanMode — treat as deny so execution
-                            # stays paused; user can requeue and re-approve later
-                            return PermissionResultDeny(message="ExitPlanMode deferred by user")
-                        if result.behavior == "deny":
-                            return result
-
-                    _sync_plan_mode_exited(refs)
-                    return PermissionResultAllow()
-
                 # Computer use: request_access is the single approval gate (keyed to
                 # permission mode); individual actions are auto-allowed here — they
                 # enforce the granted state themselves, so we never prompt per click.
@@ -2742,8 +2544,6 @@ async def _stream_to_websocket_impl(
                     if tool_name == "mcp__computer-use__request_access":
                         if _perm_mode == "bypassPermissions":
                             return PermissionResultAllow()
-                        if _perm_mode == "plan":
-                            return PermissionResultDeny(message="Computer control is disabled in plan mode.")
                         apps = tool_input.get("apps") or []
                         reason = tool_input.get("reason") or ""
                         request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
@@ -2902,10 +2702,6 @@ async def _stream_to_websocket_impl(
             connect_options=options,
             cli_stderr_lines=cli_stderr_lines,
         )
-        # The adapter only exists now (built + connected above) — hand it to the
-        # can_use_tool closure so an approved plan exit can sync app state
-        # through it (_sync_plan_mode_exited).
-        callback_refs["adapter"] = adapter
         pool.put(session_id, state)
 
     # Mark as streaming (both reuse and create paths)

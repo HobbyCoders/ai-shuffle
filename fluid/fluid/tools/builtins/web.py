@@ -333,7 +333,7 @@ FETCH_SPEC = ToolSpec(
     # instruction could encode workspace data into the query string. Under
     # on_write the first fetch to a domain prompts; allow-always is scoped to
     # that domain (see _fetch_scope), so normal research costs one approval
-    # per site. Static "write" also keeps WebFetch out of plan mode.
+    # per site.
     risk="write",
     session_scope=lambda input: _fetch_scope(input),
 )

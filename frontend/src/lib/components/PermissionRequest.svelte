@@ -1,6 +1,5 @@
 <script lang="ts">
 	import './deck/cards/card-design-system.css';
-	import { activeSession } from '$lib/stores/active-session';
 
 	export interface PermissionRequestData {
 		request_id: string;
@@ -177,10 +176,9 @@
 	}
 
 	/** Remember scope for the decision about to be sent. The checkbox is a
-	 *  tool-wide "always" — profile-scoped and pattern-less. Plan approvals
-	 *  never remember. */
+	 *  tool-wide "always" — profile-scoped and pattern-less. */
 	function currentRemember(): 'none' | 'profile' {
-		return !isPlanApproval && alwaysForTool ? 'profile' : 'none';
+		return alwaysForTool ? 'profile' : 'none';
 	}
 
 	function handleAllow() {
@@ -234,208 +232,11 @@
 		return { visible, needsTruncate };
 	});
 
-	// ExitPlanMode (SDK) and StopPlanning (fluid) share one approval panel.
-	const isPlanApproval = $derived(
-		request.tool_name === 'ExitPlanMode' || request.tool_name === 'StopPlanning'
-	);
-	const allowedPrompts = $derived(
-		isPlanApproval && Array.isArray(request.tool_input?.allowedPrompts)
-			? (request.tool_input.allowedPrompts as Array<{ tool: string; prompt: string }>)
-			: []
-	);
-
-	// Extract plan content from recent assistant messages (current turn, after last user message)
-	const planContent = $derived.by(() => {
-		if (!isPlanApproval) return '';
-		const directPlan = request.tool_input?.plan;
-		if (typeof directPlan === 'string' && directPlan.trim()) return directPlan.trim();
-		const messages = $activeSession.messages;
-		if (!messages || messages.length === 0) return '';
-
-		// Find the last user message index — plan content is everything after it
-		let lastUserIdx = -1;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			if (messages[i].role === 'user') {
-				lastUserIdx = i;
-				break;
-			}
-		}
-
-		// Collect assistant text messages from after the last user message
-		const planParts: string[] = [];
-		const startIdx = lastUserIdx + 1;
-		for (let i = startIdx; i < messages.length; i++) {
-			const msg = messages[i];
-			if (msg.role === 'assistant' && (!msg.type || msg.type === 'text') && msg.content?.trim()) {
-				planParts.push(msg.content.trim());
-			}
-		}
-		return planParts.join('\n\n');
-	});
-
-	let planExpanded = $state(true);
-
-	// Plan mode icon: clipboard/list
-	const planIcon = 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01';
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
 
-{#if isPlanApproval}
-<!-- Plan Approval Panel -->
-<div
-	class="card-system permission-panel plan-approval-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-xs"
-	style="
-		border-color: color-mix(in oklch, var(--purple, #8b5cf6) 40%, var(--border));
-		background: var(--card);
-	"
-	role="dialog"
-	aria-labelledby="permission-title"
->
-	<!-- Header -->
-	<div
-		class="flex items-center gap-3 px-4 py-3 border-b"
-		style="border-color: color-mix(in oklch, var(--purple, #8b5cf6) 20%, var(--border));"
-	>
-		<!-- Plan Icon -->
-		<div
-			class="shrink-0 w-9 h-9 rounded-xl border flex items-center justify-center shadow-xs"
-			style="
-				background: color-mix(in oklch, var(--purple, #8b5cf6) 15%, var(--card));
-				border-color: color-mix(in oklch, var(--purple, #8b5cf6) 30%, transparent);
-			"
-		>
-			<svg class="w-4.5 h-4.5" style="color: var(--purple, #8b5cf6);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d={planIcon} />
-			</svg>
-		</div>
 
-		<!-- Title -->
-		<div class="flex-1 min-w-0">
-			<h3 id="permission-title" class="text-sm font-semibold text-foreground flex items-center gap-2">
-				Plan Approval
-				<span
-					class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-md border"
-					style="
-						background: color-mix(in oklch, var(--purple, #8b5cf6) 15%, transparent);
-						color: var(--purple, #8b5cf6);
-						border-color: color-mix(in oklch, var(--purple, #8b5cf6) 30%, transparent);
-					"
-				>
-					Plan
-				</span>
-			</h3>
-			<p class="text-xs text-muted-foreground truncate">{request.tool_name}</p>
-		</div>
-
-		<!-- Queue Badge -->
-		{#if queueCount > 1}
-			<div
-				class="shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-lg border"
-				style="
-					background: color-mix(in oklch, var(--muted-foreground) 10%, transparent);
-					border-color: color-mix(in oklch, var(--muted-foreground) 20%, transparent);
-				"
-			>
-				<span class="relative flex h-2 w-2">
-					<span class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style="background: color-mix(in oklch, var(--muted-foreground) 60%, transparent);"></span>
-					<span class="relative inline-flex rounded-full h-2 w-2" style="background: var(--muted-foreground);"></span>
-				</span>
-				<span class="text-xs font-medium" style="color: var(--muted-foreground);">{queueCount}</span>
-			</div>
-		{/if}
-	</div>
-
-	<!-- Plan Content -->
-	<div class="px-4 py-3">
-		{#if planContent}
-			<!-- Actual plan text from assistant messages -->
-			<button
-				type="button"
-				class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 hover:text-foreground transition-colors"
-				onclick={() => planExpanded = !planExpanded}
-			>
-				<svg class="w-3 h-3 transition-transform" class:rotate-90={planExpanded} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-				</svg>
-				Plan Details
-			</button>
-			{#if planExpanded}
-				<div
-					class="plan-content-preview rounded-lg border p-3 text-sm leading-relaxed overflow-y-auto whitespace-pre-wrap"
-					style="
-						max-height: 320px;
-						border-color: color-mix(in oklch, var(--purple, #8b5cf6) 20%, var(--border));
-						background: color-mix(in oklch, var(--purple, #8b5cf6) 5%, var(--card));
-						color: var(--foreground);
-					"
-				>{planContent}</div>
-			{/if}
-		{:else}
-			<p class="text-sm text-muted-foreground leading-relaxed">
-				Claude has created a plan and is requesting approval to proceed.
-			</p>
-		{/if}
-
-		<!-- Requested Permissions -->
-		{#if allowedPrompts.length > 0}
-			<div class="mt-3">
-				<h4 class="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Requested Permissions</h4>
-				<div class="plan-permissions-list">
-					{#each allowedPrompts as perm}
-						{@const permConfig = getToolConfig(perm.tool)}
-						<div class="plan-permission-item">
-							<div class="plan-permission-icon">
-								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d={permConfig.icon} />
-								</svg>
-							</div>
-							<span class="plan-permission-tool">{perm.tool}</span>
-							<span class="plan-permission-prompt">{perm.prompt}</span>
-						</div>
-					{/each}
-				</div>
-			</div>
-		{/if}
-	</div>
-
-	<!-- Action Buttons (no remember section for plan approvals) -->
-	<div class="px-4 py-3 border-t border-border/40 bg-card/20">
-		<div class="flex gap-2">
-			<!-- Reject Plan Button -->
-			<button
-				type="button"
-				onclick={handleDeny}
-				class="deny-btn"
-			>
-				Reject Plan
-			</button>
-
-			<!-- Approve Plan Button -->
-			<button
-				type="button"
-				onclick={handleAllow}
-				class="allow-btn plan-approve-btn"
-			>
-				Approve Plan
-			</button>
-		</div>
-
-		<!-- Keyboard Hints -->
-		<div class="mt-2 flex items-center justify-center gap-3 text-[10px] text-muted-foreground">
-			<span class="flex items-center gap-1">
-				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded-sm text-[9px] font-mono">Enter</kbd>
-				<span>Approve</span>
-			</span>
-			<span class="flex items-center gap-1">
-				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded-sm text-[9px] font-mono">Esc</kbd>
-				<span>Reject</span>
-			</span>
-		</div>
-	</div>
-</div>
-
-{:else}
 <!-- Permission Request Panel -->
 <div
 	class="card-system permission-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-xs"
@@ -641,7 +442,6 @@
 		</div>
 	</div>
 </div>
-{/if}
 
 <style>
 	.permission-panel {
@@ -860,83 +660,11 @@
 		}
 	}
 
-	/* ═══════════════════════════════════════════════════════
-	   PLAN APPROVAL STYLES
-	   ═══════════════════════════════════════════════════════ */
-
-	.plan-permissions-list {
-		display: flex;
-		flex-direction: column;
-		gap: 0.375rem;
-	}
-
-	.plan-permission-item {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		padding: 0.375rem 0.625rem;
-		border-radius: var(--radius, 0.75rem);
-		border: 1px solid color-mix(in oklch, var(--purple, #8b5cf6) 20%, var(--border));
-		background: color-mix(in oklch, var(--purple, #8b5cf6) 6%, var(--card));
-		transition: all 0.15s ease;
-	}
-
-	.plan-permission-item:hover {
-		border-color: color-mix(in oklch, var(--purple, #8b5cf6) 35%, var(--border));
-		background: color-mix(in oklch, var(--purple, #8b5cf6) 10%, var(--card));
-	}
-
-	.plan-permission-icon {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		flex-shrink: 0;
-		width: 1.375rem;
-		height: 1.375rem;
-		border-radius: 0.375rem;
-		background: color-mix(in oklch, var(--purple, #8b5cf6) 15%, transparent);
-		color: var(--purple, #8b5cf6);
-	}
-
-	.plan-permission-tool {
-		font-size: 0.75rem;
-		font-weight: 600;
-		color: var(--foreground);
-		white-space: nowrap;
-		flex-shrink: 0;
-	}
-
-	.plan-permission-prompt {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		min-width: 0;
-	}
-
-	.plan-approve-btn {
-		background: linear-gradient(
-			135deg,
-			var(--purple, #8b5cf6) 0%,
-			color-mix(in oklch, var(--purple, #8b5cf6) 85%, oklch(0.3 0.1 280)) 100%
-		) !important;
-	}
-
-	.plan-approve-btn:hover {
-		box-shadow: var(--shadow-m, 0 4px 6px -1px rgba(0,0,0,0.15)),
-			0 0 20px color-mix(in oklch, var(--purple, #8b5cf6) 30%, transparent) !important;
-	}
-
 	/* Mobile optimizations */
 	@media (max-width: 639px) {
 		.permission-panel {
 			border-radius: 1.25rem 1.25rem 0 0;
 			border-bottom: none;
-		}
-
-		.plan-permission-prompt {
-			font-size: 0.6875rem;
 		}
 	}
 </style>

@@ -19,8 +19,6 @@
 	import { displayToolName } from '$lib/utils/tool-icons';
 	import { liveToolLabel, toolPreview, toolStateLabel } from '$lib/utils/tool-preview';
 	import { isDismissedQuestion, QUESTION_DISMISSED_LABEL } from './question-outcome';
-	import { renderChatMarkdown } from '$lib/utils/chat-markdown';
-	import { sanitizeHtml } from '$lib/utils/sanitize';
 
 	interface Props {
 		name: string;
@@ -64,12 +62,6 @@
 		status === 'running' ? liveToolLabel(name, input, partialInput) : displayToolName(name)
 	);
 	const stateLabel = $derived(toolStateLabel(status, dismissedQuestion));
-	const stopPlanningPlan = $derived(
-		name === 'StopPlanning' && typeof input?.plan === 'string' ? input.plan : ''
-	);
-	const renderedPlan = $derived(
-		stopPlanningPlan ? sanitizeHtml(renderChatMarkdown(stopPlanningPlan, !streaming)) : ''
-	);
 	const accessibleLabel = $derived(
 		`${compactName}${preview ? `: ${preview}` : ''}. ${stateLabel}`
 	);
@@ -153,15 +145,9 @@
 		</span>
 	</button>
 
-	{#if renderedPlan}
-		<div class="stop-planning-plan prose" data-testid="stop-planning-plan">
-			{@html renderedPlan}
-		</div>
-	{/if}
-
 	{#if expanded && (partialInput || input || result || status === 'running' || status === 'error')}
 		<div class="wl-body">
-			{#if name !== 'StopPlanning' && (partialInput || (input && Object.keys(input).length > 0))}
+			{#if partialInput || (input && Object.keys(input).length > 0)}
 				<div class="wl-panel">
 					<div class="wl-panel-label">Input</div>
 					<div class="wl-pane">
@@ -336,69 +322,6 @@
 	@media (max-width: 639px) {
 		.wlrow {
 			min-height: 44px;
-		}
-	}
-
-	.stop-planning-plan {
-		margin: 2px 8px 10px 35px;
-		padding: 12px 14px;
-		border-left: 2px solid var(--primary);
-		border-radius: 0 8px 8px 0;
-		background: color-mix(in oklch, var(--muted) 35%, transparent);
-		color: var(--foreground);
-		font-size: 13px;
-		line-height: 1.65;
-	}
-
-	.stop-planning-plan :global(.codeblock) {
-		margin-block: 10px;
-		overflow: hidden;
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		background: var(--code-bg);
-	}
-
-	.stop-planning-plan :global(.codehead) {
-		display: flex;
-		align-items: center;
-		gap: 7px;
-		padding: 5px 8px;
-		border-bottom: 1px solid var(--border);
-		color: var(--subtle-foreground);
-		font-family: var(--font-mono);
-		font-size: 10px;
-	}
-
-	.stop-planning-plan :global(.codehead .fname) {
-		margin-right: auto;
-	}
-
-	.stop-planning-plan :global(.code-copy-btn) {
-		display: none;
-	}
-
-	.stop-planning-plan :global(.cb-pre) {
-		margin: 0;
-		padding: 10px 12px;
-		overflow-x: auto;
-		background: transparent;
-		font-family: var(--font-mono);
-		font-size: 11.5px;
-		line-height: 1.65;
-	}
-
-	.stop-planning-plan :global(.cb-pre span) {
-		color: var(--shiki-light, inherit);
-	}
-
-	:global(html.dark) .stop-planning-plan :global(.cb-pre span) {
-		color: var(--shiki-dark, inherit);
-	}
-
-	@media (max-width: 639px) {
-		.stop-planning-plan {
-			margin-left: 8px;
-			padding: 10px 12px;
 		}
 	}
 

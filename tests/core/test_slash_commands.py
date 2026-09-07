@@ -854,7 +854,7 @@ class TestSdkBuiltinCommands:
     def test_is_sdk_builtin_command_new_commands(self):
         """Should detect all new SDK built-in commands."""
         new_commands = [
-            "cost", "model", "review", "plan", "doctor", "init",
+            "cost", "model", "review", "doctor", "init",
             "memory", "add-dir", "output-style", "todos", "export",
             "pr-comments", "stats", "insights", "sandbox",
             "security-review", "rename", "release-notes", "status",
@@ -1136,7 +1136,7 @@ class TestCommandConstants:
     def test_sdk_builtin_commands_all_present(self):
         """SDK_BUILTIN_COMMANDS should contain all expected commands."""
         expected = [
-            "compact", "context", "cost", "model", "review", "plan",
+            "compact", "context", "cost", "model", "review",
             "doctor", "init", "memory", "add-dir", "output-style",
             "todos", "export", "pr-comments", "stats", "insights",
             "sandbox", "security-review", "rename", "release-notes",

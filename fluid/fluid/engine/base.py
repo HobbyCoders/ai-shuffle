@@ -14,7 +14,6 @@ from fluid.events.ops import Op
 class EngineCaps:
     code_mode: bool = False
     inproc_tools: bool = False
-    schema_plan_mode: bool = False
     fork: bool = False
     rewind: bool = False
     subagents: bool = False

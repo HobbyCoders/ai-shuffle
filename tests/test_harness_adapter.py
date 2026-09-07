@@ -997,9 +997,9 @@ async def test_delegated_loop_allow_uses_updated_input():
     }
 
 
-# ─── 3c. Fluid QuestionRequest (AskUser / StopPlanning) → RespondQuestion ─────
+# ─── 3c. Fluid QuestionRequest (AskUser) → RespondQuestion ─────
 #
-# Native AskUser and StopPlanning park on QuestionRequest, not PermissionRequest.
+# Native AskUser parks on QuestionRequest, not PermissionRequest.
 # The adapter must NOT submit RespondPermission for those — NativeLoop is waiting
 # on RespondQuestion and a permission op would hang the turn.
 
@@ -1062,37 +1062,8 @@ async def test_fluid_question_dismiss_submits_empty_answer():
 
 
 @pytest.mark.asyncio
-async def test_stop_planning_does_not_skip_modal_on_stale_bypass_flag():
-    """A leftover pre-plan bypass flag must not hide the modal after the chip
-    switched to ask-permission. Live mode is can_use_tool's job."""
-    called = []
-
-    async def can_use_tool(tool_name, tool_input, context):
-        called.append(tool_name)
-        assert tool_input["plan"] == "# Plan"
-        return _FakeAllow({**tool_input, "_fluid_answer": "Approve"})
-
-    message = (
-        "# Plan\n\nApprove this plan and leave plan mode? "
-        "(1 = Approve, anything else = feedback)"
-    )
-    engine = FakeEngine(_fluid_question_request(name="StopPlanning", message=message))
-    adapter = _adapter_with(engine)
-    adapter._can_use_tool = can_use_tool
-    adapter._pre_plan_permission_mode = "bypassPermissions"
-    adapter._options.permission_mode = "default"
-    await _collect(adapter)
-    await _drain_bridge(engine)
-
-    assert called == ["StopPlanning"]
-    op = engine.ops[0]
-    assert isinstance(op, RespondQuestion)
-    assert op.answer == "Approve"
-
-
-@pytest.mark.asyncio
 async def test_ask_user_still_prompts_in_bypass():
-    """Bypass auto-accept is StopPlanning-only — AskUser still goes to the modal."""
+    """AskUser still goes to the modal under bypass."""
     engine = FakeEngine(_fluid_question_request(name="AskUser"))
     adapter = _adapter_with(engine)
     adapter._pre_plan_permission_mode = "bypassPermissions"
@@ -1104,19 +1075,6 @@ async def test_ask_user_still_prompts_in_bypass():
     await _collect(adapter)
     await _drain_bridge(engine)
     assert engine.ops[0].answer == "Yes"
-
-
-def test_plan_from_bypass_does_not_move_the_chip():
-    """Entering plan from bypass must not persist permission_mode=plan."""
-    engine = FakeEngine([])
-    engine.plan_mode = False
-    engine.permissions = type("P", (), {"approval_policy": "never_ask"})()
-    adapter = _adapter_with(engine)
-    adapter._pre_plan_permission_mode = "bypassPermissions"
-    adapter._on_plan_mode_changed(True)
-    assert engine.plan_mode is True
-    assert engine.permissions.approval_policy == "never_ask"
-    assert adapter._pending_plan_mode_events == []
 
 
 @pytest.mark.asyncio
@@ -1132,115 +1090,6 @@ async def test_fluid_question_does_not_yield_permission_event():
     events = await _collect(adapter)
     await _drain_bridge(engine)
     assert not any(isinstance(ev, PermissionRequestEvent) for ev in events)
-
-
-@pytest.mark.asyncio
-async def test_plan_mode_change_is_yielded_as_status_system_message():
-    """PlanModeControl.set_active queues a status note receive_events drains."""
-    engine = FakeEngine([
-        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
-    ])
-    adapter = _adapter_with(engine)
-    adapter._on_plan_mode_changed(True)
-    events = await _collect(adapter)
-    notes = [e for e in events if isinstance(e, SystemMessage) and e.subtype == "status"]
-    assert notes
-    assert notes[0].data["permissionMode"] == "plan"
-
-
-def test_wire_plan_mode_control_wraps_set_active():
-    """Wrapping PlanModeControl makes set_active queue the status note."""
-    from fluid.tools.builtins.plan import PlanModeControl
-    from fluid.tools.registry import ToolCtx
-
-    flag = {"on": False}
-    engine = FakeEngine([])
-    engine.ctx = ToolCtx()
-    engine.ctx.extra["plan_mode_control"] = PlanModeControl(
-        is_active=lambda: flag["on"],
-        set_active=lambda v: flag.__setitem__("on", bool(v)),
-    )
-    engine.plan_mode = False
-    engine.permissions = type("P", (), {"approval_policy": "on_write"})()
-    adapter = _adapter_with(engine)
-    adapter._engine = engine
-    adapter._wire_plan_mode_control(SessionOptions(model="fake-model", permission_mode="default"))
-    extra = engine.ctx.extra["plan_mode_control"]
-    extra.set_active(True)
-    assert flag["on"] is True
-    assert adapter._pending_plan_mode_events
-    assert adapter._pending_plan_mode_events[0].data["permissionMode"] == "plan"
-
-
-def test_plan_mode_exit_restores_policy_and_flag():
-    """Leaving plan mode must flip the engine flag AND the approval policy.
-
-    Otherwise a chip-initiated plan (always_ask) that StopPlanning approved
-    would keep prompting every write for the rest of the turn, and a
-    Plan-tool entry whose QuestionRequest was dropped would linger forever
-    because the next send still says permission_mode=default.
-    """
-    engine = FakeEngine([])
-    engine.plan_mode = True
-    engine.permissions = type("P", (), {"approval_policy": "always_ask"})()
-    adapter = _adapter_with(engine)
-    adapter._pre_plan_permission_mode = "acceptEdits"
-    adapter._on_plan_mode_changed(False)
-    assert engine.plan_mode is False
-    assert engine.permissions.approval_policy == "on_write"
-
-
-def test_bypass_exit_from_chip_initiated_plan_restores_binding():
-    """A bypass user who picked Plan Only, then approved the plan exit, must
-    get their session binding restored — not stay bound to ``plan`` forever.
-
-    Regression: the bypass early-return in _on_plan_mode_changed skipped the
-    restore entirely whenever pre was bypassPermissions, so an exit never
-    cleared the persisted ``plan`` binding on this path either."""
-    engine = FakeEngine([])
-    engine.plan_mode = True
-    engine.permissions = type("P", (), {"approval_policy": "never_ask"})()
-    adapter = _adapter_with(engine)
-    adapter._pre_plan_permission_mode = "bypassPermissions"
-    # The chip-initiated plan left the session binding at plan.
-    adapter._options.permission_mode = "plan"
-    restored = adapter._on_plan_mode_changed(False)
-    assert restored == "bypassPermissions"
-    assert engine.plan_mode is False
-    # Bypass semantics hold: straight back to never_ask.
-    assert engine.permissions.approval_policy == "never_ask"
-    # The status note is queued so the chip follows.
-    assert adapter._pending_plan_mode_events
-
-
-def test_notify_plan_mode_exited_noop_when_not_in_plan():
-    """An exit sync on an adapter that was never plan-bound does nothing."""
-    engine = FakeEngine([])
-    engine.plan_mode = False
-    adapter = _adapter_with(engine)
-    assert adapter.notify_plan_mode_exited() is None
-    assert not adapter._pending_plan_mode_events
-    assert engine.plan_mode is False
-
-
-def test_notify_plan_mode_exited_syncs_options_and_engine():
-    """The delegated-leg exit path: notify restores binding + options + flag."""
-    engine = FakeEngine([])
-    engine.plan_mode = True
-    engine.permissions = type("P", (), {"approval_policy": "always_ask"})()
-    adapter = _adapter_with(engine)
-    adapter._options.permission_mode = "plan"  # session bound to plan
-    adapter._pre_plan_permission_mode = "default"
-
-    restored = adapter.notify_plan_mode_exited()
-
-    assert restored == "default"
-    assert adapter._options.permission_mode == "default"
-    assert adapter._pre_plan_permission_mode == "default"
-    assert engine.plan_mode is False
-    assert engine.permissions.approval_policy == "on_write"
-    notes = [n for n in adapter._pending_plan_mode_events if n.subtype == "status"]
-    assert notes and notes[0].data["permissionMode"] == "default"
 
 
 # ─── 3. End-to-end over a real NativeLoop + fake provider ────────────────────
@@ -3903,7 +3752,7 @@ async def test_connect_native_leg_keeps_provider_settings_inert(monkeypatch, tmp
     monkeypatch.setattr(
         ha.HarnessAdapter,
         "_build_permissions",
-        lambda self, options: (PermissionEngine("on_write", rules=[host_rule]), False),
+        lambda self, options: PermissionEngine("on_write", rules=[host_rule]),
     )
     monkeypatch.setattr(
         ha.HarnessAdapter, "_build_store", staticmethod(lambda options: MemoryStore())

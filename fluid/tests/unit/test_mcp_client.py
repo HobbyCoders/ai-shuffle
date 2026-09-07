@@ -102,29 +102,26 @@ async def test_mrtr_input_required_surfaces_marker() -> None:
 
 
 async def test_trusted_server_annotations_lower_the_risk() -> None:
-    from fluid.permissions.engine import plan_mode_blocks
 
     reg = ToolRegistry()
     try:
         await reg.connect_mcp("srv", {**_config(), "trust_annotations": True})
         weather = reg.get("mcp__srv__get_weather")
         assert weather is not None and weather.risk == "safe"
-        assert not plan_mode_blocks(weather)
         note = reg.get("mcp__srv__write_note")
         assert note is not None and note.risk == "write"
     finally:
         await reg.aclose()
 
 
-async def test_untrusted_read_only_tool_leaves_the_plan_mode_surface() -> None:
-    from fluid.permissions.engine import PermissionEngine, plan_mode_blocks
+async def test_untrusted_read_only_tool_requires_permission() -> None:
+    from fluid.permissions.engine import PermissionEngine
 
     reg = ToolRegistry()
     try:
         await reg.connect_mcp("srv", _config())
         weather = reg.get("mcp__srv__get_weather")
         assert weather is not None
-        assert plan_mode_blocks(weather)
         assert PermissionEngine("on_write").decide(weather, {"city": "x"}).decision == "ask"
     finally:
         await reg.aclose()

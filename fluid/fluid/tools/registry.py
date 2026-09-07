@@ -376,8 +376,8 @@ class ToolRegistry:
         descriptors = await self._manager.connect(name, config)
         specs: list[ToolSpec] = []
         # A server's readOnlyHint is the server's word about itself. Taken
-        # at face value it skips the permission prompt and keeps the tool on
-        # the plan-mode surface, so it counts only when the config says the
+        # at face value it skips the permission prompt, so it counts only
+        # when the config says the
         # server is trusted. A destructiveHint always counts: it raises the
         # guard, never lowers it.
         trusted = bool(config.get("trust_annotations", False))

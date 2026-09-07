@@ -45,8 +45,6 @@ export interface FeedControllerDeps {
 	 *  event says it was resolved (possibly on another device). Wired to
 	 *  activeSession.resolveInteractionByRequestId; a cheap no-op when absent. */
 	resolveInteractionByRequestId: (requestId: string) => void;
-	/** Plan/StopPlanning flipped the engine flag — keep the composer chip in sync. */
-	setPermissionMode?: (mode: string) => void;
 }
 
 // ─── Module state ─────────────────────────────────────────────────────────────
@@ -816,15 +814,6 @@ export const feedController: FeedController = {
 					ev.request_id
 				) {
 					deps?.resolveInteractionByRequestId(ev.request_id);
-				}
-				// Live only: a model-initiated Plan / StopPlanning flip. Backfill
-				// must not rewind the chip to an earlier turn's mode.
-				if (caughtUp && ev.type === 'system.note') {
-					const data = ev.data as Record<string, unknown> | undefined;
-					const mode = data?.permissionMode;
-					if (typeof mode === 'string' && mode) {
-						deps?.setPermissionMode?.(mode);
-					}
 				}
 				// During backfill (!caughtUp) accumulate silently — the single fold
 				// happens on `caught_up`. After catch-up, fold on the live cadence:

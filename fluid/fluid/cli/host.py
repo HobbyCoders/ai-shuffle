@@ -864,12 +864,10 @@ class CliHost:
                     )
                 wanted = kept
             allowed = wanted
-        # No recursive fan-out, and no plan mode inside a worker — a subagent
-        # asking the user to approve a plan inverts the delegation contract
-        # (Claude Code bans its plan tools in subagents the same way).
+        # No recursive fan-out inside a worker.
         parent_disallowed = getattr(self.engine, "disallowed_tools", None) or ()
         disallowed = list(dict.fromkeys([
-            "Task", "Plan", "StopPlanning",
+            "Task",
             *self.config.tools.disallowed, *parent_disallowed,
         ]))
         refine_builtin_descriptions(

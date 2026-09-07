@@ -10,7 +10,7 @@ Two callbacks, both optional, both about asking the human something:
 
 - ``on_permission`` — the engine says "ask"; in production ``CodeModeSession``
   backs it with a ``PermissionRequest``/``RespondPermission`` pair.
-- ``on_input_required`` — the *tool* asks (MRTR: ``AskUser``, ``StopPlanning``);
+- ``on_input_required`` — the *tool* asks (MRTR: ``AskUser``);
   production backs it with ``QuestionRequest``/``RespondQuestion``.
 
 Unwired, each one fails loudly rather than quietly: a missing permission
@@ -21,9 +21,7 @@ release read to the model as "the tool ran and said nothing", and it invented
 the user's answers from there.
 
 Hard refusals, all before dispatch: a tool outside the session's tool surface
-(``tool_filter``, ruling T9), a write tool while plan mode is active
-(``plan_mode`` — same rule the request schemas apply, asked live so an
-approval mid-turn lifts it at once), a tool with ``code_mode_allowed=False`` (the
+(``tool_filter``, ruling T9), a tool with ``code_mode_allowed=False`` (the
 auditable high-risk escape hatch — the model is told to use the JSON tool path),
 a re-entrant ``run_python``, and a denied permission/hook. Refusals come back as
 ``HostReply(denied=…)`` / ``HostReply(error=…)`` so the kernel *raises* in the
@@ -43,8 +41,6 @@ from fluid.permissions.engine import (
     PROMPT_DENIAL,
     PermissionEngine,
     non_interactive_denial,
-    plan_mode_blocks,
-    plan_mode_denial,
 )
 from fluid.tools.mrtr import resolve_input_required, unresolved_notice
 from fluid.tools.registry import InputRequired, ToolCtx, ToolRegistry
@@ -80,7 +76,6 @@ class HostBridge:
         ctx: ToolCtx | None = None,
         doom_loop: bool = True,
         tool_filter: Callable[[str], bool] | None = None,
-        plan_mode: Callable[[], bool] | None = None,
         result_budget: int | None = None,
         on_stop: OnStop | None = None,
     ) -> None:
@@ -93,10 +88,6 @@ class HostBridge:
         self._ctx = ctx or ToolCtx()
         self._doom_loop = doom_loop
         self._tool_filter = tool_filter
-        # "Is plan mode on right now?" — a live predicate, not a snapshot. The
-        # mode ends mid-turn (StopPlanning's approval flips it during dispatch),
-        # and the very next in-kernel call must be free to write.
-        self._plan_mode = plan_mode
         # What the kernel delivers verbatim (its ResultRef threshold). Stamped
         # on the shared ctx so repeat-work notes can tell "the model has this"
         # from "the kernel has this" — see ToolCtx.read_delivered.
@@ -107,17 +98,6 @@ class HostBridge:
         self, tool_name: str, kwargs: dict[str, Any], *,
         tool_use_id: str | None = None,
     ) -> HostReply:
-        # Plan mode, before the surface check: a write tool is filtered out of
-        # the projection while planning, so the generic "not available in this
-        # session" would be true but useless — the model would read it as a
-        # missing tool rather than as the mode it can end itself. Checked here
-        # (not only in the projection) because the projection just decides what
-        # the kernel is TOLD about; a hand-written ``__host_call__`` skips it.
-        if self._plan_mode is not None and self._plan_mode():
-            spec = self._registry.get(tool_name)
-            if spec is not None and plan_mode_blocks(spec):
-                return HostReply(denied=True, message=plan_mode_denial(tool_name))
-
         # Session tool surface (ruling T9), ahead of the registry lookup so the
         # answer does not depend on whether the filtered name happens to exist.
         # The stub was never projected, so the model should not be able to reach
@@ -199,7 +179,7 @@ class HostBridge:
         outcome = await self._registry.dispatch(tool_name, tool_input, self._ctx)
 
         # MRTR: the tool paused to ask the user something (AskUser,
-        # StopPlanning, an elicitating MCP server). Its first leg is an EMPTY
+        # an elicitating MCP server). Its first leg is an EMPTY
         # result carrying a marker — returning that as ``result`` is how a
         # release told models their questions had been answered with silence.
         if outcome.input_required is not None:

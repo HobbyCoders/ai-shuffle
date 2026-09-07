@@ -504,7 +504,7 @@ describe('session run binding on switch', () => {
 
 		expect(getState().modelOverride).toBe('prov:openai:gpt-5.6-sol');
 		expect(getState().effortLevelOverride).toBe('xhigh');
-		expect(getState().permissionModeOverride).toBe('plan');
+		expect(getState().permissionModeOverride).toBe('default');
 		expect(getState().contextWindowChoice).toBe('standard');
 	});
 
@@ -548,7 +548,7 @@ describe('session run binding on switch', () => {
 		const s = getState();
 		expect(s.modelOverride).toBe('prov:op:openai/gpt-5.6');
 		expect(s.effortLevelOverride).toBe('high');
-		expect(s.permissionModeOverride).toBe('plan');
+		expect(s.permissionModeOverride).toBe('default');
 		expect(s.contextWindowChoice).toBe('standard');
 		// Cross-device: the row is the only carrier of the fast-tier pick.
 		expect(s.fastMode).toBe(true);
@@ -884,7 +884,7 @@ describe('session mode lanes', () => {
 		switcher.newChat();
 		switcher.destroy();
 
-		expect(getState().permissionModeOverride).toBe('plan');
+		expect(getState().permissionModeOverride).toBe('default');
 	});
 });
 

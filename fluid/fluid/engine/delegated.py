@@ -6,7 +6,7 @@ in ``-p --input-format stream-json --output-format stream-json`` mode, feeds it
 user turns on stdin, and maps every frame it writes back (via
 ``delegated_proto``) onto the same ``Event`` model ``NativeLoop`` emits. A client
 reading ``events()`` cannot tell the two engines apart, modulo the documented
-capability matrix (``EngineCaps``): no code-mode, no schema plan mode, no
+capability matrix (``EngineCaps``): no code-mode, no
 arbitrary-node fork/rewind (only ``--resume``), no cache-breakpoint metrics.
 
 In-process tools reach the CLI through a bundled stdio MCP server fronting the
@@ -139,7 +139,6 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     caps = EngineCaps(
         code_mode=False,
         inproc_tools=True,
-        schema_plan_mode=False,
         fork=False,
         rewind=False,
         subagents=True,
@@ -183,7 +182,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.claude_cmd = claude_cmd or [claude_path]
         self.system = system
         self.append_system_prompt = append_system_prompt
-        self.permission_mode = permission_mode
+        # Always set a mode so old CLI settings or resumed sessions cannot
+        # restore the retired planning mode.
+        self.permission_mode = "default" if permission_mode in (None, "plan") else permission_mode
         self.registry = registry
         self.ctx = ctx or ToolCtx()
         self.cli_session_id = cli_session_id  # --resume handle; refreshed each turn
@@ -196,7 +197,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # whole surface when set, disallowed subtracts. The native leg enforces
         # the same pair itself; here the child CLI does the enforcing.
         self.allowed_tools = allowed_tools
-        self.disallowed_tools = disallowed_tools
+        # The delegated CLI supplies these tools itself; keep them off its surface.
+        self.disallowed_tools = list(dict.fromkeys([
+            *(disallowed_tools or ()), "EnterPlanMode", "ExitPlanMode",
+        ]))
         # Gates for the bundled bridge only: the CLI owns its own tools, but a
         # registry tool served over the bridge is harness dispatch and gets the
         # native loop's hook + permission treatment. Optional; None skips.
@@ -352,8 +356,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self.model = op.model
             await self._send_control({"subtype": "set_model", "model": op.model})
         elif isinstance(op, SetPermissionMode):
-            self.permission_mode = op.mode
-            await self._send_control({"subtype": "set_permission_mode", "mode": op.mode})
+            self.permission_mode = "default" if op.mode == "plan" else op.mode
+            await self._send_control({"subtype": "set_permission_mode", "mode": self.permission_mode})
         else:  # Fork / Rewind: unsupported under delegation (see EngineCaps)
             raise NotImplementedError(f"op not supported by DelegatedLoop: {type(op).__name__}")
 

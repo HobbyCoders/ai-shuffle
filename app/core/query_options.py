@@ -59,10 +59,8 @@ logger = logging.getLogger(__name__)
 # sessions (ruling A3, 2026-07-25 — workers cannot ask user questions).
 # Ruling A3: a worker must not be able to ask the human anything. Approvals
 # redirect to the parent; questions do not — they stall on the question TTL.
-# Fluid's AskUser / StopPlanning are the same interaction kind as the SDK's
-# AskUserQuestion; Plan is stripped with them so a worker cannot enter a
-# plan mode it has no way to leave.
-WORKER_DISALLOWED_TOOLS = ("AskUserQuestion", "AskUser", "Plan", "StopPlanning")
+# Fluid's AskUser has the same interaction kind as the SDK's AskUserQuestion.
+WORKER_DISALLOWED_TOOLS = ("AskUserQuestion", "AskUser")
 WORKER_DISALLOWED_TOOL = WORKER_DISALLOWED_TOOLS[0]
 
 

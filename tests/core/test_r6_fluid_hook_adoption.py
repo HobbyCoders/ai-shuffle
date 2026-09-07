@@ -35,7 +35,6 @@ from app.core.user_question_handler import FLUID_ANSWER_KEY, HOST_USER_ANSWERED_
 from fluid.events import model as lm
 from fluid.events.ops import RespondQuestion, Steer
 from fluid.tools.builtins import refine_builtin_descriptions, register_builtins
-from fluid.tools.builtins.plan import PlanModeControl
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
 SID = "ses_r6"
@@ -187,7 +186,7 @@ def test_wired_capabilities_include_what_native_loop_wires_itself():
     ctx = ToolCtx()
     ctx.extra["task_dispatch"] = object()
     wired = ha._wired_capabilities(ctx)
-    assert {"task_dispatch", "plan_mode_control", "tool_registry", "history_recall"} <= wired
+    assert {"task_dispatch", "tool_registry", "history_recall"} <= wired
     assert "agent_message" not in wired
 
 
@@ -197,7 +196,7 @@ def test_wired_tool_names_drop_builtins_whose_capability_is_missing():
     wired = ha._wired_capabilities(ToolCtx())
     names = ha._wired_tool_names(registry, None, wired)
     assert names is not None
-    assert "Read" in names and "Plan" in names and "ToolSearch" in names
+    assert "Read" in names and "Plan" not in names and "ToolSearch" in names
     # No agent messaging, no monitor spawner, no task dispatcher on this ctx.
     assert "SendMessage" not in names and "ListAgents" not in names
     assert "Monitor" not in names and "Task" not in names
@@ -267,47 +266,6 @@ def test_monitor_description_names_the_enforced_budget(monkeypatch):
 # ─── plan gate honesty ────────────────────────────────────────────────────────
 
 
-def _engine_with_plan_control():
-    flag = {"on": False}
-    engine = _Engine()
-    engine.ctx = ToolCtx()
-    engine.ctx.extra["plan_mode_control"] = PlanModeControl(
-        is_active=lambda: flag["on"],
-        set_active=lambda v: flag.__setitem__("on", bool(v)),
-    )
-    engine.plan_mode = False
-    engine.permissions = SimpleNamespace(approval_policy="never_ask")
-    return engine, flag
-
-
-async def test_plan_controller_says_the_gate_is_automatic_under_bypass():
-    engine, flag = _engine_with_plan_control()
-    adapter = _adapter(engine, permission_mode="bypassPermissions")
-    adapter._wire_plan_mode_control(SessionOptions(model="m", permission_mode="bypassPermissions"))
-    control = engine.ctx.extra["plan_mode_control"]
-    assert control.auto_approve is True
-    # The wrapped callables still drive the engine flag.
-    control.set_active(True)
-    assert flag["on"] is True and control.is_active() is True
-
-    # Leaving bypass through the chip re-stamps the flag; the callables stay.
-    async def _no_native(op):
-        raise NotImplementedError
-
-    engine.submit = _no_native
-    await adapter.set_permission_mode("default")
-    refreshed = engine.ctx.extra["plan_mode_control"]
-    assert refreshed.auto_approve is False
-    assert refreshed.is_active is control.is_active
-
-
-async def test_plan_controller_is_honest_by_default():
-    engine, _ = _engine_with_plan_control()
-    adapter = _adapter(engine, permission_mode="default")
-    adapter._wire_plan_mode_control(SessionOptions(model="m", permission_mode="default"))
-    assert engine.ctx.extra["plan_mode_control"].auto_approve is False
-
-
 class PermissionResultAllow:
     """The adapter recognises the allow result by its class NAME."""
 
@@ -327,7 +285,7 @@ async def test_a_real_panel_answer_is_attributed_to_the_user():
 
     adapter._can_use_tool = can_use_tool
     ev = PermissionRequestEvent(
-        tool_use_id="tu1", name="StopPlanning", input={"plan": "p"}, request_id="q1",
+        tool_use_id="tu1", name="AskUser", input={"question": "Choose one"}, request_id="q1",
     )
     await adapter._bridge_question(ev)
     answers = [op for op in engine.ops if isinstance(op, RespondQuestion)]
@@ -344,7 +302,7 @@ async def test_a_policy_answer_is_not_attributed():
 
     adapter._can_use_tool = can_use_tool
     ev = PermissionRequestEvent(
-        tool_use_id="tu2", name="StopPlanning", input={"plan": "p"}, request_id="q2",
+        tool_use_id="tu2", name="AskUser", input={"question": "Choose one"}, request_id="q2",
     )
     await adapter._bridge_question(ev)
     answers = [op for op in engine.ops if isinstance(op, RespondQuestion)]

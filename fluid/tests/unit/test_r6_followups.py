@@ -9,7 +9,7 @@
   state ride each turn as a reminder, so a new day no longer rewrites the
   cached prompt prefix.
 * ``RespondQuestion(user_answered=True)`` lands ``USER_ANSWERED_KEY`` in the
-  tool's answers, which is what lets StopPlanning credit a person.
+  tool's answers, which is what lets AskUser credit a person.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from fluid.store.base import MemoryStore
 from fluid.tools import read_window
 from fluid.tools.builtins import register_builtins
 from fluid.tools.builtins.edit import handler as edit_handler
-from fluid.tools.builtins.plan import USER_ANSWERED_KEY
+USER_ANSWERED_KEY = "__user_answered__"
 from fluid.tools.builtins.read import handler as read_handler
 from fluid.tools.builtins.write import handler as write_handler
 from fluid.tools.registry import (
@@ -354,11 +354,11 @@ async def test_a_user_answered_response_marks_the_answers() -> None:
 
     loop._emit = _emit  # type: ignore[method-assign]
     marker = InputRequired(
-        server="builtin", tool="StopPlanning", request_state=None,
+        server="builtin", tool="AskUser", request_state=None,
         requests={"approve": {"message": "Approve the plan?"}},
     )
     task = asyncio.create_task(
-        loop._collect_input_responses("s", "t", "StopPlanning", "tu1", marker)
+        loop._collect_input_responses("s", "t", "AskUser", "tu1", marker)
     )
     for _ in range(50):
         await asyncio.sleep(0)
@@ -380,11 +380,11 @@ async def test_an_unattributed_response_leaves_the_answers_bare() -> None:
 
     loop._emit = _emit  # type: ignore[method-assign]
     marker = InputRequired(
-        server="builtin", tool="StopPlanning", request_state=None,
+        server="builtin", tool="AskUser", request_state=None,
         requests={"approve": {"message": "Approve the plan?"}},
     )
     task = asyncio.create_task(
-        loop._collect_input_responses("s", "t", "StopPlanning", "tu1", marker)
+        loop._collect_input_responses("s", "t", "AskUser", "tu1", marker)
     )
     for _ in range(50):
         await asyncio.sleep(0)

@@ -78,25 +78,15 @@ CAPABILITY_TOOL_REASONS: dict[str, str] = {
     "HistorySearch": "no history recall capability",
     "ListAgents": "no agent roster capability",
     "Monitor": "no monitor spawner",
-    "Plan": "no plan-mode control",
     "Recall": "no recall store",
     "Remember": "no continual journal",
     "SendMessage": "no agent messaging capability",
     "SessionSearch": "no session search capability",
     "SessionView": "no session view capability",
-    "StopPlanning": "no plan-mode control",
     "Swarm": "no swarm coordinator or task dispatch capability",
     "Task": "no task dispatch capability",
     "ToolSearch": "no tool registry capability",
 }
-
-# Builtins plan mode withholds. A name in both tables can be missing for either
-# reason, and the kernel cannot tell which — so the message says both rather
-# than asserting the wrong one.
-PLAN_MODE_WITHHELD = frozenset({
-    "Bash", "Edit", "Monitor", "SendMessage", "Swarm", "Task", "WebFetch", "Write",
-})
-
 
 def missing_leaf_message(pkg: str, name: str) -> str:
     """Why ``pkg.name`` does not resolve, and what to reach for instead.
@@ -119,17 +109,10 @@ def missing_leaf_message(pkg: str, name: str) -> str:
         )
     reason = CAPABILITY_TOOL_REASONS.get(name)
     if reason is not None:
-        if name in PLAN_MODE_WITHHELD:
-            reason = f"{reason}, or plan mode has withheld it"
         return (
             f"{head} — {name} is not available on this host ({reason}), so no "
             "import spelling will reach it. `dir(tools)` lists what is "
             "mounted here."
-        )
-    if name in PLAN_MODE_WITHHELD:
-        return (
-            f"{head} — {name} is off the surface while plan mode is on. "
-            "`dir(tools)` lists what is mounted here."
         )
     return f"{head} — `dir({pkg})` lists what is mounted here."
 

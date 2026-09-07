@@ -1,11 +1,11 @@
 """Code mode must be able to ask the user something.
 
-The shipped bug: ``AskUser`` and ``StopPlanning`` called from inside
+The shipped bug: ``AskUser`` called from inside
 ``run_python`` returned ``''``. Their first leg is an EMPTY ToolOutcome
 carrying an ``input_required`` marker, and code mode's host-call gate dispatched
 once and threw the marker away — no QuestionRequest, no modal, no second leg.
 Models read ``=> ''`` as "the tool ran and said nothing", invented the user's
-answers, and (for StopPlanning) told the user a plan was awaiting an approval
+answers and left the tool waiting for input
 nobody had been asked for. Plan mode never turned off.
 
 These tests drive the real subprocess kernel through a real ``NativeLoop``, so
@@ -31,7 +31,7 @@ from fluid.events import (
 from fluid.permissions.engine import PermissionEngine
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore
-from fluid.tools.builtins import ask_user, plan
+from fluid.tools.builtins import ask_user
 from fluid.tools.mcp.bundled_server import _answer
 from fluid.tools.registry import (
     InputRequired,
@@ -140,76 +140,6 @@ async def test_in_kernel_ask_user_completes_the_round_trip() -> None:
         assert "The user answered:" in cell.output
         assert "Region: eu-west" in cell.output
         assert not cell.is_error
-    finally:
-        await loop.aclose()
-
-
-# ── StopPlanning, from inside the kernel ──────────────────────────────────
-
-
-async def test_in_kernel_stop_planning_approval_turns_plan_mode_off() -> None:
-    registry = ToolRegistry()
-    registry.register_builtin(plan.STOP_SPEC, plan.stop_handler)
-    session = CodeModeSession(registry)
-    code = (
-        "from tools import StopPlanning\n"
-        "print(StopPlanning(plan='# Plan\\n\\nDo the thing.'))\n"
-    )
-    store = MemoryStore()
-    sid = (await store.create_session()).session_id
-    loop = NativeLoop(
-        provider=ScriptedProvider([_run_python(code), _text("done")]),
-        store=store, model="claude-sonnet-5", session_id=sid,
-        registry=registry, codemode=session, plan_mode=True,
-        permissions=PermissionEngine("never_ask"),
-    )
-    try:
-        assert loop.plan_mode is True
-        asked = await _drive(loop, sid, "1")
-
-        assert len(asked) == 1
-        assert "Do the thing." in asked[0].message
-        assert asked[0].name == "StopPlanning"
-
-        # The whole point of the call: the mode is actually off.
-        assert loop.plan_mode is False
-
-        cell = next(
-            e for e in loop.bus.log(sid)
-            if isinstance(e, ToolResult) and e.name == "run_python"
-        )
-        assert plan.APPROVED_RESULT in cell.output
-        assert not cell.is_error
-    finally:
-        await loop.aclose()
-
-
-async def test_in_kernel_stop_planning_rejection_keeps_plan_mode_on() -> None:
-    registry = ToolRegistry()
-    registry.register_builtin(plan.STOP_SPEC, plan.stop_handler)
-    session = CodeModeSession(registry)
-    code = (
-        "from tools import StopPlanning\n"
-        "print(StopPlanning(plan='# Plan\\n\\nDo the thing.'))\n"
-    )
-    store = MemoryStore()
-    sid = (await store.create_session()).session_id
-    loop = NativeLoop(
-        provider=ScriptedProvider([_run_python(code), _text("done")]),
-        store=store, model="claude-sonnet-5", session_id=sid,
-        registry=registry, codemode=session, plan_mode=True,
-        permissions=PermissionEngine("never_ask"),
-    )
-    try:
-        await _drive(loop, sid, "use postgres, not sqlite")
-        assert loop.plan_mode is True
-
-        cell = next(
-            e for e in loop.bus.log(sid)
-            if isinstance(e, ToolResult) and e.name == "run_python"
-        )
-        assert "did NOT approve" in cell.output
-        assert "use postgres, not sqlite" in cell.output
     finally:
         await loop.aclose()
 

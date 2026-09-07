@@ -2,7 +2,7 @@
 
 Turn lifecycle:
   UserTurn → persist user node → build request (append-only prefix + cache
-  plan, tool defs, plan-mode filter) → stream provider chunks → re-emit deltas
+  plan, tool defs) → stream provider chunks → re-emit deltas
   as Events → persist assistant node → if the model stopped on tool_use,
   dispatch each tool (PreToolUse hook → PermissionEngine → dispatch →
   PostToolUse), append a ToolResult user message, and loop back for the next
@@ -138,9 +138,6 @@ from fluid.messages import (
 from fluid.permissions.engine import (
     PROMPT_DENIAL,
     PermissionEngine,
-    plan_mode_blocks,
-    plan_mode_denial,
-    plan_mode_tools,
 )
 from fluid.providers.base import ProviderClient, ProviderRequest
 from fluid.context.environment import environment_note
@@ -161,27 +158,6 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 log = logging.getLogger(__name__)
 
 _BACKGROUND_SPAWN_INTERRUPT_GRACE = 1.0
-
-# Opening words of the per-turn plan-mode reminder. They double as the handle
-# the render path uses to drop a reminder the live flag has outlived — see
-# NativeLoop._without_stale_plan_reminder.
-PLAN_MODE_REMINDER_MARK = "Plan mode is active:"
-
-# Render-time replacement for the newest stale reminder once the flag is off.
-# Never written to the store: it exists only in the rendered request, so it
-# vanishes on its own if plan mode is ever entered again. The wording must not
-# contain PLAN_MODE_REMINDER_MARK verbatim, or the replacement would match its
-# own output on the next pass.
-PLAN_EXIT_REMINDER_MARK = "Plan mode is over:"
-PLAN_EXIT_REMINDER = (
-    "<system-reminder>\n"
-    f"{PLAN_EXIT_REMINDER_MARK} plan mode has ENDED (the plan was approved, "
-    "or the user switched modes) and is no longer active. Treat any earlier "
-    "notice that plan mode is active as stale. Your write and shell tools "
-    "are back on the surface — implement the approved plan; do not call "
-    "StopPlanning or re-present the plan for approval.\n"
-    "</system-reminder>"
-)
 
 # Opening words of the reflection nudge — a stable handle for tests and for
 # hosts that want to find or filter it. See NativeLoop._reflection_nudge.
@@ -787,7 +763,7 @@ def _parse_tool_args(raw_args: str) -> tuple[dict[str, Any], str | None]:
 
 class NativeLoop(BackgroundLifecycleMixin):
     caps = EngineCaps(
-        inproc_tools=True, schema_plan_mode=True,
+        inproc_tools=True,
         fork=True, rewind=True, cache_metrics=True, context_usage=True,
     )
 
@@ -809,7 +785,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         permissions: PermissionEngine | None = None,
         hooks: HookBus | None = None,
         ctx: ToolCtx | None = None,
-        plan_mode: bool = False,
         codemode: CodeModeSession | None = None,
         journal: Any | None = None,
         max_model_calls_per_turn: int | None = 200,
@@ -893,19 +868,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         # not: a host that never wired agent messaging still had SendMessage
         # turn up in ToolSearch on a leg whose schemas withheld it.
         self.ctx.extra["tool_filter"] = self._tool_wired
-        self.plan_mode = plan_mode
-        # The Plan/StopPlanning builtins flip the same flag the request build
-        # reads, so plan mode can start and (approval-gated) end mid-session.
-        # setdefault: a host wiring its own controller wins.
-        from fluid.tools.builtins.plan import PlanModeControl
-
-        self.ctx.extra.setdefault(
-            "plan_mode_control",
-            PlanModeControl(
-                is_active=lambda: self.plan_mode,
-                set_active=self._set_plan_mode,
-            ),
-        )
         self._codemode = codemode
         # JSON-mode episodic journal (fluid.codemode.journal.ToolJournal).
         # Code-mode sessions journal through the CodeModeSession instead; a
@@ -915,13 +877,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             # Ruling T9: code-mode discovery, the projected kernel VFS, and the
             # in-kernel host-call gate all see this session's tool surface, so
             # a filtered tool is never described and never callable from code.
-            # Plan mode rides in as a live predicate for the same reason: the
-            # mode ends mid-turn, and a snapshot taken at construction would
-            # keep the kernel read-only for the rest of the session.
             register_code_mode_tools(
                 registry, codemode,
                 tool_filter=self._tool_available,
-                plan_mode=lambda: self.plan_mode,
             )
         # ``None`` means unlimited: the provider stays the source of truth for
         # when a turn has to stop. Every comparison below guards that case.
@@ -1470,17 +1428,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 "bypassPermissions": "never_ask",
                 "acceptEdits": "on_write",
                 "default": "on_write",
-                "plan": "always_ask",
             }.get(mode, "on_write")
             if self.permissions is not None:
                 self.permissions.approval_policy = policy
-            # Through the injected controller, not the raw attribute: a host
-            # that wrapped PlanModeControl (to persist the mode, update its own
-            # UI, restore its approval policy) has to hear about a chip-driven
-            # flip too, or its idea of the mode and the engine's diverge —
-            # which is how a session ends up read-only with nothing left that
-            # knows how to turn it back off.
-            self._apply_plan_mode(mode == "plan")
         elif isinstance(op, Handoff):
             await self._do_handoff(op)
         elif isinstance(op, Fork):
@@ -1907,9 +1857,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         notes = self._notes_reminder()
         if notes is not None:
             content.append(Text(notes))
-        plan_reminder = self._plan_mode_reminder()
-        if plan_reminder is not None:
-            content.append(Text(plan_reminder))
         env_note = await self._environment_reminder()
         if env_note is not None:
             content.append(Text(env_note))
@@ -2246,114 +2193,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
         return render_notes_reminder(text)
 
-    def _set_plan_mode(self, active: bool) -> None:
-        """Plan/StopPlanning's switch: the next request's schemas follow."""
-        self.plan_mode = bool(active)
-
-    def _apply_plan_mode(self, active: bool) -> None:
-        """Flip plan mode the way the TOOLS do — through the injected control.
-
-        ``ctx.extra["plan_mode_control"]`` may have been replaced by the host
-        with a wrapper that persists the mode and updates its own UI, so an
-        engine-side flip (SetPermissionMode) has to go through it rather than
-        assigning the attribute. The flag is force-set afterwards regardless:
-        a host wrapper that raises must never leave the engine believing it is
-        still read-only when the session has left plan mode (or vice versa) —
-        that divergence is unrecoverable from inside the loop.
-        """
-        active = bool(active)
-        if active == self.plan_mode:
-            return
-        control = (self.ctx.extra or {}).get("plan_mode_control")
-        setter = getattr(control, "set_active", None)
-        if callable(setter):
-            try:
-                setter(active)
-            except Exception:  # noqa: BLE001 — host bookkeeping, never fatal
-                log.warning(
-                    "plan_mode_control.set_active(%s) failed; forcing the flag",
-                    active, exc_info=True,
-                )
-        self.plan_mode = active
-
-    def _without_stale_plan_reminder(self, history: list[Message]) -> list[Message]:
-        """Rewrite plan-mode reminders that the live flag has since contradicted.
-
-        The reminder is written into the user node when the turn starts, but
-        approval lands MID-turn: from that moment every remaining call of the
-        same turn re-reads "Plan mode is active" from a node that predates the
-        approval, which is exactly the contradiction the audit watched models
-        try to obey. Dropping the block silently was not enough — models that
-        had already read it kept believing plan mode was on (an approval whose
-        tool result was lost to an interrupt or restart leaves NOTHING saying
-        it ended). So the NEWEST stale reminder is replaced with an explicit
-        "plan mode is over" notice and the older ones are dropped. All of this
-        is render-time only: the stored tree keeps its true shape, and the
-        notice disappears by itself if plan mode is ever entered again.
-        """
-        if self.plan_mode:
-            return history
-        last_msg = -1  # index of the message carrying the newest stale reminder
-        for i, message in enumerate(history):
-            if any(
-                isinstance(b, Text) and PLAN_MODE_REMINDER_MARK in b.text
-                for b in message.content
-            ):
-                last_msg = i
-        if last_msg < 0:
-            return history
-        out: list[Message] = []
-        for i, message in enumerate(history):
-            replaced: list[Any] = []
-            stale = [
-                b for b in message.content
-                if isinstance(b, Text) and PLAN_MODE_REMINDER_MARK in b.text
-            ]
-            if not stale:
-                out.append(message)
-                continue
-            for b in message.content:
-                if not (isinstance(b, Text) and PLAN_MODE_REMINDER_MARK in b.text):
-                    replaced.append(b)
-                elif i == last_msg and b is stale[-1]:
-                    replaced.append(Text(PLAN_EXIT_REMINDER))
-            if not replaced:
-                # Emptying a message would break the request shape; keep it
-                # whole (it cannot be the newest one — that got the notice).
-                out.append(message)
-                continue
-            out.append(Message(
-                role=message.role, content=replaced,
-                provider_meta=message.provider_meta,
-            ))
-        return out
-
-    def _plan_mode_reminder(self) -> str | None:
-        """Recite the plan-mode contract onto each user turn while active —
-        the mode's rules must survive long exploration stretches, the same
-        way Claude Code re-reminds every turn."""
-        if not self.plan_mode:
-            return None
-        registered = (
-            self.registry.get("StopPlanning") is not None
-            if self.registry is not None
-            else False
-        )
-        exit_clause = (
-            "When the plan is ready, present it with StopPlanning for "
-            "approval; only the user's approval ends plan mode."
-            if registered and self._tool_permitted("StopPlanning")
-            else "Only the user can end plan mode."
-        )
-        return (
-            "<system-reminder>\n"
-            f"{PLAN_MODE_REMINDER_MARK} a read-only exploration and planning "
-            "phase. Do not write or edit files, run state-changing "
-            "commands, or describe edits as if you had made them. Explore "
-            "the codebase, weigh approaches and their trade-offs, and "
-            f"design a concrete implementation strategy. {exit_clause}\n"
-            "</system-reminder>"
-        )
 
     # ─── Agent loop (model call → tool dispatch → repeat) ────────────────
 
@@ -2971,9 +2810,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         Filtered on permission alone, an audited host that never wired agent
         messaging still listed SendMessage and ListAgents in ToolSearch and
         billed them in the context breakdown; models loaded them and every
-        call failed. Plan mode is deliberately not part of this predicate (see
-        :meth:`_tool_available`): a withheld write tool still exists, it is
-        only off the surface until approval.
+        call failed.
         """
         if not self._tool_permitted(name):
             return False
@@ -2992,7 +2829,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         )
 
     def _tool_available(self, name: str) -> bool:
-        """Permitted, plan-mode-allowed, *and* backed by a wired host capability.
+        """Permitted and backed by a wired host capability.
 
         The JSON surface drops a ``requires_extra`` tool whose injection is
         missing (:meth:`_capability_present`), but code mode projected it
@@ -3000,15 +2837,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         "unavailable: no session store directory injected" back as a tool
         error. Absent capability must be invisible on both surfaces.
 
-        Plan mode is here for the mirror-image reason. It used to live only in
-        :meth:`_tools_api`'s non-codemode branch, i.e. only in the request
-        schemas — so a code-mode session in "plan mode" was handed a kernel
-        that still had ``Write`` in it, and ``from tools import Write`` wrote
-        the file while the Plan tool's own result claimed write tools had left
-        the surface. This predicate is what code mode filters its projection
-        and its discovery tools through, so the withholding now happens on the
-        surface the model actually uses. It is read live: an approval that ends
-        plan mode mid-turn puts the tools back on the next call.
         """
         if not self._tool_permitted(name):
             return False
@@ -3017,33 +2845,24 @@ class NativeLoop(BackgroundLifecycleMixin):
         spec = self.registry.get(name)
         if spec is None:
             return True
-        if self.plan_mode and plan_mode_blocks(spec):
-            return False
         return self._capability_present(spec)
 
     def _tools_api(self) -> list[dict[str, Any]]:
         """The tool schemas the next request would carry (code-mode surface or
-        the loaded registry, plan-filtered, then CE12 tool-restriction filtered).
+        the loaded registry, filtered by the session's tool restrictions).
         Pure — no request is built."""
         if self.registry is None:
             return []
         if self._codemode is not None:
             # Code-mode replaces N schemas with the four-tool surface; the
             # work-tools stay in the registry (reachable via host calls) but
-            # never enter the prompt schema. Plan mode therefore has nothing to
-            # filter HERE — the four tools are all ``safe``, and the write tools
-            # it withholds are not on this surface to begin with. It is enforced
-            # where code mode actually reaches them: the projection and the
-            # host-call gate (both via :meth:`_tool_available`), plus
-            # :meth:`_gated_call`.
+            # never enter the prompt schema.
             specs = [
                 s for s in self.registry.list_tools(loaded_only=True)
                 if s.source == "codemode"
             ]
         else:
             specs = self.registry.list_tools(loaded_only=True)
-            if self.plan_mode:
-                specs = plan_mode_tools(specs)
         return [
             s.to_api()
             for s in specs
@@ -3261,7 +3080,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True
     ) -> _CallResult:
         request = self._build_request(
-            self._without_stale_plan_reminder(history), sticky=sticky
+            history, sticky=sticky
         )
         self._fingerprint_request(request)
 
@@ -3888,19 +3707,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
         spec = self.registry.get(name)
 
-        # Plan mode's last wall. The JSON surface withholds write schemas while
-        # planning, so a call arriving here names a tool the model was never
-        # offered — but code mode reaches this path from a kernel, where the
-        # model writes the call itself, and "the schema was withheld" enforces
-        # nothing. Live flag: an approval that ends plan mode mid-turn lets the
-        # very next call of the same turn through.
-        if self.plan_mode and spec is not None and plan_mode_blocks(spec):
-            return await self._finish_tool(
-                sid, turn_id, name, tool_use_id,
-                ToolOutcome(text=plan_mode_denial(name), is_error=True),
-                input=input,
-            )
-
         # PreToolUse hook: deny short-circuits with an in-context error result;
         # modify replaces the input before permissions/dispatch see it; a
         # permission decision of "allow" skips the permission gate and "ask"
@@ -4055,11 +3861,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             answers[server_req_id] = resp.answer
             user_answered = user_answered or bool(getattr(resp, "user_answered", False))
         if user_answered:
-            # The host vouched that a person answered: say so where the tool
-            # reads it (StopPlanning words "approved by the user" on it).
-            from fluid.tools.builtins.plan import USER_ANSWERED_KEY
-
-            answers[USER_ANSWERED_KEY] = True
+            answers["__user_answered__"] = True
         return answers
 
     async def _await_permission(

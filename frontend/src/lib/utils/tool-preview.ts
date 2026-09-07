@@ -52,7 +52,6 @@ const TOOL_FIELDS: Record<string, string[]> = {
 	Note: ['text'],
 	AskUserQuestion: [],
 	AskUser: [],
-	StopPlanning: ['plan']
 };
 
 /** Tools whose result carries a match count worth appending to the preview. */

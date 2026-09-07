@@ -759,10 +759,8 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
     3. else the caller AGENT's legacy ``config.permission_mode``, for sessions
        created before the binding moved onto the row.
 
-    ``plan`` is deliberately NOT inherited: it is a UI conversation mode, and a
-    worker dispatched to do work while forced into plan mode could only ever
-    produce a plan. Returns ``None`` (no override — the worker's own agent
-    config applies) when nothing resolves.
+    Retired ``plan`` settings are ignored. Returns ``None`` (no override — the
+    worker's own agent config applies) when nothing resolves.
     """
     if not caller_row:
         return None

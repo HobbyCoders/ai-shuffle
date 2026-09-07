@@ -17,7 +17,6 @@ from fluid.tools.builtins import (
     list_agents,
     monitor,
     note,
-    plan,
     read,
     recall,
     remember,
@@ -36,7 +35,7 @@ from fluid.tools.registry import ToolRegistry
 _MODULES = (
     read, grep, glob, write, edit, bash, skill, note, task, monitor,
     tool_search, history_expand, history_search, ledger,
-    session_search, session_view, ask_user, web, plan, remember, recall,
+    session_search, session_view, ask_user, web, remember, recall,
     list_agents, send_message, swarm,
 )
 

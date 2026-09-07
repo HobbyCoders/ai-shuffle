@@ -290,7 +290,6 @@ def test_code_mode_addendum_explains_deferred_tools() -> None:
     assert "load one with ToolSearch" not in code_mode_text
 
 
-
 # ─── the delegated ``claude`` leg ────────────────────────────────────────────
 
 
@@ -378,7 +377,6 @@ def test_delegated_prompt_drops_the_code_mode_addendum(tmp_path, capsys):
     assert code_mode_unavailable(off, "claude") is None
 
 
-
 # ─── Batch 8: the prompt says what the code enforces ─────────────────────────
 
 
@@ -386,27 +384,6 @@ def _builtin_registry() -> ToolRegistry:
     registry = ToolRegistry()
     register_builtins(registry)
     return registry
-
-
-def test_plan_mode_leaves_matches_the_registry() -> None:
-    """PRM-4: the set plan mode removes is the set the prompt and the Plan
-    tool name — every builtin with static write or destructive risk."""
-    from fluid.cli.prompt import PLAN_MODE_LEAVES
-    from fluid.permissions.engine import plan_mode_blocks
-    from fluid.tools.builtins.plan import ENTER_RESULT, PLAN_SPEC
-
-    blocked = sorted(
-        s.name for s in _builtin_registry().list_tools(loaded_only=False)
-        if plan_mode_blocks(s)
-    )
-    assert blocked == sorted(PLAN_MODE_LEAVES)
-    for name in ("Task", "Monitor", "WebFetch"):
-        assert name in PLAN_SPEC.description and name in ENTER_RESULT
-    assert "the shell" in PLAN_SPEC.description
-    assert (
-        "While planning, Bash, Edit, Monitor, SendMessage, Swarm, Task, WebFetch, "
-        "Write are off"
-    ) in DEFAULT_BASE_PROMPT
 
 
 def test_tool_capabilities_match_the_registry() -> None:
@@ -553,10 +530,10 @@ def test_mounted_builtin_tools_reads_a_tool_context_extras_mapping() -> None:
     both from every surface the model could call."""
     from fluid.cli.prompt import BUILTIN_TOOL_NAMES, mounted_builtin_tools
 
-    extras = {"monitor_spawn": object(), "plan_mode_control": object()}
+    extras = {"monitor_spawn": object()}
     mounted = mounted_builtin_tools(BUILTIN_TOOL_NAMES, extras)
     assert "SendMessage" not in mounted and "ListAgents" not in mounted
-    assert {"Monitor", "Plan", "StopPlanning"} <= mounted
+    assert {"Monitor"} <= mounted
     # Capability-free builtins are always mounted.
     assert {"Read", "Grep", "Glob"} <= mounted
     # Bare keys work too, and no extras at all leaves only the free ones.

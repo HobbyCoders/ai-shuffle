@@ -17,7 +17,6 @@ import pytest
 
 from fluid.codemode.vfs import (
     CAPABILITY_TOOL_REASONS,
-    PLAN_MODE_WITHHELD,
     TOP_LEVEL_TOOL_NAMES,
     install_finder,
     missing_leaf_message,
@@ -100,13 +99,6 @@ def test_attribute_access_and_import_give_the_same_correction(vfs_finder):
     assert str(attr.value) == str(imp.value)
 
 
-def test_message_flags_a_name_plan_mode_may_have_taken(vfs_finder):
-    # SendMessage is capability-backed AND plan-mode-withheld; the kernel
-    # cannot tell which emptied it, so it says both rather than asserting one.
-    both = missing_leaf_message("tools", "SendMessage")
-    assert "or plan mode has withheld it" in both
-    # Write is only ever plan mode's doing.
-    assert "plan mode is on" in missing_leaf_message("tools", "Write")
 
 
 def test_skills_package_keeps_its_own_wording():
@@ -123,10 +115,6 @@ def test_capability_table_matches_the_prompt_table():
     assert set(CAPABILITY_TOOL_REASONS) == set(TOOL_CAPABILITIES)
 
 
-def test_plan_withheld_table_matches_the_prompt_table():
-    from fluid.cli.prompt import PLAN_MODE_LEAVES
-
-    assert PLAN_MODE_WITHHELD == frozenset(PLAN_MODE_LEAVES)
 
 
 def test_kernel_projected_tools_are_not_listed_as_top_level():

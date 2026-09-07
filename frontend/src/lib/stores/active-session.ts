@@ -30,7 +30,7 @@ import {
 	createSessionSwitcher,
 	getPersistedProfile, getPersistedProject,
 	getPersistedWorktreeIntent, setPersistedWorktreeIntent,
-	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, getPersistedFastMode,
+	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, normalizePermissionMode, getPersistedFastMode,
 	getPersistedContextWindowChoice, setPersistedRunBinding,
 	reconciledSessionMode,
 } from './session/session-switcher';
@@ -702,7 +702,6 @@ feedController.attach({
 	// avoiding a circular import). Lazy ref: activeSession is defined just below and
 	// this only runs at feed-event time.
 	resolveInteractionByRequestId: (requestId: string) => activeSession.resolveInteractionByRequestId(requestId),
-	setPermissionMode: (mode: string) => activeSession.setPermissionModeOverride(mode),
 });
 
 // ─── Exported Store ──────────────────────────────────────────────────────────
@@ -912,7 +911,7 @@ export const activeSession = {
 	// NEXT new chat.
 
 	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model })); setPersistedRunBinding('model', model); persistSession(); },
-	setPermissionModeOverride(mode: string | null) { _update(s => ({ ...s, permissionModeOverride: mode })); setPersistedRunBinding('permissionMode', mode); persistSession(); },
+	setPermissionModeOverride(mode: string | null) { mode = normalizePermissionMode(mode); _update(s => ({ ...s, permissionModeOverride: mode })); setPersistedRunBinding('permissionMode', mode); persistSession(); },
 	setEffortLevelOverride(level: string | null) { _update(s => ({ ...s, effortLevelOverride: level })); setPersistedRunBinding('effort', level); persistSession(); },
 	setFastMode(on: boolean) { _update(s => ({ ...s, fastMode: on })); setPersistedRunBinding('fastMode', on ? '1' : ''); persistSession(); },
 	async setWorkspaceProjectIds(ids: string[]) {
@@ -1020,7 +1019,7 @@ export const activeSession = {
 		const localCheckout = existing && existing.projectId === project.project && !!project.project;
 		_update(s => ({...s,
 			profile:picks.profile, modelOverride:picks.model, effortLevelOverride:picks.effort,
-			permissionModeOverride:code ? picks.permissionMode : null, fastMode:picks.fastMode === '1',
+			permissionModeOverride:code ? normalizePermissionMode(picks.permissionMode) : null, fastMode:picks.fastMode === '1',
 			contextWindowChoice:getPersistedContextWindowChoice(),
 			...(code ? project : {project:'', projectV2Id:null}),
 			worktreeIntent:code ? picks.worktreeIntent : 'local',

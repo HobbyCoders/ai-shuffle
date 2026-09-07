@@ -1,10 +1,8 @@
 """MRTR (Multi Round-Trip Request) resolution — one loop, every gate.
 
 A ``tools/call`` may answer ``input_required`` (MCP spec 2026-07-28) instead of
-a result: the tool needs something from the human before it can finish. Two
-builtins ride the same seam — ``AskUser`` (questions) and ``StopPlanning``
-(plan approval) — so the marker is not an MCP curiosity, it is how the harness
-asks the user anything mid-tool.
+a result: the tool needs something from the human before it can finish. The
+``AskUser`` builtin rides the same seam to ask questions mid-tool.
 
 The marker is only half a call. Whoever dispatches a tool MUST resolve it:
 collect one answer per request, then re-dispatch the *same* call with those

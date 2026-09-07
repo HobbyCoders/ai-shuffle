@@ -72,7 +72,7 @@ def _read_spec():
 # =============================================================================
 
 def _engine_for(mode, permission_mode="default"):
-    engine, _plan = HarnessAdapter._build_permissions(
+    engine = HarnessAdapter._build_permissions(
         HarnessAdapter(), _options(mode, permission_mode=permission_mode)
     )
     return engine

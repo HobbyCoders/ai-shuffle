@@ -843,7 +843,6 @@ def build_engine(
     permissions: Any | None = None,
     hooks: Any | None = None,
     ctx: Any | None = None,
-    plan_mode: bool = False,
     with_builtins: bool = True,
     claude_cmd: list[str] | None = None,
     allowed_tools: Any | None = None,
@@ -974,7 +973,6 @@ def build_engine(
             ctx=ctx,
             cwd=config.cwd,
             claude_cmd=claude_cmd,
-            permission_mode="plan" if plan_mode else None,
             allowed_tools=(
                 list(allowed_tools) if allowed_tools is not None else None
             ),
@@ -1078,7 +1076,6 @@ def build_engine(
         permissions=permissions,
         hooks=hooks,
         ctx=ctx,
-        plan_mode=plan_mode,
         codemode=codemode,
         journal=journal,
         mcp_servers=mcp_servers,

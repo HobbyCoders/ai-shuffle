@@ -844,25 +844,6 @@ def test_legacy_terminal_events_without_call_counts_still_parse() -> None:
     assert event_from_dict(legacy_error).num_model_calls is None
 
 
-def test_plan_mode_filters_write_tools() -> None:
-    from fluid.tools.builtins import register_builtins
-
-    registry = ToolRegistry()
-    register_builtins(registry)
-    provider = ScriptedProvider([_text("hi")])
-    store = MemoryStore()
-    loop = NativeLoop(
-        provider=provider, store=store, model="claude-sonnet-5",
-        registry=registry, plan_mode=True,
-    )
-    request = loop._build_request([])
-    names = {t["name"] for t in request.tools}
-    assert "Read" in names and "Grep" in names
-    assert "Bash" not in names and "Edit" not in names and "Write" not in names
-    # third cache breakpoint reserved once tool defs are present
-    assert request.cache_breakpoints == 3
-
-
 def _cut_off(text: str) -> list[StreamChunk]:
     chunks = _text(text)
     chunks[4] = StreamChunk(

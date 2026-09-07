@@ -364,7 +364,8 @@ def test_build_options_code_mode_is_untouched():
 @pytest.mark.parametrize("mode", ["code", "voice", None, "", "nonsense"])
 @pytest.mark.parametrize("permission_mode", ["default", "plan", "bypassPermissions", None])
 def test_permission_mode_untouched_outside_chat(mode, permission_mode):
-    assert permission_mode_for_session_mode(permission_mode, mode) == permission_mode
+    expected = "default" if permission_mode == "plan" else permission_mode
+    assert permission_mode_for_session_mode(permission_mode, mode) == expected
 
 
 @pytest.mark.parametrize("permission_mode", ["default", "plan", "bypassPermissions", "acceptEdits", None])
@@ -390,9 +391,9 @@ def test_build_options_chat_mode_overrules_an_inherited_bypass():
     assert options.permission_mode == "default"
 
 
-def test_build_options_code_mode_keeps_its_permission_binding():
+def test_build_options_code_mode_normalizes_retired_permission_binding():
     options = _build_for_mode(None, {"model": "opus"}, permission_mode="plan")
-    assert options.permission_mode == "plan"
+    assert options.permission_mode == "default"
 
 
 # =============================================================================

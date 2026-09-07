@@ -214,7 +214,7 @@ def test_enabled_plugins_accessor(tmp_path, monkeypatch) -> None:
 
 
 def test_default_permission_mode_maps_known_values(tmp_path, monkeypatch) -> None:
-    for mode in ("default", "plan", "acceptEdits", "bypassPermissions"):
+    for mode in ("default", "acceptEdits", "bypassPermissions"):
         proj = _scoped(
             tmp_path / mode, monkeypatch, project={"permissions": {"defaultMode": mode}}
         )
@@ -226,6 +226,7 @@ def test_default_permission_mode_refuses_unknown_values(caplog) -> None:
         assert default_permission_mode({"permissions": {"defaultMode": "dontAsk"}}) is None
     assert any("defaultMode" in r.getMessage() for r in caplog.records)
 
+    assert default_permission_mode({"permissions": {"defaultMode": "plan"}}) is None
     assert default_permission_mode({"permissions": {"defaultMode": "auto"}}) is None
     assert default_permission_mode({"permissions": {}}) is None
     assert default_permission_mode({"permissions": "nonsense"}) is None
@@ -233,13 +234,12 @@ def test_default_permission_mode_refuses_unknown_values(caplog) -> None:
 
 
 def test_default_permission_mode_is_not_applied_to_a_session(tmp_path, monkeypatch) -> None:
-    proj = _scoped(tmp_path, monkeypatch, project={"permissions": {"defaultMode": "plan"}})
-    assert default_permission_mode(load_settings_stack(proj)) == "plan"
+    proj = _scoped(tmp_path, monkeypatch, project={"permissions": {"defaultMode": "default"}})
+    assert default_permission_mode(load_settings_stack(proj)) == "default"
 
     loop = _loop(proj)
     assert loop.claude_settings == {}
     assert loop.permissions.approval_policy == "never_ask"
-    assert loop.plan_mode is False
 
 
 def test_mcp_toggles_accessor(tmp_path, monkeypatch) -> None:

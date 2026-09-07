@@ -11,7 +11,6 @@ shared cursor. Native mode only — auto-disabled in Docker/headless.
 Permission model (faithful to the official `request_access` flow, keyed to the
 session's permission mode — enforced in query_engine's can_use_tool callback):
 - bypassPermissions -> implicit access, no request needed
-- plan              -> denied
 - default/ask/auto/acceptEdits -> request_access surfaces an approve/deny prompt
 Action tools refuse until access is granted (see app/mcp/computer_use/access.py),
 and always check their session's halt flag first (the chat Stop button
@@ -146,8 +145,6 @@ def create_computer_use_server(
     def _access_error() -> Optional[dict]:
         if permission_mode == "bypassPermissions":
             return None
-        if permission_mode == "plan":
-            return _err("Computer control is disabled in plan mode.")
         if not access.is_granted(session_id):
             return _err(
                 "No access yet. Call request_access(apps=[...], reason='...') first; "
@@ -459,8 +456,6 @@ def create_computer_use_server(
     async def request_access(args: dict) -> dict:
         if is_stopped(session_id):
             return _err("Computer-use was stopped. Start a new turn to request access again.")
-        if permission_mode == "plan":
-            return _err("Computer control is disabled in plan mode.")
         # Approval already enforced by the query callback (by permission mode);
         # if we got here, record the grant.
         granted = access.grant(

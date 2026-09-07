@@ -187,7 +187,6 @@ def test_caps_matrix() -> None:
     caps = DelegatedLoop.caps
     assert caps.code_mode is False
     assert caps.inproc_tools is True
-    assert caps.schema_plan_mode is False
     assert caps.fork is False
     assert caps.rewind is False
     assert caps.subagents is True

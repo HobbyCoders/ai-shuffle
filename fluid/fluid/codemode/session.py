@@ -10,12 +10,7 @@ into the kernel VFS, and implements the four code-mode tools:
 
 When the host restricts the session's tool surface it sets ``tool_filter``
 (ruling T9); every one of those four tools, the projected VFS, and the host-call
-gate then behave as though a filtered tool does not exist. ``plan_mode`` is the
-same idea for the read-only planning phase: while it reports active, write and
-destructive tools leave the projection (so the kernel has no stub to import)
-and the host gate refuses them by name (so a hand-written ``__host_call__``
-cannot write either). Both are live predicates — plan mode ends mid-turn, and
-the next cell must find its write tools back.
+gate then behave as though a filtered tool does not exist.
 
 With a :class:`~fluid.codemode.skills.SkillStore` attached, the session is also
 the driver of the *continual harness*: persistent skills mount into the kernel
@@ -34,7 +29,7 @@ path uses, with the ``code_mode_allowed=False`` escape hatch enforced host-side.
 The session wraps that bridge with the engine's two round-trips back to the
 human — ``PermissionRequest`` (``on_permission``) and the input-required/MRTR
 ``QuestionRequest`` (``on_input_required``, which is what lets an in-kernel
-``AskUser``/``StopPlanning`` actually reach the user) — and emits
+``AskUser`` actually reaches the user) — and emits
 ``ToolUse``/``ToolResult`` events so in-kernel calls are as observable as JSON
 calls.
 """
@@ -52,7 +47,7 @@ from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
 from fluid.codemode.verify import verify_sources, verify_store
 from fluid.events.model import ToolResult, ToolUse
-from fluid.permissions.engine import PermissionEngine, plan_mode_blocks
+from fluid.permissions.engine import PermissionEngine
 from fluid.store.base import new_id
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
@@ -241,7 +236,6 @@ class CodeModeSession:
         skills: SkillStore | None = None,
         synthesizer: Any | None = None,  # fluid.codemode.continual.Synthesizer
         tool_filter: Callable[[str], bool] | None = None,
-        plan_mode: Callable[[], bool] | None = None,
         friction: Any | None = None,  # fluid.codemode.journal.FrictionDetector
     ) -> None:
         self._registry = registry
@@ -267,13 +261,6 @@ class CodeModeSession:
         # Not cleared per turn: the point is exactly to notice a re-fetch many
         # turns later.
         self._docs_served: set[str] = set()
-        # "Is plan mode on right now?" — ``None`` for hosts with no plan mode.
-        # Same live-predicate contract as ``tool_filter``: the engine stamps its
-        # own flag in, the projection is rebuilt per call, and the VFS signature
-        # shifts when the answer changes, so entering or leaving plan mode
-        # re-mounts the kernel's ``tools`` package with the right stubs.
-        self.plan_mode: Callable[[], bool] | None = plan_mode
-
     @property
     def skills(self) -> SkillStore | None:
         return self._skills
@@ -291,8 +278,6 @@ class CodeModeSession:
             pass
         self._friction_pending = []
 
-    def _planning(self) -> bool:
-        return self.plan_mode is not None and bool(self.plan_mode())
 
     # ── projection (rebuilt cheaply; reflects late-loaded MCP tools) ──
     def _projection(self) -> Projection:
@@ -300,13 +285,6 @@ class CodeModeSession:
             s for s in self._registry.list_tools(loaded_only=False)
             if s.source != CODE_MODE_SOURCE
         ]
-        if self._planning():
-            # Plan mode's promise ("write and shell tools have left your
-            # surface") has to hold on the surface the model actually uses. In
-            # code mode that is the projection: no stub, no catalog entry, no
-            # docs — the same withholding the request schemas do on the JSON
-            # path, rather than a rule the model is merely asked to respect.
-            specs = [s for s in specs if not plan_mode_blocks(s)]
         # Deferral rides along: every projected tool is callable, but a host
         # that inlines per-tool documentation into the prompt must collapse the
         # deferred ones to name + one-liner and leave read_tool_docs to serve
@@ -434,7 +412,7 @@ class CodeModeSession:
                 )
             return verdict == "allow"
 
-        # MRTR round-trip: an in-kernel AskUser/StopPlanning (or an elicitating
+        # MRTR round-trip: an in-kernel AskUser (or an elicitating
         # MCP tool) pauses on ``input_required``, and the engine turns that into
         # QuestionRequest events, parks for RespondQuestion, and hands the
         # answers back for the retry leg — the same path the JSON surface uses.
@@ -465,7 +443,7 @@ class CodeModeSession:
             self._registry, permissions,
             hooks=loop.hooks, on_permission=_on_permission,
             on_input_required=on_input_required, ctx=loop.ctx,
-            tool_filter=self.tool_filter, plan_mode=self.plan_mode,
+            tool_filter=self.tool_filter,
             on_stop=on_stop,
             # What this surface actually delivers: a result over the ref
             # threshold reaches the cell as a ResultRef stub, not as text the
@@ -655,7 +633,6 @@ def register_code_mode_tools(
     session: CodeModeSession,
     *,
     tool_filter: Callable[[str], bool] | None = None,
-    plan_mode: Callable[[], bool] | None = None,
 ) -> None:
     """Register the four code-mode tools as the model's entire schema surface.
 
@@ -663,14 +640,10 @@ def register_code_mode_tools(
     it is stamped onto the session, so discovery (``list_tools``,
     ``search_tools``, ``read_tool_docs``), the projected kernel VFS, and the
     host-call gate all describe and accept exactly the tools this session may
-    call. ``plan_mode`` is the host's live plan-mode flag, which does the same
-    to write and destructive tools while the session is planning. Passing
-    ``None`` for either leaves whatever the session already carries.
+    call. Passing ``None`` leaves the session's existing filter in place.
     """
     if tool_filter is not None:
         session.tool_filter = tool_filter
-    if plan_mode is not None:
-        session.plan_mode = plan_mode
 
     async def _run_guard(_input: dict, _ctx: ToolCtx) -> ToolOutcome:
         # The engine intercepts run_python and drives the kernel directly; this

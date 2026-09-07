@@ -160,7 +160,7 @@ non-destructively. Consumed keys:
 | Key | Effect |
 |---|---|
 | `permissions.allow` / `ask` / `deny` | `Tool(pattern)` entries become permission rules, evaluated before the `[[permission.rules]]` from `config.toml`, so under last-match-wins a TOML rule outranks a settings rule of the same shape and `deny` outranks `ask` outranks `allow` within the settings. |
-| `permissions.defaultMode` | Sets `permission.approval_policy` unless a config file, `FLUID_APPROVAL_POLICY`, or `--approval-policy` does: `default` → `on_write`, `acceptEdits` → `on_write` plus allow rules for `Edit`, `Write`, `MultiEdit`, `NotebookEdit` (a settings `deny` still wins), `plan` → `always_ask`, `bypassPermissions` → `never_ask`. Any other value is ignored with a warning. |
+| `permissions.defaultMode` | Sets `permission.approval_policy` unless a config file, `FLUID_APPROVAL_POLICY`, or `--approval-policy` does: `default` → `on_write`, `acceptEdits` → `on_write` plus allow rules for `Edit`, `Write`, `MultiEdit`, `NotebookEdit` (a settings `deny` still wins), `bypassPermissions` → `never_ask`. Any other value is ignored with a warning. |
 | `env` | Layered over the process environment for the `Bash` builtin's child processes and for each MCP stdio server's spawn (under the server's own `env`). `os.environ` itself is never changed. The same map feeds `${VAR}` expansion in `mcp.json`. |
 | `enabledPlugins` | Which plugins under `~/.fluid/plugins` load (below). |
 | `enabledMcpjsonServers` | When non-empty, only the named servers load from a project `.fluid/mcp.json`; user `mcp.json` and TOML servers are unaffected. |
@@ -336,8 +336,7 @@ has.
 What the child CLI is given, and what it is not:
 
 - The system prompt is Fluid's, compiled for that leg: the native-only
-  builtins (`HistoryExpand`, `HistorySearch`, `ToolSearch`, `Plan`,
-  `StopPlanning`) are left out, since the bundled bridge cannot serve them,
+  builtins (`HistoryExpand`, `HistorySearch`, `ToolSearch`) are left out, since the bundled bridge cannot serve them,
   and the prompt tells the model that Fluid's tools appear under the
   `mcp__fluid_bundled__` prefix. `code_mode` is ignored on this leg, with a
   note on stderr: the CLI runs its own tool loop and has no `run_python`.
@@ -404,7 +403,7 @@ MCP servers connected at session start. Their tools appear as
 | `headers` | http: a table of request headers sent with every call (an `Authorization` bearer token, say). |
 | `connect_timeout` | Seconds allowed for the transport to open and the handshake to finish (default 30). A server that misses it is reported as a non-fatal error and the session runs without it. |
 | `call_timeout` | Seconds allowed for one tool call, and for any other request to the server (default 120). A call that misses it returns an error result to the model; the connection stays up. |
-| `trust_annotations` | `true` lets a tool's own `readOnlyHint` count: the tool runs without a prompt under `on_write` and stays on the plan-mode surface. Off by default, since the hint is the server's word about itself; a `destructiveHint` always counts. |
+| `trust_annotations` | `true` lets a tool's own `readOnlyHint` count: the tool runs without a prompt under `on_write`. Off by default, since the hint is the server's word about itself; a `destructiveHint` always counts. |
 | `shutdown_timeout` | Seconds to wait for the server to stop at session end before it is abandoned (default 5). |
 
 ```toml

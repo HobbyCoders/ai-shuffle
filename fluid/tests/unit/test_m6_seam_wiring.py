@@ -82,11 +82,11 @@ async def test_set_model_and_permission_mode_ops() -> None:
     await loop.submit(SetModel(model="model-b"))
     assert loop.model == "model-b"
 
-    await loop.submit(SetPermissionMode(mode="plan"))
-    assert perms.approval_policy == "always_ask" and loop.plan_mode is True
+    await loop.submit(SetPermissionMode(mode="always_ask"))
+    assert perms.approval_policy == "always_ask"
 
     await loop.submit(SetPermissionMode(mode="bypassPermissions"))
-    assert perms.approval_policy == "never_ask" and loop.plan_mode is False
+    assert perms.approval_policy == "never_ask"
 
     # fluid-native policy names pass straight through.
     await loop.submit(SetPermissionMode(mode="on_write"))

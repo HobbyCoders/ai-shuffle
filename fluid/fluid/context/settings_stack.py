@@ -75,7 +75,7 @@ _DECISION_ORDER = ("allow", "ask", "deny")
 # ``permissions.defaultMode`` values fluid's SetPermissionMode op understands
 # verbatim (see NativeLoop.submit). Anything outside this set is refused rather
 # than approximated — see :func:`default_permission_mode`.
-_PERMISSION_MODES = ("default", "plan", "acceptEdits", "bypassPermissions")
+_PERMISSION_MODES = ("default", "acceptEdits", "bypassPermissions")
 
 # defaultMode → fluid approval policy. ``plan`` has no policy of its own (plan
 # mode is a session flag), so it takes the policy that asks before everything;
@@ -83,7 +83,6 @@ _PERMISSION_MODES = ("default", "plan", "acceptEdits", "bypassPermissions")
 # (:data:`_ACCEPT_EDITS_TOOLS`), which is what the mode means in Claude Code.
 _MODE_POLICY = {
     "default": "on_write",
-    "plan": "always_ask",
     "acceptEdits": "on_write",
     "bypassPermissions": "never_ask",
 }

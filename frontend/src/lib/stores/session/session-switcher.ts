@@ -232,9 +232,13 @@ export function getPersistedEffort(): string | null {
 	return localStorage.getItem('aihub_lastEffort') || null;
 }
 
+export function normalizePermissionMode(mode: string | null | undefined): string | null {
+	return mode === 'plan' ? 'default' : mode ?? null;
+}
+
 export function getPersistedPermissionMode(): string | null {
 	if (typeof window === 'undefined') return null;
-	return localStorage.getItem('aihub_lastPermissionMode') || null;
+	return normalizePermissionMode(localStorage.getItem('aihub_lastPermissionMode'));
 }
 
 /** Last-used fast-tier pick. Stored as `'1'` / absent, so anything else is off. */
@@ -614,7 +618,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// to 'code'.
 			mode: normalizeSessionMode(row?.mode),
 			modelOverride: ephemeral?.modelOverride ?? sessionModelBinding(row),
-			permissionModeOverride: ephemeral?.permissionModeOverride ?? row?.permission_mode ?? null,
+			permissionModeOverride: normalizePermissionMode(ephemeral?.permissionModeOverride ?? row?.permission_mode),
 			effortLevelOverride: ephemeral?.effortLevelOverride ?? row?.effort ?? null,
 			// Cross-device hydration: the row carries the session's own fast-tier
 			// pick, so a chat opened elsewhere shows the tier it actually runs on.
@@ -890,7 +894,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		if (savedDraft) update(s => ({...s,
 			profile:savedDraft.profile ?? s.profile,
 			modelOverride:savedDraft.modelOverride, effortLevelOverride:savedDraft.effortLevelOverride,
-			permissionModeOverride:mode === 'chat' ? null : savedDraft.permissionModeOverride,
+			permissionModeOverride:mode === 'chat' ? null : normalizePermissionMode(savedDraft.permissionModeOverride),
 			fastMode:savedDraft.fastMode ?? false,
 			contextWindowChoice:savedDraft.contextWindowChoice ?? DEFAULT_CONTEXT_WINDOW_CHOICE,
 			...(mode === 'chat' ? {} : {

@@ -32,7 +32,7 @@ HONORED:
     stored session meta (``cli_session_id``), which DelegatedLoop writes back
     from the CLI's init frame. See ``_resolve_cli_session_id``.
   * ``session_id``           → explicit fluid session id
-  * ``permission_mode``      → fluid PermissionEngine approval policy + plan_mode
+  * ``permission_mode``      → fluid PermissionEngine approval policy
   * ``env``                  → delegated child env / native provider (via os.environ).
     On native legs one variable is additionally consumed directly:
     ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` (positive int) becomes ``NativeLoop
@@ -303,7 +303,6 @@ _PERMISSION_POLICY = {
     "bypassPermissions": "never_ask",
     "acceptEdits": "on_write",
     "default": "on_write",
-    "plan": "always_ask",
 }
 
 
@@ -331,15 +330,8 @@ class HarnessAdapter(ProviderAdapter):
         self._turn_floor: int = 0
         # app tool_use_id -> fluid permission request_id (respond_to_permission map)
         self._perm_requests: Dict[str, str] = {}
-        # last pending fluid QuestionRequest id (AskUser / StopPlanning).
+        # last pending fluid QuestionRequest id (AskUser).
         self._pending_question_id: Optional[str] = None
-        # Mode to restore when StopPlanning is approved. Set when PlanModeControl
-        # first enters plan mode (or, if the session connected already in plan,
-        # default).
-        self._pre_plan_permission_mode: str = "default"
-        # SystemMessage(status, permissionMode=...) queued by PlanModeControl so
-        # receive_events can yield them on the next engine tick.
-        self._pending_plan_mode_events: list = []
         self._is_delegated: bool = False
         self._provider_kind: Optional[str] = None
         # ─ translation state (see _translate) ─
@@ -425,7 +417,7 @@ class HarnessAdapter(ProviderAdapter):
 
         fluid_session_id = options.session_id or options.resume_session_id
         system, append_system = _system_parts(options.system_prompt)
-        permissions, plan_mode = self._build_permissions(options)
+        permissions = self._build_permissions(options)
 
         if self._is_delegated:
             cli_session_id = await self._resolve_cli_session_id(fluid_session_id, options)
@@ -847,7 +839,6 @@ class HarnessAdapter(ProviderAdapter):
                 registry=self._registry,
                 permissions=permissions,
                 ctx=native_ctx,
-                plan_mode=plan_mode,
                 session_id=fluid_session_id,
                 # Same scope filter the prompt compiled under, so fluid's
                 # native-agent discovery (the Task registry) sees the same
@@ -895,7 +886,6 @@ class HarnessAdapter(ProviderAdapter):
             _prune_duplicate_plugin_mcp_servers(
                 self._engine, _external_mcp_servers(options.mcp_servers)
             )
-            self._wire_plan_mode_control(options)
 
         # Prime the session so ``session_id`` and ``events()`` are usable
         # immediately (both engines lazily create it inside the first turn task,
@@ -1445,11 +1435,6 @@ class HarnessAdapter(ProviderAdapter):
             if getattr(event, "seq", -1) >= 0:
                 self._event_cursor = event.seq
 
-            # Plan/StopPlanning flip the engine flag mid-dispatch; drain any
-            # status notes they queued before translating this event so the
-            # chip update lands next to the tool result that caused it.
-            for pending in self._take_plan_mode_events():
-                yield pending
 
             for translated in self._translate(event):
                 if isinstance(translated, PermissionRequestEvent) and self._can_use_tool:
@@ -1682,15 +1667,7 @@ class HarnessAdapter(ProviderAdapter):
             )
 
     async def _bridge_question(self, ev: PermissionRequestEvent) -> None:
-        """Route one fluid QuestionRequest through the app's question modal.
-
-        AskUser / StopPlanning park on RespondQuestion, not RespondPermission.
-        ``can_use_tool`` drives the app interaction: AskUser uses UserQuestion;
-        StopPlanning uses the plan-approval PermissionRequest panel. We take
-        ``_fluid_answer`` off its allow result and submit that string as the
-        question answer. Fluid has no deny-question op, so rejection is encoded
-        as an allowed bridge result carrying ``keep planning``.
-        """
+        """Route one fluid QuestionRequest through the app's question modal."""
         from types import SimpleNamespace
 
         from app.core.user_question_handler import (
@@ -1716,7 +1693,7 @@ class HarnessAdapter(ProviderAdapter):
                     else:
                         answer = str(raw or "")
                     # Only the app knows whether a person answered or policy
-                    # did; fluid words the StopPlanning result on this.
+                    # did; preserve that attribution in the response.
                     user_answered = bool(candidate.get(HOST_USER_ANSWERED_KEY))
         except asyncio.CancelledError:
             raise
@@ -1747,19 +1724,6 @@ class HarnessAdapter(ProviderAdapter):
                 ev.tool_use_id, exc_info=True,
             )
 
-    def _came_from_bypass(self) -> bool:
-        """True when this session's human opted into bypassPermissions.
-
-        Plan persists the chip as ``plan``, so the *current* binding is the
-        wrong signal. Use the mode captured at connect / before Plan flipped
-        it. A turn that still *is* bypass (Plan + StopPlanning in one turn)
-        also counts.
-        """
-        pre = (self._pre_plan_permission_mode or "").strip()
-        current = ""
-        if self._options is not None:
-            current = (self._options.permission_mode or "").strip()
-        return "bypassPermissions" in (pre, current)
 
     async def interrupt(self) -> None:
         if self._engine is not None:
@@ -1796,7 +1760,7 @@ class HarnessAdapter(ProviderAdapter):
         )
 
     async def respond_to_user_question(self, answer: str) -> None:
-        # Live AskUser / StopPlanning answers go through _bridge_question.
+        # Live AskUser answers go through _bridge_question.
         # This remains as a fallback if a caller has the pending id.
         if self._engine is None or self._pending_question_id is None:
             return
@@ -1824,26 +1788,16 @@ class HarnessAdapter(ProviderAdapter):
             mode = 'default'
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
-        # BEFORE the submit: fluid routes a plan-mode flip through the injected
-        # PlanModeControl, so our own wrapper runs inside submit() and reads
-        # this field to decide what mode to restore to. Setting it afterwards
-        # made a chip switch out of plan restore the mode from BEFORE the one
-        # the user just picked.
-        if mode != "plan":
-            self._pre_plan_permission_mode = mode
         try:
             await self._engine.submit(SetPermissionMode(mode=mode))
         except NotImplementedError:
-            # NativeLoop: adjust the permission engine + plan_mode in place.
+            # NativeLoop: adjust the permission engine in place.
             policy = _PERMISSION_POLICY.get(mode, "on_write")
             perms = getattr(self._engine, "permissions", None)
             if perms is not None:
                 perms.approval_policy = policy
-            if hasattr(self._engine, "plan_mode"):
-                self._engine.plan_mode = mode == "plan"
         if self._options is not None:
             self._options.permission_mode = mode
-        self._refresh_plan_mode_control()
 
     async def get_context_usage(self) -> Optional[Dict[str, Any]]:
         """Context-window usage by category, or None when unavailable.
@@ -2167,25 +2121,12 @@ class HarnessAdapter(ProviderAdapter):
             ]
 
         if cls == "QuestionRequest":
-            # MRTR input_required round-trip (AskUser / StopPlanning). Record
+            # MRTR input_required round-trip (AskUser). Record
             # the id and surface as a permission-shaped event with
             # risk="question" so receive_events routes it through
             # _bridge_question → app interaction UI → RespondQuestion.
             self._pending_question_id = event.request_id
             question_input = {"question": event.message, "schema": event.schema}
-            if event.name == "StopPlanning":
-                # StopPlanning's QuestionRequest message contains the complete
-                # plan followed by fluid's synthetic approval question. Carry
-                # only the markdown plan so the permission panel does not have
-                # to scrape transcript text or show the question twice.
-                suffix = (
-                    "\n\nApprove this plan and leave plan mode? "
-                    "(1 = Approve, anything else = feedback)"
-                )
-                plan_text = event.message
-                if plan_text.endswith(suffix):
-                    plan_text = plan_text[: -len(suffix)]
-                question_input["plan"] = plan_text
             return [
                 PermissionRequestEvent(
                     tool_use_id=event.tool_use_id,
@@ -2912,225 +2853,9 @@ class HarnessAdapter(ProviderAdapter):
     def _build_permissions(self, options: SessionOptions):
         mode = options.permission_mode or "default"
         policy = _PERMISSION_POLICY.get(mode, "on_write")
-        plan_mode = mode == "plan"
-        return (
-            PermissionEngine(
-                approval_policy=policy, rules=_chat_mode_rules(options)
-            ),
-            plan_mode,
+        return PermissionEngine(
+            approval_policy=policy, rules=_chat_mode_rules(options)
         )
-
-    def _wire_plan_mode_control(self, options: SessionOptions) -> None:
-        """Wrap NativeLoop's PlanModeControl so Plan/StopPlanning persist + notify.
-
-        NativeLoop already injects a controller that flips ``engine.plan_mode``.
-        We wrap ``set_active`` so entering/leaving also:
-          * remembers the pre-plan permission mode for restore
-          * persists ``sessions.permission_mode`` (so the next send does not
-            call ``set_permission_mode(default)`` and exit plan mode)
-          * queues a SystemMessage the stream yields for the composer chip
-        """
-        engine = self._engine
-        if engine is None:
-            return
-        ctx = getattr(engine, "ctx", None)
-        extra = getattr(ctx, "extra", None)
-        if not isinstance(extra, dict):
-            return
-        from fluid.tools.builtins.plan import PlanModeControl
-
-        original = extra.get("plan_mode_control")
-        if not isinstance(original, PlanModeControl):
-            return
-        current = options.permission_mode or "default"
-        self._pre_plan_permission_mode = current if current != "plan" else "default"
-
-        def set_active(active: bool) -> None:
-            was = bool(original.is_active())
-            original.set_active(active)
-            if was == bool(active):
-                return
-            try:
-                self._on_plan_mode_changed(bool(active))
-            except Exception:  # noqa: BLE001
-                # The engine flag is ALREADY flipped by the line above, so the
-                # session's real mode is settled either way. Letting a
-                # bookkeeping failure (a DB write, a chip event) escape would
-                # surface inside fluid's tool dispatch, which turns the
-                # approval the user just granted into a tool ERROR — the model
-                # reads that as "the exit failed" and goes back to planning.
-                logger.warning(
-                    "[HarnessAdapter] plan-mode bookkeeping failed (active=%s); "
-                    "the engine flag is authoritative and already set",
-                    active, exc_info=True,
-                )
-
-        extra["plan_mode_control"] = PlanModeControl(
-            is_active=original.is_active,
-            set_active=set_active,
-            auto_approve=self._plan_auto_approve(),
-        )
-
-    def _plan_auto_approve(self) -> bool:
-        """Whether StopPlanning's gate closes on policy here (bypassPermissions).
-
-        Only the host knows this. Told, fluid's Plan entry result says the
-        approval is automatic and nobody reviews the plan, so the model does
-        not go on to report "the plan is approved" as if a person had said so
-        — the audited wording under bypass.
-        """
-        return self._came_from_bypass()
-
-    def _refresh_plan_mode_control(self) -> None:
-        """Re-stamp ``auto_approve`` after a permission-mode change.
-
-        The controller is a frozen dataclass read at Plan time, so a chip
-        switch into or out of bypass has to replace it; the wrapped callables
-        are kept as they are.
-        """
-        import dataclasses
-
-        ctx = getattr(self._engine, "ctx", None)
-        extra = getattr(ctx, "extra", None)
-        if not isinstance(extra, dict):
-            return
-        control = extra.get("plan_mode_control")
-        if control is None or not dataclasses.is_dataclass(control):
-            return
-        if not hasattr(control, "auto_approve"):
-            return
-        want = self._plan_auto_approve()
-        if bool(getattr(control, "auto_approve", False)) != want:
-            extra["plan_mode_control"] = dataclasses.replace(control, auto_approve=want)
-
-    def _on_plan_mode_changed(self, active: bool) -> Optional[str]:
-        """Keep engine policy, session binding, and the UI chip on the same mode.
-
-        Returns the mode the session ended up bound to when a restore happened
-        ("bypassPermissions" for the bypass-exit fall-through), else None.
-
-        Linger bug: Plan flips ``engine.plan_mode`` but the composer chip still
-        says ``default``. The next send therefore skips ``set_permission_mode``
-        (old == new) and plan mode never ends — even after StopPlanning ran,
-        if its QuestionRequest was never answered. Restoring the approval
-        policy here means the rest of THIS turn is not stuck on always_ask
-        after a chip-initiated plan, and persisting the binding makes the
-        next send actually call set_permission_mode.
-        """
-        pre = self._pre_plan_permission_mode or "default"
-        # Bypass users keep never_ask and their chip. Moving them to plan
-        # would make the next send look like a chip-initiated plan and
-        # StopPlanning would prompt — the opposite of bypass. What this method
-        # decides is the approval policy alone; whether the engine narrows the
-        # tool surface while ``plan_mode`` is set is the engine's business and
-        # is not asserted here.
-        #
-        # EXCEPT on exit: if the session's own binding is ``plan`` (the user
-        # picked Plan Only from the composer, then the model entered plan mode),
-        # an approved exit must still restore the persisted binding + chip, or
-        # the session stays bound to plan forever (the stickiness bug). The
-        # fall-through below restores the binding to ``default``; the approval
-        # policy is re-set to never_ask right after so bypass semantics hold.
-        if pre == "bypassPermissions" and not (
-            not active
-            and self._options is not None
-            and (self._options.permission_mode or "") == "plan"
-        ):
-            engine = self._engine
-            if engine is not None and hasattr(engine, "plan_mode"):
-                engine.plan_mode = bool(active)
-            return None
-
-        mode = "plan" if active else pre
-        label = "plan" if active else mode
-        engine = self._engine
-        if engine is not None:
-            perms = getattr(engine, "permissions", None)
-            if perms is not None:
-                # A bypass user exiting a chip-initiated plan restores their
-                # binding to ``default`` above; the approval policy itself goes
-                # straight back to never_ask — the whole point of bypass.
-                if pre == "bypassPermissions" and not active:
-                    perms.approval_policy = "never_ask"
-                else:
-                    perms.approval_policy = _PERMISSION_POLICY.get(mode, "on_write")
-            if hasattr(engine, "plan_mode"):
-                engine.plan_mode = bool(active)
-        restored = "bypassPermissions" if (pre == "bypassPermissions" and not active) else None
-        self._pending_plan_mode_events.append(
-            SystemMessage(
-                subtype="status",
-                data={
-                    "permissionMode": mode,
-                    "content": f"Switched to {label} mode.",
-                },
-            )
-        )
-        restored = restored or (mode if not active else None)
-        extras = (self._options.extra if self._options is not None else None) or {}
-        app_session_id = extras.get("app_session_id")
-        if not app_session_id:
-            return restored
-        try:
-            from app.db.sessions import set_session_run_binding
-
-            set_session_run_binding(str(app_session_id), permission_mode=mode)
-        except Exception:
-            logger.debug(
-                "[HarnessAdapter] could not persist plan-mode binding",
-                exc_info=True,
-            )
-        return restored
-
-    def _take_plan_mode_events(self) -> list:
-        events = list(self._pending_plan_mode_events)
-        self._pending_plan_mode_events.clear()
-        return events
-
-    def notify_plan_mode_exited(self) -> Optional[str]:
-        """Sync app state after an approved plan exit (ExitPlanMode / StopPlanning).
-
-        The native leg flips its own flag through PlanModeControl; the delegated
-        CLI leg has no such callback, so an approved ExitPlanMode panel left the
-        session's persisted ``plan`` binding, the composer chip and the turn's
-        permission refs pointing at plan forever — every later send re-resolved
-        plan mode and the session looked stuck. Callers invoke this once the
-        user APPROVES leaving plan mode.
-
-        Returns the restored permission mode when a sync actually happened
-        (``None`` when this adapter was never in plan — nothing to undo).
-        """
-        opts = self._options
-        current = ((opts.permission_mode or "") if opts is not None else "") or ""
-        # The session's OPTIONS mode is only half the signal. When the model
-        # entered plan mode itself (the ``Plan`` builtin, chip still on
-        # ``default``) the options never say ``plan`` — but the engine is read
-        # only and ``sessions.permission_mode`` was persisted as ``plan`` on
-        # the way in. Gating on the options alone skipped the sync for exactly
-        # that session and left the persisted binding on ``plan``, so the NEXT
-        # turn constructed the engine locked again.
-        engine_in_plan = bool(getattr(self._engine, "plan_mode", False))
-        if current != "plan" and not engine_in_plan:
-            return None
-        restored = self._on_plan_mode_changed(False)
-        # Keep the options snapshot in step so requires_reconnect / hot-swap
-        # comparisons see the post-exit mode, not the stale plan one. Mirrors
-        # what set_permission_mode would have written.
-        if opts is not None and restored and restored != "plan":
-            opts.permission_mode = restored
-            if restored != "bypassPermissions":
-                self._pre_plan_permission_mode = restored
-        # The delegated CLI leg has no PlanModeControl callback: drop its write
-        # schemas right here (the native leg's set_active wrapper is a no-op —
-        # the flag was already flipped before this call).
-        engine = self._engine
-        if engine is not None and hasattr(engine, "plan_mode"):
-            engine.plan_mode = False
-        # Never fall back to a blind "default": a bypassPermissions session
-        # whose model entered plan mode restores nothing (bypass keeps its own
-        # chip), and reporting "default" would re-pin the turn's permission
-        # refs to default and start prompting a user who opted out of prompts.
-        return restored or current or "default"
 
 
 # ─── Module-level helpers ─────────────────────────────────────────────────────
@@ -4082,7 +3807,6 @@ def _code_mode_tool_sections(
     return blocks
 
 
-
 # Appended (native leg, Bash permitted) when the install's gh CLI is signed in,
 # alongside fluid's own STEERING_BLOCK. Short by design: the model already knows
 # how to drive gh, it just has no way to know the binary is there and
@@ -4821,7 +4545,7 @@ def _monitor_budget_seconds() -> Optional[int]:
 # Capabilities NativeLoop wires onto every native session itself (mirrors
 # fluid.cli.prompt.NATIVE_WIRED_CAPABILITIES); the ctx the app builds does not
 # carry them yet when the prompt is compiled.
-_NATIVE_WIRED_FALLBACK = frozenset({"history_recall", "plan_mode_control", "tool_registry"})
+_NATIVE_WIRED_FALLBACK = frozenset({"history_recall", "tool_registry"})
 
 
 def _wired_capabilities(ctx: Any) -> frozenset:

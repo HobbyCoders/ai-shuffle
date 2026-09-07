@@ -78,19 +78,17 @@ def resolve_answer_envelope(envelope: Any) -> Dict[str, Any]:
     return resolved
 
 
-# Fluid's AskUser / StopPlanning ride QuestionRequest events, not the SDK's
+# Fluid's AskUser rides QuestionRequest events, not the SDK's
 # AskUserQuestion permission gate. The adapter translates each event into the
 # same {question, schema} shape and expects a single string back on
 # RespondQuestion. These helpers normalize that shape onto the existing
 # UserQuestion modal payload and extract the answer the engine wants.
 FLUID_ANSWER_KEY = "_fluid_answer"
 # Set truthy beside FLUID_ANSWER_KEY when a PERSON produced the answer (the
-# plan-approval panel was clicked) rather than a policy (bypassPermissions
-# closing the gate). The adapter forwards it as ``RespondQuestion(
-# user_answered=True)``; fluid credits the user in the StopPlanning result
-# only then. Absent means unattributed, which fluid words as such.
+# question was answered in the UI) rather than a host policy. The adapter forwards it as ``RespondQuestion(
+# user_answered=True)``; absent means unattributed.
 HOST_USER_ANSWERED_KEY = "_host_user_answered"
-FLUID_QUESTION_TOOLS = frozenset({"AskUser", "StopPlanning"})
+FLUID_QUESTION_TOOLS = frozenset({"AskUser"})
 QUESTION_TOOLS = frozenset({"AskUserQuestion"}) | FLUID_QUESTION_TOOLS
 
 
@@ -100,7 +98,7 @@ def questions_from_tool_input(tool_input: Any) -> List[Dict[str, Any]]:
     SDK AskUserQuestion already carries questions: [...]. Fluid
     QuestionRequest arrives as {question: <message>, schema: <q dict>};
     the schema is the structured question, and question is the plain-text
-    rendering (StopPlanning prepends the plan body there).
+    rendering.
     """
     if not isinstance(tool_input, dict):
         return []
@@ -112,8 +110,7 @@ def questions_from_tool_input(tool_input: Any) -> List[Dict[str, Any]]:
         q = dict(schema)
         message = str(tool_input.get("question") or "").strip()
         if message and message != str(q.get("question") or "").strip():
-            # Fluid StopPlanning (and any host that puts extra context in the
-            # message) — show the longer rendering so the plan body is visible.
+            # Show extra context supplied by the host in the message.
             q["question"] = message
         return [q]
     message = str(tool_input.get("question") or "").strip()
@@ -128,7 +125,7 @@ def fluid_answer_from_envelope(answers: Any) -> str:
     Option labels (and free text) pass through as-is — fluid AskUser maps
     numeric picks to labels, and a label is already the choice. Multi-select
     joins with a comma. Dismiss / empty becomes "" (AskUser records
-    (no answer); StopPlanning treats it as a reject and stays in plan mode).
+    (no answer)).
     """
     if not isinstance(answers, dict) or answers.get(DISMISSED_KEY):
         return ""

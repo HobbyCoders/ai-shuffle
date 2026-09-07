@@ -21,7 +21,6 @@ VALID_PERMISSION_MODES = (
     "default",
     "auto",
     "acceptEdits",
-    "plan",
     "bypassPermissions",
 )
 

@@ -153,28 +153,10 @@ def storage_session_mode(mode: Any) -> Optional[str]:
 
 
 def permission_mode_for_session_mode(permission_mode: Any, mode: Any) -> Any:
-    """The permission mode a session in ``mode`` actually runs on.
-
-    Chat sessions are pinned to ``'default'``, whatever their row, agent config
-    or turn override says. Two reasons, and each is enough on its own:
-
-    * The chat composer renders no tool-access control (there is nothing to
-      choose between when the surface is two web tools), so a chat session that
-      picked up ``'plan'`` — from the last code-lane pick at creation, or from a
-      hand-edited row — would have no way back out. It could not even exit plan
-      mode from inside the turn: the plan-exit tool is not on
-      ``CHAT_MODE_TOOL_SURFACE``, so the permission callback denies it against
-      the profile surface and the turn parks forever.
-    * ``'bypassPermissions'`` is a request to stop asking the callback. The chat
-      ceiling is expressed mostly as an ALLOW list, and an allow list is a
-      pre-approval, not a blocklist — leaning on the callback to hold the line
-      is exactly what bypass switches off. Refusing the mode outright is a
-      sturdier ceiling than trying to out-argue it downstream.
-
-    Code and voice are returned untouched: code IS the surface that owns this
-    control, and a voice session dispatches ordinary worker agents (ruling VM10)
-    whose permission handling must stay unchanged.
-    """
+    """Normalize retired settings and keep chat sessions on default permissions."""
+    # Old saved sessions and clients may still send the retired mode.
+    if permission_mode == "plan":
+        return "default"
     if normalize_session_mode(mode) != "chat":
         return permission_mode
     return "default"

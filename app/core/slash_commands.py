@@ -337,10 +337,6 @@ SDK_BUILTIN_COMMANDS = {
         "description": "Review uncommitted code changes for bugs and style issues",
         "type": "sdk_builtin"
     },
-    "plan": {
-        "description": "Toggle read-only planning mode",
-        "type": "sdk_builtin"
-    },
     "doctor": {
         "description": "Run diagnostics on installation and connectivity",
         "type": "sdk_builtin"

@@ -153,7 +153,6 @@ def make_engine(
     bus=None,
     session_id: str | None = None,
     extra_system: str | None = None,
-    plan_mode: bool = False,
     registry: Any | None = None,
     claude_cmd: list[str] | None = None,
     permission_responder: Any | None = None,
@@ -183,7 +182,6 @@ def make_engine(
         session_id=session_id,
         system=compiled.text,
         system_sections=compiled,
-        plan_mode=plan_mode,
         registry=registry,
         claude_cmd=claude_cmd,
     )

@@ -50,8 +50,8 @@ export const TOOL_ICON_MAP: Record<string, IconType> = {
 	Task: 'bot', Skill: 'bot', Agent: 'bot', Swarm: 'branch',
 	// Todo
 	TodoWrite: 'list',
-	// Plan mode / Questions
-	EnterPlanMode: 'list', ExitPlanMode: 'list', Plan: 'list', StopPlanning: 'list', AskUserQuestion: 'bot',
+	// Questions
+	AskUserQuestion: 'bot',
 	// Scheduling
 	ScheduleWakeup: 'clock', CronCreate: 'clock', CronList: 'clock', CronDelete: 'clock',
 	RemoteTrigger: 'send',

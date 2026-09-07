@@ -312,7 +312,7 @@ class TestTurnResolution:
         )
         assert opts.model == "haiku"
         assert opts.effort == "low"
-        assert opts.permission_mode == "plan"
+        assert opts.permission_mode == "default"
 
     def test_nothing_bound_anywhere_uses_the_registry_default(
         self, mock_db, tmp_path

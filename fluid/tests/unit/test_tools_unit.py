@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from fluid.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
-from fluid.permissions.engine import PermissionEngine, plan_mode_tools
+from fluid.permissions.engine import PermissionEngine
 from fluid.permissions.rules import Rule, evaluate_rules
 from fluid.tools.builtins import register_builtins
 from fluid.tools.inproc import create_inproc_server, tool
@@ -115,16 +115,6 @@ def test_doom_loop_forces_ask_after_three() -> None:
     assert engine.note_execution(*call) is False  # streak reset
     # a distinct call resets the streak immediately
     assert engine.note_execution("Bash", {"command": "other"}) is False
-
-
-def test_plan_mode_tools_filter() -> None:
-    specs = [
-        ToolSpec(name="Read", description="", input_schema={}, risk="safe"),
-        ToolSpec(name="Bash", description="", input_schema={}, risk="write"),
-        ToolSpec(name="Rm", description="", input_schema={}, risk="destructive"),
-    ]
-    kept = {t.name for t in plan_mode_tools(specs)}
-    assert kept == {"Read"}
 
 
 async def test_hook_modify_replaces_input() -> None:

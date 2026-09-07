@@ -180,10 +180,9 @@
 					};
 				}
 
-				// Permission mode change (plan mode, delegate mode, etc.)
+				// Permission mode change
 				if (permissionMode) {
 					const modeLabels: Record<string, string> = {
-						plan: 'Plan Mode',
 						default: 'Default Mode',
 						auto: 'Auto Mode',
 						acceptEdits: 'Accept Edits',
@@ -196,7 +195,7 @@
 						title: label,
 						content: `Switched to ${label.toLowerCase()}.`,
 						badge: permissionMode,
-						badgeColor: permissionMode === 'plan' ? 'purple' : 'blue'
+						badgeColor: 'blue'
 					};
 				}
 
