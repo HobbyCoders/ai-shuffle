@@ -5,22 +5,25 @@ vi.mock('$app/environment', () => ({ browser: true }));
 class FakeSocket {
 	static OPEN = 1;
 	static last: FakeSocket;
+	static ready: object = { type: 'ready' };
 	readyState = 1;
 	bufferedAmount = 0;
 	onmessage?: (event: { data: string }) => void;
 	onclose?: (event: { code: number; reason: string }) => void;
 	send = vi.fn();
 	close = vi.fn();
-	constructor() { FakeSocket.last = this; queueMicrotask(() => this.emit({ type: 'ready' })); }
+	constructor() { FakeSocket.last = this; queueMicrotask(() => this.emit(FakeSocket.ready)); }
 	emit(message: object) { this.onmessage?.({ data: JSON.stringify(message) }); }
 }
 const node = () => ({ connect: vi.fn(), disconnect: vi.fn(), gain: { value: 0 }, frequencyBinCount: 128 });
 class FakeAudioContext {
+	static processor: ReturnType<typeof node> & { onaudioprocess?: (event: { inputBuffer: { getChannelData: () => Float32Array } }) => void };
 	state = 'running'; sampleRate = 24000; destination = {};
-	createMediaStreamSource = node; createAnalyser = node; createScriptProcessor = node; createGain = node;
+	createMediaStreamSource = node; createAnalyser = node; createGain = node;
+	createScriptProcessor = () => (FakeAudioContext.processor = node());
 	close = vi.fn().mockResolvedValue(undefined);
 }
-afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+afterEach(() => { FakeSocket.ready = { type: 'ready' }; vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('GPT Live Transcribe startup failures', () => {
 	function setup(getUserMedia: () => Promise<unknown>) {
@@ -65,6 +68,24 @@ describe('GPT Live Transcribe startup failures', () => {
 });
 
 describe('stream session stop drain', () => {
+	it.each([false, true])('detects local PCM speech only when server VAD is %s', async (serverVad) => {
+		FakeSocket.ready = { type: 'ready', server_vad: serverVad };
+		vi.stubGlobal('WebSocket', FakeSocket);
+		vi.stubGlobal('AudioContext', FakeAudioContext);
+		vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [{ stop: vi.fn() }] }) } });
+		vi.stubGlobal('requestAnimationFrame', vi.fn()); vi.stubGlobal('cancelAnimationFrame', vi.fn());
+		const onSpeech = vi.fn(); const onReady = vi.fn();
+		const session = await startSttStream({ onSpeech, onReady });
+		const process = FakeAudioContext.processor.onaudioprocess!;
+		const sample = (value: number) => process({ inputBuffer: { getChannelData: () => new Float32Array(2048).fill(value) } });
+		sample(0); sample(0.1); sample(0.1); sample(0); sample(0);
+		expect(onReady).toHaveBeenCalledWith(expect.objectContaining({ serverVad }));
+		expect(onSpeech.mock.calls).toEqual(serverVad ? [] : [[true], [false]]);
+		expect(FakeSocket.last.send).toHaveBeenCalledTimes(5);
+		session.abort(); sample(0.1);
+		expect(onSpeech.mock.calls).toEqual(serverVad ? [] : [[true], [false]]);
+		expect(FakeSocket.last.send).toHaveBeenCalledTimes(5);
+	});
 	it('publishes words before stopping and waits past the first final for all tail turns', async () => {
 		vi.useFakeTimers();
 		vi.stubGlobal('WebSocket', FakeSocket);

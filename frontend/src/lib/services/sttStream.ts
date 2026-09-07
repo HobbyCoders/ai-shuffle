@@ -5,7 +5,7 @@
  * wants, and streams it to `/api/v1/settings/transcribe/stream` (a server-side
  * proxy onto OpenAI's realtime transcription session). Text comes back while
  * the user is still talking: `onDelta` grows the in-flight segment, `onFinal`
- * seals it once server VAD hears the pause.
+ * seals it when server VAD or the client's stop commits the turn.
  *
  * Capture path: an AudioContext pinned to 24 kHz does the resampling in native
  * code, so the JS resampler below is a fallback for browsers that refuse the
@@ -43,7 +43,7 @@ export interface SttStreamHandlers {
 	onTranscript?: (text: string) => void;
 	/** The upstream accepted the model configuration. Microphone acquisition
 	 *  runs concurrently; use `onCapture` for the recording-start signal. */
-	onReady?: (info: { model: string; modelName: string; partials: boolean }) => void;
+	onReady?: (info: { model: string; modelName: string; partials: boolean; serverVad?: boolean }) => void;
 	/** The audio graph is connected and samples are flowing. This is the only
 	 *  honest "you can talk now" signal, and the one the UI and earcon fire on. */
 	onCapture?: () => void;
@@ -51,7 +51,7 @@ export interface SttStreamHandlers {
 	onDelta?: (text: string) => void;
 	/** A segment finished; `text` is its settled transcript. */
 	onFinal?: (text: string) => void;
-	/** Server VAD heard speech start or stop. */
+	/** Speech changed, from server VAD or local PCM when the model has no VAD. */
 	onSpeech?: (active: boolean) => void;
 	/** Per-frame audio energy for the meter: `level` is 0–1 RMS, `bands` a
 	 *  low-to-high spectrum slice already normalised to 0–1. */
@@ -242,6 +242,8 @@ export async function startSttStream(
 	let pending = '';
 	let closed = false;
 	let fatalError: string | null = null;
+	let clientSpeechDetection = false;
+	let localSpeechActive = false;
 
 
 	let stream: MediaStream | null = null;
@@ -336,10 +338,12 @@ export async function startSttStream(
 				case 'ready':
 					if (!settled) {
 						settled = true;
+						clientSpeechDetection = message.server_vad === false;
 						handlers.onReady?.({
 							model: String(message.model ?? ''),
 							modelName: String(message.model_name ?? ''),
-							partials: Boolean(message.partials)
+							partials: Boolean(message.partials),
+							serverVad: !clientSpeechDetection
 						});
 						resolve();
 					}
@@ -478,6 +482,19 @@ export async function startSttStream(
 		sourceNode.connect(analyser);
 
 		const sendChunk = (frames: Float32Array) => {
+			if (closed || !audioContext) return;
+			// The capture callback keeps running when animation frames pause.
+			// GPT Live has no server VAD: detect speech from unsmoothed PCM so
+			// silence can end the recording and commit its final turn.
+			if (clientSpeechDetection && frames.length) {
+				let sumSquares = 0;
+				for (const sample of frames) sumSquares += sample * sample;
+				const active = Math.sqrt(sumSquares / frames.length) >= 0.02;
+				if (active !== localSpeechActive) {
+					localSpeechActive = active;
+					handlers.onSpeech?.(active);
+				}
+			}
 			if (!socket || socket.readyState !== WebSocket.OPEN) return;
 			if (socket.bufferedAmount > MAX_BUFFERED_BYTES) return;
 			const resampled = resample(frames, contextRate, TARGET_SAMPLE_RATE);

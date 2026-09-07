@@ -60,7 +60,7 @@ export interface GlobalSttState {
 	partial: string;
 	/** Live only: segments the model has settled on, in order. */
 	segments: string[];
-	/** Live only: server VAD currently hears speech. */
+	/** Live only: server VAD or local PCM detection currently hears speech. */
 	speechActive: boolean;
 	/** Live only: the model doing the transcribing, for the overlay caption. */
 	modelName: string | null;
@@ -133,11 +133,8 @@ const MIN_RECORDING_DURATION = 500; // 500ms minimum
 // way out is the cancel affordance, which throws the transcript away — so the
 // natural gesture (stop talking) had no natural outcome.
 //
-// Two values because the two paths start counting at different moments. The live
-// path is told by the server's VAD, which itself waits out
-// TURN_DETECTION.silence_duration_ms (700ms) first; the batch path detects
-// silence itself and starts counting immediately. Both land at roughly 2.5s of
-// quiet before the recording ends.
+// Server VAD has already waited 700ms before reporting silence. Batch and
+// live models without VAD detect silence locally and need the full 2.5s.
 const SILENCE_AUTO_STOP_LIVE_MS = 1800;
 const SILENCE_AUTO_STOP_BATCH_MS = 2500;
 
@@ -145,8 +142,8 @@ const SILENCE_AUTO_STOP_BATCH_MS = 2500;
 // indefinitely either.
 const NO_SPEECH_AUTO_STOP_MS = 12000;
 
-// Batch path only: RMS below this counts as silence. The live path uses the
-// server's own VAD instead, which is far better than a threshold.
+// Batch detection threshold. sttStream uses the same PCM threshold only for
+// live models without server VAD.
 const SILENCE_RMS_THRESHOLD = 0.02;
 
 // Mutex to prevent race conditions during toggle
@@ -397,12 +394,16 @@ async function startLiveRecording(myRun: number): Promise<boolean> {
 		partialsSupported: capability.partials
 	}));
 
+	let silenceStopMs = SILENCE_AUTO_STOP_LIVE_MS;
 	try {
 		const session = await startSttStream({
-			// Note there is no onReady handler: the socket being open says nothing
-			// about the microphone. Flipping to "listening" there told the user to
-			// start talking a few hundred milliseconds before anything could hear
-			// them, which is exactly the clipped-first-words complaint.
+			onReady: (info) => {
+				if (!isCurrentRun(myRun)) return;
+				// Use the accepted session, since a setting may change after the
+				// capability probe. Readiness alone does not start the microphone UI.
+				silenceStopMs = info.serverVad === false
+					? SILENCE_AUTO_STOP_BATCH_MS : SILENCE_AUTO_STOP_LIVE_MS;
+			},
 			onCapture: () => {
 				if (!isCurrentRun(myRun)) return;
 				globalSttState.update((s) => ({
@@ -432,12 +433,11 @@ async function startLiveRecording(myRun: number): Promise<boolean> {
 			onSpeech: (active) => {
 				if (!isCurrentRun(myRun) || !get(globalSttState).isRecording) return;
 				globalSttState.update((s) => ({ ...s, speechActive: active }));
-				// Server VAD is the authority on "are they still talking" — far
-				// better than an RMS threshold, so the live path defers to it.
+				// sttStream uses local PCM only when this model has no server VAD.
 				if (active) {
 					cancelSilenceStop();
 				} else {
-					armSilenceStop(SILENCE_AUTO_STOP_LIVE_MS);
+					armSilenceStop(silenceStopMs);
 				}
 			},
 			onAudio: (level, bands) => {
