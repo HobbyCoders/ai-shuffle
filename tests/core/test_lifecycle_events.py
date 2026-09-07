@@ -30,6 +30,26 @@ async def test_runtime_enqueues_only_winning_start_and_settlement(monkeypatch, m
                        ("completed", "fixture-session", row["id"])]
 
 
+@pytest.mark.parametrize("metadata", [{"is_error": True}, {"errors": ["max turns exceeded"]}])
+async def test_durable_failed_result_reaches_error_lifecycle(monkeypatch, mock_db, metadata):
+    from tests.core.test_session_runtime import _runtime_env, _make_pump
+    from app.core.turn_recorder import TurnRecorder
+    monkeypatch.setattr(lifecycle_events.database, "get_session", lambda sid: {"profile_id": "p"})
+    monkeypatch.setattr(lifecycle_events.database, "get_connector_sessions_for_ai_session", lambda sid: [])
+    async def create_recorder(sid, **kw):
+        recorder = TurnRecorder(sid, None, kw["run_id"], kw["fence_token"], "fixture")
+        recorder.turn_id = kw["turn_id"]
+        recorder._owns_lease = False
+        return recorder
+    row = turns.enqueue_turn("failed-result", "user", prompt="fixture")
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": metadata}])):
+        monkeypatch.setattr(session_runtime.TurnRecorder, "create_for_run", create_recorder)
+        assert await session_runtime.SessionRuntime(row).execute() == "completed"
+    event = lifecycle_events._payload("completed", "failed-result", row["id"], {})
+    assert event[0] == "session.error"
+    assert event[1]["error_message"] == "Provider execution failed"
+
+
 async def test_interaction_creation_notifies_without_tool_arguments(monkeypatch):
     monkeypatch.setattr(interaction_events, "_emit", AsyncMock())
     monkeypatch.setattr(turns, "get_live_turn", lambda sid: {"source": "automation"})
@@ -116,6 +136,8 @@ async def test_automation_lifecycle_does_not_recursively_start_models(monkeypatc
 @pytest.mark.parametrize("outcome,reason,payload,event", [
     ("completed", None, {"usage": {"tokens_in": 7, "tokens_out": 3, "duration_ms": 1200}}, "session.complete"),
     ("completed", None, {"api_error_status": 429}, "session.error"),
+    ("completed", None, {"is_error": True}, "session.error"),
+    ("completed", None, {"errors": ["max turns exceeded"]}, "session.error"),
     ("aborted", "error", {}, "session.error"),
     ("aborted", "interrupted", {}, None),
     ("aborted", "interrupt_escalation", {}, None),
