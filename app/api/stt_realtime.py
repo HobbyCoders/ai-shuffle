@@ -202,7 +202,9 @@ def _session_update_ga(model_name: str, language: Optional[str]) -> Dict[str, An
                     "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
                     "noise_reduction": {"type": "near_field"},
                     "transcription": transcription,
-                    "turn_detection": dict(TURN_DETECTION),
+                    # GPT Live streams deltas before the client commits each
+                    # audio turn; its session rejects server_vad configuration.
+                    "turn_detection": None if model_name == "gpt-live-transcribe" else dict(TURN_DETECTION),
                 }
             },
         },
@@ -347,8 +349,9 @@ async def transcribe_stream(
             drain_ready.set()
 
     async with upstream:
+        session_update = _session_update_ga(model_name, language)
         try:
-            await upstream.send(json.dumps(_session_update_ga(model_name, language)))
+            await upstream.send(json.dumps(session_update))
         except Exception as exc:  # noqa: BLE001
             logger.warning("STT stream: initial session.update failed: %s", exc)
             await _send_client(websocket, {
@@ -537,6 +540,9 @@ async def transcribe_stream(
                             "type": "ready", "model": model_id,
                             "model_name": capability["model_name"],
                             "partials": capability["partials"], "sample_rate": SAMPLE_RATE,
+                            # The accepted session, not an earlier capability
+                            # probe, determines the browser's silence handling.
+                            "server_vad": session_update["session"]["audio"]["input"]["turn_detection"] is not None,
                         })
 
                 elif kind == "error":

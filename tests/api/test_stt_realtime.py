@@ -82,6 +82,17 @@ def test_live_model_uses_languages_and_low_delay():
     assert config == {"model": "gpt-live-transcribe", "languages": ["en"], "delay": "low"}
 
 
+def test_live_model_disables_server_vad_for_explicit_commits():
+    audio_input = _session_update_ga("gpt-live-transcribe", None)["session"]["audio"]["input"]
+    assert audio_input["turn_detection"] is None
+
+
+@pytest.mark.parametrize("model", ["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"])
+def test_existing_transcription_models_keep_server_vad(model):
+    assert _session_update_ga(model, None)["session"]["audio"]["input"]["turn_detection"] == stt_realtime.TURN_DETECTION
+    assert _session_update_legacy(model, None)["session"]["turn_detection"] == stt_realtime.TURN_DETECTION
+
+
 def test_live_model_is_available_explicitly_without_changing_configured_model(capability_env):
     capability_env["model"] = "openai/gpt-live-transcribe"
     result = _resolve_capability()
@@ -392,6 +403,7 @@ def test_stream_forwards_tail_transcript_and_closes(stream_client):
         ready = ws.receive_json()
         assert ready["type"] == "ready"
         assert ready["model"] == "openai/gpt-4o-transcribe"
+        assert ready["server_vad"] is True
 
         ws.send_bytes(b"\x00\x01" * 512)
         ws.send_text(json.dumps({"type": "stop"}))
@@ -408,6 +420,40 @@ def test_stream_forwards_tail_transcript_and_closes(stream_client):
     assert "input_audio_buffer.append" in kinds
     # stop must flush, or the last utterance is never transcribed at all.
     assert "input_audio_buffer.commit" in kinds
+
+
+@pytest.mark.parametrize("control", ["commit", "stop"])
+def test_live_model_streams_without_vad_and_commits_only_on_client_control(stream_client, capability_env, control):
+    client, created = stream_client
+    capability_env["model"] = "openai/gpt-live-transcribe"
+    created["kwargs"] = {"audio_events": [
+        {"type": "conversation.item.input_audio_transcription.delta", "item_id": "item_1", "delta": "hello"},
+    ]}
+    with client.websocket_connect("/api/v1/settings/transcribe/stream") as ws:
+        ready = ws.receive_json()
+        assert ready["model"] == "openai/gpt-live-transcribe"
+        assert ready["server_vad"] is False
+        ws.send_bytes(b"\x00\x01" * 2400)
+        # GPT Live sends partials without speech_started/speech_stopped events.
+        assert ws.receive_json() == {"type": "delta", "item_id": "item_1", "text": "hello"}
+        upstream = created["upstream"]
+        sent = [json.loads(raw) for raw in upstream.sent]
+        assert sent[0]["session"]["audio"]["input"]["turn_detection"] is None
+        assert [frame["type"] for frame in sent] == ["session.update", "input_audio_buffer.append"]
+        ws.send_json({"type": control})
+        assert ws.receive_json() == {"type": "final", "item_id": "item_1", "text": "hello world"}
+        if control == "commit":
+            # The explicit commit keeps recording open; Stop then has no tail.
+            upstream.stop_error = "input_audio_buffer_commit_empty"
+            ws.send_json({"type": "stop"})
+        assert ws.receive_json() == {"type": "closed"}
+    frames = [json.loads(raw) for raw in upstream.sent]
+    commits = [frame for frame in frames if frame["type"] == "input_audio_buffer.commit"]
+    assert len(commits) == (2 if control == "commit" else 1)
+    assert commits[-1]["event_id"] == "stt-stop-commit"
+    if control == "commit":
+        assert "event_id" not in commits[0]
+    assert frames[-1] == {"type": "input_audio_buffer.clear"}
 
 
 def test_stream_forwards_interim_words_before_stop_with_turn_identity(stream_client):
@@ -661,7 +707,6 @@ def test_live_model_streams_partial_then_final_and_recovers_failed_turn(stream_c
     client, created = stream_client
     capability_env['model'] = 'openai/gpt-live-transcribe'
     created['kwargs'] = {'audio_events': [
-        {'type': 'input_audio_buffer.speech_started', 'item_id': 'live'},
         {'type': 'conversation.item.input_audio_transcription.delta', 'item_id': 'live', 'delta': 'Hello'},
         {'type': 'conversation.item.input_audio_transcription.failed', 'item_id': 'live', 'error': {'message': 'Try again'}},
         {'type': 'conversation.item.input_audio_transcription.completed', 'item_id': 'next', 'transcript': 'Recovered.'},
@@ -669,8 +714,6 @@ def test_live_model_streams_partial_then_final_and_recovers_failed_turn(stream_c
     with client.websocket_connect('/api/v1/settings/transcribe/stream') as ws:
         assert ws.receive_json()['model'] == 'openai/gpt-live-transcribe'
         ws.send_bytes(b'\x00\x00' * 2400)
-        assert ws.receive_json() == {'type': 'item_started', 'item_id': 'live'}
-        assert ws.receive_json()['type'] == 'speech_started'
         assert ws.receive_json() == {'type': 'delta', 'item_id': 'live', 'text': 'Hello'}
         assert ws.receive_json() == {'type': 'error', 'message': 'Try again', 'fatal': False}
         assert ws.receive_json() == {'type': 'final', 'item_id': 'next', 'text': 'Recovered.'}
