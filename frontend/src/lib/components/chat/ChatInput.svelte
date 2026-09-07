@@ -992,6 +992,9 @@
 							projectId={$activeSession.project}
 							worktreeId={$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined}
 							sessionId={$activeSession.sessionId ?? undefined}
+							model={$activeSession.modelOverride ?? undefined}
+							profileId={$activeSession.profile || undefined}
+							mode={$activeSession.mode}
 							visible={showCommandAutocomplete}
 							onSelect={handleCommandSelect}
 							onClose={() => showCommandAutocomplete = false}
