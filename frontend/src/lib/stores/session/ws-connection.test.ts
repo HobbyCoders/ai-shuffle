@@ -92,6 +92,7 @@ describe('ws-connection', () => {
 
 	beforeEach(() => {
 		vi.useFakeTimers();
+		vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
 		createdSockets = [];
 		originalWebSocket = globalThis.WebSocket;
 
@@ -111,6 +112,7 @@ describe('ws-connection', () => {
 
 	afterEach(() => {
 		globalThis.WebSocket = originalWebSocket;
+		vi.restoreAllMocks();
 		vi.useRealTimers();
 	});
 
@@ -477,6 +479,110 @@ describe('ws-connection', () => {
 			// The health check should have triggered a close
 			expect(config.onDisconnected).toHaveBeenCalled();
 
+			conn.destroy();
+		});
+	});
+
+	describe('visibility resume health check', () => {
+		function resume() {
+			vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+			document.dispatchEvent(new Event('visibilitychange'));
+			vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+			document.dispatchEvent(new Event('visibilitychange'));
+		}
+
+		it('keeps an idle socket open until its scheduled server heartbeat arrives', () => {
+			const config = createMockConfig();
+			const conn = createWsConnection(config);
+			conn.connect();
+			const socket = createdSockets[0];
+			socket.simulateOpen();
+			resume();
+
+			vi.advanceTimersByTime(29_999);
+			expect(socket.readyState).toBe(MockWebSocket.OPEN);
+			expect(config.onVisibilityVisible).toHaveBeenCalledOnce();
+			socket.simulateMessage({ type: 'ping' });
+			vi.advanceTimersByTime(10_000);
+			expect(socket.readyState).toBe(MockWebSocket.OPEN);
+			expect(config.onDisconnected).not.toHaveBeenCalled();
+			conn.destroy();
+		});
+
+		it('reconnects a half-open socket even when local sends reset the activity time', () => {
+			const conn = createWsConnection(createMockConfig());
+			conn.connect();
+			const socket = createdSockets[0];
+			socket.simulateOpen();
+			resume();
+			vi.advanceTimersByTime(20_000);
+			conn.resetLastMessageTime();
+			vi.advanceTimersByTime(15_001);
+			expect(socket.readyState).toBe(MockWebSocket.CLOSED);
+			vi.advanceTimersByTime(2_000);
+			expect(createdSockets).toHaveLength(2);
+			conn.destroy();
+		});
+
+		it('counts server traffic received in the same clock tick as resume', () => {
+			const conn = createWsConnection(createMockConfig());
+			conn.connect();
+			const socket = createdSockets[0];
+			socket.simulateOpen();
+			resume();
+			socket.simulateMessage({ type: 'ping' });
+			vi.advanceTimersByTime(35_001);
+			expect(socket.readyState).toBe(MockWebSocket.OPEN);
+			conn.destroy();
+		});
+
+		it('cancels the resume deadline when the page becomes hidden again', () => {
+			const conn = createWsConnection(createMockConfig());
+			conn.connect();
+			const socket = createdSockets[0];
+			socket.simulateOpen();
+			resume();
+			vi.advanceTimersByTime(1_000);
+			vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+			document.dispatchEvent(new Event('visibilitychange'));
+			vi.advanceTimersByTime(40_000);
+			expect(socket.readyState).toBe(MockWebSocket.OPEN);
+			conn.destroy();
+		});
+
+		it('does not let an old socket deadline or message affect a replacement socket', () => {
+			const config = createMockConfig();
+			const conn = createWsConnection(config);
+			conn.connect();
+			const first = createdSockets[0];
+			first.simulateOpen();
+			resume();
+			vi.advanceTimersByTime(1_000);
+			first.simulateClose(1006);
+			vi.advanceTimersByTime(2_000);
+			const second = createdSockets[1];
+			second.simulateOpen();
+			resume();
+			vi.advanceTimersByTime(10_000);
+			first.simulateMessage({ type: 'ping' });
+			expect(config.onMessage).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(22_001);
+			expect(second.readyState).toBe(MockWebSocket.OPEN);
+			vi.advanceTimersByTime(3_000);
+			expect(second.readyState).toBe(MockWebSocket.CLOSED);
+			conn.destroy();
+		});
+
+		it('closes an apparently open socket when the resume send throws', () => {
+			const conn = createWsConnection(createMockConfig());
+			conn.connect();
+			const socket = createdSockets[0];
+			socket.simulateOpen();
+			vi.spyOn(socket, 'send').mockImplementation(() => { throw new Error('Transport lost'); });
+			resume();
+			vi.advanceTimersByTime(2_001);
+			expect(socket.readyState).toBe(MockWebSocket.CLOSED);
+			expect(createdSockets).toHaveLength(2);
 			conn.destroy();
 		});
 	});
