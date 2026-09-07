@@ -588,6 +588,37 @@ describe('ws-connection', () => {
 	});
 
 	describe('destroy()', () => {
+		it('connects again only after explicit reactivation and restores one set of listeners', () => {
+			const config = createMockConfig();
+			const conn = createWsConnection(config);
+			conn.connect();
+			const first = createdSockets[0];
+			first.simulateOpen();
+			conn.destroy();
+			vi.advanceTimersByTime(1);
+			document.dispatchEvent(new Event('visibilitychange'));
+			window.dispatchEvent(new Event('online'));
+			conn.connect();
+			expect(createdSockets).toHaveLength(1);
+
+			conn.activate();
+			conn.activate();
+			conn.connect();
+			const second = createdSockets[1];
+			second.simulateOpen();
+			first.simulateOpen();
+			expect(config.onConnected).toHaveBeenCalledTimes(2);
+			first.simulateClose(1006, 'Stale close');
+			expect(config.onDisconnected).not.toHaveBeenCalled();
+			document.dispatchEvent(new Event('visibilitychange'));
+			expect(config.onVisibilityVisible).toHaveBeenCalledOnce();
+			second.simulateMessage({ type: 'ping' });
+			second.simulateClose(1006, 'Network lost');
+			vi.advanceTimersByTime(2_001);
+			expect(createdSockets).toHaveLength(3);
+			conn.destroy();
+		});
+
 		it('should prevent further connect attempts', () => {
 			const config = createMockConfig();
 			const conn = createWsConnection(config);
