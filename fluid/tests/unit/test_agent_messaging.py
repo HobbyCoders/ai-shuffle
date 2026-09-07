@@ -207,6 +207,156 @@ class _FinalTextProvider:
             yield chunk
 
 
+class _FailingPeerProvider(_FinalTextProvider):
+    def __init__(self, failure):
+        super().__init__()
+        self.failure = failure
+
+    async def stream(self, request):
+        from fluid.providers.base import StreamChunk
+        from tests.unit.test_web_and_steering import _text_script
+
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            self.entered.set()
+            await self.release.wait()
+            if self.failure == "raise":
+                raise RuntimeError("offline provider failure")
+            yield StreamChunk("error", {
+                "message": "offline provider failure", "retriable": False,
+            })
+            return
+        for chunk in _text_script("received after explicit resume"):
+            yield chunk
+
+
+@pytest.mark.parametrize("failure", ["frame", "raise"])
+async def test_provider_failure_retains_accepted_peer_without_resuming(failure, tmp_path) -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import ErrorEvent, TurnComplete
+    from fluid.events.ops import Resume
+    from fluid.store.jsonl import JsonlStore
+
+    provider = _FailingPeerProvider(failure)
+    store = JsonlStore(tmp_path)
+    loop = NativeLoop(provider=provider, store=store, model="m")
+    try:
+        await loop.submit(UserTurn(content="start"))
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        await loop.submit(AgentMessage(sender="alpha", text="retained peer", id="p1"))
+        provider.release.set()
+        await asyncio.wait_for(loop.wait_turn(), 2)
+
+        assert len(provider.requests) == 1
+        path = await store.load_path(loop.session_id)
+        assert path[-1].message.role == "user"
+        assert "retained peer" in path[-1].message.text()
+        assert PEER_OPEN_PREFIX in path[-1].message.text()
+        events = await store.events_since(loop.session_id, 0)
+        terminals = [e for e in events if isinstance(e, ErrorEvent)]
+        receipts = [e for e in events if isinstance(e, SteerDelivered)]
+        assert len(terminals) == len(receipts) == 1
+        assert "offline provider failure" in terminals[0].message
+        # Preserve the existing accounting: an exception before a complete
+        # stream returns has not yet incremented the logical call counter.
+        assert terminals[0].num_model_calls == (1 if failure == "frame" else 0)
+        assert terminals[0].node_id == path[-1].node_id
+        assert receipts[0].steers[0]["id"] == "p1"
+        assert receipts[0].seq < terminals[0].seq
+        assert not [e for e in events if isinstance(e, TurnComplete)]
+        assert not loop._pending_steers
+
+        # Only an explicit resume invokes the provider again; the retained
+        # message and original prompt survive reconstruction from the store.
+        await loop.aclose()
+        loop = NativeLoop(provider=provider, store=JsonlStore(tmp_path), model="m",
+                          session_id=loop.session_id)
+        await loop.submit(Resume())
+        await asyncio.wait_for(loop.wait_turn(), 2)
+        assert len(provider.requests) == 2
+        assert "start" in _all_text(provider.requests[-1])
+        assert _all_text(provider.requests[-1]).count("retained peer") == 1
+    finally:
+        provider.release.set()
+        await loop.aclose()
+
+
+@pytest.mark.parametrize("terminal_path", ["frame", "raise", "resume", "blocked"])
+async def test_all_error_terminal_paths_reject_late_peer_delivery(terminal_path) -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import ErrorEvent
+    from fluid.events.ops import Resume
+    from fluid.hooks.bus import HookBus, HookDecision, TURN_START
+
+    class _SlowTerminal(NativeLoop):
+        async def _emit(self, event):
+            if isinstance(event, ErrorEvent) and event.num_model_calls is not None:
+                entered.set()
+                await release.wait()
+            return await super()._emit(event)
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    provider = _FailingPeerProvider(terminal_path)
+    provider.release.set()
+    hooks = HookBus()
+
+    async def deny(event, payload):
+        return HookDecision(action="deny", note="blocked prompt")
+
+    if terminal_path == "blocked":
+        hooks.on(TURN_START, deny)
+    loop = _SlowTerminal(provider=provider, store=MemoryStore(), model="m", hooks=hooks)
+    try:
+        await loop.submit(Resume() if terminal_path == "resume" else UserTurn(content="start"))
+        await asyncio.wait_for(entered.wait(), 2)
+        with pytest.raises(RuntimeError, match="finishing.*retry"):
+            await loop.submit(AgentMessage(sender="late", text="must retry"))
+        release.set()
+        await asyncio.wait_for(loop.wait_turn(), 2)
+        assert not loop._pending_steers
+        path = await loop.store.load_path(loop.session_id)
+        assert all("must retry" not in n.message.text() for n in path)
+        assert len(provider.requests) == (1 if terminal_path in {"frame", "raise"} else 0)
+    finally:
+        release.set()
+        await loop.aclose()
+
+
+async def test_blocked_prompt_retains_accepted_peer_without_saving_prompt() -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import ErrorEvent
+    from fluid.hooks.bus import HookBus, HookDecision, TURN_START
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def deny(event, payload):
+        entered.set()
+        await release.wait()
+        return HookDecision(action="deny", note="blocked prompt")
+
+    hooks = HookBus()
+    hooks.on(TURN_START, deny)
+    provider = _FinalTextProvider()
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="m", hooks=hooks)
+    try:
+        await loop.submit(UserTurn(content="never persist this prompt"))
+        await asyncio.wait_for(entered.wait(), 2)
+        await loop.submit(AgentMessage(sender="alpha", text="retained peer", id="p1"))
+        release.set()
+        await asyncio.wait_for(loop.wait_turn(), 2)
+        path = await loop.store.load_path(loop.session_id)
+        assert len(path) == 1 and path[0].parent_id is None
+        assert "retained peer" in path[0].message.text()
+        assert "never persist this prompt" not in path[0].message.text()
+        assert not provider.requests
+        terminal = next(e for e in loop.bus.log(loop.session_id) if isinstance(e, ErrorEvent))
+        assert terminal.num_model_calls == 0 and "blocked prompt" in terminal.message
+        assert not loop._pending_steers
+    finally:
+        release.set()
+        await loop.aclose()
+
+
 async def test_peer_messages_during_final_text_are_consumed_before_completion() -> None:
     from fluid.engine.native import NativeLoop
     from fluid.events.model import TurnComplete
@@ -238,7 +388,8 @@ async def test_peer_messages_during_final_text_are_consumed_before_completion() 
     await loop.aclose()
 
 
-async def test_peer_arriving_during_delivery_write_is_not_lost() -> None:
+@pytest.mark.parametrize("repeat", [False, True])
+async def test_peer_arriving_during_delivery_write_is_not_lost(repeat) -> None:
     from fluid.engine.native import NativeLoop
 
     class _SlowPeerStore(MemoryStore):
@@ -261,14 +412,55 @@ async def test_peer_arriving_during_delivery_write_is_not_lost() -> None:
     await loop.submit(AgentMessage(sender="alpha", text="first peer", id="p1"))
     provider.release.set()
     await asyncio.wait_for(store.entered.wait(), 2)
-    await loop.submit(AgentMessage(sender="bravo", text="second peer", id="p2"))
+    second = (AgentMessage(sender="alpha", text="first peer", id="p1") if repeat
+              else AgentMessage(sender="bravo", text="second peer", id="p2"))
+    await loop.submit(second)
     store.release.set()
     await asyncio.wait_for(loop.wait_turn(), 2)
     receipts = [e for e in loop.bus.log(loop.session_id) if isinstance(e, SteerDelivered)]
-    assert [s["id"] for e in receipts for s in e.steers] == ["p1", "p2"]
+    assert [s["id"] for e in receipts for s in e.steers] == ["p1", second.id]
     assert len(provider.requests) == 3
-    assert "second peer" in provider.requests[-1].messages[-1].text()
+    assert second.text in provider.requests[-1].messages[-1].text()
     await loop.aclose()
+
+
+async def test_peer_batch_is_retained_when_its_first_history_write_fails() -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.events.model import ErrorEvent
+
+    class _FailPeerWriteOnce(MemoryStore):
+        failed = False
+
+        async def append(self, session_id, node):
+            if "retained peer" in node.message.text() and not self.failed:
+                self.failed = True
+                raise OSError("peer history write failed")
+            await super().append(session_id, node)
+
+    provider = _FinalTextProvider()
+    store = _FailPeerWriteOnce()
+    loop = NativeLoop(provider=provider, store=store, model="m")
+    try:
+        await loop.submit(UserTurn(content="start"))
+        await asyncio.wait_for(provider.entered.wait(), 2)
+        await loop.submit(AgentMessage(sender="alpha", text="retained peer", id="p1"))
+        provider.release.set()
+        await asyncio.wait_for(loop.wait_turn(), 2)
+        assert len(provider.requests) == 1
+        path = await store.load_path(loop.session_id)
+        assert sum("retained peer" in n.message.text() for n in path) == 1
+        assert "retained peer" in path[-1].message.text()
+        events = await store.events_since(loop.session_id, 0)
+        terminals = [e for e in events if isinstance(e, ErrorEvent)]
+        receipts = [e for e in events if isinstance(e, SteerDelivered)]
+        assert len(terminals) == len(receipts) == 1
+        assert "peer history write failed" in terminals[0].message
+        assert receipts[0].steers[0]["id"] == "p1"
+        assert receipts[0].seq < terminals[0].seq
+        assert not loop._pending_steers
+    finally:
+        provider.release.set()
+        await loop.aclose()
 
 
 async def test_message_during_terminal_publication_returns_retry_then_idle_accepts() -> None:

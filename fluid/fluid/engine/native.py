@@ -28,7 +28,8 @@ a text prompt, or the tool results the model never got to read. The Resume op
 picks the loop back up from exactly that node without appending anything, so
 the retry re-sends the same history the failed call saw. Resume on a head that
 is already an assistant reply has nothing to continue and ends the turn with an
-ErrorEvent saying so.
+ErrorEvent saying so. Peer messages accepted during a failed call are retained
+as a new unanswered user-role node and included in an explicit later resume.
 """
 
 from __future__ import annotations
@@ -1246,8 +1247,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         """TurnStart (UserPromptSubmit) hooks. Returns ``(blocked, context)``.
 
         A block ends the turn right here: a HookEvent names the reason, the
-        TurnEnd hooks run, an ErrorEvent closes the turn, and nothing reaches
-        the store, so the blocked prompt is not part of the session. Context
+        TurnEnd hooks run and an ErrorEvent closes the turn. The blocked prompt
+        never reaches the store; separately accepted peer messages can still
+        be retained there for a later resume. Context
         is what the hooks asked to add to the user message, already wrapped
         as system-reminder blocks; SessionStart context rides the first turn
         the same way. ``with_context=False`` (Resume) drops it, since the
@@ -1790,6 +1792,34 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     # ─── Turn lifecycle ──────────────────────────────────────────────────
 
+    async def _emit_terminal_with_park(self, event: Event) -> Event:
+        if isinstance(event, (TurnComplete, Interrupted, ErrorEvent)):
+            # Every terminal path closes admission before its first await,
+            # including provider failures and turns blocked before a prompt
+            # is written. Acknowledging a peer during publication would let
+            # turn cleanup discard it after the sender has reported success.
+            self._peer_delivery_sealed = True
+            if (
+                not isinstance(event, Interrupted)
+                and not self._interrupted.is_set()
+                and not self._background_closed
+                and any(isinstance(op, AgentMessage) for op in self._pending_steers)
+            ):
+                # Failure must not erase already accepted peers. Retain them
+                # on the durable head for an explicit resume, without issuing
+                # another provider call or changing the original outcome.
+                meta = await self.store.get_session(event.session_id)
+                peer_node = await self._finish_peer_messages(
+                    event.session_id, event.turn_id,
+                    meta.head_node_id if meta is not None else None,
+                )
+                if peer_node is not None:
+                    event = replace(event, node_id=peer_node.node_id)
+        # Keep background park/wake serialization and completion delivery in
+        # the shared lifecycle. A subsequent explicit or wake turn reopens
+        # peer admission normally.
+        return await super()._emit_terminal_with_park(event)
+
     async def _run_turn(self, op: UserTurn | Resume) -> None:
         self._peer_delivery_sealed = False
         meta = await self._ensure_session()
@@ -1938,9 +1968,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 except Exception:  # noqa: BLE001 — never mask the turn's own outcome
                     log.warning("TurnEnd hooks failed", exc_info=True)
             self._active_turn_id = None
-            # Interrupted/failed turns must not leave interjections attached
-            # to a later, unrelated user request. Normal completion already
-            # consumed peer messages before sealing admission.
+            # Interrupted turns discard their pending interjections. Other
+            # terminal paths have already retained accepted peers in history;
+            # nothing queued should leak into a later, unrelated user request.
             self._pending_steers.clear()
 
     async def _connect_mcp_once(self, sid: str, turn_id: str) -> None:
@@ -2667,7 +2697,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                                 or num_calls < self.max_model_calls_per_turn)
                 if not can_continue:
                     self._peer_delivery_sealed = True
-                peer_node = await self._finish_peer_messages(sid, turn_id, parent)
+                peer_node = await self._finish_peer_messages(sid, turn_id, parent.node_id)
                 if peer_node is not None:
                     parent = peer_node
                     if can_continue:
@@ -2769,7 +2799,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Preserve any peers accepted while that last response was written,
         # but never issue another model call beyond the configured limit.
         self._peer_delivery_sealed = True
-        peer_node = await self._finish_peer_messages(sid, turn_id, parent)
+        peer_node = await self._finish_peer_messages(sid, turn_id, parent.node_id)
         if peer_node is not None:
             parent = peer_node
         if result is not None:
@@ -2812,31 +2842,36 @@ class NativeLoop(BackgroundLifecycleMixin):
         ))
 
     async def _finish_peer_messages(
-        self, sid: str, turn_id: str, parent: SessionNode,
+        self, sid: str, turn_id: str | None, parent_id: str | None,
     ) -> SessionNode | None:
-        """Deliver peers when a final text reply leaves no next tool result.
+        """Retain peers when no next tool result will carry them.
 
-        This remains within the current turn: hosts must not observe the
-        worker completing before its acknowledged messages are processed.
-        User steers retain their existing explicit turn-end fallback.
+        Normal final text may continue the turn over the new node. Failure
+        only persists it for a later resume; user steers retain their existing
+        explicit turn-end fallback.
         """
         if self._interrupted.is_set() or self._background_closed:
             return None
         peers = [op for op in self._pending_steers if isinstance(op, AgentMessage)]
         if not peers:
             return None
-        self._pending_steers[:] = [
-            op for op in self._pending_steers if not isinstance(op, AgentMessage)
-        ]
         delivered = [_steer_parts(op) for op in peers]
         node = SessionNode(
-            node_id=new_id("node"), parent_id=parent.node_id,
+            node_id=new_id("node"), parent_id=parent_id,
             message=Message(role="user", content=[Text("".join(
                 _render_interjection(text, sender, origin)
                 for _, text, sender, origin in delivered
             ).strip())]),
         )
         await self.store.append(sid, node)
+        # Remove only the persisted batch, after its write succeeds. A peer
+        # arriving during that await belongs to the next batch, even when its
+        # fields equal an earlier message. Receipt failure must not reappend
+        # an already durable batch either.
+        persisted = {id(op) for op in peers}
+        self._pending_steers[:] = [
+            op for op in self._pending_steers if id(op) not in persisted
+        ]
         await self._emit(SteerDelivered(
             session_id=sid, node_id=node.node_id, turn_id=turn_id,
             steers=[_steer_receipt(*parts) for parts in delivered],
