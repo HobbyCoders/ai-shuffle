@@ -4,6 +4,7 @@
 	 * persistent editor. A live voice call adds compact controls alongside it. */
 	import { onDestroy, tick, untrack } from 'svelte';
 	import { activeSession, activeWsConnected } from '$lib/stores/active-session';
+	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
 	import { notify } from '$lib/stores/notifications';
 	import { createConnectionBannerGrace } from '$lib/stores/session/connection-banner-grace';
 	import Banner from '$lib/components/Banner.svelte';
@@ -301,7 +302,9 @@
 			{#if voiceCallActive && $activeSession.sessionId}
 				<VoiceCallPanel sessionId={$activeSession.sessionId} compact />
 			{/if}
-			<ChatInput compact={!showEmptyHero} {onBrowserToggle} {onBrowserPreload} {browserOpen} />
+			{#key $sessionOwnerBoundary}
+				<ChatInput compact={!showEmptyHero} {onBrowserToggle} {onBrowserPreload} {browserOpen} />
+			{/key}
 		</div>
 	{/if}
 

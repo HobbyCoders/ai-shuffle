@@ -24,6 +24,7 @@
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { cancelVoiceInput, globalSttState } from '$lib/services/globalStt';
 	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
+	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import { anyCredential } from '$lib/stores/auth.svelte';
 
@@ -68,6 +69,10 @@
 	}
 
 	let { compact = false, onBrowserToggle, onBrowserPreload, browserOpen = false }: Props = $props();
+	// ChatView remounts the editor when its account changes. Teardown and
+	// already queued callbacks must not write the previous account's text.
+	const ownerEpoch = sessionOwnerEpoch();
+	const ownsComposer = () => ownerEpoch === sessionOwnerEpoch();
 
 	// The lane this composer belongs to. `$activeSession.mode` — not the
 	// sidepanel's `appMode` — is the authority: it is the session's own mode
@@ -77,6 +82,7 @@
 
 	$effect(() => {
 		const state = $activeSession;
+		if (!ownsComposer()) return;
 		if (state.mode !== 'voice' || !state.sessionId || state.isRestoringSession) return;
 		const owner = state.sessionId;
 		void persistVoiceContext(owner, voiceContextFor(state)).catch(() => {
@@ -126,6 +132,7 @@
 
 	// Helper to save draft immediately (used on unmount and on send)
 	function saveDraftImmediately(value?: string) {
+		if (!ownsComposer()) return;
 		if (draftSaveTimeout) {
 			clearTimeout(draftSaveTimeout);
 			draftSaveTimeout = null;
@@ -149,6 +156,7 @@
 			clearTimeout(draftSaveTimeout);
 		}
 		draftSaveTimeout = setTimeout(() => {
+			if (!ownsComposer()) return;
 			// Guard: only save if we're still on the same session
 			if (get(activeSession).sessionId !== capturedSessionId) return;
 			const draftValue = getDraftJSON();
@@ -176,6 +184,7 @@
 	// was already cleared and we don't want to overwrite it with stale text.
 	// Check the store imperatively (get()) since $effects don't run during teardown.
 	onDestroy(() => {
+		if (!ownsComposer()) return;
 		if (messageSent) return;
 		const currentSessionId = get(activeSession).sessionId;
 		if (currentSessionId !== initialSessionId) return; // session switched
@@ -216,6 +225,7 @@
 	// session — getting this wrong is what made text "leak" between sessions.
 	$effect(() => {
 		const newSessionId = $activeSession.sessionId;
+		if (!ownsComposer()) return;
 		if (newSessionId !== prevSessionId) {
 			// Keep speech already visible in its original draft, then invalidate
 			// pending interim/final callbacks before the shared editor changes owner.
@@ -252,6 +262,7 @@
 	// the pending prompt so it fires exactly once.
 	$effect(() => {
 		const pending = $activeSession.pendingRestorePrompt;
+		if (!ownsComposer()) return;
 		if (!pending) return;
 		const current = (editorRef?.getMessage() ?? inputValue ?? '').trim();
 		if (current.length === 0) {
@@ -498,6 +509,7 @@
 
 	// Handle form submission
 	async function handleSubmit() {
+		if (!ownsComposer()) return;
 		// Get serialized message from editor (includes inline @path references)
 		const finalPrompt = editorRef?.getMessage() ?? '';
 
@@ -537,6 +549,7 @@
 	// steer, or the start of the next turn). Until then it renders as a pending
 	// bubble at the tail of the transcript.
 	async function sendMessage(finalPrompt: string) {
+		if (!ownsComposer()) return;
 		composerSuggestion.invalidate();
 		// Mark that we're sending - prevents onDestroy from overwriting the cleared draft
 		// This is critical for the first message when the component gets destroyed/recreated
@@ -578,6 +591,7 @@
 		saveDraftImmediately('');
 
 		const restoreOnFailure = () => {
+			if (!ownsComposer()) return;
 			if ($activeSession.sessionId !== sendingSessionId) {
 				writeDraft(sendingSessionId, priorDraftJSON);
 				return;
@@ -791,6 +805,7 @@
 
 	// Handle transcription result from VoiceRecorder
 	async function handleTranscription(text: string) {
+		if (!ownsComposer()) return;
 		editorRef?.appendText(text);
 		inputValue = editorRef?.getText() ?? '';
 		await tick();
@@ -801,11 +816,13 @@
 	// owns a span for it and replaces that span on every update, so a transcript
 	// that revises a word mid-sentence corrects in place instead of stuttering.
 	function handleLiveText(text: string) {
+		if (!ownsComposer()) return;
 		editorRef?.streamText(text);
 		inputValue = editorRef?.getText() ?? '';
 	}
 
 	function handleLiveCommit() {
+		if (!ownsComposer()) return;
 		editorRef?.commitDictation();
 		inputValue = editorRef?.getText() ?? '';
 	}

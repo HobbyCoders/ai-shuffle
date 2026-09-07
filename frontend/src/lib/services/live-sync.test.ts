@@ -3,9 +3,9 @@ const m = vi.hoisted(() => ({ listener: undefined as undefined | ((s: any)=>void
 vi.mock('$lib/stores/auth.svelte',()=>({auth:{subscribe:(fn:(s:any)=>void)=>{m.listener=fn;return m.unsubscribe;},checkAuth:m.check}}));
 vi.mock('./preferences',()=>({preferenceSync:{start:m.start,stop:m.stop,reconnect:m.reconnect,refresh:m.refresh,register:vi.fn()}}));
 vi.mock('./resource-sync',()=>({resourceSync:{subscribe:vi.fn(()=>vi.fn()),invalidate:m.invalidate,clear:m.clear}}));
-vi.mock('$lib/stores/active-session',()=>({handleGlobalUserEvent:m.handle,activeSession:{current:{sessionId:null}}}));
+vi.mock('$lib/stores/active-session',()=>({handleGlobalUserEvent:m.handle,activeSession:{current:{sessionId:null},applyComposerDefaults:vi.fn(),resetForAccountChange:vi.fn()}}));
 vi.mock('$lib/stores/app-data.svelte',()=>({appData:{loadProjects:m.loadProjects,loadClusterProjects:m.loadClusterProjects,loadSessions:m.loadSessions}}));
-vi.mock('$lib/stores/notifications',()=>({notify:{}}));
+vi.mock('$lib/stores/notifications',()=>({notify:{resetLocal:vi.fn()}}));
 vi.mock('$lib/stores/session/v2/feed-controller',()=>({feedController:{invalidate:vi.fn()}}));
 vi.mock('$lib/stores/theme.svelte',()=>({}));
 vi.mock('$lib/stores/timezonePreference.svelte',()=>({}));
@@ -22,6 +22,10 @@ vi.mock('$lib/stores/browser-panel.svelte',()=>({}));
 vi.mock('./notificationSound',()=>({}));
 import { startLiveSync } from './live-sync';
 import { resourceSync } from './resource-sync';
+import { activeSession } from '$lib/stores/active-session';
+import { TAB_ACTIVE_SESSION_KEY } from '$lib/stores/device-id';
+import { TAB_SESSION_OWNER_KEY } from '$lib/stores/session-owner';
+import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 class Socket {
  static OPEN=1;static CLOSED=3;static all:Socket[]=[];readyState=0;
  onopen?:()=>void;onmessage?:(event:{data:string})=>void;onclose?:(event:{code:number})=>void;onerror?:()=>void;
@@ -31,9 +35,32 @@ class Socket {
 }
 let stop:()=>void;
 function account(username:string|null) {m.listener?.({loading:false,status:{authenticated:!!username,username,preference_identity:username ? {user_type:'admin',user_id:username} : null}});}
-beforeEach(()=>{vi.useFakeTimers();vi.clearAllMocks();Socket.all=[];localStorage.clear();vi.stubGlobal('WebSocket',Socket);});
+beforeEach(()=>{vi.useFakeTimers();vi.clearAllMocks();Socket.all=[];localStorage.clear();sessionStorage.clear();vi.stubGlobal('WebSocket',Socket);});
 afterEach(()=>{stop?.();vi.useRealTimers();vi.unstubAllGlobals();});
 describe('root authenticated live-sync lifecycle',()=>{
+ it('retires the old session before preference resets and clears stale tab restores',()=>{
+  stop=startLiveSync();account('alice');
+  sessionStorage.setItem(TAB_ACTIVE_SESSION_KEY, '{"sessionId":"private"}');
+  writeDraft(null,'alice private draft');
+  m.stop.mockClear();
+  account('bob');
+  expect(activeSession.resetForAccountChange).toHaveBeenCalledOnce();
+  expect(readDraft(null)).toBeNull();
+  expect(sessionStorage.getItem(TAB_ACTIVE_SESSION_KEY)).toBeNull();
+  expect(vi.mocked(activeSession.resetForAccountChange).mock.invocationCallOrder[0]).toBeLessThan(m.stop.mock.invocationCallOrder[0]);
+ });
+ it('preserves a same-owner startup draft and retires a different owner after reload',()=>{
+  sessionStorage.setItem(TAB_SESSION_OWNER_KEY, JSON.stringify('admin:alice'));
+  localStorage.setItem('ai-shuffle-preferences-owner','admin:bob');
+  writeDraft(null,'alice private draft');
+  stop=startLiveSync();account('alice');
+  expect(activeSession.resetForAccountChange).not.toHaveBeenCalled();
+  expect(readDraft(null)).toBe('alice private draft');
+  stop();
+  stop=startLiveSync();account('bob');
+  expect(activeSession.resetForAccountChange).toHaveBeenCalledOnce();
+  expect(readDraft(null)).toBeNull();
+ });
  it('opens a cookie-auth global socket outside chat and refetches on every sync_ready',()=>{
   stop=startLiveSync();account('alice');const socket=Socket.all[0];
   expect(socket.url).toContain('/api/v1/ws/global?device_id=');expect(socket.url).not.toContain('token=');

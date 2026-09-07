@@ -13,6 +13,7 @@ import '$lib/stores/sessionMode.svelte';
 import '$lib/stores/browser-panel.svelte';
 import './notificationSound';
 import { getOrCreateDeviceId } from '$lib/stores/device-id';
+import { bindSessionOwner } from '$lib/stores/session-owner';
 import { preferenceSync } from './preferences';
 import { resourceSync } from './resource-sync';
 import { resetUserEventDedupe } from './user-event-dedupe';
@@ -24,14 +25,17 @@ import { feedController } from '$lib/stores/session/v2/feed-controller';
 /** Root-layout lifetime, not chat lifetime. Cookie authentication also supports
  * HttpOnly sessions; no token is copied to storage or put into diagnostics. */
 export function startLiveSync() {
- let owner: string | null = null;
+ let owner: string | null | undefined;
  let socket: WebSocket | null = null;
  let retry: ReturnType<typeof setTimeout> | undefined;
  let heartbeat: ReturnType<typeof setInterval> | undefined;
  let generation = 0, attempts = 0;
  const unsubscribeResources = [
   resourceSync.subscribe(['sessions', 'tags'], () => appData.loadSessions()),
-  resourceSync.subscribe(['projects'], () => Promise.all([appData.loadProjects(), appData.loadClusterProjects(), appData.loadSessions()])),
+  resourceSync.subscribe(['projects'], async () => {
+   await Promise.all([appData.loadProjects(), appData.loadClusterProjects(), appData.loadSessions()]);
+   activeSession.applyComposerDefaults();
+  }),
   resourceSync.subscribe(['agents'], () => appData.loadProfiles()),
   resourceSync.subscribe(['notifications'], () => notify.loadHistory())
  ];
@@ -40,6 +44,7 @@ export function startLiveSync() {
   retry = undefined; heartbeat = undefined;
   const old = socket; socket = null; old?.close();
   preferenceSync.stop(reset); resourceSync.clear(); resetUserEventDedupe();
+  if (reset) notify.resetLocal();
  }
  function connect() {
   if (!owner) return;
@@ -59,6 +64,9 @@ export function startLiveSync() {
     feedController.invalidate();
     const selected = activeSession.current.sessionId;
     if (selected && feedController.isFeeding(selected)) feedController.restart(selected);
+    resourceSync.invalidate();
+   } else if (data.type === 'sync_reconcile') {
+    void preferenceSync.reconnect();
     resourceSync.invalidate();
    } else if (data.type === 'preferences_changed' && Array.isArray(data.keys)) {
     for (const key of new Set(data.keys)) if (typeof key === 'string') void preferenceSync.refresh(key);
@@ -89,10 +97,12 @@ export function startLiveSync() {
    ? `${identity.user_type}:${identity.user_id}`
    : state.status.is_admin && state.status.username ? `admin:${state.status.username}` : null;
   if (next === owner) return;
-  const previous = owner; disconnect(!!previous); owner = next;
-  if (!owner) return;
   let cachedOwner: string | null = null;
   try { cachedOwner = localStorage.getItem('ai-shuffle-preferences-owner'); } catch { /* no cache */ }
+  // Retire old editors and restores before resetting adapters can notify them.
+  if (bindSessionOwner(owner, next, cachedOwner)) activeSession.resetForAccountChange();
+  const previous = owner; disconnect(!!previous); owner = next;
+  if (!owner) return;
   preferenceSync.start(!!cachedOwner && cachedOwner !== owner, owner);
   try { localStorage.setItem('ai-shuffle-preferences-owner', owner); } catch { /* no cache */ }
   void preferenceSync.reconnect();
