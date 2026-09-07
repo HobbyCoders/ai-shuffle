@@ -125,7 +125,7 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 				} catch (e) {
 					console.warn('[WsConnection] Failed to send ping:', e);
 					reconnectAttempts = 0;
-					connect();
+					ws.close(4000, 'Keepalive failed');
 					return;
 				}
 

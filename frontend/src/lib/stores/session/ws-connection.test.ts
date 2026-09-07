@@ -443,6 +443,18 @@ describe('ws-connection', () => {
 	});
 
 	describe('ping / health check', () => {
+		it('replaces a socket whose keepalive fails while the browser still reports OPEN', () => {
+			const conn = createWsConnection(createMockConfig());
+			conn.connect();
+			const socket = createdSockets[0];
+			socket.simulateOpen();
+			vi.spyOn(socket, 'send').mockImplementation(() => { throw new Error('Transport lost'); });
+			vi.advanceTimersByTime(32_001);
+			expect(socket.readyState).toBe(MockWebSocket.CLOSED);
+			expect(createdSockets).toHaveLength(2);
+			conn.destroy();
+		});
+
 		it('should send pong messages every 30 seconds', () => {
 			const config = createMockConfig();
 			const conn = createWsConnection(config);
