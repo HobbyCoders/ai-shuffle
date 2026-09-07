@@ -17,6 +17,7 @@
 
 import type { ChatMessage, SubagentChildMessage, Task, TeammateStatus } from '../../types';
 import type { SessionEvent } from '$lib/contract/events';
+import { isSwarmTool } from '$lib/utils/swarm';
 
 // ─── Wire event shape ─────────────────────────────────────────────────────────
 
@@ -1551,6 +1552,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// `subagent.started` keyed on the model's Task tool_use_id fired first
 			// on the native leg): absorb it as well — drop it and inherit its
 			// children below — so one dispatch renders exactly one card.
+			// Swarm children share one aggregate launch id. Its workflow card
+			// owns the graph and must survive every child's individual receipt.
 			const launchToolUseId = str(event.launch_tool_use_id);
 			const absorbedCard = launchToolUseId
 				? next.messages.find((m) => m.type === 'subagent' && m.toolId === launchToolUseId)
@@ -1561,6 +1564,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					(m) =>
 						!(
 							m.type === 'tool_use' &&
+							!isSwarmTool(m.toolName ?? '') &&
 							(m.toolId === taskId || (launchToolUseId && m.toolId === launchToolUseId))
 						) && !(absorbedCard && m.id === absorbedCard.id)
 				),

@@ -2,6 +2,7 @@
 	import type { ChatMessage } from '$lib/stores/types';
 	import { Marked } from 'marked';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
+	import { parseSwarm } from '$lib/utils/swarm';
 	import { Webhook, ChevronDown } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { notify } from '$lib/stores/notifications';
@@ -561,6 +562,23 @@
 						taskStatus: pumpStatus || subtype,
 						collapsible: true,
 						rawOutput: pumpResult
+					};
+				}
+
+				// Swarm wake turns carry their complete snapshot as the summary.
+				// The original tool row renders its stages/results; this notification
+				// needs only a human-readable outcome, not a second raw JSON dump.
+				const swarm = parseSwarm(data.summary) ?? parseSwarm(data.result);
+				if (swarm && swarm.id === data.task_id) {
+					const completed = swarm.tasks.filter((task) => task.status === 'completed').length;
+					const progress = `${completed} of ${swarm.tasks.length} tasks completed`;
+					return {
+						title: 'Swarm',
+						content: swarm.title && swarm.title !== 'Swarm' ? `${swarm.title} · ${progress}` : progress,
+						badge: swarm.status,
+						badgeColor: taskStatusColor(swarm.status),
+						taskStatus: swarm.status,
+						compact: true
 					};
 				}
 
