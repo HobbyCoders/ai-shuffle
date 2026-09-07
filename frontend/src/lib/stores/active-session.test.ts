@@ -10,30 +10,70 @@
  * filtering + the cheap no-op behaviour.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // Capture the onMessage callback active-session injects into its WS connection so
 // the test can drive the real message handlers to seed pending queues.
 const hoisted = vi.hoisted(() => ({
 	onMessage: null as ((data: Record<string, unknown>) => void) | null,
+	onDisconnected: null as ((code: number, reason: string, wasClean: boolean) => void) | null,
+	onConnected: null as (() => void) | null,
+	connect: vi.fn(),
+	resetReconnectAttempts: vi.fn(),
+	goto: vi.fn(),
 }));
 
 vi.mock('./session/ws-connection', () => ({
-	createWsConnection: (config: { onMessage: (data: Record<string, unknown>) => void }) => {
+	createWsConnection: (config: {
+		onMessage: (data: Record<string, unknown>) => void;
+		onDisconnected: (code: number, reason: string, wasClean: boolean) => void;
+		onConnected: () => void;
+	}) => {
 		hoisted.onMessage = config.onMessage;
+		hoisted.onDisconnected = config.onDisconnected;
+		hoisted.onConnected = config.onConnected;
 		return {
-			connect: vi.fn(),
+			connect: hoisted.connect,
 			disconnect: vi.fn(),
 			send: vi.fn(() => true),
 			isConnected: vi.fn(() => false),
 			resetLastMessageTime: vi.fn(),
-			resetReconnectAttempts: vi.fn(),
+			resetReconnectAttempts: hoisted.resetReconnectAttempts,
 			destroy: vi.fn(),
 		};
 	},
 }));
 
+vi.mock('$app/navigation', () => ({ goto: hoisted.goto }));
+
 import { activeSession } from './active-session';
+import { redirectToLoginOn401 } from '$lib/api/client';
+
+describe('chat authentication close recovery', () => {
+	afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
+
+	it.each([true, false])('confirms the current worker session after 4001 (authenticated=%s)', async (authenticated) => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ authenticated })));
+		Object.defineProperty(window, 'location', { configurable: true, value: { pathname: '/', assign: vi.fn() } });
+		hoisted.onDisconnected!(4001, 'Authentication required', true);
+		await redirectToLoginOn401();
+		expect(fetch).toHaveBeenCalledExactlyOnceWith('/api/v1/auth/status', expect.objectContaining({ cache: 'no-store' }));
+		expect(activeSession.current.wsConnected).toBe(false);
+		expect(activeSession.current.isRestoringSession).toBe(false);
+		expect(hoisted.connect).not.toHaveBeenCalled();
+		if (authenticated) {
+			expect(hoisted.goto).not.toHaveBeenCalled();
+			expect(activeSession.current.wsReconnectRequired).toBe(true);
+			activeSession.reconnect();
+			expect(hoisted.resetReconnectAttempts).toHaveBeenCalledOnce();
+			expect(hoisted.connect).toHaveBeenCalledOnce();
+			hoisted.onConnected!();
+			expect(activeSession.current.wsReconnectRequired).toBe(false);
+		} else {
+			expect(hoisted.goto).toHaveBeenCalledExactlyOnceWith('/login');
+		}
+	});
+});
 
 /** Seed the active queues via the real `pending_permissions` handler (REPLACES). */
 function seedPermissions(pending: string[], deferred: string[] = []): void {

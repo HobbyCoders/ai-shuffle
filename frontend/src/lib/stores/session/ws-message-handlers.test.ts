@@ -110,6 +110,7 @@ function mockState(): ActiveSessionState {
 		liveRequestedModel: null,
 		liveProvider: null,
 		wsConnected: true,
+		wsReconnectRequired: false,
 		error: null,
 		profile: 'default',
 		sessionProfileId: null,

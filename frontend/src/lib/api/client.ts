@@ -27,8 +27,8 @@ export interface ApiError {
  * Auth-related endpoint path prefixes (relative to API_BASE). A 401 from any of
  * these is EXPECTED during the login / setup / status-check flow (expired sign-in,
  * not-yet-authenticated status poll, etc.) — redirecting on those would create a
- * redirect loop off the very page that needs to render the 401. Everything else
- * that 401s means the session expired mid-use → send the user to /login.
+ * redirect loop off the very page that needs to render the 401. Other endpoints
+ * can also report provider authentication failures, so confirm worker auth first.
  */
 const AUTH_PATH_PREFIXES = ['/auth/', '/workspace/', '/pairing/exchange'];
 
@@ -39,24 +39,41 @@ function isAuthPath(path: string): boolean {
 	return AUTH_PATH_PREFIXES.some((prefix) => clean.startsWith(prefix));
 }
 
+let pendingAuthRedirect: Promise<void> | null = null;
+
+function isLoginFlow(): boolean {
+	return ['/login', '/setup', '/pair'].includes(window.location?.pathname ?? '');
+}
+
 /**
- * Redirect to /login after a session-expiry 401 on a non-auth endpoint.
- *
- * Uses a dynamic `$app/navigation` import (mirrors the WS 4001 handler in
- * active-session.ts) so this module stays importable from plain unit tests that
- * don't run inside SvelteKit. Guards against redirect loops: never fires when
- * already on /login or /setup.
+ * A failed request/socket can belong to an old cookie or to a provider login.
+ * Check the current worker session before navigating, sharing one check across
+ * concurrent failures. The failed operation is still rejected, never replayed.
  */
-export function redirectToLoginOn401(): void {
-	if (typeof window === 'undefined') return;
-	const path = window.location?.pathname ?? '';
-	if (path === '/login' || path === '/setup') return;
-	import('$app/navigation')
-		.then(({ goto }) => goto('/login'))
-		.catch(() => {
-			// Fall back to a hard navigation if the dynamic import is unavailable.
-			window.location.assign('/login');
-		});
+export function redirectToLoginOn401(): Promise<void> {
+	if (typeof window === 'undefined' || isLoginFlow()) return Promise.resolve();
+	if (pendingAuthRedirect) return pendingAuthRedirect;
+	pendingAuthRedirect = (async () => {
+		try {
+			// Reuse the store's account/logout epoch fencing. Import lazily because the
+			// auth API itself uses this client.
+			const { auth } = await import('$lib/stores/auth.svelte');
+			const status = await auth.checkAuth();
+			const stillUnauthenticated = () => status?.authenticated === false
+				&& auth.current.status?.authenticated === false
+				&& !auth.current.loading && !auth.current.error && !isLoginFlow();
+			if (!stillUnauthenticated()) return;
+			try {
+				const { goto } = await import('$app/navigation');
+				if (stillUnauthenticated()) await goto('/login');
+			} catch {
+				if (stillUnauthenticated()) window.location.assign('/login');
+			}
+		} catch {
+			// A network/status failure does not establish that the session was revoked.
+		}
+	})().finally(() => { pendingAuthRedirect = null; });
+	return pendingAuthRedirect;
 }
 
 /**
@@ -122,6 +139,8 @@ async function extractErrorDetail(response: Response): Promise<string> {
 }
 
 export interface RequestOptions {
+	/** Fetch cache policy; auth status must observe the current cookie. */
+	cache?: RequestCache;
 	/** AbortSignal for cancelling the request (e.g., timeout or component unmount) */
 	signal?: AbortSignal;
 	/**
@@ -148,15 +167,14 @@ export class ApiClient {
 			credentials: 'include',
 			body: body ? JSON.stringify(body) : undefined,
 			signal: options?.signal,
-			keepalive: options?.keepalive
+			keepalive: options?.keepalive,
+			cache: options?.cache
 		});
 
 		if (!response.ok) {
 			const detail = await extractErrorDetail(response);
-			// Global session-expiry handling: a 401 on any non-auth endpoint means
-			// the cookie session lapsed mid-use — bounce to /login. Auth endpoints
-			// (login/setup/status/workspace probes) are excluded so their expected
-			// 401s don't loop the user off the page that must render them.
+			// Confirm worker authentication separately from provider-specific or stale
+			// failures. Auth endpoints render their own expected authentication errors.
 			if (response.status === 401 && !isAuthPath(path)) {
 				redirectToLoginOn401();
 			}

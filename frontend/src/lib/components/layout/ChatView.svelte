@@ -270,7 +270,9 @@
 					<div class="connection-banner">
 						<Banner
 							severity="warning"
-							message="Connection lost — trying to reconnect. Live updates are paused."
+							message={$activeSession.wsReconnectRequired
+								? 'Connection interrupted. Reconnect to resume live updates.'
+								: 'Connection lost — trying to reconnect. Live updates are paused.'}
 							action={{ label: 'Reconnect', onClick: handleReconnect }}
 						/>
 					</div>

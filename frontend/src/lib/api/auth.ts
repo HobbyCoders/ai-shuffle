@@ -5,7 +5,7 @@
 import { api, type AuthStatus } from './client';
 
 export async function getAuthStatus(): Promise<AuthStatus> {
-	return api.get<AuthStatus>('/auth/status');
+	return api.get<AuthStatus>('/auth/status', { cache: 'no-store' });
 }
 
 export async function setupInstallation(): Promise<void> {

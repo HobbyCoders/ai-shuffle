@@ -17,7 +17,7 @@
  */
 
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest, Profile } from '$lib/api/client';
-import { api } from '$lib/api/client';
+import { api, redirectToLoginOn401 } from '$lib/api/client';
 import { acceptUserEvent } from '$lib/services/user-event-dedupe';
 import type { SessionAttention } from './session/ws-message-handlers';
 import type { SdkContextUsage } from '$lib/api/sessions';
@@ -156,6 +156,7 @@ export interface ActiveSessionState {
 	 *  `liveModel`. */
 	liveProvider: string | null;
 	wsConnected: boolean;
+	wsReconnectRequired: boolean;
 	error: string | null;
 	profile: string;
 	sessionProfileId: string | null;
@@ -324,6 +325,7 @@ function defaultState(): ActiveSessionState {
 		liveRequestedModel: null,
 		liveProvider: null,
 		wsConnected: false,
+		wsReconnectRequired: false,
 		error: null,
 		profile: getPersistedProfile(),
 		sessionProfileId: null,
@@ -479,7 +481,7 @@ const wsConn: WsConnection = createWsConnection({
 	},
 	onConnected: () => {
 		console.debug(`[ActiveSession] onConnected: sessionId=${_state.sessionId}, isStreaming=${_state.isStreaming}, hasMessages=${_state.messages.length > 0}`);
-		_update(s => ({ ...s, wsConnected: true, error: null }));
+		_update(s => ({ ...s, wsConnected: true, wsReconnectRequired: false, error: null }));
 
 		// A WS (re)connect means the backend is reachable again — heal a boot-time
 		// model-registry hydration failure (page booted during a restart window).
@@ -553,7 +555,11 @@ const wsConn: WsConnection = createWsConnection({
 		if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
 
 		if (code === 4001) {
-			import('$app/navigation').then(({ goto }) => goto('/login'));
+			// This close code stops automatic retries. Keep the current session and
+			// draft available for the existing manual Reconnect action if worker
+			// authentication is still valid (or cannot currently be checked).
+			_update(s => ({ ...s, wsReconnectRequired: true, isRestoringSession: false }));
+			void redirectToLoginOn401();
 		}
 	},
 	isStreaming: () => {

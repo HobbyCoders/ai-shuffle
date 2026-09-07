@@ -80,6 +80,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		liveRequestedModel: null,
 		liveProvider: null,
 		wsConnected: true,
+		wsReconnectRequired: false,
 		error: null,
 		profile: 'profile-global',
 		sessionProfileId: 'profile-A',

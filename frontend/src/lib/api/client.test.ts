@@ -3,7 +3,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ApiClient } from './client';
+import { ApiClient, redirectToLoginOn401 } from './client';
+import { auth } from '$lib/stores/auth.svelte';
 
 // The 401 interceptor dynamically imports `$app/navigation` and calls goto().
 // Mock it so we can assert the redirect fires (or doesn't) without a real router.
@@ -288,11 +289,84 @@ describe('ApiClient', () => {
 			setPathname('/'); // default: an app page, not login/setup
 		});
 
-		it('redirects to /login on a 401 from a NON-auth endpoint', async () => {
+		it('redirects to /login when a fresh worker check confirms an unauthenticated session', async () => {
 			set401();
+			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: false }));
 			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 });
-			// goto fires via a dynamic import() → poll until the async chain resolves.
-			await vi.waitFor(() => expect(gotoMock).toHaveBeenCalledWith('/login'));
+			await redirectToLoginOn401();
+			expect(gotoMock).toHaveBeenCalledExactlyOnceWith('/login');
+			expect(fetchMock).toHaveBeenLastCalledWith('/api/v1/auth/status', expect.objectContaining({
+				credentials: 'include', cache: 'no-store'
+			}));
+		});
+
+		it('preserves worker login on a provider-specific 401 without replaying the operation', async () => {
+			fetchMock.mockResolvedValueOnce(Response.json({ detail: 'GitHub CLI not authenticated' }, { status: 401 }));
+			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: true }));
+			await expect(client.post('/github/create-pr', { title: 'test' })).rejects.toMatchObject({
+				status: 401, detail: 'GitHub CLI not authenticated'
+			});
+			await redirectToLoginOn401();
+			expect(gotoMock).not.toHaveBeenCalled();
+			expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/api/v1/github/create-pr', '/api/v1/auth/status']);
+		});
+
+		it('ignores a delayed old-cookie 401 after the current cookie becomes authenticated', async () => {
+			let finishOld!: (response: Response) => void;
+			fetchMock.mockReturnValueOnce(new Promise<Response>((resolve) => { finishOld = resolve; }));
+			const oldRequest = client.get('/sessions');
+			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: true }));
+			await auth.checkAuth(); // A new cookie has already been accepted.
+			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: true }));
+			const rejected = expect(oldRequest).rejects.toMatchObject({ status: 401 });
+			finishOld(Response.json({ detail: 'Expired old session' }, { status: 401 }));
+			await rejected;
+			await redirectToLoginOn401();
+			expect(gotoMock).not.toHaveBeenCalled();
+			expect(auth.current.status?.authenticated).toBe(true);
+		});
+
+		it.each(['503', 'network'])('does not redirect when the fresh status check fails (%s)', async (failure) => {
+			// An older anonymous status must not substitute for the failed check.
+			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: false }));
+			await auth.checkAuth();
+			set401();
+			if (failure === '503') fetchMock.mockResolvedValueOnce(Response.json({ detail: 'Hub unavailable' }, { status: 503 }));
+			else fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 });
+			await redirectToLoginOn401();
+			expect(gotoMock).not.toHaveBeenCalled();
+			expect(window.location.assign).not.toHaveBeenCalled();
+		});
+
+		it('deduplicates concurrent HTTP and socket failures into one current auth check and redirect', async () => {
+			let finishStatus!: (response: Response) => void;
+			fetchMock.mockImplementation((url) => url === '/api/v1/auth/status'
+				? new Promise<Response>((resolve) => { finishStatus = resolve; })
+				: Promise.resolve(Response.json({ detail: 'Expired' }, { status: 401 })));
+			await Promise.all([
+				expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 }),
+				expect(client.get('/projects')).rejects.toMatchObject({ status: 401 })
+			]);
+			const socketFailure = redirectToLoginOn401();
+			await vi.waitFor(() => expect(finishStatus).toBeTypeOf('function'));
+			expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/auth/status')).toHaveLength(1);
+			finishStatus(Response.json({ authenticated: false }));
+			await socketFailure;
+			expect(gotoMock).toHaveBeenCalledExactlyOnceWith('/login');
+		});
+
+		it('does not redirect when a newer successful auth check overtakes its anonymous result', async () => {
+			let finishStatus!: (response: Response) => void;
+			fetchMock.mockReturnValueOnce(new Promise<Response>((resolve) => { finishStatus = resolve; }));
+			const confirmation = redirectToLoginOn401();
+			await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: true }));
+			await auth.checkAuth();
+			finishStatus(Response.json({ authenticated: false }));
+			await confirmation;
+			expect(gotoMock).not.toHaveBeenCalled();
+			expect(auth.current.status?.authenticated).toBe(true);
 		});
 
 		// Give any (erroneously scheduled) dynamic-import redirect a real chance to
