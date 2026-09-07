@@ -22,6 +22,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
+from app.core.resource_sync import mutation
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,7 @@ class ProjectMemoryService:
         file_path, rel_path = self._resolve(location)
         return self._read_file(location, file_path, rel_path)
 
+    @mutation("projects", scope="shared", database=False)
     def save(self, location: str, content: str) -> MemoryFile:
         """
         Create or update a memory file.
@@ -226,6 +228,7 @@ class ProjectMemoryService:
 
         return self._read_file(location, file_path, MEMORY_LOCATIONS[location])
 
+    @mutation("projects", scope="shared", database=False)
     def delete(self, location: str) -> bool:
         """
         Delete a memory file.

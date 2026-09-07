@@ -87,6 +87,10 @@ def observe_transactions(get_db):
 
 def _emit(resource, scope, arguments, before, result):
     from app.core.global_events import global_events
+    # Paired/account subscribers re-fetch through their authorized read APIs.
+    # Descriptors contain neither record IDs nor record contents.
+    for kind in ("account", "paired"):
+        global_events.resources_changed(resource, user_type=kind)
     if scope == "session":
         row = before or (result if isinstance(result, dict) else {})
         owner = row.get("api_user_id", arguments.get("api_user_id"))
@@ -145,10 +149,19 @@ def mutation(resource, *, scope="admin", database=True):
             parent = _active.get()
             frame = {"committed": False, "failed": False}
             token = _active.set(frame)
+            raised = False
             try:
                 result = function(*args, **kwargs)
+            except BaseException:
+                raised = True
+                frame['failed'] = True
+                raise
             finally:
                 _active.reset(token)
+                if raised:
+                    # A mutation may commit one transaction and then fail in
+                    # subsequent work. Those committed rows still need refresh.
+                    complete(parent, frame, arguments, before, None)
             return complete(parent, frame, arguments, before, result)
 
         @wraps(function)
@@ -157,10 +170,17 @@ def mutation(resource, *, scope="admin", database=True):
             parent = _active.get()
             frame = {"committed": False, "failed": False}
             token = _active.set(frame)
+            raised = False
             try:
                 result = await function(*args, **kwargs)
+            except BaseException:
+                raised = True
+                frame['failed'] = True
+                raise
             finally:
                 _active.reset(token)
+                if raised:
+                    complete(parent, frame, arguments, before, None)
             return complete(parent, frame, arguments, before, result)
 
         wrapper = async_wrapped if inspect.iscoroutinefunction(function) else wrapped

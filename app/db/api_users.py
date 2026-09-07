@@ -494,3 +494,12 @@ def user_has_credential(api_user_id: str, credential_type: str) -> bool:
             (api_user_id, credential_type)
         )
         return cursor.fetchone() is not None
+
+
+from app.core.resource_sync import install_database_mutations
+
+install_database_mutations(globals(), "api_users", """
+    create_api_user update_api_user delete_api_user update_credential_policy
+    set_user_credential_policy delete_user_credential_policy
+    set_user_credential delete_user_credential
+""")

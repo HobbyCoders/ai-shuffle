@@ -17,6 +17,9 @@ from app.db import database, notifications
 INVENTORY = {'projects': ('projects', 'shared', 'create_project update_project delete_project set_project_link_group'), 'projects_v2': ('projects', 'shared', 'upsert_project'), 'profiles': ('agents', 'shared', 'create_profile update_profile delete_profile set_profile_builtin'), 'subagents': ('agents', 'shared', 'create_subagent update_subagent delete_subagent set_subagent_builtin revert_subagent_to_defaults add_permission_rule delete_permission_rule delete_profile_permission_rules'), 'tags': ('tags', 'shared', 'create_tag update_tag delete_tag add_session_tag remove_session_tag set_session_tags'), 'notes': ('notes', 'shared', 'create_note update_note delete_note bulk_update_note_file_paths create_note_attachment set_note_attachment_data delete_note_attachment'), 'templates': ('templates', 'shared', 'create_template update_template delete_template set_template_builtin'), 'connectors': ('connectors', 'admin', 'create_connector update_connector update_connector_status delete_connector claim_connector_runner update_connector_event_dispatched create_connector_event_log create_connector_session update_connector_session_ai_session'), 'automations': ('automations', 'admin', 'create_automation update_automation delete_automation record_automation_run_success claim_automation_fire create_automation_run update_automation_run create_automation_approval update_automation_approval'), 'hooks': ('hooks', 'admin', 'create_hook update_hook delete_hook update_hook_triggered'), 'notifications': ('notifications', 'notification', 'create_notification mark_read mark_all_read dismiss clear_all'), 'sessions': ('sessions', 'session', 'create_session create_session_with_stats update_session set_session_run_binding adopt_session adopt_session_follow unpin_session pin_session_placement set_session_project set_session_branch resync_session_branch update_session_pr_state set_session_parked_task_kind set_working_set_ref delete_session set_session_active set_session_hidden clear_session_conversation delete_session_message delete_orphan_user_turn discard_orphan_first_turn delete_session_messages_after delete_session_messages_after_jsonl_uuid')}
 
 
+INVENTORY['api_users'] = ('api_users', 'admin', 'create_api_user update_api_user delete_api_user update_credential_policy set_user_credential_policy delete_user_credential_policy set_user_credential delete_user_credential')
+
+
 @pytest.mark.parametrize("module,resource,scope,name", [
     (module, resource, scope, name)
     for module, (resource, scope, names) in INVENTORY.items()
@@ -67,7 +70,7 @@ def test_store_crud_and_missing_delete(events, resource, create, update, delete)
         assert all(item == [resource] for item in resources(events))
         shared = resource in {"projects", "agents", "tags", "notes", "templates"}
         assert {c.kwargs["user_type"] for c in events.call_args_list} == (
-            {"admin", "api_user"} if shared else {"admin"})
+            {"admin", "api_user", "account", "paired"} if shared else {"admin", "account", "paired"})
     events.reset_mock()
     assert not delete()
     events.assert_not_called()
@@ -76,12 +79,12 @@ def test_store_crud_and_missing_delete(events, resource, create, update, delete)
 def test_system_settings_initialization_noop_and_delete(events):
     from app.db import settings
     settings.set_system_setting("sync-test", "secret value")
-    assert resources(events) == [["settings"]]
+    assert resources(events) == [["settings"]] * 3
     events.reset_mock()
     assert settings.get_or_create_system_setting("sync-test", lambda: "ignored") == "secret value"
     events.assert_not_called()
     assert settings.delete_system_setting("sync-test")
-    assert resources(events) == [["settings"]]
+    assert resources(events) == [["settings"]] * 3
     events.reset_mock()
     assert not settings.delete_system_setting("sync-test")
     events.assert_not_called()
@@ -90,7 +93,7 @@ def test_system_settings_initialization_noop_and_delete(events):
 def test_notification_mutations_user_wide_and_noop(events):
     row = notifications.create_notification("alice", message="private", notification_id="n")
     assert row["message"] == "private"
-    assert resources(events) == [["notifications"]]
+    assert resources(events) == [["notifications"]] * 3
     assert events.call_args.kwargs == {"user_type": "api_user", "user_id": "alice"}
     events.reset_mock()
     notifications.create_notification("alice", message="ignored", notification_id="n")
@@ -102,7 +105,7 @@ def test_notification_mutations_user_wide_and_noop(events):
                       lambda: notifications.clear_all("alice")):
         events.reset_mock()
         assert operation()
-        assert resources(events) == [["notifications"]]
+        assert resources(events) == [["notifications"]] * 3
         assert events.call_args.kwargs["user_id"] == "alice"
 
 
@@ -134,7 +137,7 @@ def test_publish_occurs_after_transaction_exit(events, mock_db):
         assert database.get_tag("post")["name"] == "committed"
     events.side_effect = check
     database.create_tag("post", "committed")
-    assert events.call_count == 2
+    assert events.call_count == 4
 
 
 def test_session_metadata_not_token_stream(events):
@@ -143,11 +146,11 @@ def test_session_metadata_not_token_stream(events):
     database.create_session("s", "p", api_user_id="admin")
     events.reset_mock()
     database.update_session("s", title="renamed")
-    assert resources(events) == [["sessions"], ["sessions"]]
+    assert resources(events) == [["sessions"]] * 4
     assert events.call_args.kwargs == {"user_type": "api_user", "user_id": "admin"}
     events.reset_mock()
     database.set_session_hidden("s", True)
-    assert resources(events) == [["sessions"], ["sessions"]]
+    assert resources(events) == [["sessions"]] * 4
     events.reset_mock()
     database.add_session_message("s", "assistant", "token")
     events.assert_not_called()
@@ -193,11 +196,11 @@ def test_rest_store_uses_same_boundary(events):
     with TestClient(app) as client:
         response = client.post("/api/v1/tags", json={"name": "REST", "color": "#112233"})
         assert response.status_code == 201, response.text
-        assert resources(events) == [["tags"], ["tags"]]
+        assert resources(events) == [["tags"]] * 4
         events.reset_mock()
         response = client.delete("/api/v1/tags/" + response.json()["id"])
         assert response.status_code == 204, response.text
-        assert resources(events) == [["tags"], ["tags"]]
+        assert resources(events) == [["tags"]] * 4
 
 
 @pytest.mark.asyncio
@@ -206,7 +209,7 @@ async def test_app_config_hook_tool_common_boundary(events):
     tool = next(t for t in _create_hook_tools(True, None) if t.name == "createHook")
     result = await tool.handler({"name": "tool", "event": "PreToolUse", "hook_type": "bash", "command": "true", "tool_matcher": "Bash"})
     assert not result.get("isError"), result
-    assert resources(events) == [["hooks"]]
+    assert resources(events) == [["hooks"]] * 3
 
 
 def test_mcp_durable_success_and_failure(events, tmp_path):
@@ -217,14 +220,14 @@ def test_mcp_durable_success_and_failure(events, tmp_path):
     config = McpServerConfig(name="test", command="test-command")
     service.add_server("test", config, McpScope.USER)
     assert json.loads(service.USER_MCP_FILE.read_text())["mcpServers"]["test"]["command"] == "test-command"
-    assert resources(events) == [["mcp"], ["mcp"]]
+    assert resources(events) == [["mcp"]] * 4
     events.reset_mock()
     with patch.object(service, "_write_json_file", return_value=False):
         with pytest.raises(RuntimeError):
             service.remove_server("test")
     events.assert_not_called()
     assert service.remove_server("test")
-    assert resources(events) == [["mcp"], ["mcp"]]
+    assert resources(events) == [["mcp"]] * 4
 
 
 def test_plugin_writes_and_failed_results(events, tmp_path):
@@ -233,7 +236,7 @@ def test_plugin_writes_and_failed_results(events, tmp_path):
         service = PluginService()
     assert service.enable_plugin("test")
     assert json.loads(service.SETTINGS_FILE.read_text())["enabledPlugins"]["test"] is True
-    assert resources(events) == [["plugins"], ["plugins"]]
+    assert resources(events) == [["plugins"]] * 4
     events.reset_mock()
     with patch.object(service, "_write_json_file", return_value=False):
         assert not service.disable_plugin("test")
@@ -257,7 +260,7 @@ async def test_async_signature_and_result_semantics(events):
     assert inspect.iscoroutinefunction(write)
     assert inspect.signature(write) == inspect.signature(write.__wrapped__)
     assert await write("ok") == "ok"
-    assert resources(events) == [["mcp"]]
+    assert resources(events) == [["mcp"]] * 3
 
 @pytest.mark.parametrize("module,cls,resource,names", [
     ("mcp_service", "McpService", "mcp", "add_server update_server remove_server set_server_enabled set_project_server_enabled add_project_installed_server remove_project_installed_server"),
@@ -302,7 +305,56 @@ def test_swallowed_file_write_failure_and_failed_batch(events):
 def test_nested_agent_facades_coalesce(events):
     row = database.create_subagent("nested", "Nested", "description", "prompt")
     assert row["id"] == "nested"
-    assert resources(events) == [["agents"], ["agents"]]
+    assert resources(events) == [["agents"]] * 4
+
+
+def test_committed_rows_are_invalidated_even_when_later_work_raises(events):
+    @mutation('tags', scope='shared')
+    def partially_successful():
+        database.create_tag('committed-before-error', 'kept')
+        raise RuntimeError('later operation failed')
+    with pytest.raises(RuntimeError, match='later operation failed'):
+        partially_successful()
+    assert database.get_tag('committed-before-error')['name'] == 'kept'
+    assert resources(events) == [['tags']] * 4
+
+
+def test_api_user_crud_invalidates_after_commit_but_usage_touch_does_not(events):
+    database.create_api_user('u', 'User', 'private-key-hash')
+    assert resources(events) == [['api_users']] * 3
+    assert 'private-key-hash' not in str(events.call_args_list)
+    events.reset_mock()
+    database.update_api_user_last_used('u')
+    events.assert_not_called()
+    database.update_api_user('u', name='Updated')
+    assert resources(events) == [['api_users']] * 3
+    events.reset_mock()
+    assert database.delete_api_user('u')
+    assert resources(events) == [['api_users']] * 3
+    events.reset_mock()
+    assert not database.delete_api_user('u')
+    events.assert_not_called()
+
+
+def test_project_memory_save_delete_and_failed_write_invalidation(events, tmp_path):
+    from app.core.project_memory_service import ProjectMemoryService
+    from pathlib import Path
+    service = ProjectMemoryService(tmp_path)
+    saved = service.save('project', 'private memory')
+    assert saved.content == 'private memory'
+    assert resources(events) == [['projects']] * 4
+    assert 'private memory' not in str(events.call_args_list)
+    events.reset_mock()
+    with patch.object(Path, 'write_text', side_effect=OSError('read-only')):
+        with pytest.raises(OSError):
+            service.save('project', 'not written')
+    events.assert_not_called()
+    assert service.delete('project')
+    assert resources(events) == [['projects']] * 4
+    events.reset_mock()
+    with pytest.raises(ValueError):
+        service.delete('project')
+    events.assert_not_called()
 
 
 def test_notification_rest_keeps_explicit_audience(events):
@@ -316,5 +368,5 @@ def test_notification_rest_keeps_explicit_audience(events):
             response = client.post("/api/v1/notifications", json={"message": "private"})
             assert response.status_code == 200
             assert events.call_args.kwargs == {"user_type": "api_user", "user_id": "admin"}
-            assert resources(events) == [["notifications"]]
+            assert resources(events) == [["notifications"]] * 3
             assert events.call_args.args[0] == {"type": "resources_changed", "resources": ["notifications"]}
