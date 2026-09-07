@@ -56,7 +56,7 @@ def test_fresh_db_carries_the_v84_index_and_columns(mock_db):
     assert _index_exists(conn, "idx_usage_log_session")  # B3
     assert "folded_through_id" in _column_names(conn, "session_store_summaries")  # B4
     assert "is_worker" in _column_names(conn, "sessions")  # B7
-    assert _schema_version(conn) == database.SCHEMA_VERSION == 85
+    assert _schema_version(conn) == database.SCHEMA_VERSION
 
 
 # ---------------------------------------------------------------------------
