@@ -24,6 +24,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # Set test environment variables before importing app modules
 os.environ["TESTING"] = "1"
 
+
+@pytest.fixture(autouse=True)
+def _isolated_computer_use_halt_state(monkeypatch):
+    """Stop tests must not leak arbitrary session flags into another test."""
+    from app.mcp.computer_use import abort
+    with abort._LOCK:
+        monkeypatch.setattr(abort, "_HALTED", {})
+        monkeypatch.setattr(abort, "_GENERATIONS", {})
+
 # The FastAPI TestClient issues same-origin requests but sends no Origin/Referer
 # header and reports a client host of "testclient" (not localhost), so the CSRF
 # middleware would reject every state-changing request (POST/PUT/DELETE/PATCH)
