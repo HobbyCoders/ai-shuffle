@@ -135,12 +135,11 @@ COPY requirements-dev.txt .
 RUN pip install --no-cache-dir -r requirements-dev.txt
 
 # ── fluid harness (REQUIRED — the only provider backend) ──
-# vendor/fluid contains the harness source as a
-# pristine copy of fluid main, committed to this repo and kept current by
-# .github/workflows/vendor-sync.yml, so the build needs no cross-repo
-# credentials. The image build must fail if the required harness cannot install.
-COPY vendor/ /opt/vendor/
-RUN pip install --no-cache-dir /opt/vendor/fluid && python -c "import fluid"
+# fluid is developed in this repo under fluid/ (its own pyproject; the package
+# is fluid/fluid). Installed from the tree so the image needs no registry or
+# cross-repo credentials. The build must fail if the harness cannot install.
+COPY fluid/ /opt/fluid/
+RUN pip install --no-cache-dir /opt/fluid && python -c "import fluid"
 
 # ── Backend code ──
 COPY --chown=appuser:appuser app/ ./app/

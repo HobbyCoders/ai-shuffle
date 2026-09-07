@@ -304,7 +304,7 @@ if __name__ == '__main__':
     parser.add_argument('--runtime', type=Path, required=True)
     parser.add_argument('--database', default=DATABASE)
     args = parser.parse_args()
-    sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parents[1] / 'vendor/fluid')]
+    sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parents[1] / 'fluid')]
     logging.disable(logging.CRITICAL)
     if not args.execute:
         print(json.dumps({'planned_database': args.database, 'executed': False}))

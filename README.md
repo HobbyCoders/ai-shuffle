@@ -212,10 +212,12 @@ would allow it.
 ai-shuffle/
 ├── app/               # FastAPI backend (API, WebSocket, DB, services)
 ├── frontend/          # SvelteKit frontend (Svelte 5, Tailwind)
+├── fluid/             # The fluid agent harness (own pyproject; package is fluid/fluid)
+├── android/           # Android app (Kotlin/Gradle) and the Cloudflare account hub (android/hub)
 ├── browser-mcp/       # Bundled browser-control MCP server (Playwright/CDP)
 ├── tools/             # AI tool scripts (fal.ai integrations)
 ├── docs/              # Technology documentation
-├── tests/             # Backend test suite
+├── tests/             # Backend test suite (fluid's own suite lives in fluid/tests)
 ├── .github/           # CI/CD workflows
 ├── docker-compose.yml
 ├── run_local.py       # Cross-platform local launcher

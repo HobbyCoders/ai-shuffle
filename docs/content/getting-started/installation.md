@@ -26,7 +26,7 @@ cd ai-shuffle
 ### 2. Install Backend Dependencies
 
 ```bash
-pip install -r requirements.txt ./vendor/fluid
+pip install -r requirements.txt ./fluid
 # Optional: computer-use (host desktop control), native runs only
 pip install -r requirements-native.txt
 ```
@@ -99,7 +99,7 @@ For production deployments, consider:
 
 ```bash
 git pull
-pip install -r requirements.txt ./vendor/fluid
+pip install -r requirements.txt ./fluid
 cd frontend && npm install && npm run build && cd ..
 rm -rf app/static && cp -r frontend/build app/static
 python -m app.main

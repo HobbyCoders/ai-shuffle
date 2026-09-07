@@ -55,7 +55,7 @@ python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # Install dependencies
-pip install -r requirements.txt ./vendor/fluid
+pip install -r requirements.txt ./fluid
 pip install -r requirements-dev.txt
 # Optional: computer-use (host desktop control), native runs only
 pip install -r requirements-native.txt
@@ -131,8 +131,8 @@ Run all checks locally:
 # Python linting
 ruff check app/ run_local.py
 
-# Python tests (see Testing below — the suite needs vendor/fluid importable)
-PYTHONPATH=vendor/fluid pytest tests/ -v
+# Python tests (see Testing below — the suite needs fluid importable)
+PYTHONPATH=fluid pytest tests/ -v
 
 # Frontend type check and build
 cd frontend
@@ -249,28 +249,49 @@ ruff format app/ main.py run_local.py
 
 ### Python Tests
 
-The suite imports the vendored fluid harness (`vendor/fluid`), which is not on
+The suite imports the fluid harness (`fluid/`), which is not on
 `sys.path` by default — without it collection fails before a single test runs.
-Either install it once (`pip install -e ./vendor/fluid`) or point `PYTHONPATH`
+Either install it once (`pip install -e ./fluid`) or point `PYTHONPATH`
 at it for the run:
 
 ```bash
 # Run all tests (POSIX)
-PYTHONPATH=vendor/fluid pytest tests/ -v
+PYTHONPATH=fluid pytest tests/ -v
 
 # Run with coverage
-PYTHONPATH=vendor/fluid pytest tests/ --cov=app --cov-report=term-missing
+PYTHONPATH=fluid pytest tests/ --cov=app --cov-report=term-missing
 
 # Run specific test file
-PYTHONPATH=vendor/fluid pytest tests/test_auth.py -v
+PYTHONPATH=fluid pytest tests/test_auth.py -v
 
 # Run specific test
-PYTHONPATH=vendor/fluid pytest tests/test_auth.py::test_login -v
+PYTHONPATH=fluid pytest tests/test_auth.py::test_login -v
 ```
 
 ```powershell
 # Windows / PowerShell
-$env:PYTHONPATH = "vendor/fluid"; python -m pytest tests/ -v
+$env:PYTHONPATH = "fluid"; python -m pytest tests/ -v
+```
+
+### fluid Tests
+
+The harness has its own suite under `fluid/tests`. Install it with the dev
+extras and run the unit tests from the repository root:
+
+```bash
+pip install -e './fluid[dev]'
+python -m pytest fluid/tests/unit -q
+```
+
+Run it on Linux as well as Windows before opening a PR that touches `fluid/`;
+CI (`ci-fluid.yml`) runs it on Linux.
+
+### Android Tests
+
+```bash
+cd android
+./gradlew testDebugUnitTest lintDebug   # Windows: gradlew.bat
+cd hub && npm ci && npm test            # account hub Worker
 ```
 
 **Test file structure:**
@@ -367,8 +388,13 @@ ai-shuffle/
 │   └── src/
 │       ├── lib/           # Components, stores, utils
 │       └── routes/        # Pages
+├── fluid/                 # The fluid agent harness (own pyproject; package is fluid/fluid)
+│   └── tests/unit/        # fluid's own unit suite
+├── android/               # Android app (Kotlin/Gradle)
+│   ├── hub/               # Cloudflare Worker + D1 account hub
+│   └── ci/                # Emulator and instrumentation helpers used by android.yml
 ├── tools/                 # AI tools (TypeScript)
-├── tests/                 # Python tests
+├── tests/                 # Python tests for the backend
 ├── plugins/               # Plugin system
 └── docs/                  # Documentation
 ```

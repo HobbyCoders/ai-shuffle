@@ -74,6 +74,16 @@ browser-mcp/dist/
 # Claude config
 .claude/
 
+# Android app and account hub: built by their own workflows, never part of the
+# server image.
+android/
+
+# fluid harness: only fluid/pyproject.toml, fluid/README.md and fluid/fluid are
+# needed to pip install it; its tests, docs and benchmarks stay out of the image.
+fluid/tests/
+fluid/docs/
+fluid/benchmarks/
+
 # Frontend build artifacts (rebuilt inside container)
 frontend/node_modules/
 frontend/build/

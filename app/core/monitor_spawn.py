@@ -953,7 +953,7 @@ def amend_native_monitor_spec(registry: Any) -> None:
 
     Ruling A13 splits the tool: fluid owns Monitor's shape, the app owns its
     supervision — and the inline wait is supervision. The parameter is
-    therefore added to the vendored spec here rather than in vendor/fluid, the
+    therefore added to the vendored spec here rather than in fluid, the
     same way :func:`_amend_native_task_spec` installs the app's Task contract.
     Fully defensive: a failure leaves the vendor spec as-is and the spawner
     simply never sees a ``wait_seconds``.

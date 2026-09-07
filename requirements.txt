@@ -14,11 +14,10 @@ bcrypt==4.2.1
 cryptography>=42.0.0
 claude-agent-sdk==0.2.126
 # fluid agent harness — REQUIRED: it is the only provider backend
-# (app/core/provider/factory.py). Not listed here as a pinned dep because the
-# repo is private (Quickkill0/fluid): vendor/fluid holds a pristine copy of
-# fluid main, kept current by .github/workflows/vendor-sync.yml, and both the
-# Docker image and dev installs install from there
-# (`pip install -e ./vendor/fluid`). Requires Python >=3.12.
+# (app/core/provider/factory.py). Not listed here as a pinned dep because it
+# lives in this repo under fluid/ (its own pyproject.toml); the Docker image
+# and dev installs install it from the tree (`pip install -e ./fluid`).
+# Requires Python >=3.12.
 # Native git reads (pygit2/libgit2) — falls back to CLI subprocess if unavailable
 pygit2>=1.19.0
 # Mobile support dependencies

@@ -61,7 +61,7 @@ source venv/bin/activate
 
 ### 3. Install Dependencies
 ```bash
-pip install -r requirements.txt ./vendor/fluid
+pip install -r requirements.txt ./fluid
 # Optional: computer-use (host desktop control), native runs only
 pip install -r requirements-native.txt
 ```
@@ -296,7 +296,7 @@ npm run dev
 git pull
 
 # Update dependencies
-pip install -r requirements.txt ./vendor/fluid
+pip install -r requirements.txt ./fluid
 
 # Rebuild frontend
 cd frontend

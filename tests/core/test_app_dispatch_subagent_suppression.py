@@ -12,7 +12,7 @@ On the native/fluid leg an app-dispatched sub-agent spawn had TWO announcers:
 
 WorkerFeed's row wins, so the streaming loop must stay silent for app-dispatched
 spawns ONLY. The discriminator is the tool input's SHAPE: fluid's bare-named
-"Task" dispatch builtin (``vendor/fluid/fluid/tools/builtins/task.py``) takes
+"Task" dispatch builtin (``fluid/fluid/tools/builtins/task.py``) takes
 ``{agent, prompt, mode, label}`` — always an ``agent`` key, never
 ``subagent_type`` — while the CLI's genuine Task/Agent sub-agent tools carry
 ``subagent_type`` / ``description`` / ``prompt`` and never ``agent``.

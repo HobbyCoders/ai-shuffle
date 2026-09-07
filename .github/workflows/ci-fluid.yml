@@ -1,0 +1,52 @@
+name: CI fluid
+
+# Unit suite for the fluid harness (fluid/). Paths-filtered like the other CI
+# workflows: only a PR that touches fluid/ runs it. The app's own backend CI
+# (ci-backend.yml) also triggers on fluid/** because the app imports the
+# harness, so a fluid change gets both suites.
+#
+# fluid is developed on Windows; this Linux run is the one that catches
+# POSIX-only failures (path separators, os.fork, unix sockets). Before the
+# monorepo merge it ran inside the vendor-sync workflow, once a day plus on
+# every fluid push. The daily canary below keeps that cadence.
+#
+# Blacksmith runners are PAID per minute; every trigger below is deliberate.
+on:
+  pull_request:
+    paths:
+      - 'fluid/**'
+      - '.github/workflows/ci-fluid.yml'
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-fluid-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: fluid unit tests
+    timeout-minutes: 20
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          # Matches production (the Docker image) and fluid's requires-python.
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: fluid/pyproject.toml
+
+      - name: Install fluid with its dev extras
+        run: pip install './fluid[dev]'
+
+      - name: Run the unit suite
+        # fluid/pyproject.toml carries the pytest config (asyncio_mode=auto);
+        # pytest picks it up as rootdir because the test path sits under it.
+        run: python -m pytest fluid/tests/unit -q -p no:cacheprovider

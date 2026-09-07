@@ -85,7 +85,7 @@ def main():
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15).stdout
 
     def diagnostics():
-        subprocess.run(["bash", ".github/scripts/emulator-diagnostics.sh", "launcher-recovery"],
+        subprocess.run(["bash", "ci/emulator-diagnostics.sh", "launcher-recovery"],
                        check=False, timeout=240)
 
     prepare(adb, Path(os.environ["RUNNER_TEMP"]) / "android-emulator" / "readiness", diagnostics=diagnostics)

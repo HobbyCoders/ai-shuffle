@@ -181,9 +181,9 @@ def install_dependencies():
     project_root = Path(__file__).parent
     requirements = project_root / "requirements.txt"
 
-    fluid_dir = project_root / "vendor" / "fluid"
+    fluid_dir = project_root / "fluid"
     if not requirements.exists() or not (fluid_dir / "pyproject.toml").exists():
-        print_status("Incomplete installation: requirements.txt and vendor/fluid are required", "error")
+        print_status("Incomplete installation: requirements.txt and fluid/pyproject.toml are required", "error")
         return False
 
     try:

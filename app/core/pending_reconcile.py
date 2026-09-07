@@ -2,7 +2,7 @@
 
 fluid keeps its own ``_background_pending`` set and rebuilds it, on every
 rehydrate, purely from the ``SubagentEvent`` log
-(``vendor/fluid/fluid/engine/background.py`` ``_rehydrate_background_lifecycle_unlocked``):
+(``fluid/fluid/engine/background.py`` ``_rehydrate_background_lifecycle_unlocked``):
 a ``started`` event puts an id in, and ONLY a terminal ``SubagentEvent``
 (``finished``/``failed``/``cancelled``) takes it out. Every ``SessionParked``
 lists whatever is left.

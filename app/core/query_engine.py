@@ -3639,7 +3639,7 @@ async def _stream_to_websocket_impl(
                             )
                             # Shape gate: fluid's bare-named "Task" dispatch
                             # builtin always carries an "agent" key and never a
-                            # "subagent_type" (vendor/fluid/.../builtins/task.py:
+                            # "subagent_type" (fluid/.../builtins/task.py:
                             # {agent, prompt, mode, label}); the CLI's genuine
                             # Task/Agent subagent tools carry subagent_type /
                             # description / prompt and never "agent". An

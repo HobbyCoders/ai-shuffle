@@ -1,6 +1,6 @@
 """Stage a native release from source plus an already-built frontend.
 
-No network calls: run_local.py --setup installs the vendored Python harness and
+No network calls: run_local.py --setup installs the fluid harness from fluid/ and
 builds both Node tools from the included lockfiles on the target platform.
 """
 
@@ -18,7 +18,7 @@ def stage_release(repo: Path, destination: Path) -> None:
     required = [
         "app/main.py",
         "frontend/build/index.html",
-        "vendor/fluid/pyproject.toml",
+        "fluid/pyproject.toml",
         "tools/package-lock.json",
         "browser-mcp/package-lock.json",
     ]
@@ -43,7 +43,7 @@ def stage_release(repo: Path, destination: Path) -> None:
             excluded.add("static")  # never mix a local stale build into the archive
         return excluded
 
-    for name in ("app", "vendor/fluid", "tools", "browser-mcp"):
+    for name in ("app", "fluid", "tools", "browser-mcp"):
         shutil.copytree(repo / name, destination / name, ignore=source_ignore)
     shutil.copytree(
         repo / "frontend/build", destination / "app/static", dirs_exist_ok=True

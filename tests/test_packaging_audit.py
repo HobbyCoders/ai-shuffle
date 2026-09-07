@@ -18,15 +18,15 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_setup_installs_required_harness(tmp_path, monkeypatch):
     monkeypatch.setattr(run_local, "__file__", str(tmp_path / "run_local.py"))
     (tmp_path / "requirements.txt").write_text("fastapi")
-    (tmp_path / "vendor/fluid").mkdir(parents=True)
-    (tmp_path / "vendor/fluid/pyproject.toml").write_text("[project]")
+    (tmp_path / "fluid").mkdir(parents=True)
+    (tmp_path / "fluid/pyproject.toml").write_text("[project]")
     calls = []
     monkeypatch.setattr(
         run_local.subprocess, "run", lambda args, **kw: calls.append(args)
     )
     assert run_local.install_dependencies()
     assert calls[0][-1] == "pip==26.2.1"
-    assert str(tmp_path / "vendor/fluid") in calls[1]
+    assert str(tmp_path / "fluid") in calls[1]
     assert calls[2][-1] == "import fluid"
 
 
@@ -101,8 +101,8 @@ def test_stage_release_includes_runtime_sources_without_local_artifacts(tmp_path
     for name in (
         "app/main.py",
         "frontend/build/index.html",
-        "vendor/fluid/pyproject.toml",
-        "vendor/fluid/fluid/__init__.py",
+        "fluid/pyproject.toml",
+        "fluid/fluid/__init__.py",
         "tools/package-lock.json",
         "tools/worker.ts",
         "tools/scripts/clean.mjs",
@@ -122,7 +122,7 @@ def test_stage_release_includes_runtime_sources_without_local_artifacts(tmp_path
     dest = tmp_path / "release"
     stage_release(repo, dest)
     for name in (
-        "vendor/fluid/fluid/__init__.py",
+        "fluid/fluid/__init__.py",
         "tools/worker.ts",
         "tools/scripts/clean.mjs",
         "browser-mcp/src/index.ts",

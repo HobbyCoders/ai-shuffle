@@ -6,7 +6,7 @@ on:
       - 'app/**'
       - 'tests/integration/test_mobile_postgres.py'
       - 'requirements*.txt'
-      - 'vendor/**'
+      - 'fluid/**'
       - '.github/workflows/mobile-postgres.yml'
   push:
     branches: ['feat/android-account-hub']
@@ -46,7 +46,7 @@ jobs:
       - name: Install backend dependencies
         run: |
           python -m pip install -r requirements.txt -r requirements-dev.txt
-          python -m pip install -e ./vendor/fluid
+          python -m pip install -e ./fluid
       - name: Run isolated real PostgreSQL contracts
         env:
           TESTING: '1'

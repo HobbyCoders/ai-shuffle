@@ -723,7 +723,7 @@ class PgFluidStore:
         exclude_session_id: Optional[str] = None,
     ) -> List[SessionSearchHit]:
         """fluid's optional SessionStore recall hook (see
-        ``vendor/fluid/fluid/store/base.py``) — backs the SessionSearch builtin
+        ``fluid/fluid/store/base.py``) — backs the SessionSearch builtin
         over both the native fluid node tree and the SDK transcript mirror.
         """
         return await run_sync(_search_sync, list(terms), int(limit), exclude_session_id)
