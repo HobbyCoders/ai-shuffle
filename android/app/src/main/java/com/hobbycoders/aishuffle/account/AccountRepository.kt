@@ -42,9 +42,11 @@ class AccountRepository(private val context: Context) {
             val item = list.getJSONObject(i)
             val id = HubClient.segment(item.getString("id"))
             val url = PairingInput.origin(item.getString("url"))
-            val cached = saved.firstOrNull { it.accountId == session.accountId && it.hubUrl == session.hub && it.hubServerId == id && it.baseUrl == url && it.deviceId == session.deviceId && it.apiKey.startsWith("aim_") }
+            val cached = AccountWorkerCache.updated(saved, session, id, item.getString("name"), url)
             if (cached != null) {
-                next += cached.copy(name = item.getString("name"))
+                check(store.matches(session)) { "Account changed. Sign in again." }
+                servers.update(cached)
+                next += cached
                 continue
             }
             val ticket = HubClient.call(session.hub, "/v1/servers/$id/tickets", "POST", token = session.token).getString("ticket")

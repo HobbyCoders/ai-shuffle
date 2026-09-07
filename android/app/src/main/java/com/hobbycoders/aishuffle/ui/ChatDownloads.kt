@@ -58,7 +58,7 @@ internal class ChatDownloads(
             transfer.job = activity.lifecycleScope.launch {
                 try {
                     withContext(Dispatchers.IO + NonCancellable) {
-                        transfer.output.set(requireNotNull(activity.contentResolver.openOutputStream(uri, "w")))
+                        transfer.output.set(requireNotNull(activity.contentResolver.openOutputStream(uri, "wt")))
                     }
                     if (!current(transfer)) {
                         if (active === transfer) cancel("Chat changed. Download the file again.") else cleanup(transfer)

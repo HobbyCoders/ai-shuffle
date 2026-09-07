@@ -12,7 +12,11 @@ Embedded chat can request audio capture from the current worker's HTTPS document
 
 Native voice sessions request `purpose=native` when obtaining their worker session token. Embedded chat uses `purpose=web`, so a backend implementing the independent session slots can keep both active at once.
 
-When the web voice UI requests a native handoff, `shuffleNativeVoice` accepts only a start request with a correlation UUID and a bounded selected-chat ID. Like file saves, this listener is restricted to the worker's exact origin and main frame. The activity must be focused, resumed and still authorized for that worker. Its reply includes the request/chat IDs and is sent before opening the native voice screen. A request cannot choose a worker URL or provide credentials. The native voice implementation must carry the selected-chat extra through to the service; this bridge alone does not create a voice session or relax the contained page's network policy.
+If Android stops chat before its initial web session is ready, returning to chat retries that interrupted load. Late callbacks from the cancelled attempt cannot load an obsolete session. Returning to an already loaded chat keeps its cookie rather than rotating it unnecessarily.
+
+Account sync treats a changed HTTPS tunnel address from the authenticated hub as an endpoint update for the same worker. It reuses a saved device key only when hub, account, worker and device identity all match. Foreign identities must enroll normally. Optional Cloudflare Access service headers configured for the old origin are cleared when the origin changes; they are not carried to a new host. This avoids duplicate-enrollment conflicts while keeping unrelated credentials separate.
+
+When the web voice UI requests a native handoff, `shuffleNativeVoice` accepts only a start request with a correlation UUID and a bounded selected-chat ID. Like file saves, this listener is restricted to the worker's exact origin and main frame. The activity must be focused, resumed and still authorized for that worker. Its single result includes the request/chat IDs; success is sent only after the native activity launch returns successfully, before lifecycle pause dispatch. A request cannot choose a worker URL or provide credentials. The native voice implementation must carry the selected-chat extra through to the service; this bridge alone does not create a voice session or relax the contained page's network policy.
 
 ## Verification
 

@@ -49,6 +49,14 @@ class AccountStoreLifecycleTest {
         assertEquals(requested, store.session()!!.deviceId)
         assertTrue(store.matches(accepted))
     }
+    @Test fun identicalTokenTextNeverMatchesAnotherHubAccountOrDevice() {
+        val expected = session(store.beginSignIn())
+        store.save(expected)
+        assertTrue(store.matches(expected))
+        assertFalse(store.matches(AccountSession("https://other.example", expected.token, expected.expiresAt, expected.deviceId, expected.accountId, "tester")))
+        assertFalse(store.matches(AccountSession(expected.hub, expected.token, expected.expiresAt, "other-device", expected.accountId, "tester")))
+        assertFalse(store.matches(AccountSession(expected.hub, expected.token, expected.expiresAt, expected.deviceId, "other-account", "tester")))
+    }
     @Test fun ambiguousLinkResponseCanBeRetriedBySameAccountAfterRelogin() {
         val first = session(store.beginSignIn())
         store.savePendingLink("local-server", first, JSONObject().put("id", "server-one").put("server_secret", "test-only-secret"))

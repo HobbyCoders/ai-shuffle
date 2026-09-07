@@ -41,6 +41,8 @@ class ChatActivity : NativeScreen() {
     private lateinit var server: Server
     private lateinit var web: WebView
     private var sessionJob: Job? = null
+    private var sessionAttempt = 0
+    private var needsSession = true
     private lateinit var downloads: ChatDownloads
     private lateinit var nativeVoice: NativeVoiceBridge
     private var document = 0
@@ -78,9 +80,13 @@ class ChatActivity : NativeScreen() {
         chatLayout()
         downloads = ChatDownloads(this, web, server, ::authorized) { status.text = it }
         downloads.install()
-        nativeVoice = NativeVoiceBridge(this, web, server.baseUrl, ::authorized) { sessionId ->
+        nativeVoice = NativeVoiceBridge(this, web, server.baseUrl, ::authorized, refusal = { sessionId ->
+            val call = com.hobbycoders.aishuffle.voice.VoiceCallState.state.value
+            if (com.hobbycoders.aishuffle.voice.VoiceCallState.isActive && (call.serverId != server.id || call.sessionId != sessionId))
+                "End the current voice call before opening another chat." else null
+        }) { sessionId ->
             startActivity(Intent(this, VoiceCallActivity::class.java)
-                .putExtra(VoiceCallService.EXTRA_SERVER_ID, server.id).putExtra("session_id", sessionId))
+                .putExtra(VoiceCallService.EXTRA_SERVER_ID, server.id).putExtra(VoiceCallService.EXTRA_SESSION_ID, sessionId))
         }
         nativeVoice.install()
         with(web.settings) {
@@ -226,22 +232,38 @@ class ChatActivity : NativeScreen() {
         // the result, then recheck both the document generation and account.
         if (!microphoneDialogOpen) { microphone?.deny(); microphone = null; microphoneReady = false }
         if (::web.isInitialized) { DeviceToolsRuntime.detach(this); web.onPause() }
+        sessionAttempt++
         sessionJob?.cancel()
         super.onStop()
     }
-    override fun onResume() { super.onResume(); if (::web.isInitialized) { if (!authorized()) finish() else { web.onResume(); nativeVoice.resumed(); web.post { completeMicrophonePermission() }; DeviceToolsRuntime.attach(this, server) } } }
+    override fun onResume() {
+        super.onResume()
+        if (::web.isInitialized) {
+            if (!authorized()) finish()
+            else {
+                web.onResume(); nativeVoice.resumed(); web.post { completeMicrophonePermission() }
+                DeviceToolsRuntime.attach(this, server)
+                if (needsSession) startSession()
+            }
+        }
+    }
     override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (hasFocus && ::web.isInitialized) completeMicrophonePermission() }
     private fun startSession() {
         if (sessionJob?.isActive == true) return
+        needsSession = true
+        val attempt = ++sessionAttempt
         sessionJob = lifecycleScope.launch {
             status.text = "Opening a secure chat…"
             if (server.hasCfAccess) ApiClient.fetchCfAuthorizationCookie(server)?.let { CookieManager.getInstance().setCookie(server.baseUrl, "$it; Path=/; Secure; HttpOnly; SameSite=Strict") }
             when (val result = ApiClient.createWebSession(server)) {
                 is ApiResult.Success -> {
-                    if (!authorized()) return@launch
+                    if (!authorized() || attempt != sessionAttempt) return@launch
                     require(!result.data.contains(';') && !result.data.contains('\n') && !result.data.contains('\r'))
                     CookieManager.getInstance().setCookie(server.baseUrl, "session=${result.data}; Path=/; Secure; HttpOnly; SameSite=Strict") {
-                        if (!isFinishing && authorized()) { CookieManager.getInstance().flush(); web.loadUrl(server.baseUrl + "/") }
+                        if (!isFinishing && authorized() && attempt == sessionAttempt) {
+                            needsSession = false
+                            CookieManager.getInstance().flush(); web.loadUrl(server.baseUrl + "/")
+                        }
                     }
                 }
                 is ApiResult.Failure -> status.text = result.message

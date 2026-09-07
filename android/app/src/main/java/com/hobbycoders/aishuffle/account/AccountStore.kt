@@ -53,5 +53,6 @@ class AccountStore internal constructor(private val prefs: android.content.Share
         prefs.edit().putString("link:$serverId", JSONObject().put("hub", session.hub).put("account_id", session.accountId).put("registration", registration).toString()).commit()
     }
     fun clearPendingLink(serverId: String) { prefs.edit().remove("link:$serverId").commit() }
-    fun matches(session: AccountSession) = session()?.token == session.token
+    fun matches(session: AccountSession) = session()?.let { current -> current.token == session.token &&
+        current.hub == session.hub && current.accountId == session.accountId && current.deviceId == session.deviceId } == true
 }

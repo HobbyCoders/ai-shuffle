@@ -46,7 +46,12 @@ class ChatCapabilitiesSmokeTest {
         val shell = activity.findViewById<TextView>(R.id.screenStatus).parent as LinearLayout
         return shell.getChildAt(shell.childCount - 1) as WebView
     }
-    private fun fixture(picker: (Intent, Server) -> Instrumentation.ActivityResult?, block: (ActivityScenario<ChatActivity>, Server) -> Unit) {
+    private fun fixture(
+        picker: (Intent, Server) -> Instrumentation.ActivityResult?,
+        beforeSession: (Int) -> Unit = {},
+        beforeReady: (ActivityScenario<ChatActivity>) -> Unit = {},
+        block: (ActivityScenario<ChatActivity>, Server) -> Unit,
+    ) {
         val server = Server.create("Benign capability fixture", "https://chat-fixture.example", "fixture-key")
         instrumentation.runOnMainSync {
             DeviceToolsRuntime.stop(); ToolsPreferences(context).setEnabled(false); AccountStore(context).clear()
@@ -59,8 +64,10 @@ class ChatCapabilitiesSmokeTest {
         val oldDoc = docField.get(null)
         fun response(request: okhttp3.Request, text: String, mime: String) = Response.Builder().request(request)
             .protocol(Protocol.HTTP_1_1).code(200).message("Fixture").body(text.toResponseBody(mime.toMediaType())).build()
+        val sessions = java.util.concurrent.atomic.AtomicInteger()
         val api = OkHttpClient.Builder().addInterceptor { chain ->
             check(chain.request().url.encodedPath == "/api/v1/mobile/web-session")
+            beforeSession(sessions.incrementAndGet())
             response(chain.request(), "{\"session_token\":\"fixture-cookie\"}", "application/json")
         }.build()
         val doc = OkHttpClient.Builder().addInterceptor { chain ->
@@ -74,6 +81,7 @@ class ChatCapabilitiesSmokeTest {
         apiField.set(null, lazyOf(api)); docField.set(null, doc); instrumentation.addMonitor(monitor)
         try {
             ActivityScenario.launch<ChatActivity>(Intent(context, ChatActivity::class.java).putExtra(ChatActivity.EXTRA_SERVER_ID, server.id)).use { scenario ->
+                beforeReady(scenario)
                 waitFor("Fixture document never loaded") {
                     var ready = false
                     scenario.onActivity { ready = it.hasWindowFocus() && web(it).url == server.baseUrl + "/" && it.findViewById<TextView>(R.id.screenStatus).text.isEmpty() }
@@ -235,6 +243,91 @@ class ChatCapabilitiesSmokeTest {
                 }
                 assertEquals(1, launches.size)
             } finally { instrumentation.removeMonitor(monitor) }
+        }
+    }
+    @Test fun failedNativeVoiceLaunchHasOneFailureAndNeverAcknowledgesSuccess() {
+        fixture({ _, _ -> Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null) }) { scenario, server ->
+            var originalPage = 0
+            val pageField = ChatActivity::class.java.getDeclaredField("document").apply { isAccessible = true }
+            scenario.onActivity { activity ->
+                originalPage = pageField.getInt(activity)
+                val view = web(activity)
+                val bridgeField = ChatActivity::class.java.getDeclaredField("nativeVoice").apply { isAccessible = true }
+                (bridgeField.get(activity) as com.hobbycoders.aishuffle.ui.NativeVoiceBridge).close()
+                val fixtureBridge = com.hobbycoders.aishuffle.ui.NativeVoiceBridge(activity, view, server.baseUrl, { true }) {
+                    throw IllegalStateException("Fixture activity launch refused")
+                }
+                bridgeField.set(activity, fixtureBridge)
+                fixtureBridge.install()
+                view.reload()
+            }
+            waitFor("Replacement voice bridge document did not load") {
+                var ready = false
+                scenario.onActivity { ready = pageField.getInt(it) > originalPage && web(it).progress == 100 && it.hasWindowFocus() }
+                ready
+            }
+            val request = """{"type":"start","id":"4165b4fc-c414-4e76-a39a-e173904831ca","sessionId":"chosen_chat-123"}"""
+            scenario.onActivity { web(it).evaluateJavascript("window.voiceReplies=[]; shuffleNativeVoice.addEventListener('message',e=>voiceReplies.push(JSON.parse(e.data))); shuffleNativeVoice.postMessage(${org.json.JSONObject.quote(request)});", null) }
+            var replies = ""
+            waitFor("Failed voice launch never replied") {
+                scenario.onActivity { web(it).evaluateJavascript("JSON.stringify(voiceReplies)") { raw -> replies = raw } }
+                replies.contains("false")
+            }
+            assertFalse(replies.contains("true"))
+            val decoded = org.json.JSONArray(org.json.JSONTokener(replies).nextValue() as String)
+            assertEquals(1, decoded.length())
+            assertEquals("Voice could not open. Try again.", decoded.getJSONObject(0).getString("error"))
+        }
+    }
+    @Test fun interruptedInitialSessionLoadsAfterResumeWithoutRotatingReadyChat() {
+        val firstStarted = java.util.concurrent.CountDownLatch(1)
+        val releaseFirst = java.util.concurrent.CountDownLatch(1)
+        val requests = java.util.concurrent.atomic.AtomicInteger()
+        fixture(
+            picker = { _, _ -> Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null) },
+            beforeSession = { number ->
+                requests.incrementAndGet()
+                if (number == 1) { firstStarted.countDown(); check(releaseFirst.await(10, java.util.concurrent.TimeUnit.SECONDS)) }
+            },
+            beforeReady = { scenario ->
+                assertTrue(firstStarted.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+                releaseFirst.countDown()
+                scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            },
+        ) { scenario, _ ->
+            assertEquals(2, requests.get())
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            instrumentation.waitForIdleSync()
+            assertEquals("Ready chat must keep its existing cookie on ordinary resume", 2, requests.get())
+        }
+    }
+    @Test fun nativeVoiceHandoffCannotReplaceAnActiveCallForAnotherChat() {
+        fixture({ _, _ -> Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null) }) { scenario, server ->
+            val launches = CopyOnWriteArrayList<Intent>()
+            val monitor = object : Instrumentation.ActivityMonitor() {
+                override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
+                    if (intent.component?.className != "com.hobbycoders.aishuffle.voice.VoiceCallActivity") return null
+                    launches.add(intent); return Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null)
+                }
+            }
+            instrumentation.addMonitor(monitor)
+            try {
+                scenario.onActivity {
+                    com.hobbycoders.aishuffle.voice.VoiceCallState.update { state -> state.copy(status = com.hobbycoders.aishuffle.voice.CallStatus.LIVE, serverId = server.id, sessionId = "another-chat") }
+                    web(it).evaluateJavascript("window.voiceReplies=[]; shuffleNativeVoice.addEventListener('message',e=>voiceReplies.push(JSON.parse(e.data))); shuffleNativeVoice.postMessage('{\"type\":\"start\",\"id\":\"4165b4fc-c414-4e76-a39a-e173904831ca\",\"sessionId\":\"chosen-chat\"}');", null)
+                }
+                var replies = ""
+                waitFor("Active-call handoff was not refused") {
+                    scenario.onActivity { web(it).evaluateJavascript("JSON.stringify(voiceReplies)") { raw -> replies = raw } }
+                    replies.contains("false")
+                }
+                assertTrue(replies.contains("End the current voice call")); assertTrue(launches.isEmpty())
+            } finally {
+                instrumentation.removeMonitor(monitor)
+                scenario.onActivity { com.hobbycoders.aishuffle.voice.VoiceCallState.reset() }
+            }
         }
     }
 }
