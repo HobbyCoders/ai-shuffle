@@ -12,6 +12,8 @@
 	 * is responsible for persistence.
 	 */
 	import { api } from '$lib/api/client';
+	import { onDestroy } from 'svelte';
+	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { modelSchemaStore, type ModelSchema, type ParamField } from '$lib/stores/modelSchema';
 
 	interface Props {
@@ -22,6 +24,15 @@
 	}
 
 	let { endpointId, persistKey }: Props = $props();
+	const owner = sessionOwnerEpoch();
+	let destroyed = false;
+	let loadGeneration = 0;
+	const isCurrent = () => !destroyed && owner === sessionOwnerEpoch();
+	onDestroy(() => {
+		destroyed = true;
+		loadGeneration++;
+		if (saveTimer) clearTimeout(saveTimer);
+	});
 
 	let schema = $state<ModelSchema | null>(null);
 	let loading = $state(false);
@@ -31,23 +42,27 @@
 	// Fetch the schema + stored params whenever the selected model changes.
 	$effect(() => {
 		const id = endpointId;
-		if (!id || id === loadedFor) return;
+		const key = persistKey;
+		const context = JSON.stringify([id, key]);
+		if (!id || context === loadedFor || !isCurrent()) return;
+		const generation = ++loadGeneration;
+		if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
 		loading = true;
 		Promise.all([
 			modelSchemaStore.fetch(id),
 			api
 				.get<{ params: Record<string, unknown> }>(
-					`/settings/integrations/model-params?key=${encodeURIComponent(persistKey)}`
+					`/settings/integrations/model-params?key=${encodeURIComponent(key)}`
 				)
 				.then((r) => r.params ?? {})
 				.catch(() => ({}) as Record<string, unknown>),
 		]).then(([s, stored]) => {
 			// Guard against races: only apply if the model hasn't changed again.
-			if (endpointId === id) {
+			if (isCurrent() && generation === loadGeneration && endpointId === id && persistKey === key) {
 				schema = s;
 				values = stored;
 				savedSnapshot = JSON.stringify(stored);
-				loadedFor = id;
+				loadedFor = context;
 				loading = false;
 			}
 		});
@@ -62,16 +77,24 @@
 	let remoteChange = $state('');
 
 	function onchange(name: string, value: unknown) {
+		if (!isCurrent()) return;
 		revision++;
 		values = { ...values, [name]: value };
 		if (saveTimer) clearTimeout(saveTimer);
+		const id = endpointId;
+		const key = persistKey;
+		const params = { ...values };
 		saveTimer = setTimeout(() => {
 			saveTimer = null;
-			const snapshot = JSON.stringify(values);
+			if (!isCurrent() || endpointId !== id || persistKey !== key) return;
+			const snapshot = JSON.stringify(params);
 			saving++;
 			api
-				.patch('/settings/integrations/model-params', { key: persistKey, params: values })
-				.then(() => { if (JSON.stringify(values) === snapshot) savedSnapshot = snapshot; })
+				.patch('/settings/integrations/model-params', { key, params })
+				.then(() => {
+					if (isCurrent() && endpointId === id && persistKey === key && JSON.stringify(values) === snapshot)
+						savedSnapshot = snapshot;
+				})
 				.catch(() => { /* Leave the changed buffer intact for the next edit. */ })
 				.finally(() => { saving--; });
 		}, 350);
@@ -91,13 +114,14 @@
 		return field.minimum !== null && field.maximum !== null;
 	}
 	watchResources(['settings'], async () => {
+		if (!isCurrent()) return;
 		const id = endpointId;
 		const key = persistKey;
 		const before = revision;
 		const { params = {} } = await api.get<{ params: Record<string, unknown> }>(
 			`/settings/integrations/model-params?key=${encodeURIComponent(key)}`
 		);
-		if (id !== endpointId || key !== persistKey) return;
+		if (!isCurrent() || id !== endpointId || key !== persistKey) return;
 		if (saving || saveTimer || before !== revision || JSON.stringify(values) !== savedSnapshot) {
 			if (JSON.stringify(params) !== savedSnapshot) remoteChange = 'Model options changed elsewhere. Your unsaved options are kept here.';
 			return;
