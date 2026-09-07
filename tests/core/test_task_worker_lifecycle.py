@@ -714,7 +714,8 @@ class TestProviderOrgAdmission:
         ))
 
         assert refusal is not None
-        assert "token-per-minute budget is shared" in refusal
+        assert "Shuffle's configured TASK_WORKER_MAX_PER_PROVIDER limit 1" in refusal
+        assert "token-per-minute" not in refusal
 
     def test_the_delegated_claude_leg_is_exempt(self, monkeypatch):
         from app.core import config as cfg

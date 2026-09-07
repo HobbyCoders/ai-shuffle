@@ -631,7 +631,7 @@ class Settings(BaseSettings):
     # agent-invokes-agent chains and the live-worker budget per root session
     # tree. Set via TASK_TOOL_MAX_DEPTH / TASK_TOOL_MAX_WORKERS.
     task_tool_max_depth: int = 5
-    task_tool_max_workers: int = 8
+    task_tool_max_workers: int = 64
 
     # Per-parent concurrent subagent workers, enforced in the dispatch admission
     # gate (app/core/task_dispatch.py). This is the NATIVE lane's backpressure:
@@ -642,7 +642,7 @@ class Settings(BaseSettings):
     # a simultaneous fan-out actually loses, and it waits briefly for a worker
     # to finish before refusing with a retryable capacity error. 0 disables it.
     # Override via SUBAGENT_MAX_CONCURRENT_PER_SESSION.
-    subagent_max_concurrent_per_session: int = 8
+    subagent_max_concurrent_per_session: int = 64
 
     # ── Task worker lifecycle (2026-09-05 audit, round 7) ────────────────
     # A worker has no wall-clock ceiling by design — a subagent may legitimately
@@ -686,21 +686,19 @@ class Settings(BaseSettings):
     # retry-after is the floor; it is doubled per attempt and clamped here.
     # Override via TASK_WORKER_RATE_LIMIT_BACKOFF_CAP_SECONDS.
     task_worker_rate_limit_backoff_cap_seconds: float = 60.0
-    # Concurrent workers admitted per PROVIDER ORG — one ``model_providers``
-    # row is one credential is one org quota. Worker admission gated only on
-    # worker COUNT (8) and pool lane, never on provider throughput, so five
-    # large-context workers on one key were admitted and then died on the org's
-    # tokens-per-minute limit. This is the cheap interim for real token
-    # accounting: a dispatch over the cap QUEUES (it is not refused) until a
-    # sibling on that provider settles. 0 disables. Never applies to the
-    # provider-less delegated Claude leg, whose quota is per-subscription and
-    # handled by the CLI's own backoff.
+    # Optional administrator limit on concurrent workers per provider row.
+    # Worker count is not a provider token quota: ten small requests can fit
+    # where one large request does not. Default to the native/session resource
+    # guards and actual provider rate-limit feedback instead of an artificial
+    # three-worker ceiling. An explicit positive limit still queues dispatches
+    # until a sibling settles. 0 disables this limit. The provider-less
+    # delegated Claude leg remains governed by its process/resource guards.
     # Override via TASK_WORKER_MAX_PER_PROVIDER.
-    task_worker_max_per_provider: int = 3
-    # How long a dispatch queues on that provider-org ceiling before giving up
-    # with a retryable capacity error. Longer than the pool admission wait (a
-    # TPM window is 60s, so waiting out one or two is usually right), but NOT
-    # unbounded: the queue happens inside the model's Task tool call, so this
+    task_worker_max_per_provider: int = 0
+    # How long a dispatch queues on an explicitly configured provider-row
+    # limit before giving up with a retryable capacity error. Longer than the
+    # pool admission wait, but bounded: the queue happens inside the model's
+    # Task tool call, so this
     # is also the worst case for how long that call can take to hand back a
     # receipt. Raising it trades a slower tool call for fewer refusals.
     # Override via TASK_WORKER_PROVIDER_QUEUE_SECONDS.
