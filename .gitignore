@@ -123,3 +123,4 @@ scripts/unraid-lab/lab_manifest.jsonl
 stub-requests.jsonl
 /.fluid
 /.live-monitor
+/.codex
