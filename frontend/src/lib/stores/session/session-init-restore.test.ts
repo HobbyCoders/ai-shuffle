@@ -63,6 +63,7 @@ function makeInit(
 		setState: (s: ActiveSessionState) => { state = s; },
 		internal,
 		wsConn: {
+			activate: vi.fn(),
 			connect: vi.fn(),
 			disconnect: vi.fn(),
 			destroy: vi.fn(),
@@ -80,12 +81,50 @@ function makeInit(
 		persistTimer: { get: () => null, clear: vi.fn() },
 	};
 
-	return { init: createSessionInit(deps).init, getState, deps };
+	return { ...createSessionInit(deps), getState, deps };
 }
 
 describe('session-init · isRestoringSession on persisted restore', () => {
 	beforeEach(() => {
 		sessionStorage.clear();
+	});
+
+	it('explicitly reactivates transport after each owner remount', async () => {
+		const { init, destroy, deps } = makeInit(null);
+		await init();
+		destroy();
+		await init();
+		expect(deps.wsConn.activate).toHaveBeenCalledTimes(2);
+		expect(deps.wsConn.connect).toHaveBeenCalledTimes(2);
+		expect(deps.wsConn.activate).toHaveBeenCalledBefore(deps.wsConn.connect);
+	});
+
+	it('does not reactivate or restore state when an initialization finishes after destruction', async () => {
+		let resolve!: (value: PersistedSession | null) => void;
+		const load = vi.fn(() => new Promise<PersistedSession | null>(done => { resolve = done; }));
+		const { init, destroy, deps, getState } = makeInit(null, load);
+		const initializing = init();
+		destroy();
+		resolve({ sessionId: 'stale-session' } as PersistedSession);
+		await initializing;
+		expect(deps.wsConn.activate).not.toHaveBeenCalled();
+		expect(deps.wsConn.connect).not.toHaveBeenCalled();
+		expect(getState().sessionId).toBeNull();
+	});
+
+	it('ignores a stale failed initialization after a later remount has succeeded', async () => {
+		let reject!: (error: Error) => void;
+		const load = vi.fn<() => Promise<PersistedSession | null>>()
+			.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }))
+			.mockResolvedValue(null);
+		const { init, destroy, deps } = makeInit(null, load);
+		const first = init();
+		destroy();
+		await init();
+		reject(new Error('Old request failed'));
+		await first;
+		expect(deps.wsConn.activate).toHaveBeenCalledTimes(1);
+		expect(deps.wsConn.connect).toHaveBeenCalledTimes(1);
 	});
 
 	it('marks the restore window when a persisted sessionId is adopted', async () => {

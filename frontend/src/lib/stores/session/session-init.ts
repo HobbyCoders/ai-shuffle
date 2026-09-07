@@ -28,6 +28,7 @@ export interface SessionInitDeps {
 
 	// External modules
 	wsConn: {
+		activate: () => void;
 		connect: () => void;
 		disconnect: () => void;
 		destroy: () => void;
@@ -212,9 +213,12 @@ export function createSessionInit(deps: SessionInitDeps) {
 				}
 			}
 
+			wsConn.activate();
 			wsConn.connect();
 		} catch (error) {
+			if (initGen !== getInitGeneration()) return;
 			console.error('[ActiveSession] Failed to initialize:', error);
+			wsConn.activate();
 			wsConn.connect();
 		}
 	}
@@ -222,6 +226,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 	// ─── destroy ─────────────────────────────────────────────────────
 
 	function destroy() {
+		bumpInitGeneration();
 		disconnectFn();
 		feedController.stop();
 		wsConn.destroy();

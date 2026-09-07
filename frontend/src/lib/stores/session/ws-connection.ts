@@ -49,6 +49,8 @@ export interface WsConnectionConfig {
 }
 
 export interface WsConnection {
+	/** Re-arm a destroyed connection for an explicit owner lifecycle remount. */
+	activate: () => void;
 	/** Establish the WebSocket connection. No-op if already connected or connecting. */
 	connect: () => void;
 	/** Intentionally disconnect (no auto-reconnect). Clears all timers. */
@@ -163,6 +165,7 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		ws = socket;
 
 		ws.onopen = () => {
+			if (destroyed || socket !== ws) return;
 			reconnectAttempts = 0;
 			lastSeq = 0; // Reset sequence tracking for new connection
 			config.onConnected();
@@ -170,6 +173,7 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		};
 
 		ws.onclose = (event) => {
+			if (destroyed) return;
 			// Guard: ignore stale close events from a previous WebSocket instance.
 			// Without this, an old WS's onclose can call stopPing() and kill the
 			// health-check timer that belongs to the new, active connection.
@@ -362,6 +366,14 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 	// ── Public API ───────────────────────────────────────────────────────
 
 	return {
+		activate() {
+			if (!destroyed) return;
+			destroyed = false;
+			intentionalDisconnect = false;
+			reconnectAttempts = 0;
+			setupVisibilityHandler();
+			setupNetworkHandlers();
+		},
 		connect,
 		disconnect,
 		send,
