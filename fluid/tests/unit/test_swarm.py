@@ -194,6 +194,120 @@ async def test_snapshot_publications_cannot_overtake_each_other():
     assert published[0]["updated_at"] <= published[1]["updated_at"]
 
 
+@pytest.mark.parametrize("worker_count", [1, 10])
+async def test_publication_failure_drains_inflight_spawn_receipts(worker_count):
+    created, failing, acknowledge = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    workers, stops, abandoned, acknowledged = {}, {}, [], []
+    failed = False
+
+    async def dispatch(data, ctx):
+        key = data["label"]
+        stops[key] = asyncio.Event()
+        workers[key] = asyncio.create_task(stops[key].wait())
+        if len(workers) == worker_count:
+            created.set()
+        try:
+            await acknowledge.wait()
+        except asyncio.CancelledError:
+            abandoned.append(key)
+            raise
+        acknowledged.append(key)
+        return BackgroundTaskReceipt(task_id=key, worker_session_id="session-" + key)
+
+    async def publish(snapshot):
+        nonlocal failed
+        if not failed and snapshot["tasks"][-1]["status"] == "running":
+            await created.wait()
+            failed = True
+            failing.set()
+            raise OSError("snapshot write failed")
+
+    async def stop(key):
+        stops[key].set()
+        await workers[key]
+        # No completion callback: exception cleanup must not await its future.
+
+    finished, cancel = AsyncMock(), AsyncMock(side_effect=stop)
+    c = SwarmCoordinator("main", dispatch, cancel, publish, finished)
+    _, receipt = await c.start({"tasks": [spec(str(i)) for i in range(worker_count + 1)]}, ToolCtx())
+    try:
+        await asyncio.wait_for(failing.wait(), 5)
+        acknowledge.set()
+        await asyncio.wait_for(c.jobs[receipt.task_id], 5)
+        assert not abandoned
+        assert len(acknowledged) == worker_count
+        assert {call.args[0] for call in cancel.await_args_list} == set(workers)
+        assert all(worker.done() for worker in workers.values())
+        snapshot = c.snapshot(receipt.task_id)
+        assert snapshot["status"] == "failed"
+        assert "snapshot write failed" in finished.await_args.args[2]
+        assert {row["task_id"] for row in snapshot["tasks"] if row["task_id"]} == set(workers)
+        finished.assert_awaited_once()
+    finally:
+        acknowledge.set()
+        for gate in stops.values():
+            gate.set()
+        await asyncio.gather(*workers.values(), return_exceptions=True)
+
+
+@pytest.mark.parametrize("receipt_returned", [False, True])
+async def test_repeated_coordinator_interrupt_stops_ten_workers(receipt_returned):
+    created, acknowledge, recorded = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    workers, stops, abandoned = {}, {}, []
+    if receipt_returned:
+        acknowledge.set()
+
+    async def dispatch(data, ctx):
+        key = data["label"]
+        stops[key] = asyncio.Event()
+        workers[key] = asyncio.create_task(stops[key].wait())
+        if len(workers) == 10:
+            created.set()
+        try:
+            await acknowledge.wait()
+        except asyncio.CancelledError:
+            abandoned.append(key)
+            raise
+        return BackgroundTaskReceipt(task_id=key)
+
+    async def publish(snapshot):
+        if all(row["task_id"] for row in snapshot["tasks"]):
+            recorded.set()
+
+    async def stop(key):
+        stops[key].set()
+        await workers[key]
+        # The stopped worker never emits a completion callback.
+
+    finished, cancel = AsyncMock(), AsyncMock(side_effect=stop)
+    c = SwarmCoordinator("main", dispatch, cancel, publish, finished)
+    _, receipt = await c.start({"tasks": [spec(str(i)) for i in range(10)]}, ToolCtx())
+    job = c.jobs[receipt.task_id]
+    try:
+        await asyncio.wait_for(recorded.wait() if receipt_returned else created.wait(), 5)
+        job.cancel()
+
+        async def cancellation_latched():
+            while receipt.task_id not in c.cancelled:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(cancellation_latched(), 5)
+        job.cancel()  # Shutdown/Stop can race the first interrupt's cleanup.
+        acknowledge.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(job, 5)
+        assert not abandoned
+        assert cancel.await_count == 10
+        assert all(worker.done() for worker in workers.values())
+        assert c.snapshot(receipt.task_id)["status"] == "interrupted"
+        finished.assert_awaited_once()
+    finally:
+        acknowledge.set()
+        for gate in stops.values():
+            gate.set()
+        await asyncio.gather(*workers.values(), return_exceptions=True)
+
+
 async def test_close_drains_workers_and_completion():
     launched = asyncio.Event()
     refs = {}

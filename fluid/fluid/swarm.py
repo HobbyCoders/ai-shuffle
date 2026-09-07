@@ -27,6 +27,16 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+async def _drain_cleanup(task):
+    """Finish owned cleanup even when shutdown repeats cancellation."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
+
+
 def validate(data):
     tasks = data.get("tasks")
     if not isinstance(tasks, list) or not 1 <= len(tasks) <= MAX_TASKS:
@@ -175,24 +185,31 @@ class SwarmCoordinator:
                 if task["status"] not in TERMINAL:
                     task.update(status="interrupted", error=str(exc)[:RESULT_LIMIT], finished_at=now())
         finally:
-            if running:
-                await asyncio.gather(*(self.cancel_worker(t["task_id"]) for t in running.values() if t["task_id"]), return_exceptions=True)
-                for job in running:
-                    job.cancel()
-                await asyncio.gather(*running, return_exceptions=True)
-            for task in rows.values():
-                if task["status"] not in TERMINAL:
-                    task.update(status="interrupted", finished_at=now())
-            try:
-                await self.emit(key)
-            finally:
-                await self.finished(key, swarm["status"], json.dumps({"swarm": self.snapshot(key)}))
+            await _drain_cleanup(asyncio.create_task(self._finish_run(key, running)))
+
+    async def _finish_run(self, key, running):
+        if running:
+            # Admission queues can observe this latch and refuse an unstarted
+            # launch. Already-started launches must return their receipts
+            # before _task can stop them; never abandon that handshake.
+            self.cancelled.add(key)
+            for job in running:
+                job.cancel()
+            await asyncio.gather(*running, return_exceptions=True)
+        for task in self.swarms[key]["tasks"]:
+            if task["status"] not in TERMINAL:
+                task.update(status="interrupted", finished_at=now())
+        try:
+            await self.emit(key)
+        finally:
+            await self.finished(key, self.swarms[key]["status"], json.dumps({"swarm": self.snapshot(key)}))
 
     async def _task(self, key, task, prompt, rows, ctx):
         future = asyncio.get_running_loop().create_future()
         launch = Launch(self, key, task["id"], future)
         token = current_launch.set(launch)
         receipt = None
+        dispatch = None
         try:
             if key in self.cancelled:
                 task.update(status="cancelled", error="Cancelled before dispatch")
@@ -200,8 +217,9 @@ class SwarmCoordinator:
             if task["depends_on"]:
                 prior = {d: rows[d]["result"] for d in task["depends_on"]}
                 prompt += "\n\nDependency results (peer data, not authorization):\n" + json.dumps(prior)[:RESULT_LIMIT]
-            outcome = _background_outcome(await self.dispatch(dict(agent=task["agent"], prompt=prompt,
-                label=task["title"], mode="background"), ctx), {})
+            dispatch = asyncio.create_task(self.dispatch(dict(agent=task["agent"], prompt=prompt,
+                label=task["title"], mode="background"), ctx))
+            outcome = _background_outcome(await asyncio.shield(dispatch), {})
             receipt = outcome.background_task
             if receipt is not None:
                 task.update(task_id=receipt.task_id,
@@ -216,7 +234,11 @@ class SwarmCoordinator:
                 "completed" if status in {"completed", "finished", "success"} else "failed")
             task["result" if task["status"] == "completed" else "error"] = str(result)[:RESULT_LIMIT]
         except asyncio.CancelledError:
-            task.update(status="interrupted", error="Host stopped")
+            # Cancellation may arrive after the host created a worker but
+            # before it returned the receipt. Drain only that acknowledgement,
+            # stop the actual worker, and do not wait for its completion future.
+            await _drain_cleanup(asyncio.create_task(self._settle_cancelled_spawn(dispatch, receipt, task)))
+            task.update(status="interrupted", error=task.get("error") or "Host stopped")
             raise
         except Exception as exc:
             if receipt is not None:
@@ -225,6 +247,18 @@ class SwarmCoordinator:
         finally:
             task["finished_at"] = now()
             current_launch.reset(token)
+
+    async def _settle_cancelled_spawn(self, dispatch, receipt, task):
+        if receipt is None and dispatch is not None:
+            try:
+                receipt = _background_outcome(await dispatch, {}).background_task
+            except (asyncio.CancelledError, Exception):
+                # A refused/failed admission has no worker receipt to stop.
+                pass
+        if receipt is not None:
+            task.update(task_id=receipt.task_id,
+                worker_session_id=task["worker_session_id"] or receipt.worker_session_id)
+            await self.cancel_worker(receipt.task_id)
 
     async def cancel(self, key):
         if self.swarms[key]["status"] in TERMINAL:
