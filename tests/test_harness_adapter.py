@@ -4073,6 +4073,7 @@ async def test_task_dispatch_uses_the_stamped_app_session_id(monkeypatch, tmp_pa
         caller_session_id,
         caller_profile_id=None,
         caller_provider_id=None,
+        caller_effort=None,
         launch_tool_use_id=None,
         agent_registry=None,
     ):
@@ -4103,6 +4104,7 @@ async def test_task_dispatch_falls_back_to_the_sdk_id_lookup(monkeypatch, tmp_pa
         caller_session_id,
         caller_profile_id=None,
         caller_provider_id=None,
+        caller_effort=None,
         launch_tool_use_id=None,
         agent_registry=None,
     ):
@@ -4166,6 +4168,7 @@ async def test_pooled_engine_dispatcher_picks_up_a_late_session_id(
         caller_session_id,
         caller_profile_id=None,
         caller_provider_id=None,
+        caller_effort=None,
         launch_tool_use_id=None,
         agent_registry=None,
     ):

@@ -553,6 +553,7 @@ def _build_thinking_config(
     model: Optional[str],
     overrides: Optional[Dict[str, Any]] = None,
     session_effort: Optional[str] = None,
+    allow_profile_effort: bool = True,
 ) -> Dict[str, Any]:
     """
     Build thinking/effort configuration for ClaudeAgentOptions.
@@ -574,6 +575,8 @@ def _build_thinking_config(
         session_effort: The effort the session itself is bound to (v79 —
             picked at session creation, not pinned by the agent). Beaten by a
             query-level override, beats the agent's legacy config.effort.
+        allow_profile_effort: False for worker sessions, which use the model
+            default when neither spawn nor caller selected an effort.
 
     Returns:
         Dict with thinking/effort configuration to spread into ClaudeAgentOptions
@@ -598,7 +601,9 @@ def _build_thinking_config(
 
     # Resolve effort: override takes priority over profile config (independent of thinking)
     # Preserve recognized values here; the adapter validates the selected route and model.
-    effort = overrides.get('effort') or session_effort or config.get('effort')
+    effort = overrides.get('effort') or session_effort
+    if not effort and allow_profile_effort:
+        effort = config.get('effort')
     if effort and effort in ('none', 'minimal', 'low', 'medium', 'high', 'max', 'xhigh', 'ultra'):
         result['effort'] = effort
         logger.debug(f"Using effort={effort}")
@@ -1610,7 +1615,10 @@ def build_options_from_profile(
         # For Opus 4.6+: use effort-based adaptive thinking
         # For Sonnet/Haiku: use token budget-based thinking
         **_build_thinking_config(
-            config, model_to_use, overrides, session_effort=_session_effort
+            config, model_to_use, overrides, session_effort=_session_effort,
+            # Workers carry an explicit spawn or inherited caller binding.
+            # With neither, use the model default, not a saved role default.
+            allow_profile_effort=not bool((_binding_row or {}).get("is_worker")),
         ),
     )
 

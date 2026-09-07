@@ -304,3 +304,41 @@ async def test_stopped_nested_swarm_cannot_reenter_admission_for_retry(harness, 
     assert len(calls) == 1
     assert coordinator.snapshot(key)["status"] == "cancelled"
     assert task_dispatch._pending_admission_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_dependent_swarm_workers_keep_the_originating_effort(harness, monkeypatch):
+    from app.db import turns
+
+    barrier, _ = harness
+    latest = {"overrides": {"effort": "xhigh"}}
+    monkeypatch.setattr(turns, "get_latest_turn", lambda _: latest)
+    captured = []
+
+    async def worker(**kwargs):
+        captured.append(kwargs["inherited_effort"])
+        return await barrier.worker(**kwargs)
+
+    monkeypatch.setattr(provider_agent, "dispatch_worker", worker)
+    ctx = ToolCtx(extra={
+        "app_caller_effort": "xhigh",
+        "task_dispatch": task_dispatch.make_fluid_dispatcher("swarm-parent", provider_id="test-provider"),
+        "background_task_started": AsyncMock(),
+    })
+    result = await swarm.make_handler(lambda: "swarm-parent")({
+        "action": "start", "tasks": [
+            {"id": "first", "agent": "swarm-helper", "prompt": "first"},
+            {"id": "dependent", "agent": "swarm-helper", "prompt": "second", "depends_on": ["first"]},
+        ],
+    }, ctx)
+    assert not result.is_error
+    await barrier.wait_for_starts(1)
+    latest["overrides"]["effort"] = "low"
+    barrier.release()
+    await barrier.wait_for_starts(2)
+    assert captured == ["xhigh", "xhigh"]
+    barrier.release()
+    coordinator = swarm.coordinators["swarm-parent"]
+    key = result.background_task.task_id
+    await asyncio.wait_for(coordinator.jobs[key], 5)
+    assert coordinator.snapshot(key)["status"] == "completed"

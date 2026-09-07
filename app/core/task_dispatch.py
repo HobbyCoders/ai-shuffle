@@ -157,6 +157,7 @@ _REPORT_DIR_PARTS = (".fluid", "task-reports")
 # effective turn provider must be able to pass it distinctly from callers that
 # omitted provider context and need the session-row compatibility fallback.
 _PROVIDER_UNSET = object()
+_EFFORT_UNSET = object()
 
 # ── session-pool admission, checked BEFORE any receipt is returned ───────────
 # A worker is a new pooled session, so it is subject to
@@ -1375,6 +1376,7 @@ async def dispatch_task_tool(
     caller_session_id: str,
     caller_profile_id: Optional[str] = None,
     caller_provider_id: Any = _PROVIDER_UNSET,
+    caller_effort: Any = _EFFORT_UNSET,
     launch_tool_use_id: Optional[str] = None,
     agent_registry: Optional[Dict[str, Any]] = None,
     roster: Optional[Sequence[Any]] = None,
@@ -1422,6 +1424,12 @@ async def dispatch_task_tool(
         }
 
     caller_row = _session_row(caller_session_id) or {}
+    # Resolve before the first admission await. Queuing/retries must not inherit
+    # a later parent turn's settings. Native callers supply their engine binding.
+    selected_effort = (
+        provider_agent._caller_effort(caller_row)
+        if caller_effort is _EFFORT_UNSET else caller_effort
+    )
     caller_pid = caller_profile_id or caller_row.get("profile_id")
     if not caller_pid:
         return {
@@ -1519,6 +1527,7 @@ async def dispatch_task_tool(
         profile_id=profile_id,
         provider_id=effective_provider_id,
         model_id=model_id,
+        inherited_effort=selected_effort,
         prompt=prompt,
         label=label,
         agent_name=target_name,
@@ -1865,8 +1874,10 @@ def make_fluid_dispatcher(
         # sequential). Absent on the delegated leg's bridged mcp tool.
         launch_tool_use_id = None
         agent_registry = None
+        caller_effort = _EFFORT_UNSET
         try:
             extra = getattr(ctx, "extra", None) or {}
+            caller_effort = extra.get("app_caller_effort", _EFFORT_UNSET)
             candidate = extra.get("tool_use_id")
             if isinstance(candidate, str) and candidate:
                 launch_tool_use_id = candidate
@@ -1884,6 +1895,7 @@ def make_fluid_dispatcher(
             caller_session_id=str(caller_session_id),
             caller_profile_id=profile_id,
             caller_provider_id=provider_id,
+            caller_effort=caller_effort,
             launch_tool_use_id=launch_tool_use_id,
             agent_registry=agent_registry,
         )

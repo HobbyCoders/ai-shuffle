@@ -67,8 +67,8 @@ HONORED:
 
   * ``effort``               → delegated: CLI ``--effort``; native: fluid
     serializers map it per provider (Anthropic ``output_config.effort``
-    verbatim, OpenAI-shaped ``reasoning.effort`` with xhigh/max clamped to
-    high). Validated app-side (``_valid_effort``); changes force reconnect.
+    verbatim, OpenAI-shaped ``reasoning.effort`` verbatim). Model/route
+    capabilities are validated app-side; changes force reconnect.
 
   * ``disallowed_tools``     → native ``NativeLoop(disallowed_tools=...)``, which
     filters the tool at the provider schema, the deferred/ToolSearch catalog and
@@ -527,6 +527,9 @@ class HarnessAdapter(ProviderAdapter):
             # for every fresh native session. The supplier resolves the id at
             # dispatch time instead — see _resolve_app_session_id.
             native_ctx = ToolCtx(cwd=options.cwd or ".", session_id=fluid_session_id)
+            # This ctx also accompanies delayed Swarm dependency launches. Keep
+            # their originating engine effort, even after a later parent turn.
+            native_ctx.extra["app_caller_effort"] = options.effort
             try:
                 from app.core.task_dispatch import make_fluid_dispatcher
 
