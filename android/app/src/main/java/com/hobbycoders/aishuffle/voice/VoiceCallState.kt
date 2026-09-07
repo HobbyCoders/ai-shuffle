@@ -4,13 +4,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /** Where the call is in its lifecycle. */
-enum class CallStatus { IDLE, CONNECTING, LIVE, ENDED, ERROR }
+enum class CallStatus { IDLE, CONNECTING, RECONNECTING, LIVE, ENDED, ERROR }
 
 /** Snapshot of the live call for the UI. */
 data class CallUiState(
     val status: CallStatus = CallStatus.IDLE,
     val serverName: String? = null,
     val serverId: String? = null,
+    val sessionId: String? = null,
     val userCaption: String = "",
     val assistantCaption: String = "",
     val muted: Boolean = false,
@@ -27,7 +28,7 @@ object VoiceCallState {
     val state: StateFlow<CallUiState> = _state
 
     val isActive: Boolean
-        get() = _state.value.status == CallStatus.CONNECTING || _state.value.status == CallStatus.LIVE
+        get() = _state.value.status in setOf(CallStatus.CONNECTING, CallStatus.RECONNECTING, CallStatus.LIVE)
 
     internal fun update(transform: (CallUiState) -> CallUiState) {
         _state.value = transform(_state.value)

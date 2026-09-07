@@ -27,6 +27,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.TimeoutCancellationException
 import org.json.JSONObject
 import java.util.Collections
 
@@ -35,7 +37,7 @@ import java.util.Collections
  * session on the server, runs the WebRTC leg against OpenAI Realtime, attaches
  * the server's sideband (declaring the phone tools), and services those phone
  * tool calls locally. The UI ([VoiceCallActivity]) is just a viewer over
- * [VoiceCallState]; leaving the activity ends the call and releases audio.
+ * [VoiceCallState]; the foreground microphone notification remains across app switching.
  */
 class VoiceCallService : Service() {
 
@@ -44,7 +46,7 @@ class VoiceCallService : Service() {
     private var server: Server? = null
     private var sessionCookie: String? = null
     private var voiceSessionId: String? = null
-    private var realtime: RealtimeClient? = null
+    private var realtime: VoicePeer? = null
     private lateinit var tools: PhoneTools
 
     /** How this session was started; COMMAND sessions end themselves. */
@@ -111,11 +113,13 @@ class VoiceCallService : Service() {
         // Claim synchronously so repeated taps cannot create duplicate calls.
         VoiceCallState.reset()
         val serverId = intent?.getStringExtra(EXTRA_SERVER_ID)
-        VoiceCallState.update { it.copy(status = CallStatus.CONNECTING, serverId = serverId) }
+        val selectedSession = intent?.getStringExtra(EXTRA_SESSION_ID)
+        VoiceCallState.update { it.copy(status = CallStatus.CONNECTING, serverId = serverId, sessionId = selectedSession) }
         connectionJob = scope.launch {
-            try { connect(serverId) }
+            try { connect(serverId, selectedSession) }
+            catch (_: TimeoutCancellationException) { failCall("Voice setup timed out. Check your connection and retry.") }
             catch (e: kotlinx.coroutines.CancellationException) { throw e }
-            catch (_: Exception) { failCall("Cannot access the selected server or Android audio services. Reopen voice and retry.") }
+            catch (e: Exception) { failCall(e.message ?: "Cannot access the selected worker or Android audio services. Reopen voice and retry.") }
         }
         return START_NOT_STICKY
     }
@@ -135,6 +139,7 @@ class VoiceCallService : Service() {
             this, 0,
             Intent(this, VoiceCallActivity::class.java)
                 .putExtra(EXTRA_SERVER_ID, server?.id ?: VoiceCallState.state.value.serverId)
+                .putExtra(EXTRA_SESSION_ID, voiceSessionId ?: VoiceCallState.state.value.sessionId)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -158,99 +163,88 @@ class VoiceCallService : Service() {
     // Call setup
     // ------------------------------------------------------------------
 
-    private suspend fun connect(serverId: String?) {
-        // State was already set to CONNECTING synchronously in onStartCommand.
-        val store = ServerStore.get(this)
-        val srv = serverId?.let { store.getById(it) }
-        if (srv == null) {
-            failCall(getString(R.string.voice_error_no_server))
-            return
+    private fun authorized(srv: Server): Boolean = runCatching {
+        val current = ServerStore.get(this).getById(srv.id) ?: return@runCatching false
+        if (current.baseUrl != srv.baseUrl || current.apiKey != srv.apiKey || current.deviceId != srv.deviceId ||
+            current.accountId != srv.accountId || current.hubUrl != srv.hubUrl || current.hubServerId != srv.hubServerId) return@runCatching false
+        if (current.apiKey.isBlank()) return@runCatching false
+        com.hobbycoders.aishuffle.account.PairingInput.origin(current.baseUrl)
+        if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) return@runCatching false
+        if (current.accountId != null) {
+            val account = com.hobbycoders.aishuffle.account.AccountStore(this).session()
+            if (account == null || account.accountId != current.accountId || account.hub != current.hubUrl) return@runCatching false
         }
+        true
+    }.getOrDefault(false)
+
+    private fun <T> value(result: ApiResult<T>): T = when (result) {
+        is ApiResult.Success -> result.data
+        is ApiResult.Failure -> throw IllegalStateException(result.message)
+        is ApiResult.NeedsCfAccess -> throw IllegalStateException(getString(R.string.cf_access_reauth))
+    }
+
+    private suspend fun connect(serverId: String?, selectedSession: String?) {
+        val srv = serverId?.let { ServerStore.get(this).getById(it) }
+            ?: throw IllegalStateException(getString(R.string.voice_error_no_server))
         server = srv
         VoiceCallState.update { it.copy(serverName = srv.name, serverId = srv.id) }
-
-        // 1. aim_ key -> web session cookie (voice endpoints don't take aim_).
-        val cookie = when (val result = ApiClient.createWebSession(srv)) {
-            is ApiResult.Success -> result.data
-            is ApiResult.NeedsCfAccess -> {
-                failCall(getString(R.string.cf_access_reauth)); return
-            }
-            is ApiResult.Failure -> {
-                failCall(result.message); return
-            }
-        }
-        sessionCookie = cookie
-
-        // 2. Create the voice session (server mints the ephemeral ek_ secret).
-        // Session creation returns a descriptive error when voice mode is off.
         val sessionMode = if (mode == SessionMode.COMMAND) "command" else "chat"
-        val session = when (val result = VoiceApi.createSession(srv, cookie, sessionMode)) {
-            is ApiResult.Success -> result.data
-            is ApiResult.NeedsCfAccess -> {
-                failCall(getString(R.string.cf_access_reauth)); return
+        var firstReady = true
+        val backend = object : VoiceBackend {
+            override suspend fun open(sessionId: String?): com.hobbycoders.aishuffle.net.VoiceSession {
+                check(authorized(srv)) { "Access to this worker changed. Reconnect from Shuffle." }
+                // Native credentials are never installed in WebView's cookie jar.
+                val cookie = value(ApiClient.createWebSession(srv, ApiClient.SessionPurpose.NATIVE))
+                check(authorized(srv)) { "Access to this worker changed. Reconnect from Shuffle." }
+                sessionCookie = cookie
+                return if (sessionId == null) value(VoiceApi.createSession(srv, cookie, sessionMode))
+                else value(VoiceApi.refreshSession(srv, cookie, sessionId))
             }
-            is ApiResult.Failure -> {
-                failCall(result.message); return
+            override suspend fun exchange(session: com.hobbycoders.aishuffle.net.VoiceSession, offer: String) =
+                value(VoiceApi.postSdpOffer(session.clientSecret, session.model, offer))
+            override suspend fun attach(sessionId: String, callId: String) {
+                value(VoiceApi.attachCall(srv, checkNotNull(sessionCookie), sessionId, callId, tools.declarations(), sessionMode))
+            }
+            override suspend fun checkAccess() {
+                check(authorized(srv)) { "Access to this worker changed. Reconnect from Shuffle." }
+                val cookie = sessionCookie ?: return // Initial native authorization is still in progress.
+                if (VoiceCallState.state.value.status != CallStatus.LIVE) return
+                val access = VoiceApi.isVoiceModeEnabled(srv, cookie)
+                // A refresh can rotate this credential while the probe is in flight.
+                if (cookie != sessionCookie || VoiceCallState.state.value.status != CallStatus.LIVE) return
+                check(value(access)) { "Voice has been disabled on this worker." }
             }
         }
-        voiceSessionId = session.sessionId
-
-        // 3. WebRTC leg to OpenAI.
-        val client = try {
-            RealtimeClient(this, onEvent = ::handleRealtimeEvent, onDisconnected = {
-                scope.launch { endCall(userInitiated = false) }
-            })
-        } catch (e: Exception) {
-            failCall("WebRTC init failed: ${e.message}"); return
-        }
-        realtime = client
-
-        try {
-            val offer = client.createOffer()
-            val (answer, callId) = when (
-                val result = VoiceApi.postSdpOffer(session.clientSecret, session.model, offer)
-            ) {
-                is ApiResult.Success -> result.data
-                is ApiResult.Failure -> {
-                    failCall(result.message); return
+        VoiceCallRunner(
+            backend = backend,
+            authorized = { authorized(srv) },
+            newPeer = {
+                var created: RealtimeClient? = null
+                created = RealtimeClient(this, onEvent = { event ->
+                    scope.launch {
+                        if (created != null && realtime === created && authorized(srv)) handleRealtimeEvent(event)
+                    }
+                })
+                checkNotNull(created)
+            },
+            onSession = { id ->
+                voiceSessionId = id
+                VoiceCallState.update { it.copy(sessionId = id) }
+            },
+            onPeer = { peer ->
+                realtime = peer
+                peer?.setMicEnabled(!VoiceCallState.state.value.muted)
+            },
+            onStatus = { status ->
+                VoiceCallState.update { it.copy(status = status) }
+                if (status == CallStatus.LIVE && firstReady) {
+                    firstReady = false
+                    lastActivityMs = System.currentTimeMillis()
+                    playReadyTone()
+                    if (mode == SessionMode.COMMAND) startIdleWatchdog()
                 }
-                else -> {
-                    failCall("Unexpected OpenAI response"); return
-                }
-            }
-            client.acceptAnswer(answer)
-
-            // 4. Attach the server's sideband, declaring OUR phone tools so the
-            // model sees them and the sideband leaves their servicing to us.
-            if (callId != null) {
-                val attach = VoiceApi.attachCall(
-                    srv, cookie, session.sessionId, callId,
-                    clientTools = tools.declarations(),
-                    // The prompt text itself lives server-side (Settings →
-                    // Voice) — the app only reports which kind of session
-                    // this is.
-                    sessionMode = sessionMode,
-                )
-                if (attach is ApiResult.Failure) {
-                    Log.w(TAG, "Sideband attach failed")
-                }
-            } else {
-                Log.w(TAG, "No call_id from OpenAI — server sideband cannot join")
-            }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            failCall("Call setup failed. Check the connection and retry.")
-            return
-        }
-
-        VoiceCallState.update { it.copy(status = CallStatus.LIVE) }
-        lastActivityMs = System.currentTimeMillis()
-
-        playReadyTone()
-        if (mode == SessionMode.COMMAND) {
-            startIdleWatchdog()
-        }
+            },
+        ).run(selectedSession)
     }
 
     /**
@@ -339,15 +333,20 @@ class VoiceCallService : Service() {
      * don't own are the sideband's business — never answer them.
      */
     private fun maybeServiceCall(callId: String, name: String, arguments: String) {
+        val requestingPeer = realtime ?: return
         if (callId.isBlank() || name.isBlank()) return
         if (!tools.owns(name)) return
         if (!servicedCalls.add(callId)) return
 
         scope.launch {
+            val owner = server ?: return@launch
+            if (realtime !== requestingPeer) return@launch
+            if (!authorized(owner)) { failCall("Access to this worker changed. Reconnect from Shuffle."); return@launch }
             val args = runCatching { JSONObject(arguments.ifBlank { "{}" }) }
                 .getOrDefault(JSONObject())
             val outcome = tools.execute(name, args)
-            realtime?.send(JSONObject().apply {
+            if (realtime !== requestingPeer || !authorized(owner)) return@launch
+            requestingPeer.send(JSONObject().apply {
                 put("type", "conversation.item.create")
                 put("item", JSONObject().apply {
                     put("type", "function_call_output")
@@ -355,12 +354,12 @@ class VoiceCallService : Service() {
                     put("output", outcome.result.toString())
                 })
             })
-            realtime?.send(JSONObject().put("type", "response.create"))
+            requestingPeer.send(JSONObject().put("type", "response.create"))
 
             if (outcome.endSession) {
                 // Let the model speak its short wrap-up before hanging up.
                 delay(outcome.endDelayMs)
-                endCall(userInitiated = true)
+                if (realtime === requestingPeer) endCall(userInitiated = true)
             }
         }
     }
@@ -400,7 +399,7 @@ class VoiceCallService : Service() {
         if (srv != null && cookie != null && sessionId != null) {
             // Fire-and-forget on a background scope that survives stopSelf().
             CoroutineScope(Dispatchers.IO).launch {
-                VoiceApi.hangup(srv, cookie, sessionId)
+                withTimeoutOrNull(10_000) { VoiceApi.hangup(srv, cookie, sessionId) }
             }
         }
         voiceSessionId = null
@@ -424,6 +423,7 @@ class VoiceCallService : Service() {
         private const val IDLE_TIMEOUT_MS = 30_000L
 
         const val EXTRA_SERVER_ID = "server_id"
+        const val EXTRA_SESSION_ID = "session_id"
         const val EXTRA_MODE = "session_mode"
         const val MODE_COMMAND = "command"
         const val MODE_CHAT = "chat"
@@ -438,6 +438,7 @@ class VoiceCallService : Service() {
             context: Context,
             serverId: String? = null,
             mode: SessionMode = SessionMode.CHAT,
+            sessionId: String? = null,
         ) {
             val intent = Intent(context, VoiceCallService::class.java)
                 .putExtra(
@@ -445,6 +446,7 @@ class VoiceCallService : Service() {
                     if (mode == SessionMode.COMMAND) MODE_COMMAND else MODE_CHAT,
                 )
             serverId?.let { intent.putExtra(EXTRA_SERVER_ID, it) }
+            sessionId?.let { intent.putExtra(EXTRA_SESSION_ID, it) }
             context.startForegroundService(intent)
         }
 

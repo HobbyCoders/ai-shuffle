@@ -38,6 +38,7 @@ object VoiceApi {
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS)
             .followRedirects(false)
             .followSslRedirects(false)
             .build()
@@ -105,6 +106,21 @@ object VoiceApi {
             .post(body.toString().toRequestBody(JSON_MEDIA.toMediaType()))
             .build()
         execute(request) { }
+    }
+
+    /** Rejoin/refresh the selected session without creating a different chat. */
+    suspend fun refreshSession(server: Server, sessionCookie: String, sessionId: String): ApiResult<VoiceSession> =
+        withContext(Dispatchers.IO) {
+            val request = refreshRequest(server, sessionCookie, sessionId)
+            execute(request) { json ->
+                VoiceSession(sessionId, json.getString("client_secret"), json.getString("model"))
+            }
+        }
+
+    internal fun refreshRequest(server: Server, sessionCookie: String, sessionId: String): Request {
+        require(com.hobbycoders.aishuffle.voice.validVoiceSessionId(sessionId)) { "Invalid voice session." }
+        return serverRequest(server, sessionCookie, "/api/v1/voice/sessions/$sessionId/secret")
+            .post(ByteArray(0).toRequestBody(JSON_MEDIA.toMediaType())).build()
     }
 
     /** POST /api/v1/voice/sessions/{id}/hangup — tears down the sideband. */

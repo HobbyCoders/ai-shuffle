@@ -5,6 +5,8 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.util.Log
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import org.json.JSONObject
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
@@ -31,11 +33,25 @@ import kotlin.coroutines.resumeWithException
  * Usage: [createOffer] → POST the SDP via [com.hobbycoders.aishuffle.net.VoiceApi.postSdpOffer]
  * → [acceptAnswer] → exchange events → [close].
  */
-class RealtimeClient(
+internal class RealtimeClient(
     context: Context,
     private val onEvent: (JSONObject) -> Unit,
-    private val onDisconnected: () -> Unit,
-) {
+) : VoicePeer {
+
+    private val state = MutableStateFlow(VoiceMediaState.CONNECTING)
+    override val mediaState: StateFlow<VoiceMediaState> = state
+    @Volatile private var peerState = PeerConnection.PeerConnectionState.NEW
+    @Volatile private var channelOpen = false
+
+    private fun publishState() {
+        state.value = when {
+            closed || peerState == PeerConnection.PeerConnectionState.CLOSED -> VoiceMediaState.CLOSED
+            peerState == PeerConnection.PeerConnectionState.FAILED -> VoiceMediaState.FAILED
+            peerState == PeerConnection.PeerConnectionState.DISCONNECTED -> VoiceMediaState.DISCONNECTED
+            peerState == PeerConnection.PeerConnectionState.CONNECTED && channelOpen -> VoiceMediaState.READY
+            else -> VoiceMediaState.CONNECTING
+        }
+    }
 
     private val appContext = context.applicationContext
     private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -85,7 +101,11 @@ class RealtimeClient(
         events = peer.createDataChannel("oai-events", DataChannel.Init())
         events.registerObserver(object : DataChannel.Observer {
             override fun onBufferedAmountChange(previousAmount: Long) {}
-            override fun onStateChange() {}
+            override fun onStateChange() {
+                channelOpen = events.state() == DataChannel.State.OPEN
+                if (events.state() == DataChannel.State.CLOSED) state.value = VoiceMediaState.CLOSED
+                else publishState()
+            }
             override fun onMessage(buffer: DataChannel.Buffer) {
                 val bytes = ByteArray(buffer.data.remaining())
                 buffer.data.get(bytes)
@@ -139,50 +159,51 @@ class RealtimeClient(
     }
 
     /** Create the local SDP offer (also sets it as the local description). */
-    suspend fun createOffer(): String {
+    override suspend fun createOffer(): String {
         val offer = suspendCancellableCoroutine<SessionDescription> { cont ->
             peer.createOffer(object : SdpObserverAdapter() {
-                override fun onCreateSuccess(desc: SessionDescription) = cont.resume(desc)
+                override fun onCreateSuccess(desc: SessionDescription) { if (cont.isActive) cont.resume(desc) }
                 override fun onCreateFailure(error: String?) =
-                    cont.resumeWithException(IllegalStateException("createOffer: $error"))
+                    if (cont.isActive) cont.resumeWithException(IllegalStateException("createOffer: $error")) else Unit
             }, MediaConstraints())
         }
         suspendCancellableCoroutine<Unit> { cont ->
             peer.setLocalDescription(object : SdpObserverAdapter() {
-                override fun onSetSuccess() = cont.resume(Unit)
+                override fun onSetSuccess() { if (cont.isActive) cont.resume(Unit) }
                 override fun onSetFailure(error: String?) =
-                    cont.resumeWithException(IllegalStateException("setLocalDescription: $error"))
+                    if (cont.isActive) cont.resumeWithException(IllegalStateException("setLocalDescription: $error")) else Unit
             }, offer)
         }
         return offer.description
     }
 
     /** Apply OpenAI's SDP answer; media + the data channel come up after this. */
-    suspend fun acceptAnswer(answerSdp: String) {
+    override suspend fun acceptAnswer(answerSdp: String) {
         suspendCancellableCoroutine<Unit> { cont ->
             peer.setRemoteDescription(object : SdpObserverAdapter() {
-                override fun onSetSuccess() = cont.resume(Unit)
+                override fun onSetSuccess() { if (cont.isActive) cont.resume(Unit) }
                 override fun onSetFailure(error: String?) =
-                    cont.resumeWithException(IllegalStateException("setRemoteDescription: $error"))
+                    if (cont.isActive) cont.resumeWithException(IllegalStateException("setRemoteDescription: $error")) else Unit
             }, SessionDescription(SessionDescription.Type.ANSWER, answerSdp))
         }
     }
 
     /** Send one realtime client event (e.g. a `function_call_output` item). */
-    fun send(event: JSONObject) {
+    override fun send(event: JSONObject) {
         if (closed) return
         val bytes = event.toString().toByteArray(StandardCharsets.UTF_8)
         events.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false))
     }
 
     /** Mute or unmute the mic track. */
-    fun setMicEnabled(enabled: Boolean) {
+    override fun setMicEnabled(enabled: Boolean) {
         micTrack.setEnabled(enabled)
     }
 
-    fun close() {
+    override fun close() {
         if (closed) return
         closed = true
+        state.value = VoiceMediaState.CLOSED
         runCatching { events.unregisterObserver() }
         runCatching { events.close() }
         runCatching { peer.close() }
@@ -218,12 +239,8 @@ class RealtimeClient(
 
         override fun onConnectionChange(newState: PeerConnection.PeerConnectionState?) {
             if (closed) return
-            if (newState == PeerConnection.PeerConnectionState.FAILED ||
-                newState == PeerConnection.PeerConnectionState.CLOSED ||
-                newState == PeerConnection.PeerConnectionState.DISCONNECTED
-            ) {
-                onDisconnected()
-            }
+            peerState = newState ?: PeerConnection.PeerConnectionState.NEW
+            publishState()
         }
     }
 

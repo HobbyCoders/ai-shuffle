@@ -16,12 +16,13 @@ import kotlinx.coroutines.launch
 
 /**
  * The talk screen: a viewer over [VoiceCallState] with mute/hang-up controls.
- * The call lives in [VoiceCallService] across rotation, but leaving this screen
- * hangs up and releases the microphone. Started only for the explicitly selected server.
+ * The foreground service owns the call across rotation and app switching.
+ * Started only for the explicitly selected server and optional existing session.
  */
 class VoiceCallActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityVoiceCallBinding
+    private var startIssued = false
 
     private val micPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -30,6 +31,7 @@ class VoiceCallActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        startIssued = savedInstanceState?.getBoolean("voice_start_issued") ?: false
         if (!VoiceCallState.isActive) VoiceCallState.reset()
         binding = ActivityVoiceCallBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -41,12 +43,20 @@ class VoiceCallActivity : AppCompatActivity() {
         }
 
         observeState()
-        ensureMicThenStart()
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) { ensureMicThenStart() }
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("voice_start_issued", startIssued)
+        super.onSaveInstanceState(outState)
     }
 
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        startIssued = false // A new foreground handoff is an explicit start request.
         ensureMicThenStart()
     }
 
@@ -59,7 +69,6 @@ class VoiceCallActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
-        if (!isChangingConfigurations && VoiceCallState.isActive) VoiceCallService.hangup(this)
         com.hobbycoders.aishuffle.tools.DeviceToolsRuntime.detach(this)
         super.onPause()
     }
@@ -97,17 +106,26 @@ class VoiceCallActivity : AppCompatActivity() {
     }
 
     private fun startCallIfIdle() {
+        // A permission result or a new intent can arrive after the activity
+        // paused. The RESUMED observer retries without consuming the request.
+        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return
         val serverId = authorizedServerId()
         if (serverId == null) { finish(); return }
         if (!hasMicrophone()) { renderMicrophoneOff(); return }
         binding.muteButton.setOnClickListener { VoiceCallService.toggleMute(this) }
-        if (VoiceCallState.isActive && VoiceCallState.state.value.serverId != null && VoiceCallState.state.value.serverId != serverId) {
+        val sessionId = intent.getStringExtra(VoiceCallService.EXTRA_SESSION_ID)
+        if (sessionId != null && !validVoiceSessionId(sessionId)) { finish(); return }
+        val active = VoiceCallState.state.value
+        if (VoiceCallState.isActive && (active.serverId != serverId || (sessionId != null && active.sessionId != sessionId))) {
             // A deliberate selection must never attach this screen to another account/server's call.
-            if (VoiceCallState.isActive) VoiceCallService.hangup(this)
+            android.widget.Toast.makeText(this, "End the current voice call before opening another session.", android.widget.Toast.LENGTH_LONG).show()
             finish()
             return
         }
-        if (!VoiceCallState.isActive) VoiceCallService.start(this, serverId, SessionMode.CHAT)
+        if (!VoiceCallState.isActive && !startIssued) {
+            startIssued = true
+            VoiceCallService.start(this, serverId, SessionMode.CHAT, sessionId)
+        }
     }
 
     private fun observeState() {
@@ -121,6 +139,7 @@ class VoiceCallActivity : AppCompatActivity() {
                     binding.statusText.text = when (state.status) {
                         CallStatus.IDLE, CallStatus.CONNECTING ->
                             getString(R.string.voice_status_connecting)
+                        CallStatus.RECONNECTING -> "Reconnecting voice chat…"
                         CallStatus.LIVE -> state.serverName
                             ?.let { getString(R.string.voice_status_live, it) }
                             ?: getString(R.string.voice_status_live_generic)
@@ -134,6 +153,10 @@ class VoiceCallActivity : AppCompatActivity() {
                         if (state.muted) R.string.voice_unmute else R.string.voice_mute,
                     )
                     binding.orb.isActivated = state.status == CallStatus.LIVE
+                    if (state.status == CallStatus.ERROR) {
+                        binding.muteButton.text = "Try voice again"
+                        binding.muteButton.setOnClickListener { startIssued = false; ensureMicThenStart() }
+                    }
 
                     if (state.status == CallStatus.ENDED) {
                         // Give the "Call ended" state a beat, then leave —
