@@ -43,8 +43,12 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
             except HTTPException as exc:
                 if exc.status_code >= 500:
                     raise WebSocketException(code=1013, reason='Account authorization unavailable; retry later') from exc
-            except Exception:
-                pass  # Includes live hub refusal; never fall through as admin.
+            except PermissionError:
+                pass  # An explicit live-principal refusal is an auth failure.
+            except Exception as exc:
+                # A failed dependency check grants no authority, but does not
+                # prove that the saved credential was revoked or expired.
+                raise WebSocketException(code=1013, reason='Account authorization unavailable; retry later') from exc
             continue
         session = await run_sync(database.get_auth_session, candidate)
         if session and owner_auth.loopback_request(websocket):

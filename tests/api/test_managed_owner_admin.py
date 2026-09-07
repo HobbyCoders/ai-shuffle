@@ -310,6 +310,44 @@ async def test_hub_outage_preserves_saved_websocket_login(owner_app, monkeypatch
     assert await authenticate_websocket(Mock(cookies={}), token) == (True, None)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['lookup', 'principal'])
+@pytest.mark.parametrize('error', [RuntimeError('dependency failed'), TimeoutError('dependency timed out')])
+async def test_websocket_dependency_failure_retries_same_saved_login(owner_app, monkeypatch, stage, error):
+    from types import SimpleNamespace
+    from fastapi import WebSocketException
+    from app.api import ws_auth
+    bind_and_enroll(monkeypatch)
+    _, token = web_session(owner_app)
+    socket = Mock(cookies={}, state=SimpleNamespace())
+    module, attribute = (auth, 'get_paired_client_from_token') if stage == 'lookup' else (ws_auth.identity, 'principal')
+    with monkeypatch.context() as failing:
+        failing.setattr(module, attribute, Mock(side_effect=error))
+        with pytest.raises(WebSocketException) as caught:
+            await ws_auth.authenticate_websocket(socket, token)
+        assert caught.value.code == 1013
+        assert str(error) not in caught.value.reason
+        assert socket.state.mobile_tool_principal is None
+    # No replacement token or enrollment: the same cookie works after recovery.
+    assert await ws_auth.authenticate_websocket(socket, token) == (True, None)
+    assert socket.state.mobile_tool_principal['kind'] == 'paired'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['lookup', 'principal'])
+@pytest.mark.parametrize('refusal', [PermissionError('revoked'), HTTPException(401, 'revoked'), HTTPException(403, 'wrong owner')])
+async def test_websocket_explicit_authorization_refusal_still_denies(owner_app, monkeypatch, stage, refusal):
+    from types import SimpleNamespace
+    from app.api import ws_auth
+    bind_and_enroll(monkeypatch)
+    _, token = web_session(owner_app)
+    socket = Mock(cookies={}, state=SimpleNamespace())
+    module, attribute = (auth, 'get_paired_client_from_token') if stage == 'lookup' else (ws_auth.identity, 'principal')
+    monkeypatch.setattr(module, attribute, Mock(side_effect=refusal))
+    assert await ws_auth.authenticate_websocket(socket, token) == (False, None)
+    assert socket.state.mobile_tool_principal is None
+
+
 def test_owner_admin_cookie_retains_same_origin_csrf_protection(owner_app, monkeypatch):
     from app.middleware.csrf import CSRFProtectionMiddleware
     monkeypatch.setattr(settings, 'cors_origins', 'https://worker.example.com')
