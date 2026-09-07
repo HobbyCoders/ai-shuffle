@@ -519,6 +519,7 @@ async def _reserve_admission(
     *,
     lane: str = DELEGATED_LANE,
     parent_session_id: Optional[str] = None,
+    context_session_id: Optional[str] = None,
     provider_id: Optional[str] = None,
     wait_seconds: Optional[float] = None,
 ) -> Tuple[Optional[str], float]:
@@ -574,7 +575,10 @@ async def _reserve_admission(
     def cancelled() -> bool:
         return bool(
             launch is not None
-            and launch.coordinator.session_id == root_session_id
+            # The actual caller can be a nested worker. Supervisor/root budget
+            # identity is shared by its siblings and grants no cancellation
+            # authority over their separate Swarms.
+            and launch.coordinator.session_id == (context_session_id or parent_session_id)
             and (
                 launch.coordinator.closed
                 or launch.swarm_id in launch.coordinator.cancelled
@@ -970,6 +974,7 @@ async def _dispatch_worker_with_retries(
             retry_worker_id,
             lane=lane,
             parent_session_id=parent_session_id,
+            context_session_id=kwargs.get("context_session_id"),
             provider_id=provider_id,
         )
         if capacity_error:
@@ -1544,6 +1549,7 @@ async def dispatch_task_tool(
         worker_id,
         lane=lane,
         parent_session_id=root_session_id,
+        context_session_id=caller_session_id,
         provider_id=effective_provider_id,
     )
     if capacity_error:

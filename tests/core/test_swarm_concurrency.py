@@ -25,6 +25,7 @@ class WorkerBarrier:
         self.peak = 0
         self.changed = asyncio.Event()
         self.snapshot_calls = 0
+        self.owners = {}
 
     def peek(self, key):
         return self.active.get(key)
@@ -49,6 +50,8 @@ class WorkerBarrier:
             tool_use_id=key, provider_id=kwargs["provider_id"], background=True,
         ))
         self.started.append(key)
+        self.owners[key] = kwargs["context_session_id"]
+        assert parent == "swarm-parent"  # nested workers retain root supervision
         self.peak = max(self.peak, len(self.active))
         self.changed.set()
         try:
@@ -89,6 +92,12 @@ async def harness(mock_db, monkeypatch):
         "allowed_tools": ["Read", "Grep"],
     })
     database.create_session(session_id="swarm-parent", profile_id="swarm-root", title="Offline Swarm")
+    for session_id in ("nested-owner", "nested-sibling"):
+        database.create_session(
+            session_id=session_id, profile_id="swarm-root", title=session_id,
+            parent_session_id="swarm-parent",
+        )
+        provider_agent.register_worker_session(session_id)
     barrier = WorkerBarrier()
     supervisor.reset()
     task_dispatch._PENDING_ADMISSIONS.clear()
@@ -103,11 +112,10 @@ async def harness(mock_db, monkeypatch):
     monkeypatch.setattr(supervisor, "_kill_worker_session", AsyncMock())
     monkeypatch.setattr(swarm, "persist", AsyncMock())
     monkeypatch.setattr(turn_scheduler, "on_task_terminal", AsyncMock())
-    ctx = ToolCtx(extra={"task_dispatch": task_dispatch.make_fluid_dispatcher(
-        "swarm-parent", provider_id="test-provider"), "background_task_started": AsyncMock()})
-
-    async def start(count, **options):
-        result = await swarm.make_handler(lambda: "swarm-parent")({
+    async def start(count, *, caller_session_id="swarm-parent", **options):
+        ctx = ToolCtx(extra={"task_dispatch": task_dispatch.make_fluid_dispatcher(
+            caller_session_id, provider_id="test-provider"), "background_task_started": AsyncMock()})
+        result = await swarm.make_handler(lambda: caller_session_id)({
             "action": "start", "tasks": [
                 {"id": str(i), "agent": "swarm-helper", "prompt": "Wait at the offline barrier"}
                 for i in range(count)
@@ -115,7 +123,7 @@ async def harness(mock_db, monkeypatch):
         }, ctx)
         assert not result.is_error, result.text
         key = result.background_task.task_id
-        return swarm.coordinators["swarm-parent"], key
+        return swarm.coordinators[caller_session_id], key
 
     yield barrier, start
     for coordinator in list(swarm.coordinators.values()):
@@ -127,6 +135,7 @@ async def harness(mock_db, monkeypatch):
     task_dispatch._PENDING_ADMISSIONS.clear()
     task_dispatch._ADMISSION_LOCK = None
     supervisor.reset()
+    provider_agent.reset_worker_sessions()
     swarm.coordinators.clear()
     swarm.workers.clear()
     swarm.worker_jobs.clear()
@@ -226,3 +235,72 @@ async def test_cancelled_launch_does_not_block_a_different_root(harness):
     assert refusal is None
     assert "unrelated-worker" in task_dispatch._PENDING_ADMISSIONS
     task_dispatch._release_admission("unrelated-worker")
+
+
+@pytest.mark.asyncio
+async def test_nested_owner_stop_preserves_same_root_sibling_swarm(harness, monkeypatch):
+    barrier, start = harness
+    monkeypatch.setattr(config.settings, "task_worker_max_per_provider", 1)
+    owner, owner_key = await start(3, caller_session_id="nested-owner")
+    await barrier.wait_for_starts(1)
+    sibling, sibling_key = await start(1, caller_session_id="nested-sibling")
+    await asyncio.sleep(0.08)
+    assert set(barrier.owners.values()) == {"nested-owner"}
+    await swarm.cancel_all("nested-owner")
+    await asyncio.wait_for(owner.jobs[owner_key], 1)
+    await barrier.wait_for_starts(2)
+    assert list(barrier.owners.values()).count("nested-owner") == 1
+    assert list(barrier.owners.values()).count("nested-sibling") == 1
+    assert owner.snapshot(owner_key)["status"] == "cancelled"
+    barrier.release()
+    await asyncio.wait_for(sibling.jobs[sibling_key], 5)
+    assert sibling.snapshot(sibling_key)["status"] == "completed"
+    assert task_dispatch._pending_admission_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sibling_launch_does_not_authorize_cancelling_actual_caller(harness, monkeypatch):
+    coordinator = SimpleNamespace(session_id="nested-owner", closed=True, cancelled={"old-swarm"})
+    launch = Launch(coordinator, "old-swarm", "child", asyncio.get_running_loop().create_future())
+    worker = AsyncMock(return_value=provider_agent.WorkerOutcome(ok=True, session_id="test-sibling", report="done"))
+    monkeypatch.setattr(provider_agent, "dispatch_worker", worker)
+    # Both caller chains resolve to swarm-parent. An inherited launch from the
+    # other branch must not cancel this caller simply because roots match.
+    assert task_dispatch.caller_chain("nested-owner")[1] == task_dispatch.caller_chain("nested-sibling")[1]
+    token = current_launch.set(launch)
+    try:
+        result = await task_dispatch.make_fluid_dispatcher(
+            "nested-sibling", provider_id="test-provider",
+        )({"agent": "swarm-helper", "prompt": "Benign sibling work"}, ToolCtx())
+    finally:
+        current_launch.reset(token)
+    assert not result.is_error, result.text
+    worker.assert_awaited_once()
+    assert worker.await_args.kwargs["parent_session_id"] == "swarm-parent"
+    assert worker.await_args.kwargs["context_session_id"] == "nested-sibling"
+    assert task_dispatch._pending_admission_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_stopped_nested_swarm_cannot_reenter_admission_for_retry(harness, monkeypatch):
+    _, start = harness
+    calls = []
+    async def fails_before_first_frame(**kwargs):
+        calls.append(kwargs)
+        assert kwargs["parent_session_id"] == "swarm-parent"
+        assert kwargs["context_session_id"] == "nested-owner"
+        launch = current_launch.get()
+        launch.coordinator.cancelled.add(launch.swarm_id)
+        return provider_agent.WorkerOutcome(
+            ok=False, session_id=kwargs["worker_session_id"],
+            error="worker failed to start: peer closed connection without sending complete message body",
+            frames_forwarded=0,
+        )
+    monkeypatch.setattr(provider_agent, "dispatch_worker", fails_before_first_frame)
+    monkeypatch.setattr(provider_agent, "announce_abandoned_retry", AsyncMock())
+    monkeypatch.setattr(task_dispatch, "_retry_backoff", lambda *args: 0)
+    coordinator, key = await start(1, caller_session_id="nested-owner")
+    await asyncio.wait_for(coordinator.jobs[key], 1)
+    assert len(calls) == 1
+    assert coordinator.snapshot(key)["status"] == "cancelled"
+    assert task_dispatch._pending_admission_count() == 0
