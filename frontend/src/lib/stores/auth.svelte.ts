@@ -28,6 +28,11 @@ let _state = $state<AuthState>({
 	error: null
 });
 
+// Account-scoped caches subscribe to this state. A superseded status response
+// must never move them back to the previous principal.
+let requestEpoch = 0;
+let pendingLogout: Promise<void> | null = null;
+
 // ============================================
 // Subscribe shim (centralized via store-utils)
 // ============================================
@@ -50,27 +55,37 @@ export const auth = {
 	subscribe,
 
 	async checkAuth() {
+		const epoch = ++requestEpoch;
 		_update(s => ({ ...s, loading: true, error: null }));
 		try {
+			// A refresh during logout must observe the completed cookie change.
+			if (pendingLogout) await pendingLogout;
+			if (epoch !== requestEpoch) return _state.status;
 			const status = await getAuthStatus();
-			_update(s => ({ ...s, status, loading: false }));
-			return status;
+			if (epoch === requestEpoch) _update(s => ({ ...s, status, loading: false }));
+			return epoch === requestEpoch ? status : _state.status;
 		} catch (e) {
-			_update(s => ({ ...s, loading: false, error: 'Failed to check auth status' }));
+			if (epoch === requestEpoch) _update(s => ({ ...s, loading: false, error: 'Failed to check auth status' }));
 			throw e;
 		}
 	},
 
 	async logout() {
+		const epoch = ++requestEpoch;
 		// Retire authenticated sync work before dispatching the logout request.
 		_update(s => ({ ...s, status: s.status ? { ...s.status, authenticated: false } : null, loading: false, error: null }));
+		const request = apiLogout();
+		pendingLogout = request;
 		try {
-			await apiLogout();
+			await request;
+			if (epoch !== requestEpoch) return;
 			const status = await getAuthStatus();
-			_update(s => ({ ...s, status, loading: false }));
+			if (epoch === requestEpoch) _update(s => ({ ...s, status, loading: false }));
 		} catch (e: any) {
-			_update(s => ({ ...s, loading: false, error: e.detail || 'Logout failed' }));
+			if (epoch === requestEpoch) _update(s => ({ ...s, loading: false, error: e.detail || 'Logout failed' }));
 			throw e;
+		} finally {
+			if (pendingLogout === request) pendingLogout = null;
 		}
 	},
 
