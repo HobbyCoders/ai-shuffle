@@ -14,6 +14,9 @@ const TOOL_EXECUTION_TIMEOUT_MS = 120_000;
 const MAX_RECONNECT_ATTEMPTS = 50;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 const PING_INTERVAL_MS = 30_000;
+// The server sends heartbeats every 30 seconds and does not reply to client
+// pongs. Allow a full heartbeat interval plus scheduling/network delay on resume.
+const RESUME_HEALTH_TIMEOUT_MS = PING_INTERVAL_MS + 5_000;
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -93,6 +96,13 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 	// Track visibility health-check timeout so it can be cancelled
 	let visibilityCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
+	function stopVisibilityCheck() {
+		if (visibilityCheckTimer !== null) {
+			clearTimeout(visibilityCheckTimer);
+			visibilityCheckTimer = null;
+		}
+	}
+
 	// ── Ping / Health Check ──────────────────────────────────────────────
 
 	function stopPing() {
@@ -149,7 +159,8 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		const token = config.getAuthToken();
 		if (token) url = `${url}&token=${encodeURIComponent(token)}`;
 
-		ws = new WebSocket(url);
+		const socket = new WebSocket(url);
+		ws = socket;
 
 		ws.onopen = () => {
 			reconnectAttempts = 0;
@@ -167,6 +178,7 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 			}
 
 			stopPing();
+			stopVisibilityCheck();
 
 			const wasClean = intentionalDisconnect;
 			config.onDisconnected(event.code, event.reason || '', wasClean);
@@ -197,7 +209,9 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		};
 
 		ws.onmessage = (event) => {
+			if (socket !== ws) return;
 			lastMessageTime = Date.now();
+			stopVisibilityCheck();
 			try {
 				const data = JSON.parse(event.data);
 
@@ -229,6 +243,7 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 			reconnectTimer = null;
 		}
 		stopPing();
+		stopVisibilityCheck();
 
 		intentionalDisconnect = true;
 		if (ws) {
@@ -259,10 +274,7 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 			if (destroyed) return;
 
 			// Cancel any pending health-check from a previous visibility change
-			if (visibilityCheckTimer !== null) {
-				clearTimeout(visibilityCheckTimer);
-				visibilityCheckTimer = null;
-			}
+			stopVisibilityCheck();
 
 			if (document.hidden) {
 				// Tab is hidden — pause pings to reduce idle CPU.
@@ -281,27 +293,23 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 					reconnectAttempts = 0;
 					connect();
 				} else if (ws.readyState === WebSocket.OPEN) {
-					// Don't blindly reset lastMessageTime — the connection may be
-					// half-open (browser reports OPEN but TCP is dead). Instead,
-					// send a pong and verify we get a server response within 5s.
-					const preVisibilityTime = lastMessageTime;
+					// Check this socket against the next scheduled server heartbeat.
+					// A successful send alone does not prove that TCP is still alive.
+					const resumedSocket = ws;
 					try {
-						ws.send(JSON.stringify({ type: 'pong' }));
+						resumedSocket.send(JSON.stringify({ type: 'pong' }));
 					} catch {
 						reconnectAttempts = 0;
-						connect();
+						resumedSocket.close(4000, 'Resume keepalive failed');
 						return;
 					}
-					// If no server message arrives within 2s, force reconnect.
-					// Shorter window minimises perceived stall after phone unlock /
-					// network resume where the underlying socket is usually dead.
 					visibilityCheckTimer = setTimeout(() => {
 						visibilityCheckTimer = null;
-						if (lastMessageTime === preVisibilityTime && ws?.readyState === WebSocket.OPEN) {
+						if (ws === resumedSocket && resumedSocket.readyState === WebSocket.OPEN) {
 							console.warn('[WsConnection] No server response after tab return, forcing reconnect');
-							ws.close(4000, 'Half-open connection detected');
+							resumedSocket.close(4000, 'Half-open connection detected');
 						}
-					}, 2000);
+					}, RESUME_HEALTH_TIMEOUT_MS);
 				}
 			}
 		};
@@ -373,11 +381,6 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		destroy() {
 			destroyed = true;
 			disconnect();
-
-			if (visibilityCheckTimer !== null) {
-				clearTimeout(visibilityCheckTimer);
-				visibilityCheckTimer = null;
-			}
 
 			if (visibilityHandler && typeof document !== 'undefined') {
 				document.removeEventListener('visibilitychange', visibilityHandler);
