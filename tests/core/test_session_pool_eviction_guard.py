@@ -127,6 +127,17 @@ async def test_evict_if_needed_force_evicts_busy_at_hard_cap():
     assert seen == [("busy-old", "lru_force")]
 
 
+@pytest.mark.asyncio
+async def test_native_admission_at_busy_delegated_hard_cap_never_evicts():
+    pool = SessionPool(max_size=1)
+    pool.put("busy-old", _make_state())
+    pool.put("busy-new", _make_state())
+    _mark_busy("busy-old")
+    _mark_busy("busy-new")
+    assert await pool.evict_if_needed("native") is None
+    assert "busy-old" in pool and "busy-new" in pool
+
+
 # ─── LRU capacity is a SUBPROCESS bound ─────────────────────────────────────
 
 

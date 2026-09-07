@@ -1592,16 +1592,15 @@ async def stream_query(
         # Lane-aware: the pool's subprocess cap counts DELEGATED sessions
         # only, and deciding the leg can read the provider row, so both
         # run in the same worker thread.
-        refusal = await asyncio.to_thread(
-            lambda: pool.admission_check(memory_leg_for_options(options))
-        )
+        incoming_lane = await asyncio.to_thread(memory_leg_for_options, options)
+        refusal = await asyncio.to_thread(pool.admission_check, incoming_lane)
         if refusal is not None:
             logger.warning(f"[Admission] Refusing new session {session_id}: {refusal}")
             yield {"type": "error", "message": f"Server is at capacity — {refusal}. Please retry shortly."}
             return
 
         # Evict LRU if pool is full
-        await pool.evict_if_needed()
+        await pool.evict_if_needed(incoming_lane)
 
         logger.debug(f"Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
 
@@ -2833,16 +2832,15 @@ async def _stream_to_websocket_impl(
         # Lane-aware: the pool's subprocess cap counts DELEGATED sessions
         # only, and deciding the leg can read the provider row, so both
         # run in the same worker thread.
-        refusal = await asyncio.to_thread(
-            lambda: pool.admission_check(memory_leg_for_options(options))
-        )
+        incoming_lane = await asyncio.to_thread(memory_leg_for_options, options)
+        refusal = await asyncio.to_thread(pool.admission_check, incoming_lane)
         if refusal is not None:
             logger.warning(f"[Admission] Refusing new session {session_id}: {refusal}")
             yield {"type": "error", "message": f"Server is at capacity — {refusal}. Please retry shortly."}
             return
 
         # Evict LRU session if pool is full
-        evicted = await pool.evict_if_needed()
+        evicted = await pool.evict_if_needed(incoming_lane)
         if evicted:
             logger.debug(f"[WS] Evicted LRU session {evicted} to make room for {session_id}")
 

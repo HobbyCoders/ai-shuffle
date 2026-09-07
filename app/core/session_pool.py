@@ -1010,7 +1010,7 @@ class SessionPool:
 
         return None
 
-    async def evict_if_needed(self) -> Optional[str]:
+    async def evict_if_needed(self, incoming_lane: str = DELEGATED_LANE) -> Optional[str]:
         """If pool is at capacity, evict the LRU non-streaming session.
 
         Returns the evicted session_id, or None if no eviction was needed/possible.
@@ -1036,6 +1036,8 @@ class SessionPool:
         stalled behind a multi-second disconnect and a callback that re-enters
         the pool cannot deadlock on the lock.
         """
+        if incoming_lane == NATIVE_LANE:
+            return None
         async with self._eviction_lock:
             delegated_size = self.delegated_size
             if delegated_size < self._max_size:
