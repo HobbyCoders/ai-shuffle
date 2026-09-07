@@ -32,7 +32,7 @@ export function openNativeVoice(sessionId: string): Promise<boolean> {
 			try {
 				const reply = JSON.parse(event.data);
 				if (reply.id !== id || reply.sessionId !== sessionId || typeof reply.ok !== 'boolean') return;
-				finish(reply.ok ? undefined : typeof reply.error === 'string' && reply.error.length <= 250 ? reply.error : UNAVAILABLE);
+				finish(reply.ok ? undefined : typeof reply.error === 'string' && reply.error.trim() && reply.error.length <= 250 ? reply.error : UNAVAILABLE);
 			} catch { /* Ignore unrelated or malformed messages. */ }
 		}
 		try {

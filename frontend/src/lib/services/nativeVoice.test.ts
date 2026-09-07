@@ -60,6 +60,14 @@ describe('Android voice handoff', () => {
 		fixture.reply({ ...JSON.parse(fixture.postMessage.mock.calls[1][0]), ok: true });
 		expect(await retry).toBe(true);
 	});
+	it('treats a native refusal with an empty error as a failure', async () => {
+		const fixture = installBridge();
+		for (const error of ['', '   ']) {
+			const result = openNativeVoice('session-1');
+			fixture.reply({ ...JSON.parse(fixture.postMessage.mock.lastCall![0]), ok: false, error });
+			await expect(result).rejects.toThrow('Android voice did not open');
+		}
+	});
 	it('rejects invalid session identifiers without sending native commands', async () => {
 		const fixture = installBridge();
 		await expect(openNativeVoice('../other?secret=x')).rejects.toThrow('Select a voice session');
