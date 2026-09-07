@@ -211,12 +211,14 @@ def test_owner_web_logout_invalidates_the_derived_session(owner_app, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_native_voice_session_does_not_rotate_webview_and_logout_is_scoped(owner_app, monkeypatch):
+@pytest.mark.parametrize('transport', ['query', 'json'])
+async def test_native_voice_session_does_not_rotate_webview_and_logout_is_scoped(owner_app, monkeypatch, transport):
     from app.api.ws_auth import authenticate_websocket
     bind_and_enroll(monkeypatch)
     browser, web_token = web_session(owner_app)
     native = TestClient(owner_app, headers={'Origin': 'http://testserver'})
-    first = native.post('/api/v1/mobile/web-session?purpose=native',
+    options = {'params': {'purpose': 'native'}} if transport == 'query' else {'json': {'purpose': 'native'}}
+    first = native.post('/api/v1/mobile/web-session', **options,
                         headers={'Authorization': 'Bearer aim_owner-test'})
     assert first.status_code == 200
     assert 'set-cookie' not in first.headers
@@ -225,7 +227,7 @@ async def test_native_voice_session_does_not_rotate_webview_and_logout_is_scoped
     assert browser.get('/principal').status_code == 200
     assert await authenticate_websocket(Mock(cookies={}), web_token) == (True, None)
     assert await authenticate_websocket(Mock(cookies={}), native_token) == (True, None)
-    second = native.post('/api/v1/mobile/web-session?purpose=native',
+    second = native.post('/api/v1/mobile/web-session', **options,
                          headers={'Authorization': 'Bearer aim_owner-test'}).json()['session_token']
     assert await authenticate_websocket(Mock(cookies={}), native_token) == (False, None)
     assert await authenticate_websocket(Mock(cookies={}), web_token) == (True, None)
@@ -234,6 +236,64 @@ async def test_native_voice_session_does_not_rotate_webview_and_logout_is_scoped
     assert await authenticate_websocket(Mock(cookies={}), second) == (True, None)
     pairing_store.revoke_paired_client(hub_store.ownership(DEVICE)['paired_client_id'])
     assert await authenticate_websocket(Mock(cookies={}), second) == (False, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('revocation', ['paired', 'hub'])
+async def test_json_web_and_native_sessions_share_device_revocation(owner_app, monkeypatch, revocation):
+    from app.api.ws_auth import authenticate_websocket
+    call = bind_and_enroll(monkeypatch)
+    browser = TestClient(owner_app, headers={'Origin': 'http://testserver'})
+    web = browser.post('/api/v1/mobile/web-session', json={'purpose': 'web'},
+                       headers={'Authorization': 'Bearer aim_owner-test'})
+    assert web.status_code == 200 and 'set-cookie' in web.headers
+    web_token = web.json()['session_token']
+    browser.cookies.set('session', web_token)
+    native = TestClient(owner_app)
+    minted = native.post('/api/v1/mobile/web-session', json={'purpose': 'native'},
+                         headers={'Authorization': 'Bearer aim_owner-test'})
+    assert minted.status_code == 200 and 'set-cookie' not in minted.headers
+    native_token = minted.json()['session_token']
+    assert browser.get('/principal').status_code == 200
+    assert await authenticate_websocket(Mock(cookies={}), native_token) == (True, None)
+    if revocation == 'paired':
+        pairing_store.revoke_paired_client(hub_store.ownership(DEVICE)['paired_client_id'])
+    else:
+        call.return_value = {'active': False}
+    assert browser.get('/principal').status_code == 401
+    for token in (web_token, native_token):
+        assert await authenticate_websocket(Mock(cookies={}), token) == (False, None)
+
+
+@pytest.mark.parametrize('options', [
+    {'json': {'purpose': 'unknown'}}, {'json': {'purpose': None}},
+    {'json': {'purpose': 1}}, {'json': {'purpsoe': 'native'}},
+    {'json': ['native']}, {'content': 'null', 'headers': {'Content-Type': 'application/json'}},
+    {'content': '{"purpose":', 'headers': {'Content-Type': 'application/json'}},
+    {'content': '{"purpose":"native","purpose":"web"}', 'headers': {'Content-Type': 'application/json'}},
+    {'params': {'purpose': 'unknown'}},
+    {'params': {'purpose': 'web'}, 'json': {'purpose': 'native'}},
+    {'params': {'purpose': 'native'}, 'json': {'purpose': 'web'}},
+    {'params': [('purpose', 'native'), ('purpose', 'web')]},
+])
+def test_invalid_session_purpose_never_rotates_existing_web_session(owner_app, monkeypatch, options):
+    bind_and_enroll(monkeypatch)
+    browser, _ = web_session(owner_app)
+    request_options = dict(options)
+    headers = {'Authorization': 'Bearer aim_owner-test', **request_options.pop('headers', {})}
+    response = TestClient(owner_app).post('/api/v1/mobile/web-session', headers=headers, **request_options)
+    assert response.status_code == 422
+    assert 'set-cookie' not in response.headers
+    assert browser.get('/principal').status_code == 200
+
+
+def test_matching_query_and_json_native_purpose_is_compatible(owner_app, monkeypatch):
+    bind_and_enroll(monkeypatch)
+    browser, _ = web_session(owner_app)
+    response = TestClient(owner_app).post('/api/v1/mobile/web-session?purpose=native',
+        json={'purpose': 'native'}, headers={'Authorization': 'Bearer aim_owner-test'})
+    assert response.status_code == 200 and 'set-cookie' not in response.headers
+    assert browser.get('/principal').status_code == 200
 
 
 @pytest.mark.asyncio

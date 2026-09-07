@@ -7,9 +7,10 @@ import json
 import secrets
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import List, Literal
 
-from fastapi import APIRouter, HTTPException, Depends, Request, Response, status
+from fastapi import APIRouter, Body, HTTPException, Depends, Request, Response, status
+from pydantic import BaseModel, ConfigDict
 from fastapi.responses import StreamingResponse
 from starlette.requests import ClientDisconnect
 
@@ -434,8 +435,17 @@ async def notifications_stream(request: Request):
     )
 
 
+class WebSessionMintRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    purpose: Literal['web', 'native'] = 'web'
+
+
 @router.post("/web-session")
-async def create_web_session(request: Request, response: Response, purpose: str = 'web'):
+async def create_web_session(
+    request: Request, response: Response,
+    purpose: Literal['web', 'native'] | None = None,
+    payload: WebSessionMintRequest | None = Body(default=None),
+):
     """
     Mint a web session cookie from a valid mobile API key.
 
@@ -447,8 +457,22 @@ async def create_web_session(request: Request, response: Response, purpose: str 
     managed worker, its live-verified owner account can administer the worker;
     direct/legacy pairing remains restricted to controller capabilities.
     """
-    if purpose not in ('web', 'native'):
-        raise HTTPException(status_code=422, detail='Session purpose must be web or native')
+    # Android supplies JSON; older clients used a query parameter. Resolve both
+    # explicitly before minting so a native request never rotates the web slot.
+    query_purposes = request.query_params.getlist('purpose')
+    if any(value not in ('web', 'native') or value != purpose for value in query_purposes):
+        raise HTTPException(status_code=422, detail='Conflicting or invalid session purpose')
+    raw_body = await request.body()
+    if payload is None and raw_body:
+        raise HTTPException(status_code=422, detail='Session request must be a JSON object')
+    if payload is not None:
+        fields = json.loads(raw_body, object_pairs_hook=list)
+        if len(fields) != len({field[0] for field in fields}):
+            raise HTTPException(status_code=422, detail='Session request must not repeat fields')
+    body_purpose = payload.purpose if payload and 'purpose' in payload.model_fields_set else None
+    if purpose and body_purpose and purpose != body_purpose:
+        raise HTTPException(status_code=422, detail='Body and query session purposes must match')
+    purpose = body_purpose or purpose or 'web'
     # Validates expiry/revocation and bumps last_seen.
     device = get_device_with_scope(request, "web:session")
 

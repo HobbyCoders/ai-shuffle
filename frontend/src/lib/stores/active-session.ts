@@ -1004,7 +1004,13 @@ export const activeSession = {
 		// A legacy worktree ID belongs to its original checkout. Never transplant
 		// it into a different runner's clone, even when both share a Git origin.
 		const existing = checkout?.kind === 'existing' ? checkout : null;
-		const branch = checkout?.kind === 'branch' ? checkout : null;
+		// Staging a branch protects this composer from later defaults. Wait for
+		// its project to resolve first, or that guard also blocks a late catalog
+		// from mapping a shared UUID to this worker's local clone.
+		const projectResolved = !!project.project || (!!project.projectV2Id
+			&& appData.current.clusterProjects.some(p => p.project_v2_id === project.projectV2Id
+				&& p.local_project_id === null));
+		const branch = checkout?.kind === 'branch' && projectResolved ? checkout : null;
 		const localCheckout = existing && existing.projectId === project.project && !!project.project;
 		_update(s => ({...s,
 			profile:picks.profile, modelOverride:picks.model, effortLevelOverride:picks.effort,
