@@ -141,6 +141,40 @@ def _runtime_env(*, pump, bg_work=None, bg_launches=None, patch_idle=True):
 
 # ---------------------------------------------------------------------------
 # 1. Mandatory lease
+
+@pytest.mark.parametrize("phase", ["start", "done", "close", "timer"])
+@pytest.mark.parametrize("background", [False, True])
+async def test_recording_failure_aborts_and_cleans_up(mock_db, phase, background):
+    turn = turns_db.enqueue_turn("recording-failure", "user", prompt="hello")
+    holder = {}
+
+    async def pump(**kwargs):
+        if phase == "timer":
+            asyncio.get_running_loop().call_soon(holder["runtime"]._on_recorder_recording_failed)
+            await asyncio.Event().wait()
+        yield {"type": "done", "metadata": {}}
+
+    with _runtime_env(pump=pump, bg_work=[{"id": "task"}] if background else []) as env:
+        rt = session_runtime.SessionRuntime(turn)
+        holder["runtime"] = rt
+        async def fail(*args, **kwargs):
+            rt._on_recorder_recording_failed()
+            await asyncio.sleep(0)  # A self-cancel would interrupt cleanup here.
+        if phase != "timer":
+            method = {"start": "start", "done": "on_event", "close": "close"}[phase]
+            getattr(env["recorder"], method).side_effect = fail
+        with patch("app.core.query_session_lifecycle.interrupt_session", new=AsyncMock()) as interrupt:
+            await asyncio.wait_for(rt.execute(), 2)
+            await asyncio.sleep(0)
+            interrupt.assert_awaited_once_with(turn["session_id"])
+        assert rt._abort_reason == "recording_failed"
+        assert turns_db.get_turn(turn["id"])["state"] == "aborted"
+        env["recorder"].close.assert_awaited_once()
+        assert all(call.args[1].get("type") != "done" for call in env["broadcaster"].await_args_list)
+        env["start_idle"].assert_not_called()
+        assert rt._pump_task is None
+        assert session_runtime.get_live_runtime(turn["session_id"]) is None
+
 # ---------------------------------------------------------------------------
 
 async def test_execute_requires_run_claim(mock_db):
@@ -295,6 +329,101 @@ async def test_finalize_completes_when_no_background_work(mock_db):
     env["scheduler"].assert_called_once_with("s4", turn["id"], "completed")
     done = [c.args[1] for c in env["broadcaster"].await_args_list if c.args[1]["type"] == "done"]
     assert done == [{"type": "done", "metadata": {}, "session_id": "s4", "outcome": "completed"}]
+
+
+# ---------------------------------------------------------------------------
+# 3b. Park gate — durable truth (2026-09-05 audit F7/F9)
+# ---------------------------------------------------------------------------
+
+def _durable_task(session_id, task_id, status, kind="agent"):
+    from app.db import background_tasks as background_tasks_db
+    background_tasks_db.upsert_background_task({
+        "task_id": task_id,
+        "session_id": session_id,
+        "kind": kind,
+        "status": status,
+        "title": task_id,
+        "started_at": "2026-09-05T00:00:00+00:00",
+        "updated_at": "2026-09-05T00:00:01+00:00",
+    })
+
+
+async def test_park_drops_a_task_that_has_already_settled(mock_db):
+    """F7: a park named a shell that had settled four seconds earlier, and the
+    late terminal frame bought a no-op wake turn. The id is dropped."""
+    turn = turns_db.enqueue_turn("s-drop", "user", prompt="hi")
+    _durable_task("s-drop", "settled", "completed", kind="shell")
+    _durable_task("s-drop", "still-going", "running", kind="shell")
+
+    with _runtime_env(
+        pump=_make_pump([{"type": "done", "metadata": {}}]),
+        bg_work=[{"id": "settled"}, {"id": "still-going"}],
+    ) as env:
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "parked"
+    assert turns_db.get_turn(turn["id"])["payload"]["task_ids"] == ["still-going"]
+    assert env["record_parked"].await_args.args[1] == ["still-going"]
+
+
+async def test_no_park_when_every_registry_id_has_already_settled(mock_db):
+    """Parking on nothing is the stuck-parked shape; if the gate's only ids are
+    all durably terminal the turn simply completes."""
+    turn = turns_db.enqueue_turn("s-nopark", "user", prompt="hi")
+    _durable_task("s-nopark", "settled", "completed", kind="shell")
+
+    with _runtime_env(
+        pump=_make_pump([{"type": "done", "metadata": {}}]),
+        bg_work=[{"id": "settled"}],
+    ) as env:
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"
+    env["record_parked"].assert_not_called()
+    env["start_idle"].assert_not_called()
+
+
+async def test_park_gate_falls_back_to_the_durable_subagent_rows(mock_db):
+    """F9: a turn ended end_turn with an Explore still running because the gate
+    read only the in-memory registry. The durable row parks it instead."""
+    turn = turns_db.enqueue_turn("s-durable", "user", prompt="hi")
+    _durable_task("s-durable", "explore-1", "running", kind="agent")
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "parked"
+    assert turns_db.get_turn(turn["id"])["payload"]["task_ids"] == ["explore-1"]
+    env["start_idle"].assert_called_once_with("s-durable")
+
+
+async def test_durable_park_arm_ignores_monitor_shells(mock_db):
+    """A Monitor shell can be a ``serves`` process meant to stay up; parking on
+    one would pin the session forever — the same exclusion fluid makes."""
+    turn = turns_db.enqueue_turn("s-serves", "user", prompt="hi")
+    _durable_task("s-serves", "dev-server", "running", kind="shell")
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])) as env:
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"
+    env["record_parked"].assert_not_called()
+
+
+async def test_turn_end_reconciles_the_engine_pending_set(mock_db):
+    """F1: the next park must name only work that is genuinely outstanding, so
+    turn end retires whatever the engine still counts pending and the app can
+    prove is over."""
+    turn = turns_db.enqueue_turn("s-reconcile", "user", prompt="hi")
+    reconcile = AsyncMock(return_value=["ghost"])
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+        with patch(
+            "app.core.pending_reconcile.reconcile_engine_pending", new=reconcile
+        ):
+            await session_runtime.SessionRuntime(turn).execute()
+
+    reconcile.assert_awaited_once_with("s-reconcile")
 
 
 async def test_turn_start_self_heal_settles_stale_park_when_no_bg_work(mock_db):
@@ -615,8 +744,10 @@ async def test_interrupt_honors_durable_stop_background_on_owning_runner(mock_db
         )
 
     assert state == "aborted"
-    # Same shell-sparing semantics as the WebSocket Stop that set the bit.
-    stop_all.assert_awaited_once_with("s9-bg", include_shells=False)
+    # Same semantics as the WebSocket Stop that set the bit (round 7): kill ALL
+    # of the session's work and latch the session stopped, HERE — this is the
+    # runner that owns the tasks the foreign WebSocket cannot see.
+    stop_all.assert_awaited_once_with("s9-bg", user_stop=True)
 
 
 async def test_interrupt_cancels_pending_prompts_before_signalling_the_sdk(mock_db):
@@ -1012,6 +1143,59 @@ async def test_task_notification_receipt_settles_the_card_and_latches(mock_db):
     assert rt._task_steers == {}
 
 
+async def test_failed_task_receipt_remains_recoverable(mock_db):
+    frames = _notification_frames()
+    rt = session_runtime.SessionRuntime(
+        {"session_id": "failed-task", "id": "failed-task-turn", "source": "user"}
+    )
+    entry = {"frames": frames, "task_ids": ["bg-1"]}
+    rt._task_steers["task-notify:failed"] = entry
+    recorder = _recorder_mock()
+    recorder.recording_failed = False
+
+    async def fail_recording(_frames):
+        recorder.recording_failed = True
+        rt._on_recorder_recording_failed()
+        return 0
+
+    recorder.record_task_terminal.side_effect = fail_recording
+    with patch("app.core.query_session_lifecycle.interrupt_session", new_callable=AsyncMock), \
+         patch("app.core.turn_scheduler.retire_task_terminals", new_callable=AsyncMock) as retire, \
+         patch("app.core.turn_scheduler.on_task_notification_delivered") as delivered, \
+         patch("app.core.turn_scheduler.on_task_notification_stranded", new_callable=AsyncMock) as stranded:
+        await rt._on_steer_delivered(recorder, {"steers": [{"id": "task-notify:failed"}]})
+        assert rt._abort_reason == "recording_failed"
+        assert rt._task_steers == {"task-notify:failed": entry}
+        retire.assert_not_awaited()
+        delivered.assert_not_called()
+        await rt._strand_task_steers()
+        stranded.assert_awaited_once_with("failed-task", frames, ["bg-1"])
+        await asyncio.sleep(0)
+
+
+async def test_failed_user_receipt_keeps_queue_without_legacy_duplicate(mock_db):
+    row = turns_db.enqueue_turn("failed-user", "user", prompt="follow-up")
+    rt = session_runtime.SessionRuntime(
+        {"session_id": "failed-user", "id": "failed-user-turn", "source": "user"}
+    )
+    recorder = _recorder_mock()
+
+    async def fail_recording(*args, **kwargs):
+        rt._on_recorder_recording_failed()
+        return False
+
+    recorder.record_steered_user_message = AsyncMock(side_effect=fail_recording)
+    with patch("app.core.query_session_lifecycle.interrupt_session", new_callable=AsyncMock), \
+         patch.object(rt, "_persist_user_message", new_callable=AsyncMock) as persist, \
+         patch.object(rt, "_absorb_delivered_row", new_callable=AsyncMock) as absorb:
+        await rt._on_steer_delivered(recorder, {"steers": [{"id": row["id"]}]})
+        assert rt._abort_reason == "recording_failed"
+        assert turns_db.get_turn(row["id"])["state"] == "queued"
+        persist.assert_not_awaited()
+        absorb.assert_not_awaited()
+        await asyncio.sleep(0)
+
+
 async def test_undelivered_task_notification_is_handed_back_at_finalize(mock_db):
     """fluid drops an unreceipted steer at turn end. A user's message survives
     that on its still-queued row; a notification has none, so the runtime hands
@@ -1069,3 +1253,162 @@ async def test_plain_turn_latches_nothing(mock_db):
 
     assert outcome == "completed"
     delivered.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Durable surface for an error terminal
+# ---------------------------------------------------------------------------
+
+def _seed_message_session(session_id):
+    """session_messages has a FK onto sessions, so a durable system row needs a
+    real session behind it. profile_id stays NULL for the same reason as
+    ``_seed_session`` above: this module routes a bare shim connection with no
+    seeded "default" profile."""
+    from app.db import database
+
+    database.create_session(session_id=session_id, profile_id=None)
+
+
+def _system_rows(session_id):
+    from app.db import sessions as sessions_db
+
+    return [
+        m for m in sessions_db.get_session_messages(session_id)
+        if m.get("role") == "system"
+    ]
+
+
+async def test_error_terminal_persists_a_durable_system_message(mock_db):
+    """The error frame reached the live WS and the turns row but never the
+    message list, so a reload showed the user's prompt and nothing else."""
+    _seed_message_session("se1")
+    turn = turns_db.enqueue_turn("se1", "user", prompt="do the thing")
+    pump = _make_pump([
+        {"type": "error", "message": "RuntimeError('client has been closed')"},
+    ])
+
+    with _runtime_env(pump=pump):
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "aborted"
+    (row,) = _system_rows("se1")
+    assert "client has been closed" in row["content"]
+    assert row["metadata"]["subtype"] == "error"
+    assert row["metadata"]["system_data"]["turn_id"] == turn["id"]
+
+
+async def test_a_wake_turns_error_message_says_it_was_automatic(mock_db):
+    _seed_message_session("se2")
+    turn = turns_db.enqueue_turn("se2", "unpark", prompt="<task-notification/>")
+
+    with _runtime_env(pump=_make_pump([{"type": "error", "message": "boom"}])):
+        await session_runtime.SessionRuntime(turn).execute()
+
+    (row,) = _system_rows("se2")
+    assert "started automatically" in row["content"]
+
+
+async def test_a_clean_turn_writes_no_error_row(mock_db):
+    _seed_message_session("se3")
+    turn = turns_db.enqueue_turn("se3", "user", prompt="hi")
+
+    with _runtime_env(pump=_make_pump([{"type": "done", "metadata": {}}])):
+        await session_runtime.SessionRuntime(turn).execute()
+
+    assert _system_rows("se3") == []
+
+
+# ---------------------------------------------------------------------------
+# Per-turn progress watchdog
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def _progress_timeout(seconds):
+    with patch.object(
+        session_runtime.settings, "turn_progress_timeout_seconds", seconds,
+        create=True,
+    ):
+        yield
+
+
+async def test_watchdog_terminalizes_a_turn_that_stops_producing_events(mock_db):
+    """A host tool call that never returns leaves the turn with no events at
+    all; the cell's own timeout cannot interrupt it and nothing above bounded
+    the turn, so a session sat 'running' for three hours."""
+    _seed_message_session("wd1")
+    turn = turns_db.enqueue_turn("wd1", "user", prompt="drive the browser")
+
+    async def _wedged_pump(**kwargs):
+        yield {"type": "tool_use", "name": "browser_eval"}
+        await asyncio.sleep(30)  # the host call that never comes back
+        yield {"type": "done", "metadata": {}}
+
+    with _runtime_env(pump=_wedged_pump), _progress_timeout(0.25):
+        outcome = await asyncio.wait_for(
+            session_runtime.SessionRuntime(turn).execute(), 10.0,
+        )
+
+    assert outcome == "aborted"
+    row = turns_db.get_turn(turn["id"])
+    assert row["stop_reason"] == "error"
+    assert "progress watchdog" in (row["error"] or "")
+    (message,) = _system_rows("wd1")
+    assert "progress watchdog" in message["content"]
+
+
+async def test_watchdog_leaves_a_turn_blocked_on_a_user_question_alone(mock_db):
+    """An AskUser round-trip is legitimately silent for as long as the person
+    takes; its deadline is user_question_timeout_seconds, not this one."""
+    _seed_message_session("wd2")
+    turn = turns_db.enqueue_turn("wd2", "user", prompt="ask me something")
+    answered = asyncio.Event()
+
+    async def _asking_pump(**kwargs):
+        yield {"type": "tool_use", "name": "AskUser"}
+        await answered.wait()
+        yield {"type": "done", "metadata": {}}
+
+    with _runtime_env(pump=_asking_pump), _progress_timeout(0.25):
+        with patch("app.core.interaction_wait.has_waiters", lambda sid: True):
+            task = asyncio.create_task(session_runtime.SessionRuntime(turn).execute())
+            # Six times the watchdog budget with no event at all — and the turn
+            # is still alive, because the silence is a person thinking.
+            await asyncio.sleep(1.5)
+            assert not task.done()
+            answered.set()
+            outcome = await asyncio.wait_for(task, 5.0)
+
+    assert outcome == "completed"
+    assert _system_rows("wd2") == []
+
+
+async def test_watchdog_does_not_fire_on_a_turn_that_keeps_producing_events(mock_db):
+    turn = turns_db.enqueue_turn("wd3", "user", prompt="a long but live turn")
+
+    async def _busy_pump(**kwargs):
+        for _ in range(12):
+            await asyncio.sleep(0.05)
+            yield {"type": "text", "text": "still here"}
+        yield {"type": "done", "metadata": {}}
+
+    with _runtime_env(pump=_busy_pump), _progress_timeout(0.25):
+        outcome = await asyncio.wait_for(
+            session_runtime.SessionRuntime(turn).execute(), 10.0,
+        )
+
+    assert outcome == "completed"
+
+
+async def test_watchdog_is_off_when_the_timeout_is_zero(mock_db):
+    turn = turns_db.enqueue_turn("wd4", "user", prompt="hi")
+
+    async def _slow_pump(**kwargs):
+        await asyncio.sleep(0.4)
+        yield {"type": "done", "metadata": {}}
+
+    with _runtime_env(pump=_slow_pump), _progress_timeout(0):
+        rt = session_runtime.SessionRuntime(turn)
+        outcome = await asyncio.wait_for(rt.execute(), 10.0)
+
+    assert outcome == "completed"
+    assert rt._progress_watchdog is None

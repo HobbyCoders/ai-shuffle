@@ -147,7 +147,15 @@ export async function runEval(session: Session, input: { code: string }): Promis
   }
 
   if (!outcome.ok) {
-    return errorResult(outcome.error ?? "eval failed", { stack: outcome.stack ?? "" });
+    // A page-side throw is usually about what the network returned, not about
+    // the code: `Response.json()` on an HTML sign-in page reads as "Unexpected
+    // end of JSON input" and says nothing about the 302 that caused it. The
+    // recorded responses carry the status and content-type that name it.
+    const recent = session.recentNetwork();
+    return errorResult(outcome.error ?? "eval failed", {
+      stack: outcome.stack ?? "",
+      ...(recent.length ? { recent_requests: recent } : {}),
+    });
   }
 
   const { text, truncated, fullChars } = capText(outcome.value ?? "undefined", EVAL_MAX_CHARS);

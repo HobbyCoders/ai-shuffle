@@ -5,7 +5,7 @@
  */
 
 import type { AuthStatus } from '$lib/api/client';
-import { getAuthStatus, login as apiLogin, logout as apiLogout, setup as apiSetup } from '$lib/api/auth';
+import { getAuthStatus, logout as apiLogout } from '$lib/api/auth';
 import { createSubscribers } from './store-utils';
 
 // ============================================
@@ -57,30 +57,6 @@ export const auth = {
 			return status;
 		} catch (e) {
 			_update(s => ({ ...s, loading: false, error: 'Failed to check auth status' }));
-			throw e;
-		}
-	},
-
-	async setup(username: string, password: string) {
-		_update(s => ({ ...s, loading: true, error: null }));
-		try {
-			await apiSetup(username, password);
-			const status = await getAuthStatus();
-			_update(s => ({ ...s, status, loading: false }));
-		} catch (e: any) {
-			_update(s => ({ ...s, loading: false, error: e.detail || 'Setup failed' }));
-			throw e;
-		}
-	},
-
-	async login(username: string, password: string) {
-		_update(s => ({ ...s, loading: true, error: null }));
-		try {
-			await apiLogin(username, password);
-			const status = await getAuthStatus();
-			_update(s => ({ ...s, status, loading: false }));
-		} catch (e: any) {
-			_update(s => ({ ...s, loading: false, error: e.detail || 'Login failed' }));
 			throw e;
 		}
 	},

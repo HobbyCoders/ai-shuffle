@@ -35,6 +35,25 @@ from app.core.session_pool import SessionPool, SessionState
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pressure", [None, {"connections_opened": 8, "waiting": 72,
+                                           "hold_seconds_total": 1.25}])
+async def test_collect_metrics_includes_db_pressure(monkeypatch, pressure):
+    import app.db.base as base
+    from app.core import resource_monitor as rm
+
+    monkeypatch.setattr(base, "pool_stats", lambda: {"in_use": 8, "idle": 0, "max": 8})
+    monkeypatch.setattr(base, "pressure_stats", lambda: pressure)
+    metrics = await rm._collect_metrics()
+    assert metrics["db_pool_in_use"] == 8
+    assert metrics["db_pool_max"] == 8
+    if pressure is None:
+        assert "db_pool_waiting" not in metrics
+    else:
+        for key, value in pressure.items():
+            assert metrics["db_pool_" + key] == value
+
+
 def _make_state(*, is_streaming: bool, streaming_age_seconds: float = 0.0,
                 connected: bool = True, alive: bool = True) -> SessionState:
     """Build a SessionState backed by a mock adapter.

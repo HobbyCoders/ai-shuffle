@@ -101,15 +101,21 @@ class TestAuthenticateWebSocket:
     """Tests for WebSocket authentication."""
 
     @pytest.fixture
-    def mock_websocket(self):
-        """Create a mock WebSocket object."""
+    def mock_websocket(self, monkeypatch):
+        """Model explicit localhost recovery with automatic LAN access disabled."""
+        from app.core.config import settings
+        monkeypatch.setattr(settings, 'shuffle_local_access', False)
         ws = AsyncMock()
         ws.cookies = {}
+        ws.scope = {'type': 'websocket', 'shuffle.ingress': 'local'}
+        ws.headers = {'host': 'localhost', 'origin': 'http://localhost'}
+        ws.client = MagicMock(host='127.0.0.1')
+        ws.url = MagicMock(scheme='ws')
         return ws
 
     @pytest.mark.asyncio
     async def test_authenticate_with_valid_session_token(self, mock_websocket):
-        """Should authenticate with valid admin session token."""
+        """A valid console recovery session works only on explicit loopback ingress."""
         from app.api.websocket import authenticate_websocket
 
         # authenticate_websocket lives in app.api.ws_auth and reads `database`
@@ -128,18 +134,15 @@ class TestAuthenticateWebSocket:
         """A live shc_ controller token authenticates without becoming an API user."""
         from app.api.websocket import authenticate_websocket
 
-        with patch("app.api.ws_auth.database") as mock_db:
-            mock_db.get_paired_client_by_session_hash.return_value = {
-                "id": "paired-client-1",
-                "device_name": "Tablet",
-            }
+        client = {"id": "paired-client-1", "device_name": "Tablet", "scopes": ["controller"]}
+        with patch("app.api.auth.get_paired_client_from_token", return_value=client),                 patch("app.core.mobile_tool_identity.pairing.get_paired_client_by_session_hash", return_value=client),                 patch("app.core.account_hub.check_paired_client"),                 patch("app.db.mobile_hub.ownership", return_value=None):
             is_auth, api_user = await authenticate_websocket(
                 mock_websocket, "shc_controller-token"
             )
 
         assert is_auth is True
         assert api_user is None
-        mock_db.touch_paired_client.assert_called_once_with("paired-client-1")
+        assert mock_websocket.state.mobile_tool_principal["kind"] == "paired"
 
     @pytest.mark.asyncio
     async def test_authenticate_with_api_key_session(self, mock_websocket):
@@ -176,7 +179,7 @@ class TestAuthenticateWebSocket:
 
     @pytest.mark.asyncio
     async def test_authenticate_with_cookie_session(self, mock_websocket):
-        """Should authenticate using session cookie."""
+        """A same-origin console recovery cookie works on explicit loopback ingress."""
         from app.api.websocket import authenticate_websocket
 
         mock_websocket.cookies = {"session": "cookie-session-token"}
@@ -1437,10 +1440,16 @@ class TestAuthenticateWebSocketEdgeCases:
     """Additional edge case tests for authentication."""
 
     @pytest.fixture
-    def mock_websocket(self):
-        """Create a mock WebSocket object."""
+    def mock_websocket(self, monkeypatch):
+        """Model explicit localhost recovery with automatic LAN access disabled."""
+        from app.core.config import settings
+        monkeypatch.setattr(settings, 'shuffle_local_access', False)
         ws = AsyncMock()
         ws.cookies = {}
+        ws.scope = {'type': 'websocket', 'shuffle.ingress': 'local'}
+        ws.headers = {'host': 'localhost', 'origin': 'http://localhost'}
+        ws.client = MagicMock(host='127.0.0.1')
+        ws.url = MagicMock(scheme='ws')
         return ws
 
     @pytest.mark.asyncio

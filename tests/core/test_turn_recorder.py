@@ -37,6 +37,64 @@ from app.db import sessions as sessions_db
 
 SID = "sess-v2"
 
+@pytest.mark.parametrize("phase", ["start", "timer", "done", "close", "usage"])
+@pytest.mark.parametrize("callback_raises", [False, True])
+async def test_recording_failure_latches_without_retry(mock_db, monkeypatch, phase, callback_raises):
+    from unittest.mock import Mock
+
+    _mk_session()
+    rec = await _recorder()
+    if phase != "start":
+        await rec.start("hello")
+    if phase in ("timer", "close"):
+        await rec.on_event({"type": "stream_delta", "delta_type": "text", "content": "pending"})
+    if phase == "usage":
+        await rec.on_event({"type": "done", "metadata": {}})
+        rec._pending_usage = {"tokens_in": 10}
+    callback = Mock(side_effect=RuntimeError("owner failed") if callback_raises else None)
+    rec.on_recording_failed = callback
+    append = Mock(side_effect=RuntimeError("commit outcome unknown"))
+    monkeypatch.setattr(se, "append_events", append)
+    if phase == "start":
+        await rec.start("hello")
+    elif phase == "timer":
+        await asyncio.wait_for(rec._flush_task, 1)
+    elif phase == "done":
+        await rec.on_event({"type": "done", "metadata": {}})
+    else:
+        await rec.close()
+    assert rec.recording_failed
+    for _ in range(100):
+        await rec.on_event({"type": "stream_delta", "delta_type": "text", "content": "ignored"})
+        await rec.on_event({"type": "turn_usage", "usage": {"tokens_in": 20}})
+    assert not await rec.record_steered_user_message("ignored")
+    assert await rec.record_task_terminal([{"task_id": "task", "status": "completed"}]) == 0
+    await rec.record_empty_turn_discard()
+    await rec.start("ignored")
+    await rec.close()
+    await rec.close()
+    assert append.call_count == 1
+    callback.assert_called_once_with()
+    assert not rec._delta_buffers
+    assert rec._pending_usage is None
+    assert rec._flush_task is None
+    assert rec._renew_task is None
+    assert rec.recording_failed_dropped > 0
+    if phase != "usage":
+        assert "turn.completed" not in _types()
+
+
+async def test_task_terminal_failed_append_returns_zero(mock_db, monkeypatch):
+    from unittest.mock import Mock
+
+    _mk_session()
+    rec = await _recorder()
+    monkeypatch.setattr(se, "append_events", Mock(side_effect=RuntimeError("unavailable")))
+    assert await rec.record_task_terminal([{"task_id": "task", "status": "completed"}]) == 0
+    assert rec.recording_failed
+    await rec.close()
+
+
 
 def _mk_session(session_id: str = SID, v2: bool = True) -> None:
     # `v2` is vestigial — create_session always stamps v2_stream TRUE now.
@@ -1467,6 +1525,55 @@ async def test_record_voice_exchange_does_not_retitle_a_named_session(mock_db):
     sessions_db.create_session(SID, "default", title="Release prep")
     await tr.record_voice_exchange(SID, "hello", "hi")
     assert sessions_db.get_session(SID)["title"] == "Release prep"
+
+
+async def test_record_voice_exchange_stores_a_bridge_note_as_system(mock_db):
+    # A backend-injected note ("[call started]", "[agent update]") is not the
+    # user's words: it persists as a tagged ``system`` row so it cannot title
+    # the session or come back as history on the next call.
+    sessions_db.create_session(SID, "default", title=tr.VOICE_PLACEHOLDER_TITLE)
+    await tr.record_voice_exchange(
+        SID, None, "Welcome back — we were on the release checklist.",
+        system_text="[call started] The user just joined the call.",
+    )
+
+    rows = _rows()
+    assert [r["event_type"] for r in rows] == [
+        "turn.started", "message.user", "message.assistant", "turn.completed",
+    ]
+    assert rows[1]["payload"]["source"] == tr.VOICE_SYSTEM_NOTE_SOURCE
+
+    messages = sessions_db.get_session_messages(SID)
+    assert [(m["role"], m["content"]) for m in messages] == [
+        ("system", "[call started] The user just joined the call."),
+        ("assistant", "Welcome back — we were on the release checklist."),
+    ]
+    assert messages[0]["metadata"] == {"source": tr.VOICE_SYSTEM_NOTE_SOURCE}
+    assert sessions_db.get_session(SID)["title"] == tr.VOICE_PLACEHOLDER_TITLE
+
+
+async def test_record_voice_exchange_never_titles_from_a_machine_note(mock_db):
+    # Belt-and-braces: both audited voice sessions were titled "[call started]
+    # The user just joined the call…" because the greeting reached the title
+    # deriver as user text.
+    sessions_db.create_session(SID, "default", title=tr.VOICE_PLACEHOLDER_TITLE)
+    await tr.record_voice_exchange(
+        SID, "[call started] The user just joined the call.", "hello",
+    )
+    assert sessions_db.get_session(SID)["title"] == tr.VOICE_PLACEHOLDER_TITLE
+
+
+async def test_record_voice_exchange_writes_a_note_only_exchange(mock_db):
+    _mk_session()
+    turn_id = await tr.record_voice_exchange(
+        SID, None, None, system_text="[agent update] Worker 'x' finished.",
+    )
+    assert turn_id is not None
+    # The assistant event is unconditional (same as a user-only exchange).
+    assert _types() == [
+        "turn.started", "message.user", "message.assistant", "turn.completed",
+    ]
+    assert _rows()[1]["payload"]["source"] == tr.VOICE_SYSTEM_NOTE_SOURCE
 
 
 async def test_record_voice_exchange_never_raises(mock_db, monkeypatch):

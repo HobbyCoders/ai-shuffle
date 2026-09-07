@@ -108,8 +108,8 @@ async def get_current_user(request: Request) -> tuple[Optional[str], Optional[st
     Resolve (user_id, api_key_id, is_admin) for the current request.
 
     Consolidated onto the centralized ``app.api.auth`` primitives:
-      - cookie sessions are validated with ``auth_service.validate_session``
-        (same path require_auth/require_admin use)
+      - paired sessions use the same live managed-owner check as require_admin;
+        ordinary cookies use ``auth_service.validate_session``
       - ``aih_`` bearer keys are hashed with ``hash_api_key`` and looked up
         via ``get_api_user_by_key_hash`` (identical to require_auth)
 
@@ -126,19 +126,31 @@ async def get_current_user(request: Request) -> tuple[Optional[str], Optional[st
     safe — they are already-parsed attributes of the Request, not I/O.
     """
     def _resolve() -> tuple[Optional[str], Optional[str], bool]:
+        from app.core import owner_auth
+        if owner_auth.local_access(request):
+            return (owner_auth.preference_identity(), None, True)
         user_id: Optional[str] = None
         api_key_id: Optional[str] = None
         is_admin = False
 
-        # Cookie session -> admin (canonical validation)
+        # Preserve paired device identity while recognizing this worker's owner.
         token = _auth.get_session_token(request)
-        if token and _auth.auth_service.validate_session(token):
-            is_admin = True
-            user_id = "admin"
+        if token:
+            paired = _auth.get_paired_client_from_token(token, touch=False)
+            if paired:
+                return (paired.get('device_name') or 'paired-device', paired['id'],
+                        paired.get('account_owner_admin') is True)
+            if owner_auth.loopback_request(request) and _auth.auth_service.validate_session(token):
+                is_admin = True
+                user_id = "admin"
 
         # Bearer token: aih_ API key (canonical) or opaque API-key session
         api_key = _auth.get_api_key(request)
         if api_key:
+            paired = _auth.get_paired_client_from_token(api_key, touch=False)
+            if paired:
+                return (paired.get('device_name') or 'paired-device', paired['id'],
+                        paired.get('account_owner_admin') is True)
             if api_key.startswith("aih_"):
                 api_user = database.get_api_user_by_key_hash(_auth.hash_api_key(api_key))
                 if api_user:

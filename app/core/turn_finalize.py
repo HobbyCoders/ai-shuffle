@@ -9,6 +9,9 @@ DURABLE write a finished turn owes the session row:
    session row; otherwise clear it. This is what lets a later boot tell
    "parked awaiting unpark" apart from idle (boot reconcile force-clears
    stale markers, since no background work survives a restart).
+   :func:`clear_parked_marker_if_idle` is the between-turns half of the same
+   write: the last worker can settle with no wake behind it, and then there is
+   no next turn end to do the clearing.
 
 2. Branch resync — the session row's branch was written once, at intake, and
    never again, so an agent that ran ``git checkout -b`` in its own worktree
@@ -130,15 +133,16 @@ def resync_session_branch_from_head(session_id: str) -> Optional[Tuple[str, str]
     return (session_branch or recorded, head)
 
 
-async def persist_turn_end_state(session_id: str) -> None:
-    """Persist the durable end-of-turn state for ``session_id``. Never raises."""
-    # 1. Durable parked marker (set or clear).
+async def _write_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
+    """Write ``sessions.parked_task_kind`` and broadcast the change.
+
+    Shared by the turn-end write and the between-turns clear so both produce
+    exactly the same row update and the same ``session.updated`` broadcast.
+    Returns whether the row actually changed. Never raises.
+    """
     try:
-        from app.core.task_registry import task_registry
         from app.db import database
 
-        work = task_registry.get_active_background_work(session_id)
-        kind = (work[0].get("kind") or "agent") if work else None
         updated = await asyncio.to_thread(
             database.set_session_parked_task_kind, session_id, kind
         )
@@ -155,6 +159,62 @@ async def persist_turn_end_state(session_id: str) -> None:
                     )
             except Exception:
                 logger.debug("broadcasting parked_task_kind failed", exc_info=True)
+        return bool(updated)
+    except Exception:
+        logger.debug("persisting parked_task_kind failed", exc_info=True)
+        return False
+
+
+async def clear_parked_marker_if_idle(session_id: str) -> bool:
+    """Drop ``parked_task_kind`` once nothing is left to park on. Never raises.
+
+    The marker is written at turn end and, until now, cleared only by the NEXT
+    turn's end or by a boot reconcile. When the last background worker settles
+    BETWEEN turns and no wake fires — a worker that died with its wake already
+    suppressed, or one killed by a sweep — there is no next turn, so the marker
+    stayed ``agent`` for as long as the process lived. Two sessions in the
+    2026-09-05 audit sat that way with both their tasks terminal;
+    ``lifecycle_state._detect_drift`` already names the state
+    (``parked-marker-while-idle``) and only ever logged it.
+
+    Deliberately CLEAR-ONLY. Setting the marker is the turn's decision — it
+    knows about launches that have no registry record yet — and a terminal-task
+    callback that could also SET it would race a turn that is still running.
+    Returns True only when a marker was actually removed.
+    """
+    if not session_id:
+        return False
+    try:
+        from app.core.task_registry import task_registry
+
+        if task_registry.get_active_background_work(session_id):
+            return False
+        from app.db import database
+
+        session = await asyncio.to_thread(database.get_session, session_id)
+        if not session or not session.get("parked_task_kind"):
+            return False
+    except Exception:
+        logger.debug("parked-marker idle check failed", exc_info=True)
+        return False
+    cleared = await _write_parked_task_kind(session_id, None)
+    if cleared:
+        logger.info(
+            "turn_finalize: cleared the parked marker on %s — its last "
+            "background task settled between turns", session_id,
+        )
+    return cleared
+
+
+async def persist_turn_end_state(session_id: str) -> None:
+    """Persist the durable end-of-turn state for ``session_id``. Never raises."""
+    # 1. Durable parked marker (set or clear).
+    try:
+        from app.core.task_registry import task_registry
+
+        work = task_registry.get_active_background_work(session_id)
+        kind = (work[0].get("kind") or "agent") if work else None
+        await _write_parked_task_kind(session_id, kind)
     except Exception:
         logger.debug("persisting parked_task_kind failed", exc_info=True)
 

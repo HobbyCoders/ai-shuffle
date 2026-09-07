@@ -868,6 +868,11 @@ async def test_hub_starts_screencast_and_stops_on_last_viewer(monkeypatch):
     await _wait_for(lambda: "Page.startScreencast" in fake.methods())
     assert "target-abc" in fake.uri
     assert "Page.enable" in fake.methods()
+    # Chrome only paints the foreground tab: without this the panel reaches
+    # "live" and then never receives a frame.
+    methods = fake.methods()
+    assert "Page.bringToFront" in methods
+    assert methods.index("Page.bringToFront") < methods.index("Page.startScreencast")
     sc = next(m for m in fake.sent if m["method"] == "Page.startScreencast")
     assert sc["params"] == {
         "format": "jpeg",
@@ -983,6 +988,58 @@ async def test_same_target_updates_do_not_restart_live_screencast(monkeypatch):
     assert not fakes[0].closed
 
     await browser_stream.detach_viewer(sid, viewer)
+
+
+async def test_resize_refreshes_stalled_capture_for_both_viewers(monkeypatch):
+    sid = "hub-resize"
+    registry.register(sid, "target-1", "tab-1", "http://a/")
+
+    class StalledCapture(FakeUpstream):
+        async def send(self, text):
+            await super().send(text)
+            if self.methods().count("Page.startScreencast") == 2 and (
+                self.sent[-1]["method"] == "Page.startScreencast"
+            ):
+                self.feed_frame("resized", {"deviceWidth": 844, "deviceHeight": 390})
+
+    fake = StalledCapture()
+    opened = []
+
+    async def opener(uri):
+        opened.append(uri)
+        return fake
+
+    monkeypatch.setattr(browser_stream, "_open_upstream", opener)
+    sockets = [FakeViewerWS(), FakeViewerWS()]
+    hub, first = await browser_stream.attach_viewer(sid, sockets[0])
+    _, second = await browser_stream.attach_viewer(sid, sockets[1])
+    try:
+        await _wait_for(lambda: "Page.startScreencast" in fake.methods())
+        fake.feed_frame("old", {"deviceWidth": 390, "deviceHeight": 844})
+        await _wait_for(
+            lambda: all(any(m.get("data") == "old" for m in ws.sent) for ws in sockets)
+        )
+        # The target reports its resize but does not produce another frame
+        # until capture is restarted, as observed with real static Chromium.
+        fake._incoming.put_nowait(
+            json.dumps({"method": "Page.frameResized", "params": {}})
+        )
+        await _wait_for(
+            lambda: all(any(m.get("data") == "resized" for m in ws.sent) for ws in sockets)
+        )
+        assert len(opened) == 1
+        assert not fake.closed
+        assert fake.methods().count("Page.stopScreencast") == 1
+        assert fake.methods().count("Page.startScreencast") == 2
+        assert fake.methods().count("Page.bringToFront") == 1
+        assert hub._attached_target_id == "target-1"
+        for ws in sockets:
+            frame = next(m for m in ws.sent if m.get("data") == "resized")
+            assert frame["metadata"]["deviceWidth"] == 844
+            assert frame["metadata"]["deviceHeight"] == 390
+    finally:
+        await browser_stream.detach_viewer(sid, first)
+        await browser_stream.detach_viewer(sid, second)
 
 
 async def test_upstream_death_exhausts_retries_then_no_page(monkeypatch):

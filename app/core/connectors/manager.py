@@ -899,17 +899,10 @@ class ConnectorManager:
         for key in sensitive:
             value = encrypted.get(key)
             if value and isinstance(value, str) and not encryption.is_encrypted(value):
-                if encryption.is_encryption_ready():
-                    try:
-                        encrypted[key] = encryption.encrypt_value(value)
-                    except Exception as e:
-                        logger.error(f"Failed to encrypt connector field '{key}': {e}")
-                else:
-                    raise ValueError(
-                        f"Cannot store connector config field '{key}': "
-                        "encryption is not available. Set the ENCRYPTION_KEY "
-                        "environment variable before saving sensitive configuration."
-                    )
+                try:
+                    encrypted[key] = encryption.encrypt_value(value)
+                except Exception:
+                    raise ValueError("Cannot store connector secret: credential storage requires local recovery.") from None
         return encrypted
 
 

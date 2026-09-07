@@ -78,7 +78,7 @@ jobs:
         # --timeout=120 bounds the rare hard-wedge per test: a wedged run fails
         # in ~2 minutes with the hung test named, instead of billing the full
         # 20-minute job timeout with no diagnosis.
-        run: python -m pytest tests/api tests/core tests/db tests/middleware tests/contract -o addopts="" -q -p no:cacheprovider --timeout=120
+        run: python -m pytest tests/api tests/core tests/db tests/middleware tests/contract tests/performance -o addopts="" -q -p no:cacheprovider --timeout=120
 
       - name: Packaging and backup regression checks
         run: python -m pytest tests/test_packaging_audit.py tests/test_run_local_supervisor.py tests/test_chrome_supervisor.py -o addopts="" -q --timeout=120

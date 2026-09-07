@@ -156,7 +156,12 @@ def test_an_inline_failure_is_reported_as_one(mock_db, fake_shell):
         {"command": "pytest -q", "wait_seconds": 30}
     )))
 
-    assert body["success"] is False
+    # A SUCCESSFUL tool result carrying a failed command: `success: false`
+    # sets isError, which the code-execution runner raises on, and a red test
+    # suite then took the whole cell (and its queued calls) with it.
+    assert body["success"] is True
+    assert body["failed"] is True
+    assert body["exit_code"] == 1
     assert body["status"] == "error"
     assert "FAILED tests/test_a.py::test_b" in body["output"]
 

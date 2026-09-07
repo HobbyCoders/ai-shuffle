@@ -66,9 +66,11 @@ The application starts on `http://localhost:8000` by default.
 
 On first launch, you'll be directed to the setup page where you:
 
-1. **Create an admin account** — Set a username and password
-2. **Authenticate Claude** — Connect your Anthropic account via OAuth
-3. **Configure workspace** — Set the default working directory for projects
+1. **Choose a workspace** — Set the working directory for projects.
+2. **Connect development tools** — Connect Claude or add another supported model provider. GitHub setup is optional.
+3. **Configure providers** — Review the models and credentials available to your worker.
+
+Local setup and trusted local-network use require no username, password, or Shuffle account. For optional remote access, open **Devices → Remote access** and link the worker to your account in the browser or Android app. Shuffle creates the managed tunnel automatically. Remote browsers sign in with the account that owns that worker.
 
 ## Configuration
 
@@ -78,6 +80,7 @@ On first launch, you'll be directed to the setup page where you:
 |----------|---------|-------------|
 | `HOST` | `0.0.0.0` | Server bind address |
 | `PORT` | `8000` | Server port |
+| `SHUFFLE_LOCAL_ACCESS` | `true` | Allow owner access from direct trusted local/LAN requests on the local listener. Use `false` during an existing deployment's protected-ingress upgrade. |
 | `CORS_ORIGINS` | `http://localhost:8000,http://127.0.0.1:8000` | Comma-separated allowed CORS origins (use `*` for development only) |
 | `POSTGRES_PASSWORD` | _(required)_ | PostgreSQL password. No default — the server refuses to start without it. Collected by `python run_local.py --setup` on local installs. |
 | `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_DB` | `localhost`¹ / `5432` / `ai_shuffle` / `ai_shuffle` | Remaining PostgreSQL connection pieces — the app assembles the connection URL itself. ¹`postgres` (the compose service) in Docker. |
@@ -87,7 +90,7 @@ On first launch, you'll be directed to the setup page where you:
 
 For production deployments, consider:
 
-- Running behind a reverse proxy (nginx, Caddy) for HTTPS
+- Using Shuffle's managed remote connection, or directing a custom HTTPS reverse proxy to the protected loopback listener on port 8001 in the same network namespace. Never expose the local owner listener through a public proxy or tunnel.
 - Setting specific CORS origins instead of `*`
 - Using a process manager (systemd, PM2) for auto-restart
 - Reviewing security settings (rate limiting, audit logging)
@@ -102,7 +105,9 @@ rm -rf app/static && cp -r frontend/build app/static
 python -m app.main
 ```
 
-The database migrations run automatically on startup.
+Database schema migrations run automatically on startup. Before upgrading a password-encrypted installation, stop all writers and back up both PostgreSQL and the persistent data directory. Adopt its existing encryption key using the legacy startup password or the private `python -m scripts.credential_keys adopt` prompt, then verify `python -m scripts.credential_keys status` reports ready. Browser sign-in is not an encryption-unlock step.
+
+For an existing managed tunnel, start the new build with `SHUFFLE_LOCAL_ACCESS=false`, verify its protected port 8001 and public remote authorization, then enable local access. Preserve persistent credential keys and remove the legacy password from configuration after successful adoption and restart verification. The repository's [local-access rollout](https://github.com/HobbyCoders/ai-shuffle/blob/main/docs/LOCAL_ACCESS.md) and [credential recovery guide](https://github.com/HobbyCoders/ai-shuffle/blob/main/docs/credential-key-recovery.md) describe the full migration and backup requirements.
 
 > **Always rebuild the frontend when you update the backend.** The backend
 > serves the SPA from `app/static`, so a `git pull` that changes API routes but

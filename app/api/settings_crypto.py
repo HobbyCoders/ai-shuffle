@@ -38,16 +38,10 @@ def get_decrypted_api_key(setting_name: str) -> Optional[str]:
 def set_encrypted_api_key(setting_name: str, api_key: str) -> None:
     """
     Encrypt and store an API key in the database.
-    If encryption is not ready, stores as plaintext (will be encrypted on next admin login).
+    Locked or unavailable server storage must never downgrade to plaintext.
     """
-    if encryption.is_encryption_ready():
-        encrypted = encryption.encrypt_value(api_key)
-        database.set_system_setting(setting_name, encrypted)
-    else:
-        # Fallback to plaintext if encryption not ready
-        # This will be encrypted when admin logs in
-        logger.warning(f"Storing {setting_name} as plaintext - encryption key not loaded")
-        database.set_system_setting(setting_name, api_key)
+    encrypted = encryption.encrypt_value(api_key)
+    database.set_system_setting(setting_name, encrypted)
 
 
 def mask_api_key(key: str) -> str:

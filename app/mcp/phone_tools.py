@@ -107,12 +107,8 @@ PUSH_SECURITY_MAP = {
 # ============================================================================
 
 async def _get_default_device() -> Optional[Dict[str, Any]]:
-    """Get the default (most recently active) device."""
-    devices = await mobile_device_manager.list_devices(active_only=True)
-    if not devices:
-        return None
-    # Return most recently seen device (list is already sorted by last_seen)
-    return devices[0]
+    """Legacy unscoped device selection is disabled; use AndroidDevices/AndroidAction."""
+    return None
 
 
 async def _wait_for_action_completion(

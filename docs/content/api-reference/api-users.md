@@ -16,6 +16,12 @@ API users provide authentication for external integrations, connectors, and auto
 - Optional project and profile restrictions
 - Rate limits independent from admin session
 
+API users are connector/application credentials, not human sign-in accounts.
+They cannot become administrators, even when a request arrives over the trusted
+local network. The administration examples below use direct localhost owner
+access on an enabled local listener. Remote administration uses the owner's
+authenticated browser session instead.
+
 ## API User CRUD
 
 ### GET /api/v1/api-users
@@ -25,8 +31,7 @@ List all API users.
 **Auth:** Admin only
 
 ```bash
-curl http://localhost:8000/api/v1/api-users \
-  -H "Authorization: Bearer aih_admin_key"
+curl http://localhost:8000/api/v1/api-users
 ```
 
 **Response:**
@@ -52,7 +57,7 @@ Create a new API user. Returns the plaintext API key **once** — it cannot be r
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/api-users \
-  -H "Authorization: Bearer aih_admin_key" \
+  -H "Origin: http://localhost:8000" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "CI/CD Pipeline",
@@ -94,7 +99,7 @@ Update an API user's name or restrictions.
 
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/api-users/usr_abc123 \
-  -H "Authorization: Bearer aih_admin_key" \
+  -H "Origin: http://localhost:8000" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Updated Name",
@@ -118,7 +123,7 @@ Generate a new API key for the user, invalidating the old one.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/api-users/usr_abc123/rotate-key \
-  -H "Authorization: Bearer aih_admin_key"
+  -H "Origin: http://localhost:8000"
 ```
 
 **Response:**

@@ -91,7 +91,9 @@ def _monitor_description() -> str:
         "`gh pr checks <PR> --watch --fail-fast`, which blocks until the "
         "checks settle. Pass wait_seconds for work that will probably be "
         "quick: if it finishes inside the wait you get the result right here "
-        "and nothing parks at all.\n"
+        "and nothing parks at all. A non-zero exit comes back as an ordinary "
+        "result with failed: true and exit_code — a failing test run is an "
+        "answer, not a tool error, and nothing is raised.\n"
         "\n"
         "The shell survives the user pressing Stop — a server started here "
         "keeps running until TaskStop, the task's x button, or the session "
@@ -120,6 +122,14 @@ def _err(message: str, **extra: Any) -> Dict[str, Any]:
 #: session, so a result where everything is still running has nothing in it.
 _PARK_NUDGE = "all tasks still running — park; you will be woken on completion."
 
+#: Attached when the task belongs to a worker this session dispatched. It is
+#: readable — that is the point — but its completion wakes the WORKER, not the
+#: reader, so the park nudge above must never ride along with it.
+_WORKER_TASK_SCOPE_NOTE = (
+    "this task belongs to a worker session you dispatched. You can read it, "
+    "but its completion does NOT wake you — do not park waiting for it."
+)
+
 
 # Bound GetAppErrors output on the server, including repeated stack traces and the serialized envelope. Tool-
 # description guidance alone cannot guarantee the response size.
@@ -136,6 +146,41 @@ _APP_ERROR_LEVELS = {
     "ERROR": ["ERROR", "CRITICAL"],
     "WARNING": ["WARNING", "ERROR", "CRITICAL"],
 }
+
+
+# ── GetAppLogs output bounds ─────────────────────────────────────────────────
+#
+# The ring buffer behind ``GET /api/v1/logs`` holds ~5000 formatted lines. The
+# endpoint is admin-cookie-only, which a Bearer key does not satisfy, so an
+# audited session that needed INFO logs spent user round-trips and needless money
+# driving a browser through a Cloudflare login to read them. Same buffer, same
+# filters, in-process — with the same server-side bounds GetAppErrors uses,
+# because a full-text log is the easiest way there is to fill a context window.
+_APP_LOGS_DEFAULT_LIMIT = 50
+_APP_LOGS_MAX_LIMIT = 300
+_APP_LOGS_MAX_CHARS = 20_000
+_APP_LOGS_MAX_LINE_CHARS = 2_000
+
+#: Levels ``GetAppLogs`` will filter on. Exact match, not a floor: the buffer
+#: stores level names, and "show me the INFO lines" is the actual request.
+_APP_LOG_LEVELS = frozenset(
+    {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+)
+
+
+def _log_record_after(record: Any, cutoff: datetime) -> bool:
+    """Whether a ring-buffer record is newer than ``cutoff``.
+
+    Unparseable timestamps are KEPT: dropping a line because its stamp did not
+    parse would silently narrow an investigation.
+    """
+    try:
+        stamp = datetime.fromisoformat(str(record.timestamp).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return True
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp >= cutoff
 
 
 def _clip(text: Any, limit: int) -> Any:
@@ -226,8 +271,14 @@ def _agent_report_fields(task_id: str, record: Dict[str, Any]) -> Dict[str, Any]
     The stored path is preferred; ``final_turn_outcome`` is the fallback for
     workers that completed BEFORE the path was recorded. Never raises — a
     failure here degrades TaskGet to what it already returned.
+
+    ``report_path`` is ALWAYS in the returned dict, ``None`` when there is no
+    readable file. It used to appear only when the file read succeeded, so a
+    report whose worktree had been removed came back with ``report_head`` and
+    no path at all — and the caller's ``j['report_path']`` raised a KeyError
+    that aborted its whole code cell.
     """
-    fields: Dict[str, Any] = {}
+    fields: Dict[str, Any] = {"report_path": None}
     try:
         from app.core.task_dispatch import SYNC_REPORT_HEAD_CHARS
 
@@ -320,6 +371,20 @@ class _BackgroundTask:
 _background_tasks: Dict[str, _BackgroundTask] = {}
 _BACKGROUND_LINE_LIMIT = 5000  # avoid unbounded growth
 
+#: How much the output reader pulls off the pipe per read. Chunked on purpose:
+#: ``StreamReader.readline()`` raises ``ValueError`` (from
+#: ``LimitOverrunError``) on a line longer than its 64 KiB limit AND discards
+#: the buffered chunk, which killed the reader outright — a live production
+#: occurrence, after which the task's output stalled while its process kept
+#: running and the task looked stuck. Reading chunks and splitting lines here
+#: has no such limit.
+_READ_CHUNK_BYTES = 64 * 1024
+
+#: Longest single line kept intact. A minified bundle, a one-line JSON dump or
+#: a progress bar with no newline is chopped into pieces of this size rather
+#: than buffered forever.
+_MAX_LINE_BYTES = 256 * 1024
+
 # Terminal statuses the output reader must not overwrite: each was written by a
 # path that knows more than an exit code does (a deliberate stop, or the
 # monitor watcher's outcome-derived settle).
@@ -345,8 +410,105 @@ def is_background_shell_running(task_id: str) -> bool:
     return bool(task and task.is_running())
 
 
+def _session_in_caller_lineage(
+    caller_session_id: Optional[str], owner_session_id: Optional[str]
+) -> bool:
+    """True when ``owner_session_id`` is a worker the caller dispatched.
+
+    Directly or transitively: a grandchild's task is still the caller's work.
+    Reuses ``task_dispatch.caller_chain`` — the same upward walk the dispatcher
+    uses for depth and admission — so there is one definition of "my lineage".
+    Never raises: an unresolvable chain is not a lineage.
+    """
+    if not caller_session_id or not owner_session_id:
+        return False
+    if caller_session_id == owner_session_id:
+        return True
+    try:
+        from app.core.task_dispatch import caller_chain
+
+        rows, root_id, _depth = caller_chain(owner_session_id)
+    except Exception:  # noqa: BLE001 — scoping must never fail a read
+        logger.debug("lineage check failed for %s", owner_session_id, exc_info=True)
+        return False
+    ancestors = {row.get("id") for row in (rows or []) if isinstance(row, dict)}
+    ancestors.add(root_id)
+    return caller_session_id in ancestors
+
+
+def _resolve_task_scope(
+    task_id: str, session_id: Optional[str]
+) -> "tuple[Optional[_BackgroundTask], Optional[str], Optional[str]]":
+    """``(shell, owner_session_id, relation)`` for a task id this session named.
+
+    ``relation`` is ``"own"``, ``"lineage"`` (a worker this session dispatched,
+    at any depth) or ``"foreign"``; ``None`` when the id is unknown here.
+
+    The leak this closes: ``_background_tasks`` is a process-global dict, and
+    both task tools read it with no session check. An audited parent asked
+    ``TaskGet`` about a task id its WORKER had named, got another session's
+    live shell back — with "all tasks still running — park; you will be woken
+    on completion" attached — parked, was never woken (it was subscribed to
+    nothing), and on its own unrelated wake found the task reaped and re-ran
+    the build by hand. Reading a worker's task is legitimate; being told you
+    will be woken by it is not.
+    """
+    shell = _background_tasks.get(task_id)
+    owner = shell.session_id if shell is not None else None
+    if shell is None:
+        # No live shell. It may still be a task registered under a worker
+        # session in this caller's lineage (an agent task, or a shell whose
+        # process is gone but whose record survives).
+        for candidate in _sessions_holding_task(task_id):
+            if candidate == session_id:
+                return None, candidate, "own"
+            if _session_in_caller_lineage(session_id, candidate):
+                return None, candidate, "lineage"
+            owner = owner or candidate
+        return None, owner, ("foreign" if owner else None)
+    if owner is None or session_id is None or owner == session_id:
+        # A module-level spawn (no session) has no scope to violate.
+        return shell, owner, "own"
+    if _session_in_caller_lineage(session_id, owner):
+        return shell, owner, "lineage"
+    return None, owner, "foreign"
+
+
+def _sessions_holding_task(task_id: str) -> List[str]:
+    """Session ids whose registry knows ``task_id`` (live or recently terminal)."""
+    try:
+        from app.core.task_registry import task_registry
+
+        return list(task_registry.sessions_with_task(task_id))
+    except Exception:  # noqa: BLE001 — a lookup miss is just a miss
+        logger.debug("registry owner lookup failed for %s", task_id, exc_info=True)
+        return []
+
+
+def _foreign_task_error(task_id: str, owner_session_id: Optional[str]) -> Dict[str, Any]:
+    """The "not yours" answer, which used to be an indistinguishable "not found".
+
+    Two different failures wore the same message: an id that never existed, and
+    an id that exists in another session. The second is recoverable — read the
+    worker's own transcript, or ask the worker to report it — and the model
+    cannot tell which it is looking at without being told.
+    """
+    return _err(
+        "This task belongs to a different session, so it cannot be read from "
+        "here. If it is a worker's Monitor task, its result reaches you in the "
+        "worker's report; otherwise read the worker session directly.",
+        task_id=task_id,
+        owner_session_id=owner_session_id,
+    )
+
+
 async def stop_background_shell_task(
-    task_id: str, session_id: Optional[str] = None
+    task_id: str,
+    session_id: Optional[str] = None,
+    *,
+    summary: Optional[str] = None,
+    reason: Optional[str] = None,
+    suppress_wake: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Force-stop a Monitor shell background task by id.
 
@@ -363,6 +525,25 @@ async def stop_background_shell_task(
     ``netstat`` showed the port bound and the agent had to ``taskkill`` by
     hand. When descendants survive, this says so: ``running`` stays true and
     ``warning`` names the pids (and the ports they still hold).
+
+    ``summary``/``reason`` attribute the kill on the registry row (and so on the
+    terminal chip built from it). Optional and never destructive: an attribution
+    already on the record — the one ``monitor_spawn._enforce_deadline`` stamps
+    before it calls here, for instance — always wins, and a shell stopped with
+    no attribution at all falls back to a plain "stopped" line rather than the
+    blank one it used to get.
+
+    ``suppress_wake`` (ON by default, because every caller but one is a
+    DELIBERATE stop) means the terminal frame the watcher fires a moment from
+    now must not reach the model: no wake turn and no mid-turn steer. The
+    audited case is an agent stopping its own stale CI watcher and then being
+    interrupted twenty seconds later with a ``<task-notification>`` telling it
+    the thing it just stopped had stopped. The engine is still told the task is
+    terminal HERE, since the suppressed frame will not get that far — without
+    it fluid keeps the dead id in ``_background_pending`` and lists it on every
+    later ``SessionParked``. The deadline enforcer passes ``suppress_wake
+    =False``: a task killed by its own time budget is news the parent does not
+    have, and being woken with it is the point.
 
     Returns a small status dict when ``task_id`` is a known shell task, or
     ``None`` when no such shell task exists — letting callers fall through to
@@ -384,10 +565,38 @@ async def stop_background_shell_task(
     # running — the shell itself is gone and nothing would ever settle it — but
     # they are reported to the caller.
     if session_id:
-        from app.core.task_registry import task_registry
-        _registry_safe(
-            lambda: task_registry.complete_task(session_id, task_id, "killed")
+        from app.core.task_registry import (
+            AGENT_STOP_REASON,
+            AGENT_STOP_SUMMARY,
+            task_registry,
         )
+
+        # Default attribution: this function only ever runs because SOMEBODY
+        # asked for the stop, and by far the most common somebody is the model
+        # firing ``TaskStop`` at its own watcher or dev server. Saying so keeps
+        # that out of the failure vocabulary (the chip reads "cancelled", not a
+        # red cross) and out of the blank-summary bucket. Callers with a better
+        # answer pass one; an attribution ALREADY on the row always wins — the
+        # timeout path stamps its own before calling here and relies on this
+        # leaving it alone (``complete_task`` only overwrites what it is given).
+        recorded = task_registry.get_task(session_id, task_id) or {}
+        kill_summary = (
+            None if recorded.get("summary") else (summary or AGENT_STOP_SUMMARY)
+        )
+        kill_reason = (
+            None if recorded.get("reason") else (reason or AGENT_STOP_REASON)
+        )
+        _registry_safe(
+            lambda: task_registry.complete_task(
+                session_id, task_id, "killed",
+                summary=kill_summary, reason=kill_reason,
+            )
+        )
+        if suppress_wake:
+            _registry_safe(
+                lambda: task_registry.suppress_wake(session_id, task_id)
+            )
+            await _retire_stopped_shell(session_id, task_id)
     result: Dict[str, Any] = {
         "task_id": task_id,
         "kind": "shell",
@@ -401,6 +610,35 @@ async def stop_background_shell_task(
             "TaskStop left orphans for shell %s: %s", task_id, survivors
         )
     return result
+
+
+async def _retire_stopped_shell(session_id: str, task_id: str) -> None:
+    """Tell the ENGINE a deliberately-stopped shell is terminal. Never raises.
+
+    The wake-suppression above drops the watcher's terminal frame at the
+    scheduler's entry point, which is what stops the pointless notification —
+    but that frame is also what normally submits the ``BackgroundTaskFinished``
+    fluid needs to drop the id from ``_background_pending``. Submitting it here
+    keeps both properties: nothing wakes, and nothing is parked on a task that
+    is already dead. ``retire_task_terminals`` is ``wake=False`` by
+    construction, so this cannot start a turn.
+    """
+    try:
+        from app.core import turn_scheduler
+        from app.core.task_registry import task_registry
+
+        record = task_registry.get_task(session_id, task_id) or {}
+        await turn_scheduler.retire_task_terminals(session_id, [{
+            "task_id": task_id,
+            "status": record.get("status") or "killed",
+            "summary": record.get("summary") or "",
+            "kind": "shell",
+        }])
+    except Exception:  # noqa: BLE001 — bookkeeping never fails a stop.
+        logger.debug(
+            "engine retirement failed for stopped shell %s/%s",
+            session_id, task_id, exc_info=True,
+        )
 
 
 # Strong references to in-flight reap tasks so the fire-and-forget scheduler
@@ -595,6 +833,81 @@ async def _emit_shell_settle_frame(
         )
 
 
+async def _read_lines(stream: Any):
+    """Yield newline-terminated chunks from ``stream``, with NO line limit.
+
+    ``StreamReader.readline()`` raises ``ValueError`` on a line longer than the
+    stream's 64 KiB limit — and clears the buffer on the way out, so the
+    exception is not even recoverable in place. Nothing caught it: the reader
+    task died, the task's output froze mid-run while the process kept going,
+    and the shell looked hung (live production occurrence — a minified bundle
+    on one line is enough). Reading fixed chunks and splitting on newlines here
+    has no limit at all; an over-long line is emitted in ``_MAX_LINE_BYTES``
+    pieces so the buffer cannot grow without bound either.
+
+    Bytes are buffered, not text, so a multi-byte character is only ever split
+    at a forced chop — never at a chunk boundary.
+    """
+    buffer = b""
+    while True:
+        chunk = await stream.read(_READ_CHUNK_BYTES)
+        if not chunk:
+            if buffer:
+                yield buffer
+            return
+        buffer += chunk
+        while True:
+            index = buffer.find(b"\n")
+            if index < 0:
+                break
+            yield buffer[: index + 1]
+            buffer = buffer[index + 1:]
+        while len(buffer) > _MAX_LINE_BYTES:
+            yield buffer[:_MAX_LINE_BYTES]
+            buffer = buffer[_MAX_LINE_BYTES:]
+
+
+def sh_fallback_command(command: str, cwd: Optional[str]) -> str:
+    """``command``, or ``sh <path>`` when it names a script with no exec bit.
+
+    A launch script a worker wrote without ``chmod +x`` fails with
+    ``/bin/sh: 1: …/launch-backend.sh: Permission denied`` and exit 126 — one
+    audited session lost a whole Monitor cycle and a steer before prefixing
+    ``sh`` by hand. Nothing has run at that point, so running it through the
+    shell instead is safe and loses nothing.
+
+    Deliberately narrow: the command must be exactly one token, that token must
+    resolve to an existing regular file that is readable but not executable,
+    and the platform must have an exec bit at all (never on Windows, where
+    ``os.access(X_OK)`` answers about file extensions).
+    """
+    import os
+    import shlex
+
+    text = (command or "").strip()
+    if os.name == "nt" or not text or text.startswith(("sh ", "bash ", "sudo ")):
+        return command
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        return command
+    if len(parts) != 1:
+        return command
+    path = parts[0]
+    candidate = path if os.path.isabs(path) else os.path.join(cwd or "", path)
+    try:
+        if not os.path.isfile(candidate):
+            return command
+        if os.access(candidate, os.X_OK) or not os.access(candidate, os.R_OK):
+            return command
+    except OSError:
+        return command
+    logger.info(
+        "Monitor: %s is not executable — running it as `sh %s`", path, path
+    )
+    return f"sh {shlex.quote(path)}"
+
+
 async def _spawn_background(
     command: str,
     cwd: Optional[str],
@@ -602,6 +915,9 @@ async def _spawn_background(
     tool_use_id: Optional[str] = None,
 ) -> _BackgroundTask:
     task_id = str(uuid.uuid4())[:8]
+    # A script with no exec bit never runs; `sh <path>` does. Applied before the
+    # task records its command so TaskList shows what actually ran.
+    command = sh_fallback_command(command, cwd)
     task = _BackgroundTask(task_id=task_id, command=command, cwd=cwd, session_id=session_id)
     # Run through the SAME shell fluid's Bash resolves (Git Bash on Windows,
     # sh/bash on POSIX) — create_subprocess_shell would use cmd.exe on
@@ -646,10 +962,7 @@ async def _spawn_background(
 
     async def _reader() -> None:
         assert proc.stdout is not None
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                break
+        async for line in _read_lines(proc.stdout):
             decoded = line.decode("utf-8", errors="replace").rstrip("\n")
             # Scrub terminal control sequences at the SOURCE, so every consumer
             # of this buffer (TaskOutput, TaskGet, the completion summary the
@@ -995,6 +1308,70 @@ def create_builtin_tools_server(
 
     all_tools: list = []
 
+    # Native Android tools are visible in NORMAL sessions. Identity comes only
+    # from this runtime session id, never from model-supplied account/admin flags.
+    @tool(
+        "AndroidDevices",
+        "List only Android devices authorized for this session, with supported tools, "
+        "foreground heartbeat and enabled state. No devices/offline is a normal result.",
+        {"type": "object", "properties": {}, "additionalProperties": False},
+    )
+    async def android_devices(args: dict) -> dict:
+        from app.services import mobile_tools
+        try:
+            return _ok(await asyncio.to_thread(mobile_tools.list_devices, session_id))
+        except mobile_tools.CommandError as exc:
+            return _ok({"error": str(exc)})
+        except Exception:
+            return _ok({"error": "android_service_unavailable"})
+
+    from app.services.mobile_tools import FIELDS as android_fields
+    android_variants = []
+    for android_name, (required_fields, optional_fields) in android_fields.items():
+        android_variants.append({
+            "type": "object",
+            "properties": {
+                "device_id": {"type": "string", "minLength": 1, "maxLength": 256},
+                "name": {"const": android_name},
+                "arguments": {
+                    "type": "object",
+                    "properties": {key: {"type": "integer" if kind is int else "string"}
+                                   for key, kind in (required_fields | optional_fields).items()},
+                    "required": list(required_fields), "additionalProperties": False,
+                },
+                "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 25},
+            },
+            "required": ["device_id", "name", "arguments"], "additionalProperties": False,
+        })
+
+    @tool(
+        "AndroidAction",
+        "Run a supported native action on ONE explicitly selected Android device. "
+        "Use AndroidDevices first. Foreground tools must be locally enabled; "
+        "sensitive actions require real on-device approval (never pass confirmed=true). "
+        "System intents report launched_confirmation, NOT completion of the external action. "
+        "Returns actual device result; waits at most 25 seconds. Cancellation cannot undo "
+        "a side effect already performed. Calendar times must include a timezone.",
+        {"type": "object", "oneOf": android_variants,
+         "properties": {"device_id": {"type": "string"}, "name": {"type": "string", "enum": list(android_fields)},
+                        "arguments": {"type": "object"}, "timeout_seconds": {"type": "number", "maximum": 25}},
+         "required": ["device_id", "name", "arguments"], "additionalProperties": False},
+    )
+    async def android_action(args: dict) -> dict:
+        from app.services import mobile_tools
+        if set(args) - {"device_id", "name", "arguments", "timeout_seconds"}:
+            return _ok({"error": "invalid_arguments"})
+        try:
+            return _ok(await mobile_tools.execute(
+                session_id, args.get("device_id"), args.get("name"), args.get("arguments"),
+                args.get("timeout_seconds", 25),
+            ))
+        except Exception:
+            return _ok({"error": "android_service_unavailable"})
+
+    all_tools.extend([android_devices, android_action])
+
+
     # ------------------------------------------------------------------
     # ScheduleWakeup — pause + resume session after a delay
     # ------------------------------------------------------------------
@@ -1171,7 +1548,8 @@ def create_builtin_tools_server(
     @tool(
         "EnterWorktree",
         "Materialize (or resolve) the current project's persistent branch checkout and return its path. "
-        "The checkout path can be used as cwd for subsequent tool calls. Requires an active project.",
+        "The checkout path can be used as cwd for subsequent tool calls. Requires an active project. "
+        "Also records the branch on this session, so the sidebar and PR tracking follow the work you do there.",
         {
             "type": "object",
             "properties": {
@@ -1211,10 +1589,33 @@ def create_builtin_tools_server(
                     "(no base checkout here, or the branch exists nowhere and "
                     "create_new_branch was not set)."
                 )
+            # BIND THE SESSION TO THE BRANCH, exactly as the HTTP intake paths
+            # do (app/api/sessions_worktree.py:329 and :521). Without this the
+            # tool materialized a checkout and told nobody: `sessions.branch`
+            # stayed NULL, the sidebar showed the session on no branch, the
+            # turn-finalize resync could not repair it (with no branch it
+            # resolves the BASE checkout, whose branch it deliberately refuses
+            # to adopt), and PR reconciliation — which matches on session_id,
+            # pr_number, or project_id+branch — could match nothing.
+            bound = False
+            if session_id:
+                try:
+                    from app.db import database
+
+                    bound = bool(await asyncio.to_thread(
+                        database.set_session_branch,
+                        session_id, branch, pv2.get("id"),
+                    ))
+                except Exception:  # noqa: BLE001 — bookkeeping must never fail
+                    logger.warning(  # a checkout that was really materialized
+                        "EnterWorktree: binding session %s to %r failed",
+                        session_id, branch, exc_info=True,
+                    )
             return _ok({
                 "branch_name": branch,
                 "worktree_path": checkout_path,
                 "status": "active",
+                "session_branch_recorded": bound,
                 # Audited sessions edited a file at its old path's worktree
                 # twin and hit the read-before-edit gate as if it were a new
                 # file — which, to the gate, it is.
@@ -1482,15 +1883,24 @@ def create_builtin_tools_server(
                 message = monitor_inline_receipt_text(
                     task.task_id, task.exit_code, output, failed=failed
                 )
-                detail = {
+                # A non-zero exit is the command's RESULT, not a tool failure.
+                # It used to come back through _err, and an is_error result is
+                # raised by the code-execution runner: a red TDD baseline —
+                # the expected outcome of what the model asked for — killed the
+                # whole cell and every call queued behind it (five Edits lost
+                # in one audited session; another wrapped every later Monitor
+                # in try/except, which would swallow real harness failures
+                # too). _err is now reserved for spawn/infra faults. The task
+                # ROW still settles as "error" so the chip and the wake
+                # notification stay honest about a command that failed.
+                return _ok({
+                    "message": message,
                     "task_id": task.task_id,
                     "exit_code": task.exit_code,
                     "status": status,
+                    "failed": failed,
                     "output": output,
-                }
-                if failed:
-                    return _err(message, **detail)
-                return _ok({"message": message, **detail})
+                })
 
             # The receipt COMMANDS the park (same wording as the native leg's
             # spawner and the TaskList nudge). Audited sessions read a bare
@@ -1527,16 +1937,23 @@ def create_builtin_tools_server(
     )
     async def task_output(args: dict) -> dict:
         tid = (args.get("task_id") or "").strip()
-        task = _background_tasks.get(tid)
+        # SCOPED: the buffer belongs to a session, and until now any session
+        # could read any other's. A worker's own task stays readable by the
+        # parent that dispatched it — that is the case an audited parent could
+        # not serve and re-ran a whole test suite over.
+        task, owner_session_id, relation = _resolve_task_scope(tid, session_id)
+        if relation == "foreign" and task is None:
+            return _foreign_task_error(tid, owner_session_id)
         if not task:
             # Not a Monitor shell task — it may be a background AGENT task tracked
             # in the registry. Agent tasks have no buffered stdout here (their
             # output arrives via <task-notification> + the subagent transcript),
             # so return their live status/summary rather than a confusing
             # "not found" for an id the agent legitimately saw via TaskList.
-            if session_id:
+            lookup_session = owner_session_id if relation == "lineage" else session_id
+            if lookup_session:
                 from app.core.task_registry import task_registry
-                record = task_registry.get_task(session_id, tid)
+                record = task_registry.get_task(lookup_session, tid)
                 if record is not None:
                     payload = {
                         "task_id": tid,
@@ -1580,7 +1997,12 @@ def create_builtin_tools_server(
                             "<task-notification> and the subagent transcript; no "
                             "buffered stdout is available here."
                         )
+                    if relation == "lineage":
+                        payload["owner_session_id"] = lookup_session
+                        payload["scope_note"] = _WORKER_TASK_SCOPE_NOTE
                     return _ok(payload)
+            if owner_session_id:
+                return _foreign_task_error(tid, owner_session_id)
             return _err("task not found.", task_id=tid)
         lines = task.lines
         since = int(args.get("since_line") or 0)
@@ -1592,13 +2014,17 @@ def create_builtin_tools_server(
                 lines = lines[-int(tail):]
             except (TypeError, ValueError):
                 pass
-        return _ok({
+        payload = {
             "task_id": tid,
             "running": task.is_running(),
             "exit_code": task.exit_code,
             "total_lines": len(task.lines),
             "lines": lines,
-        })
+        }
+        if relation == "lineage":
+            payload["owner_session_id"] = owner_session_id
+            payload["scope_note"] = _WORKER_TASK_SCOPE_NOTE
+        return _ok(payload)
 
     all_tools.append(task_output)
 
@@ -1703,11 +2129,18 @@ def create_builtin_tools_server(
         "how you read what the worker produced: it returns report_head (the "
         "start of the worker's report), report_chars, and report_path (the "
         "full report on disk — Read it only if the head does not answer your "
-        "question). For shell tasks it returns whether the process is still "
-        "running, its exit code, and the tail of its output buffer. "
+        "question). report_path is ALWAYS present for an agent task and is "
+        "null when no readable report file exists; check it before using it. "
+        "For shell tasks it returns whether the process is still running, its "
+        "exit code, and the tail of its output buffer. "
         "Completions wake this session on their own, so this is for inspecting "
         "a task you were just woken about or one the user asked about — never "
-        "a polling loop. Use TaskList to discover ids.",
+        "a polling loop. Use TaskList to discover ids.\n"
+        "\n"
+        "A task belonging to a worker YOU dispatched is readable and comes "
+        "back with owner_session_id set — but its completion wakes that "
+        "worker, not you, so never park waiting for one. A task belonging to "
+        "any other session is refused by name rather than as 'not found'.",
         {
             "type": "object",
             "properties": {
@@ -1728,17 +2161,30 @@ def create_builtin_tools_server(
             return _err("task_id is required.")
         from app.core.task_registry import task_registry
 
+        # SCOPED. ``_background_tasks`` is process-global: one audited parent
+        # named an id it had read in a WORKER's report, was handed that other
+        # session's live shell plus "you will be woken on completion", parked,
+        # and was never woken — nothing had subscribed it to that task. A
+        # worker's task is still readable here (the parent dispatched it), but
+        # it is labelled as the worker's and never carries the park nudge.
+        shell, owner_session_id, relation = _resolve_task_scope(tid, session_id)
+        if relation == "foreign" and shell is None:
+            return _foreign_task_error(tid, owner_session_id)
         # ``durable=True``: the whole point of this call is a parent that was
         # WOKEN about a finished task, and the wake can land long after the
         # in-memory record has been evicted with its session. The registry
         # resolves live → retained snapshot → durable row, so "task not found"
         # now means genuinely never seen rather than merely no longer resident.
-        record = task_registry.get_task(session_id, tid, durable=True)
-        shell = _background_tasks.get(tid)
+        lookup_session = owner_session_id if relation == "lineage" else session_id
+        record = task_registry.get_task(lookup_session, tid, durable=True)
         if record is None and shell is None:
+            if owner_session_id and owner_session_id != session_id:
+                return _foreign_task_error(tid, owner_session_id)
             return _err("task not found.", task_id=tid)
 
         out: Dict[str, Any] = {"task": record}
+        if relation == "lineage":
+            out["owner_session_id"] = owner_session_id
         # Enrich with live process detail for Monitor shell tasks.
         if shell is not None:
             try:
@@ -1752,17 +2198,28 @@ def create_builtin_tools_server(
             out["lines"] = shell.lines[-tail_n:] if tail_n > 0 else []
         # A finished agent worker's actual output. This is the whole point of
         # the call for a parent that was just woken about its child.
-        if (
-            record is not None
-            and record.get("kind") == "agent"
-            and record.get("status") == "completed"
-        ):
-            out.update(_agent_report_fields(tid, record))
+        if record is not None and record.get("kind") == "agent":
+            if record.get("status") == "completed":
+                out.update(_agent_report_fields(tid, record))
+            # ALWAYS present, null when there is no readable file. It used to be
+            # written only inside the read-success branch, so an unreadable
+            # report returned no key at all and the caller's `j['report_path']`
+            # raised KeyError — which, in a code cell, took the rest of the
+            # cell with it (one audited call, one dropped queued command).
+            out.setdefault("report_path", None)
         still_running = (
             out.get("running") if shell is not None else _all_still_running([record])
         )
         if still_running:
-            out = {"note": _PARK_NUDGE, **out}
+            # The nudge is a PROMISE that a completion will wake this session.
+            # It is only true for this session's own work: a worker's task
+            # wakes the worker.
+            out = {
+                "note": (
+                    _WORKER_TASK_SCOPE_NOTE if relation == "lineage" else _PARK_NUDGE
+                ),
+                **out,
+            }
         return _ok(out)
 
     all_tools.append(task_get)
@@ -1925,6 +2382,129 @@ def create_builtin_tools_server(
     all_tools.append(get_app_errors)
 
     # ------------------------------------------------------------------
+    # GetAppLogs — read the in-memory runtime log ring buffer
+    # ------------------------------------------------------------------
+    @tool(
+        "GetAppLogs",
+        "Read AI Shuffle's own runtime log — the same in-memory ring buffer "
+        "the admin Logs view shows, every level including INFO and DEBUG. Use "
+        "it to see what the SERVER did: which code path ran, what a background "
+        "task or a wake did, why a request took the branch it took.\n"
+        "\n"
+        "GetAppErrors is the durable ERROR/WARNING table; this is the live "
+        "narrative around them, and it is where anything logged below WARNING "
+        "lives. Reach for it when GetAppErrors comes back empty but something "
+        "clearly happened. The buffer holds the most recent ~5000 lines and "
+        "does not survive a restart.\n"
+        "\n"
+        "Filter before you read: `search` is a case-insensitive substring "
+        "(a session id, a task id, a function name) and is by far the best "
+        "way to make the answer small. Output is capped server-side.",
+        {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        f"Max lines to return, newest first "
+                        f"(default {_APP_LOGS_DEFAULT_LIMIT}, max "
+                        f"{_APP_LOGS_MAX_LIMIT})."
+                    ),
+                },
+                "level": {
+                    "type": "string",
+                    "description": (
+                        "Exact level to return: DEBUG, INFO, WARNING, ERROR or "
+                        "CRITICAL. Omit for all levels."
+                    ),
+                },
+                "search": {
+                    "type": "string",
+                    "description": (
+                        "Case-insensitive substring the line must contain — a "
+                        "session id, task id, logger name or message fragment."
+                    ),
+                },
+                "since_minutes": {
+                    "type": "number",
+                    "description": "Only lines written within the last N minutes.",
+                },
+            },
+            "required": [],
+        },
+    )
+    async def get_app_logs(args: dict) -> dict:
+        try:
+            from app.api.logs import ring_handler
+
+            try:
+                limit = int(args.get("limit") or _APP_LOGS_DEFAULT_LIMIT)
+            except (TypeError, ValueError):
+                limit = _APP_LOGS_DEFAULT_LIMIT
+            limit = max(1, min(limit, _APP_LOGS_MAX_LIMIT))
+            level = (args.get("level") or "").strip().upper() or None
+            if level is not None and level not in _APP_LOG_LEVELS:
+                return _err(
+                    f"level must be one of {', '.join(sorted(_APP_LOG_LEVELS))} "
+                    f"(got {level!r})."
+                )
+            search = (args.get("search") or "").strip().lower() or None
+            cutoff = None
+            since_minutes = args.get("since_minutes")
+            if since_minutes:
+                try:
+                    cutoff = datetime.now(timezone.utc) - timedelta(
+                        minutes=float(since_minutes)
+                    )
+                except (TypeError, ValueError):
+                    cutoff = None
+
+            buffer = list(ring_handler.buffer)
+            lines, matched, used = [], 0, 0
+            for record in reversed(buffer):  # newest first
+                if level and record.level != level:
+                    continue
+                if search and search not in record.message.lower():
+                    continue
+                if cutoff is not None and not _log_record_after(record, cutoff):
+                    continue
+                matched += 1
+                if len(lines) >= limit or used >= _APP_LOGS_MAX_CHARS:
+                    continue
+                message = _clip(record.message, _APP_LOGS_MAX_LINE_CHARS)
+                used += len(message)
+                lines.append({
+                    "timestamp": record.timestamp,
+                    "level": record.level,
+                    "logger": record.logger_name,
+                    "message": message,
+                })
+            payload: Dict[str, Any] = {
+                "lines": lines,
+                "count": len(lines),
+                "matched": matched,
+                "buffered": len(buffer),
+            }
+            if matched > len(lines):
+                payload["truncated"] = (
+                    f"{matched - len(lines)} more matching line(s) omitted. "
+                    "Narrow with search / level / since_minutes rather than "
+                    "raising limit."
+                )
+            elif not lines:
+                payload["note"] = (
+                    "nothing matched. The buffer holds only this process's "
+                    "recent lines and is empty after a restart; try a wider "
+                    "search or drop the level filter."
+                )
+            return _ok(payload)
+        except Exception as e:
+            logger.exception("GetAppLogs failed")
+            return _err(f"failed to read logs: {e}")
+
+    all_tools.append(get_app_logs)
+
+    # ------------------------------------------------------------------
     # App-memory bridge — Remember / Recall / SessionSearch / SessionView.
     # These exist for the DELEGATED (claude CLI) leg, which otherwise sees
     # none of the app's memory (see docs/MEMORY_ARCHITECTURE.md): the CLI
@@ -1969,6 +2549,8 @@ def create_builtin_tools_server(
 def get_builtin_tool_names() -> List[str]:
     """Return MCP tool names so they can be added to ``allowed_tools``."""
     names = [
+        "mcp__builtins__AndroidDevices",
+        "mcp__builtins__AndroidAction",
         "mcp__builtins__ScheduleWakeup",
         "mcp__builtins__Task",
         "mcp__builtins__NotifyDevices",
@@ -1985,6 +2567,7 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__TaskGet",
         "mcp__builtins__ToolSearch",
         "mcp__builtins__GetAppErrors",
+        "mcp__builtins__GetAppLogs",
         # The app-memory bridge (delegated leg; shadowed on native legs where
         # fluid's bare-named builtins serve the same stores). Allow-listed
         # unconditionally — per-session registration gates real availability.

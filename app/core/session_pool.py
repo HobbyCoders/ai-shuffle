@@ -23,6 +23,7 @@ user messages, avoiding repeated subprocess spawns and JSONL history replays.
 import asyncio
 import logging
 import os
+import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -706,6 +707,9 @@ class SessionPool:
         # event loop only holds weak refs, so an unreferenced task can be GC'd
         # mid-disconnect.
         self._background_teardowns: set[asyncio.Task] = set()
+        # session_id -> monotonic deadline for a WAKE that has been enqueued but
+        # has not claimed the client yet. See note_wake_pending.
+        self._wake_pending: Dict[str, float] = {}
 
     def set_eviction_callback(
         self, callback: Optional[Callable[[str, str], Awaitable[None]]]
@@ -1241,6 +1245,87 @@ class SessionPool:
         )
         return state
 
+    # ─── Wake-pending / awaiting-input hold ──────────────────────────────
+
+    #: Backstop TTL for a wake-pending hold. A wake that never claims the client
+    #: (the runner died, the turn lost its start race to another install) must
+    #: not pin a subprocess forever, so the hold self-expires. Generous relative
+    #: to the enqueue→start latency it covers, which is sub-second in the normal
+    #: case and a few seconds through the terminal batch window.
+    WAKE_PENDING_GRACE_SECONDS = 300.0
+
+    def note_wake_pending(self, session_id: str, ttl: Optional[float] = None) -> None:
+        """Mark a session as owing a wake turn that has not started yet.
+
+        The gap this closes: between a background task going terminal and the
+        wake turn claiming the pooled client, NOTHING marked the session busy.
+        ``is_streaming`` is False (the parked turn already returned),
+        ``_has_background_work`` goes False the instant the task finishes, and
+        ``last_activity`` is as stale as the park was long. A park longer than
+        the session's idle tier therefore had its client evicted milliseconds
+        before the wake tried to use it — which was the closed-client crash
+        before PR #1104 and is a full client respawn plus conversation resume
+        after it. Neither is what the wake asked for.
+
+        Also bumps ``last_activity``: the wake IS activity, and leaving the
+        stamp at park time makes the session look idle for the whole park.
+        Safe to call for a session that is not pooled (the hold is keyed on the
+        id and honoured whenever the session does appear).
+        """
+        deadline = time.monotonic() + (
+            ttl if ttl is not None else self.WAKE_PENDING_GRACE_SECONDS
+        )
+        self._wake_pending[session_id] = deadline
+        state = self._pool.get(session_id)
+        if state is not None:
+            state.last_activity = datetime.now(timezone.utc)
+        self._wake_idle_watchdog()
+
+    def clear_wake_pending(self, session_id: str) -> None:
+        """Release the hold — the wake started, settled, or was abandoned."""
+        if self._wake_pending.pop(session_id, None) is not None:
+            self._wake_idle_watchdog()
+
+    def _wake_pending_active(self, session_id: str) -> bool:
+        """True while an un-started wake still holds this session, dropping the
+        hold once its backstop TTL lapses."""
+        deadline = self._wake_pending.get(session_id)
+        if deadline is None:
+            return False
+        if time.monotonic() >= deadline:
+            self._wake_pending.pop(session_id, None)
+            logger.info(
+                "[Pool] Wake-pending hold expired for %s — the wake never "
+                "claimed the client", session_id,
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _is_awaiting_user_input(session_id: str) -> bool:
+        """True while this session blocks on a durable ``pending_interactions``
+        round-trip (an AskUser question, a permission prompt, a plan gate).
+
+        The turn is live but produces nothing while it waits, and the wait is
+        bounded by ``user_question_timeout_seconds`` (1h) — comfortably past the
+        pool's 30-minute hot idle tier. An audited session had its subprocess
+        reclaimed out from under a blocked ``AskUser`` at exactly 1800s: fluid's
+        MRTR round-trip turned the lost answer into ``input_required round-trip
+        interrupted`` while the durable row still advertised an hour, leaving a
+        live modal on the user's device that nothing was listening to.
+
+        Reads the in-process waiter registry, not the DB: it is populated for
+        exactly as long as ``interaction_wait.await_interaction`` blocks, so it
+        costs nothing on this hot path. Defensive — an unreadable registry
+        resolves to False, exactly like ``_has_background_work``.
+        """
+        try:
+            from app.core import interaction_wait
+
+            return interaction_wait.has_waiters(session_id)
+        except Exception:  # noqa: BLE001
+            return False
+
     # ─── Idle eviction (tiered) ──────────────────────────────────────────
 
     def _is_busy(self, session_id: str, state: SessionState) -> bool:
@@ -1248,8 +1333,9 @@ class SessionPool:
 
         Streaming turns, the between-turns idle reader (which holds the client
         through the CLI-wake grace window while looking idle to
-        ``is_streaming``), and in-flight background sub-agents / SDK-backgrounded
-        shells all mean "disconnecting would kill running work". This guard is
+        ``is_streaming``), in-flight background sub-agents / SDK-backgrounded
+        shells, an enqueued-but-unstarted wake, and a turn blocked on a user
+        question all mean "disconnecting would kill running work". This guard is
         checked BEFORE any deadline arithmetic and is never overridden by the
         idle policy.
         """
@@ -1257,6 +1343,8 @@ class SessionPool:
             state.is_streaming
             or state.idle_reader_active
             or self._has_background_work(session_id)
+            or self._wake_pending_active(session_id)
+            or self._is_awaiting_user_input(session_id)
         )
 
     def _refresh_detachment(self, session_id: str, state: SessionState,

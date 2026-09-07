@@ -196,6 +196,46 @@ def _on_task_terminal(session_id: str, task: Dict[str, Any]) -> None:
     t.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
 
+def _terminal_chip_text(task: Dict[str, Any], wire_status: str) -> str:
+    """The line a terminal background-task chip shows in chat. Never empty.
+
+    Order of preference:
+
+    1. the record's own ``summary`` — agent-kind tasks and every attributed kill
+       (timeout, server shutdown, user stop) carry one, and it is the best text
+       available;
+    2. the task's ``title``/``subject``, prefixed with what happened to it — a
+       Monitor shell settled by the plain ``complete_task(..., "killed")`` path
+       has no summary at all but does have the command it was running, which is
+       what the user needs to recognise the row;
+    3. a bare statement of the outcome, so the bubble still says something.
+
+    This is the fix for the audited empty bubbles: ``content=summary or ""``
+    persisted fifteen blank ``role=system`` rows in a single session because
+    shell tasks never populate ``summary``. The text existed the whole time on
+    the SubagentEvent the model received; only the user-facing copy was dropped.
+    """
+    summary = (task.get("summary") or "").strip()
+    if summary:
+        return summary
+    verb = {
+        "cancelled": "Stopped",
+        "killed": "Stopped",
+        "error": "Failed",
+        "completed": "Finished",
+    }.get(wire_status, wire_status or "Finished")
+    kind = task.get("kind") or "agent"
+    what = "Background command" if kind == "shell" else "Background task"
+    label = (task.get("title") or task.get("subject") or "").strip()
+    if label:
+        # Long shell command lines are the common case here; the chip is one
+        # line and the full text is in the expandable payload beside it.
+        if len(label) > 160:
+            label = label[:157] + "..."
+        return f"{what} {verb.lower()}: {label}"
+    return f"{what} {verb.lower()}."
+
+
 async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) -> None:
     """Guaranteed terminal surface for an error/killed background task (4b).
 
@@ -209,21 +249,41 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
     The legacy step 3 (the ``HeadlessChatHandler`` unpark handoff) is GONE (V2
     A7, B5): the v2 scheduler (idle_reader -> turn_scheduler.on_task_terminal)
     is the sole unpark producer, so this surface only records; it never spawns.
+
+    Two things the chip says are derived rather than copied straight off the
+    record:
+
+    * **Its text.** ``summary`` is populated for agent-kind tasks but not for
+      shell ones — a Monitor shell settles through ``complete_task(...,
+      "killed")`` with no summary at all — so ``content=summary or ""`` wrote a
+      BLANK system bubble into the transcript. One audited session had fifteen
+      of them; the user saw "a task errored" with no reason while the model's
+      own steer for the same event carried the full text.
+      :func:`_terminal_chip_text` fills the gap from what the record does have.
+    * **Its status.** ``killed`` is the registry vocabulary and stays on the row
+      (``/live``, ``TaskGet``, retention all keep reading it), but a DELIBERATE
+      stop is chipped ``cancelled`` (``task_registry.chip_status``) so an agent
+      stopping its own healthy dev server, or the user pressing Stop, does not
+      render as a red failure in chat. ``cancelled`` folds back to ``killed`` in
+      the frontend's task reducer, so cards still settle and the strip still
+      clears.
     """
-    from app.core.task_registry import task_registry
+    from app.core.task_registry import task_registry, chip_status
 
     task_id = task.get("id")
     status = task.get("status") or "killed"
-    summary = task.get("summary")
+    reason = task.get("reason")
+    wire_status = chip_status(status, reason)
+    summary = _terminal_chip_text(task, wire_status)
     data: Dict[str, Any] = {
         "task_id": task_id,
-        "status": status,
+        "status": wire_status,
         "summary": summary,
         # SystemMessage.svelte's task_updated branch prefers patch.status.
-        "patch": {"status": status},
+        "patch": {"status": wire_status},
     }
-    if task.get("reason"):
-        data["reason"] = task.get("reason")
+    if reason:
+        data["reason"] = reason
     # The card join key (mirror of the #540 enrichment): the frontend settles a
     # subagent card only when the terminal chip carries the launch tool_use_id
     # (the card's toolId). This SAME data dict feeds both the live chip
@@ -240,8 +300,8 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
             from app.core.turn_recorder import record_task_settle_frame
 
             await record_task_settle_frame(
-                session_id, task_id, status, summary,
-                reason=task.get("reason"), tool_use_id=tool_use_id,
+                session_id, task_id, wire_status, summary,
+                reason=reason, tool_use_id=tool_use_id,
             )
         except Exception:
             logger.debug(
@@ -255,7 +315,7 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
             database.add_session_message,
             session_id=session_id,
             role="system",
-            content=summary or "",
+            content=summary,
             metadata={"subtype": "task_updated", "system_data": data},
         )
     except Exception:
@@ -311,11 +371,13 @@ class ChatWebSocketHandler:
         device_id: str,
         user_id: str,
         api_user_id: Optional[str],
+        trusted_principal: Optional[dict] = None,
     ):
         self.websocket = websocket
         self.device_id = device_id
         self.user_id = user_id
         self.api_user_id = api_user_id
+        self.trusted_principal = trusted_principal
 
         # Mutable connection state (formerly nonlocal variables)
         self.current_session_id: Optional[str] = None
@@ -915,11 +977,23 @@ class ChatWebSocketHandler:
         })
         return "approved" if approved else "feedback"
 
+    async def _authorize_mobile_session(self, session_id, *, claim=False):
+        from app.core.mobile_tool_identity import bind_session
+        try:
+            await run_sync(bind_session, session_id, self.trusted_principal, claim=claim)
+            return True
+        except Exception:
+            await self.send_json({"type": "error", "message": "Session authorization denied"})
+            return False
+
     async def handle_query(self, data: dict) -> None:
         """Handle 'query' message type."""
 
         prompt = data.get("prompt", "").strip()
         session_id = data.get("session_id")
+        if session_id and not await self._authorize_mobile_session(
+                session_id, claim=data.get("claim_mobile_authority") is True):
+            return
         profile_id = data.get("profile", "claude-code")
         project_id = data.get("project") or None
         if isinstance(project_id, str):
@@ -1121,6 +1195,8 @@ class ChatWebSocketHandler:
                         mode=session_mode,
                         _conn=txn
                     )
+                    from app.core.mobile_tool_identity import bind_session
+                    bind_session(session_id, self.trusted_principal, new=True, conn=txn)
                     _msg_role = "user"
                     _msg_meta = None
                     if prompt.strip().startswith("/"):
@@ -1430,23 +1506,33 @@ class ChatWebSocketHandler:
             # executes the turn (its turn_claim observe pass drives the live
             # runtime), so stop needs no HTTP hop.
             # Stop now means STOP, not "interrupt so I can send another message":
-            # mid-stream messages have their own steering path. Cancel the
-            # session's background AGENT work and suppress canceled completions
-            # from scheduling a later wake.
+            # mid-stream messages have their own steering path.
             #
-            # STOP SEMANTICS (audit item 5). ``stop_background`` ends the turn
-            # and everything working ON the turn — sub-agents, provider-lane
-            # workers. It does NOT end a healthy Monitor shell: those are
-            # long-lived services the user asked to keep up ("it stays up while
-            # we work"), and killing the dev server out from under a session
-            # whose turn was merely interrupted is not what the button says.
-            # It was also INCONSISTENT — typing mid-stream goes through
-            # ``interrupt_for_query``, which never set stop_background, so the
-            # server survived a steer but died on Stop. Both paths now leave
-            # running shells alone (``include_shells=False``). Shells still die
-            # on the per-task "x", on session delete, and on the eviction reap
-            # (``reap_session_background_shells``) — those force paths are
-            # unchanged. Ghost shell rows are still swept so nothing strands.
+            # STOP SEMANTICS (round 7). Stop ends EVERYTHING this session is
+            # doing and lets NOTHING restart it until the user's next message.
+            # That is the whole button, and it is a deliberate reversal of the
+            # audit-item-5 rule that used to spare a healthy Monitor shell ("a
+            # dev server the user asked to keep up is not part of the turn").
+            # Living with that produced the complaint this change answers —
+            # stopped sessions came back to life, because the spared shell (or
+            # a CI watcher, or a nested worker, or an armed wakeup, or a turn
+            # queued behind the stopped one) still had a road back into the
+            # scheduler. So ``stop_all_background_tasks(user_stop=True)`` now:
+            #   * kills every background task — sub-agents and their
+            #     descendants, provider-lane workers including nested ones,
+            #     Monitor shells including serving tasks and watchers;
+            #   * latches the session stopped, so every wake producer no-ops
+            #     until the user speaks;
+            #   * drops armed wakeups, aborts queued turns and settles stale
+            #     parked rows;
+            #   * gives every killed task a terminal registry row, a terminal
+            #     chip and an engine retirement, so nothing sits "running"
+            #     forever and the model is never left waiting on a corpse.
+            # The old keep-the-server-up behaviour survives as an explicit
+            # opt-in that defaults to OFF: ``STOP_KEEPS_MONITOR_SHELLS=true``.
+            # Typing mid-stream is UNCHANGED: it goes through
+            # ``interrupt_for_query``, which sets no stop_background bit and
+            # never reaches this path — a steer is not a Stop.
 
             # v2 turns cutover: the ONE interrupt implementation. Flip the live
             # turn running->interrupting (durable intent) and fire the executor,
@@ -1475,7 +1561,11 @@ class ChatWebSocketHandler:
                 # matched no live turn must not cancel a successor's work.
                 from app.core.query_session_lifecycle import stop_all_background_tasks
 
-                await stop_all_background_tasks(session_id, include_shells=False)
+                await stop_all_background_tasks(session_id, user_stop=True)
+                # The queue was just emptied durably; re-broadcast so the
+                # pending bubbles the client is showing go with it instead of
+                # sitting there implying work that will never run.
+                await self._v2_broadcast_queue(session_id)
                 # Cross-runner wake: if the executing runtime lives on another
                 # install, its turn_claim observe pass reacts on this NOTIFY
                 # tick instead of its next 5s poll. Locally the executor
@@ -1575,6 +1665,9 @@ class ChatWebSocketHandler:
 
         if not session:
             await self.send_json({"type": "session_not_found", "session_id": session_id})
+            return
+
+        if not await self._authorize_mobile_session(session_id):
             return
 
         # Unregister from old session if switching
@@ -2010,6 +2103,9 @@ class ChatWebSocketHandler:
             return
         if not session_id:
             await self.send_json({"type": "error", "message": "No session for queue"})
+            return
+
+        if not await self._authorize_mobile_session(session_id):
             return
 
         # V2 placement: the durable queued turn IS the hand-off (see

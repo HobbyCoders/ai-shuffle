@@ -78,7 +78,12 @@ async def test_vendored_stop_planning_confirms_after_the_host_flipped_the_flag()
     )
 
     assert not outcome.is_error, outcome.text
-    assert "approved" in outcome.text.lower() and "OFF" in outcome.text
+    # fluid #36 leads the auto-approval result with the imperative and keeps
+    # the not-user-approved caveat; assert that contract, not the old
+    # capitalisation.
+    lowered = outcome.text.lower()
+    assert "plan mode is off" in lowered and "proceed with the plan" in lowered
+    assert "user-approved" in lowered
     assert "Enter it with Plan" not in outcome.text
     assert state["active"] is False
 

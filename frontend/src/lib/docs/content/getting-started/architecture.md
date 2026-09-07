@@ -74,13 +74,13 @@ auth              → authentication state, admin status
 | `AutomationManager` | `app/core/automation_manager.py` | APScheduler integration, budget enforcement |
 | `HookExecutor` | `app/core/hook_executor.py` | Bash and webhook hook execution |
 | `MCPService` | `app/core/mcp_service.py` | MCP server configuration and tool discovery |
-| `AuthService` | `app/core/auth.py` | Admin auth, API keys |
-| `EncryptionService` | `app/core/encryption.py` | Password-based encryption for secrets |
+| `AuthService` | `app/core/auth.py`, `app/core/owner_auth.py` | Local owner access, account-authorized sessions and scoped API credentials |
+| Credential encryption | `app/core/encryption.py`, `app/core/credential_keys.py` | Persistent data key protected by a private server key outside PostgreSQL |
 
 ### Request Flow
 
 1. **HTTP/WebSocket request** arrives at FastAPI
-2. **Authentication middleware** validates session cookie or API key
+2. **Authentication** checks the trusted ingress socket and local peer, or validates a session cookie/API key. Remote owner sessions also require current hub ownership and device authorization.
 3. **Router handler** processes the request
 4. For chat: **Claude Agent SDK** creates/continues a session
 5. **Tool execution** happens within the SDK (file ops, bash, MCP tools)
@@ -101,8 +101,8 @@ Key tables:
 
 ## Security
 
-- **Encryption** — All sensitive fields (API keys, tokens) encrypted at rest with password-derived key
-- **Authentication** — Cookie-based sessions for admin, Bearer tokens for API users
+- **Encryption** — Stored credentials use a persistent data key wrapped by a private key under `DATA_DIR/.credential-keys`. Adoption retains existing ciphertext and data keys; fresh installations generate random keys. Key backups are required alongside PostgreSQL backups.
+- **Authentication** — Trusted local/LAN owner access on the local listener; account-authorized cookie sessions on protected remote ingress; scoped Bearer tokens for API users. Local setup requires no account or password.
 - **Authorization** — Admin-only endpoints, API user scoping by project/profile
 - **Rate Limiting** — Per-IP and per-user request limits
 - **CORS** — Configurable origin restrictions

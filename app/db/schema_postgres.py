@@ -34,6 +34,10 @@ def create_postgres_schema(cursor) -> None:
     """
 
     # ------------------------------------------------------------------
+    # Account hub tables have no ordering dependencies.
+    from app.db.mobile_hub import create_schema as create_mobile_hub_schema
+    create_mobile_hub_schema(cursor)
+
     # 1. Schema version
     # ------------------------------------------------------------------
     cursor.execute("""

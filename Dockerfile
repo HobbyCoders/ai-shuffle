@@ -48,7 +48,13 @@ RUN npm run build && npm prune --omit=dev
 # ============================================================================
 # Stage 4: Runtime — lean Python image with only what's needed
 # ============================================================================
+FROM cloudflare/cloudflared:2026.8.3@sha256:51c9cefcb4569df44e1ad403ab1d3d8065aa8e84339bcfc6aee75502e1140339 AS tunnel-client
+
 FROM python:3.12-slim
+
+# The account-approved connection runs inside Shuffle. No sidecar, credentials
+# entered on the phone, or manual tunnel configuration is required.
+COPY --from=tunnel-client /usr/local/bin/cloudflared /usr/local/bin/cloudflared
 
 WORKDIR /app
 

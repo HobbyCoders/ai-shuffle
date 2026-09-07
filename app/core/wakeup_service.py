@@ -266,6 +266,24 @@ async def _rearm_after_failed_submit(row: Dict[str, Any], reason: str) -> None:
     _arm(replacement, delay)
 
 
+def _session_user_stopped(session_id: Optional[str]) -> bool:
+    """True while ``session_id`` is under a user Stop with no newer message.
+
+    Read through a helper so an import/registry failure can never turn a wake
+    into an exception: a wakeup service that cannot answer the question fires
+    the wake, which is the behaviour that predates the latch.
+    """
+    if not session_id:
+        return False
+    try:
+        from app.core.task_registry import task_registry
+
+        return task_registry.is_user_stopped(session_id)
+    except Exception:  # noqa: BLE001 — never let the check break a wake.
+        logger.debug("wakeup: stop-latch check failed", exc_info=True)
+        return False
+
+
 async def _fire(row: Dict[str, Any]) -> None:
     """Claim one wakeup (delete its row) and enrol its prompt in the turn queue.
 
@@ -286,6 +304,24 @@ async def _fire(row: Dict[str, Any]) -> None:
     """
     wakeup_id = row.get("id")
     session_id = row.get("session_id")
+
+    # STOP SEMANTICS (round 7): a session the user stopped stays stopped until
+    # they speak again. Stop already DELETES the session's pending wakeup rows,
+    # which is the cross-runner half of this; the latch is the local race-closer
+    # for a timer that had already fired (or was mid-flight) when Stop landed.
+    # Dropped rather than re-armed: the wake's premise — that the session should
+    # pick work back up on its own — is exactly what the user just refused.
+    if _session_user_stopped(session_id):
+        logger.info(
+            "wakeup %s (session %s, source %s) dropped — the user stopped this "
+            "session and has not messaged it since",
+            wakeup_id, session_id, row.get("source"),
+        )
+        if wakeup_id:
+            await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
+            _retry_attempts.pop(str(wakeup_id), None)
+        return
+
     claimed = await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
     if not claimed:
         logger.info(
@@ -500,6 +536,22 @@ async def schedule(
     re-arms on every turn leaves one pending wake, not a growing pile that all
     come due together.
     """
+    if source != "schedule_wakeup" and _session_user_stopped(session_id):
+        # No SERVER-originated producer arms a wake on a session the user
+        # stopped — the idle watchdog above all, which exists precisely to nudge
+        # quiet sessions back to work. Any outstanding row for the source is
+        # still dropped, so this never leaves a stale wake behind.
+        # ``schedule_wakeup`` (the model's own tool, which returns the row to a
+        # caller that reads its id) is deliberately not refused here: it can
+        # only run inside a turn, and :func:`_fire` drops the wake anyway if the
+        # stop still stands when it comes due.
+        dropped = await cancel_session_wakeups_async(session_id, source)
+        logger.info(
+            "wakeup schedule refused for stopped session %s (source=%s, "
+            "dropped %d outstanding)",
+            session_id, source, dropped,
+        )
+        return {}
     replaced = await cancel_session_wakeups_async(session_id, source)
     if replaced:
         logger.info(

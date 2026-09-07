@@ -157,8 +157,13 @@ async def start_panel(
     from app.core import browser_runtime
     try:
         return await browser_runtime.start(session_id)
-    except browser_runtime.RuntimeUnavailable:
-        raise HTTPException(503, "Browser runtime could not start") from None
+    except browser_runtime.RuntimeUnavailable as exc:
+        # These messages are app-authored constants (never server-echoed text),
+        # and the panel shows the detail verbatim: a startup failure the user
+        # can act on beats a generic 503 they can only re-try.
+        raise HTTPException(
+            503, str(exc) or "Browser runtime could not start"
+        ) from None
 
 
 @router.post("/api/v1/browser/panel/rpc", include_in_schema=False)
@@ -188,8 +193,10 @@ async def browser_rpc(request: Request):
         return await browser_runtime.call(session_id, body.get("tool"), body.get("arguments", {}))
     except (ValueError, TypeError, RecursionError):
         raise HTTPException(422, "Invalid browser tool call") from None
-    except browser_runtime.RuntimeUnavailable:
-        raise HTTPException(503, "Browser runtime unavailable; outcome unknown") from None
+    except browser_runtime.RuntimeUnavailable as exc:
+        raise HTTPException(
+            503, str(exc) or "Browser runtime unavailable; outcome unknown"
+        ) from None
 
 
 @router.get("/api/v1/sessions/{session_id}/browser/panel")

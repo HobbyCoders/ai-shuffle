@@ -2,6 +2,7 @@
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -24,6 +25,9 @@ async def fake(monkeypatch):
 
         async def start(self):
             await asyncio.sleep(0)
+
+        async def list_tools(self):
+            return [SimpleNamespace(name=name) for name in runtime.HANDSHAKE_TOOLS]
 
         async def call_tool(self, tool, arguments):
             self.tools.append((tool, arguments))
@@ -307,3 +311,109 @@ async def test_shutdown_retires_outstanding_rpc_jobs(fake):
     assert fake[0].closed
 
 
+
+
+@pytest.mark.asyncio
+async def test_stale_build_is_named_not_a_parse_crash(fake, monkeypatch):
+    """A dist predating the workspace runtime has no browser_status.
+
+    Production shipped `503 Browser runtime startup failed (KeyError)` because
+    the handshake read `runtime_id` straight out of that server's
+    `{"ok": false, "error": "unknown tool: browser_status"}` error result.
+    """
+    async def list_tools(self):
+        return [
+            SimpleNamespace(name=name)
+            for name in ("browser_navigate", "browser_snapshot", "browser_tabs")
+        ]
+
+    async def call_tool(self, tool, arguments):
+        return {
+            "content": [{
+                "type": "text",
+                "text": json.dumps({"ok": False, "error": f"unknown tool: {tool}"}),
+            }],
+            "isError": True,
+        }
+
+    monkeypatch.setattr(runtime.RawMcpClient, "list_tools", list_tools)
+    monkeypatch.setattr(runtime.RawMcpClient, "call_tool", call_tool)
+    with pytest.raises(runtime.RuntimeUnavailable) as failure:
+        await runtime.start("runtime-test")
+    assert "out of date" in str(failure.value)
+    assert "npm --prefix browser-mcp run build" in str(failure.value)
+    assert fake[0].closed
+
+
+@pytest.mark.asyncio
+async def test_status_error_result_never_raises_key_error(fake, monkeypatch):
+    """Same payload, but the tool listing looks healthy: still no crash."""
+    async def call_tool(self, tool, arguments):
+        return {
+            "content": [{"type": "text", "text": json.dumps({"ok": False, "error": "x"})}],
+            "isError": True,
+        }
+
+    monkeypatch.setattr(runtime.RawMcpClient, "call_tool", call_tool)
+    with pytest.raises(runtime.RuntimeUnavailable, match="expected identity"):
+        await runtime.start("runtime-test")
+    assert fake[0].closed
+
+
+@pytest.mark.parametrize("status", [
+    None,
+    {},
+    {"content": [{"type": "text", "text": '{"ok": false}'}]},
+    {"content": [{"type": "text", "text": "not json"}]},
+    {"content": [{"type": "text"}]},
+    {"content": [{"type": "text", "text": '{"runtime_id": 5}'}]},
+    {"content": [{"type": "text", "text": '{"runtime_id": "has spaces"}'}]},
+    {"content": [{"type": "text", "text": '{"runtime_id": "ok"}'}], "isError": True},
+    {"content": "not a list"},
+])
+def test_reported_runtime_id_absorbs_every_malformed_status(status):
+    assert runtime._reported_runtime_id(status) is None
+
+
+def test_reported_runtime_id_reads_a_healthy_status():
+    status = {"content": [
+        {"type": "image", "data": "YQ==", "mimeType": "image/png"},
+        {"type": "text", "text": '{"runtime_id": "abc-123", "available": true}'},
+    ]}
+    assert runtime._reported_runtime_id(status) == "abc-123"
+
+
+@pytest.mark.asyncio
+async def test_hung_call_returns_a_deadline_error_without_replaying(fake, monkeypatch):
+    await runtime.start("runtime-test")
+    monkeypatch.setenv("BROWSER_TOOL_TIMEOUT_SECONDS", "0.05")
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def hung(tool, args):
+        entered.set()
+        await release.wait()
+        return {"content": [{"type": "text", "text": "{}"}]}
+
+    fake[0].call_tool = hung
+    instance = runtime.get("runtime-test")
+    result = await runtime.call("runtime-test", "browser_act", {"ref": "e1"})
+    assert entered.is_set()
+    assert result["isError"] is True
+    body = json.loads(result["content"][0]["text"])
+    assert body["ok"] is False
+    assert "did not finish within 0.05s" in body["error"]
+    assert "NOT replayed" in body["error"]
+    # The admitted call is still owned by the runtime, not cancelled behind it.
+    assert instance.calls and instance.active == 1
+    release.set()
+    await asyncio.gather(*instance.calls, return_exceptions=True)
+
+
+def test_call_timeout_defaults_and_rejects_nonsense(monkeypatch):
+    monkeypatch.delenv("BROWSER_TOOL_TIMEOUT_SECONDS", raising=False)
+    assert runtime.call_timeout() == runtime.DEFAULT_CALL_TIMEOUT
+    for bad in ("", "abc", "0", "-3"):
+        monkeypatch.setenv("BROWSER_TOOL_TIMEOUT_SECONDS", bad)
+        assert runtime.call_timeout() == runtime.DEFAULT_CALL_TIMEOUT
+    monkeypatch.setenv("BROWSER_TOOL_TIMEOUT_SECONDS", "12.5")
+    assert runtime.call_timeout() == 12.5

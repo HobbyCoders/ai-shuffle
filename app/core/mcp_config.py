@@ -36,6 +36,7 @@ _BROWSER_ENV_KEYS = (
     "BROWSER_UPLOAD_DIR",
     "BROWSER_SSRF_BLOCK",
     "BROWSER_SSRF_ALLOW",
+    "BROWSER_LOOPBACK_HOST",
 )
 
 # Keys that may also be sourced from the process environment when absent from
@@ -49,6 +50,7 @@ _BROWSER_ENV_OS_FALLBACK_KEYS = (
     "BROWSER_UPLOAD_DIR",
     "BROWSER_SSRF_BLOCK",
     "BROWSER_SSRF_ALLOW",
+    "BROWSER_LOOPBACK_HOST",
 )
 
 # Process-env override for the loopback panel-register URL (same fallback shape
@@ -94,6 +96,54 @@ def _browser_ssrf_allow(explicit: Optional[str]) -> Optional[str]:
     return _LOOPBACK_ALLOW if opt_in else None
 
 
+def _own_routable_address() -> Optional[str]:
+    """This host's address on the interface it would use to reach the network.
+
+    A UDP socket that is only "connected" sends nothing; the kernel still picks
+    the outbound interface, so ``getsockname`` names the address other machines
+    (and other containers) can reach this one on. ``gethostname`` resolution is
+    not used: on Windows it happily returns a VPN or Hyper-V adapter, and inside
+    a container it often resolves to loopback.
+    """
+    import socket
+
+    for family, probe in (
+        (socket.AF_INET, ("10.255.255.255", 1)),
+        (socket.AF_INET6, ("2001:4860:4860::8888", 1)),
+    ):
+        sock = socket.socket(family, socket.SOCK_DGRAM)
+        try:
+            sock.connect(probe)
+            address = sock.getsockname()[0]
+        except OSError:
+            continue
+        finally:
+            sock.close()
+        if address and not address.startswith(("127.", "::1", "fe80")):
+            return address
+    return None
+
+
+def _browser_loopback_host(explicit: Optional[str]) -> Optional[str]:
+    """Where the browser should look when a loopback URL is really this host.
+
+    The shell an agent runs commands in and the Chrome this server drives are
+    not always the same network namespace: on a shared runner the shell is a
+    container and the browser lives elsewhere, so a dev server the agent just
+    started on ``localhost:5179`` is unreachable by that name. browser-mcp
+    retries such a URL against this address (only after the direct attempt
+    fails) and, failing that, names it in the error instead of leaving the model
+    to discover ``hostname -I`` on its own.
+    """
+    if explicit:
+        return explicit
+    try:
+        return _own_routable_address()
+    except Exception:  # pragma: no cover - socket policy varies by platform
+        logger.debug("Could not resolve a routable address for the browser", exc_info=True)
+        return None
+
+
 def _build_browser_server_env(
     tool_env: Optional[Dict[str, str]],
     session_id: Optional[str] = None,
@@ -125,6 +175,10 @@ def _build_browser_server_env(
     ssrf_allow = _browser_ssrf_allow(env.get("BROWSER_SSRF_ALLOW"))
     if ssrf_allow:
         env["BROWSER_SSRF_ALLOW"] = ssrf_allow
+
+    loopback_host = _browser_loopback_host(env.get("BROWSER_LOOPBACK_HOST"))
+    if loopback_host:
+        env["BROWSER_LOOPBACK_HOST"] = loopback_host
 
     if session_id:
         from app.core import browser_panel_registry

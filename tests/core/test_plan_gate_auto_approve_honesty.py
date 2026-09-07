@@ -100,3 +100,141 @@ async def test_the_plan_mode_exit_sync_still_runs():
         await qe._auto_approve_plan_exit("sess-1", dict(_PLAN_INPUT), refs)
 
     spy.assert_called_once_with(refs)
+
+
+# ---------------------------------------------------------------------------
+# The plan itself (2026-09-05 audit F5 / F11 / F13)
+# ---------------------------------------------------------------------------
+#
+# The Plan Approval panel is what would have rendered ``question_input["plan"]``
+# — and on this path it never opens, so the plan markdown lived only inside
+# fluid's own QuestionRequest event and the user never saw it. Two audited
+# sessions bet a whole round on a decision nobody outside the model read.
+
+_PLAN_MARKDOWN = (
+    "## Round 1\n\n1. Rewrite `parked_task_kind`\n2. Ship it behind a flag"
+)
+_ISOLATED_PLAN_INPUT = {
+    **_PLAN_INPUT,
+    "plan": _PLAN_MARKDOWN,
+}
+
+
+class _FakeAdapter:
+    """Only the surface the disclosure touches: the plan-mode note queue that
+    ``receive_events`` drains into the stream on the next engine event."""
+
+    def __init__(self):
+        self._pending_plan_mode_events = []
+
+
+async def test_the_plan_reaches_the_transcript():
+    from app.core.plan_disclosure import PLAN_DISCLOSURE_SUBTYPE
+
+    adapter = _FakeAdapter()
+
+    with patch.object(qe.permission_handler, "supersede_plan_approvals", AsyncMock()), \
+            patch.object(qe, "_sync_plan_mode_exited", return_value=None):
+        await qe._auto_approve_plan_exit(
+            "sess-plan", dict(_ISOLATED_PLAN_INPUT), {"adapter": adapter}
+        )
+
+    queued = adapter._pending_plan_mode_events
+    assert len(queued) == 1
+    assert queued[0].subtype == PLAN_DISCLOSURE_SUBTYPE
+    assert queued[0].data["plan"] == _PLAN_MARKDOWN
+    # The generic system card renders ``data["content"]``, so the plan has to
+    # be in there too, not only in a field nothing reads.
+    assert _PLAN_MARKDOWN in queued[0].data["content"]
+
+
+async def test_the_note_says_who_approved_it():
+    """The same entry is the app's durable answer to a gate nobody was offered,
+    so it has to carry the provenance rather than read as an approval."""
+    adapter = _FakeAdapter()
+
+    with patch.object(qe.permission_handler, "supersede_plan_approvals", AsyncMock()), \
+            patch.object(qe, "_sync_plan_mode_exited", return_value=None):
+        await qe._auto_approve_plan_exit(
+            "sess-plan", dict(_ISOLATED_PLAN_INPUT), {"adapter": adapter}
+        )
+
+    data = adapter._pending_plan_mode_events[0].data
+    assert data["answeredBy"] == "host_policy"
+    assert data["approved"] is True
+    assert data["userReviewed"] is False
+    assert "No approval was collected from you" in data["content"]
+
+
+async def test_the_note_is_not_a_modal():
+    """It is an ordinary ``system`` entry. The app's question and permission
+    modals are driven by ``pending_interactions`` rows, and this path
+    deliberately creates none — so nothing here can render as one."""
+    from app.core.provider.events import SystemMessage
+    from app.core.system_message_filter import is_hidden_system_subtype
+    from app.core.plan_disclosure import PLAN_DISCLOSURE_SUBTYPE
+
+    adapter = _FakeAdapter()
+
+    with patch.object(qe.permission_handler, "supersede_plan_approvals", AsyncMock()), \
+            patch.object(qe, "_sync_plan_mode_exited", return_value=None):
+        await qe._auto_approve_plan_exit(
+            "sess-plan", dict(_ISOLATED_PLAN_INPUT), {"adapter": adapter}
+        )
+
+    note = adapter._pending_plan_mode_events[0]
+    assert isinstance(note, SystemMessage)
+    # Not filtered out of history either — a hidden subtype would put us back
+    # where we started.
+    assert not is_hidden_system_subtype(PLAN_DISCLOSURE_SUBTYPE)
+
+
+async def test_the_approval_question_is_stripped_from_the_fallback():
+    """Older inputs carry no isolated ``plan``; the raw QuestionRequest message
+    ends with fluid's synthetic approval prompt, which must not be replayed to
+    a user who was never asked it."""
+    from app.core.plan_disclosure import plan_markdown
+
+    raw = (
+        _PLAN_MARKDOWN
+        + "\n\nApprove this plan and leave plan mode? "
+        + "(1 = Approve, anything else = feedback)"
+    )
+
+    assert plan_markdown({"question": raw}) == _PLAN_MARKDOWN
+    assert plan_markdown({"plan": _PLAN_MARKDOWN, "question": raw}) == _PLAN_MARKDOWN
+    assert plan_markdown({}) == ""
+    assert plan_markdown(None) == ""
+
+
+async def test_a_missing_queue_never_fails_the_plan_exit():
+    """The SDK leg reaches plan approval through ExitPlanMode and its own
+    panel; it has no note queue, and the exit must still succeed."""
+    from app.core.user_question_handler import FLUID_ANSWER_KEY
+
+    with patch.object(qe.permission_handler, "supersede_plan_approvals", AsyncMock()), \
+            patch.object(qe, "_sync_plan_mode_exited", return_value=None):
+        updated = await qe._auto_approve_plan_exit(
+            "sess-plan", dict(_ISOLATED_PLAN_INPUT), {"adapter": object()}
+        )
+
+    assert updated[FLUID_ANSWER_KEY] == "approve"
+
+
+async def test_the_plan_note_precedes_the_mode_switch_note():
+    """Transcript order: the plan, then the decision. ``_sync_plan_mode_exited``
+    is what queues 'Switched to … mode.' onto the same list."""
+    adapter = _FakeAdapter()
+
+    def _mode_note(refs):
+        adapter._pending_plan_mode_events.append("mode-switch")
+        return None
+
+    with patch.object(qe.permission_handler, "supersede_plan_approvals", AsyncMock()), \
+            patch.object(qe, "_sync_plan_mode_exited", side_effect=_mode_note):
+        await qe._auto_approve_plan_exit(
+            "sess-plan", dict(_ISOLATED_PLAN_INPUT), {"adapter": adapter}
+        )
+
+    assert adapter._pending_plan_mode_events[-1] == "mode-switch"
+    assert len(adapter._pending_plan_mode_events) == 2

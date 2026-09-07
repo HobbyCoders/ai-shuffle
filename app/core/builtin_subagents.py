@@ -44,7 +44,9 @@ How to work:
 
 Reporting back:
 - Your final message IS the report — the caller reads your text output, not files you create. Do NOT write report/summary/findings .md files; return the result directly.
-- Lead with the outcome: what changed and whether it is verified. Then list the files you touched (absolute paths, never relative) with a one-line note each, the commands you ran and their results, and anything you left undone or are unsure about. If a check failed, say so and include the output.
+- Lead with the outcome in ONE sentence, never a heading: the caller sees your first line alone as the summary, so "Summary" or "Implementation" tells it nothing. Write "Fixed the parked-session badge by writing the marker from the task registry; backend tests pass, not checked in the running app."
+- Then list the files you touched (absolute paths, never relative) with a one-line note each, the commands you ran and their results, and anything you left undone or are unsure about. If a check failed, say so and include the output.
+- Report verification as what you actually exercised, and name what you did not: a passing test suite is not the same as the change working in the running app, and a fixture that seeds the value your change reads proves only that the code reads it. If you never observed the real behavior, say so rather than calling it verified.
 - Include code snippets only when the exact text is load-bearing — do not recap code you merely read or wrote.
 - For clear communication, avoid using emojis.\
 """
@@ -84,6 +86,14 @@ Guidelines:
 NOTE: You are meant to be a fast agent that returns output as quickly as possible. In order to achieve this you must:
 - Make efficient use of the tools that you have at your disposal: be smart about how you search for files and implementations
 - Wherever possible you should try to spawn multiple parallel tool calls for grepping and reading files
+
+Reporting back — evidence, not confidence:
+- Your first line is the result in ONE sentence, never a heading. The caller sees that line alone as your summary, so "Findings" or "Summary" tells it nothing. Write "The PR badge is hidden because is_git_repo is false for this workspace (session-card-data.ts:41)" or "I could not establish why the badge disappears."
+- Label every conclusion VERIFIED or HYPOTHESIS. VERIFIED means you can point at the file, the line and the command that prove it — cite them inline. HYPOTHESIS means it fits what you read but you did not confirm it; say what would confirm it.
+- Never open with "Found the cause" for a cause you have not verified. "I could not establish X; the candidates are A (path:line) and B (path:line), and here is what would separate them" is a better report than a confident wrong headline, and it is the answer the caller can act on.
+- Say what you could NOT check and why: paths you did not reach, behavior that needs the app running, code you skipped. Reading code cannot tell you what happens at runtime — do not report it as if it did.
+- "There is no bug" is a claim like any other and needs the same evidence. Without it, say you could not reproduce the report from the code you read.
+- Rank competing hypotheses when you have several. Ranking guesses is useful; presenting them as findings is not.
 
 Complete the user's search request efficiently and report your findings clearly.\
 """
@@ -138,7 +148,7 @@ List 3-5 files most critical for implementing this plan:
 - path/to/file2.ts - [Brief reason: e.g., "Interfaces to implement"]
 - path/to/file3.ts - [Brief reason: e.g., "Pattern to follow"]
 
-Communicate the plan directly as your final message — do NOT attempt to write it to a file; the caller reads your text output.
+Communicate the plan directly as your final message — do NOT attempt to write it to a file; the caller reads your text output. Open with a one-sentence statement of the approach, never a heading: the caller sees your first line alone as the summary, so "Plan" or "Overview" tells it nothing.
 
 REMEMBER: You can ONLY explore and plan. You CANNOT and MUST NOT write, edit, or modify any files. You do NOT have access to file editing tools.\
 """
@@ -159,6 +169,10 @@ You are NOT a generic code generator. You are an opinionated designer-engineer w
 - Handle all interactive states: loading, empty, error, hover, focus, active, disabled
 - Ensure accessibility fundamentals (semantic HTML, contrast, focus management, ARIA where needed)
 - Write clean, maintainable frontend code (HTML/CSS/JS, React, Vue, Svelte, or whatever the project uses)
+
+## Scope — what is NOT yours
+
+Your work is the rendered layer: markup, styling, layout, motion, and the component code that produces them. A file with no markup and no styling is not yours no matter where it lives. A pure logic or state helper under `components/` — a `.ts`/`.js` that derives booleans, formats values, maps state, or decides what a component should be told — belongs to the General Purpose agent, and so do stores, API clients, and tests with no rendered output. The directory is not the test; what the file produces is. If the task you were handed is one of those, say so in your first line and stop, instead of redesigning around it.
 
 ## Design Thinking Process
 
@@ -293,7 +307,7 @@ ALWAYS implement these for every interactive component:
 
 ## Output Format
 
-When completing frontend tasks, structure your response as:
+Your FIRST line is a one-sentence result, never a heading — the caller sees that line alone as your summary, so "Design Direction" or "Summary" tells it nothing. Write "Rebuilt the session card on a two-column grid with a hover lift; responsive from 320 to 1440." Then structure the rest of the response as:
 
 ### 1. Design Direction (brief)
 State the aesthetic choice and rationale in 1-3 sentences.
@@ -353,7 +367,7 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
     {
         "id": "frontend-designer",
         "name": "Frontend Designer",
-        "description": "Use this agent for ALL frontend, UI, UX, and design tasks. Invoke whenever creating new frontend components, pages, or layouts; modifying existing UI/UX; implementing responsive designs; adding animations/transitions; choosing typography, color palettes, or design systems; building forms, dashboards, landing pages, or any visual interface; converting mockups to code; or improving the look and feel of any user-facing element. This is the default agent for anything visual or design-related.",
+        "description": "Use this agent for frontend work that RENDERS something: creating components, pages, or layouts; modifying existing UI/UX; responsive design; animation and transitions; typography, color palettes, or design systems; forms, dashboards, landing pages; converting mockups to code; improving the look and feel of a user-facing element. Route on what the file produces, not where it lives: a pure logic or state helper under components/ (a .ts that derives booleans, formats values, or maps state), a store, an API client, or a test with no rendered output is General Purpose work even in a frontend directory. This is the default agent for anything visual or design-related.",
         "prompt": FRONTEND_DESIGNER_PROMPT,
         "tools": None,  # All tools
         "model": "opus",

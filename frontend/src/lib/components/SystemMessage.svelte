@@ -148,10 +148,15 @@
 
 	// Shared status → badge-color mapping for task-notification cards/chips
 	// (own card and quiet-pump chip). Keeps 'stopped' → amber consistent.
+	// 'cancelled'/'stopped' mean somebody stopped this on purpose — the user's
+	// Stop, an agent's own TaskStop of a service it no longer needs. That is not
+	// a failure and must not be dressed as one; 'killed'/'error' still are.
+	const TASK_STOPPED_STATUSES = ['stopped', 'cancelled'];
+
 	function taskStatusColor(status: string): string {
 		return status === 'failed' ? 'red'
 			: status === 'completed' ? 'green'
-			: status === 'stopped' ? 'amber'
+			: TASK_STOPPED_STATUSES.includes(status) ? 'amber'
 			: 'gray';
 	}
 
@@ -971,6 +976,12 @@
 						{:else if formatted.taskStatus === 'failed' || formatted.taskStatus === 'error' || formatted.taskStatus === 'killed'}
 							<svg class="w-4 h-4 text-red-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+							</svg>
+						{:else if TASK_STOPPED_STATUSES.includes(formatted.taskStatus ?? '')}
+							<!-- Deliberately stopped: a stop square, not a failure cross and
+							     not a success tick. -->
+							<svg class="w-4 h-4 text-amber-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<rect x="6" y="6" width="12" height="12" rx="2" stroke-width="2" />
 							</svg>
 						{:else}
 							<svg class="w-4 h-4 text-green-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">

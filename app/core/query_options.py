@@ -823,6 +823,25 @@ def build_options_from_profile(
             _binding_row = None
     session_mode = session_mode_of(_binding_row)
 
+    # ── Where this session EXECUTES, for the <env> block below ───────────────
+    #
+    # ``sessions.placement["where"]`` — ``runner:<id>`` for a pinned session.
+    # The app has always known this and never told the model, which is how a
+    # session on a shared runner spends nine minutes starting the app inside
+    # that runner and pointing the browser tool at its loopback address. Read
+    # off the same row snapshot as the lane above; only an EXPLICIT placement
+    # counts (the A11 implicit ``instance_id`` pin is every session, including
+    # the local lane, so surfacing it would say "shared runner" everywhere).
+    placement_where: Optional[str] = None
+    try:
+        from app.core.placement import _normalize_placement
+
+        _placement = _normalize_placement((_binding_row or {}).get("placement"))
+        _where = str((_placement or {}).get("where") or "").strip()
+        placement_where = _where or None
+    except Exception:  # noqa: BLE001 — placement is a prompt nicety, never a gate
+        placement_where = None
+
     if session_mode == "chat":
         # A chat session RUNS INSIDE its own uploads folder. This is not
         # cosmetic and it is not about tidiness: it is half of the read fence.
@@ -910,6 +929,7 @@ def build_options_from_profile(
                     execution_mode=execution_mode,
                     worktree_info=worktree_info,
                     include_volatile=False,
+                    placement_where=placement_where,
                 ))
                 turn_env = {
                     "execution_mode": execution_mode,

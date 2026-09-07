@@ -14,6 +14,7 @@ Tests cover:
 """
 
 from unittest.mock import patch
+import pytest
 
 
 # =============================================================================
@@ -138,13 +139,15 @@ class TestSetEncryptedApiKey:
                 mock_db.set_system_setting.assert_called_once_with("openai_api_key", "encrypted:sk-key")
 
     def test_set_encrypted_api_key_without_encryption(self):
-        """Should store plaintext when encryption not ready."""
+        """An unavailable server key must never downgrade storage to plaintext."""
         with patch("app.api.settings_crypto.database") as mock_db:
             with patch("app.api.settings_crypto.encryption") as mock_enc:
                 mock_enc.is_encryption_ready.return_value = False
+                mock_enc.encrypt_value.side_effect = RuntimeError('Credential storage locked')
                 from app.api.settings import set_encrypted_api_key
-                set_encrypted_api_key("openai_api_key", "sk-key")
-                mock_db.set_system_setting.assert_called_once_with("openai_api_key", "sk-key")
+                with pytest.raises(RuntimeError):
+                    set_encrypted_api_key("openai_api_key", "sk-key")
+                mock_db.set_system_setting.assert_not_called()
 
 
 class TestComputeEffectiveStatus:

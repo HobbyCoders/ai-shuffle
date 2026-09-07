@@ -18,7 +18,7 @@
 	import type { Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/types';
 	import {
-		getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword
+		getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig
 	} from '$lib/api/auth';
 	import ConnectorManager from '$lib/components/ConnectorManager.svelte';
 	import Banner from '$lib/components/Banner.svelte';
@@ -99,14 +99,6 @@
 	let githubToken = $state('');
 	let githubLoginLoading = $state(false);
 	let githubUser: string | null = $state(null);
-
-	// Password change
-	let currentPassword = $state('');
-	let newPassword = $state('');
-	let confirmPassword = $state('');
-	let changingPassword = $state(false);
-	let passwordChangeError = $state('');
-	let passwordChangeSuccess = $state('');
 
 	// Chat Behavior Preferences
 	let chatPrefs = $state<ChatPreferences | null>(null);
@@ -275,33 +267,6 @@
 	// Computed: check if instructions have changed
 	let securityInstructionsChanged = $derived(securityInstructions !== originalSecurityInstructions);
 
-	// Password change
-	async function handleChangePassword() {
-		if (newPassword !== confirmPassword) {
-			passwordChangeError = 'Passwords do not match';
-			return;
-		}
-		if (newPassword.length < 8) {
-			passwordChangeError = 'Password must be at least 8 characters';
-			return;
-		}
-		changingPassword = true;
-		passwordChangeError = '';
-		passwordChangeSuccess = '';
-		try {
-			await changePassword(currentPassword, newPassword);
-			passwordChangeSuccess = 'Password changed';
-			currentPassword = '';
-			newPassword = '';
-			confirmPassword = '';
-			setTimeout(() => passwordChangeSuccess = '', 3000);
-		} catch (e: any) {
-			passwordChangeError = e.detail || 'Failed to change password';
-		} finally {
-			changingPassword = false;
-		}
-	}
-
 	// Workspace validation
 	async function handleValidateWorkspace() {
 		if (!workspacePath.trim()) return;
@@ -397,18 +362,7 @@
 							onSaveWorkspace={handleSaveWorkspace}
 						/>
 
-						<SecuritySection
-							{currentPassword}
-							onCurrentPasswordChange={(v) => currentPassword = v}
-							{newPassword}
-							onNewPasswordChange={(v) => newPassword = v}
-							{confirmPassword}
-							onConfirmPasswordChange={(v) => confirmPassword = v}
-							{changingPassword}
-							{passwordChangeSuccess}
-							{passwordChangeError}
-							onChangePassword={handleChangePassword}
-						/>
+						<SecuritySection />
 					</div>
 				{/if}
 

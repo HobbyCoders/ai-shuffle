@@ -279,8 +279,7 @@ def _encrypt_token_or_400(token: str) -> str:
     if not encryption.is_encryption_ready():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Encryption is locked. Log in again as admin (or set "
-                   "ADMIN_PASSWORD) before storing a provider auth token.",
+            detail="Credential storage is locked; local recovery is required.",
         )
     return encryption.encrypt_value(token)
 
@@ -517,8 +516,7 @@ def _subscription_access_token(
     if not encryption.is_encryption_ready():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Encryption is locked. Log in again as admin (or set "
-                   "ADMIN_PASSWORD) before fetching provider models.",
+            detail="Credential storage is locked; local recovery is required.",
         )
     stored = db.get_codex_tokens(provider_id)
     if (
@@ -584,8 +582,7 @@ def _generic_auth_token(row: Dict[str, Any]) -> Optional[str]:
     if not encryption.is_encryption_ready():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Encryption is locked. Log in again as admin (or set "
-                   "ADMIN_PASSWORD) before fetching provider models.",
+            detail="Credential storage is locked; local recovery is required.",
         )
     return encryption.decrypt_value(enc_token)
 
@@ -1085,8 +1082,7 @@ def _codex_reset_credentials(provider_id: str) -> Tuple[str, Optional[str]]:
     if not encryption.is_encryption_ready():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Encryption is locked. Log in again as admin before using "
-                   "reset credits.",
+            detail="Credential storage is locked; local recovery is required.",
         )
 
     stored = db.get_codex_tokens(provider_id)
@@ -1243,8 +1239,7 @@ def _grok_reset_credentials(provider_id: str) -> str:
     if not encryption.is_encryption_ready():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Encryption is locked. Log in again as admin before using "
-                   "reset credits.",
+            detail="Credential storage is locked; local recovery is required.",
         )
 
     stored = db.get_codex_tokens(provider_id)
@@ -1424,8 +1419,7 @@ async def codex_device_start(provider_id: str, token: str = Depends(require_admi
     if not encryption.is_encryption_ready():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Encryption is locked. Log in again as admin (or set "
-                   "ADMIN_PASSWORD) before enrolling a Codex login.",
+            detail="Credential storage is locked; local recovery is required.",
         )
     if db.get_model_provider(provider_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
@@ -1590,8 +1584,7 @@ async def xai_device_start(provider_id: str, token: str = Depends(require_admin)
     if not encryption.is_encryption_ready():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Encryption is locked. Log in again as admin (or set "
-                   "ADMIN_PASSWORD) before enrolling a Grok login.",
+            detail="Credential storage is locked; local recovery is required.",
         )
     if db.get_model_provider(provider_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,

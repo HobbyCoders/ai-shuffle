@@ -17,7 +17,7 @@ resolves lazily at call time (``session_runtime.execute``,
 import asyncio
 import logging
 from contextlib import ExitStack, contextmanager
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1963,3 +1963,192 @@ async def test_delivery_latches_terminal_notified(mock_db):
 
     # The one-shot latch is spent: a second delivery cannot claim it again.
     assert task_registry.mark_terminal_notified("mt7", "task-mt7") is False
+
+
+# ---------------------------------------------------------------------------
+# Round-6 regression: the batch-window kick must not read a pending task's
+# exception (InvalidStateError aborted on_task_terminal on EVERY completion)
+# ---------------------------------------------------------------------------
+
+async def test_batch_window_kick_does_not_touch_a_pending_tasks_exception():
+    """``_kick_after_batch_window`` used to call ``task.exception()`` on the task
+    it had just created. A task created a statement ago is always PENDING, so
+    the read raised ``InvalidStateError`` — every single time."""
+    turn_scheduler._batch_kick_tasks.pop("bw1", None)
+    try:
+        turn_scheduler._kick_after_batch_window("bw1")  # must not raise
+        task = turn_scheduler._batch_kick_tasks.get("bw1")
+        assert task is not None and not task.done()
+    finally:
+        task = turn_scheduler._batch_kick_tasks.pop("bw1", None)
+        if task is not None:
+            task.cancel()
+            turn_scheduler._kick_tasks.discard(task)
+
+
+async def test_on_task_terminal_completes_without_a_failure_warning(mock_db, caplog):
+    """End-to-end shape of the same regression: the wake enqueue is followed by
+    the batch-window kick, and ``on_task_terminal`` must return normally instead
+    of falling into its blanket ``except`` and logging
+    ``on_task_terminal failed``."""
+    live = turns_db.enqueue_turn("bw2", "user", prompt="working")
+    turns_db.start_turn(live["id"], None, "runner")
+    _own_agent_task("bw2", "task-bw2")
+    frame = _terminal_frame("task-bw2", "child report")
+
+    with caplog.at_level(logging.WARNING, logger="app.core.turn_scheduler"):
+        with ExitStack() as stack:
+            stack.enter_context(_patch_execute())
+            stack.enter_context(patch(
+                "app.core.query_engine._read_task_output_file", return_value="",
+            ))
+            await turn_scheduler.on_task_terminal("bw2", frame)
+            await _drain_kicks()
+
+    assert "on_task_terminal failed" not in caplog.text
+    assert "InvalidStateError" not in caplog.text
+    (wake,) = _by_source("bw2", "unpark")
+    assert wake["payload"]["task_ids"] == ["task-bw2"]
+
+
+# ---------------------------------------------------------------------------
+# Policy (1b) — a wake turn that died doing nothing is re-run once
+# ---------------------------------------------------------------------------
+
+def _dead_wake_turn(session_id, *, payload=None, error="Cannot send a request"):
+    """A source=unpark turn that started and died on a provider error frame."""
+    turn = turns_db.enqueue_turn(
+        session_id, "unpark", prompt="<task-notification>...</task-notification>",
+        profile_id="p1", project_id="proj-1", payload=payload or {},
+    )
+    assert turns_db.start_turn(turn["id"], None, "runner") is not None
+    turns_db.settle_turn(turn["id"], "aborted", "error", error)
+    return turns_db.get_turn(turn["id"])
+
+
+def _usage_event(session_id, turn_id):
+    se_db.append_events(session_id, [{
+        "type": "turn.usage", "payload": {"usage": {"input_tokens": 10}},
+        "turn_id": turn_id,
+    }])
+
+
+@contextmanager
+def _fake_pool():
+    """Stand in for the session pool so the recovery path's drop + wake hold are
+    observable without a real adapter."""
+    pool = MagicMock()
+    pool.remove = AsyncMock(return_value=None)
+    with patch("app.core.session_pool.get_session_pool", return_value=pool):
+        yield pool
+
+
+async def test_failed_wake_with_no_model_calls_is_re_enqueued_once(mock_db):
+    dead = _dead_wake_turn("wr1")
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        pool = stack.enter_context(_fake_pool())
+        await turn_scheduler.on_turn_settled("wr1", dead["id"], "aborted")
+        await _drain_kicks()
+
+    (retry,) = _by_source("wr1", "unpark")
+    assert retry["id"] != dead["id"]
+    assert retry["prompt"] == dead["prompt"]
+    assert retry["profile_id"] == "p1" and retry["project_id"] == "proj-1"
+    assert retry["payload"][turn_scheduler.WAKE_RETRY_KEY] is True
+    assert retry["parent_turn_id"] == dead["id"]
+    # The client that killed the wake is torn down first, so the retry connects
+    # fresh instead of dying the same way.
+    pool.remove.assert_awaited_once_with("wr1")
+    pool.note_wake_pending.assert_called_with("wr1")
+
+
+async def test_a_retried_wake_that_dies_again_is_surfaced_not_retried(mock_db):
+    dead = _dead_wake_turn(
+        "wr2", payload={turn_scheduler.WAKE_RETRY_KEY: True, "api_user_id": "u-9"},
+    )
+    emit = AsyncMock()
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(_fake_pool())
+        stack.enter_context(patch(
+            "app.services.notification_service.emit_notification", emit,
+        ))
+        await turn_scheduler.on_turn_settled("wr2", dead["id"], "aborted")
+        await _drain_kicks()
+
+    assert _by_source("wr2", "unpark") == []  # no second retry
+    emit.assert_awaited_once()
+    assert emit.await_args.args[0] == "u-9"
+    assert emit.await_args.kwargs["severity"] == "error"
+    assert emit.await_args.kwargs["push"] is True
+    assert emit.await_args.kwargs["session_id"] == "wr2"
+
+
+async def test_a_wake_that_died_after_real_work_is_not_retried(mock_db):
+    """A retry would redo billed work, which is worse than surfacing the
+    failure — the recovery is only for wakes that never reached the provider."""
+    dead = _dead_wake_turn("wr3")
+    _usage_event("wr3", dead["id"])
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        pool = stack.enter_context(_fake_pool())
+        await turn_scheduler.on_turn_settled("wr3", dead["id"], "aborted")
+        await _drain_kicks()
+
+    assert _by_source("wr3", "unpark") == []
+    pool.remove.assert_not_awaited()
+
+
+async def test_a_failed_user_turn_is_never_re_enqueued_as_a_wake(mock_db):
+    turn = turns_db.enqueue_turn("wr4", "user", prompt="hi")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.settle_turn(turn["id"], "aborted", "error", "boom")
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(_fake_pool())
+        await turn_scheduler.on_turn_settled("wr4", turn["id"], "aborted")
+        await _drain_kicks()
+
+    assert turns_db.get_queued_turns("wr4") == []
+
+
+async def test_a_user_stopped_wake_is_not_retried(mock_db):
+    """Only an ERROR terminal qualifies: a user Stop settles aborted too, and
+    re-running what they just stopped is the opposite of what they asked for."""
+    turn = turns_db.enqueue_turn("wr5", "unpark", prompt="<task-notification/>")
+    turns_db.start_turn(turn["id"], None, "runner")
+    turns_db.settle_turn(turn["id"], "aborted", "interrupted")
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(_fake_pool())
+        await turn_scheduler.on_turn_settled("wr5", turn["id"], "aborted")
+        await _drain_kicks()
+
+    assert _by_source("wr5", "unpark") == []
+
+
+async def test_enqueueing_a_wake_holds_the_pool_and_settlement_releases_it(mock_db):
+    context = turns_db.enqueue_turn("wr6", "user", prompt="go", profile_id="p2")
+    turns_db.start_turn(context["id"], None, "runner")
+    _own_agent_task("wr6", "task-wr6")
+    frame = _terminal_frame("task-wr6", "done")
+
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.query_engine._read_task_output_file", return_value="",
+        ))
+        pool = stack.enter_context(_fake_pool())
+        await turn_scheduler.on_task_terminal("wr6", frame)
+        await _drain_kicks()
+        pool.note_wake_pending.assert_called_once_with("wr6")
+
+        await turn_scheduler.on_turn_settled("wr6", context["id"], "completed")
+
+    pool.clear_wake_pending.assert_called_with("wr6")

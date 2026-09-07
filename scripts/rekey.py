@@ -1,4 +1,7 @@
-"""Re-encrypt DB-stored secrets under a new admin password (offline rekey).
+"""Legacy-only offline password rekey; refused after server-key adoption.
+
+Current installations use ``python -m scripts.credential_keys`` for portable
+recovery. Do not use this legacy utility to change server-managed custody.
 
 Why this exists
 ---------------
@@ -183,6 +186,12 @@ def rekey(
     from app.core.auth import auth_service
     from app.db import database as db
     from app.db.base import transaction
+
+    try:
+        encryption.require_legacy_key_mode(db)
+    except RuntimeError:
+        logger.error("Server-managed credential storage cannot be password-rekeyed; use scripts.credential_keys.")
+        return 2
 
     if old_password == new_password:
         logger.error("New password must differ from the old password.")

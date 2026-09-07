@@ -533,6 +533,84 @@ async def _broadcast_queue_after_start(session_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Durable surface for a turn that died on a provider error
+# ---------------------------------------------------------------------------
+
+def _awaiting_user_input(session_id: str) -> bool:
+    """True while this session blocks on a durable interaction round-trip.
+
+    An ``AskUser`` question, a permission prompt or a plan gate makes a live
+    turn legitimately silent for as long as the person takes. Both the progress
+    watchdog and the pool's idle policy have to know the difference between
+    that and a wedged turn. Never raises: unknown resolves to "not waiting".
+    """
+    try:
+        from app.core import interaction_wait
+
+        return interaction_wait.has_waiters(session_id)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+#: What the durable row says when the provider gave us no message at all.
+_GENERIC_TURN_ERROR = "The turn ended with a provider error before finishing."
+
+#: Extra line on a wake turn — the user did not type anything, so without it
+#: the row reads as an error against a prompt they never sent.
+_WAKE_ERROR_NOTE = (
+    " This turn was started automatically to deliver a finished background "
+    "task's result."
+)
+
+
+async def persist_turn_error_message(
+    session_id: str,
+    turn_id: str,
+    message: Optional[str],
+    *,
+    source: str = "user",
+) -> None:
+    """Write a durable ``system`` row for a turn that ended on an error frame.
+
+    The gap: an ``error`` terminal reaches the live WebSocket and the ``turns``
+    table, but never ``session_messages``. Reload the session and it shows the
+    user's prompt followed by nothing — no banner, no explanation, no retry
+    affordance. One audited session was abandoned for twenty minutes because of
+    it; another recovered only because the user typed "resume" on a hunch.
+    Background-worker failures already write a system row (``chat_ws_handler``'s
+    terminal surface); turn failures now match.
+
+    Never raises: a message that cannot be written must not change how the turn
+    settles.
+    """
+    text = (message or "").strip() or _GENERIC_TURN_ERROR
+    if source in ("unpark", "unpark_pump"):
+        text += _WAKE_ERROR_NOTE
+    try:
+        from app.db import sessions as sessions_db
+
+        await asyncio.to_thread(
+            sessions_db.add_session_message,
+            session_id=session_id,
+            role="system",
+            content=text,
+            metadata={
+                "subtype": "error",
+                "system_data": {
+                    "message": text,
+                    "turn_id": turn_id,
+                    "turn_source": source,
+                },
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "SessionRuntime: could not persist the error message for %s turn %s",
+            session_id, turn_id, exc_info=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # SessionRuntime
 # ---------------------------------------------------------------------------
 
@@ -577,6 +655,7 @@ class SessionRuntime:
         self._drain_after_cancel = False
         # stop_reason override for an escalation-forced abort.
         self._abort_reason: Optional[str] = None
+        self._recorder_closing = False
         # Queued turn ids already handed to the engine as steers THIS turn.
         # ``try_steer_pending`` fires once per send, so without this a message
         # still awaiting its receipt would be submitted again by the next send.
@@ -627,6 +706,10 @@ class SessionRuntime:
         # create_task can be garbage-collected mid-await) and so the turn can
         # wait for it at finalize rather than leaving it orphaned.
         self._start_window_sweep_task: Optional[asyncio.Task] = None
+        # Progress watchdog: when this turn last saw ANY pump event, and the
+        # task that watches that stamp. See _progress_watchdog_loop.
+        self._last_progress_at: float = time.perf_counter()
+        self._progress_watchdog: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # execute
@@ -793,6 +876,16 @@ class SessionRuntime:
             #     block the self-heal (that would re-introduce the stuck-parked
             #     stick this heal exists to clear). Best-effort: a settle failure
             #     must never delay/kill the turn.
+            #
+            #     "stale" is the exceptional case, not the common one: the
+            #     ORDINARY unpark passes through here with its parked row just
+            #     resolved, and settling it is the normal hand-off, not a
+            #     repair. (An audit read the old "self-healed N stale parked
+            #     turn(s)" line as evidence of a fault because it fires on
+            #     essentially every unpark.) The Stop path now settles parked
+            #     rows itself (``query_session_lifecycle.enter_user_stop``), so
+            #     a session the user stopped no longer waits for its next turn
+            #     to stop reporting itself parked.
             try:
                 from app.core.task_registry import task_registry
 
@@ -802,7 +895,7 @@ class SessionRuntime:
                     )
                     if settled:
                         logger.info(
-                            "SessionRuntime: self-healed %d stale parked turn(s) "
+                            "SessionRuntime: settled %d resolved parked turn(s) "
                             "for %s at turn %s start", settled, sid, tid,
                         )
             except Exception:
@@ -854,6 +947,7 @@ class SessionRuntime:
             # recorder goes silent and this hook stops the pump we are still
             # driving (same cancel path as interrupt escalation).
             recorder.on_superseded = self._on_recorder_superseded
+            recorder.on_recording_failed = self._on_recorder_recording_failed
 
             # 6/7. Pump under the reader token, then ALWAYS finalize. A pump
             #    crash is absorbed (``_terminal`` stays ``None`` → finalize
@@ -865,9 +959,11 @@ class SessionRuntime:
                 async with get_reader_lock(sid):
                     pump = asyncio.create_task(self._run_pump(recorder))
                     self._pump_task = pump
+                    self._start_progress_watchdog()
                     try:
                         await pump
                     finally:
+                        self._stop_progress_watchdog()
                         self._pump_task = None
                         if not pump.done():
                             # execute() itself is being torn down mid-pump —
@@ -916,16 +1012,20 @@ class SessionRuntime:
                     outcome = final["state"]
                 return outcome
             outcome, settled_here = await self._finalize(sid, tid)
-            if self._pending_done is not None:
+            if (
+                self._pending_done is not None
+                and self._abort_reason != "recording_failed"
+            ):
                 # The pump ending does not prove the session is finished: the
                 # park gate above may still find background work. Deliver the
-                # WS completion only once its outcome is known.
+                # WS completion only once its outcome is known. A turn aborted
+                # because recording failed (#1124) never completes.
                 await self._broadcast({
                     **self._pending_done,
                     "session_id": sid,
                     "outcome": outcome,
                 })
-                self._pending_done = None
+            self._pending_done = None
         finally:
             # Deregister ourselves as the live runtime (self-guarded so a fresh
             # runtime that already took over the session is never evicted).
@@ -1009,46 +1109,53 @@ class SessionRuntime:
             and (self.turn.get("payload") or {}).get("deferred_user_record")
         ):
             await self._persist_user_message(prompt)
-        await recorder.start(
-            prompt,
-            profile_id=self.turn.get("profile_id"),
-            record_user=not resume and not already_recorded,
-        )
-        if completion_frames:
-            # The wake turn is the claimed completions' delivery point, so this
-            # is where the event log — and with it the frontend card — learns
-            # the task is done. A task that finished BETWEEN turns produces no
-            # terminal frame inside this turn's stream, and the frontend no
-            # longer force-settles background shells at turn end (#991), so
-            # without this append the card runs forever.
-            try:
-                await recorder.record_task_terminal(completion_frames)
-            except Exception:  # noqa: BLE001 — a card badge never kills a turn
-                logger.warning(
-                    "SessionRuntime: recording terminal task events failed for "
-                    "%s (%d frame(s))",
-                    self.session_id, len(completion_frames), exc_info=True,
-                )
-            # This wake turn IS the delivery of those completions, so it is also
-            # where ``terminal_notified`` becomes true — the steered mid-turn
-            # path latches it at its own delivery receipt. Without this the flag
-            # stayed False forever for every clean completion (only the
-            # error/killed chip in ``complete_task`` ever set it).
-            try:
-                from app.core import turn_scheduler
-
-                turn_scheduler.on_task_notification_delivered(
-                    self.session_id,
-                    (self.turn.get("payload") or {}).get("task_ids")
-                    or [f.get("task_id") for f in completion_frames
-                        if isinstance(f, dict)],
-                )
-            except Exception:  # noqa: BLE001 — bookkeeping never kills a turn
-                logger.warning(
-                    "SessionRuntime: terminal_notified latch failed for %s",
-                    self.session_id, exc_info=True,
-                )
+        done_event = None
         try:
+            await recorder.start(
+                prompt,
+                profile_id=self.turn.get("profile_id"),
+                record_user=not resume and not already_recorded,
+            )
+            if self._abort_reason == "recording_failed":
+                return
+            if completion_frames:
+                # The wake turn is the claimed completions' delivery point, so this
+                # is where the event log — and with it the frontend card — learns
+                # the task is done. A task that finished BETWEEN turns produces no
+                # terminal frame inside this turn's stream, and the frontend no
+                # longer force-settles background shells at turn end (#991), so
+                # without this append the card runs forever.
+                try:
+                    await recorder.record_task_terminal(completion_frames)
+                    if self._abort_reason == "recording_failed":
+                        return
+                except Exception:  # noqa: BLE001 — a card badge never kills a turn
+                    logger.warning(
+                        "SessionRuntime: recording terminal task events failed for "
+                        "%s (%d frame(s))",
+                        self.session_id, len(completion_frames), exc_info=True,
+                    )
+                # This wake turn IS the delivery of those completions, so it is also
+                # where ``terminal_notified`` becomes true — the steered mid-turn
+                # path latches it at its own delivery receipt. Without this the flag
+                # stayed False forever for every clean completion (only the
+                # error/killed chip in ``complete_task`` ever set it).
+                try:
+                    from app.core import turn_scheduler
+
+                    turn_scheduler.on_task_notification_delivered(
+                        self.session_id,
+                        (self.turn.get("payload") or {}).get("task_ids")
+                        or [f.get("task_id") for f in completion_frames
+                            if isinstance(f, dict)],
+                    )
+                except Exception:  # noqa: BLE001 — bookkeeping never kills a turn
+                    logger.warning(
+                        "SessionRuntime: terminal_notified latch failed for %s",
+                        self.session_id, exc_info=True,
+                    )
+            if self._abort_reason == "recording_failed":
+                return
             async for event in _stream_to_websocket_impl(
                 prompt=engine_prompt,
                 resume=resume,
@@ -1073,6 +1180,11 @@ class SessionRuntime:
                 ),
             ):
                 etype = event.get("type") if isinstance(event, dict) else None
+                # ANY frame is proof the engine is still moving — a tool result,
+                # a usage record, a token of text. The watchdog only fires on
+                # total silence, so this is deliberately the widest possible
+                # liveness signal.
+                self._last_progress_at = time.perf_counter()
                 if etype == "steer_delivered":
                     # Internal receipt, not a render frame: it becomes a
                     # ``message.user`` in the log (below) and never reaches the
@@ -1086,6 +1198,8 @@ class SessionRuntime:
                     # be folded in rather than run as a second turn.
                     self._sweep_start_window_steers()
                 await recorder.on_event(event)
+                if self._abort_reason == "recording_failed":
+                    return
                 if etype in ("done", "interrupted", "error"):
                     self._terminal = etype
                     if etype == "error":
@@ -1107,9 +1221,119 @@ class SessionRuntime:
                         # WS consumer reads (copies rather than mutating, so the
                         # recorder's already-handed-over dict is untouched).
                         ws_event = _cap_ws_tool_input(event)
-                    await self._broadcast(ws_event)
+                    if etype == "done":
+                        done_event = ws_event
+                    else:
+                        await self._broadcast(ws_event)
         finally:
+            self._recorder_closing = True
             await recorder.close()
+        if done_event is not None and self._abort_reason != "recording_failed":
+            await self._broadcast(done_event)
+
+    # ------------------------------------------------------------------
+    # progress watchdog — a turn that goes completely silent is terminalized
+    # ------------------------------------------------------------------
+
+    def _progress_timeout_seconds(self) -> float:
+        """The configured silence budget, or 0 when the watchdog is off."""
+        try:
+            return max(0.0, float(
+                getattr(settings, "turn_progress_timeout_seconds", 0) or 0
+            ))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _start_progress_watchdog(self) -> None:
+        """Arm the silence watchdog for this turn (no-op when disabled)."""
+        timeout = self._progress_timeout_seconds()
+        if timeout <= 0:
+            return
+        self._last_progress_at = time.perf_counter()
+        task = asyncio.create_task(self._progress_watchdog_loop(timeout))
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        self._progress_watchdog = task
+
+    def _stop_progress_watchdog(self) -> None:
+        task = self._progress_watchdog
+        self._progress_watchdog = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _progress_watchdog_loop(self, timeout: float) -> None:
+        """Terminalize a turn that has produced NO event for ``timeout`` seconds.
+
+        The failure it exists for: a host tool call (a browser automation step,
+        an MCP round-trip) that blocks forever. The code cell's own timeout
+        cannot interrupt a blocked ``__host_call__``, nothing above it bounds
+        the turn, and the session presents as ``running`` indefinitely — one
+        audited session sat wedged for three hours with the user's last request
+        unanswered and no signal that anything was wrong.
+
+        Two things are deliberately NOT killed:
+
+        * a turn waiting on the human (an ``AskUser`` round-trip, a permission
+          or plan gate). It is legitimately silent for as long as the person
+          takes, and its own deadline is ``user_question_timeout_seconds``.
+        * a turn that has already reached a terminal frame — the pump is
+          finishing, and cancelling it there would only lose the tail.
+
+        The kill mirrors a provider error exactly: an ``error`` frame on the
+        live stream, ``_terminal='error'`` so ``_finalize`` settles the row
+        ``aborted``/``stop_reason=error`` with the reason on it, the recorder's
+        crash path writing ``turn.aborted``, and the durable system message
+        every error terminal now leaves behind.
+        """
+        # Poll often enough to be prompt without being a busy loop: a minute, or
+        # a quarter of the budget when the budget is short (tests set seconds).
+        interval = max(0.05, min(60.0, timeout / 4))
+        while True:
+            await asyncio.sleep(interval)
+            if self._terminal is not None:
+                return  # the pump reached a terminal frame on its own
+            silent_for = time.perf_counter() - self._last_progress_at
+            if silent_for < timeout:
+                continue
+            if _awaiting_user_input(self.session_id):
+                # Blocked on a person, not wedged. Restamp so the budget starts
+                # again from the moment the answer lands.
+                self._last_progress_at = time.perf_counter()
+                continue
+            await self._terminalize_silent_turn(silent_for)
+            return
+
+    async def _terminalize_silent_turn(self, silent_for: float) -> None:
+        """End a wedged turn the way a provider error would. Never raises."""
+        elapsed = (
+            f"{int(silent_for // 60)} minutes" if silent_for >= 60
+            else f"{silent_for:.0f} seconds"
+        )
+        message = (
+            f"This turn stopped producing any output for {elapsed} and was "
+            f"ended by the progress watchdog. A tool call most likely never "
+            f"returned; nothing after it ran."
+        )
+        logger.warning(
+            "SessionRuntime: progress watchdog terminalizing %s turn %s "
+            "(silent for %.0fs)", self.session_id, self.turn_id, silent_for,
+        )
+        self._terminal = "error"
+        self._terminal_error = message
+        self._abort_reason = "progress_timeout"
+        try:
+            await self._broadcast({
+                "type": "error",
+                "message": message,
+                "session_id": self.session_id,
+            })
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "SessionRuntime: watchdog error broadcast failed for %s",
+                self.session_id, exc_info=True,
+            )
+        pump = self._pump_task
+        if pump is not None and not pump.done():
+            pump.cancel()
 
     async def _broadcast(self, event: Dict[str, Any]) -> None:
         """Route one frame through the broadcast adapter (registered or default)."""
@@ -1455,9 +1679,12 @@ class SessionRuntime:
                 # where the event log learns the task is done — the same
                 # ``task.updated`` append the wake turn makes, so the frontend
                 # card settles mid-turn instead of running forever (#991).
-                await self._on_task_notification_delivered(
-                    recorder, self._task_steers.pop(row_id)
+                delivered = await self._on_task_notification_delivered(
+                    recorder, self._task_steers[row_id]
                 )
+                if not delivered:
+                    return
+                self._task_steers.pop(row_id, None)
                 continue
             try:
                 row = await asyncio.to_thread(turns_db.get_turn, row_id)
@@ -1491,12 +1718,14 @@ class SessionRuntime:
                 continue
             content = row.get("prompt") or steer.get("text") or ""
             profile_id = row.get("profile_id") or self.turn.get("profile_id")
-            await self._persist_user_message(content, profile_id=profile_id)
-            await recorder.record_steered_user_message(
+            recorded = await recorder.record_steered_user_message(
                 content,
                 profile_id=profile_id,
                 command_id=row.get("command_id"),
             )
+            if not recorded:
+                return
+            await self._persist_user_message(content, profile_id=profile_id)
             if await self._absorb_delivered_row(row_id):
                 absorbed = True
                 # Remember WHEN this turn swallowed the row, and the row
@@ -1511,7 +1740,7 @@ class SessionRuntime:
 
     async def _on_task_notification_delivered(
         self, recorder: TurnRecorder, entry: Dict[str, Any]
-    ) -> None:
+    ) -> bool:
         """Close out one steered ``<task-notification>`` fluid just delivered.
 
         Three effects, all best-effort and none allowed to disturb the pump:
@@ -1535,6 +1764,8 @@ class SessionRuntime:
         if frames:
             try:
                 await recorder.record_task_terminal(frames)
+                if recorder.recording_failed is True or self._abort_reason == "recording_failed":
+                    return False
             except Exception:  # noqa: BLE001 — a card badge never kills a turn
                 logger.warning(
                     "SessionRuntime: recording steered terminal task events "
@@ -1551,6 +1782,7 @@ class SessionRuntime:
                 "SessionRuntime: task-notification delivery callback failed "
                 "for %s", self.session_id, exc_info=True,
             )
+        return True
 
     async def _strand_task_steers(self) -> None:
         """Hand back every task notification this turn swallowed undelivered.
@@ -1756,6 +1988,24 @@ class SessionRuntime:
                 sid, exc_info=True,
             )
 
+        # Engine pending-set hygiene (2026-09-05 audit F1). fluid rebuilds its
+        # ``_background_pending`` from the SubagentEvent log alone and lists
+        # whatever is left on every ``SessionParked``, so a completion that
+        # never reached the engine is listed forever — seven such ids poisoned
+        # 35 of one session's 38 parks, one of them for twenty-one hours.
+        # Reconciling at turn end (cheap: fluid's rehydrate is latched, and
+        # nothing is submitted unless the app can prove a pending id is over)
+        # means the NEXT park names only work that is genuinely outstanding.
+        try:
+            from app.core import pending_reconcile
+
+            await pending_reconcile.reconcile_engine_pending(sid)
+        except Exception:
+            logger.debug(
+                "SessionRuntime: engine pending reconcile failed for %s", sid,
+                exc_info=True,
+            )
+
         # Park gate — the legacy predicate (chat_ws_handler :4461-4462), amended
         # 2026-08-08: the launch-set arm now counts only UNRESOLVED launches.
         # ``_background_launches`` itself stays CUMULATIVE and untouched (PR #765
@@ -1778,8 +2028,74 @@ class SessionRuntime:
         except Exception:
             logger.debug("SessionRuntime: park-gate read failed for %s", sid, exc_info=True)
 
-        if bg_work or has_unresolved_launches:
-            task_ids = [w.get("id") for w in bg_work if w.get("id")]
+        # Third arm (2026-09-05 audit F9): the durable mirror. The two arms
+        # above read the IN-MEMORY registry, so a sub-agent whose record never
+        # landed there — or was cleared out from under a live worker — ended
+        # the turn as a bare ``end_turn`` with a worker still running, and the
+        # audited session produced exactly that (an Explore outstanding, no
+        # park, while the same situation parked correctly three turns later).
+        # ``kind == "agent"`` only, deliberately: a Monitor shell can be a
+        # ``serves`` process meant to stay up, and parking on one of those
+        # would pin the session forever — the same exclusion fluid makes.
+        durable_agent_ids: List[str] = []
+        if not (bg_work or has_unresolved_launches):
+            try:
+                from app.core import pending_reconcile
+
+                durable_agent_ids = await asyncio.to_thread(
+                    pending_reconcile.nonterminal_agent_task_ids, sid
+                )
+                if durable_agent_ids:
+                    logger.info(
+                        "SessionRuntime: parking %s on durable sub-agent work "
+                        "the registry did not report: %s", sid, durable_agent_ids,
+                    )
+            except Exception:
+                logger.debug(
+                    "SessionRuntime: durable park-gate read failed for %s", sid,
+                    exc_info=True,
+                )
+
+        task_ids = [w.get("id") for w in bg_work if w.get("id")]
+        task_ids.extend(t for t in durable_agent_ids if t not in task_ids)
+        # Re-check against durable truth in the same breath as the park (audit
+        # F7): the registry's running view can be a beat behind a completion
+        # that has already written its row, and a park naming a task which
+        # settled four seconds ago buys a no-op wake turn when its terminal
+        # frame finally lands. Only ids with a durable TERMINAL row are
+        # dropped — an id with NO row at all is a task too young to have been
+        # persisted, not a settled one, so silence never narrows a park.
+        if task_ids:
+            try:
+                from app.core import pending_reconcile
+
+                settled_ids = await asyncio.to_thread(
+                    pending_reconcile.settled_task_ids, sid, list(task_ids)
+                )
+                if settled_ids:
+                    task_ids = [t for t in task_ids if t not in settled_ids]
+                    logger.info(
+                        "SessionRuntime: dropped %d already-settled task id(s) "
+                        "from the park for %s: %s",
+                        len(settled_ids), sid, sorted(settled_ids),
+                    )
+            except Exception:
+                logger.debug(
+                    "SessionRuntime: park settle re-check failed for %s", sid,
+                    exc_info=True,
+                )
+
+        # Park only on work that is actually outstanding. A gate armed solely
+        # by registry records whose durable rows have all settled would park on
+        # nothing — the stuck-parked shape the launch-set arm was narrowed to
+        # avoid. The unresolved-LAUNCH arm still parks with an empty list on
+        # purpose: that is the launched-but-not-yet-registered race.
+        # A turn aborted because recording failed (#1124) never parks: the
+        # transcript is holed and the row must settle, not wait on work.
+        if (
+            (task_ids or has_unresolved_launches)
+            and self._abort_reason != "recording_failed"
+        ):
             parked = None
             try:
                 parked = await asyncio.to_thread(turns_db.park_turn, tid, task_ids)
@@ -1796,8 +2112,10 @@ class SessionRuntime:
             start_idle_reader(sid)
             return "parked", parked is not None
 
-        if self._terminal in ("interrupted", "error") or self._terminal is None:
-            stop_reason = self._terminal or self._abort_reason or "crash"
+        if (self._abort_reason == "recording_failed"
+                or self._terminal in ("interrupted", "error") or self._terminal is None):
+            stop_reason = ("recording_failed" if self._abort_reason == "recording_failed"
+                           else self._terminal or self._abort_reason or "crash")
             settled = None
             try:
                 # Record the pump's error text on the row (an 'error' terminal
@@ -1810,6 +2128,16 @@ class SessionRuntime:
                 )
             except Exception:
                 logger.warning("SessionRuntime: settle_turn(aborted) failed for %s", tid, exc_info=True)
+            # A turn that died on a provider error has to leave a DURABLE trace.
+            # The error frame reaches the live WebSocket and the ``turns`` row,
+            # but neither survives a reload: an audited session showed the
+            # user's prompt and then nothing at all, and was abandoned for
+            # twenty minutes because the failure was invisible. Worker failures
+            # already write a system row; turn failures now do too.
+            if self._terminal == "error":
+                await persist_turn_error_message(
+                    sid, tid, self._terminal_error, source=self.source,
+                )
             # A message this dying turn swallowed on its way out goes back on
             # the queue — BEFORE the scheduler seam fires, so it runs as the
             # very next turn.
@@ -1993,11 +2321,18 @@ class SessionRuntime:
             if interrupted_row and interrupted_row.get("stop_background"):
                 from app.core.query_session_lifecycle import stop_all_background_tasks
 
-                # Same semantics as the WebSocket Stop that set the bit: end the
-                # turn's own background work, leave a healthy Monitor shell (the
-                # user's dev server) running. See handle_stop's STOP SEMANTICS
-                # note for why, and for what still kills shells.
-                await stop_all_background_tasks(sid, include_shells=False)
+                # Same semantics as the WebSocket Stop that set the bit (round
+                # 7): end ALL of the session's background work — sub-agents and
+                # their descendants, provider-lane workers, Monitor shells
+                # including serving tasks and watchers — and quiesce the session
+                # so nothing wakes it until the user's next message. Running it
+                # HERE as well as on the WebSocket is what makes that latch
+                # cross-runner correct: the WebSocket may live on an install
+                # whose in-memory registry cannot see this runner's tasks, and
+                # this is the runner that actually owns them. Deliberately
+                # idempotent — the second call finds no active tasks and simply
+                # re-asserts the latch. See handle_stop's STOP SEMANTICS note.
+                await stop_all_background_tasks(sid, user_stop=True)
         except Exception:
             logger.warning(
                 "SessionRuntime: background-task stop failed for %s", sid,
@@ -2079,6 +2414,24 @@ class SessionRuntime:
         self._drain_after_cancel = True
         self._cancel_pump()
         return "draining"
+
+    def _on_recorder_recording_failed(self) -> None:
+        """Stop generation without cancelling the task doing recorder cleanup."""
+        if self._abort_reason == "recording_failed":
+            return
+        self._abort_reason = "recording_failed"
+        self._drain_after_cancel = False
+        task = self._pump_task
+        if not self._recorder_closing and task is not asyncio.current_task():
+            self._cancel_pump()
+        try:
+            from app.core.query_session_lifecycle import interrupt_session
+
+            interrupt = asyncio.get_running_loop().create_task(interrupt_session(self.session_id))
+            interrupt.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        except Exception:
+            logger.debug("SessionRuntime: interrupt after recording failure failed for %s",
+                         self.session_id, exc_info=True)
 
     def _on_recorder_superseded(self) -> None:
         """The run lease moved to another runner mid-turn (fence violation).

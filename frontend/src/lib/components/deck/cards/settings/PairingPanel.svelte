@@ -118,7 +118,7 @@
 	<div class="pair-head">
 		<div>
 			<h4><Link2 size={15} /> Pair a controller</h4>
-			<p>Connect a phone, tablet, or browser without sharing the admin password. Codes work once and expire after five minutes.</p>
+			<p>Connect a phone, tablet, or browser to this worker. Codes work once and expire after five minutes.</p>
 		</div>
 		<span class="count">{clients.length} paired</span>
 	</div>

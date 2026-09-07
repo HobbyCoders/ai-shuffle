@@ -5,7 +5,7 @@
  */
 
 import type { Session } from "../session.js";
-import { emptyContentWarning, jsonResult, type McpToolResult } from "./result.js";
+import { contentWarning, jsonResult, type McpToolResult } from "./result.js";
 
 export async function runSnapshot(
   session: Session,
@@ -17,7 +17,9 @@ export async function runSnapshot(
     scopeRef: input.scope_ref,
     maxChars: input.max_chars,
   });
-  const warning = emptyContentWarning(snap.text, snap.refs.length);
+  // Refs are proof the page rendered; only an empty tree needs the page asked.
+  const warning =
+    snap.refs.length === 0 ? contentWarning(await session.pageContent(), 0) : undefined;
   return jsonResult(
     {
       ok: true,

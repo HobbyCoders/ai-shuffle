@@ -33,7 +33,11 @@ SNAPSHOT VS SCREENSHOT
 
 READING AND SCRIPTING
 - browser_read_text gives you the page's prose in reader mode (main article/content region, else the body) as { title, url, text }, capped ~30k chars. Reach for it when you want the content, not the controls — it is far cheaper than a snapshot or screenshot.
-- browser_eval runs JavaScript in the page. It is a REPL: top-level await is allowed. A single bare expression returns its value automatically; multi-statement code must \`return\` the value explicitly, otherwise nothing comes back. Results are JSON-ish and size-capped (~10k chars, plus an internal total-work budget on huge/deep objects). Non-serializable values are described by type. On a thrown error you get the message and the top stack frame only.
+- browser_eval runs JavaScript in the page. It is a REPL: top-level await is allowed. A single bare expression returns its value automatically; multi-statement code must \`return\` the value explicitly, otherwise nothing comes back. Results are JSON-ish and size-capped (~10k chars, plus an internal total-work budget on huge/deep objects). Non-serializable values are described by type. On a thrown error you get the message, the top stack frame, and recent_requests — the last few responses with their status and content-type. Read those before blaming your code: a fetch that "returns invalid JSON" is usually an HTML sign-in page with a 200, or a 401/403.
+
+SIGN-IN AND COOKIES
+- This browser starts with NO session cookies for the user's own apps, and it cannot log itself in. A navigate that lands on another origin reports redirected_to_origin — that is a sign-in redirect, not a page, even though ok stays true because the navigation did happen.
+- When you hit one, stop and say so: ask the user to sign in through the live browser panel (they can take control of this same page), or use an endpoint that does not require a session. Do not attempt to enter credentials.
 
 CONSOLE AND NETWORK
 - The server records console messages and network responses per tab from the moment the tab is acquired — you do not start a capture, you query the buffer.

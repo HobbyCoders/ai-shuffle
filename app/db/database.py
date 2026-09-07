@@ -801,6 +801,10 @@ def _run_column_migrations(cursor):
                 cursor.execute(f"ALTER TABLE mobile_devices ADD COLUMN {column} {definition}")
                 migrations_applied.append(f"mobile_devices.{column}")
 
+    # Additive account-hub migration, included in this module's fingerprint.
+    from app.db.mobile_hub import create_schema as create_mobile_hub_schema
+    create_mobile_hub_schema(cursor)
+
     # v78 controller pairing. These blocks run on every boot so an interrupted
     # rolling upgrade cannot leave the new version without its security tables.
     if not table_exists(cursor, "paired_clients"):
@@ -2346,11 +2350,14 @@ def migrations_fingerprint() -> str:
     """
     import hashlib
 
-    from app.db import schema_postgres
+    from app.db import schema_postgres, mobile_hub
+    from app.core import owner_auth
 
     h = hashlib.sha256()
     h.update(f"v{SCHEMA_VERSION}\n".encode())
-    for module in (sys.modules[__name__], schema_postgres):
+    # The hub and owner helpers also define tables used during encryption init.
+    # Include their sources so an upgrade cannot skip newly imported DDL.
+    for module in (sys.modules[__name__], schema_postgres, mobile_hub, owner_auth):
         path = getattr(module, "__file__", None)
         if not path:
             return ""
@@ -2995,7 +3002,7 @@ from app.db.pairing import (  # noqa: F401
     revoke_pairing_grant,
     exchange_grant_for_client,
     exchange_grant_for_mobile,
-    get_paired_client_by_session_hash,
+    get_paired_client_by_session_hash as _get_paired_client_by_session_hash,
     touch_paired_client,
     list_paired_clients,
     get_paired_client,
@@ -3006,6 +3013,21 @@ from app.db.pairing import (  # noqa: F401
     clear_paired_client_session,
     consume_grant_for_runner,
 )
+
+def get_paired_client_by_session_hash(token_hash):
+    """All derived-session consumers must check the originating authorization."""
+    client = _get_paired_client_by_session_hash(token_hash)
+    if client:
+        from app.core.account_hub import check_paired_client
+        from fastapi import HTTPException
+        try:
+            # Derived only after live local + hub authorization, never persisted
+            # in paired_clients or accepted from a request/scopes payload.
+            client['account_owner_admin'] = check_paired_client(client) is True
+        except HTTPException:
+            return None
+    return client
+
 
 from app.db.installs import (  # noqa: F401
     register_install,

@@ -127,11 +127,11 @@
 			const path = $page.url.pathname;
 			const isPairingPage = path === '/pair';
 
-			if ($setupRequired && path !== '/setup' && !isPairingPage) {
+			if ($isAuthenticated && $setupRequired && path !== '/setup' && !isPairingPage) {
 				goto('/setup');
 			} else if ($isAuthenticated && !$onboardingComplete && path !== '/setup' && !isPairingPage) {
 				goto('/setup');
-			} else if (!$isAuthenticated && !$setupRequired && path !== '/login' && !isPairingPage) {
+			} else if (!$isAuthenticated && path !== '/login' && !isPairingPage) {
 				goto('/login');
 			} else if ($isAuthenticated && path === '/login') {
 				goto('/');

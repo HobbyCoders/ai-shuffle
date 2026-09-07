@@ -20,6 +20,8 @@ export const JPEG_QUALITY = 80;
  * in-page re-encode fails AND the capture is huge.
  */
 export const MAX_BASE64_LEN = 2_621_440;
+/** Wall clock for one capture. Playwright's own default is 30s. */
+export const SCREENSHOT_TIMEOUT_MS = 10_000;
 
 export interface ScreenshotInput {
   region?: number[];
@@ -58,6 +60,11 @@ export async function runScreenshot(session: Session, input: ScreenshotInput): P
   }
 
   const page = await session.ensurePage();
+
+  // Chrome paints only the foreground tab of a window, so capturing a
+  // backgrounded one blocks until the deadline below and then fails. Pull the
+  // tab forward first; the live panel's screencast wants the same thing.
+  await session.bringToFront();
 
   session.invalidateScreenshot();
   const pageDims = await raceWithTimeout(page.evaluate(() => ({
@@ -108,14 +115,27 @@ export async function runScreenshot(session: Session, input: ScreenshotInput): P
     height = pageDims.innerH;
   }
 
-  const buffer = await page.screenshot({
-    timeout: 10000,
-    type: "jpeg",
-    quality: JPEG_QUALITY,
-    scale: "css",
-    fullPage,
-    clip,
-  });
+  let buffer: Buffer;
+  try {
+    buffer = await page.screenshot({
+      timeout: SCREENSHOT_TIMEOUT_MS,
+      type: "jpeg",
+      quality: JPEG_QUALITY,
+      scale: "css",
+      fullPage,
+      clip,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/timeout/i.test(message)) {
+      return errorResult(
+        `screenshot timed out after ${SCREENSHOT_TIMEOUT_MS}ms — the page never painted a ` +
+          "frame (fonts still loading, a busy renderer, or a tab Chrome will not bring " +
+          "forward). browser_snapshot and browser_read_text do not need a paint.",
+      );
+    }
+    throw err;
+  }
   let data = buffer.toString("base64");
 
   // Oversized capture: downscale to the vision budget. The re-encode runs

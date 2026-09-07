@@ -134,92 +134,30 @@ class AuthService:
     # =========================================================================
 
     def is_setup_required(self) -> bool:
-        """Check if initial setup is required"""
-        return database.is_setup_required()
+        from app.core.owner_auth import setup_required
+        return setup_required()
 
-    def setup_admin(self, username: str, password: str) -> Dict[str, Any]:
-        """Create the admin account (first-run only)"""
-        if not self.is_setup_required():
-            raise ValueError("Admin already configured")
+    def setup_admin(self, username, password):
+        raise ValueError('Worker passwords are retired; configure the local installation instead.')
 
-        # Hash password with bcrypt
-        password_hash = bcrypt.hashpw(
-            password.encode('utf-8'),
-            bcrypt.gensalt()
-        ).decode('utf-8')
+    def login(self, username, password):
+        return None
 
-        admin = database.create_admin(username, password_hash)
-
-        # Create session token
-        token = self.create_session()
-
-        return {
-            "admin": admin,
-            "token": token
-        }
-
-    def login(self, username: str, password: str) -> Optional[str]:
-        """Verify credentials and create session"""
-        admin = database.get_admin()
-        if not admin:
-            return None
-
-        if admin["username"] != username:
-            return None
-
-        # Verify password
-        if not bcrypt.checkpw(
-            password.encode('utf-8'),
-            admin["password_hash"].encode('utf-8')
-        ):
-            return None
-
-        return self.create_session()
-
-    def create_session(self) -> str:
-        """Create a new auth session token"""
-        token = secrets.token_urlsafe(32)
-        expires_at = datetime.now(timezone.utc) + timedelta(days=settings.session_expire_days)
-        database.create_auth_session(token, expires_at)
-        return token
+    def create_session(self):
+        raise ValueError('Password sessions are retired.')
 
     def validate_session(self, token: str) -> bool:
-        """Validate a session token"""
-        if not token:
+        if not token or not token.startswith('shr_'):
             return False
-        session = database.get_auth_session(token)
-        if session is None:
-            # Diagnostic: check if token exists at all (ignoring expiry)
-            from datetime import datetime
-            with database.get_db() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT token, expires_at FROM auth_sessions WHERE token = %s",
-                    (token,)
-                )
-                row = cursor.fetchone()
-                if row:
-                    now_str = datetime.now(timezone.utc).isoformat()
-                    logger.warning(
-                        f"[{_SERVER_INSTANCE_ID}] Session EXPIRED: "
-                        f"expires_at={row['expires_at']}, now={now_str}"
-                    )
-                else:
-                    logger.warning(
-                        f"[{_SERVER_INSTANCE_ID}] Session token NOT FOUND in database "
-                        f"(last4=...{token[-4:]})"
-                    )
-        return session is not None
+        return database.get_auth_session(token) is not None
 
     def logout(self, token: str):
-        """Invalidate a session"""
         if token:
             database.delete_auth_session(token)
 
     def get_admin_username(self) -> Optional[str]:
-        """Get the admin username"""
-        admin = database.get_admin()
-        return admin["username"] if admin else None
+        from app.core.owner_auth import preference_identity
+        return preference_identity()
 
     def verify_password(self, password: str, password_hash: str) -> bool:
         """Verify a password against a hash"""

@@ -1,0 +1,72 @@
+"""Run local and managed-remote ingress with one application lifespan.
+
+The remote socket is always loopback-only and never grants local authority.
+HTTP headers cannot select an ingress: the ASGI server supplies the actual
+listening socket address, and proxy-header rewriting is disabled.
+"""
+from __future__ import annotations
+
+import socket
+import sys
+from contextlib import ExitStack
+
+REMOTE_PORT = 8001
+
+
+class IngressApplication:
+    def __init__(self, app, local_port: int, remote_port: int = REMOTE_PORT):
+        if local_port == remote_port:
+            raise ValueError("Local and remote listener ports must be different")
+        self.app = app
+        self.local_port = local_port
+        self.remote_port = remote_port
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in {"http", "websocket"}:
+            scope = dict(scope)
+            server = scope.get("server")
+            port = server[1] if server else None
+            # Unknown sockets are deliberately treated as remote.
+            scope["shuffle.ingress"] = "local" if port == self.local_port else "remote"
+        await self.app(scope, receive, send)
+
+
+def bind_listener(host: str, port: int) -> socket.socket:
+    sock = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if sys.platform == "win32":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if sock.family == socket.AF_INET6:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        sock.bind((host, port))
+        sock.set_inheritable(True)
+        return sock
+    except BaseException:
+        sock.close()
+        raise
+
+
+def run(app, settings) -> None:
+    import uvicorn
+
+    if not 1 <= settings.port <= 65535 or settings.port == REMOTE_PORT:
+        raise ValueError("The local port must be valid and different from protected remote port 8001")
+    # Bind both sockets before starting services. A collision cannot leave a
+    # half-started worker exposing just one of the required ingress boundaries.
+    with ExitStack() as stack:
+        local = stack.enter_context(bind_listener(settings.host, settings.port))
+        remote = stack.enter_context(bind_listener("127.0.0.1", REMOTE_PORT))
+        config = uvicorn.Config(
+            IngressApplication(app, local.getsockname()[1]),
+            host=settings.host,
+            port=settings.port,
+            proxy_headers=False,
+            log_level=settings.log_level.lower(),
+            access_log=False,
+            ws_max_size=10 * 1024 * 1024,
+            ws_ping_interval=None,
+            ws_ping_timeout=None,
+        )
+        uvicorn.Server(config).run(sockets=[local, remote])

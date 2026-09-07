@@ -220,17 +220,10 @@ def encrypt_webhook_secret(trigger_config: Dict[str, Any]) -> Dict[str, Any]:
     config = dict(trigger_config)
     secret = config.get("secret")
     if secret and isinstance(secret, str) and not encryption.is_encrypted(secret):
-        if encryption.is_encryption_ready():
-            try:
-                config["secret"] = encryption.encrypt_value(secret)
-            except Exception as e:
-                logger.error(f"Failed to encrypt webhook secret: {e}")
-        else:
-            raise ValueError(
-                "Cannot store webhook secret: encryption is not available. "
-                "Set the ENCRYPTION_KEY environment variable before saving "
-                "automation secrets."
-            )
+        try:
+            config["secret"] = encryption.encrypt_value(secret)
+        except Exception:
+            raise ValueError("Cannot store webhook secret: credential storage requires local recovery.") from None
     return config
 
 

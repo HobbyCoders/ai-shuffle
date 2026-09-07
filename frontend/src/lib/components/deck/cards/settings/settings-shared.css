@@ -209,7 +209,6 @@
 	min-width: 0;
 }
 
-.settings .password-form .input,
 .settings .field .input {
 	width: 100%;
 }
@@ -522,13 +521,6 @@
 .settings .validation-result.valid {
 	background: color-mix(in oklch, var(--success) 10%, transparent);
 	color: var(--success);
-}
-
-/* Password form (vertical stack of fields). */
-.settings .password-form {
-	display: flex;
-	flex-direction: column;
-	gap: 8px;
 }
 
 /* Security instructions editor (SystemTab). */

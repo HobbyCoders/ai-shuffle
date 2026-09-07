@@ -27,6 +27,7 @@
 # Verified offline with:  bash -n scripts/backup.sh  and  --dry-run
 #
 set -euo pipefail
+umask 077
 
 DRY_RUN=0
 for arg in "$@"; do

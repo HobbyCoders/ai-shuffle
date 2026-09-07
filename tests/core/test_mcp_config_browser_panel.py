@@ -118,3 +118,53 @@ def test_explicit_allow_from_process_env_passes_through(monkeypatch):
 
     env = mcp_config._build_browser_server_env({}, session_id=None)
     assert env["BROWSER_SSRF_ALLOW"] == "192.168.0.0/16"
+
+
+# --- BROWSER_LOOPBACK_HOST ----------------------------------------------------
+#
+# The shell and the browser are not always in the same network namespace, so a
+# dev server on localhost can be real and unreachable at once. The app passes
+# the address this host answers on; browser-mcp uses it only after a direct
+# attempt fails.
+
+
+def test_loopback_host_passes_an_explicit_value_through(monkeypatch):
+    monkeypatch.setenv("BROWSER_LOOPBACK_HOST", "10.0.0.135")
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert env["BROWSER_LOOPBACK_HOST"] == "10.0.0.135"
+
+
+def test_loopback_host_prefers_the_session_env_over_the_process_env(monkeypatch):
+    monkeypatch.setenv("BROWSER_LOOPBACK_HOST", "10.0.0.135")
+    env = mcp_config._build_browser_server_env(
+        {"BROWSER_LOOPBACK_HOST": "172.17.0.5"}, session_id=None
+    )
+    assert env["BROWSER_LOOPBACK_HOST"] == "172.17.0.5"
+
+
+def test_loopback_host_falls_back_to_this_host_s_own_address(monkeypatch):
+    monkeypatch.delenv("BROWSER_LOOPBACK_HOST", raising=False)
+    monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: "172.17.0.5")
+    env = mcp_config._build_browser_server_env({}, session_id=None)
+    assert env["BROWSER_LOOPBACK_HOST"] == "172.17.0.5"
+
+
+def test_loopback_host_is_omitted_when_no_address_resolves(monkeypatch):
+    monkeypatch.delenv("BROWSER_LOOPBACK_HOST", raising=False)
+    monkeypatch.setattr(mcp_config, "_own_routable_address", lambda: None)
+    assert "BROWSER_LOOPBACK_HOST" not in mcp_config._build_browser_server_env({}, session_id=None)
+
+
+def test_loopback_host_survives_a_socket_that_refuses_to_probe(monkeypatch):
+    monkeypatch.delenv("BROWSER_LOOPBACK_HOST", raising=False)
+
+    def boom():
+        raise OSError("no network")
+
+    monkeypatch.setattr(mcp_config, "_own_routable_address", boom)
+    assert "BROWSER_LOOPBACK_HOST" not in mcp_config._build_browser_server_env({}, session_id=None)
+
+
+def test_own_address_is_routable_or_absent():
+    address = mcp_config._own_routable_address()
+    assert address is None or not address.startswith(("127.", "::1", "fe80"))

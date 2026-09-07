@@ -324,6 +324,14 @@ class UserQuestionHandler:
 
         state = (result_row or {}).get("state")
         if result_row is None or state in ("expired", "pending"):
+            # The tool is giving up, so the ROW has to stop being answerable and
+            # every device has to be told. Without this a still-``pending`` row
+            # left a live modal on the user's phone for a question the session
+            # was no longer waiting on: they answered it, the answer landed on a
+            # dead round-trip, and nothing said so. Cancel first, then fan the
+            # timeout out — a device that answers between the two loses the
+            # guarded UPDATE and re-renders from the notification.
+            await self._retire_unanswered(session_id, interaction_id, request_id)
             try:
                 await broadcast_func({
                     "type": "user_question_timeout",
@@ -332,6 +340,7 @@ class UserQuestionHandler:
                 })
             except Exception:
                 pass
+            await self._notify_question_expired(session_id, request_id, questions)
             logger.warning(f"User question request timed out: {request_id}")
             return {"error": "Question timed out - no response from user"}
         if state == "cancelled":
@@ -341,6 +350,87 @@ class UserQuestionHandler:
         if answers:
             return resolve_answer_envelope(answers)
         return {"error": "No answers received"}
+
+    @staticmethod
+    async def _retire_unanswered(
+        session_id: str, interaction_id: str, request_id: Optional[str]
+    ) -> None:
+        """Cancel a question row the tool has stopped waiting on. Never raises.
+
+        Emits the same ``interaction.expired`` the sweeper would, so the durable
+        lifecycle log tells one story whether the TTL was reached here or by the
+        cross-install sweep, and ticks local waiters so any peer blocked on the
+        same row unblocks immediately instead of polling it out.
+        """
+        from app.core import interaction_wait
+        from app.db import interactions
+
+        try:
+            cancelled = await asyncio.to_thread(
+                interactions.cancel_interaction, interaction_id
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Could not cancel timed-out question row %s", interaction_id,
+                exc_info=True,
+            )
+            return
+        if not cancelled:
+            return  # answered or already retired in the meantime
+        try:
+            interaction_wait.notify_changed(session_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("notify_changed failed after question timeout", exc_info=True)
+        try:
+            from app.core import interaction_events
+
+            await interaction_events.emit_interaction_expired(
+                session_id, interaction_id, request_id, "timeout",
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "interaction.expired emit failed after question timeout",
+                exc_info=True,
+            )
+
+    @staticmethod
+    async def _notify_question_expired(
+        session_id: str, request_id: str, questions: List[Dict[str, Any]]
+    ) -> None:
+        """Tell the user's devices the question they are staring at is dead.
+
+        The modal is dismissed by the ``user_question_timeout`` frame on the
+        session channel, which only reaches devices currently watching THIS
+        session. The notification is user-scoped and pushes, so the person who
+        walked away learns the session stopped waiting rather than coming back
+        to a question that silently stopped mattering. Never raises.
+        """
+        try:
+            from app.services.notification_service import emit_notification
+
+            first = ""
+            if questions:
+                first = str(questions[0].get("question") or "").strip()
+            detail = f" ({first[:120]})" if first else ""
+            await emit_notification(
+                "admin",
+                severity="warning",
+                title="Question expired",
+                message=(
+                    "A session stopped waiting for your answer"
+                    f"{detail}. It carried on without one."
+                ),
+                category="question_timeout",
+                surface="notification",
+                session_id=session_id,
+                persist=True,
+                push=True,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "question-timeout notification failed for %s", request_id,
+                exc_info=True,
+            )
 
     async def _respond_v2(
         self,

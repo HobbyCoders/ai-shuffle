@@ -212,6 +212,8 @@ async def lifespan(app: FastAPI):
     if runner_approved:
         await start_services()
         bg_tasks = start_background_tasks()
+        from app.core.managed_connection import supervise as supervise_account_connection
+        bg_tasks.append(asyncio.create_task(supervise_account_connection()))
         monitor_task = await start_resource_monitor(interval_seconds=300)
         # Thread-based: keeps working while the loop is frozen and logs the
         # loop thread's stack so a stall is diagnosable after the fact.
@@ -499,6 +501,8 @@ app.include_router(mcp.router)
 app.include_router(tools_api.router)
 app.include_router(browser_panel.router)
 app.include_router(mobile.router)
+from app.api import mobile_tools
+app.include_router(mobile_tools.router)
 app.include_router(pairing.router)
 app.include_router(internal.router)
 app.include_router(workspace_files.router)
@@ -580,22 +584,6 @@ if static_dir.exists():
 
 
 if __name__ == "__main__":
-    import uvicorn
+    from app.serve import run
 
-    uvicorn.run(
-        "app.main:app",
-        host=settings.host,
-        port=settings.port,
-        log_level=settings.log_level.lower(),
-        reload=False,
-        access_log=False,  # Replaced by AccessLogMiddleware (only logs errors/slow requests)
-        # Increase WebSocket max message size from default 1MB to 10MB
-        # This is a safety net - payloads should be truncated before hitting this limit
-        ws_max_size=10 * 1024 * 1024,  # 10MB
-        # Disable Uvicorn's built-in WebSocket ping/pong — the app has its own
-        # keepalive (30s server ping + 10s client ping). Uvicorn's default 20s
-        # ping + 20s timeout can race with app-level pings and cause spurious
-        # disconnects, especially during long load_session or tool execution.
-        ws_ping_interval=None,
-        ws_ping_timeout=None,
-    )
+    run(app, settings)

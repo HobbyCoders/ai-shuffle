@@ -2245,7 +2245,12 @@ def test_deferred_tools_collapse_to_name_and_one_liner(agent_workspace):
     # A deferred catalog must not expand every tool description into the prompt before those tools are loaded.
     saved = len(before.text) - len(after.text)
     assert saved > 20_000, f"only saved {saved} chars"
-    assert len(after.text) < len(before.text) * 0.35
+    # Measure the tools sections only: the fixed prompt blocks around them
+    # (agent descriptions, the verification doctrine) grow independently
+    # of deferral and would otherwise dilute the ratio.
+    tools_before = sum(len(s.text) for s in before.sections if s.kind == "tools")
+    tools_after = sum(len(s.text) for s in after.sections if s.kind == "tools")
+    assert tools_after < tools_before * 0.35
 
 
 def test_code_mode_tools_section_skipped_without_a_projection(agent_workspace):
@@ -6375,3 +6380,239 @@ async def test_recoverable_compaction_is_enabled_for_native_loops(monkeypatch, t
     assert compaction.trigger_tokens == 120_000
     assert compaction.headroom_tokens == 16_000
     assert compaction.target_ratio == 0.70
+
+
+@pytest.mark.asyncio
+async def test_connect_reconciles_the_engine_pending_set(monkeypatch):
+    """Rehydrate reconcile (2026-09-05 audit F1): fluid rebuilds its pending set
+    from the SubagentEvent log alone, so a completion that never reached the
+    engine is re-created as a phantom on every resume. Connect asks the freshly
+    rehydrated engine what it still counts pending, right after the wake turn's
+    own ``prepare_background_completions``."""
+    import types
+    from unittest.mock import AsyncMock
+
+    import app.core.pending_reconcile as pending_reconcile
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(
+        HarnessAdapter, "_build_store", staticmethod(lambda _o: MemoryStore())
+    )
+    reconcile = AsyncMock(return_value=["ghost"])
+    monkeypatch.setattr(pending_reconcile, "reconcile_engine_pending", reconcile)
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect_with_sdk_options(
+        types.SimpleNamespace(
+            model="claude-sonnet-4-5",
+            aih_provider_id=None,
+            aih_session_id="app-sess-reconcile",
+            aih_profile_id="profile-1",
+        )
+    )
+
+    reconcile.assert_awaited_once()
+    assert reconcile.await_args.args[0] == "app-sess-reconcile"
+    assert reconcile.await_args.kwargs["adapter"] is adapter
+
+
+@pytest.mark.asyncio
+async def test_a_failing_pending_reconcile_never_blocks_a_connect(monkeypatch):
+    import types
+
+    import app.core.pending_reconcile as pending_reconcile
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(
+        HarnessAdapter, "_build_store", staticmethod(lambda _o: MemoryStore())
+    )
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("reconcile exploded")
+
+    monkeypatch.setattr(pending_reconcile, "reconcile_engine_pending", _boom)
+
+    adapter = ha.HarnessAdapter()
+    await adapter.connect_with_sdk_options(
+        types.SimpleNamespace(
+            model="claude-sonnet-4-5",
+            aih_provider_id=None,
+            aih_session_id="app-sess-boom",
+            aih_profile_id="profile-1",
+        )
+    )
+    assert adapter.is_connected()
+# ── lifecycle: a torn-down adapter must never present as alive ─────────────
+
+
+class _FakeHttp:
+    """Just enough httpx.AsyncClient for the liveness gate."""
+
+    def __init__(self, closed: bool = False) -> None:
+        self.is_closed = closed
+        self.aclosed = False
+
+    async def aclose(self) -> None:
+        self.aclosed = True
+        self.is_closed = True
+
+
+@pytest.mark.asyncio
+async def test_is_alive_false_when_the_injected_provider_client_is_closed():
+    """The wake-turn killer: the engine object is still there and _connected is
+    still True, but the httpx client the fluid provider client holds has been
+    closed, so the next request dies with a bare RuntimeError that fluid never
+    retries. Report NOT alive so the caller rebuilds."""
+    adapter = _adapter_with(FakeEngine([]))
+    adapter._provider_http = _FakeHttp(closed=False)
+    assert adapter.is_alive() is True
+
+    adapter._provider_http.is_closed = True
+    assert adapter.is_alive() is False
+
+
+@pytest.mark.asyncio
+async def test_is_alive_true_when_no_http_client_was_injected():
+    """Delegated legs and env-credential native legs inject nothing; a None
+    client is normal, not a failure."""
+    adapter = _adapter_with(FakeEngine([]))
+    adapter._provider_http = None
+    assert adapter.is_alive() is True
+
+
+@pytest.mark.asyncio
+async def test_disconnect_drops_the_engine_so_a_half_torn_adapter_is_not_alive():
+    adapter = _adapter_with(FakeEngine([]))
+    http = _FakeHttp()
+    adapter._provider_http = http
+
+    await adapter.disconnect()
+
+    assert http.aclosed is True
+    assert adapter._engine is None
+    assert adapter._provider_http is None
+    assert adapter.is_alive() is False
+    assert adapter.is_connected() is False
+    # Idempotent: a second teardown is a no-op, not a crash.
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_send_query_after_disconnect_raises_instead_of_using_a_dead_client():
+    adapter = _adapter_with(FakeEngine([]))
+    adapter._provider_http = _FakeHttp()
+    await adapter.disconnect()
+    with pytest.raises(RuntimeError):
+        await adapter.send_query("hello")
+
+
+# ── background completion: carry the report path to the wake ──────────────
+
+
+@pytest.mark.asyncio
+async def test_background_completion_carries_the_report_path():
+    engine = FakeEngine([])
+    adapter = _adapter_with(engine)
+
+    await adapter.prepare_background_completions([{
+        "task_id": "worker-9",
+        "status": "completed",
+        "summary": "done",
+        "report_path": "/reports/worker-9.md",
+    }])
+
+    op = engine.ops[0]
+    assert isinstance(op, BackgroundTaskFinished)
+    assert op.report_path == "/reports/worker-9.md"
+
+
+@pytest.mark.asyncio
+async def test_background_completion_falls_back_to_the_frames_output_file():
+    engine = FakeEngine([])
+    adapter = _adapter_with(engine)
+
+    await adapter.prepare_background_completions([{
+        "task_id": "shell-1",
+        "status": "completed",
+        "output_file": "/tmp/shell-1.log",
+    }])
+
+    assert engine.ops[0].report_path == "/tmp/shell-1.log"
+
+
+@pytest.mark.asyncio
+async def test_background_completion_reads_the_report_path_off_the_registry():
+    from app.core.task_registry import task_registry
+
+    engine = FakeEngine([])
+    adapter = _adapter_with(engine)
+    adapter._options = SessionOptions(
+        model="fake-model", extra={"app_session_id": "app-sess-rp"},
+    )
+    task_registry.start_task("app-sess-rp", "worker-rp", "agent", "bg")
+    task_registry.complete_task(
+        "app-sess-rp", "worker-rp", "completed",
+        summary="done", report_path="/reports/worker-rp.md",
+    )
+    try:
+        await adapter.prepare_background_completions([{
+            "task_id": "worker-rp", "status": "completed", "summary": "done",
+        }])
+    finally:
+        task_registry.clear_session("app-sess-rp")
+
+    assert engine.ops[0].report_path == "/reports/worker-rp.md"
+
+
+# ── ErrorEvent billing: the turn's own usage must still reach the session ──
+
+
+@pytest.mark.asyncio
+async def test_error_event_bills_the_turns_accumulated_usage():
+    """fluid's catch-all ErrorEvent carries no usage and no cost at all, so an
+    errored turn used to bill $0 however many calls it had already paid for."""
+    events = [
+        lm.Usage(
+            session_id=SID, input_tokens=100, output_tokens=20,
+            cache_read_tokens=900, cache_creation_tokens=10,
+            raw={"cost_usd": 0.25, "model_call_index": 1},
+        ),
+        lm.Usage(
+            session_id=SID, input_tokens=50, output_tokens=5,
+            raw={"cost_usd": 0.15, "model_call_index": 2},
+        ),
+        lm.ErrorEvent(
+            session_id=SID,
+            message="RuntimeError('Cannot send a request, as the client has been closed.')",
+            retriable=False, num_model_calls=0,
+        ),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+
+    result = got[-1]
+    assert isinstance(result, ResultMessage) and result.is_error
+    assert result.total_cost_usd == pytest.approx(0.40)
+    assert result.usage["input_tokens"] == 150
+    assert result.usage["output_tokens"] == 25
+    assert result.usage["cache_read_input_tokens"] == 900
+    # The turn made two model calls; the event under-reported zero.
+    assert result.num_turns == 2
+
+
+@pytest.mark.asyncio
+async def test_error_event_with_no_calls_still_bills_zero():
+    """The wake-turn failure mode: the turn died before any model call, so
+    there is nothing to bill and nothing to invent."""
+    events = [
+        lm.ErrorEvent(
+            session_id=SID, message="boom", retriable=False, num_model_calls=0,
+        ),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+
+    result = got[-1]
+    assert result.total_cost_usd == 0.0
+    assert result.usage == {}
+    assert result.num_turns == 0

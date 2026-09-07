@@ -110,7 +110,10 @@ async def chat_websocket(
     # Extract api_user_id if authenticated as an API user
     api_user_id: Optional[str] = api_user["id"] if api_user else None
     # user_id for user-level broadcasts (admin users use a constant since there's one admin)
-    user_id: Optional[str] = api_user_id or "admin"
+    principal = getattr(websocket.state, "mobile_tool_principal", None)
+    user_id: Optional[str] = ("paired:" + principal["principal_id"]
+                              if isinstance(principal, dict) and principal["kind"] == "paired"
+                              else api_user_id or "admin")
     logger.debug(f"Chat WebSocket connected and authenticated (api_user_id={api_user_id})")
 
     # Generate device_id if not provided
@@ -130,5 +133,6 @@ async def chat_websocket(
         device_id=device_id,
         user_id=user_id,
         api_user_id=api_user_id,
+        trusted_principal=getattr(websocket.state, "mobile_tool_principal", None),
     )
     await handler.run()

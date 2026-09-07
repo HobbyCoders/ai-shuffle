@@ -251,17 +251,15 @@ class Settings(BaseSettings):
     postgres_password: Optional[str] = None
     postgres_db: str = "ai_shuffle"
     database_url: Optional[str] = None
-    db_pool_min: int = 2  # Min connections in PostgreSQL pool
-    db_pool_max: int = 32  # Max connections in PostgreSQL pool
-    # Headroom note: the rate-limit middleware does a synchronous DB auth
-    # lookup on every HTTP request, multiple devices poll /live, and several
-    # thread pools draw on this one pool concurrently (asyncio's default
-    # executor is capped at 32 threads, anyio's sync-dependency pool at 40,
-    # the git pool at 4), so a burst of concurrent requests can need many
-    # slots at once. The old max of 20 was below that concurrency and a
-    # transient overlap produced hard "connection pool exhausted" 500s. 32 is
-    # still well within a default Postgres max_connections=100 even with a
-    # second install sharing the same database (2×32 = 64 leaves headroom).
+    db_pool_min: int = 2  # Connections opened at startup
+    db_pool_max: int = 32  # Pool limit; healthy burst connections stay open for reuse
+    # Several thread pools share this pool: the asyncio default executor,
+    # AnyIO sync dependencies, and Git workers. Agents borrow connections for
+    # short operations rather than holding one for their entire turn.
+    # Budget db_pool_max plus one dedicated listener for EVERY app process
+    # across all installs against the server's actual max_connections, minus
+    # reserved slots and headroom for other clients. Agent count alone is not
+    # a reason to raise this limit.
 
     # Instance identity — isolates projects, sessions, and workspace path
     # when multiple deployments share the same database.
@@ -319,6 +317,13 @@ class Settings(BaseSettings):
     # Security - Cookie settings
     cookie_secure: bool = True  # Set to False only for local HTTP development
 
+    # Local transport access and optional account service share normal Settings
+    # precedence: process environment overrides .env; neither is exported to os.environ.
+    shuffle_local_access: bool = True
+    shuffle_local_hostnames: str = ""
+    account_browser_origin: str = "https://shuffle-connect.unraidhomeserver.com"
+    mobile_account_hub_url: str = "https://shuffle-account-hub.example.workers.dev"
+
     # Security - Request limits
     max_request_body_mb: int = 50  # Maximum request body size in MB
 
@@ -326,8 +331,8 @@ class Settings(BaseSettings):
     ws_rate_limit_messages: int = 30  # Max messages per sliding window
     ws_rate_limit_window_seconds: float = 10.0  # Sliding window duration in seconds
 
-    # Admin password - used for encryption key derivation on startup
-    # Set via ADMIN_PASSWORD env var or .env file to survive server restarts
+    # Optional one-time adoption of legacy encrypted credentials. Once private
+    # server key custody is active, restarts and human access do not use this.
     admin_password: Optional[str] = None
 
     # Notes disk-sync worker. Notes are materialized to per-install local .md
@@ -463,6 +468,11 @@ class Settings(BaseSettings):
     # token, Chrome native-host handshake), so keep this comfortably above a
     # normal read-and-reply gap. Override via
     # SDK_SESSION_IDLE_TIMEOUT_SECONDS.
+    #
+    # It is SHORTER than ``user_question_timeout_seconds`` (1h) below, and that
+    # is only safe because ``SessionPool._is_busy`` exempts a session blocked on
+    # a pending interaction from idle eviction. Deadlines a user can see must be
+    # the ones that fire — this timeout is not one of them.
     sdk_session_idle_timeout_seconds: int = 1800  # 30 minutes
 
     # COLD-tier idle timeout: everything ranked below the hot tier. These are
@@ -492,15 +502,40 @@ class Settings(BaseSettings):
     sdk_session_idle_reevaluate_seconds: int = 60
 
     # AskUserQuestion backstop (seconds). A parked question keeps its SDK
-    # subprocess alive AND pinned in the pool — while awaiting an answer the
-    # session still counts as "streaming", so idle/LRU eviction skips it. The
-    # backstop has to be long enough that a question survives you stepping away
-    # across many sessions, but short enough that a truly-abandoned session
+    # subprocess alive AND pinned in the pool: while awaiting an answer the
+    # session counts as "streaming" AND ``SessionPool._is_busy`` holds it via
+    # the ``interaction_wait`` waiter registry, so idle/LRU eviction skips it.
+    # The backstop has to be long enough that a question survives you stepping
+    # away across many sessions, but short enough that a truly-abandoned session
     # reaps its hot subprocess instead of holding ~100MB for hours. 1h is the
     # default; raise it toward Claude-Desktop-style persistence if you have the
     # headroom, or lower it on a tight box. Override via
     # USER_QUESTION_TIMEOUT_SECONDS.
+    #
+    # THIS is the deadline the durable ``pending_interactions`` row advertises
+    # and the ONLY one that may end a question. It deliberately exceeds
+    # ``sdk_session_idle_timeout_seconds`` (30 min) above; that is safe only
+    # because of the pool exemption named there. Without it the pool reclaimed
+    # the subprocess at 1800s under a question whose modal said 3600s, fluid
+    # answered the tool with "input_required round-trip interrupted", and the
+    # user's device kept showing a live question nobody was listening to.
+    # Whoever changes either number must keep that exemption honest.
     user_question_timeout_seconds: int = 3600  # 1 hour
+
+    # Per-turn progress watchdog (seconds). A turn that produces NO event at all
+    # — no tool result, no usage, no text — for this long is terminalized with a
+    # provider-error-shaped failure and a durable system message. It exists for
+    # a host tool call that never returns: an audited session issued a browser
+    # automation call whose own 30s cell timeout could not interrupt the blocked
+    # host call, and sat "running" for three hours with the user's final request
+    # unanswered and no way to tell from the outside.
+    #
+    # Deliberately generous — a legitimately slow model call, a long compaction
+    # or a big file write must never trip it, and a turn blocked on a user
+    # question or permission prompt is exempt outright (the wait is bounded by
+    # ``user_question_timeout_seconds`` instead). 0 disables the watchdog.
+    # Override via TURN_PROGRESS_TIMEOUT_SECONDS.
+    turn_progress_timeout_seconds: int = 1800  # 30 minutes of total silence
 
     # Between-turns idle reader — CLI-owned wake grace window (seconds). When the
     # LAST background task completes while the parent is parked, the scheduler
@@ -609,6 +644,78 @@ class Settings(BaseSettings):
     # Override via SUBAGENT_MAX_CONCURRENT_PER_SESSION.
     subagent_max_concurrent_per_session: int = 8
 
+    # ── Task worker lifecycle (2026-09-05 audit, round 7) ────────────────
+    # A worker has no wall-clock ceiling by design — a subagent may legitimately
+    # run for hours — but a worker that has never streamed a SINGLE frame has
+    # not started, and the harness knows it (``frames_forwarded == 0`` is what
+    # produces the "worker failed to start" summary). The audit found ten such
+    # workers sitting "started" for ~900s each across seven sessions before
+    # anyone was told. These settings bound only that pre-first-frame state; a
+    # working worker stays unbounded.
+    #
+    # How long an admitted worker may go without streaming its first frame
+    # before it is failed as "worker failed to start". 0 disables the watchdog.
+    #
+    # TRADE-OFF, because there is no third signal: a worker whose provider
+    # connection is wedged and a reasoning model whose first token is merely
+    # late look identical from here — both have an empty event log. Raise this
+    # if slow-thinking models start being reported as "failed to start"; the
+    # automatic re-dispatch already gives the retry DOUBLE this deadline for
+    # exactly that reason, so a false positive costs one wasted start rather
+    # than the work.
+    # Override via TASK_WORKER_FIRST_FRAME_SECONDS.
+    task_worker_first_frame_seconds: float = 90.0
+    # Hard wall-clock cap on a SYNCHRONOUS Task worker, measured across every
+    # attempt. A sync dispatch blocks the parent turn — it cannot park, cannot
+    # be steered and cannot be told the worker went quiet — so unlike the
+    # background lane it gets a real ceiling (two audited sync dispatches
+    # blocked their parents for 15m03s and 19m28s and produced nothing).
+    # 0 disables the cap. Override via TASK_WORKER_SYNC_MAX_SECONDS.
+    task_worker_sync_max_seconds: float = 900.0
+    # How many times a BACKGROUND dispatch whose worker never streamed a frame
+    # is re-dispatched automatically with the same brief. Each retry is its own
+    # visible task row. Sync dispatches never take this path — their caller is
+    # live and gets the failure to act on. Override via
+    # TASK_WORKER_START_RETRIES.
+    task_worker_start_retries: int = 1
+    # Reschedule provider-rate-limited worker connects using the parseable provider delay or Retry-After rather
+    # than exhausting retries before the token window clears. Applies to both modes;
+    # TASK_WORKER_RATE_LIMIT_RETRIES controls the limit.
+    task_worker_rate_limit_retries: int = 3
+    # Ceiling on one rate-limit reschedule's backoff. The provider's own
+    # retry-after is the floor; it is doubled per attempt and clamped here.
+    # Override via TASK_WORKER_RATE_LIMIT_BACKOFF_CAP_SECONDS.
+    task_worker_rate_limit_backoff_cap_seconds: float = 60.0
+    # Concurrent workers admitted per PROVIDER ORG — one ``model_providers``
+    # row is one credential is one org quota. Worker admission gated only on
+    # worker COUNT (8) and pool lane, never on provider throughput, so five
+    # large-context workers on one key were admitted and then died on the org's
+    # tokens-per-minute limit. This is the cheap interim for real token
+    # accounting: a dispatch over the cap QUEUES (it is not refused) until a
+    # sibling on that provider settles. 0 disables. Never applies to the
+    # provider-less delegated Claude leg, whose quota is per-subscription and
+    # handled by the CLI's own backoff.
+    # Override via TASK_WORKER_MAX_PER_PROVIDER.
+    task_worker_max_per_provider: int = 3
+    # How long a dispatch queues on that provider-org ceiling before giving up
+    # with a retryable capacity error. Longer than the pool admission wait (a
+    # TPM window is 60s, so waiting out one or two is usually right), but NOT
+    # unbounded: the queue happens inside the model's Task tool call, so this
+    # is also the worst case for how long that call can take to hand back a
+    # receipt. Raising it trades a slower tool call for fewer refusals.
+    # Override via TASK_WORKER_PROVIDER_QUEUE_SECONDS.
+    task_worker_provider_queue_seconds: float = 120.0
+    # How long a worker's OWN background work (Monitor shells, nested workers)
+    # is given to drain after its turn ends, before its report is written. A
+    # worker has no wake seam: one audited worker ended its turn with
+    # "Baseline tests are running. No files changed yet." and that interim
+    # sentence became its report and its registry summary. Work still
+    # outstanding when this expires fails the worker instead of booking an
+    # interim note as a result. 0 disables the WAIT, not the check: a worker
+    # that ends with live work then fails immediately.
+    # Override via TASK_WORKER_BACKGROUND_SETTLE_SECONDS.
+    task_worker_background_settle_seconds: float = 120.0
+
     # Compiled system prompt on the delegated (claude CLI) leg (agents-program
     # ruling A3). True (default since the 2026-08 prompt overhaul): the fluid
     # compiler's full output (base + instruction files + skills + env +
@@ -674,6 +781,16 @@ class Settings(BaseSettings):
     # Bound the completion summary delivered with a wake; the full buffer remains available through TaskOutput.
     # MONITOR_SUMMARY_MAX_CHARS controls this budget.
     monitor_summary_max_chars: int = 1000
+    # Idle bound for a SERVING Monitor task (``serves``). Those are exempt from
+    # the command budget by design — they are meant to stay up — and nothing
+    # else bounded them: when a session's wake died, an audited runner carried
+    # a uvicorn fixture and a Vite dev server for 8h15m, next to a
+    # resource-monitor warning about 17 orphan children. The bound is on the
+    # SESSION, not the process: while the session that started it keeps being
+    # touched, the server is never disturbed. Past this many seconds with no
+    # activity on that session, the process is stopped and the completion says
+    # why. 0 disables. Env: MONITOR_SERVING_IDLE_SECONDS.
+    monitor_serving_idle_seconds: int = 3600  # 60 minutes
 
     # Park watchdog: periodic sweeps report background parks with no wake after the warning interval. Past the
     # force ceiling, settle still-running task rows and emit their terminals so the session wakes.
@@ -687,6 +804,18 @@ class Settings(BaseSettings):
     # timer. 0 disables forcing (report only).
     # Env: PARK_WATCHDOG_FORCE_SECONDS.
     park_watchdog_force_seconds: int = 3600  # 60 minutes
+
+    # STOP SEMANTICS opt-out (round 7). Stop kills EVERYTHING the session is
+    # doing: sub-agents and their descendants, provider-lane workers, and
+    # Monitor shells including serving tasks and CI watchers. That is what the
+    # button says and what the user asked for after living with the previous
+    # rule, which spared a healthy Monitor shell on the theory that "a dev
+    # server the user asked to keep up is not part of the turn" — and which is
+    # one of the ways a stopped session came back to life. Set
+    # STOP_KEEPS_MONITOR_SHELLS=true to restore that older behaviour: a Stop
+    # then leaves running Monitor shells alive and only ghost rows are swept.
+    # Defaults OFF; the default must stay "kill everything".
+    stop_keeps_monitor_shells: bool = False
 
     # Durable background-task state (Phase 1, WRITE-ONLY). When on,
     # task_registry mirrors every task transition into the background_tasks

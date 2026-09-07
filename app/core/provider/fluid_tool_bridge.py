@@ -154,6 +154,7 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "EnterWorktree": "write",
     "ExitWorktree": "write",
     "GetAppErrors": "safe",
+    "GetAppLogs": "safe",
     "ToolSearch": "safe",
     "RemoteTrigger": "write",
     # Dispatching an agent spawns a session that can act — gated like a write.

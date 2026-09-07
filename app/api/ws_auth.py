@@ -1,84 +1,54 @@
-"""WebSocket authentication helpers."""
-
+"""WebSocket authentication with an explicit, server-owned mobile principal."""
 import hashlib
-import logging
 from typing import Optional
-
 from fastapi import WebSocket
-
 from app.db import database
 from app.db.async_database import run_sync
-from app.core.pairing import PAIRED_SESSION_PREFIX, hash_controller_session
-
-logger = logging.getLogger(__name__)
+from app.core.pairing import PAIRED_SESSION_PREFIX
+from app.core import mobile_tool_identity as identity
 
 
 async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> tuple[bool, Optional[dict]]:
-    """
-    Validate authentication token for WebSocket connection.
-
-    Returns:
-        tuple[bool, Optional[dict]]: (is_authenticated, api_user_or_none)
-        - For admin sessions: (True, None)
-        - For API user sessions: (True, api_user_dict)
-        - For failed auth: (False, None)
-    """
-    # First try the token from query parameter
-    # All DB calls use run_sync to avoid blocking the event loop during auth.
-    if token:
-        if token.startswith(PAIRED_SESSION_PREFIX):
-            client = await run_sync(
-                database.get_paired_client_by_session_hash,
-                hash_controller_session(token),
-            )
-            if client and (
-                client.get("scopes") is None or "controller" in client.get("scopes", [])
-            ):
-                await run_sync(database.touch_paired_client, client["id"])
-                return (True, None)
-
-        # Check admin session token
-        session = await run_sync(database.get_auth_session, token)
-        if session:
-            return (True, None)  # Admin user
-
-        # Check API key web session token
-        api_key_session = await run_sync(database.get_api_key_session, token)
-        if api_key_session:
-            api_user = await run_sync(database.get_api_user, api_key_session["api_user_id"])
-            if api_user and api_user.get("is_active", True):
-                return (True, api_user)
-
-        # Check raw API key (hashed)
-        key_hash = hashlib.sha256(token.encode()).hexdigest()
-        api_user = await run_sync(database.get_api_user_by_key_hash, key_hash)
-        if api_user and api_user.get("is_active", True):
-            return (True, api_user)
-
-    # Also check the cookie directly (for httpOnly cookies that JS can't read)
-    cookie_token = websocket.cookies.get("session")
-    if cookie_token:
-        if cookie_token.startswith(PAIRED_SESSION_PREFIX):
-            client = await run_sync(
-                database.get_paired_client_by_session_hash,
-                hash_controller_session(cookie_token),
-            )
-            if client and (
-                client.get("scopes") is None or "controller" in client.get("scopes", [])
-            ):
-                await run_sync(database.touch_paired_client, client["id"])
-                return (True, None)
-
-        # Check admin session
-        session = await run_sync(database.get_auth_session, cookie_token)
-        if session:
-            return (True, None)  # Admin user
-
-        # Check API key web session
-        api_key_session = await run_sync(database.get_api_key_session, cookie_token)
-        if api_key_session:
-            api_user = await run_sync(database.get_api_user, api_key_session["api_user_id"])
-            if api_user and api_user.get("is_active", True):
-                return (True, api_user)
-
-    return (False, None)
+    from app.core import owner_auth
+    # Only the actual local listener can establish a passwordless LAN owner.
+    # Browsers must send a matching Origin, preventing cross-site WebSocket use.
+    if not token and not websocket.cookies.get('session') and owner_auth.local_access(websocket):
+        try:
+            owner_auth.same_origin(websocket)
+        except Exception:
+            return False, None
+        websocket.state.mobile_tool_principal = identity.principal(
+            'admin', 'install', 'local-transport:' + owner_auth.settings.effective_instance_id)
+        return True, None
+    # Keep the legacy return contract; authority travels only on trusted state.
+    websocket.state.mobile_tool_principal = None
+    if not token and websocket.cookies.get('session'):
+        try:
+            owner_auth.same_origin(websocket)
+        except Exception:
+            return False, None
+    for candidate in (token, websocket.cookies.get('session')):
+        if not candidate:
+            continue
+        if candidate.startswith(PAIRED_SESSION_PREFIX):
+            from app.api.auth import get_paired_client_from_token
+            try:
+                client = await run_sync(get_paired_client_from_token, candidate)
+                if client:
+                    value = await run_sync(identity.principal, 'paired', client['id'], candidate)
+                    websocket.state.mobile_tool_principal = value
+                    return True, None
+            except Exception:
+                pass  # Includes live hub refusal; never fall through as admin.
+            continue
+        session = await run_sync(database.get_auth_session, candidate)
+        if session and owner_auth.loopback_request(websocket):
+            websocket.state.mobile_tool_principal = identity.principal('admin', 'install', candidate)
+            return True, None
+        key_session = await run_sync(database.get_api_key_session, candidate)
+        user = (await run_sync(database.get_api_user, key_session['api_user_id']) if key_session
+                else await run_sync(database.get_api_user_by_key_hash, hashlib.sha256(candidate.encode()).hexdigest()))
+        if user and user.get('is_active', True):
+            websocket.state.mobile_tool_principal = identity.principal('api_user', user['id'], candidate)
+            return True, user
+    return False, None

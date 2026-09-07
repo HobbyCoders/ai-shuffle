@@ -34,6 +34,9 @@ _EXEMPT_PATHS = frozenset({
     # CORS), so it carries no CSRF risk. Every other /api/v1/mobile/* endpoint
     # is a safe GET or already Bearer-authenticated (exempt below).
     "/api/v1/mobile/register",
+    # Account enrollment is authenticated by a one-use ticket in its body,
+    # never by a browser cookie. Native phones have no Origin header here.
+    "/api/v1/mobile/hub/enroll",
     # Pair exchange authenticates with a one-time, high-entropy grant in the
     # request body and is called before the new device owns a session cookie.
     "/api/v1/pairing/exchange",
@@ -149,6 +152,15 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         return is_match
 
     async def dispatch(self, request: Request, call_next) -> Response:
+        from app.core import owner_auth
+        # Passwordless LAN ownership needs its own strict boundary even when
+        # development CORS is wildcard. A fabricated bearer disables local auth
+        # entirely, so it cannot skip these checks and retain owner authority.
+        if owner_auth.local_access(request) and request.method in _UNSAFE_METHODS:
+            try:
+                owner_auth.same_origin(request)
+            except Exception:
+                return JSONResponse(status_code=403, content={'detail': 'Same-origin request required'})
         # 1. Safe methods — no CSRF risk
         if request.method not in _UNSAFE_METHODS:
             return await call_next(request)

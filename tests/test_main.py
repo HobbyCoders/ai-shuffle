@@ -242,19 +242,20 @@ class TestLifespan:
                 mock_prereqs.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_lifespan_clears_sessions_when_no_env_password(self):
-        """init_encryption_and_sessions should clear sessions when ADMIN_PASSWORD not set."""
+    async def test_lifespan_preserves_sessions_when_credential_recovery_required(self):
+        """Key recovery is independent of device/session authentication."""
         import app.core.startup  # noqa: F401
         from app.core.startup import init_encryption_and_sessions
 
         with patch("app.core.startup.encryption") as mock_encryption, \
              patch("app.core.startup.database") as mock_database:
 
-            mock_encryption.init_encryption_from_env.return_value = False
-            mock_database.clear_all_sessions.return_value = (5, 3)
+            mock_encryption.initialize_server_key.return_value = False
+            mock_encryption.credential_key_status.return_value = {'ready': False, 'state': 'recovery_required'}
 
             init_encryption_and_sessions()
-            mock_database.clear_all_sessions.assert_called_once()
+            mock_encryption.initialize_server_key.assert_called_once_with(mock_database)
+            mock_database.clear_all_sessions.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_lifespan_handles_setup_required(self):

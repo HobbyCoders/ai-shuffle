@@ -1,122 +1,56 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { auth, authLoading, authError } from '$lib/stores/auth.svelte';
-	import type { LoginResponse } from '$lib/api/auth';
-
-	// Login fields
-	let username = '';
-	let password = '';
-
-	// Password visibility
-	let showPassword = false;
-
-	async function handleLogin() {
-		// Clear any previous errors at the start
-		auth.clearError();
-
-		const response = await fetch('/api/v1/auth/login', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ username, password }),
-			credentials: 'include'
-		});
-		const data: LoginResponse = await response.json();
-
-		if (response.ok) {
-			// Admin login successful, refresh auth status and redirect
+	import { auth } from '$lib/stores/auth.svelte';
+	import OwnerSignIn from '$lib/components/OwnerSignIn.svelte';
+	import { api, getErrorMessage } from '$lib/api/client';
+	let recoveryCode = $state('');
+	let recovering = $state(false);
+	let recoveryError = $state('');
+	async function recover(event: SubmitEvent) {
+		event.preventDefault();
+		if (recovering) return;
+		recovering = true;
+		recoveryError = '';
+		try {
+			await api.post('/auth/recovery', { code: recoveryCode.trim() });
+			recoveryCode = '';
 			await auth.checkAuth();
-			goto('/');
-			return;
-		}
-
-		// Login failed
-		auth.setError(data.detail || data.message || 'Login failed');
+			if (!auth.current.status?.authenticated) throw new Error('The worker could not verify local recovery.');
+			await goto(auth.current.status.onboarding_complete ? '/' : '/setup');
+		} catch (e) {
+			recoveryError = getErrorMessage(e, 'Local recovery could not be completed.');
+		} finally { recovering = false; }
 	}
 </script>
 
 <svelte:head>
-	<title>Login - AI Shuffle</title>
-	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+	<title>Sign in - AI Shuffle</title>
 </svelte:head>
 
 <div class="min-h-screen flex items-center justify-center p-4">
 	<div class="card p-6 sm:p-8 w-full max-w-md">
-		<div class="text-center mb-6 sm:mb-8">
-			<div class="text-4xl mb-3">🤖</div>
-			<h1 class="text-xl sm:text-2xl font-bold text-foreground mb-2">AI Shuffle</h1>
-			<p class="text-muted-foreground text-sm sm:text-base">
-				Sign in to continue
-			</p>
+		<div class="mb-8">
+			<h1 class="text-2xl font-bold text-foreground mb-2">AI Shuffle</h1>
+			<p class="text-muted-foreground">Sign in with the account that owns this worker.</p>
 		</div>
-
-		<!-- Login Form -->
-		<form on:submit|preventDefault={handleLogin} class="space-y-4">
-			<div>
-				<label for="username" class="block text-sm font-medium text-muted-foreground mb-1">
-					Username
-				</label>
-				<input
-					type="text"
-					id="username"
-					bind:value={username}
-					class="input"
-					placeholder="Username"
-					required
-					autocomplete="username"
-				/>
-			</div>
-
-			<div>
-				<label for="password" class="block text-sm font-medium text-muted-foreground mb-1">
-					Password
-				</label>
-				<div class="relative">
-					<input
-						type={showPassword ? "text" : "password"}
-						id="password"
-						bind:value={password}
-						class="input pr-10"
-						placeholder="Password"
-						required
-						autocomplete="current-password"
-					/>
-					<button
-						type="button"
-						class="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-						on:click={() => showPassword = !showPassword}
-						tabindex="-1"
-						aria-label={showPassword ? "Hide password" : "Show password"}
-					>
-						{#if showPassword}
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-							</svg>
-						{:else}
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-								<path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-							</svg>
-						{/if}
-					</button>
-				</div>
-			</div>
-
-		{#if $authError}
-			<div class="bg-destructive/10 border border-destructive text-destructive px-3 sm:px-4 py-3 rounded-lg text-sm">
-				{$authError}
-			</div>
+		{#if $auth.status?.account_sign_in_available}
+			<OwnerSignIn onAuthenticated={() => goto($auth.status?.onboarding_complete ? '/' : '/setup')} />
+		{:else if $auth.status?.credential_storage?.ready === false}
+			<p role="alert" class="text-sm text-muted-foreground">This worker’s credential storage is unavailable. Check its local console for recovery instructions, then reload this page.</p>
+		{:else}
+			<p class="text-sm text-muted-foreground">Remote access is not connected to an account yet. Open Shuffle on your local network, then link this worker in Devices.</p>
 		{/if}
-
-		<button
-			type="submit"
-			class="btn btn-primary w-full py-3"
-			disabled={$authLoading}
-		>
-			{#if $authLoading}
-				<span class="inline-block animate-spin mr-2">&#9696;</span>
-			{/if}
-			Sign In
-		</button>
-		</form>
+		{#if $auth.status?.local_recovery_available}
+			<details class="mt-6 text-sm">
+				<summary class="cursor-pointer">Local recovery</summary>
+				<p class="my-3 text-muted-foreground">Enter the one-use recovery code generated in this worker’s local console.</p>
+				<form onsubmit={recover} class="space-y-3">
+					<label for="recovery-code">Recovery code</label>
+					<input id="recovery-code" class="input" bind:value={recoveryCode} required minlength={43} maxlength={43} autocomplete="off" spellcheck={false} />
+					<button type="submit" class="btn w-full" disabled={recovering}>{recovering ? 'Verifying…' : 'Recover local access'}</button>
+					{#if recoveryError}<p role="alert" class="text-destructive">{recoveryError}</p>{/if}
+				</form>
+			</details>
+		{/if}
 	</div>
 </div>

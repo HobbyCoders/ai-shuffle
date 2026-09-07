@@ -97,7 +97,7 @@ def create_api_user(
     api_key_hash: str,
     project_id: Optional[str] = None,
     profile_ids: Optional[List[str]] = None,
-    web_login_allowed: bool = True,
+    web_login_allowed: bool = False,
     description: Optional[str] = None,
     model: Optional[str] = None,
     effort: Optional[str] = None,

@@ -185,14 +185,17 @@ describe("classifyIp — env overrides & precedence", () => {
 });
 
 describe("block reasons name their remedy", () => {
-  it("a default-block reason names BROWSER_SSRF_ALLOW and the bind-to-0.0.0.0 workaround", () => {
+  it("a default-block reason leads with the workaround, then the settings", () => {
     const v = classifyIp("127.0.0.1", DEFAULT);
     expect(v.blocked).toBe(true);
     expect(v.reason).toMatch(/IPv4 loopback/);
     expect(v.reason).toContain("BROWSER_SSRF_ALLOW");
     expect(v.reason).toContain("BROWSER_SSRF_ALLOW_LOOPBACK");
     expect(v.reason).toMatch(/0\.0\.0\.0/);
-    expect(v.reason).toMatch(/LAN IP/);
+    expect(v.reason).toMatch(/hostname -I/);
+    // One session read this reason, found the remedy buried at the end and gave
+    // up after a single attempt: the action must come before the settings.
+    expect(v.reason!.indexOf("0.0.0.0")).toBeLessThan(v.reason!.indexOf("BROWSER_SSRF_ALLOW"));
   });
 
   it("the metadata reason says plainly that no setting re-enables it", () => {

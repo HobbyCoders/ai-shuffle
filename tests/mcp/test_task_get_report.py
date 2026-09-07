@@ -117,7 +117,9 @@ def test_a_pre_existing_task_falls_back_to_the_event_log(mock_db, monkeypatch):
 
     assert body["report_head"] == "recovered report"
     assert body["report_chars"] == len("recovered report")
-    assert "report_path" not in body
+    # Present and null, never absent: `j['report_path']` on a report with no
+    # file used to raise KeyError and abort the caller's whole cell.
+    assert body["report_path"] is None
 
 
 def test_a_vanished_report_file_falls_back_too(mock_db, monkeypatch, tmp_path):
@@ -146,7 +148,7 @@ def test_a_vanished_report_file_falls_back_too(mock_db, monkeypatch, tmp_path):
     body = _get()
 
     assert body["report_head"] == "from the log"
-    assert "report_path" not in body
+    assert body["report_path"] is None
 
 
 def test_a_running_agent_task_gets_no_report_fields(mock_db, monkeypatch):

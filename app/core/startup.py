@@ -200,6 +200,10 @@ def init_core() -> None:
     init_database()
     run_migrations()
 
+    from app.db import mobile_tools, mobile_tool_identity
+    mobile_tools.init_schema()
+    mobile_tool_identity.init_schema()
+
     # Auto-migrate from SQLite if it exists and Postgres is empty
     _auto_migrate_sqlite_to_postgres()
 
@@ -257,8 +261,8 @@ def init_encryption_and_sessions() -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Could not register Claude account post-write hook: {e}")
 
-    if encryption.init_encryption_from_env(database):
-        logger.info("Encryption initialized from ADMIN_PASSWORD environment variable")
+    if encryption.initialize_server_key(database):
+        logger.info("Credential storage initialized from private server key custody")
         # Encryption is available — seed the default account from any existing
         # credentials file (idempotent, no-op if accounts already exist).
         try:
@@ -267,13 +271,10 @@ def init_encryption_and_sessions() -> None:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Claude account seed on startup failed (ignored): {e}")
     else:
-        # Clear all sessions on startup - forces re-login to restore encryption key
-        # This is required because the encryption key (derived from admin password)
-        # is only kept in memory and lost on restart
-        admin_cleared, api_cleared = database.clear_all_sessions()
-        if admin_cleared or api_cleared:
-            logger.info(f"Cleared {admin_cleared} admin and {api_cleared} API user sessions (re-login required)")
-        logger.info("Set ADMIN_PASSWORD env var for automatic encryption key loading")
+        # Keep the local UI available for an honest recovery status. Auth and
+        # secret writers must fail closed; sign-in cannot unlock server custody.
+        logger.error("Credential storage requires local recovery (%s). Run python -m scripts.credential_keys --help",
+                     encryption.credential_key_status()['state'])
 
 
 def init_workspace() -> None:
@@ -290,9 +291,9 @@ def check_prerequisites() -> None:
         logger.warning("Claude CLI: Not authenticated - run 'claude login' in container")
 
     if auth_service.is_setup_required():
-        logger.info("Admin setup required - visit /setup to create admin account")
+        logger.info("Local setup required - visit /setup on this computer or your LAN")
     else:
-        logger.info(f"Admin user: {auth_service.get_admin_username()}")
+        logger.info("Local installation configured; account sign-in is optional for remote access")
 
     _check_browser_mcp_prereqs()
     _warn_removed_env_vars()

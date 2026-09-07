@@ -235,6 +235,10 @@ def delete_mobile_device(device_id: str) -> bool:
     """Delete a mobile device"""
     with get_db() as conn:
         cursor = conn.cursor()
+        cursor.execute("""UPDATE paired_clients
+            SET revoked_at = NOW(), session_token_hash = NULL, session_expires_at = NULL
+            WHERE id IN (SELECT paired_client_id FROM mobile_devices WHERE device_id = %s)
+        """, (device_id,))
         cursor.execute("DELETE FROM mobile_devices WHERE device_id = %s", (device_id,))
         return cursor.rowcount > 0
 

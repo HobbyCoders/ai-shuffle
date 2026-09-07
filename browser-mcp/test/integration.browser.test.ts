@@ -461,6 +461,26 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     expect(firstText(err)).toContain("kaboom");
   });
 
+  it("a failed fetch in eval reports the response's status and content-type", async () => {
+    await runNavigate(session, { url: httpUrl });
+    // The classic auth-wall shape: an HTML page parsed as JSON. The thrown
+    // message says nothing about HTTP, so the recorded response has to.
+    const failed = await runEval(session, {
+      code: "const r = await fetch('/'); return await r.json();",
+    });
+    expect(failed.isError).toBe(true);
+    const body = JSON.parse(firstText(failed));
+    expect(body.ok).toBe(false);
+    expect(Array.isArray(body.recent_requests)).toBe(true);
+    const html = body.recent_requests.find((r: { url: string }) => !r.url.includes("/api/"));
+    expect(html.status).toBe(200);
+    expect(html.content_type).toContain("text/html");
+    expect(typeof html.id).toBe("string");
+    // Leave the shared page's buffer as we found it: the two-phase network test
+    // reads the oldest recorded /api/data response.
+    session.clearNetwork();
+  });
+
   it("eval bounds a pathological wide+deep object via the work budget", async () => {
     await runNavigate(session, { url: fixtureUrl });
 
@@ -573,6 +593,47 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     expect([explicit.width, explicit.height]).toEqual([900, 650]);
   });
 
+  it("resize reports the page's own viewport, not the request", async () => {
+    await runNavigate(session, { url: fixtureUrl });
+    const page = await session.ensurePage();
+    const body = JSON.parse(firstText(await runResize(session, { width: 412, height: 700 })));
+
+    const inner = await page.evaluate(() => ({
+      w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio,
+    }));
+    expect(body.requested).toEqual({ width: 412, height: 700 });
+    expect([body.width, body.height]).toEqual([inner.w, inner.h]);
+    expect(body.device_scale_factor).toBe(inner.dpr);
+
+    // A viewer resize behind the agent's back is reported, not papered over.
+    await page.setViewportSize({ width: 369, height: 714 });
+    const stale = await session.appliedViewport();
+    expect([stale.width, stale.height]).toEqual([369, 714]);
+
+    // …and the agent's pinned size is restored on its next admitted call.
+    await session.runAgentExclusive(async () => undefined);
+    const restored = await page.evaluate(() => window.innerWidth);
+    expect(restored).toBe(412);
+  });
+
+  it("screenshot brings a backgrounded tab forward before capturing", async () => {
+    await runNavigate(session, { url: fixtureUrl });
+    const first = session.currentTabId()!;
+    const opened = JSON.parse(firstText(await runTabs(session, { op: "create" })));
+    await runNavigate(session, { url: fixtureUrl });
+    // Back to the first tab: Chrome still has the newest one in the foreground.
+    await runTabs(session, { op: "select", tab_id: first });
+    try {
+      const shot = await runScreenshot(session, {});
+      expect(shot.isError).toBeUndefined();
+      expect(shot.content.find((c) => c.type === "image")).toBeTruthy();
+      const page = await session.ensurePage();
+      expect(await page.evaluate(() => document.visibilityState)).toBe("visible");
+    } finally {
+      await runTabs(session, { op: "close", tab_id: opened.tab_id });
+    }
+  });
+
   it("upload: env-gate, not-a-file-input guard, and allowlisted happy path", async () => {
     // Non-file-input ref (a textbox) is rejected clearly once the dir is set.
     await runNavigate(session, { url: fixtureUrl });
@@ -675,11 +736,14 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     const guardedSession = new Session(guarded);
     try {
       // navigate rethrows on a blocked request exactly like a net error; the MCP
-      // dispatcher (index.ts) turns the throw into an errorResult. Assert the
-      // friendly reason reaches the caller.
-      await expect(runNavigate(guardedSession, { url: httpUrl })).rejects.toThrow(
-        /blocked by SSRF policy:.*loopback/,
+      // dispatcher (index.ts) turns the throw into an errorResult. The message
+      // must lead with what to do and still carry the policy reason.
+      const failure = await runNavigate(guardedSession, { url: httpUrl }).then(
+        () => undefined,
+        (err: Error) => err,
       );
+      expect(failure?.message ?? "").toMatch(/^Bind the server to 0\.0\.0\.0/);
+      expect(failure?.message ?? "").toMatch(/Policy detail:.*loopback/);
     } finally {
       // Close only the page we opened; leave the shared browser to the suite.
       await guarded.cleanup().catch(() => {});

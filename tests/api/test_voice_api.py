@@ -1106,6 +1106,36 @@ class TestVoiceHangup:
             f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup"
         ).status_code == 200
 
+
+    def test_hangup_clears_is_active(self, authenticated_client, mock_db, sidebands):
+        """Session creation stamps is_active True and nothing used to clear it,
+        so every finished call left a permanently "live" session card."""
+        _enable_voice()
+        _make_provider()
+        _mk_voice_session()
+        db.set_session_active(SESSION_ID, True)
+        authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
+        )
+        assert bool(db.get_session(SESSION_ID)["is_active"]) is True
+
+        assert authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup"
+        ).status_code == 200
+        assert bool(db.get_session(SESSION_ID)["is_active"]) is False
+
+    def test_hangup_clears_is_active_without_a_bridge(
+        self, authenticated_client, mock_db, sidebands
+    ):
+        """The sideband dropping first is exactly when the row goes stale."""
+        _enable_voice()
+        _mk_voice_session()
+        db.set_session_active(SESSION_ID, True)
+        assert authenticated_client.post(
+            f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup"
+        ).status_code == 200
+        assert bool(db.get_session(SESSION_ID)["is_active"]) is False
+
     def test_hangup_on_a_missing_session_returns_404(self, authenticated_client, mock_db):
         _enable_voice()
         assert authenticated_client.post(
