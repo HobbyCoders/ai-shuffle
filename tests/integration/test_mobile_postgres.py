@@ -113,6 +113,10 @@ def pg(monkeypatch):
                 last_seen TIMESTAMPTZ, revoked_at TIMESTAMPTZ);
             CREATE TABLE paired_client_native_sessions (
                 client_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL);
+            CREATE TABLE paired_client_web_reservations (
+                client_id TEXT PRIMARY KEY REFERENCES paired_clients(id) ON DELETE CASCADE,
+                mobile_record_id TEXT NOT NULL, api_key_hash TEXT NOT NULL,
+                reservation_hash TEXT NOT NULL UNIQUE, expires_at TIMESTAMPTZ NOT NULL);
             CREATE TABLE pairing_grants (
                 id TEXT PRIMARY KEY, token_hash TEXT UNIQUE, purpose TEXT, scopes JSONB,
                 target_install_id TEXT, endpoint_url TEXT, device_label TEXT, created_by TEXT,
@@ -253,6 +257,91 @@ def test_concurrent_immutable_bind_preserves_winners_secret(pg):
     assert (first["hub_url"], first["server_id"], first["encrypted_secret"], first["linked_by"]) == winner
     assert len(pg.rows("mobile_worker_bindings")) == len(pg.rows("system_settings")) == 1
     assert pg.hub.bind("https://third.invalid", "server-third", "enc:fake-third", "other") == first
+
+
+def web_reservation_fixture(pg):
+    enroll(pg)
+    with pg.transaction() as conn:
+        conn.cursor().execute('UPDATE mobile_devices SET scopes=\'["controller", "web:session"]\'')
+    device = pg.rows('mobile_devices')[0]
+    client_id = device['paired_client_id']
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=2)
+    assert pg.pairing.set_paired_client_session(client_id, 'original-cookie', expiry, mobile_device=device)
+    return device, client_id, expiry
+
+
+@pytest.mark.parametrize('first', ['A', 'B'])
+def test_reserved_web_commit_order_never_allows_older_mint_to_win(pg, monkeypatch, first):
+    device, client_id, expiry = web_reservation_fixture(pg)
+    for label in ('A', 'B'):
+        assert pg.pairing.reserve_paired_client_web_session(client_id, 'reservation-' + label, expiry, mobile_device=device)
+    held = threading.Event()
+    attempted = threading.Event()
+    acquired_second = threading.Event()
+    release = threading.Event()
+    local = threading.local()
+    original = pg.pairing._lock_current_mobile_client
+
+    def controlled(*args):
+        if local.label != first:
+            attempted.set()
+        value = original(*args)
+        if local.label == first:
+            held.set()
+            assert release.wait(timeout=10)
+        else:
+            acquired_second.set()
+        return value
+
+    monkeypatch.setattr(pg.pairing, '_lock_current_mobile_client', controlled)
+
+    def commit(label):
+        local.label = label
+        try:
+            value = pg.pairing.set_paired_client_session(client_id, 'cookie-' + label, expiry,
+                mobile_device=device, web_reservation_hash='reservation-' + label)
+            assert value
+            return 'committed'
+        except pg.pairing.WebSessionReservationConflict:
+            return 'superseded'
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        winner = executor.submit(commit, first)
+        try:
+            assert held.wait(timeout=5)
+            second = 'B' if first == 'A' else 'A'
+            loser = executor.submit(commit, second)
+            assert attempted.wait(timeout=5)
+            assert not acquired_second.wait(timeout=0.2)
+        finally:
+            release.set()
+        results = {first: winner.result(timeout=10), second: loser.result(timeout=10)}
+    assert results == {'A': 'superseded', 'B': 'committed'}
+    assert pg.rows('paired_clients')[0]['session_token_hash'] == 'cookie-B'
+    assert pg.rows('paired_client_web_reservations') == []
+
+
+def test_late_reservation_and_replaced_mobile_snapshot_cannot_invalidate_web(pg):
+    device, client_id, expiry = web_reservation_fixture(pg)
+    assert pg.pairing.reserve_paired_client_web_session(client_id, 'reservation-B', expiry, mobile_device=device)
+    assert pg.pairing.set_paired_client_session(client_id, 'cookie-B', expiry,
+        mobile_device=device, web_reservation_hash='reservation-B')
+    # A cancelled request may reserve late; it must not rotate B's installed cookie.
+    assert pg.pairing.reserve_paired_client_web_session(client_id, 'orphan-A', expiry, mobile_device=device)
+    assert pg.rows('paired_clients')[0]['session_token_hash'] == 'cookie-B'
+    with pg.transaction() as conn:
+        conn.cursor().execute('UPDATE mobile_devices SET id=%s, api_key_hash=%s', ('new-mobile-row', 'new-key'))
+    current = pg.rows('mobile_devices')[0]
+    assert not pg.pairing.reserve_paired_client_web_session(client_id, 'obsolete-reserve', expiry, mobile_device=device)
+    assert pg.pairing.set_paired_client_session(client_id, 'obsolete-cookie', expiry,
+        mobile_device=device, web_reservation_hash='orphan-A') is None
+    with pytest.raises(pg.pairing.WebSessionReservationConflict):
+        pg.pairing.set_paired_client_session(client_id, 'invalid-cookie', expiry,
+            mobile_device=current, web_reservation_hash='orphan-A')
+    assert pg.pairing.reserve_paired_client_web_session(client_id, 'new-reserve', expiry, mobile_device=current)
+    assert pg.pairing.set_paired_client_session(client_id, 'new-cookie', expiry,
+        mobile_device=current, web_reservation_hash='new-reserve')
+    assert pg.rows('paired_clients')[0]['session_token_hash'] == 'new-cookie'
 
 
 @pytest.mark.parametrize('first', ['account', 'direct'])

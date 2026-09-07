@@ -241,6 +241,8 @@ def delete_mobile_device(device_id: str) -> bool:
         """, (device_id,))
         cursor.execute("""DELETE FROM paired_client_native_sessions WHERE client_id IN
             (SELECT paired_client_id FROM mobile_devices WHERE device_id=%s)""", (device_id,))
+        cursor.execute("""DELETE FROM paired_client_web_reservations WHERE client_id IN
+            (SELECT paired_client_id FROM mobile_devices WHERE device_id=%s)""", (device_id,))
         cursor.execute("DELETE FROM mobile_devices WHERE device_id = %s", (device_id,))
         return cursor.rowcount > 0
 

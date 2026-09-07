@@ -1411,6 +1411,12 @@ def create_postgres_schema(cursor) -> None:
         token_hash TEXT NOT NULL UNIQUE,
         expires_at TIMESTAMP WITH TIME ZONE NOT NULL
     )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS paired_client_web_reservations (
+        client_id TEXT PRIMARY KEY REFERENCES paired_clients(id) ON DELETE CASCADE,
+        mobile_record_id TEXT NOT NULL, api_key_hash TEXT NOT NULL,
+        reservation_hash TEXT NOT NULL UNIQUE,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+    )""")
 
     # -- user_preferences
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_preferences_user ON user_preferences(user_type, user_id)")

@@ -889,6 +889,12 @@ def _run_column_migrations(cursor):
         token_hash TEXT NOT NULL UNIQUE,
         expires_at TIMESTAMP WITH TIME ZONE NOT NULL
     )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS paired_client_web_reservations (
+        client_id TEXT PRIMARY KEY REFERENCES paired_clients(id) ON DELETE CASCADE,
+        mobile_record_id TEXT NOT NULL, api_key_hash TEXT NOT NULL,
+        reservation_hash TEXT NOT NULL UNIQUE,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+    )""")
 
     # Existing installs predate approval state and are trusted in place. New
     # rows created after this migration choose their approval explicitly.

@@ -6,6 +6,7 @@ import asyncio
 import json
 import secrets
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import List, Literal
 
@@ -467,6 +468,27 @@ class WebSessionMintRequest(BaseModel):
     purpose: Literal['web', 'native'] = 'web'
 
 
+WEB_RESERVATION_HEADER = 'x-shuffle-web-session-reservation'
+
+
+@router.post('/web-session/reservations')
+async def reserve_web_session(request: Request, response: Response):
+    """Prepare a mint without invalidating the phone's existing web session."""
+    from app.db.pairing import reserve_paired_client_web_session
+    device = get_device_with_scope(request, 'web:session')
+    client = await run_sync(db.ensure_paired_client_for_mobile, device)
+    if client is None:
+        raise HTTPException(401, 'Mobile device credential changed; pair this device again')
+    reservation = 'wsm_' + secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=120)
+    stored = await run_sync(reserve_paired_client_web_session, client['id'], hash_api_key(reservation),
+                            expires_at, mobile_device=device)
+    if not stored:
+        raise HTTPException(401, 'Mobile device credential changed; pair this device again')
+    response.headers['Cache-Control'] = 'no-store'
+    return {'reservation': reservation, 'expires_at': expires_at.isoformat(), 'expires_in': 120}
+
+
 @router.post("/web-session")
 async def create_web_session(
     request: Request, response: Response,
@@ -500,6 +522,10 @@ async def create_web_session(
     if purpose and body_purpose and purpose != body_purpose:
         raise HTTPException(status_code=422, detail='Body and query session purposes must match')
     purpose = body_purpose or purpose or 'web'
+    reservations = request.headers.getlist(WEB_RESERVATION_HEADER)
+    if reservations and (purpose != 'web' or len(reservations) != 1
+                         or re.fullmatch(r'wsm_[A-Za-z0-9_-]{43}', reservations[0]) is None):
+        raise HTTPException(422, 'Invalid web session reservation')
     # Validates expiry/revocation and bumps last_seen.
     device = get_device_with_scope(request, "web:session")
 
@@ -508,17 +534,23 @@ async def create_web_session(
         raise HTTPException(status_code=401, detail="Mobile device credential changed; pair this device again")
     token = pairing.generate_controller_session()
     expires_at = datetime.now(timezone.utc) + timedelta(days=settings.session_expire_days)
-    stored = await run_sync(
-        db.set_paired_client_session,
-        client["id"],
-        pairing.hash_controller_session(token),
-        expires_at,
-        purpose=purpose,
-        mobile_device=device,
-    )
+    from app.db.pairing import WebSessionReservationConflict
+    try:
+        stored = await run_sync(
+            db.set_paired_client_session,
+            client["id"],
+            pairing.hash_controller_session(token),
+            expires_at,
+            purpose=purpose,
+            mobile_device=device,
+            web_reservation_hash=hash_api_key(reservations[0]) if reservations else None,
+        )
+    except WebSessionReservationConflict:
+        raise HTTPException(409, 'Web session reservation expired or was superseded; open this worker again') from None
     if stored is None:
         raise HTTPException(status_code=401, detail="Paired device has been revoked")
 
+    response.headers['Cache-Control'] = 'no-store'
     if purpose == "web":
         response.set_cookie(
             key="session",

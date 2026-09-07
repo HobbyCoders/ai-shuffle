@@ -268,3 +268,29 @@ def test_old_key_request_cannot_mint_across_repair(repair, test_db, monkeypatch,
     monkeypatch.setattr(database, name, operation)
     assert client.post('/api/v1/mobile/web-session', headers={'Authorization': 'Bearer ' + fresh_keys[0]}, json={'purpose': purpose}).status_code == 200
     assert database.get_mobile_device(other) == untouched
+
+
+def test_repair_retires_old_reservation_and_new_key_can_reserve(repair, test_db):
+    client, device, other, owner = repair
+    test_db.execute('UPDATE paired_clients SET revoked_at=NULL WHERE id=?', (owner['paired_client_id'],))
+    test_db.execute('UPDATE mobile_devices SET revoked_at=NULL WHERE device_id=?', (device,))
+    test_db.commit()
+    untouched = database.get_mobile_device(other)
+    old = client.post('/api/v1/mobile/web-session/reservations', headers={'Authorization': 'Bearer ' + OLD_KEY})
+    assert old.status_code == 200
+    reservation = old.json()['reservation']
+    unregister(repair)
+    assert test_db.execute('SELECT * FROM paired_client_web_reservations').fetchall() == []
+    grant()
+    result = client.post('/api/v1/mobile/register', json=payload(device))
+    assert result.status_code == 200
+    fresh = result.json()['api_key']
+    headers = {'Authorization': 'Bearer ' + fresh, 'X-Shuffle-Web-Session-Reservation': reservation}
+    rejected = client.post('/api/v1/mobile/web-session', headers=headers)
+    assert rejected.status_code == 409 and 'set-cookie' not in rejected.headers
+    assert client.post('/api/v1/mobile/web-session/reservations', headers={'Authorization': 'Bearer ' + OLD_KEY}).status_code == 401
+    current = client.post('/api/v1/mobile/web-session/reservations', headers={'Authorization': 'Bearer ' + fresh})
+    assert current.status_code == 200
+    headers['X-Shuffle-Web-Session-Reservation'] = current.json()['reservation']
+    assert client.post('/api/v1/mobile/web-session', headers=headers).status_code == 200
+    assert database.get_mobile_device(other) == untouched

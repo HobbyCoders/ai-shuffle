@@ -264,6 +264,8 @@ def exchange_grant_for_client(
             ),
         )
         client = _client(cursor.fetchone())
+        if client is not None:
+            cursor.execute('DELETE FROM paired_client_web_reservations WHERE client_id=%s', (client['id'],))
     if client is None:
         raise RuntimeError("Paired client upsert returned no row")
     return {"grant": grant, "client": client}
@@ -376,6 +378,7 @@ def exchange_grant_for_mobile(
         if client is None:
             raise RuntimeError("Paired mobile client upsert returned no row")
         cursor.execute('DELETE FROM paired_client_native_sessions WHERE client_id = %s', (client['id'],))
+        cursor.execute('DELETE FROM paired_client_web_reservations WHERE client_id = %s', (client['id'],))
         cursor.execute(
             """
             INSERT INTO mobile_devices
@@ -462,6 +465,7 @@ def revoke_paired_client(client_id: str) -> bool:
         changed = cursor.rowcount > 0
         if changed:
             cursor.execute("DELETE FROM paired_client_native_sessions WHERE client_id=%s", (client_id,))
+            cursor.execute("DELETE FROM paired_client_web_reservations WHERE client_id=%s", (client_id,))
             cursor.execute(
                 "UPDATE mobile_devices SET revoked_at = NOW() WHERE paired_client_id = %s",
                 (client_id,),
@@ -548,38 +552,66 @@ def ensure_paired_client_for_mobile(device: Dict[str, Any]) -> Optional[PairedCl
     return client
 
 
+class WebSessionReservationConflict(Exception):
+    """An older or consumed mint must not rotate the current web cookie."""
+
+
+def _lock_current_mobile_client(cursor, client_id, mobile_device):
+    # Same lock order as revocation/deletion. Authentication before an await
+    # is insufficient: require the exact current credential at commit time.
+    cursor.execute('SELECT * FROM paired_clients WHERE id = %s AND revoked_at IS NULL FOR UPDATE',
+                   (client_id,))
+    client = _client(cursor.fetchone())
+    if client is None:
+        return None
+    cursor.execute('''SELECT * FROM mobile_devices WHERE id = %s AND device_id = %s
+        AND paired_client_id = %s AND api_key_hash = %s AND revoked_at IS NULL FOR SHARE''',
+        (mobile_device.get('id'), mobile_device['device_id'], client_id, mobile_device.get('api_key_hash')))
+    current = cursor.fetchone()
+    if current is None:
+        return None
+    current = dict(current)
+    expiry = current.get('api_key_expires_at') or current.get('created_at')
+    if isinstance(expiry, str):
+        expiry = datetime.fromisoformat(expiry.replace('Z', '+00:00'))
+    if expiry is not None and current.get('api_key_expires_at') is None:
+        from datetime import timedelta
+        expiry += timedelta(days=365)
+    if expiry is None or expiry <= datetime.now(timezone.utc):
+        return None
+    if current.get('scopes') and 'web:session' not in _json_list(current['scopes']):
+        return None
+    return client
+
+
+def reserve_paired_client_web_session(client_id, reservation_hash, expires_at, *, mobile_device):
+    """Replace only the pending reservation; the active session stays valid."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if _lock_current_mobile_client(cursor, client_id, mobile_device) is None:
+            return False
+        cursor.execute('''INSERT INTO paired_client_web_reservations
+            (client_id, mobile_record_id, api_key_hash, reservation_hash, expires_at)
+            VALUES (%s, %s, %s, %s, %s) ON CONFLICT(client_id) DO UPDATE SET
+            mobile_record_id=EXCLUDED.mobile_record_id, api_key_hash=EXCLUDED.api_key_hash,
+            reservation_hash=EXCLUDED.reservation_hash, expires_at=EXCLUDED.expires_at''',
+            (client_id, mobile_device['id'], mobile_device['api_key_hash'], reservation_hash, expires_at.isoformat()))
+        return True
+
+
 def set_paired_client_session(
     client_id: str, token_hash: str, expires_at: datetime, *, purpose: str = 'web',
     mobile_device: Optional[Dict[str, Any]] = None,
+    web_reservation_hash: Optional[str] = None,
 ) -> Optional[PairedClientRow]:
     if purpose not in ('web', 'native'):
         raise ValueError('Unknown session purpose')
+    if web_reservation_hash is not None and (purpose != 'web' or mobile_device is None):
+        raise ValueError('Web reservation requires the current mobile credential')
     with get_db() as conn:
         cursor = conn.cursor()
         if mobile_device is not None:
-            # Lock client before mobile row, matching revocation/deletion. A
-            # request authenticated before repair must still hold the current
-            # credential when its session is persisted, for either purpose.
-            cursor.execute('SELECT id FROM paired_clients WHERE id = %s AND revoked_at IS NULL FOR UPDATE',
-                           (client_id,))
-            if cursor.fetchone() is None:
-                return None
-            cursor.execute('''SELECT * FROM mobile_devices WHERE id = %s AND device_id = %s
-                AND paired_client_id = %s AND api_key_hash = %s AND revoked_at IS NULL FOR SHARE''',
-                (mobile_device.get('id'), mobile_device['device_id'], client_id, mobile_device.get('api_key_hash')))
-            current = cursor.fetchone()
-            if current is None:
-                return None
-            current = dict(current)
-            expiry = current.get('api_key_expires_at') or current.get('created_at')
-            if isinstance(expiry, str):
-                expiry = datetime.fromisoformat(expiry.replace('Z', '+00:00'))
-            if expiry is not None and current.get('api_key_expires_at') is None:
-                from datetime import timedelta
-                expiry += timedelta(days=365)
-            if expiry is None or expiry <= datetime.now(timezone.utc):
-                return None
-            if current.get('scopes') and 'web:session' not in _json_list(current['scopes']):
+            if _lock_current_mobile_client(cursor, client_id, mobile_device) is None:
                 return None
         if purpose == 'native':
             cursor.execute("SELECT * FROM paired_clients WHERE id=%s AND revoked_at IS NULL FOR UPDATE",
@@ -592,6 +624,21 @@ def set_paired_client_session(
                 token_hash=EXCLUDED.token_hash, expires_at=EXCLUDED.expires_at""",
                            (client_id, token_hash, expires_at.isoformat()))
             return client
+        # Every web rotation serializes with reservations, including legacy
+        # callers. A reservation alone never changes the active cookie.
+        cursor.execute('SELECT id FROM paired_clients WHERE id=%s AND revoked_at IS NULL FOR UPDATE', (client_id,))
+        if cursor.fetchone() is None:
+            return None
+        if web_reservation_hash is not None:
+            cursor.execute('''DELETE FROM paired_client_web_reservations
+                WHERE client_id=%s AND mobile_record_id=%s AND api_key_hash=%s
+                AND reservation_hash=%s AND expires_at>%s RETURNING client_id''',
+                (client_id, mobile_device['id'], mobile_device['api_key_hash'], web_reservation_hash,
+                 datetime.now(timezone.utc).isoformat()))
+            if cursor.fetchone() is None:
+                raise WebSessionReservationConflict()
+        else:
+            cursor.execute('DELETE FROM paired_client_web_reservations WHERE client_id=%s', (client_id,))
         cursor.execute(
             """
             UPDATE paired_clients
@@ -609,6 +656,9 @@ def clear_paired_client_session(client_id: str, token_hash: Optional[str] = None
     """Invalidate a controller session without revoking the paired device."""
     with get_db() as conn:
         cursor = conn.cursor()
+        cursor.execute('SELECT id FROM paired_clients WHERE id=%s FOR UPDATE', (client_id,))
+        if cursor.fetchone() is None:
+            return False
         cursor.execute("DELETE FROM paired_client_native_sessions WHERE client_id=%s"
                        + (" AND token_hash=%s" if token_hash else ""),
                        (client_id, token_hash) if token_hash else (client_id,))
@@ -623,7 +673,10 @@ def clear_paired_client_session(client_id: str, token_hash: Optional[str] = None
             """,
             (client_id, token_hash, token_hash),
         )
-        return native_changed or cursor.rowcount > 0
+        web_changed = cursor.rowcount > 0
+        if web_changed:
+            cursor.execute('DELETE FROM paired_client_web_reservations WHERE client_id=%s', (client_id,))
+        return native_changed or web_changed
 
 
 def consume_grant_for_runner(
