@@ -96,8 +96,13 @@ def _payload(kind: str, session_id: str, identity: str, extra: dict) -> tuple[st
                     return None
                 data["error_message"] = turn.get("error") or "Turn failed"
                 event_type = "session.error"
-            elif payload.get("api_error_status"):
-                data["error_message"] = f"Provider returned status {payload['api_error_status']}"
+            elif payload.get("api_error_status") or payload.get("is_error") or payload.get("errors"):
+                # A completed pump can carry an unsuccessful provider result.
+                # Do not expose arbitrary provider error details to webhooks.
+                data["error_message"] = (
+                    f"Provider returned status {payload['api_error_status']}"
+                    if payload.get("api_error_status") else "Provider execution failed"
+                )
                 event_type = "session.error"
             else:
                 usage = payload.get("usage") or {}
