@@ -794,6 +794,7 @@ async def _dispatch_worker_with_retries(
     parent_session_id: Optional[str],
     dispatcher: Callable[..., Any],
     overall_deadline: Optional[float] = None,
+    stop_generation: Optional[int] = None,
 ):
     """Run one Task dispatch, re-dispatching a worker that never started.
 
@@ -813,6 +814,20 @@ async def _dispatch_worker_with_retries(
     """
     from app.core import provider_agent
     from app.core.config import settings
+    from app.core.task_registry import task_registry
+
+    owner = parent_session_id or kwargs.get("context_session_id") or ""
+    generation = task_registry.stop_generation(owner) if stop_generation is None else stop_generation
+
+    def stopped():
+        return task_registry.stop_invalidated(owner, generation)
+
+    def cancelled_outcome(worker_id):
+        _release_admission(worker_id)
+        return provider_agent.WorkerOutcome(
+            ok=False, session_id=worker_id, killed=True,
+            error="The user stopped this Task dispatch.",
+        )
 
     start_max = (
         int(getattr(settings, "task_worker_start_retries", 0) or 0)
@@ -834,6 +849,8 @@ async def _dispatch_worker_with_retries(
 
     while True:
         worker_id = attempt_kwargs["worker_session_id"]
+        if stopped():
+            return cancelled_outcome(worker_id)
         if overall_deadline is not None:
             remaining = overall_deadline - time.monotonic()
             if remaining <= 0:
@@ -867,6 +884,9 @@ async def _dispatch_worker_with_retries(
         finally:
             _release_admission(worker_id)
 
+        if stopped():
+            return cancelled_outcome(worker_id)
+
         status = (
             "completed" if outcome.ok
             else ("killed" if outcome.killed else "error")
@@ -890,6 +910,8 @@ async def _dispatch_worker_with_retries(
             worker_id, kind, delay, used["start"] + used["rate"] + 1,
         )
         await asyncio.sleep(delay)
+        if stopped():
+            return cancelled_outcome(worker_id)
 
         retry_worker_id = str(uuid.uuid4())
         attempt_kwargs = dict(attempt_kwargs)
@@ -920,6 +942,8 @@ async def _dispatch_worker_with_retries(
             parent_session_id=parent_session_id,
             provider_id=provider_id,
         )
+        if stopped():
+            return cancelled_outcome(retry_worker_id)
         if capacity_error:
             error = (
                 f"{outcome.error or 'The worker failed to start.'} The "
@@ -1436,6 +1460,10 @@ async def dispatch_task_tool(
 
     max_depth = int(getattr(settings, "task_tool_max_depth", 5) or 5)
     _, root_session_id, caller_depth = caller_chain(caller_session_id)
+    from app.core.task_registry import task_registry
+    stop_generation = task_registry.stop_generation(root_session_id)
+    if task_registry.is_user_stopped(root_session_id):
+        return {"ok": False, "error": "The user stopped this Task dispatch.", "killed": True}
     if caller_depth + 1 > max_depth:
         return {
             "ok": False,
@@ -1488,12 +1516,17 @@ async def dispatch_task_tool(
     # subprocess, so the subprocess cap is not its ceiling) — resolving it can
     # read the provider row, so it runs off the loop.
     lane = await asyncio.to_thread(_worker_lane, effective_provider_id, model_id)
+    if task_registry.stop_invalidated(root_session_id, stop_generation):
+        return {"ok": False, "error": "The user stopped this Task dispatch.", "killed": True}
     capacity_error, queued_seconds = await _reserve_admission(
         worker_id,
         lane=lane,
         parent_session_id=root_session_id,
         provider_id=effective_provider_id,
     )
+    if task_registry.stop_invalidated(root_session_id, stop_generation):
+        _release_admission(worker_id)
+        return {"ok": False, "error": "The user stopped this Task dispatch.", "killed": True}
     if capacity_error:
         return {
             "ok": False,
@@ -1511,9 +1544,11 @@ async def dispatch_task_tool(
                 provider_id=effective_provider_id,
                 parent_session_id=root_session_id,
                 dispatcher=provider_agent.dispatch_worker,
+                stop_generation=stop_generation,
             )
         )
         _BACKGROUND_TASKS.add(task)
+        task_registry.supervise_until_stop(root_session_id, task)
         task.add_done_callback(_BACKGROUND_TASKS.discard)
         # The reservation stops counting once the worker is pooled (or ages
         # out); this also frees it the moment a dispatch dies before it ever
@@ -1608,6 +1643,7 @@ async def dispatch_task_tool(
             overall_deadline=(
                 time.monotonic() + sync_cap if sync_cap > 0 else None
             ),
+            stop_generation=stop_generation,
         )
     finally:
         # A sync worker holds its slot for as long as it runs, and the pool is

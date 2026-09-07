@@ -328,9 +328,13 @@ async def _kick_impl(session_id: str) -> None:
     """Peek the front queued turn and execute it. Ownership is DB-raced inside
     ``execute`` (run lease + guarded ``start_turn``) — a lost race returns
     ``None`` and the row stays queued for whoever owns the session."""
+    from app.core.task_registry import task_registry
+    generation = task_registry.stop_generation(session_id)
+    if task_registry.is_user_stopped(session_id):
+        return
     try:
         row = await asyncio.to_thread(turns_db.pop_ready, session_id)
-        if row is None:
+        if row is None or task_registry.stop_invalidated(session_id, generation):
             return
         from app.core import session_runtime
         await session_runtime.execute(row)
@@ -562,6 +566,10 @@ async def _maybe_recover_failed_wake(
 
     Returns True only when a retry was enqueued.
     """
+    from app.core.task_registry import task_registry
+    generation = task_registry.stop_generation(session_id)
+    if task_registry.is_user_stopped(session_id):
+        return False
     if (settled.get("source") or "") != "unpark":
         return False
     if settled.get("state") != "aborted":
@@ -580,6 +588,8 @@ async def _maybe_recover_failed_wake(
         return False
 
     calls = await asyncio.to_thread(_turn_model_call_count, session_id, turn_id)
+    if task_registry.stop_invalidated(session_id, generation):
+        return False
     if calls:
         logger.info(
             "turn_scheduler: wake %s for %s failed after %d model call(s) — "
@@ -589,6 +599,8 @@ async def _maybe_recover_failed_wake(
         return False
 
     await _drop_pooled_client(session_id)
+    if task_registry.stop_invalidated(session_id, generation):
+        return False
     payload[WAKE_RETRY_KEY] = True
     retry = await asyncio.to_thread(
         _enqueue,
@@ -605,6 +617,10 @@ async def _maybe_recover_failed_wake(
         # ahead of anything queued behind the wake, not after it.
         at_front=True,
     )
+    if task_registry.stop_invalidated(session_id, generation):
+        # Stop can race the database enqueue itself; retire only our stale row.
+        await asyncio.to_thread(turns_db.remove_queued_turn, retry["id"])
+        return False
     note_wake_pending(session_id)
     logger.info(
         "turn_scheduler: wake %s for %s died with 0 model calls (%s) — "

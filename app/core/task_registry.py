@@ -314,6 +314,7 @@ class TaskRegistry:
         # of ``_sdk_background_tasks`` and deliberately do NOT pin the session in
         # the pool (``get_active_background_work`` keeps excluding them).
         self._monitor_shell_tasks: Dict[str, set] = {}
+        self._serving_monitor_tasks: Dict[str, set] = {}
         # session_id -> {task_id -> {"task": <wire dict>, "recorded_at": <epoch>}}
         # for tasks that reached a FAILURE terminal status ("error"/"killed").
         # This is the retention store that fixes the "background task vanished
@@ -365,6 +366,8 @@ class TaskRegistry:
         # to life" reports were produced). A dict, not a set, purely so the
         # insertion order gives the cap below something to evict.
         self._user_stopped: Dict[str, float] = {}
+        self._stop_generations: Dict[str, int] = {}
+        self._stop_supervisors: Dict[str, set] = {}
         # session_id -> {child_launch_tuid -> owner_launch_tuid} (B-1). A grand-
         # child background task's launch tool_use_id mapped to the launch
         # tool_use_id of the SUB-AGENT that spawned it (its owner). Recorded when
@@ -436,7 +439,7 @@ class TaskRegistry:
             return
         self._sdk_background_tasks.setdefault(session_id, set()).add(task_id)
 
-    def mark_monitor_shell_task(self, session_id: Optional[str], task_id: str) -> None:
+    def mark_monitor_shell_task(self, session_id: Optional[str], task_id: str, *, serves: bool = False) -> None:
         """Record that ``task_id`` is an APP-spawned Monitor shell of ``session_id``.
 
         Admits the shell to the OWN lane of the unpark gate so its terminal frame
@@ -447,6 +450,11 @@ class TaskRegistry:
         if not session_id or not task_id:
             return
         self._monitor_shell_tasks.setdefault(session_id, set()).add(task_id)
+        if serves:
+            self._serving_monitor_tasks.setdefault(session_id, set()).add(task_id)
+
+    def is_serving_monitor(self, session_id: str, task_id: str) -> bool:
+        return task_id in self._serving_monitor_tasks.get(session_id, set())
 
     def is_monitor_shell_task(self, session_id: str, task_id: str) -> bool:
         """True iff ``task_id`` was recorded as an app-spawned Monitor shell."""
@@ -684,6 +692,7 @@ class TaskRegistry:
             return False
         if session_id in self._user_stopped:
             return False
+        self._stop_generations[session_id] = self.stop_generation(session_id) + 1
         # Bounded: the latch is normally released by the user's very next
         # message, but a session stopped and never returned to would otherwise
         # hold its entry for the life of the process. Evicting the oldest is
@@ -692,6 +701,12 @@ class TaskRegistry:
         while len(self._user_stopped) >= _USER_STOPPED_MAX:
             self._user_stopped.pop(next(iter(self._user_stopped)), None)
         self._user_stopped[session_id] = _now_epoch()
+        for task in tuple(self._stop_supervisors.get(session_id, ())):
+            if not task.done():
+                try:
+                    task.get_loop().call_soon_threadsafe(task.cancel)
+                except RuntimeError:
+                    logger.debug("Stopped supervisor's loop is already closed", exc_info=True)
         return True
 
     def is_user_stopped(self, session_id: str) -> bool:
@@ -699,6 +714,26 @@ class TaskRegistry:
         if not session_id:
             return False
         return session_id in self._user_stopped
+
+    def stop_generation(self, session_id: str) -> int:
+        """An operation's generation survives resume, so old retries stay dead."""
+        return self._stop_generations.get(session_id, 0)
+
+    def stop_invalidated(self, session_id: str, generation: int) -> bool:
+        return self.is_user_stopped(session_id) or self.stop_generation(session_id) != generation
+
+    def supervise_until_stop(self, session_id: str, task: Any) -> None:
+        """Keep detached dispatch supervisors cancellable between attempts."""
+        self._stop_supervisors.setdefault(session_id, set()).add(task)
+        def finished(done):
+            bucket = self._stop_supervisors.get(session_id)
+            if bucket is not None:
+                bucket.discard(done)
+                if not bucket:
+                    self._stop_supervisors.pop(session_id, None)
+        task.add_done_callback(finished)
+        if self.is_user_stopped(session_id):
+            task.cancel()
 
     def clear_user_stop(self, session_id: str) -> bool:
         """Release the Stop latch — the user addressed the session again.
@@ -1612,6 +1647,7 @@ class TaskRegistry:
         self._unpark_pending_since.pop(session_id, None)
         self._sdk_background_tasks.pop(session_id, None)
         self._monitor_shell_tasks.pop(session_id, None)
+        self._serving_monitor_tasks.pop(session_id, None)
         self._subagent_background_launches.pop(session_id, None)
         self._subagent_background_tasks.pop(session_id, None)
         self._chipped.pop(session_id, None)
@@ -1635,12 +1671,15 @@ class TaskRegistry:
         self._unpark_pending_since.clear()
         self._sdk_background_tasks.clear()
         self._monitor_shell_tasks.clear()
+        self._serving_monitor_tasks.clear()
         self._subagent_background_launches.clear()
         self._subagent_background_tasks.clear()
         self._chipped.clear()
         self._woken.clear()
         self._wake_suppressed.clear()
         self._user_stopped.clear()
+        self._stop_generations.clear()
+        self._stop_supervisors.clear()
         self._child_owner.clear()
         self._owner_activity_ts.clear()
         self._terminal_notified.clear()

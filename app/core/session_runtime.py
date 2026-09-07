@@ -710,6 +710,7 @@ class SessionRuntime:
         # task that watches that stamp. See _progress_watchdog_loop.
         self._last_progress_at: float = time.perf_counter()
         self._progress_watchdog: Optional[asyncio.Task] = None
+        self._stop_generation: Optional[int] = None
 
     # ------------------------------------------------------------------
     # execute
@@ -723,6 +724,11 @@ class SessionRuntime:
         sid = self.session_id
         tid = self.turn_id
         runner_id = settings.effective_instance_id
+        from app.core.task_registry import task_registry
+        self._stop_generation = task_registry.stop_generation(sid)
+        if task_registry.is_user_stopped(sid):
+            await asyncio.to_thread(turns_db.remove_queued_turn, tid)
+            return None
 
         # 0. Placement gate (V2 Phase 4). A session explicitly placed on ANOTHER
         #    runner must not be executed here even if this install's kick fired
@@ -759,6 +765,10 @@ class SessionRuntime:
             )
             return None
 
+        if task_registry.stop_invalidated(sid, self._stop_generation):
+            await asyncio.to_thread(turns_db.remove_queued_turn, tid)
+            return None
+
         # 1. Claim the run lease — MANDATORY. No claim ⇒ another runner owns the
         #    session; leave the turn queued for a later kick/reap.
         try:
@@ -789,6 +799,9 @@ class SessionRuntime:
         outcome: Optional[str] = None
         settled_here = False
         try:
+            if task_registry.stop_invalidated(sid, self._stop_generation):
+                await asyncio.to_thread(turns_db.remove_queued_turn, tid)
+                return None
             # 2. Take the session's single live slot.
             started = await asyncio.to_thread(
                 turns_db.start_turn, tid, run_id, runner_id
@@ -799,6 +812,12 @@ class SessionRuntime:
                     sid, tid,
                 )
                 return None
+
+            if task_registry.stop_invalidated(sid, self._stop_generation):
+                # Stop may have cleared the queue while start_turn was in flight.
+                # Do not re-arm input or connect a provider for this obsolete turn.
+                await asyncio.to_thread(turns_db.settle_turn, tid, "aborted", "interrupted")
+                return "aborted"
 
             # Register as the session's live runtime the instant we own it, so
             # the command→runtime interrupt seam (turn_manager.interrupt →
@@ -1155,6 +1174,12 @@ class SessionRuntime:
                         self.session_id, exc_info=True,
                     )
             if self._abort_reason == "recording_failed":
+                return
+            from app.core.task_registry import task_registry
+            if (self._stop_generation is not None
+                    and task_registry.stop_invalidated(self.session_id, self._stop_generation)):
+                self._terminal = "interrupted"
+                self._abort_reason = "user_stopped"
                 return
             async for event in _stream_to_websocket_impl(
                 prompt=engine_prompt,
@@ -2094,7 +2119,7 @@ class SessionRuntime:
         # transcript is holed and the row must settle, not wait on work.
         if (
             (task_ids or has_unresolved_launches)
-            and self._abort_reason != "recording_failed"
+            and self._abort_reason not in ("recording_failed", "user_stopped")
         ):
             parked = None
             try:

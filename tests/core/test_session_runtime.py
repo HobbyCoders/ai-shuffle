@@ -104,6 +104,9 @@ def _runtime_env(*, pump, bg_work=None, bg_launches=None, patch_idle=True):
     registry.has_unresolved_background_launches.return_value = bool(bg_launches)
     registry.has_active_background_work.return_value = bool(bg_work)
     registry.reset_started_this_turn.return_value = None
+    registry.stop_generation.return_value = 0
+    registry.stop_invalidated.return_value = False
+    registry.is_user_stopped.return_value = False
 
     recorder = _recorder_mock()
     broadcaster = AsyncMock(name="broadcaster")

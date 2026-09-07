@@ -825,7 +825,15 @@ async def _await_worker_idle(
     )
     try:
         while True:
-            done, _pending = await asyncio.wait({waiter}, timeout=WAIT_SLICE_SECONDS)
+            now = loop.time()
+            if hard_deadline is not None and now >= hard_deadline:
+                return WAIT_DEADLINE
+            wait_seconds = WAIT_SLICE_SECONDS
+            if hard_deadline is not None:
+                wait_seconds = min(wait_seconds, hard_deadline - now)
+            done, _pending = await asyncio.wait({waiter}, timeout=wait_seconds)
+            if hard_deadline is not None and loop.time() >= hard_deadline:
+                return WAIT_DEADLINE
             if done:
                 # Surface any exception the wait raised — notably the
                 # CancelledError when the parent turn is cancelled, which MUST
@@ -895,12 +903,7 @@ def _worker_still_working(worker_session_id: str) -> bool:
         return False
     if (row or {}).get("state") != "parked":
         return False
-    try:
-        from app.core.task_registry import task_registry
-
-        return bool(task_registry.get_active(worker_session_id))
-    except Exception:  # noqa: BLE001
-        return False
+    return bool(_active_worker_background_work(worker_session_id))
 
 
 def _worker_deadlines(
@@ -986,7 +989,8 @@ def _active_worker_background_work(worker_session_id: str) -> List[Dict[str, Any
     try:
         from app.core.task_registry import task_registry
 
-        return list(task_registry.get_active(worker_session_id) or [])
+        return [record for record in task_registry.get_active(worker_session_id) or []
+                if not task_registry.is_serving_monitor(worker_session_id, _work_task_id(record))]
     except Exception:  # noqa: BLE001
         logger.debug(
             "ProviderAgent: background-work probe failed for worker %s",
@@ -1036,7 +1040,7 @@ def _background_settle_seconds() -> float:
         return 0.0
 
 
-def _force_settle_background_work(
+async def _force_settle_background_work(
     worker_session_id: str, records: List[Dict[str, Any]]
 ) -> None:
     """Retire a dead worker's abandoned Monitor rows.
@@ -1052,18 +1056,32 @@ def _force_settle_background_work(
 
         for record in records:
             task_id = _work_task_id(record)
-            if record.get("kind") != "shell" or not task_id:
+            if (record.get("kind") != "shell" or not task_id
+                    or task_registry.is_serving_monitor(worker_session_id, task_id)):
                 continue
-            task_registry.complete_task(
-                worker_session_id,
-                task_id,
-                "killed",
-                summary=(
-                    "Abandoned: the worker that started it ended first, so "
-                    "nothing can read its result."
-                ),
-                notify=False,
-            )
+            # The stop primitive kills and reaps the owned process tree before
+            # recording its outcome. A registry-only transition strands it.
+            from app.mcp.builtin_tools import _background_tasks, stop_background_shell_task
+
+            tracked = _background_tasks.get(task_id)
+            if tracked is not None and tracked.session_id != worker_session_id:
+                logger.warning("Refusing to stop shell %s owned by another session", task_id)
+                continue
+            try:
+                result = await stop_background_shell_task(
+                    task_id, session_id=worker_session_id,
+                    reason="worker_abandoned",
+                    summary=(
+                        "Abandoned: the worker that started it ended first, so "
+                        "nothing can read its result."
+                    ),
+                )
+            except Exception:
+                logger.warning("Could not stop abandoned shell %s", task_id, exc_info=True)
+                continue
+            if result is None or result.get("running"):
+                logger.warning("Worker %s could not stop abandoned shell %s: %s",
+                               worker_session_id, task_id, result)
     except Exception:  # noqa: BLE001 — bookkeeping, never fatal
         logger.debug(
             "ProviderAgent: force-settle of worker %s background work failed",
@@ -2004,6 +2022,9 @@ async def dispatch_worker(
         settle_budget = _background_settle_seconds()
         outstanding: List[Dict[str, Any]] = []
         while not wait_verdict and not supervised.torn_down:
+            if hard_deadline is not None and asyncio.get_event_loop().time() >= hard_deadline:
+                wait_verdict = WAIT_DEADLINE
+                break
             if await asyncio.to_thread(_worker_still_working, worker_session_id):
                 if not announced_park:
                     announced_park = True
@@ -2029,7 +2050,10 @@ async def dispatch_worker(
                     )
                 if now >= settle_deadline:
                     break
-            await asyncio.sleep(PARK_RECHECK_SECONDS)
+            pause = PARK_RECHECK_SECONDS
+            if hard_deadline is not None:
+                pause = min(pause, max(0, hard_deadline - asyncio.get_event_loop().time()))
+            await asyncio.sleep(pause)
             wait_verdict = await _await_worker_idle(
                 worker_session_id,
                 provider_id,
@@ -2180,7 +2204,7 @@ async def dispatch_worker(
         # finished report. Fail dispatch and retire abandoned Monitor rows that no other session can reach.
         outstanding = _active_worker_background_work(worker_session_id)
         if outstanding:
-            _force_settle_background_work(worker_session_id, outstanding)
+            await _force_settle_background_work(worker_session_id, outstanding)
             error = _outstanding_work_error(worker_session_id, outstanding)
             preview = error
             status = "error"

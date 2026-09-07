@@ -772,7 +772,7 @@ def settle_inline_monitor_task(
     if task.lines:
         output = _summarize(list(task.lines), budget=_INLINE_OUTPUT_MAX_CHARS)
         output += not_executable_hint(task.exit_code, output)
-    return status, output
+    return record_settled_status(session_id, task.task_id, status, output, serves=False)
 
 
 async def wait_for_inline_settle(task: Any, wait_seconds: int) -> bool:
@@ -1048,7 +1048,7 @@ def make_fluid_monitor_spawner(
             # OWN-lane admission: without this the watcher's terminal frame is
             # dropped by on_task_terminal's ownership gate as not-own work and a
             # parked parent never wakes.
-            task_registry.mark_monitor_shell_task(caller_session_id, task.task_id)
+            task_registry.mark_monitor_shell_task(caller_session_id, task.task_id, serves=serves)
 
         # INLINE WAIT: block here for the window the model asked for. A command
         # that settles inside it costs no park, no wake, no fresh turn and no

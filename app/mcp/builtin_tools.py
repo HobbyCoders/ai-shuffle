@@ -979,7 +979,17 @@ async def _spawn_background(
         task.exit_code = await proc.wait()
         if session_id:
             from app.core.task_registry import task_registry
-            status = "completed" if task.exit_code == 0 else "error"
+            from app.core.monitor_spawn import last_exit_marker
+            marker = None
+            for line in reversed(task.lines):
+                marker = last_exit_marker(line)
+                if marker is not None:
+                    break
+            # Settle the first chip using the same inner-command verdict as
+            # inline/detached Monitor receipts; terminal chip dedup must not
+            # freeze a weaker raw-exit success before those consumers run.
+            failed = task.exit_code != 0 or (marker is not None and marker != 0)
+            status = "error" if failed else "completed"
 
             settled: Dict[str, Any] = {}
 

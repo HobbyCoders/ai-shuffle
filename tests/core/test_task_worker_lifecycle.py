@@ -860,6 +860,13 @@ class TestWorkerEndsWithOutstandingWork:
             pa, "final_assistant_text",
             lambda sid: "Baseline tests are running. No files changed yet.",
         )
+        from app.mcp import builtin_tools
+        stopped = []
+        async def stop_owned_shell(task_id, session_id, **kwargs):
+            stopped.append((session_id, task_id))
+            task_registry.complete_task(session_id, task_id, "killed")
+            return {"running": False}
+        monkeypatch.setattr(builtin_tools, "stop_background_shell_task", stop_owned_shell)
 
         outcome = _run(pa.dispatch_worker(
             parent_session_id="parent-1",
@@ -877,6 +884,7 @@ class TestWorkerEndsWithOutstandingWork:
         # The abandoned Monitor row is settled — nothing will ever read it.
         monitor = task_registry.get_task(outcome.session_id, "mon-1")
         assert monitor["status"] == "killed"
+        assert stopped == [(outcome.session_id, "mon-1")]
         task_registry.clear_session(outcome.session_id)
 
     def test_work_that_drains_in_time_still_completes(
