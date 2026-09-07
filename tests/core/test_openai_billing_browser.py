@@ -137,6 +137,62 @@ async def test_generation_change_during_body_read_is_ignored(browser, session, m
     assert session.observation is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['timeout', 'malformed'])
+@pytest.mark.parametrize('advance', ['newer', 'generation'])
+async def test_superseded_capture_failure_cannot_overwrite_current_observation(browser, session, monkeypatch, failure, advance):
+    started, release = asyncio.Event(), asyncio.Event()
+    async def body(_session, method, params):
+        if params['requestId'] == 'old':
+            started.set()
+            await release.wait()
+            if failure == 'timeout':
+                raise mod.BillingBrowserError('billing_timeout')
+            return {'body': 'not json'}
+        return {'body': json.dumps({'total_available': 25})}
+    monkeypatch.setattr(browser, '_call', body)
+    def finish(request_id):
+        request(browser, session, request_id)
+        browser._event(session, 'Network.responseReceived', {
+            'requestId': request_id, 'response': {'url': mod.CREDIT_URL, 'status': 200}})
+        browser._event(session, 'Network.loadingFinished', {'requestId': request_id})
+    finish('old')
+    old = next(iter(session.body_tasks))
+    await started.wait()
+    if advance == 'generation':
+        session.generation += 1
+    finish('new')
+    await asyncio.gather(*(task for task in session.body_tasks if task is not old))
+    fresh_id = session.observation_id
+    release.set()
+    await old
+    assert session.status == 'ready'
+    assert session.error_kind is None
+    assert session.observation_id == fresh_id
+    assert browser.confirm('provider', session.flow_id, fresh_id, 'org-test')['credits']['balance_remaining'] == 25
+
+
+def test_stale_network_loading_failure_does_not_downgrade_ready(browser, session):
+    request(browser, session, 'old')
+    request(browser, session, 'new')
+    session.status = 'ready'
+    browser._event(session, 'Network.loadingFailed', {'requestId': 'old'})
+    assert session.status == 'ready'
+    assert session.error_kind is None
+
+
+@pytest.mark.asyncio
+async def test_generation_only_advance_discards_failed_body_read(browser, session, monkeypatch):
+    record = request(browser, session)
+    record['status'] = 200
+    async def body(*args):
+        session.generation += 1
+        raise mod.BillingBrowserError('billing_timeout')
+    monkeypatch.setattr(browser, '_call', body)
+    await browser._capture(session, 'req', record)
+    assert session.error_kind is None
+
+
 def test_stale_confirmation_cannot_bind(browser, session):
     session.status = "ready"
     session.observation_id = "observation"

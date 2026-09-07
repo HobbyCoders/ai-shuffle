@@ -321,12 +321,17 @@ class OpenAIBillingBrowser:
             session.body_tasks.add(task)
             task.add_done_callback(session.body_tasks.discard)
         elif method == "Network.loadingFailed" and request_id in session.requests:
-            session.requests.pop(request_id, None)
-            self._fail(session, "billing_browser_unavailable")
+            record = session.requests.pop(request_id)
+            if self._current_capture(session, record):
+                self._fail(session, "billing_browser_unavailable")
+
+    def _current_capture(self, session: _Session, record: dict) -> bool:
+        return (self._current(session) and record["generation"] == session.generation
+                and record["sequence"] == session.request_sequence)
 
     async def _capture(self, session: _Session, request_id: str, record: dict) -> None:
         try:
-            if record["generation"] != session.generation or record["sequence"] != session.request_sequence:
+            if not self._current_capture(session, record):
                 return
             if record["status"] in {401, 403}:
                 raise BillingBrowserError("billing_sign_in_required")
@@ -344,10 +349,7 @@ class OpenAIBillingBrowser:
             if result.get("base64Encoded"):
                 body = base64.b64decode(body, validate=True).decode("utf-8")
             observation = _observation(json.loads(body), org)
-            if (
-                not self._current(session) or record["generation"] != session.generation
-                or record["sequence"] != session.request_sequence
-            ):
+            if not self._current_capture(session, record):
                 return
             if session.expected_org and session.expected_org != org:
                 raise BillingBrowserError("billing_organization_mismatch")
@@ -357,11 +359,13 @@ class OpenAIBillingBrowser:
             session.status = "connected" if session.expected_org else "ready"
             session.changed.set()
         except BillingBrowserError as error:
-            self._fail(session, error.kind)
+            if self._current_capture(session, record):
+                self._fail(session, error.kind)
         except asyncio.CancelledError:
             raise
         except Exception:
-            self._fail(session, "billing_invalid_response")
+            if self._current_capture(session, record):
+                self._fail(session, "billing_invalid_response")
 
     async def _dispose(self, session: _Session) -> None:
         tasks = [session.reader, session.expiry, *session.body_tasks]
