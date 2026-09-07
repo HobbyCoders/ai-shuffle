@@ -190,6 +190,8 @@ export interface SessionGitFacts {
 	 * that has been pushed and is waiting on a PR (ahead>0, unpushed=0 → pushed).
 	 */
 	unpushed?: number | null;
+	/** Exact HEAD/default tree equality, independent of squash commit ancestry. */
+	matchesBaseTree?: boolean | null;
 	/** The repo's real default branch, for telling a session branch from trunk. */
 	defaultBranch?: string | null;
 }
@@ -247,6 +249,9 @@ export function deriveGitStage(input: GitStageInput): GitStage {
 		return 'clean';
 	}
 	if (input.git.hasChanges) return 'dirty';
+	// A deleted remote ref has no push count. Squash ancestry alone does not
+	// imply follow-up work when the committed tree is exactly what was merged.
+	if (input.prState === 'merged' && input.git.unpushed == null && input.git.matchesBaseTree === true) return 'merged';
 	// Unique commits vs default branch: fully on the remote → waiting on a PR;
 	// otherwise still local (never pushed, or pushed-then-committed-more).
 	// After merge those remote commits are the ones that landed, so unpushed===0

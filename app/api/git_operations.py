@@ -388,7 +388,7 @@ async def _cleanup_linked_worktree(
 
         rev = git_service._run_git(working_dir, ["rev-parse", "HEAD"], timeout=10)
         if rev.returncode == 0 and (rev.stdout or "").strip():
-            checkouts_db.set_head_sha_for_path(working_dir, rev.stdout.strip())
+            checkouts_db.set_head_sha_for_path(working_dir, rev.stdout.strip(), project_id=op.project_id)
     except Exception:
         logger.debug("cleanup: could not stamp head_sha for %s", working_dir, exc_info=True)
 

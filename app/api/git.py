@@ -197,6 +197,7 @@ async def get_git_status(
         ahead=status_data.get("ahead", 0),
         behind=status_data.get("behind", 0),
         differs_from_base=status_data.get("differs_from_base", False),
+        matches_base_tree=status_data.get("matches_base_tree"),
         unpushed=status_data.get("unpushed"),
         conflicts=status_data.get("conflicts", []),
         repository_id=repo["id"] if repo else None,

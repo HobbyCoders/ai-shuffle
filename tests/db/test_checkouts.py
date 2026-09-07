@@ -60,6 +60,23 @@ def test_partial_upsert_does_not_clobber(project):
     assert c["dirty"] is True
 
 
+def test_path_recovery_and_archive_are_runner_and_project_scoped(project, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, 'instance_id', 'local')
+    other = projects_v2.upsert_project('git:other', name='Other')
+    foreign = checkouts.upsert_checkout(project['id'], 'foreign', '/work/shared', head_sha='foreign')
+    local = checkouts.upsert_checkout(project['id'], 'local', '/work/shared', head_sha='local')
+    assert checkouts.get_checkout_by_path('/work/shared')['id'] == local['id']
+    unrelated = checkouts.upsert_checkout(other['id'], 'local', '/work/shared', head_sha='other')
+    assert checkouts.get_checkout_by_path('/work/shared') is None
+    assert checkouts.set_head_sha_for_path('/work/shared', 'ambiguous') is None
+    assert checkouts.set_head_sha_for_path('/work/shared', 'updated', project_id=project['id'])['id'] == local['id']
+    assert checkouts.archive_checkout_by_path(project['id'], '/work/shared')['id'] == local['id']
+    assert checkouts.get_checkout(project['id'], 'foreign')['head_sha'] == foreign['head_sha']
+    assert checkouts.get_checkout(project['id'], 'foreign')['status'] == 'active'
+    assert checkouts.get_checkout(other['id'], 'local')['head_sha'] == unrelated['head_sha']
+
+
 def test_per_runner_divergence(project):
     checkouts.upsert_checkout(project["id"], "runnerA", "/a/repo")
     checkouts.upsert_checkout(project["id"], "runnerB", "/b/repo")
@@ -102,10 +119,10 @@ def test_archive_checkout_by_path(project):
     c = checkouts.upsert_checkout(
         project["id"], "runnerA", "/work/feat", branch="feat-x"
     )
-    updated = checkouts.archive_checkout_by_path(project["id"], "/work/feat")
+    updated = checkouts.archive_checkout_by_path(project["id"], "/work/feat", runner_id="runnerA")
     assert updated is not None and updated["id"] == c["id"]
     assert updated["status"] == "archived"
-    again = checkouts.archive_checkout_by_path(project["id"], "/work/feat")
+    again = checkouts.archive_checkout_by_path(project["id"], "/work/feat", runner_id="runnerA")
     assert again is not None and again["id"] == c["id"]
     assert checkouts.archive_checkout_by_path(project["id"], "/no/such") is None
     assert checkouts.archive_checkout_by_path("", "/work/feat") is None

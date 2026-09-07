@@ -89,6 +89,7 @@ class GitStatusResponse(BaseModel):
     # count), this is False for branches whose commits net to no change — so the
     # UI can hide "Ship It" when there is nothing left to ship.
     differs_from_base: bool = False
+    matches_base_tree: Optional[bool] = None
     # Commits on HEAD that origin/<branch> does not have. None when the branch
     # has no remote counterpart yet (never pushed). Distinct from `ahead`, which
     # counts commits vs the default branch — a brand-new worktree is ahead=0

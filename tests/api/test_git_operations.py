@@ -476,7 +476,7 @@ class TestExecuteFinish:
 
         assert op.status == "done"
         assert _step_status(op, "cleanup") == "done"
-        stamp.assert_called_once_with(str(wt), "abc123def456")
+        stamp.assert_called_once_with(str(wt), "abc123def456", project_id=op.project_id)
 
     async def test_linked_worktree_cleanup_failure_is_warning(
         self, mock_git_service, mock_github_service, mock_worktree_manager, tmp_path

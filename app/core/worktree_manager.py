@@ -234,7 +234,10 @@ def _try_restore_deleted_branch(
         try:
             from app.db.sessions import latest_pr_number_for_branch
 
-            pr_number = latest_pr_number_for_branch(branch_name, project_id)
+            # Without an unambiguous local project, a branch name is not an
+            # identity: another project may use the same name and PR number.
+            if project_id:
+                pr_number = latest_pr_number_for_branch(branch_name, project_id)
         except Exception:
             logger.debug(
                 "restore: pr lookup failed for branch %s", branch_name, exc_info=True

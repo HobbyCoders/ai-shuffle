@@ -387,6 +387,7 @@ class GitNativeReader:
             "behind": 0,
             "differs_from_base": False,
             "unpushed": None,
+            "matches_base_tree": None,
             "conflicts": [],
         }
 
@@ -473,6 +474,9 @@ class GitNativeReader:
                             ahead, behind = repo.ahead_behind(local_oid, remote_oid)
                             status["ahead"] = ahead
                             status["behind"] = behind
+                            status["matches_base_tree"] = (
+                                repo[local_oid].tree_id == repo[remote_oid].tree_id
+                            )
                             # Only commits *with net content* over the base count as
                             # shippable — see _branch_differs_from_base. Skip the
                             # check when not ahead (nothing committed beyond base).

@@ -129,27 +129,34 @@ def get_checkout(
     return _row(row)
 
 
-def get_checkout_by_path(path: str) -> Optional[Dict[str, Any]]:
-    """Return the checkout row whose ``path`` matches, or ``None``."""
+def get_checkout_by_path(path: str, *, project_id: Optional[str] = None,
+                         runner_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Resolve a physical path only on its runner; reject ambiguous projects."""
     if not path:
         return None
+    if runner_id is None:
+        from app.core.config import settings
+        runner_id = settings.effective_instance_id
     target = os.path.normcase(os.path.normpath(path))
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM checkouts")
+        if project_id:
+            cursor.execute("SELECT * FROM checkouts WHERE runner_id = %s AND project_id = %s",
+                           (runner_id, project_id))
+        else:
+            cursor.execute("SELECT * FROM checkouts WHERE runner_id = %s", (runner_id,))
         rows = cursor.fetchall()
-    for row in _rows(rows):
-        raw = row.get("path") or ""
-        if os.path.normcase(os.path.normpath(raw)) == target:
-            return row
-    return None
+    matches = [row for row in _rows(rows)
+               if os.path.normcase(os.path.normpath(row.get("path") or "")) == target]
+    return matches[0] if len(matches) == 1 else None
 
 
-def set_head_sha_for_path(path: str, head_sha: str) -> Optional[Dict[str, Any]]:
+def set_head_sha_for_path(path: str, head_sha: str, *, project_id: Optional[str] = None,
+                          runner_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Record ``head_sha`` on the checkout at ``path`` without changing status."""
     if not path or not head_sha:
         return None
-    row = get_checkout_by_path(path)
+    row = get_checkout_by_path(path, project_id=project_id, runner_id=runner_id)
     if not row or not row.get("id"):
         return None
     with get_db() as conn:
@@ -363,7 +370,8 @@ def set_checkout_status(checkout_id: str, status: str) -> Optional[Dict[str, Any
     return _row(row)
 
 
-def archive_checkout_by_path(project_id: str, path: str) -> Optional[Dict[str, Any]]:
+def archive_checkout_by_path(project_id: str, path: str, *,
+                             runner_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Mark the checkout whose path matches ``path`` as archived.
 
     Comparison is case- and slash-insensitive so Windows and POSIX spellings
@@ -372,15 +380,7 @@ def archive_checkout_by_path(project_id: str, path: str) -> Optional[Dict[str, A
     """
     if not project_id or not path:
         return None
-    target = os.path.normcase(os.path.normpath(path))
-    for row in list_checkouts(project_id):
-        raw = row.get("path") or ""
-        if os.path.normcase(os.path.normpath(raw)) != target:
-            continue
-        if row.get("status") == "archived":
-            return row
-        cid = row.get("id")
-        if not cid:
-            return None
-        return set_checkout_status(cid, "archived")
-    return None
+    row = get_checkout_by_path(path, project_id=project_id, runner_id=runner_id)
+    if not row or row.get("status") == "archived":
+        return row
+    return set_checkout_status(row["id"], "archived")

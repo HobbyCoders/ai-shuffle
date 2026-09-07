@@ -165,6 +165,7 @@
 			hasChanges: s.has_changes,
 			ahead: s.ahead,
 			unpushed: s.unpushed,
+			matchesBaseTree: s.matches_base_tree,
 			defaultBranch: s.default_branch
 		};
 	});

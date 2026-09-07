@@ -41,6 +41,7 @@ export interface RawGitStatus {
     ahead?: number;
     behind?: number;
     differs_from_base?: boolean;
+    matches_base_tree?: boolean | null;
     /** Commits on HEAD missing from origin/<branch>; null/absent if never pushed. */
     unpushed?: number | null;
     // Repository-record fields. Present on GET /git/status, ABSENT from the
@@ -79,6 +80,7 @@ export interface GitStatus {
      *  base...HEAD diff). False for branches whose commits net to no change,
      *  so the UI can hide "Ship It" when there is nothing left to ship. */
     differs_from_base: boolean;
+    matches_base_tree?: boolean | null;
     /**
      * Commits on HEAD that origin/<branch> does not have. `null` when the branch
      * has no remote counterpart (never pushed) — distinct from `0`, which means
@@ -130,6 +132,7 @@ export function transformGitStatus(raw: RawGitStatus): GitStatus {
         ahead: raw.ahead ?? 0,
         behind: raw.behind ?? 0,
         differs_from_base: raw.differs_from_base ?? false,
+        matches_base_tree: raw.matches_base_tree ?? null,
         // Preserve null (never pushed) — only absent/undefined becomes null.
         unpushed: raw.unpushed ?? null,
         repository_id: raw.repository_id ?? null,
@@ -172,6 +175,7 @@ export function gitStatusEqual(a: GitStatus | null, b: GitStatus | null): boolea
         a.ahead === b.ahead &&
         a.behind === b.behind &&
         a.differs_from_base === b.differs_from_base &&
+        a.matches_base_tree === b.matches_base_tree &&
         a.unpushed === b.unpushed &&
         a.repository_id === b.repository_id &&
         a.default_branch === b.default_branch &&

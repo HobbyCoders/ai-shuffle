@@ -259,6 +259,14 @@ describe('sessionModeOf', () => {
 describe('deriveGitStage', () => {
 	const repo = { hasProject: true };
 	const clean = { isRepo: true, hasChanges: false, ahead: 0, unpushed: null as number | null, defaultBranch: 'main' };
+	it('preserves a squash-merged stage after remote deletion when HEAD matches base', () => {
+		expect(deriveGitStage({ hasProject: true, prState: 'merged', git: {
+			...clean, ahead: 2, matchesBaseTree: true
+		} })).toBe('merged');
+		expect(deriveGitStage({ hasProject: true, prState: 'merged', git: {
+			...clean, ahead: 3, matchesBaseTree: false
+		} })).toBe('committed');
+	});
 
 	it('marks a session with no repo behind it', () => {
 		expect(deriveGitStage({ hasProject: false })).toBe('none');

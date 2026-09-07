@@ -456,6 +456,7 @@ class GitService(
             "behind": 0,
             "differs_from_base": False,
             "unpushed": None,
+            "matches_base_tree": None,
             "conflicts": []
         }
 
@@ -502,11 +503,9 @@ class GitService(
             if status["current_branch"]:
                 ab_cache_key = f"ahead_behind:{working_dir}:{status['current_branch']}"
                 ab_cached = _git_cache.get(ab_cache_key, _AHEAD_BEHIND_CACHE_TTL)
-                if ab_cached is not None and len(ab_cached) >= 3:
+                if ab_cached is not None and len(ab_cached) >= 4:
                     status["ahead"], status["behind"], status["differs_from_base"] = ab_cached[:3]
-                elif ab_cached is not None:
-                    # Legacy 2-tuple cached before differs_from_base existed.
-                    status["ahead"], status["behind"] = ab_cached[:2]
+                    status["matches_base_tree"] = ab_cached[3]
                 else:
                     default_branch = self.get_default_branch(working_dir)
                     for ref in [f"origin/{default_branch}", default_branch]:
@@ -534,9 +533,15 @@ class GitService(
                                     timeout=5
                                 )
                                 status["differs_from_base"] = diff_check.returncode != 0
+                            tree_check = self._run_git(
+                                working_dir, ["diff", "--quiet", ref, "HEAD", "--"], timeout=5
+                            )
+                            if tree_check.returncode in (0, 1):
+                                status["matches_base_tree"] = tree_check.returncode == 0
                             _git_cache.put(
                                 ab_cache_key,
-                                (status["ahead"], status["behind"], status["differs_from_base"])
+                                (status["ahead"], status["behind"], status["differs_from_base"],
+                                 status["matches_base_tree"])
                             )
                             break
 
