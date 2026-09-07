@@ -40,13 +40,12 @@ def mock_database():
 def mock_settings():
     """Mock the settings module.
 
-    Path resolution spans app.api.commands (workspace fallback), app.api.common
+    Path resolution spans app.api.command_context (workspace fallback), app.api.common
     (resolve_project_path fallback) and app.core.project_utils (working-dir
     composition). Patch settings in all three so one fixture governs it.
     """
-    with patch("app.api.commands.settings") as mock_settings, \
+    with patch("app.api.command_context.settings") as mock_settings, \
             patch("app.api.common.settings", mock_settings), \
-            patch("app.api.command_context.settings", mock_settings), \
             patch("app.core.project_utils.settings", mock_settings):
         mock_settings.workspace_dir = MagicMock()
         mock_settings.workspace_dir.__truediv__ = lambda self, x: MagicMock(__str__=lambda s: f"/workspace/{x}")
