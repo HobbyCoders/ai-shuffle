@@ -1,4 +1,6 @@
 """Authorize artifact bytes through the session that produced or references them."""
+import json
+
 from fastapi import HTTPException
 
 from app.core.config import settings
@@ -24,7 +26,28 @@ def authorize_session_artifact(request, row, digest, session_id=None):
                            "AND ((event_type='artifact.created' AND payload ->> 'hash'=%s) "
                            "OR (event_type='tool.use' AND payload ->> 'screenshot'=%s)) LIMIT 1",
                            (target, digest, '/api/v1/artifacts/' + digest))
-            if cursor.fetchone() is None:
+            referenced = cursor.fetchone() is not None
+            if not referenced:
+                # Child workers can publish their image hashes into a parent's
+                # durable progress without duplicating artifact.created there.
+                # Only inspect matching candidates, with bounded memory/work;
+                # a hash mentioned in ordinary output is never a reference.
+                cursor.execute("SELECT payload ->> 'payload' AS progress_payload FROM session_events "
+                               "WHERE session_id=%s AND event_type IN ('subagent.progress','team.member_progress') "
+                               "AND payload ->> 'kind'='tool_result' AND CAST(payload AS TEXT) LIKE %s "
+                               "ORDER BY seq DESC LIMIT 64", (target, '%"' + digest + '"%'))
+                for row in cursor.fetchall():
+                    payload = row['progress_payload']
+                    if isinstance(payload, str):
+                        try:
+                            payload = json.loads(payload)
+                        except (ValueError, TypeError):
+                            continue
+                    hashes = payload.get('artifact_hashes') if isinstance(payload, dict) else None
+                    if isinstance(hashes, list) and digest in hashes:
+                        referenced = True
+                        break
+            if not referenced:
                 raise HTTPException(404, 'Not found')
     provenance = mobile_tool_identity.read(target)
     api_user = getattr(request.state, 'api_user', None)
@@ -38,6 +61,12 @@ def authorize_session_artifact(request, row, digest, session_id=None):
         owner = mobile_hub.ownership(paired_client_id=client['id'])
         expected = 'account:' + owner['account_id'] if owner else 'paired:' + client['id']
         allowed = bool(provenance and provenance['owner'] == expected)
+        if provenance and not allowed:
+            from app.core.mobile_tool_identity import same_install_owner
+            allowed = same_install_owner(provenance, {
+                'kind': 'paired', 'principal_id': client['id'],
+                'account_id': owner['account_id'] if owner else None,
+            }, session)
         if not provenance:
             allowed = bool(client.get('account_owner_admin') is True
                            and session.get('instance_id') == settings.effective_instance_id
