@@ -58,7 +58,15 @@ export default defineConfig({
 	server: {
 		proxy: {
 			'/api': {
-				target: 'http://localhost:8000',
+				// Set AI_SHUFFLE_DEV_API=http://host:8000 to review the UI against a
+				// remote backend. The backend's CSRF check compares Origin with the
+				// forwarded host, so we forward the browser-facing Host explicitly.
+				target: process.env.AI_SHUFFLE_DEV_API || 'http://localhost:8000',
+				configure(proxy) {
+					proxy.on('proxyReq', (proxyReq, req) => {
+						if (req.headers.host) proxyReq.setHeader('x-forwarded-host', req.headers.host);
+					});
+				},
 				// Chat and transcription use same-origin WebSockets, including LAN previews.
 				ws: true,
 				// Preserve the browser-facing Host so the backend can validate Origin
@@ -73,7 +81,7 @@ export default defineConfig({
 				}
 			},
 			'/health': {
-				target: 'http://localhost:8000',
+				target: process.env.AI_SHUFFLE_DEV_API || 'http://localhost:8000',
 				changeOrigin: true
 			}
 		}

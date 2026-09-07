@@ -1,9 +1,10 @@
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
+import { platform } from '$lib/stores/platform.svelte';
 import '../../test-stubs/composer-dom';
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); platform.set('desktop'); });
 afterAll(() => vi.unstubAllGlobals());
 vi.hoisted(() => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }));
@@ -18,8 +19,7 @@ it('explains no adjustable effort and keeps fast mode available', async () => {
 	expect(onToggleFast).toHaveBeenCalledOnce();
 });
 it('reserves a hero window, falling back to a usable normal-flow panel on short empty surfaces', async () => {
-	const width = window.innerWidth;
-	window.innerWidth = 412;
+	platform.set('mobile');
 	const surface = document.createElement('div');
 	surface.className = 'chat-view is-empty';
 	const setHeight = (value: number) => Object.defineProperty(surface, 'clientHeight', { configurable: true, value });
@@ -63,11 +63,11 @@ it('reserves a hero window, falling back to a usable normal-flow panel on short 
 	expect(slot.hasAttribute('data-panel-flow')).toBe(false);
 	await rerender(props());
 	expect(slot.hasAttribute('data-panel-flow')).toBe(true);
-	window.innerWidth = 1280;
+	platform.set('desktop');
 	await fireEvent(window, new Event('resize'));
 	expect(panel.style.getPropertyValue('--empty-panel-limit')).toBe('');
 	expect(slot.hasAttribute('data-panel-flow')).toBe(false);
-	window.innerWidth = 412;
+	platform.set('mobile');
 	await fireEvent(window, new Event('resize'));
 	expect(slot.hasAttribute('data-panel-flow')).toBe(true);
 	surface.classList.remove('is-empty');
@@ -77,7 +77,7 @@ it('reserves a hero window, falling back to a usable normal-flow panel on short 
 	await waitFor(() => expect(slot.hasAttribute('data-panel-flow')).toBe(true));
 	unmount();
 	expect(slot.hasAttribute('data-panel-flow')).toBe(false);
-	surface.remove(); window.innerWidth = width;
+	surface.remove();
 });
 it('supports a single effort option', async () => {
 	const onEffortSelect = vi.fn();

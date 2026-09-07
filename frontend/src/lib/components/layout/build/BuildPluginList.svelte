@@ -576,12 +576,14 @@
 	.bpl-row:hover, .bpl-row:focus-within { --ram-reveal: 1; }
 	.bpl-row--static { --ram-reveal: 1; }
 	/* Available rows: a single Install button, no menu — simple hover-reveal that
-	   stays visible on touch / mobile-width (1080px = app-wide mobile cutoff). */
+	   stays visible on touch and on the mobile shell, where there is no hover to
+	   reveal it with. */
 	.bpl-actions--hover { opacity: 0; transition: opacity 120ms ease; }
 	.bpl-row:hover .bpl-actions--hover, .bpl-row:focus-within .bpl-actions--hover { opacity: 1; }
-	@media (hover: none), (max-width: 1080px) {
+	@media (hover: none) {
 		.bpl-actions--hover { opacity: 1; }
 	}
+	:global(html[data-platform='mobile']) .bpl-actions--hover { opacity: 1; }
 	.bpl-act { display: grid; place-items: center; width: 28px; height: 28px; background: transparent; border: 1px solid transparent; border-radius: 7px; color: var(--muted-foreground); cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
 	.bpl-act:hover { color: var(--foreground); background: var(--hover-overlay); }
 	.bpl-act:disabled { opacity: 0.5; cursor: not-allowed; }

@@ -198,11 +198,9 @@
 		max-width: 80px;
 	}
 
-	/* Desktop: allow wider name */
-	@media (min-width: 1081px) {
-		.selector-text {
-			max-width: 160px;
-		}
+	/* Desktop shell: allow wider name */
+	:global(html[data-platform='desktop']) .selector-text {
+		max-width: 160px;
 	}
 
 	/* ===== DROPDOWN MENU ===== */
@@ -255,31 +253,28 @@
 		background: var(--scrollbar-thumb-hover);
 	}
 
-	/* Responsive: mobile layout adjustments */
-	@media (max-width: 1080px) {
-		/* On mobile the pill bar wraps onto multiple lines, so the profile pill is
-		   free to grow — show the full profile name instead of truncating it.
-		   Bound to the viewport (minus the bar's padding) so a pathologically long
-		   name can't overflow horizontally; normal names show in full. */
-		.selector-text {
-			font-size: 12px;
-			max-width: calc(100vw - 4rem);
-			overflow: hidden;
-			text-overflow: ellipsis;
-		}
+	/* Mobile shell layout adjustments */
+	/* In the app the pill bar wraps onto multiple lines, so the profile pill is
+	   free to grow — show the full profile name instead of truncating it.
+	   Bound to the viewport (minus the bar's padding) so a pathologically long
+	   name can't overflow horizontally; normal names show in full. */
+	:global(html[data-platform='mobile']) .selector-text {
+		font-size: 12px;
+		max-width: calc(100vw - 4rem);
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
 
-		/* In the pill bar the dropdown opens upward; keep it within the viewport
-		   by anchoring to the bar's full width. */
-		.selector-wrapper {
-			position: static;
-		}
+	/* In the pill bar the dropdown opens upward; keep it within the viewport
+	   by anchoring to the bar's full width. */
+	:global(html[data-platform='mobile']) .selector-wrapper {
+		position: static;
+	}
 
-		.selector-dropdown {
-			left: 12px;
-			right: 12px;
-			min-width: 0;
-			max-width: none;
-		}
-
+	:global(html[data-platform='mobile']) .selector-dropdown {
+		left: 12px;
+		right: 12px;
+		min-width: 0;
+		max-width: none;
 	}
 </style>

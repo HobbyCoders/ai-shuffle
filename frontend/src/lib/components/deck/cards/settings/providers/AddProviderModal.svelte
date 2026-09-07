@@ -17,7 +17,8 @@
 	 *
 	 * A `role="dialog"` modal following the `McpServerForm` precedent: self-contained
 	 * Tailwind utility classes, so it is immune to the shell-owned `.ed-content`
-	 * global CSS (landmine L3). Fullscreen at ≤1080px via `isPanelFullscreenWidth`.
+	 * global CSS (landmine L3). Fullscreen on the mobile shell; a centred card,
+	 * clamped to the viewport, on the desktop shell at every width.
 	 *
 	 * Internal step machine: `choose` (five friendly cards) → one step per flow.
 	 * Each flow gets `{ onDone, onCancel, onBusyChange }`:
@@ -31,7 +32,7 @@
 	 */
 	import { onMount } from 'svelte';
 	import { X, ArrowLeft, Sparkles, MessageSquare, KeyRound, Bot, Network, Zap } from 'lucide-svelte';
-	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
+	import { platform } from '$lib/stores/platform.svelte';
 	import OpenAiKeyFlow from './flows/OpenAiKeyFlow.svelte';
 	import ChatGptDeviceFlow from './flows/ChatGptDeviceFlow.svelte';
 	import GrokKeyFlow from './flows/GrokKeyFlow.svelte';
@@ -62,9 +63,8 @@
 	// True while the active flow has an operation in flight — guards Esc/backdrop.
 	let busy = $state(false);
 
-	// Fullscreen at handheld widths (mirrors the drawer convention, viewport.ts).
-	let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280);
-	let fullscreen = $derived(isPanelFullscreenWidth(viewportWidth));
+	// Fullscreen on the mobile shell only (mirrors the drawer convention).
+	const fullscreen = $derived(platform.isMobile);
 
 	// Esc is handled via keydown on the dialog container, which only fires while
 	// focus is inside it — so focus it on open.
@@ -72,9 +72,6 @@
 
 	onMount(() => {
 		dialogEl?.focus();
-		const onResize = () => (viewportWidth = window.innerWidth);
-		window.addEventListener('resize', onResize);
-		return () => window.removeEventListener('resize', onResize);
 	});
 
 	const TITLES: Record<Step, string> = {

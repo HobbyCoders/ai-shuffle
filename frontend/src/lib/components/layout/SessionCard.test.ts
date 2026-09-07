@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { platform } from '$lib/stores/platform.svelte';
 
 const mocks = vi.hoisted(() => {
 	function store<T>(initial: T) {
@@ -167,7 +168,10 @@ beforeEach(() => {
 	mocks.forkSession.mockResolvedValue({ session_id: 'forked-session' });
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+	cleanup();
+	platform.set('desktop');
+});
 
 describe('SessionCard actions', () => {
 	it('keeps settle and omits rename, fork, and delete controls', () => {
@@ -294,11 +298,7 @@ describe('SessionCard actions', () => {
 
 	it('reports its reveal to the parent instead of closing itself', async () => {
 		const onActionsOpenChange = vi.fn();
-		vi.mocked(window.matchMedia).mockImplementation(() => ({
-			matches: true,
-			addEventListener: vi.fn(),
-			removeEventListener: vi.fn(),
-		}) as unknown as MediaQueryList);
+		platform.set('mobile');
 		const { container } = renderCard({}, { openActionsId: null, onActionsOpenChange });
 		const frame = container.querySelector('.scard-frame') as HTMLElement;
 		const card = container.querySelector('.scard') as HTMLElement;
@@ -311,11 +311,7 @@ describe('SessionCard actions', () => {
 	});
 
 	it('keeps mobile actions hidden until a left swipe reveals them', async () => {
-		vi.mocked(window.matchMedia).mockImplementation(() => ({
-			matches: true,
-			addEventListener: vi.fn(),
-			removeEventListener: vi.fn(),
-		}) as unknown as MediaQueryList);
+		platform.set('mobile');
 		const { container, onOpen } = renderCard();
 		const frame = container.querySelector('.scard-frame') as HTMLElement;
 		const card = container.querySelector('.scard') as HTMLElement;
@@ -334,11 +330,7 @@ describe('SessionCard actions', () => {
 	});
 
 	it('closes revealed mobile actions when the card is tapped', async () => {
-		vi.mocked(window.matchMedia).mockImplementation(() => ({
-			matches: true,
-			addEventListener: vi.fn(),
-			removeEventListener: vi.fn(),
-		}) as unknown as MediaQueryList);
+		platform.set('mobile');
 		const { container, onOpen } = renderCard();
 		const frame = container.querySelector('.scard-frame') as HTMLElement;
 		const card = container.querySelector('.scard') as HTMLElement;

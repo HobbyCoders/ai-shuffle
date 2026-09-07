@@ -2,19 +2,25 @@
 	/**
 	 * AppLayout - app shell (Studio Noir)
 	 *
-	 * Desktop (>1080px): a 256px sidebar on the black `--sidebar` plane holds the
-	 * session navigator and the page rail; the main panel carries its own top bar
-	 * (StudioTopBar, rendered by MainPanel so it can host the existing git
-	 * actions). The sidebar collapses from that top bar and its collapsed state
-	 * persists via the layout store.
+	 * Two shells, chosen by PLATFORM (see `$lib/stores/platform.svelte`), never
+	 * by window width:
 	 *
-	 * Mobile (≤1080px): unchanged pattern — AppTopBar's compact bar plus the
-	 * slide-in drawer, which now hosts the very same Sidebar component.
+	 * Desktop (every web browser): a 256px sidebar on the black `--sidebar`
+	 * plane holds the session navigator and the page rail; the main panel
+	 * carries its own top bar (StudioTopBar, rendered by MainPanel so it can
+	 * host the existing git actions). The sidebar collapses from that top bar
+	 * and its collapsed state persists via the layout store. In a narrow window
+	 * (≤1080px) the same shell stays, but the sidebar becomes an overlay that
+	 * starts collapsed, so the main panel keeps the full width.
+	 *
+	 * Mobile (the Android app's WebView, or `?ui=mobile`): AppTopBar's compact
+	 * bar plus the slide-in drawer, which hosts the very same Sidebar component.
 	 */
 	import { onMount, onDestroy } from 'svelte';
 	import { layout, sidebarCollapsed } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
-	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
+	import { platform } from '$lib/stores/platform.svelte';
+	import { isNarrowViewportWidth } from '$lib/utils/viewport';
 	import MainPanel from './MainPanel.svelte';
 	import AppTopBar from './AppTopBar.svelte';
 	import Sidebar from './Sidebar.svelte';
@@ -42,7 +48,9 @@
 		onOpenSpotlight
 	}: Props = $props();
 
-	let isMobile = $state(false);
+	const isMobile = $derived(platform.isMobile);
+	/** Desktop shell only: window is too narrow for a docked sidebar. */
+	let narrow = $state(false);
 
 	// --- resizable sidebar ---------------------------------------------------
 	const WIDTH_MIN = 220;
@@ -77,33 +85,47 @@
 		persistWidth();
 	}
 
-	// Mobile is width-based (not pointer-gated) so the mobile UI is reachable by
-	// simply narrowing a desktop window — important for testing on desktop. The
-	// 1080px cutoff also covers unfolded foldables whose inner screens report
-	// ~1028px (Galaxy Z Fold 6) / ~1040px (Z Fold 7) CSS width in their wide
-	// orientation; a pointer:coarse gate at 1024 would have missed those.
-	// Shared with the slide-out panels via isPanelFullscreenWidth, and mirrored
-	// by the `max-width: 1080px` media queries in the headers.
-	function checkMobile() {
-		isMobile = isPanelFullscreenWidth(window.innerWidth);
- layout.setSidebarOverlay(isMobile);
+	// The sidebar is an overlay (collapsed by default, not persisted) on the
+	// mobile shell always, and on the desktop shell only while the window is
+	// narrow. To try the mobile shell in a desktop browser, load `?ui=mobile`.
+	let overlayApplied: boolean | null = null;
+	function syncOverlay() {
+		narrow = isNarrowViewportWidth(window.innerWidth);
+		const overlay = isMobile || narrow;
+		if (overlay === overlayApplied) return;
+		overlayApplied = overlay;
+		layout.setSidebarOverlay(overlay);
 	}
 
 	onMount(() => {
-		checkMobile();
-		window.addEventListener('resize', checkMobile);
+		syncOverlay();
+		window.addEventListener('resize', syncOverlay);
 	});
 
 	onDestroy(() => {
 		if (typeof window !== 'undefined') {
-			window.removeEventListener('resize', checkMobile);
+			window.removeEventListener('resize', syncOverlay);
 		}
 	});
 
 	const showSidebar = $derived(!isMobile && !$sidebarCollapsed);
+	/** Desktop shell, narrow window: the open sidebar floats over the main panel. */
+	const sidebarFloating = $derived(showSidebar && narrow);
+
+	function closeFloatingSidebar() {
+		if (sidebarFloating) layout.setSidebarCollapsed(true);
+	}
+	// Navigating from a floating sidebar dismisses it, like the mobile drawer.
+	const sidebarNav = $derived({
+		onNewSession: () => { onNewSession(); closeFloatingSidebar(); },
+		onSettledOpenSession: () => { onSettledOpenSession(); closeFloatingSidebar(); },
+		onOpenSession: (id: string) => { onOpenSession(id); closeFloatingSidebar(); },
+		onOpenFeature: (type: ViewType) => { onOpenFeature(type); closeFloatingSidebar(); },
+		onOpenSpotlight: onOpenSpotlight ? () => { onOpenSpotlight?.(); closeFloatingSidebar(); } : undefined
+	});
 </script>
 
-<div class="app-shell" class:mobile={isMobile}>
+<div class="app-shell" class:mobile={isMobile} class:narrow={!isMobile && narrow}>
 	<CredentialStorageBanner />
 	{#if isMobile}
 		<AppTopBar
@@ -117,27 +139,33 @@
 	{/if}
 
 	<div class="app-body">
+		{#if sidebarFloating}
+			<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+			<div class="sidebar-scrim" onclick={closeFloatingSidebar}></div>
+		{/if}
 		{#if showSidebar}
-			<div class="sidebar-slot" style:width="{sidebarWidth}px">
+			<div class="sidebar-slot" class:floating={sidebarFloating} style:width="{sidebarWidth}px">
 				<Sidebar
 					{isAdmin}
-					{onNewSession}
-					{onSettledOpenSession}
-					{onOpenSession}
-					{onOpenFeature}
-					{onOpenSpotlight}
+					onNewSession={sidebarNav.onNewSession}
+					onSettledOpenSession={sidebarNav.onSettledOpenSession}
+					onOpenSession={sidebarNav.onOpenSession}
+					onOpenFeature={sidebarNav.onOpenFeature}
+					onOpenSpotlight={sidebarNav.onOpenSpotlight}
 				/>
-				<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-				<div
-					class="resize-handle"
-					class:active={resizing}
-					role="separator"
-					aria-orientation="vertical"
-					aria-label="Resize sidebar"
-					title="Drag to resize · double-click to reset"
-					onpointerdown={startResize}
-					ondblclick={resetWidth}
-				></div>
+				{#if !sidebarFloating}
+					<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+					<div
+						class="resize-handle"
+						class:active={resizing}
+						role="separator"
+						aria-orientation="vertical"
+						aria-label="Resize sidebar"
+						title="Drag to resize · double-click to reset"
+						onpointerdown={startResize}
+						ondblclick={resetWidth}
+					></div>
+				{/if}
 			</div>
 		{/if}
 
@@ -167,6 +195,7 @@
 	}
 
 	.app-body {
+		position: relative;
 		flex: 1;
 		min-height: 0;
 		min-width: 0;
@@ -179,6 +208,24 @@
 		flex: none;
 		min-height: 0;
 		border-right: 1px solid var(--sidebar-border);
+	}
+
+	/* Desktop shell in a narrow window: the sidebar floats over the main panel
+	   instead of squeezing it, and never grows past the viewport. */
+	.sidebar-slot.floating {
+		position: absolute;
+		inset: 0 auto 0 0;
+		z-index: 40;
+		max-width: min(100%, 100vw);
+		background: var(--sidebar);
+		box-shadow: 8px 0 32px color-mix(in oklch, black 45%, transparent);
+	}
+
+	.sidebar-scrim {
+		position: absolute;
+		inset: 0;
+		z-index: 39;
+		background: color-mix(in oklch, black 45%, transparent);
 	}
 
 	/* Drag handle on the sidebar's right edge. Slightly overhangs the border so

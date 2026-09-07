@@ -9,14 +9,14 @@
 	 * footer — the drawer is purely a close affordance around it.
 	 *
 	 * Drawer chrome: role="dialog", aria-modal,
-	 * right-side drawer above 1080px / fullscreen at ≤1080px via
-	 * `isPanelFullscreenWidth`, backdrop-click + Esc + ✕ to close, self-contained
+	 * right-side drawer on the desktop shell (clamped to the viewport at every
+	 * width) / fullscreen on the mobile shell, backdrop-click + Esc + ✕ to close, self-contained
 	 * Tailwind theme-token utilities. Wide (max-w-3xl) to host the full
 	 * media-model browser grid.
 	 */
 	import { onMount } from 'svelte';
 	import { X } from 'lucide-svelte';
-	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
+	import { platform } from '$lib/stores/platform.svelte';
 	import AIToolsSettings from '../AIToolsSettings.svelte';
 
 	interface Props {
@@ -24,9 +24,8 @@
 	}
 	let { onClose }: Props = $props();
 
-	// ----- Fullscreen at handheld widths (mirrors AddProviderModal) -----
-	let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280);
-	let fullscreen = $derived(isPanelFullscreenWidth(viewportWidth));
+	// ----- Fullscreen on the mobile shell (mirrors AddProviderModal) -----
+	const fullscreen = $derived(platform.isMobile);
 
 	// Esc is handled via keydown on the dialog container, which only fires while
 	// focus is inside it — so focus it on mount.
@@ -34,9 +33,6 @@
 
 	onMount(() => {
 		dialogEl?.focus();
-		const onResize = () => (viewportWidth = window.innerWidth);
-		window.addEventListener('resize', onResize);
-		return () => window.removeEventListener('resize', onResize);
 	});
 
 	function handleKeydown(event: KeyboardEvent) {

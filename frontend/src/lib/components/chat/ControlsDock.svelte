@@ -150,6 +150,9 @@
 		mobileSheetOpen = open;
 		onSheetOpenChange?.(open);
 	}
+	// The controls sheet belongs to the mobile shell, which CSS hides outside
+	// `html[data-platform='mobile']`. The shell is fixed for the life of the
+	// page, so there is no resize that can strand an open sheet on desktop.
 
 	// Model / effort / permission are the SESSION's run binding, not an override
 	// of the agent's: an agent is the configuration (prompt, tools, memory) and
@@ -352,10 +355,6 @@
 		permissionModes.find((m) => m.value === permissionValue)?.description ?? ''
 	);
 </script>
-
-<svelte:window onresize={() => {
-	if (window.innerWidth > 1080 && mobileSheetOpen) setMobileSheetOpen(false);
-}} />
 
 <div
 	class="controls-dock"
@@ -883,43 +882,43 @@
 		color: var(--warning, var(--primary));
 	}
 
-	@media (max-width: 1080px) {
-		.controls-dock {
-			gap: 3px;
-			padding: 5px 6px 7px;
-			background: var(--card);
-			border-radius: 0 0 20px 20px;
-			box-shadow: 0 6px 10px -8px color-mix(in oklch, var(--foreground) 20%, transparent);
-		}
+	/* Mobile shell only: the dock becomes the composer's bottom edge and swaps
+	   the desktop control row for the settings-sheet trigger. */
+	:global(html[data-platform='mobile']) .controls-dock {
+		gap: 3px;
+		padding: 5px 6px 7px;
+		background: var(--card);
+		border-radius: 0 0 20px 20px;
+		box-shadow: 0 6px 10px -8px color-mix(in oklch, var(--foreground) 20%, transparent);
+	}
 
-		.desktop-controls {
-			display: none;
-		}
+	:global(html[data-platform='mobile']) .desktop-controls {
+		display: none;
+	}
 
-		.composer-mobile-only {
-			display: grid;
-		}
+	:global(html[data-platform='mobile']) .composer-mobile-only {
+		display: grid;
+	}
 
-		.mobile-controls {
-			display: flex;
-			margin-left: auto;
-		}
+	:global(html[data-platform='mobile']) .mobile-controls {
+		display: flex;
+		margin-left: auto;
+	}
 
-		/* Settings · voice · call · attach on the left; usage on the right. */
-		.dock-left {
-			gap: 0;
-		}
+	/* Settings · voice · call · attach on the left; usage on the right. */
+	:global(html[data-platform='mobile']) .dock-left {
+		gap: 0;
+	}
 
-		.dock-ico,
-		.dock-left :global(.voice-btn),
-		.dock-left :global(.voice-call-btn) {
-			width: 36px;
-			height: 36px;
-			border-radius: 11px;
-		}
+	:global(html[data-platform='mobile']) .dock-ico,
+	:global(html[data-platform='mobile']) .dock-left :global(.voice-btn),
+	:global(html[data-platform='mobile']) .dock-left :global(.voice-call-btn) {
+		width: 36px;
+		height: 36px;
+		border-radius: 11px;
+	}
 
-		.dock-left :global(.voice-btn-wrapper) {
-			border-radius: 11px;
-		}
+	:global(html[data-platform='mobile']) .dock-left :global(.voice-btn-wrapper) {
+		border-radius: 11px;
 	}
 </style>

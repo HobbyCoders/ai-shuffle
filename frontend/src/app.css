@@ -1100,120 +1100,17 @@ select option {
 }
 
 /* ========================================
-   RESPONSIVE UTILITY CLASSES
-   Provide CSS fallback for JS-based responsive behavior
+   RESPONSIVE UTILITY CLASSES / MOBILE LAYOUT FALLBACKS — removed
+   These width-keyed visibility helpers (.mobile-only, .desktop-only,
+   .mobile-hidden, .desktop-hidden, .tablet-only, .tablet-hidden,
+   .context-panel-desktop, .dock-desktop, .rail-desktop, .rail-mobile,
+   .main-content-responsive, .has-mobile-rail, .context-panel-responsive,
+   .rail-responsive, .deck-layout-responsive and the matching
+   [data-layout] selectors) had no consumers anywhere in the app. The
+   mobile/desktop shell is now chosen by platform, not width — see
+   docs/mobile-desktop-ui-split.md. Gate shell-specific chrome on
+   html[data-platform='mobile'] / html[data-platform='desktop'] instead.
    ======================================== */
-
-/* Hide on mobile (< 640px) */
-@media (max-width: 639px) {
-	.mobile-hidden,
-	.desktop-only {
-		display: none !important;
-	}
-}
-
-/* Hide on desktop (>= 640px) */
-@media (min-width: 640px) {
-	.desktop-hidden,
-	.mobile-only {
-		display: none !important;
-	}
-}
-
-/* Tablet-specific visibility */
-@media (min-width: 640px) and (max-width: 1023px) {
-	.tablet-hidden {
-		display: none !important;
-	}
-}
-
-@media (max-width: 639px), (min-width: 1024px) {
-	.tablet-only {
-		display: none !important;
-	}
-}
-
-/* ========================================
-   MOBILE LAYOUT FALLBACKS
-   CSS backup for JS-based mobile detection
-   ======================================== */
-
-/* Mobile: Hide desktop-only elements via CSS as fallback */
-@media (max-width: 639px) {
-	/* Hide context panel on mobile */
-	.context-panel-desktop,
-	[data-layout="context-panel"] {
-		display: none !important;
-	}
-
-	/* Hide dock on mobile */
-	.dock-desktop,
-	[data-layout="dock"] {
-		display: none !important;
-	}
-
-	/* Desktop activity rail hidden on mobile */
-	.rail-desktop,
-	[data-layout="rail-desktop"] {
-		display: none !important;
-	}
-
-	/* Mobile activity rail visible and positioned at bottom */
-	.rail-mobile,
-	[data-layout="rail-mobile"] {
-		display: flex !important;
-		position: fixed;
-		bottom: 0;
-		left: 0;
-		right: 0;
-		z-index: 100;
-		background: var(--card);
-		height: calc(64px + env(safe-area-inset-bottom, 0px));
-		padding-bottom: env(safe-area-inset-bottom, 0px);
-	}
-
-	/* Main content takes full width on mobile */
-	.main-content-responsive {
-		grid-column: 1 !important;
-		margin-left: 0 !important;
-		width: 100% !important;
-	}
-
-	/* Ensure proper spacing for mobile bottom rail */
-	.has-mobile-rail {
-		padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
-	}
-}
-
-/* Desktop: Hide mobile-only elements via CSS as fallback */
-@media (min-width: 640px) {
-	.rail-mobile,
-	[data-layout="rail-mobile"] {
-		display: none !important;
-	}
-}
-
-/* ========================================
-   TABLET LAYOUT ADJUSTMENTS
-   Intermediate sizing for 640px - 1024px
-   ======================================== */
-
-@media (min-width: 640px) and (max-width: 1023px) {
-	/* Narrower context panel on tablets */
-	.context-panel-responsive {
-		width: 280px !important;
-	}
-
-	/* Slightly narrower activity rail on tablets */
-	.rail-responsive {
-		width: 56px !important;
-	}
-
-	/* Adjust grid for tablet */
-	.deck-layout-responsive {
-		grid-template-columns: 56px 1fr !important;
-	}
-}
 
 /* ========================================
    MOBILE OPTIMIZATIONS

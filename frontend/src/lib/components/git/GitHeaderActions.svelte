@@ -1114,65 +1114,62 @@
 		to { transform: rotate(360deg); }
 	}
 
-	/* Mobile touch targets — single horizontal rail (no wrapping).
-	   1080px keeps this in sync with AppLayout's isMobile width cutoff so it also
-	   covers unfolded foldables (Z Fold 6/7 inner ~1028–1040px). */
-	@media (max-width: 1080px) {
-		.git-actions {
-			/* Stay on one line so the header reads as a single touch-scrollable rail.
-			   Items keep their intrinsic size and overflow-scroll with the header. */
-			flex-wrap: nowrap;
-			flex-shrink: 0;
-		}
+	/* Mobile shell (Android WebView) — single horizontal rail (no wrapping)
+	   with touch-sized targets. */
+	:global(html[data-platform='mobile']) .git-actions {
+		/* Stay on one line so the header reads as a single touch-scrollable rail.
+		   Items keep their intrinsic size and overflow-scroll with the header. */
+		flex-wrap: nowrap;
+		flex-shrink: 0;
+	}
 
-		/* Don't let rail items shrink — they should keep their size and scroll. */
-		.git-btn,
-		.split-btn-group,
-		.diff-stats {
-			flex-shrink: 0;
-		}
+	/* Don't let rail items shrink — they should keep their size and scroll. */
+	:global(html[data-platform='mobile']) .git-btn,
+	:global(html[data-platform='mobile']) .split-btn-group,
+	:global(html[data-platform='mobile']) .diff-stats {
+		flex-shrink: 0;
+	}
 
-		/* Pin Commit/Finish/Create PR at the start of the rail so Finish is
-		   visible when a PR is open — Pull/Push used to sit first and push
-		   the primary action off-screen on a phone-width header. */
-		.git-primary {
-			order: -1;
-		}
+	/* Pin Commit/Finish/Create PR at the start of the rail so Finish is
+	   visible when a PR is open — Pull/Push used to sit first and push
+	   the primary action off-screen on a phone-width header. */
+	:global(html[data-platform='mobile']) .git-primary {
+		order: -1;
+	}
 
-		.git-btn {
-			height: 36px;
-			padding: 0 12px;
-			font-size: 0.75rem;
-		}
+	:global(html[data-platform='mobile']) .git-btn {
+		height: 36px;
+		padding: 0 12px;
+		font-size: 0.75rem;
+	}
 
-		/* Keep the chevron compact even at the larger mobile touch size. */
-		.split-btn-group .split-chevron {
-			padding: 0 8px;
-		}
+	/* Keep the chevron compact even at the larger mobile touch size. */
+	:global(html[data-platform='mobile']) .split-btn-group .split-chevron {
+		padding: 0 8px;
+	}
 
-		.branch-name {
-			max-width: 80px;
-		}
+	:global(html[data-platform='mobile']) .branch-name {
+		max-width: 80px;
+	}
 
-		.project-name {
-			max-width: 80px;
-		}
+	:global(html[data-platform='mobile']) .project-name {
+		max-width: 80px;
+	}
 
-		/* The header is a horizontal scroll container on mobile, which would clip an
-		   absolutely-positioned dropdown. Pin it as a fixed panel just below the
-		   header so it escapes the rail's overflow while staying in the DOM tree
-		   (so outside-click detection keeps working). */
-		.branch-dropdown {
-			position: fixed;
-			top: 100px;
-			left: 8px;
-			right: 8px;
-			bottom: auto;
-			min-width: 0;
-			max-width: none;
-			max-height: 60vh;
-			z-index: 200;
-		}
+	/* The header is a horizontal scroll container on mobile, which would clip an
+	   absolutely-positioned dropdown. Pin it as a fixed panel just below the
+	   header so it escapes the rail's overflow while staying in the DOM tree
+	   (so outside-click detection keeps working). */
+	:global(html[data-platform='mobile']) .branch-dropdown {
+		position: fixed;
+		top: 100px;
+		left: 8px;
+		right: 8px;
+		bottom: auto;
+		min-width: 0;
+		max-width: none;
+		max-height: 60vh;
+		z-index: 200;
 	}
 
 	@media (prefers-reduced-motion: reduce) {

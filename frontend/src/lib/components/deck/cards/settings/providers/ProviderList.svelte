@@ -29,9 +29,9 @@
 	 * confirms, and the `providers` store calls (which re-hydrate the model
 	 * registry — landmine L4).
 	 */
-	import { onMount, untrack } from 'svelte';
+	import { untrack } from 'svelte';
 	import { X } from 'lucide-svelte';
-	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
+	import { platform } from '$lib/stores/platform.svelte';
 	import { claudeAuthenticated, claudeTokenValid } from '$lib/stores/auth.svelte';
 	import { type ModelProvider } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
@@ -82,20 +82,13 @@
 	// True while the Claude sign-in flow has an operation in flight — guards close.
 	let claudeSignInBusy = $state(false);
 
-	// Fullscreen at handheld widths for the reconnect modal (mirrors AddProviderModal).
-	let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280);
-	let reconnectFullscreen = $derived(isPanelFullscreenWidth(viewportWidth));
+	// Fullscreen on the mobile shell for the reconnect modal (mirrors AddProviderModal).
+	const reconnectFullscreen = $derived(platform.isMobile);
 
 	// Esc fires on keydown within the dialog container, which only receives events
 	// while focus is inside it — so focus it on open (AddProviderModal precedent).
 	let reconnectDialogEl = $state<HTMLDivElement | null>(null);
 	let claudeSignInDialogEl = $state<HTMLDivElement | null>(null);
-
-	onMount(() => {
-		const onResize = () => (viewportWidth = window.innerWidth);
-		window.addEventListener('resize', onResize);
-		return () => window.removeEventListener('resize', onResize);
-	});
 
 	// Focus the dialog container once it mounts so Esc works before the first click.
 	$effect(() => {

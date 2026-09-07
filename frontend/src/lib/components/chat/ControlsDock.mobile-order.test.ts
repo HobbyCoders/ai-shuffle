@@ -27,7 +27,7 @@ afterEach(() => cleanup());
 afterAll(() => vi.unstubAllGlobals());
 
 describe('ControlsDock mobile control order', () => {
-	it('toggles closed from settings even when the panel is scrolled and clears it on desktop', async () => {
+	it('toggles closed from settings even when the panel is scrolled', async () => {
 		const onSheetOpenChange = vi.fn();
 		const { container } = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn(), onSheetOpenChange } });
 		const trigger = container.querySelector('.mobile-settings-trigger')!;
@@ -47,12 +47,8 @@ describe('ControlsDock mobile control order', () => {
 		expect(document.activeElement).toBe(trigger);
 		expect(trigger.getAttribute('aria-expanded')).toBe('false');
 		await fireEvent.click(trigger);
-		const previousWidth = window.innerWidth;
-		window.innerWidth = 1200;
-		await fireEvent.resize(window);
-		expect(trigger.getAttribute('aria-expanded')).toBe('false');
-		expect(onSheetOpenChange).toHaveBeenLastCalledWith(false);
-		window.innerWidth = previousWidth;
+		expect(trigger.getAttribute('aria-expanded')).toBe('true');
+		expect(onSheetOpenChange).toHaveBeenLastCalledWith(true);
 	});
 
 	it('places chat settings first, then browser immediately before attach, with usage on the right', () => {

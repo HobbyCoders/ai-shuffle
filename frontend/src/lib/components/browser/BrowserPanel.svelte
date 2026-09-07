@@ -14,8 +14,8 @@
 	 * element's selector/context attached. Code stays the single source of
 	 * truth; the agent makes the edit and the screencast shows the reload.
 	 *
-	 * Layout: a right-aligned, left-edge-resizable overlay on wide screens; a
-	 * fullscreen overlay at/under the app's 1080px handheld cutoff. The live-view
+	 * Layout: a right-aligned, left-edge-resizable overlay on the desktop shell
+	 * at every width; a fullscreen overlay on the mobile shell. The live-view
 	 * box only affects page geometry when its controlling viewer explicitly
 	 * chooses Fit. Fixed agent viewports remain authoritative through resizes
 	 * and reconnects.
@@ -45,7 +45,7 @@
 	import { PanelOperation } from '$lib/browser-panel/panel-operation';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
+	import { platform } from '$lib/stores/platform.svelte';
 	import {
 		createBrowserStreamClient,
 		type BrowserStreamClient,
@@ -310,7 +310,7 @@
 	// ── Viewport follows the live-view box ──────────────────────────────
 	// Headless Chrome does not resize with the docked panel. Without this
 	// the streamed page stays at its launch (or last agent-resize) size,
-	// so this app's 1080px mobile shell never lifts no matter how wide
+	// so its own narrow-window layout never lifts no matter how wide
 	// the user drags the panel.
 	let panelBodyEl: HTMLElement | undefined = $state();
 	let lastViewportW = 0;
@@ -415,21 +415,13 @@
 		}
 	}
 
-	/** Fullscreen (handheld) mode: jump back to the chat to watch the reply. */
+	/** Fullscreen (mobile shell) mode: jump back to the chat to watch the reply. */
 	function viewChat() {
 		browserPanel.closePanel(sessionId);
 	}
 
-	// ── Fullscreen (handheld) detection ────────────────────────────────────
-	function computeFullscreen(): boolean {
-		return (
-			typeof window !== 'undefined' && isPanelFullscreenWidth(window.innerWidth)
-		);
-	}
-	let isFullscreen = $state(computeFullscreen());
-	function handleResize() {
-		isFullscreen = computeFullscreen();
-	}
+	// ── Fullscreen is the mobile shell, not a width ────────────────────────
+	const isFullscreen = $derived(platform.isMobile);
 
 	// ── Left-edge drag resize (docked mode only) ───────────────────────────
 	let panelEl: HTMLElement | undefined = $state();
@@ -641,8 +633,6 @@
 		selectedElement ? describeElement(selectedElement) : '',
 	);
 </script>
-
-<svelte:window onresize={handleResize} />
 
 {#if open}
 	<aside
@@ -981,7 +971,7 @@
 		pointer-events: none;
 	}
 
-	/* Fullscreen overlay at/under the handheld cutoff. */
+	/* Fullscreen overlay on the mobile shell. */
 	.browser-panel.fullscreen {
 		position: absolute;
 		inset: 0;
@@ -993,16 +983,15 @@
 		padding-bottom: env(safe-area-inset-bottom, 0px);
 	}
 
-	@media (max-width: 1080px) {
-		.browser-panel {
-			position: absolute;
-			inset: 0;
-			z-index: 95;
-			width: 100% !important;
-			border-left: none;
-			padding-top: env(safe-area-inset-top, 0px);
-			padding-bottom: env(safe-area-inset-bottom, 0px);
-		}
+	/* Mobile shell: fullscreen even before hydration sets .fullscreen. */
+	:global(html[data-platform='mobile']) .browser-panel {
+		position: absolute;
+		inset: 0;
+		z-index: 95;
+		width: 100% !important;
+		border-left: none;
+		padding-top: env(safe-area-inset-top, 0px);
+		padding-bottom: env(safe-area-inset-bottom, 0px);
 	}
 
 	/* ── Resize handle (left edge) ─────────────────────────────────────── */
@@ -1429,8 +1418,13 @@
 		background: var(--hover-overlay);
 	}
 
-	/* 16px stops iOS Safari from zooming into the textarea on focus. */
-	@media (max-width: 1080px) {
+	/* 16px stops mobile browsers zooming into the textarea on focus. Applies on
+	   the mobile shell, and in any narrow window where the keyboard is touch. */
+	:global(html[data-platform='mobile']) .composer-input {
+		font-size: 16px;
+	}
+
+	@media (max-width: 639px) {
 		.composer-input {
 			font-size: 16px;
 		}
@@ -1483,12 +1477,12 @@
 			transition: none;
 		}
 	}
-	@media (max-width: 1080px) {
-		.panel-header { gap: 2px; padding: 3px 4px; min-height: 34px; }
-		.tool-btn { width: 26px; height: 30px; }
-		.nav-forward { display: flex; }
-		.address-bar { min-width: 32px; }
-		.address-display, .address-input { height: 30px; font-size: 0.75rem; }
-		.address-display { padding-inline: 5px; }
-	}
+	/* Mobile shell: compact toolbar, with the forward button always shown. */
+	:global(html[data-platform='mobile']) .panel-header { gap: 2px; padding: 3px 4px; min-height: 34px; }
+	:global(html[data-platform='mobile']) .tool-btn { width: 26px; height: 30px; }
+	:global(html[data-platform='mobile']) .nav-forward { display: flex; }
+	:global(html[data-platform='mobile']) .address-bar { min-width: 32px; }
+	:global(html[data-platform='mobile']) .address-display,
+	:global(html[data-platform='mobile']) .address-input { height: 30px; font-size: 0.75rem; }
+	:global(html[data-platform='mobile']) .address-display { padding-inline: 5px; }
 </style>

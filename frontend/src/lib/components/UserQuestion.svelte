@@ -917,8 +917,8 @@
 		font-style: italic;
 	}
 
-	/* Touch (handhelds ≤1080px included): tap targets stay comfortable and no
-	   hover fill is left stuck after a tap. */
+	/* Touch devices (the mobile shell included): tap targets stay comfortable and
+	   no hover fill is left stuck after a tap. */
 	@media (hover: none) {
 		.uq-close-btn {
 			width: 2rem;

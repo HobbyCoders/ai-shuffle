@@ -14,7 +14,7 @@ const chatInput = readFileSync(
 	'utf8'
 );
 const mobileStyles = chatInput.slice(
-	chatInput.indexOf('@media (max-width: 1080px)'),
+	chatInput.indexOf(":global(html[data-platform='mobile']) .chat-input-wrapper"),
 	chatInput.indexOf('@media (prefers-reduced-motion: reduce)')
 );
 
@@ -53,7 +53,7 @@ describe('mobile composer collapse predicate', () => {
 		expect(shouldCollapseMobileComposer({ ...idleCompactComposer, compact: false })).toBe(false);
 	});
 
-	it('never collapses on a desktop viewport, even when the chat is compact', () => {
+	it('never collapses on the desktop shell, even when the chat is compact', () => {
 		// `compact` is true for any active (non-hero) chat, including desktop.
 		expect(shouldCollapseMobileComposer({ ...idleCompactComposer, mobileViewport: false })).toBe(false);
 	});
@@ -159,10 +159,13 @@ describe('ChatInput mobile collapsed surface', () => {
 		expect(mobileStyles).not.toContain('.controls-right');
 	});
 
-	it('gates collapse and toolbar-inert on the mobile viewport, not compact-alone', () => {
+	it('gates collapse and toolbar-inert on the mobile shell, not compact-alone', () => {
 		expect(chatInput).toMatch(/shouldCollapseMobileComposer\(\{[\s\S]*?mobileViewport/);
 		expect(chatInput).toMatch(/shouldBlockMobileComposerToolbarPointer\(\{[\s\S]*?mobileViewport/);
-		expect(chatInput).toContain('<svelte:window onresize={syncMobileViewport} />');
+		// The shell is fixed for the life of the page, so there is nothing to
+		// recompute on resize.
+		expect(chatInput).toContain('const mobileViewport = $derived(platform.isMobile);');
+		expect(chatInput).not.toContain('onresize=');
 	});
 
 	it('keeps the dock inert for the tap that expands the collapsed composer', () => {

@@ -1,5 +1,7 @@
 # Files and microphone in embedded chat
 
+Embedded chat appends `AIShuffleAndroid/<versionName>` to the WebView's default user agent (`ui/WebUserAgent.kt`). The web frontend reads that token before first paint and renders its mobile shell; every other browser, including a phone browser, gets the desktop shell regardless of width. See `docs/mobile-desktop-ui-split.md` at the repository root. The token adds no capability and carries no credentials; it is appended once and the rest of the user agent is unchanged so the server still sees the real WebView version.
+
 Chat file and image downloads use Android's system Save dialog. Files are streamed to the selected document, with one active save per chat and a 128 MB limit. A save expires after five minutes, including time spent choosing a destination. Cancelling, navigating, closing chat, removing the worker or changing accounts stops the transfer and attempts to delete its incomplete destination. A process crash or a document provider that refuses deletion can leave an incomplete file; retry the download in that case.
 
 Ordinary HTTPS file requests use the current WebView session and optional Cloudflare Access headers. Initial URLs and every redirect must match the selected worker's exact HTTPS origin, including its port. Cross-origin and HTTP redirects fail without forwarding credentials. Same-origin redirects are limited to five. Authentication and network failures show an in-app error; they do not save the error response as a file.

@@ -42,9 +42,10 @@
 	 * to the lane just left. `onSelectMode` stays available for a host that
 	 * wants to observe the switch.
 	 *
-	 * Desktop hosts it beside the main panel; at ≤1080px the same component is
-	 * rendered inside AppTopBar's slide-in drawer, so every navigation path is
-	 * identical on both.
+	 * The desktop shell hosts it beside the main panel (as an overlay when the
+	 * window is narrow); on the mobile shell the same component is rendered
+	 * inside AppTopBar's slide-in drawer, so every navigation path is identical
+	 * on both.
 	 *
 	 * Data comes exclusively from the stores the app already loads ($sessions,
 	 * streamingSessions, backgroundPermissions). Internal worker sessions, and
@@ -85,7 +86,7 @@
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { preloadPanelForView } from '$lib/components/deck/lazy/panels';
 	import { appMode, sessionMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
-	import { isPanelFullscreenWidth } from '$lib/utils/viewport';
+	import { platform } from '$lib/stores/platform.svelte';
 	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 	import SessionCard from './SessionCard.svelte';
 	import SessionModeSwitcher from './SessionModeSwitcher.svelte';
@@ -487,10 +488,10 @@
 	// it only appears once the list has actually moved under it.
 	let scrollRef = $state<HTMLDivElement | null>(null);
 	let scrolled = $state(false);
-	let viewportWidth = $state(0);
-	/** Panel is fullscreen-width (≤1080px) — the drawer, or a foldable's inner
-	 *  screen. Drives where the More flyout is drawn. */
-	const fullscreen = $derived(viewportWidth > 0 && isPanelFullscreenWidth(viewportWidth));
+	/** Panel is fullscreen — the mobile shell's drawer. Drives where the More
+	 *  flyout is drawn. Never true on the desktop shell, at any window width:
+	 *  there the sidebar is a docked (or overlaid) panel with room beside it. */
+	const fullscreen = $derived(platform.isMobile);
 
 	function handleScroll() {
 		scrolled = (scrollRef?.scrollTop ?? 0) > 2;
@@ -593,7 +594,7 @@
 	}
 </script>
 
-<svelte:window onclick={handleWindowClick} onkeydown={handleWindowKeydown} bind:innerWidth={viewportWidth} />
+<svelte:window onclick={handleWindowClick} onkeydown={handleWindowKeydown} />
 
 <aside class="sidebar grain" aria-label="Sessions">
 	<!-- Sticky top block: the brand row and New session travel together and never
@@ -1209,10 +1210,11 @@
 
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 
-	/* The same rows serve the desktop sidebar and the mobile drawer; on handheld
-	   widths enlarge the controls to clear the 44px touch minimum, and the ⌘N
-	   hint goes away because there is no keyboard to press it on. */
-	@media (hover: none), (max-width: 1080px) {
+	/* The same rows serve the desktop sidebar and the mobile drawer; on the
+	   mobile shell — and on any touch-only device — enlarge the controls to
+	   clear the 44px touch minimum, and drop the ⌘N hint because there is no
+	   keyboard to press it on. */
+	@media (hover: none) {
 		.iconbtn { width: 40px; height: 40px; }
 		.ghostrow { height: 44px; }
 		.shortcut { display: none; }
@@ -1221,6 +1223,14 @@
 		.sb-top { padding-top: env(safe-area-inset-top, 0px); }
 		.sb-head { height: 56px; }
 	}
+
+	:global(html[data-platform='mobile']) .iconbtn { width: 40px; height: 40px; }
+	:global(html[data-platform='mobile']) .ghostrow { height: 44px; }
+	:global(html[data-platform='mobile']) .shortcut { display: none; }
+	/* The drawer is fullscreen, so the brand row sits under the status bar /
+	   notch unless it clears the inset itself. */
+	:global(html[data-platform='mobile']) .sb-top { padding-top: env(safe-area-inset-top, 0px); }
+	:global(html[data-platform='mobile']) .sb-head { height: 56px; }
 
 	@media (prefers-reduced-motion: reduce) {
 		.iconbtn, .ghostrow, .shelf, .fbtn, .scope-clear, .group-chev, .sb-top::after { transition: none; }

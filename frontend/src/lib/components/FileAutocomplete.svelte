@@ -869,13 +869,11 @@
     background: var(--popover, var(--card));
   }
 
-  /* Mobile: break out of textarea-wrapper to span full chat island width */
-  @media (max-width: 1080px) {
-    .file-autocomplete-panel {
-      left: -15px; /* -(island .input-area padding 14px + island border 1px) */
-      right: auto;
-      width: calc(100vw - 1.5rem); /* viewport minus chat-input-wrapper horizontal padding */
-    }
+  /* Mobile shell: break out of textarea-wrapper to span full chat island width */
+  :global(html[data-platform='mobile']) .file-autocomplete-panel {
+    left: -15px; /* -(island .input-area padding 14px + island border 1px) */
+    right: auto;
+    width: calc(100vw - 1.5rem); /* viewport minus chat-input-wrapper horizontal padding */
   }
 
   .file-autocomplete-list {

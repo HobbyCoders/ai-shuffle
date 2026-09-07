@@ -67,7 +67,7 @@ Global markdown notes with tags, pinning, and search. Each note backed by a phys
 Full documentation rendered in-app covering getting started, all features, connectors, and API reference.
 
 ### Mobile & PWA
-Fully responsive layout with a mobile-optimized sidebar, 44px touch targets, PWA install support, offline detection, and push notifications.
+The web UI is the desktop layout at every window size; narrow windows collapse the sidebar into an overlay and tighten spacing. The Android app renders a separate mobile shell with a compact app bar, slide-in drawer, collapsing composer and 44px touch targets. PWA install support, offline detection, and push notifications work in both. See [docs/mobile-desktop-ui-split.md](docs/mobile-desktop-ui-split.md).
 
 Pair another browser, phone, tablet, or cluster runner with a short-lived,
 one-time code or locally rendered QR. Local/LAN use requires no Shuffle account; optionally link a worker to an account for managed remote access.
