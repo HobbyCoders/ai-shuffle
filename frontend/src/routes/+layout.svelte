@@ -7,7 +7,7 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { auth, isAuthenticated, setupRequired, claudeAuthenticated, onboardingComplete } from '$lib/stores/auth.svelte';
+	import { auth, isAuthenticated } from '$lib/stores/auth.svelte';
 	import { theme } from '$lib/stores/theme.svelte';
 	import { pwa } from '$lib/stores/pwa.svelte';
 	import { ensureModelRegistryHydrated } from '$lib/constants/models';
@@ -19,12 +19,14 @@
 	import { notify } from '$lib/stores/notifications';
 	import { installGlobalErrorHandlers } from '$lib/services/error-reporter';
 	import { bindVisualViewport } from '$lib/utils/visual-viewport';
- import { startLiveSync } from '$lib/services/live-sync';
- let teardownLiveSync: (() => void) | undefined;
+	import { startLiveSync } from '$lib/services/live-sync';
+	let teardownLiveSync: (() => void) | undefined;
 
 	let { children }: { children: Snippet } = $props();
 
 	let initialized = $state(false);
+	let mounted = $state(false);
+	let bootstrapPreparation: Promise<unknown> | undefined;
 	let teardownErrorHandlers: (() => void) | null = null;
 	let teardownVisualViewport: (() => void) | null = null;
 
@@ -49,28 +51,45 @@
 	const AUTH_POLL_INTERVAL_MS = 120_000;
 	let authPollTimer: ReturnType<typeof setInterval> | null = null;
 
-	// Bounce to /login when the auth poll observes a lost session, mirroring the
-	// HTTP-401 interceptor. Guarded against loops: only fires once initialized,
-	// only when confirmed-unauthenticated (not merely "still checking"), setup is
-	// not the intended destination, and we're not already on /login or /setup.
-	function redirectIfDeauthenticated() {
-		if (!initialized) return;
-		if ($setupRequired) return; // setup flow owns its own routing
-		if ($isAuthenticated) return;
+	// Unknown/loading/error states cannot substitute for a confirmed denial.
+	const authDestination = $derived.by(() => {
+		const { status, loading, error } = $auth;
 		const path = $page.url.pathname;
-		if (path === '/login' || path === '/setup' || path === '/pair') return;
-		goto('/login');
+		if (!initialized || loading || error || !status || path === '/pair') return null;
+		if (status.authenticated === false) return path === '/login' ? null : '/login';
+		if (status.authenticated !== true) return null;
+		if (status.setup_required || status.onboarding_complete === false) return path === '/setup' ? null : '/setup';
+		return path === '/login' || path === '/setup' ? '/' : null;
+	});
+	$effect(() => {
+		if (authDestination) void goto(authDestination);
+	});
+
+	// Delay protected children until bootstrap has real auth evidence. A failed
+	// refresh after mounting retains the existing authenticated UI and its draft.
+	$effect(() => {
+		const { status, loading, error } = $auth;
+		if (!mounted || initialized || loading || error || typeof status?.authenticated !== 'boolean') return;
+		let current = true;
+		// Metadata failures can start another auth check through the 401 handler.
+		// Reuse this work so that confirmation cannot restart failing requests.
+		const preparation = status.authenticated
+			? (bootstrapPreparation ??= Promise.allSettled([ensureModelRegistryHydrated(), notify.loadHistory()]))
+			: Promise.resolve();
+		void preparation.then(() => { if (current) initialized = true; });
+		// A newer auth check or unmount retires this bootstrap continuation.
+		return () => { current = false; };
+	});
+
+	async function refreshAuth() {
+		try { await auth.checkAuth(); }
+		catch { /* The store retains prior auth and exposes a connection error. */ }
 	}
 
 	function startAuthPoll() {
 		if (authPollTimer) return;
-		authPollTimer = setInterval(async () => {
-			try {
-				await auth.checkAuth();
-				redirectIfDeauthenticated();
-			} catch (e) {
-				console.debug('Auth poll failed:', e);
-			}
+		authPollTimer = setInterval(() => {
+			if (!auth.current.loading) void refreshAuth();
 		}, AUTH_POLL_INTERVAL_MS);
 	}
 
@@ -86,12 +105,12 @@
 			stopAuthPoll();
 		} else {
 			// Check immediately on tab return, then resume interval
-			auth.checkAuth().then(redirectIfDeauthenticated).catch(() => {});
+			void refreshAuth();
 			startAuthPoll();
 		}
 	}
 
-	onMount(async () => {
+	onMount(() => {
 		// Size the app shell to the visible viewport so the composer stays
 		// above the virtual keyboard (100dvh does not shrink with it).
 		teardownVisualViewport = bindVisualViewport();
@@ -107,41 +126,8 @@
 		// can read them via GetAppErrors. Gated on auth inside the reporter.
 		teardownErrorHandlers = installGlobalErrorHandlers();
 
-		try {
-			await auth.checkAuth();
-
-			// Load and sync user preferences after auth is verified
-			if ($isAuthenticated) {
-				// Sync all settings from server (database is source of truth)
-				// These run in parallel for faster startup
-				await Promise.all([
-					ensureModelRegistryHydrated(),
-					// Seed the notification bell from persisted history.
-					notify.loadHistory()
-				]);
-			}
-
-			initialized = true;
-
-			// Handle redirects
-			const path = $page.url.pathname;
-			const isPairingPage = path === '/pair';
-
-			if ($isAuthenticated && $setupRequired && path !== '/setup' && !isPairingPage) {
-				goto('/setup');
-			} else if ($isAuthenticated && !$onboardingComplete && path !== '/setup' && !isPairingPage) {
-				goto('/setup');
-			} else if (!$isAuthenticated && path !== '/login' && !isPairingPage) {
-				goto('/login');
-			} else if ($isAuthenticated && path === '/login') {
-				goto('/');
-			} else if ($isAuthenticated && path === '/setup' && $onboardingComplete) {
-				goto('/');
-			}
-		} catch (e) {
-			console.error('Auth check failed:', e);
-			initialized = true;
-		}
+		mounted = true;
+		void refreshAuth();
 
 		// Start visibility-aware auth polling
 		startAuthPoll();
@@ -149,7 +135,7 @@
 	});
 
 	onDestroy(() => {
- teardownLiveSync?.();
+		teardownLiveSync?.();
 		stopAuthPoll();
 		document.removeEventListener('visibilitychange', handleAuthVisibility);
 		teardownErrorHandlers?.();
@@ -182,11 +168,16 @@
 	</script>`}
 </svelte:head>
 
-{#if !initialized}
+{#if $page.url.pathname !== '/pair' && (!initialized || authDestination || (!['/login', '/setup'].includes($page.url.pathname) && !$isAuthenticated))}
 	<div class="min-h-screen flex items-center justify-center">
 		<div class="text-center">
-			<div class="animate-spin w-8 h-8 border-2 border-primary border-t-transparent rounded-full mx-auto mb-4"></div>
-			<p class="text-gray-400">Loading...</p>
+			{#if $auth.error && !$auth.loading}
+				<p role="status" class="text-muted-foreground mb-4">Could not verify your connection to this worker.</p>
+				<button type="button" class="btn" onclick={() => void refreshAuth()}>Try again</button>
+			{:else}
+				<div class="animate-spin w-8 h-8 border-2 border-primary border-t-transparent rounded-full mx-auto mb-4"></div>
+				<p class="text-gray-400">Loading...</p>
+			{/if}
 		</div>
 	</div>
 {:else}

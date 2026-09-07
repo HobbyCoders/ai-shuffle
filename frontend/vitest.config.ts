@@ -36,6 +36,7 @@ export default defineConfig({
 			// SvelteKit virtual modules aren't available outside the kit plugin;
 			// stub them so store code that imports them can be unit-tested.
 			{ find: /^\$app\/environment$/, replacement: `${stubs}/app-environment.ts` },
+			{ find: /^\$app\/stores$/, replacement: `${stubs}/app-stores.ts` },
 			{ find: /^\$app\/navigation$/, replacement: `${stubs}/app-navigation.ts` }
 		]
 	},

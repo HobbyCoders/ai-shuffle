@@ -19,7 +19,6 @@
 	 * what handleOpenSession and handleNewSessionForProject do below.
 	 */
 	import { onMount, onDestroy } from 'svelte';
-	import { goto } from '$app/navigation';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { appMode } from '$lib/stores/sessionMode.svelte';
@@ -166,10 +165,8 @@
 	}
 
 	onMount(async () => {
-		if (!$isAuthenticated) {
-			await goto('/login');
-			return;
-		}
+		// The root layout owns auth routing and delays this mount until verified.
+		if (!$isAuthenticated) return;
 
 		// Initialize data
 		await activeSession.init();
@@ -428,7 +425,7 @@
 
 {#if !$isAuthenticated}
 	<div class="flex items-center justify-center h-screen bg-background">
-		<p class="text-muted-foreground">Redirecting to login...</p>
+		<p class="text-muted-foreground">Checking connection...</p>
 	</div>
 {:else}
 	<ActiveVoiceCallBar onReturn={handleOpenSession} />

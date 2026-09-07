@@ -5,7 +5,9 @@
 import { api, type AuthStatus } from './client';
 
 export async function getAuthStatus(): Promise<AuthStatus> {
-	return api.get<AuthStatus>('/auth/status', { cache: 'no-store' });
+	const status = await api.get<AuthStatus>('/auth/status', { cache: 'no-store' });
+	if (typeof status?.authenticated !== 'boolean') throw new Error('Invalid authentication status response');
+	return status;
 }
 
 export async function setupInstallation(): Promise<void> {
