@@ -51,6 +51,11 @@ def bind(session_id, principal, *, new=False, claim=False, conn=None):
     previous = c.fetchone()
     if previous:
         if not principal or previous['owner'] != principal['owner']:
+            from app.core.mobile_tool_identity import same_install_owner
+            if same_install_owner(dict(previous), principal, dict(session)):
+                # Permit owner continuation without transferring Android grants
+                # or overwriting the original account/device provenance.
+                return
             raise PermissionError('Session principal mismatch')
     elif not new:
         if not claim:

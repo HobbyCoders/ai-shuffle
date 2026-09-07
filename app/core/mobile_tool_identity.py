@@ -51,6 +51,23 @@ def bind_session(session_id, value, *, new=False, claim=False, conn=None):
     return store.bind(session_id, value, new=new, claim=claim, conn=conn)
 
 
+def same_install_owner(previous, value, session):
+    """Chat continuation is distinct from replacing Android tool provenance."""
+    from app.core.config import settings
+    if (not value or session['api_user_id']
+            or session['instance_id'] != settings.effective_instance_id):
+        return False
+    if {previous['kind'], value['kind']} != {'admin', 'paired'}:
+        return False
+    paired_value = value if value['kind'] == 'paired' else previous
+    client = pairing.get_paired_client(paired_value['principal_id'])
+    if not client or client.get('revoked_at'):
+        return False
+    owner = mobile_hub.ownership(paired_client_id=client['id'])
+    return bool(owner and owner['account_id'] == paired_value.get('account_id')
+                and account_hub.check_paired_client(client) is True)
+
+
 def authorized_device_ids(session_id):
     try:
         value = store.read(session_id)
@@ -62,7 +79,9 @@ def authorized_device_ids(session_id):
         if value.get('account_id'):
             membership = mobile_hub.ownership(paired_client_id=value['principal_id'])
             controller_device = mobile.get_mobile_device(membership['device_id'])
-            if not controller_device or 'mobile:actions' not in (controller_device.get('scopes') or []):
+            owner_controller = account_hub.check_paired_client(live_client(value)) is True
+            if (not controller_device or (not owner_controller
+                    and 'mobile:actions' not in (controller_device.get('scopes') or []))):
                 return []
         result = []
         for device in mobile.get_mobile_devices():

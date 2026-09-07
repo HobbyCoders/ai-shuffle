@@ -1,7 +1,7 @@
 """WebSocket authentication with an explicit, server-owned mobile principal."""
 import hashlib
 from typing import Optional
-from fastapi import WebSocket
+from fastapi import HTTPException, WebSocket, WebSocketException
 from app.db import database
 from app.db.async_database import run_sync
 from app.core.pairing import PAIRED_SESSION_PREFIX
@@ -22,14 +22,16 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
         return True, None
     # Keep the legacy return contract; authority travels only on trusted state.
     websocket.state.mobile_tool_principal = None
-    if not token and websocket.cookies.get('session'):
-        try:
-            owner_auth.same_origin(websocket)
-        except Exception:
-            return False, None
-    for candidate in (token, websocket.cookies.get('session')):
+    for candidate, ambient in ((token, False), (websocket.cookies.get('session'), True)):
         if not candidate:
             continue
+        # Validate the transport actually supplying authority. An invalid query
+        # credential must never exempt the fallback ambient cookie from Origin.
+        if ambient:
+            try:
+                owner_auth.same_origin(websocket)
+            except Exception:
+                return False, None
         if candidate.startswith(PAIRED_SESSION_PREFIX):
             from app.api.auth import get_paired_client_from_token
             try:
@@ -38,6 +40,9 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
                     value = await run_sync(identity.principal, 'paired', client['id'], candidate)
                     websocket.state.mobile_tool_principal = value
                     return True, None
+            except HTTPException as exc:
+                if exc.status_code >= 500:
+                    raise WebSocketException(code=1013, reason='Account authorization unavailable; retry later') from exc
             except Exception:
                 pass  # Includes live hub refusal; never fall through as admin.
             continue

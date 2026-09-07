@@ -160,7 +160,7 @@ async def global_sync_websocket(
     device_id: str = Query(..., description="Unique device identifier"),
     token: str | None = Query(None, description="Authentication token"),
 ):
-    from app.core.auth import auth_service
+    from app.core.preference_identity import principal_preference_identity
     from app.core.global_events import global_events
 
     auth_ok, api_user = await authenticate_websocket(websocket, token)
@@ -168,9 +168,8 @@ async def global_sync_websocket(
     if not auth_ok:
         await websocket.close(code=4001, reason="Authentication failed")
         return
-    user_type = "api_user" if api_user else "admin"
-    user_id = api_user["id"] if api_user else (
-        await run_sync(auth_service.get_admin_username) or "admin"
+    user_type, user_id = await run_sync(
+        principal_preference_identity, websocket.state.mobile_tool_principal
     )
     socket_id = global_events.register(websocket, user_type, user_id)
     try:

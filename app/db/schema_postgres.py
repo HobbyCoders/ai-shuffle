@@ -1403,6 +1403,11 @@ def create_postgres_schema(cursor) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_pairing_grants_active ON pairing_grants(expires_at) WHERE consumed_at IS NULL AND revoked_at IS NULL")
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_paired_clients_session ON paired_clients(session_token_hash) WHERE session_token_hash IS NOT NULL")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_paired_clients_active ON paired_clients(revoked_at, paired_at DESC)")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS paired_client_native_sessions (
+        client_id TEXT PRIMARY KEY REFERENCES paired_clients(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+    )""")
 
     # -- user_preferences
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_preferences_user ON user_preferences(user_type, user_id)")

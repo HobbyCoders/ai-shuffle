@@ -219,6 +219,92 @@ def test_browser_signin_is_cookie_bound_one_use_and_uses_live_device_proof(app, 
     assert c.get('/owner').status_code == 403
 
 
+def browser_login(app, monkeypatch):
+    bind()
+    hub_mock(monkeypatch)
+    c = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
+    assert c.post('/api/v1/auth/account/start', json={}).status_code == 200
+    assert c.post('/api/v1/auth/account/poll', json={'completion_secret': 'c' * 43}).status_code == 200
+    return c
+
+
+def test_invalid_query_token_cannot_bypass_cookie_origin(app, monkeypatch):
+    c = browser_login(app, monkeypatch)
+    with c.websocket_connect('wss://worker.example.com/ws?token=invalid', headers={'Origin': 'https://evil.example.com'}) as ws:
+        assert ws.receive_json()['authenticated'] is False
+    with c.websocket_connect('wss://worker.example.com/ws?token=invalid') as ws:
+        assert ws.receive_json()['authenticated'] is True
+    token = c.cookies.get('session')
+    c.cookies.clear()
+    with c.websocket_connect('/ws?token=' + token, headers={'Origin': 'https://elsewhere.example'}) as ws:
+        assert ws.receive_json()['authenticated'] is True  # explicit possession
+
+
+def test_recovery_cookie_with_invalid_token_still_requires_origin(app):
+    c = client(app, peer='127.0.0.1', origin='http://localhost')
+    with database.get_db() as conn:
+        conn.cursor().execute('INSERT INTO owner_local_sessions VALUES (%s,%s,%s,%s)',
+            (owner_auth.digest('shr_recovery'), settings.effective_instance_id, 'recovery', '2999-01-01'))
+    c.cookies.set('session', 'shr_recovery')
+    with c.websocket_connect('/ws?token=invalid', headers={'Origin': 'http://evil.localhost'}) as ws:
+        assert ws.receive_json()['authenticated'] is False
+
+
+def test_local_account_chat_continuation_preserves_provenance(app, monkeypatch, test_db):
+    from app.core import mobile_tool_identity as identity
+    from app.db import mobile_tool_identity as provenance
+    c = browser_login(app, monkeypatch)
+    token = c.cookies.get('session')
+    browser = auth.get_paired_client_from_token(token)
+    remote = identity.principal('paired', browser['id'], token)
+    local = identity.principal('admin', 'install', 'local-transport:' + settings.effective_instance_id)
+    for sid, original, arriving in [('local-chat', local, remote), ('remote-chat', remote, local)]:
+        database.create_session(sid, 'default')
+        identity.bind_session(sid, original, new=True)
+        before = provenance.read(sid)
+        identity.bind_session(sid, arriving)
+        assert provenance.read(sid) == before
+        test_db.execute('UPDATE sessions SET instance_id=? WHERE id=?', ('another-worker', sid))
+        with pytest.raises(PermissionError):
+            identity.bind_session(sid, arriving)
+
+
+def test_local_and_account_preference_identity_match_without_device_or_worker_keys(app, monkeypatch):
+    from app.core.preference_identity import principal_preference_identity, request_preference_identity
+    from types import SimpleNamespace
+    c = browser_login(app, monkeypatch)
+    paired = auth.get_paired_client_from_token(c.cookies.get('session'))
+    expected = ('account', 'https://hub.example.com#' + ACCOUNT)
+    assert principal_preference_identity({'kind': 'admin'}) == expected
+    assert request_preference_identity(SimpleNamespace(state=SimpleNamespace(paired_client=paired))) == expected
+    assert principal_preference_identity({'kind': 'paired', 'principal_id': 'different-device-on-other-worker',
+                                          'account_id': ACCOUNT}) == expected
+    assert principal_preference_identity({'kind': 'paired', 'principal_id': 'other',
+                                          'account_id': OTHER}) != expected
+    assert principal_preference_identity({'kind': 'paired', 'principal_id': 'direct'}) == ('paired', 'direct')
+
+
+def test_owner_browser_can_authorize_only_same_account_native_targets(app, monkeypatch):
+    from app.core import mobile_tool_identity as identity
+    from app.core.models import DeviceInfo
+    c = browser_login(app, monkeypatch)
+    token = c.cookies.get('session')
+    browser = auth.get_paired_client_from_token(token)
+    database.create_session('browser-chat', 'default')
+    identity.bind_session('browser-chat', identity.principal('paired', browser['id'], token), new=True)
+    mobile_hub.enroll({'device_id': OTHER, 'account_id': ACCOUNT, 'server_id': SERVER, 'device_name': 'Phone'},
+        DeviceInfo(device_id=OTHER, device_name='Phone', platform='android', capabilities={}),
+        'testhash', owner_auth.now() + timedelta(days=1), list(pairing.DEFAULT_MOBILE_SCOPES), scoped=True)
+    monkeypatch.setattr(account_hub, 'call', lambda binding, method, suffix, body=None:
+                        {'active': True, 'account_id': ACCOUNT, 'device_id': suffix.split('/')[-1]})
+    phone = mobile_hub.local_device_id(SERVER, OTHER)
+    assert identity.authorized_device_ids('browser-chat') == [phone]
+    # Browser never becomes a native target itself.
+    assert browser['device_id'] not in identity.authorized_device_ids('browser-chat')
+    mobile_hub.disconnect()
+    assert identity.authorized_device_ids('browser-chat') == []
+
+
 @pytest.mark.parametrize('hub_result', ['denied', 'approved_without_completion_proof'])
 def test_browser_status_only_poll_reports_denial_but_cannot_enroll(app, monkeypatch, test_db, hub_result):
     bind()

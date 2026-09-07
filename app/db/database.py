@@ -850,6 +850,13 @@ def _run_column_migrations(cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_pairing_grants_active ON pairing_grants(expires_at) WHERE consumed_at IS NULL AND revoked_at IS NULL")
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_paired_clients_session ON paired_clients(session_token_hash) WHERE session_token_hash IS NOT NULL")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_paired_clients_active ON paired_clients(revoked_at, paired_at DESC)")
+    # A native voice transport must not replace the WebView's session. One
+    # bounded auxiliary slot per device; parent revocation gates both slots.
+    cursor.execute("""CREATE TABLE IF NOT EXISTS paired_client_native_sessions (
+        client_id TEXT PRIMARY KEY REFERENCES paired_clients(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+    )""")
 
     # Existing installs predate approval state and are trusted in place. New
     # rows created after this migration choose their approval explicitly.
@@ -3025,7 +3032,9 @@ def get_paired_client_by_session_hash(token_hash):
             # Derived only after live local + hub authorization, never persisted
             # in paired_clients or accepted from a request/scopes payload.
             client['account_owner_admin'] = check_paired_client(client) is True
-        except HTTPException:
+        except HTTPException as exc:
+            if exc.status_code >= 500:
+                raise  # Temporary hub outages must not invalidate saved login.
             return None
     return client
 

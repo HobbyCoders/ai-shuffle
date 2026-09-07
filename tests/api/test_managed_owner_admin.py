@@ -127,6 +127,12 @@ def test_copied_owner_session_loses_admin_on_any_failed_ownership_proof(owner_ap
         call.return_value = {'active': True, 'account_id': ACCOUNT, 'device_id': OTHER}
     elif failure == 'hub_unavailable':
         call.side_effect = HTTPException(503, 'Unavailable')
+        assert change_voice(client).status_code == 503
+        assert client.get('/api/v1/auth/status').status_code == 503
+        assert client.get('/api/v1/mobile/devices').status_code == 503
+        call.side_effect = None
+        assert change_voice(client).status_code == 200  # same saved cookie recovers
+        return
     else:
         statement = {
             'local_device_revoked': "UPDATE mobile_devices SET revoked_at='2026-01-01'",
@@ -202,6 +208,46 @@ def test_owner_web_logout_invalidates_the_derived_session(owner_app, monkeypatch
     client.cookies.set('session', token)
     assert change_voice(client).status_code == 403
     assert not client.get('/api/v1/auth/status').json()['authenticated']
+
+
+@pytest.mark.asyncio
+async def test_native_voice_session_does_not_rotate_webview_and_logout_is_scoped(owner_app, monkeypatch):
+    from app.api.ws_auth import authenticate_websocket
+    bind_and_enroll(monkeypatch)
+    browser, web_token = web_session(owner_app)
+    native = TestClient(owner_app, headers={'Origin': 'http://testserver'})
+    first = native.post('/api/v1/mobile/web-session?purpose=native',
+                        headers={'Authorization': 'Bearer aim_owner-test'})
+    assert first.status_code == 200
+    assert 'set-cookie' not in first.headers
+    native_token = first.json()['session_token']
+    assert native_token != web_token
+    assert browser.get('/principal').status_code == 200
+    assert await authenticate_websocket(Mock(cookies={}), web_token) == (True, None)
+    assert await authenticate_websocket(Mock(cookies={}), native_token) == (True, None)
+    second = native.post('/api/v1/mobile/web-session?purpose=native',
+                         headers={'Authorization': 'Bearer aim_owner-test'}).json()['session_token']
+    assert await authenticate_websocket(Mock(cookies={}), native_token) == (False, None)
+    assert await authenticate_websocket(Mock(cookies={}), web_token) == (True, None)
+    assert browser.post('/api/v1/auth/logout').status_code == 200
+    assert await authenticate_websocket(Mock(cookies={}), web_token) == (False, None)
+    assert await authenticate_websocket(Mock(cookies={}), second) == (True, None)
+    pairing_store.revoke_paired_client(hub_store.ownership(DEVICE)['paired_client_id'])
+    assert await authenticate_websocket(Mock(cookies={}), second) == (False, None)
+
+
+@pytest.mark.asyncio
+async def test_hub_outage_preserves_saved_websocket_login(owner_app, monkeypatch):
+    from fastapi import WebSocketException
+    from app.api.ws_auth import authenticate_websocket
+    call = bind_and_enroll(monkeypatch)
+    _, token = web_session(owner_app)
+    call.side_effect = HTTPException(503, 'Unavailable')
+    with pytest.raises(WebSocketException) as caught:
+        await authenticate_websocket(Mock(cookies={}), token)
+    assert caught.value.code == 1013
+    call.side_effect = None
+    assert await authenticate_websocket(Mock(cookies={}), token) == (True, None)
 
 
 def test_owner_admin_cookie_retains_same_origin_csrf_protection(owner_app, monkeypatch):

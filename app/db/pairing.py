@@ -357,12 +357,13 @@ def get_paired_client_by_session_hash(token_hash: str) -> Optional[PairedClientR
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT * FROM paired_clients
-            WHERE session_token_hash = %s
-              AND revoked_at IS NULL
-              AND session_expires_at > NOW()
+            SELECT p.* FROM paired_clients p
+            WHERE p.revoked_at IS NULL AND (
+                (p.session_token_hash = %s AND p.session_expires_at > NOW())
+                OR EXISTS (SELECT 1 FROM paired_client_native_sessions n
+                    WHERE n.client_id = p.id AND n.token_hash = %s AND n.expires_at > NOW()))
             """,
-            (token_hash,),
+            (token_hash, token_hash),
         )
         return _client(cursor.fetchone())
 
@@ -410,6 +411,7 @@ def revoke_paired_client(client_id: str) -> bool:
         )
         changed = cursor.rowcount > 0
         if changed:
+            cursor.execute("DELETE FROM paired_client_native_sessions WHERE client_id=%s", (client_id,))
             cursor.execute(
                 "UPDATE mobile_devices SET revoked_at = NOW() WHERE paired_client_id = %s",
                 (client_id,),
@@ -489,10 +491,23 @@ def ensure_paired_client_for_mobile(device: Dict[str, Any]) -> PairedClientRow:
 
 
 def set_paired_client_session(
-    client_id: str, token_hash: str, expires_at: datetime
+    client_id: str, token_hash: str, expires_at: datetime, *, purpose: str = 'web'
 ) -> Optional[PairedClientRow]:
+    if purpose not in ('web', 'native'):
+        raise ValueError('Unknown session purpose')
     with get_db() as conn:
         cursor = conn.cursor()
+        if purpose == 'native':
+            cursor.execute("SELECT * FROM paired_clients WHERE id=%s AND revoked_at IS NULL FOR UPDATE",
+                           (client_id,))
+            client = _client(cursor.fetchone())
+            if not client:
+                return None
+            cursor.execute("""INSERT INTO paired_client_native_sessions(client_id,token_hash,expires_at)
+                VALUES(%s,%s,%s) ON CONFLICT(client_id) DO UPDATE SET
+                token_hash=EXCLUDED.token_hash, expires_at=EXCLUDED.expires_at""",
+                           (client_id, token_hash, expires_at.isoformat()))
+            return client
         cursor.execute(
             """
             UPDATE paired_clients
@@ -506,20 +521,25 @@ def set_paired_client_session(
         return _client(cursor.fetchone())
 
 
-def clear_paired_client_session(client_id: str) -> bool:
+def clear_paired_client_session(client_id: str, token_hash: Optional[str] = None) -> bool:
     """Invalidate a controller session without revoking the paired device."""
     with get_db() as conn:
         cursor = conn.cursor()
+        cursor.execute("DELETE FROM paired_client_native_sessions WHERE client_id=%s"
+                       + (" AND token_hash=%s" if token_hash else ""),
+                       (client_id, token_hash) if token_hash else (client_id,))
+        native_changed = cursor.rowcount > 0
         cursor.execute(
             """
             UPDATE paired_clients
             SET session_token_hash = NULL, session_expires_at = NULL,
                 updated_at = NOW()
             WHERE id = %s AND revoked_at IS NULL
+              AND (%s IS NULL OR session_token_hash = %s)
             """,
-            (client_id,),
+            (client_id, token_hash, token_hash),
         )
-        return cursor.rowcount > 0
+        return native_changed or cursor.rowcount > 0
 
 
 def consume_grant_for_runner(

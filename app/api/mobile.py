@@ -435,7 +435,7 @@ async def notifications_stream(request: Request):
 
 
 @router.post("/web-session")
-async def create_web_session(request: Request, response: Response):
+async def create_web_session(request: Request, response: Response, purpose: str = 'web'):
     """
     Mint a web session cookie from a valid mobile API key.
 
@@ -447,6 +447,8 @@ async def create_web_session(request: Request, response: Response):
     managed worker, its live-verified owner account can administer the worker;
     direct/legacy pairing remains restricted to controller capabilities.
     """
+    if purpose not in ('web', 'native'):
+        raise HTTPException(status_code=422, detail='Session purpose must be web or native')
     # Validates expiry/revocation and bumps last_seen.
     device = get_device_with_scope(request, "web:session")
 
@@ -458,18 +460,20 @@ async def create_web_session(request: Request, response: Response):
         client["id"],
         pairing.hash_controller_session(token),
         expires_at,
+        purpose=purpose,
     )
     if stored is None:
         raise HTTPException(status_code=401, detail="Paired device has been revoked")
 
-    response.set_cookie(
-        key="session",
-        value=token,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite="lax",
-        max_age=settings.session_expire_days * 24 * 60 * 60,
-    )
+    if purpose == "web":
+        response.set_cookie(
+            key="session",
+            value=token,
+            httponly=True,
+            secure=settings.cookie_secure,
+            samesite="lax",
+            max_age=settings.session_expire_days * 24 * 60 * 60,
+        )
 
     return {
         "status": "ok",

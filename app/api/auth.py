@@ -404,6 +404,18 @@ async def get_auth_status(request: Request, response: Response = None):
         is_github_authenticated_cached, auth_service.is_github_authenticated
     )
 
+    preference_principal = None
+    if is_paired_authenticated:
+        from app.db import mobile_hub
+        owner = await run_sync(mobile_hub.ownership, paired_client_id=paired_client['id'])
+        preference_principal = {'kind': 'paired', 'principal_id': paired_client['id'],
+                                'account_id': owner['account_id'] if owner else None}
+    elif is_admin_authenticated:
+        preference_principal = {'kind': 'admin'}
+    from app.core.preference_identity import principal_preference_identity
+    pref_identity = (await run_sync(principal_preference_identity, preference_principal)
+                     if preference_principal else None)
+
     return {
         "authenticated": is_admin_authenticated or is_paired_authenticated,
         "local_access": local,
@@ -416,9 +428,8 @@ async def get_auth_status(request: Request, response: Response = None):
         "is_admin": is_admin_authenticated,
         "paired_client": is_paired_authenticated,
         "preference_identity": {
-            "user_type": "admin",
-            "user_id": auth_service.get_admin_username() or "admin",
-        } if is_admin_authenticated or is_paired_authenticated else None,
+            "user_type": pref_identity[0], "user_id": pref_identity[1],
+        } if pref_identity else None,
         "setup_required": auth_service.is_setup_required(),
         "claude_authenticated": claude_authenticated,
         # PA10 (docs/PROVIDER_AGNOSTIC_PLAN.md): "does this install have ANY
@@ -559,7 +570,8 @@ async def logout(request: Request, response: Response):
     if token:
         paired_client = await run_sync(get_paired_client_from_token, token, touch=False)
         if paired_client:
-            await run_sync(db.clear_paired_client_session, paired_client["id"])
+            from app.core.pairing import hash_controller_session
+            await run_sync(db.clear_paired_client_session, paired_client["id"], hash_controller_session(token))
             await run_sync(audit_service.log_logout, request, paired_client["id"], "paired_client")
         else:
             valid_session = await run_sync(db.get_auth_session, token)
