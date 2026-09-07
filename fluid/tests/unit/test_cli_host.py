@@ -12,6 +12,8 @@ import json
 import sys
 from collections.abc import AsyncIterator
 
+import pytest
+
 from fluid.cli.__main__ import run_once
 from fluid.cli.config import host_of, make_engine
 from fluid.cli.host import GENERIC_SUBAGENT_PROMPT, CliHost, Worker
@@ -249,6 +251,69 @@ async def test_task_uses_agent_definition_prompt_and_tools(tmp_path) -> None:
     assert "HELPER-PROMPT" in _system_text(child_req)
     assert GENERIC_SUBAGENT_PROMPT not in _system_text(child_req)
     assert {t["name"] for t in child_req.tools} == {"Read", "Grep"}
+
+
+@pytest.mark.parametrize("effort", [None, "low", "xhigh", "ultra"])
+async def test_task_child_request_inherits_live_caller_effort_not_profile(tmp_path, effort) -> None:
+    from fluid.context.agents import AgentDefinition
+
+    provider = ScriptedProvider([_text("child finished")])
+    store = MemoryStore()
+    meta = await store.create_session()
+    engine = make_engine(_config(tmp_path), store, provider=provider, session_id=meta.session_id)
+    host = host_of(engine)
+    engine.effort = effort  # The effective session setting, absent from HarnessConfig.
+    engine.ctx.extra["agent_registry"] = {"helper": AgentDefinition(
+        name="helper", path="helper.md", body="Only answer the delegated task.",
+        model="gpt-6-astra", raw={"effort": "medium"},
+    )}
+    try:
+        outcome = await host.task_dispatch({"agent": "helper", "prompt": "respond", "mode": "sync"}, engine.ctx)
+        assert not outcome.is_error
+        assert outcome.text == "child finished"
+        assert len(provider.requests) == 1
+        request = provider.requests[0]
+        assert request.effort == effort
+        # Effort inheritance does not discard the child's selected model.
+        assert request.model == "gpt-6-astra"
+    finally:
+        await host.aclose()
+        await engine.aclose()
+
+
+async def test_child_session_effort_override_and_resume_use_effective_settings(tmp_path) -> None:
+    provider = ScriptedProvider([_text("first reply"), _text("resumed reply")])
+    store = MemoryStore()
+    meta = await store.create_session()
+    engine = make_engine(_config(tmp_path), store, provider=provider, session_id=meta.session_id)
+    host = host_of(engine)
+    engine.effort = "xhigh"
+    worker = Worker(task_id="first", kind="task", description="helper")
+    child = resumed = None
+    try:
+        child = await host._build_child(None, worker)
+        assert child.effort == "xhigh"
+        await host._run_child(child, worker.worker_session_id, UserTurn(content="respond"))
+        assert provider.requests[-1].effort == "xhigh"
+        await child.aclose()
+        child = None
+
+        engine.effort = "high"
+        resumed_worker = Worker(task_id="resumed", kind="task", description="helper")
+        resumed = await host._build_child(None, resumed_worker, session_id=worker.worker_session_id)
+        assert resumed.effort == "high"
+        # An explicit child-session change after construction takes precedence.
+        resumed.effort = "low"
+        await host._run_child(resumed, resumed_worker.worker_session_id, UserTurn(content="continue"))
+        assert resumed_worker.worker_session_id == worker.worker_session_id
+        assert provider.requests[-1].effort == "low"
+    finally:
+        if child is not None:
+            await child.aclose()
+        if resumed is not None:
+            await resumed.aclose()
+        await host.aclose()
+        await engine.aclose()
 
 
 async def test_child_permission_requests_route_to_responder(tmp_path) -> None:

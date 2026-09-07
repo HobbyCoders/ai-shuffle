@@ -909,6 +909,11 @@ class CliHost:
         )
         if definition is not None and definition.model:
             child.model = definition.model
+        # Effort is a live session option, not part of HarnessConfig. A saved
+        # agent profile must not replace the caller's effective setting. None
+        # leaves the selected model's default intact; an explicit child-session
+        # change can still override this after construction.
+        child.effort = getattr(self.engine, "effort", None)
         child_host = CliHost(
             self.config, self.store,
             provider=self.provider, provider_name=self.provider_name,
