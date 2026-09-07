@@ -12,6 +12,7 @@
 	 *    of leaving a blank panel.
 	 */
 	import type { LazyComponentHandle } from './lazy-component';
+	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
 
 	interface Props {
 		/** The lazy handle for this surface (see `./panels.ts`). */
@@ -89,7 +90,9 @@
 </script>
 
 {#if Component}
-	<Component {...props} />
+	{#key $sessionOwnerBoundary}
+		<Component {...props} />
+	{/key}
 {:else if failed && !bare}
 	<div class="lazy-error" role="alert">
 		<p class="lazy-error-title">Couldn’t load {label}.</p>

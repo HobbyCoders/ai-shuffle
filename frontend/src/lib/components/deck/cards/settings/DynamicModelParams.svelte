@@ -38,6 +38,8 @@
 	let loading = $state(false);
 	let loadedFor = $state<string>('');
 	let values = $state<Record<string, unknown>>({});
+	const currentContext = $derived(JSON.stringify([endpointId, persistKey]));
+	const contextReady = $derived(!loading && loadedFor === currentContext);
 
 	// Fetch the schema + stored params whenever the selected model changes.
 	$effect(() => {
@@ -77,7 +79,7 @@
 	let remoteChange = $state('');
 
 	function onchange(name: string, value: unknown) {
-		if (!isCurrent()) return;
+		if (!isCurrent() || !contextReady) return;
 		revision++;
 		values = { ...values, [name]: value };
 		if (saveTimer) clearTimeout(saveTimer);
@@ -114,14 +116,15 @@
 		return field.minimum !== null && field.maximum !== null;
 	}
 	watchResources(['settings'], async () => {
-		if (!isCurrent()) return;
+		if (!isCurrent() || !contextReady) return;
 		const id = endpointId;
 		const key = persistKey;
+		const generation = loadGeneration;
 		const before = revision;
 		const { params = {} } = await api.get<{ params: Record<string, unknown> }>(
 			`/settings/integrations/model-params?key=${encodeURIComponent(key)}`
 		);
-		if (!isCurrent() || id !== endpointId || key !== persistKey) return;
+		if (!isCurrent() || !contextReady || generation !== loadGeneration || id !== endpointId || key !== persistKey) return;
 		if (saving || saveTimer || before !== revision || JSON.stringify(values) !== savedSnapshot) {
 			if (JSON.stringify(params) !== savedSnapshot) remoteChange = 'Model options changed elsewhere. Your unsaved options are kept here.';
 			return;
@@ -132,7 +135,7 @@
 	});
 </script>
 
-{#if loading && !schema}
+{#if !contextReady}
 	<div class="dyn-loading">Loading model options…</div>
 {:else if fields.length > 0}
 	<div class="dyn-params">

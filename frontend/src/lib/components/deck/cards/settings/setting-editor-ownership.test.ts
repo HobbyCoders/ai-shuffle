@@ -3,9 +3,13 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import { tick } from 'svelte';
 import type { AnyModel, ToolCategory } from '$lib/types/ai-tool-registry';
 
-const mocks = vi.hoisted(() => ({ owner: 0, get: vi.fn(), patch: vi.fn() }));
+const mocks = vi.hoisted(() => ({ owner: 0, owners: new Set<(epoch: number) => void>(), get: vi.fn(), patch: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api: { get: mocks.get, patch: mocks.patch }, getErrorMessage: () => 'Failed' }));
-vi.mock('$lib/stores/session-owner', () => ({ sessionOwnerEpoch: () => mocks.owner }));
+vi.mock('$lib/stores/session-owner', () => ({ sessionOwnerEpoch: () => mocks.owner,
+ sessionOwnerBoundary: { subscribe(run: (epoch: number) => void) {
+  run(mocks.owner); mocks.owners.add(run); return () => mocks.owners.delete(run);
+ } }
+}));
 vi.mock('$lib/services/watch-resources', () => ({ watchResources: () => {} }));
 vi.mock('svelte/transition', () => ({ slide: () => ({ duration: 0 }) }));
 vi.mock('$lib/services/sttStream', () => ({ invalidateSttCapability: vi.fn() }));
@@ -15,6 +19,8 @@ vi.mock('$lib/stores/modelSchema', () => ({ modelSchemaStore: {
 } }));
 import DynamicModelParams from './DynamicModelParams.svelte';
 import ToolCategoryCard from './ToolCategoryCard.svelte';
+import LazyPanel from '../../lazy/LazyPanel.svelte';
+import { createLazyComponent } from '../../lazy/lazy-component';
 
 beforeEach(() => { mocks.owner = 0; vi.clearAllMocks(); mocks.get.mockResolvedValue({ params: {} }); mocks.patch.mockResolvedValue({}); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
@@ -72,6 +78,37 @@ describe('settings editor ownership', () => {
   await view.rerender({ endpointId: 'model', persistKey: 'tts_model' });
   await waitFor(() => expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true));
   expect(mocks.get).toHaveBeenLastCalledWith('/settings/integrations/model-params?key=tts_model');
+ });
+
+ it('hides old parameter controls while a different setting context is loading', async () => {
+  const view = render(DynamicModelParams, { endpointId: 'model', persistKey: 'image_model' });
+  await screen.findByRole('checkbox', { name: 'Enabled' });
+  let resolve!: (value: unknown) => void;
+  mocks.get.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+  await view.rerender({ endpointId: 'model', persistKey: 'tts_model' });
+  expect(screen.queryByRole('checkbox')).toBeNull();
+  expect(screen.getByText('Loading model options…')).toBeTruthy();
+  expect(mocks.patch).not.toHaveBeenCalled();
+  resolve({ params: { enabled: true } });
+  expect((await screen.findByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+ });
+
+ it('remounts retained panels for a new account while preserving the same-account instance', async () => {
+  const handle = createLazyComponent('params', async () => ({ default: DynamicModelParams }));
+  render(LazyPanel, { props: { handle, props: { endpointId: 'model', persistKey: 'image_model' } } });
+  const first = await screen.findByRole('checkbox');
+  for (const notify of mocks.owners) notify(mocks.owner);
+  await tick();
+  expect(screen.getByRole('checkbox')).toBe(first);
+  mocks.owner++;
+  for (const notify of mocks.owners) notify(mocks.owner);
+  await tick();
+  const second = await screen.findByRole('checkbox');
+  expect(second).not.toBe(first);
+  vi.useFakeTimers();
+  await fireEvent.click(second);
+  await vi.advanceTimersByTimeAsync(400);
+  expect(mocks.patch).toHaveBeenCalledWith('/settings/integrations/model-params', { key: 'image_model', params: { enabled: true } });
  });
 
  it('does not send model-reset followups after the account changes during a save', async () => {
