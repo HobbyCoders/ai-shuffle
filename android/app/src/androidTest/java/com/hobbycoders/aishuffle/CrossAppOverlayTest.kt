@@ -110,6 +110,8 @@ class CrossAppOverlayTest {
                 awaitCondition("Test launcher surface did not become the active application") {
                     automation.windows.any { it.isActive && it.root?.packageName?.toString() == fixturePackage }
                 }
+                // Active-window visibility can precede the service's final layout events.
+                automation.waitForIdle(500, 5_000)
                 val reading = request("read_screen", JSONObject())
                 localPress(automation, "Allow once")
                 val screen = result(reading)
@@ -138,6 +140,9 @@ class CrossAppOverlayTest {
                 assertTrue("Cross-app request rejected before expiry", System.currentTimeMillis() >= expiryStarted + 2_000)
                 localPress(automation, "Show protected content")
                 awaitCondition("Protected screen fixture did not update") { automation.rootInActiveWindow?.findAccessibilityNodeInfosByText("Payment method")?.isNotEmpty() == true }
+                // Let both accessibility consumers observe the changed target before
+                // asserting its stable protected-screen classification.
+                automation.waitForIdle(500, 5_000)
                 assertEquals("protected_screen", result(request("read_screen", JSONObject())).getString("status"))
                 instrumentation.runOnMainSync { ToolsPreferences(context).setCrossAppEnabled(false) }
                 assertFalse(ToolsPreferences(context).crossAppEnabled)
