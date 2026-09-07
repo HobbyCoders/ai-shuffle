@@ -20,5 +20,21 @@ python3 ci/prepare-android-ui.py
 
 adb -s emulator-5554 install -r instrumentation-apks/debug/app-debug.apk
 adb -s emulator-5554 install -r instrumentation-apks/androidTest/debug/app-debug-androidTest.apk
-timeout --kill-after=15s 600s adb -s emulator-5554 shell am instrument -w -r   -e additionalTestOutputDir /sdcard/Android/media/com.hobbycoders.aishuffle/ui-smoke   com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner | tee "$out/runner.txt"
+
+# Revocation kills a running app, including its instrumentation process. Establish
+# the denied state before this isolated run; later capability tests may grant it.
+adb -s emulator-5554 shell pm revoke com.hobbycoders.aishuffle android.permission.RECORD_AUDIO
+timeout --kill-after=15s 180s adb -s emulator-5554 shell am instrument -w -r \
+  -e class com.hobbycoders.aishuffle.VoicePermissionSmokeTest \
+  -e additionalTestOutputDir /sdcard/Android/media/com.hobbycoders.aishuffle/ui-smoke \
+  com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner | tee "$out/voice-permission.txt"
+python3 ci/check-instrumentation.py "$out/voice-permission.txt"
+
+# The real Save dialog needs an external driver and has a separate manual run.
+# Exclude only that opt-in test and the already executed permission class, so the
+# strict result parser continues rejecting every unexpected skip or failure.
+timeout --kill-after=15s 600s adb -s emulator-5554 shell am instrument -w -r \
+  -e notClass 'com.hobbycoders.aishuffle.VoicePermissionSmokeTest,com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#realSystemSaveDialogReturnsToChatAndCompletesTransfer' \
+  -e additionalTestOutputDir /sdcard/Android/media/com.hobbycoders.aishuffle/ui-smoke \
+  com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner | tee "$out/runner.txt"
 python3 ci/check-instrumentation.py "$out/runner.txt"

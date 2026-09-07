@@ -17,7 +17,6 @@ import com.hobbycoders.aishuffle.account.HubClient
 import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.tools.*
 import com.hobbycoders.aishuffle.ui.*
-import com.hobbycoders.aishuffle.voice.*
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import org.junit.*
@@ -382,25 +381,5 @@ class NativeSmokeTest {
         }
     }
 
-    @Test fun voiceWithoutMicrophoneShowsControlsAndDoesNotStartService() {
-        instrumentation.uiAutomation.revokeRuntimePermission(context.packageName, android.Manifest.permission.RECORD_AUDIO)
-        Assert.assertNotEquals(android.content.pm.PackageManager.PERMISSION_GRANTED, androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO))
-        val server = com.hobbycoders.aishuffle.model.Server.create("Voice test server", "https://instrumentation.invalid", "test-only")
-        ServerStore.get(context).add(server)
-        Assert.assertEquals(server, ServerStore.get(context).getById(server.id))
-        ActivityScenario.launch<VoiceCallActivity>(Intent(context, VoiceCallActivity::class.java).putExtra(VoiceCallService.EXTRA_SERVER_ID, server.id)).use { scenario ->
-            awaitFocused(scenario)
-            instrumentation.runOnMainSync { VoiceCallState.update { it.copy(userCaption = "State update while microphone is off") } }
-            onView(withText("Enable microphone")).check(matches(isDisplayed()))
-            onView(withId(R.id.statusText)).check(matches(withText("Microphone is off. Voice stays off until you grant access.")))
-            onView(withId(R.id.hangupButton)).check(matches(isDisplayed()))
-            Assert.assertFalse(VoiceCallState.isActive)
-            val manager = context.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-            @Suppress("DEPRECATION")
-            val voiceServiceRunning = manager.getRunningServices(Int.MAX_VALUE).any { it.service.className == VoiceCallService::class.java.name }
-            Assert.assertFalse("Denied microphone must not start VoiceCallService", voiceServiceRunning)
-            variants(scenario, "voice-microphone-off")
-        }
-        Assert.assertFalse(VoiceCallState.isActive)
-    }
+
 }

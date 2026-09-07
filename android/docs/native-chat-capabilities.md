@@ -23,7 +23,14 @@ When the web voice UI requests a native handoff, `shuffleNativeVoice` accepts on
 ```sh
 node --test app/src/test/js/chat-downloads.test.cjs
 ./gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
-adb shell am instrument -w -e class com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner
+adb -s emulator-5554 shell am instrument -w \
+  -e class com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest \
+  -e notClass 'com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#realSystemSaveDialogReturnsToChatAndCompletesTransfer' \
+  com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
 The instrumentation fixture uses a real WebView, intercepted benign HTTP responses and a storage provider present only in the test APK. It does not connect to an account or a real worker, record microphone audio, or exercise a paid voice provider. Run it only on an isolated test device: like the existing native smoke tests, it resets the application's local account/worker state.
+
+CI runs `VoicePermissionSmokeTest` separately, revoking microphone permission from the host before instrumentation starts. Revoking a granted permission inside the running test process kills that process on Android. The remaining suite can then grant permission for capability checks. Both runs use the strict result parser, which rejects crashes, failures, unexpected skips, and incomplete results.
+
+`realSystemSaveDialogReturnsToChatAndCompletesTransfer` is a separate opt-in test requiring an external driver to complete the Android Save dialog. It is explicitly excluded from unattended CI rather than reported as a passing or skipped check there.
