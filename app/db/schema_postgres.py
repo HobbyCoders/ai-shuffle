@@ -437,6 +437,7 @@ def create_postgres_schema(cursor) -> None:
             user_id TEXT NOT NULL,
             key TEXT NOT NULL,
             value JSONB,
+            revision TEXT,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             UNIQUE(user_type, user_id, key)
         )

@@ -428,6 +428,22 @@ def _migrate_agent_tool_access(cursor, migrations_applied=None):
         logger.info("v82: stamped tool_selection_mode onto %d agent(s)", stamped)
 
 
+def _migrate_preference_revisions(cursor):
+    """Backfill opaque preference revisions without changing values/timestamps."""
+    from uuid import uuid4
+
+    if not table_exists(cursor, "user_preferences"):
+        return
+    if not column_exists(cursor, "user_preferences", "revision"):
+        cursor.execute("ALTER TABLE user_preferences ADD COLUMN revision TEXT")
+    cursor.execute("SELECT user_type, user_id, key FROM user_preferences WHERE revision IS NULL")
+    for row in cursor.fetchall():
+        cursor.execute(
+            "UPDATE user_preferences SET revision = %s WHERE user_type = %s AND user_id = %s AND key = %s AND revision IS NULL",
+            (str(uuid4()), row["user_type"], row["user_id"], row["key"]),
+        )
+
+
 def _run_column_migrations(cursor):
     """Run idempotent column migrations.
 
@@ -438,6 +454,7 @@ def _run_column_migrations(cursor):
     - Docker volume has stale schema version
     """
     migrations_applied = []
+    _migrate_preference_revisions(cursor)
 
     # Session messages profile tracking (v30)
     if table_exists(cursor, "session_messages"):
