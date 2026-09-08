@@ -25,6 +25,7 @@ from app.core import (
 )
 from app.core.session_pool import SessionState, get_session_pool
 from app.core.task_registry import task_registry
+from app.core.turn_scheduler import on_task_terminal as _real_task_terminal
 from tests.core import test_provider_agent
 
 dispatch_env = test_provider_agent.dispatch_env
@@ -100,6 +101,9 @@ async def workers(dispatch_env, monkeypatch):
     monkeypatch.setattr(swarm, "coordinators", {})
     monkeypatch.setattr(swarm, "worker_jobs", {})
     runtime = _RunningWorkers()
+    from app.core import session_runtime
+
+    monkeypatch.setattr(session_runtime, "get_live_runtime", runtime.engines.get)
     monkeypatch.setattr(turn_manager, "wait_session_idle", runtime.wait_session_idle)
     try:
         yield runtime
@@ -151,6 +155,7 @@ async def _send(ctx, address, receiver, *, sender):
     assert isinstance(op, AgentMessage)
     assert op.sender == sender
     assert op.text == "Check the failing path"
+    assert op.wake is False
 
 
 @pytest.mark.asyncio
@@ -388,3 +393,88 @@ async def test_real_swarm_binding_keeps_worker_scope_and_deduplicates_parent(wor
         for worker_id in reversed(workers.jobs):
             await workers.finish(worker_id)
         await asyncio.wait_for(asyncio.gather(*coordinator.jobs.values()), timeout=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime_present", [False, True])
+async def test_worker_message_to_idle_parent_uses_owned_turn_queue(
+    workers, dispatch_env, monkeypatch, runtime_present
+):
+    """A real Task sends main a message, then completes: neither may bypass
+    app admission, including the setup window where a runtime has no engine turn.
+    """
+    from fluid.engine.native import NativeLoop
+    from fluid.events.ops import UserTurn
+    from fluid.providers.base import ProviderCaps, StreamChunk
+    from fluid.store.base import MemoryStore
+
+    from app.core import session_runtime, turn_scheduler
+    from app.db import turns as turns_db
+
+    class Provider:
+        name = "fake"
+        caps = ProviderCaps()
+
+        def __init__(self):
+            self.calls = 0
+
+        async def stream(self, request):
+            self.calls += 1
+            yield StreamChunk("text_delta", text="Acknowledged")
+            yield StreamChunk("done", stop_reason="end_turn")
+
+    provider = Provider()
+    engine = NativeLoop(provider=provider, store=MemoryStore(), model="fake")
+    workers.receiver("root")
+    get_session_pool().get("root").adapter.engine = engine
+    await workers.start("reporting-worker")
+    monkeypatch.setattr(
+        session_runtime, "get_live_runtime",
+        lambda sid: object() if runtime_present else None,
+    )
+    kicks = []
+    monkeypatch.setattr(turn_scheduler, "kick", kicks.append)
+    context = turns_db.enqueue_turn(
+        "root", "user", prompt="Delegate and wait", profile_id="profile",
+        project_id="project", worktree_id="worktree",
+        overrides={"model": "fake", "permission_mode": "default"},
+        payload={"api_user_id": "owner"},
+    )
+    turns_db.start_turn(context["id"], None, "runner")
+    turns_db.park_turn(context["id"], "background_tasks")
+    try:
+        result = await send_message.handler(
+            {"to": "main", "message": "Progress before completion"},
+            _ctx("reporting-worker"),
+        )
+        assert not result.is_error, result.text
+        assert engine._turn_task is None, "SendMessage started an unowned engine turn"
+        (message_turn,) = turns_db.get_queued_turns("root")
+        assert message_turn["source"] == "agent_message"
+        assert "Progress before completion" in message_turn["prompt"]
+        assert "from='reporting-worker'" in message_turn["prompt"]
+        assert message_turn["profile_id"] == "profile"
+        assert message_turn["project_id"] == "project"
+        assert message_turn["worktree_id"] == "worktree"
+        assert message_turn["overrides"] == context["overrides"]
+        assert message_turn["payload"]["api_user_id"] == "owner"
+        assert message_turn["payload"]["task_ids"] == []
+        assert kicks == ["root"]
+
+        # dispatch_worker produces the real terminal frame. Feed that to the
+        # real scheduler (dispatch_env captured it rather than auto-running it).
+        await workers.finish("reporting-worker")
+        # The fixture replaces the module attribute; use the import-time alias.
+        await _real_task_terminal(*dispatch_env.wakes[-1])
+        queued = turns_db.get_queued_turns("root")
+        assert [row["source"] for row in queued] == ["agent_message", "unpark"]
+        assert queued[1]["payload"]["task_ids"] == ["reporting-worker"]
+        for row in queued:
+            assert turns_db.start_turn(row["id"], None, "runner")
+            await engine.submit(UserTurn(content=row["prompt"]))
+            await engine.wait_turn()
+            turns_db.settle_turn(row["id"], "completed")
+        assert provider.calls == 2
+        assert turns_db.get_queued_turns("root") == []
+    finally:
+        await engine.aclose()

@@ -746,8 +746,8 @@ def reap_expired() -> List[Dict[str, Any]]:
 
     A dead-lease live turn is resolved by its ``source`` and ``state``:
 
-    * ``running`` ``user`` / ``queue`` turns are **re-queued** at their original
-      position so the crashed work is retried (front of queue);
+    * ``running`` ``user`` / ``queue`` / ``agent_message`` turns are **re-queued**
+      at their original position so accepted messages survive a runner crash;
     * ``interrupting`` / ``draining`` turns are **aborted** regardless of
       source: the user already asked this turn to stop, so retrying it would
       re-run the very prompt they interrupted (replayed user message,
@@ -767,7 +767,9 @@ def reap_expired() -> List[Dict[str, Any]]:
         )
         dead = _rows(cursor.fetchall())
         for turn in dead:
-            if turn["state"] == "running" and turn["source"] in ("user", "queue"):
+            if turn["state"] == "running" and turn["source"] in (
+                "user", "queue", "agent_message",
+            ):
                 cursor.execute(
                     "UPDATE turns SET state='queued', run_id=NULL, instance_id=NULL, "
                     "started_at=NULL, interrupt_mode=NULL, stop_background=FALSE "

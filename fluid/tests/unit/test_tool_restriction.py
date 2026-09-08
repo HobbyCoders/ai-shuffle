@@ -341,4 +341,7 @@ def test_delegated_argv_emits_allowed_tools() -> None:
     unrestricted = DelegatedLoop(store=MemoryStore(), model="m")
     unrestricted_argv = unrestricted._build_argv()
     assert "--allowed-tools" not in unrestricted_argv
-    assert unrestricted_argv[unrestricted_argv.index("--disallowed-tools") + 1] == "EnterPlanMode,ExitPlanMode"
+    assert (
+        unrestricted_argv[unrestricted_argv.index("--disallowed-tools") + 1]
+        == "EnterPlanMode,ExitPlanMode"
+    )
