@@ -3,6 +3,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.api import cluster as cluster_api
 from app.api import network as network_api
 from app.api import pairing as pairing_api
 from app.api.auth import require_admin, require_auth
@@ -197,3 +198,19 @@ def test_enrollment_status_and_cancel(workers, make_client):
         missing = client.post("/api/v1/network/enroll", json={"endpoint_url": "http://x", "code": "AAAA"})
         assert missing.status_code == 400
         assert client.delete("/api/v1/network/enroll").status_code == 204
+
+
+def test_cluster_installs_marks_this_worker_by_device_id(workers, make_client):
+    """/cluster/installs lists the runner directory once enrolled, so its self
+    marker and ``self_instance_id`` must use the device id the rows carry, not
+    the legacy instance id (which a fresh network never maps)."""
+    a = workers("a")
+    with a.active():
+        client = make_client()
+        client.app.include_router(cluster_api.router)
+        assert client.post("/api/v1/network/create", json={"name": "Home", "device_name": "Desk"}).status_code == 201
+        listing = client.get("/api/v1/cluster/installs").json()
+        assert listing["self_instance_id"] == a.device_id
+        assert [row["id"] for row in listing["installs"]] == [a.device_id]
+        me = listing["installs"][0]
+        assert me["is_self"] is True and me["online"] is True and me["device_name"] == "Desk"

@@ -46,13 +46,32 @@ class InstallApprovalRequest(BaseModel):
     approved: bool
 
 
+def _self_install_id() -> str:
+    """The id of this worker's own row in the install listing.
+
+    Enrolled in a network, the listing is the runner directory and its rows
+    are keyed by device id; outside one, the legacy registry keys rows by
+    instance id. ``is_self`` and ``self_instance_id`` must use whichever id
+    the rows actually carry, or the composer's runner picker offers this
+    worker as "another worker" and Settings > Devices loses its badge.
+    """
+    from app.core.config import settings
+
+    try:
+        from app.network import runners
+
+        device_id = runners.self_device_id()
+    except Exception:  # noqa: BLE001 — the network layer must never break a listing
+        device_id = None
+    return device_id or settings.effective_instance_id
+
+
 @router.get("/installs")
 async def list_installs(token: str = Depends(require_auth)) -> Dict[str, Any]:
     """List every registered install, annotating which row is this one."""
-    from app.core.config import settings
 
     installs = await run_sync(database.get_installs)
-    me = settings.effective_instance_id
+    me = _self_install_id()
     for row in installs:
         row["is_self"] = row.get("id") == me
     return {"installs": installs, "self_instance_id": me}
@@ -179,7 +198,6 @@ async def list_cluster_projects(
     A scoped user whose assigned project is gone gets an empty list,
     not every origin.
     """
-    from app.core.config import settings
     from app.db import checkouts as checkouts_db
     from app.db import projects_v2 as projects_v2_db
 
@@ -192,7 +210,7 @@ async def list_cluster_projects(
     pv2s = await run_sync(projects_v2_db.list_projects_v2)
     installs = await run_sync(database.get_installs)
     local_projects = await run_sync(database.get_all_projects)
-    me = settings.effective_instance_id
+    me = _self_install_id()
 
     catalog = _build_cluster_catalog(
         bases=bases,
@@ -228,7 +246,6 @@ async def git_state(
     A legacy project with no ``projects_v2`` row (a non-git project) is not an
     error: it answers 200 with ``project_v2_id: null`` and every device ineligible.
     """
-    from app.core.config import settings
     from app.db import checkouts as checkouts_db
     from app.db import git_ops as git_ops_db
 
@@ -242,7 +259,7 @@ async def git_state(
     pv2_id = pv2["id"] if pv2 else None
 
     installs = await run_sync(database.get_installs)
-    me = settings.effective_instance_id
+    me = _self_install_id()
 
     if pv2_id:
         rows = await run_sync(checkouts_db.list_checkouts, pv2_id)
