@@ -2660,22 +2660,81 @@ async def test_add_dirs_reach_delegated_loop(monkeypatch, tmp_path):
     assert _CapturingLoop.captured["add_dirs"] == ["/notes", "/extra"]
 
 
-def test_store_derived_from_database_presence(monkeypatch):
-    """No store flags (2026-08-13 ruling): DATABASE_URL set -> PgFluidStore;
-    DB-less (unit tests) -> MemoryStore. The retired AIH_OMNI_STORE env var
-    must be ignored."""
-    from app.core.config import settings
-    from app.core.provider.fluid_pg_store import PgFluidStore
-    from fluid.store.base import MemoryStore as FluidMemoryStore
+@pytest.fixture()
+def _db_less_settings(monkeypatch):
+    """The suite's DB shim isolates connections, not the loaded configuration.
 
-    monkeypatch.setattr(settings, "database_url", "postgresql://REDACTED@h:5432/db")
+    Clear both database sources: a legacy URL can already have populated the
+    POSTGRES_* fields at settings load, and clearing only the URL leaves a DB.
+    Keep this opt-in so unrelated tests retain their configured-store coverage.
+    """
+    from app.core.config import settings
+
+    for name, value in {
+        "database_url": None,
+        "postgres_host": None,
+        "postgres_port": 5432,
+        "postgres_user": "ai_shuffle",
+        "postgres_password": None,
+        "postgres_db": "ai_shuffle",
+    }.items():
+        monkeypatch.setattr(settings, name, value)
+    return settings
+
+
+@pytest.fixture(params=["legacy_url", "postgres_fields", "imported_legacy_url"])
+def _configured_db_settings(monkeypatch, _db_less_settings, request):
+    """Exercise each DB source without borrowing the runner's credentials."""
+    settings = _db_less_settings
+    url = "postgresql://REDACTED@postgres.test.invalid:5433/harness_test"
+    if request.param == "postgres_fields":
+        for name, value in {
+            "postgres_host": "postgres.test.invalid",
+            "postgres_port": 5433,
+            "postgres_user": "harness",
+            "postgres_password": "harness-test",
+            "postgres_db": "harness_test",
+        }.items():
+            monkeypatch.setattr(settings, name, value)
+    else:
+        monkeypatch.setattr(settings, "database_url", url)
+        if request.param == "imported_legacy_url":
+            import app.core.config as config
+
+            monkeypatch.setattr(config, "legacy_database_url_imported", False)
+            # Run the real settings-load importer, not a pre-seeded password.
+            settings._import_legacy_database_url()
+            assert config.legacy_database_url_imported is True
+            monkeypatch.setattr(settings, "database_url", None)
+    assert settings.get_database_url() == url
+    return settings
+
+
+def test_store_derived_from_database_presence(monkeypatch, _configured_db_settings):
+    """Either configured DB source requires durability; only neither is DB-less.
+
+    The retired AIH_OMNI_STORE env var must not override either choice.
+    """
+    import app.core.provider.harness_adapter as ha
+    from app.core.provider.fluid_pg_store import PgFluidStore
+
+    settings = _configured_db_settings
+    monkeypatch.setenv("AIH_OMNI_STORE", "memory")  # retired flag — ignored
     store = HarnessAdapter._build_store(SessionOptions(model="m"))
     assert isinstance(store, PgFluidStore)
+    assert ha._recall_backend_available() is True
 
     monkeypatch.setattr(settings, "database_url", None)
+    store = HarnessAdapter._build_store(SessionOptions(model="m"))
+    expected_store = PgFluidStore if settings.postgres_password else MemoryStore
+    assert isinstance(store, expected_store)
+    assert ha._recall_backend_available() is bool(settings.postgres_password)
+
+    monkeypatch.setattr(settings, "postgres_password", None)
     monkeypatch.setenv("AIH_OMNI_STORE", "pg")  # retired flag — ignored
     store = HarnessAdapter._build_store(SessionOptions(model="m"))
-    assert isinstance(store, FluidMemoryStore)
+    assert isinstance(store, MemoryStore)
+    assert ha._recall_backend_available() is False
 
 
 def test_requires_reconnect():
@@ -5791,13 +5850,13 @@ async def test_github_section_is_dropped_when_bash_is_not_permitted(
 
 @pytest.mark.asyncio
 async def test_native_prompt_carries_the_recall_block_with_a_db(
-    monkeypatch, agent_workspace
+    monkeypatch, agent_workspace, _configured_db_settings
 ):
     import app.core.provider.harness_adapter as ha
-    from app.core.config import settings
+    from app.core.provider.fluid_pg_store import PgFluidStore
 
-    monkeypatch.setattr(settings, "database_url", "postgresql://stub/db")
     captured = await _connect_with_github(monkeypatch, agent_workspace, False)
+    assert isinstance(captured["store"], PgFluidStore)
     system = captured["system"]
     assert ha.RECALL_BLOCK in system
     # Code mode stays LAST — the recall tools are reached from run_python.
@@ -5806,25 +5865,26 @@ async def test_native_prompt_carries_the_recall_block_with_a_db(
 
 @pytest.mark.asyncio
 async def test_recall_block_is_absent_without_a_db_backend(
-    monkeypatch, agent_workspace
+    monkeypatch, agent_workspace, _db_less_settings
 ):
-    """Unit-test deployments run MemoryStore, which offers no recall — the
-    tools are gated off, so nothing may describe them (ruling T9)."""
+    """Genuinely DB-less deployments run MemoryStore, which offers no recall —
+    the tools are gated off, so nothing may describe them (ruling T9)."""
     captured = await _connect_with_github(monkeypatch, agent_workspace, False)
+    assert isinstance(captured["store"], MemoryStore)
     assert "# Past sessions are your memory" not in captured["system"]
 
 
 @pytest.mark.asyncio
 async def test_recall_block_is_dropped_when_the_tools_are_not_permitted(
-    monkeypatch, agent_workspace
+    monkeypatch, agent_workspace, _configured_db_settings
 ):
-    from app.core.config import settings
+    from app.core.provider.fluid_pg_store import PgFluidStore
 
-    monkeypatch.setattr(settings, "database_url", "postgresql://stub/db")
     captured = await _connect_with_github(
         monkeypatch, agent_workspace, False,
         disallowed_tools=["SessionSearch", "SessionView"],
     )
+    assert isinstance(captured["store"], PgFluidStore)
     assert "# Past sessions are your memory" not in captured["system"]
 
 
