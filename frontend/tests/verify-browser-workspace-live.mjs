@@ -176,10 +176,20 @@ try {
   const initialViewport = initial.viewport;
   phase = 'rendered navigation controls';
   async function navigate(page, destination) {
-    const input = page.getByRole('textbox', { name: 'Page address', exact: true });
-    if (!await input.count()) await page.locator('.address-display').click();
-    await input.fill(destination);
-    await input.press('Enter');
+    // The address bar re-renders while a previous navigation or reload settles,
+    // which can swallow a keystroke; confirm the command actually left rather
+    // than assume Enter landed, and type again when it did not.
+    const sent = (u) => window.browserFixture.messages.filter(m => m.op === 'navigate' && m.args.url === u).length;
+    const before = await page.evaluate(sent, destination);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const input = page.getByRole('textbox', { name: 'Page address', exact: true });
+      if (!await input.count()) await page.locator('.address-display').click();
+      await input.fill(destination);
+      await input.press('Enter');
+      const left = await page.waitForFunction(([u, n]) => window.browserFixture.messages.filter(m => m.op === 'navigate' && m.args.url === u).length > n, [destination, before], { timeout: 5_000 }).then(() => true, () => false);
+      if (left) return;
+    }
+    throw new Error(`navigate to ${destination} was never sent`);
   }
   const firstUrl = config.api + '/fixture';
   const nextUrl = config.api + '/fixture?history=second';
