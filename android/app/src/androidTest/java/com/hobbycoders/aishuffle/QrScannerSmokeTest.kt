@@ -41,13 +41,14 @@ class QrScannerSmokeTest {
                 val scanner = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
                     .filterIsInstance<QrCaptureActivity>().singleOrNull()
                 if (scanner != null) {
-                    assertTrue(scanner.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0)
+                    assertEquals("QR scanner must allow user screenshots", 0, scanner.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE)
                     camera = scanner.findViewById<DecoratedBarcodeView>(R.id.zxing_barcode_scanner).barcodeView
                     ready = scanner.hasWindowFocus() && camera!!.isPreviewActive
                 }
             }
             ready
         }
+        TestScreenshots.capture("qr-scanner")
         onView(withId(R.id.scannerBack)).check(matches(isDisplayed())).check(matches(withText("Back"))).perform(click())
         onView(withHint(returnHint)).check(matches(isDisplayed()))
         awaitCondition("Scanner camera remained open after Back") {

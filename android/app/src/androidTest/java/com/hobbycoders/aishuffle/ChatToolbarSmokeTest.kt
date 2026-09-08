@@ -129,7 +129,7 @@ class ChatToolbarSmokeTest {
                             assertTrue(action.isClickable && action.isFocusable)
                             assertTrue(action.width >= (48 * density).toInt() && action.height >= (48 * density).toInt())
                         }
-                        assertTrue(activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0)
+                        assertEquals("Chat must allow user screenshots", 0, activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE)
                         assertEquals(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE,
                             activity.window.attributes.softInputMode and WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST)
                         assertFalse(web.settings.allowFileAccess)
@@ -138,6 +138,7 @@ class ChatToolbarSmokeTest {
                     }
                 }
                 loaded(Configuration.ORIENTATION_PORTRAIT); checkViewport()
+                TestScreenshots.capture("chat-toolbar-portrait")
                 onView(withText("Refresh chat")).check(doesNotExist())
                 onView(withText("Voice")).check(doesNotExist())
                 onView(withText(server.host)).check(doesNotExist())
@@ -156,6 +157,7 @@ class ChatToolbarSmokeTest {
                 assertEquals(1, voiceLaunches.get())
                 scenario.onActivity { it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE }
                 loaded(Configuration.ORIENTATION_LANDSCAPE); checkViewport()
+                TestScreenshots.capture("chat-toolbar-landscape")
                 scenario.onActivity { it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
                 loaded(Configuration.ORIENTATION_PORTRAIT); checkViewport()
                 onView(withContentDescription("Back")).perform(click())
