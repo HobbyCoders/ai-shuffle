@@ -5,6 +5,12 @@
   "description": "AI Shuffle desktop app: a native window around the web UI of any AI Shuffle worker",
   "author": "HobbyCoders",
   "license": "MIT",
+  "homepage": "https://github.com/HobbyCoders/ai-shuffle",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HobbyCoders/ai-shuffle.git",
+    "directory": "desktop"
+  },
   "main": "dist/main/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",

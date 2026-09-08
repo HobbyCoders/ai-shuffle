@@ -41,6 +41,9 @@ win:
   icon: build/icon.png
 
 nsis:
+  # One installer per architecture instead of a combined x64+arm64 one, so
+  # each download is half the size and the updater fetches only its own.
+  buildUniversalInstaller: false
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
