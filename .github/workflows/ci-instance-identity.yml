@@ -31,9 +31,6 @@ jobs:
       TESTING: '1'
       ALLOW_REAL_PG: '0'
       PYTHONPATH: .
-      AI_SHUFFLE_ENV_FILE: '${{ runner.temp }}/nonexistent-identity-test.env'
-      DATA_DIR: '${{ runner.temp }}/shuffle-identity-data'
-      WORKSPACE_DIR: '${{ runner.temp }}/shuffle-identity-workspace'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -45,6 +42,11 @@ jobs:
           python -m pip install -c requirements.txt -c requirements-dev.txt
           pydantic-settings pytest pytest-timeout
       - name: Exercise native thread and process identity publication
+        # Runner paths exist only in step-level expression context.
+        env:
+          AI_SHUFFLE_ENV_FILE: '${{ runner.temp }}/nonexistent-identity-test.env'
+          DATA_DIR: '${{ runner.temp }}/shuffle-identity-data'
+          WORKSPACE_DIR: '${{ runner.temp }}/shuffle-identity-workspace'
         # Do not load the unrelated backend/database fixtures or plugins.
         run: >-
           python -m pytest tests/core/test_instance_identity.py

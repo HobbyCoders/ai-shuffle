@@ -19,10 +19,11 @@ import tempfile
 
 
 @pytest.fixture(autouse=True)
-def isolate_data_directory_default(monkeypatch):
+def isolate_directory_defaults(monkeypatch):
     # Tests of Settings defaults must not inherit the test runner's explicit
-    # disposable DATA_DIR. The already-created app singleton stays isolated.
+    # disposable paths. The already-created app singleton stays isolated.
     monkeypatch.delenv("DATA_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_DIR", raising=False)
 
 
 class TestSettingsDefaults:
