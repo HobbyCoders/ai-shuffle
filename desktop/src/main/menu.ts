@@ -18,7 +18,10 @@ export type DesktopCommand =
 
 export interface MenuActions {
 	command(name: DesktopCommand): void;
-	switchWorker(): void;
+	restartWorker(): void;
+	openDatabaseSettings(): void;
+	showLogs(): void;
+	openInBrowser(): void;
 	checkForUpdates(): void;
 	reload(): void;
 	openDocs(): void;
@@ -53,8 +56,6 @@ export function installMenu(actions: MenuActions): void {
 		label: 'File',
 		submenu: [
 			{ label: 'New Session', accelerator: 'CmdOrCtrl+N', click: () => actions.command('new-session') },
-			{ type: 'separator' },
-			{ label: 'Switch Worker…', accelerator: 'CmdOrCtrl+Shift+O', click: () => actions.switchWorker() },
 			...(isMac
 				? []
 				: ([
@@ -101,6 +102,17 @@ export function installMenu(actions: MenuActions): void {
 		]
 	};
 
+	const workerMenu: MenuItemConstructorOptions = {
+		label: 'Worker',
+		submenu: [
+			{ label: 'Restart Worker', click: () => actions.restartWorker() },
+			{ label: 'Open in Browser', click: () => actions.openInBrowser() },
+			{ type: 'separator' },
+			{ label: 'Database Connection…', click: () => actions.openDatabaseSettings() },
+			{ label: 'Show Worker Log', click: () => actions.showLogs() }
+		]
+	};
+
 	const windowMenu: MenuItemConstructorOptions = {
 		label: 'Window',
 		submenu: isMac
@@ -123,5 +135,5 @@ export function installMenu(actions: MenuActions): void {
 		]
 	};
 
-	Menu.setApplicationMenu(Menu.buildFromTemplate([...appMenu, fileMenu, editMenu, viewMenu, windowMenu, helpMenu]));
+	Menu.setApplicationMenu(Menu.buildFromTemplate([...appMenu, fileMenu, editMenu, viewMenu, workerMenu, windowMenu, helpMenu]));
 }

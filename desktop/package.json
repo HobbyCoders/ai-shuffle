@@ -14,6 +14,8 @@
   "main": "dist/main/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "build:worker": "node scripts/build-worker.mjs",
+    "build:worker:stub": "node scripts/build-worker.mjs --stub",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "npm run build && electron .",
     "test": "npm run build && node --test \"test/**/*.test.mjs\"",

@@ -1,7 +1,11 @@
 name: Desktop CI
 
-# Desktop shell (desktop/). Path-filtered like the other CI workflows. The
+# Desktop app (desktop/). Path-filtered like the other CI workflows. The
 # release build that publishes installers lives in release.yml.
+#
+# Pull requests package a shell without the worker runtime on every platform
+# (the stub manifest) and assemble the full runtime once, on Linux, to catch
+# packaging regressions without three long dependency installs per run.
 on:
   push:
     branches: [ main ]
@@ -40,7 +44,7 @@ jobs:
       - run: npm test
 
   package:
-    name: Package (${{ matrix.os }})
+    name: Package shell (${{ matrix.os }})
     needs: check
     strategy:
       fail-fast: false
@@ -60,6 +64,8 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
       - run: npm ci
+      - name: Write a stub worker manifest
+        run: npm run build:worker:stub
       - name: Build unpacked app
         run: npm run pack
       - name: Smoke-run the shell headless
@@ -68,17 +74,52 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq xvfb > /dev/null
           mkdir -p "$RUNNER_TEMP/profile"
           SHUFFLE_DESKTOP_USER_DATA="$RUNNER_TEMP/profile" \
-          SHUFFLE_DESKTOP_SHOT="$RUNNER_TEMP/connect.png" \
+          SHUFFLE_DESKTOP_WORKER_DIR="$PWD/worker" \
+          SHUFFLE_DESKTOP_SHOT="$RUNNER_TEMP/status.png" \
           SHUFFLE_DESKTOP_SHOT_DELAY=3000 \
           xvfb-run --auto-servernum npx electron . --no-sandbox --disable-gpu
           # A PNG proves the page painted; the .txt fallback proves it loaded
           # when the headless compositor cannot capture.
-          test -s "$RUNNER_TEMP/connect.png" || { test -s "$RUNNER_TEMP/connect.png.txt" && cat "$RUNNER_TEMP/connect.png.txt"; }
+          test -s "$RUNNER_TEMP/status.png" || { test -s "$RUNNER_TEMP/status.png.txt" && cat "$RUNNER_TEMP/status.png.txt"; }
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
         with:
-          name: desktop-connect-screenshot
+          name: desktop-status-screenshot
           path: |
-            ${{ runner.temp }}/connect.png
-            ${{ runner.temp }}/connect.png.txt
+            ${{ runner.temp }}/status.png
+            ${{ runner.temp }}/status.png.txt
           if-no-files-found: ignore
+
+  runtime:
+    name: Assemble worker runtime (linux-x64)
+    needs: check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build
+      - run: npm ci
+      - name: Assemble the runtime
+        run: npm run build:worker -- --frontend-build ../frontend/build
+      - name: Runtime is complete and imports the server
+        run: |
+          node -e '
+            const fs = require("fs");
+            const m = JSON.parse(fs.readFileSync("worker/manifest.json", "utf8"));
+            if (m.stub) throw new Error("stub manifest");
+            for (const f of ["worker/python/bin/python3", "worker/node/bin/node", "worker/server/app/main.py", "worker/server/app/static/index.html", "worker/server/tools/dist/index.js", "worker/server/browser-mcp/dist/index.js"]) {
+              if (!fs.existsSync(f)) throw new Error("missing " + f);
+            }
+            console.log("runtime ok", m.python.version, m.node.version);
+          '
+          cd worker/server && ../python/bin/python3 -c "import app.core.config; print('server imports ok')"
+          ../node/bin/node --version

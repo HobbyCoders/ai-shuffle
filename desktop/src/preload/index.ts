@@ -2,9 +2,10 @@
  * `window.shuffleDesktop`: the bridge the web UI uses to notice it runs in
  * the desktop app and to talk to the shell.
  *
- * The preload runs for every document in the main window. Worker management
- * is exposed only to the bundled connect screen (file://); the worker's own
- * web UI gets the window, theme, notification and update surface.
+ * The preload runs for every document in the main window. The worker's web
+ * UI gets the window, theme, notification, update and worker-status surface.
+ * The database setup and the raw worker log are exposed only to the bundled
+ * setup/status page (file://) as `window.shuffleDesktopWorker`.
  */
 import { contextBridge, ipcRenderer } from 'electron';
 
@@ -22,7 +23,7 @@ const info = ipcRenderer.sendSync('desktop:info') as {
 	platform: NodeJS.Platform;
 	version: string;
 	titleBarHeight: number;
-	server: { id: string; name: string; url: string } | null;
+	worker: { url: string; phase: string; external: boolean } | null;
 	windowState: { maximized: boolean; fullscreen: boolean; focused: boolean };
 	updateState: unknown;
 } | null;
@@ -32,8 +33,6 @@ const bridge = {
 	version: info?.version ?? '0.0.0',
 	platform: info?.platform ?? process.platform,
 	titleBarHeight: info?.titleBarHeight ?? 52,
-	/** The worker this window is connected to (name only carries user-chosen text). */
-	server: info?.server ? { id: info.server.id, name: info.server.name } : null,
 
 	window: {
 		getState: () => ipcRenderer.invoke('desktop:window-state') as Promise<{ maximized: boolean; fullscreen: boolean; focused: boolean }>,
@@ -51,10 +50,18 @@ const bridge = {
 		setBadge: (count: number) => void ipcRenderer.invoke('desktop:set-badge', count),
 		notify: (payload: { title: string; body?: string; tag?: string; silent?: boolean }) => void ipcRenderer.invoke('desktop:notify', payload),
 		onNotificationClick: (listener: Listener<{ tag: string | null }>) => subscribe('desktop:notification-click', listener),
-		switchWorker: () => void ipcRenderer.invoke('desktop:switch-worker'),
 		/** Fired for menu items and tray actions: `new-session`, `command-palette`, `toggle-sidebar`, `open-settings`, `focus-composer`, `find`, `open-docs`. */
 		onCommand: (listener: Listener<string>) => subscribe('desktop:command', listener),
 		onNativeTheme: (listener: Listener<{ dark: boolean }>) => subscribe('desktop:native-theme', listener)
+	},
+
+	/** The local worker this window belongs to. */
+	worker: {
+		getState: () => ipcRenderer.invoke('desktop:worker-state'),
+		onState: (listener: Listener<unknown>) => subscribe('desktop:worker-state', listener),
+		restart: () => ipcRenderer.invoke('desktop:worker-restart'),
+		openLogs: () => void ipcRenderer.invoke('desktop:worker-open-logs'),
+		openDatabaseSettings: () => void ipcRenderer.invoke('desktop:worker-open-setup')
 	},
 
 	updates: {
@@ -68,13 +75,17 @@ const bridge = {
 contextBridge.exposeInMainWorld('shuffleDesktop', bridge);
 
 if (window.location.protocol === 'file:') {
-	contextBridge.exposeInMainWorld('shuffleDesktopServers', {
-		list: () => ipcRenderer.invoke('desktop:servers-list'),
-		add: (input: { url: string; name?: string }) => ipcRenderer.invoke('desktop:servers-add', input),
-		rename: (id: string, name: string) => ipcRenderer.invoke('desktop:servers-rename', id, name),
-		remove: (id: string) => ipcRenderer.invoke('desktop:servers-remove', id),
-		connect: (id: string, pairingCode?: string | null) => ipcRenderer.invoke('desktop:servers-connect', id, pairingCode ?? null),
-		probe: (url: string) => ipcRenderer.invoke('desktop:servers-probe', url),
-		detectLocal: () => ipcRenderer.invoke('desktop:servers-detect-local')
+	contextBridge.exposeInMainWorld('shuffleDesktopWorker', {
+		getSettings: () => ipcRenderer.invoke('desktop:settings-get'),
+		checkDatabase: (config: unknown, action: 'test' | 'create') => ipcRenderer.invoke('desktop:db-check', config, action),
+		saveAndStart: (config: unknown) => ipcRenderer.invoke('desktop:setup-save', config),
+		cancelSetup: () => void ipcRenderer.invoke('desktop:setup-cancel'),
+		openSetup: () => void ipcRenderer.invoke('desktop:worker-open-setup'),
+		getState: () => ipcRenderer.invoke('desktop:worker-state'),
+		onState: (listener: Listener<unknown>) => subscribe('desktop:worker-state', listener),
+		onLog: (listener: Listener<string>) => subscribe('desktop:worker-log', listener),
+		tail: () => ipcRenderer.invoke('desktop:worker-tail') as Promise<string[]>,
+		restart: () => ipcRenderer.invoke('desktop:worker-restart'),
+		openLogs: () => void ipcRenderer.invoke('desktop:worker-open-logs')
 	});
 }

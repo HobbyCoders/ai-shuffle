@@ -1,29 +1,41 @@
 /**
  * IPC handlers behind the preload bridge.
  *
- * Every handler checks that the message comes from the main window. Worker
- * management (list / add / remove / connect) is additionally limited to the
- * bundled connect screen, so a worker's web UI can steer its own window but
- * never read or change which other workers this computer knows about.
+ * Every handler checks that the message comes from the main window. The
+ * database setup and the worker's raw log are additionally limited to the
+ * bundled pages (file://), so the worker's web UI can steer its own window
+ * but never read the database credentials this app holds.
  */
-import { app, ipcMain, Notification, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron';
-import { detectLocal, probe } from './probe';
-import type { ServerStore } from './servers';
-import { parseServerInput } from './servers';
+import { app, ipcMain, Notification, shell, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron';
+import { validatePostgres, type PostgresConfig, type SettingsStore } from './settings';
 import type { Updater } from './updater';
 import { MainWindow, TITLE_BAR_HEIGHT, type TitleBarTheme } from './window';
+import { checkPostgres, type WorkerState, type WorkerSupervisor } from './worker';
+
+export interface WorkerControl {
+	supervisor: WorkerSupervisor | null;
+	/** Why no supervisor exists (runtime missing), shown on the status page. */
+	runtimeError: string | null;
+	state(): WorkerState;
+	openSetup(): Promise<void>;
+	cancelSetup(): Promise<void>;
+	saveAndStart(config: PostgresConfig): Promise<void>;
+	restart(): Promise<void>;
+}
 
 interface Deps {
 	window: MainWindow;
-	servers: ServerStore;
+	settings: SettingsStore;
 	updater: Updater;
+	worker: WorkerControl;
+	keyringAvailable: boolean;
 }
 
 type Handler = (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown;
 
-export function registerIpc({ window, servers, updater }: Deps): void {
+export function registerIpc({ window, settings, updater, worker, keyringAvailable }: Deps): void {
 	const fromMainWindow = (event: IpcMainInvokeEvent | IpcMainEvent) => window.isOwnSender(event.sender.id);
-	const fromConnectScreen = (event: IpcMainInvokeEvent | IpcMainEvent) =>
+	const fromBundledPage = (event: IpcMainInvokeEvent | IpcMainEvent) =>
 		fromMainWindow(event) && (event.senderFrame?.url ?? '').startsWith('file:');
 
 	const handle = (channel: string, guard: (event: IpcMainInvokeEvent) => boolean, fn: Handler) => {
@@ -39,12 +51,12 @@ export function registerIpc({ window, servers, updater }: Deps): void {
 			event.returnValue = null;
 			return;
 		}
-		const server = window.server;
+		const state = worker.state();
 		event.returnValue = {
 			platform: process.platform,
 			version: app.getVersion(),
 			titleBarHeight: TITLE_BAR_HEIGHT,
-			server: server ? { id: server.id, name: server.name, url: server.url } : null,
+			worker: { url: state.url, phase: state.phase, external: state.external },
 			windowState: window.windowState(),
 			updateState: updater.current
 		};
@@ -80,8 +92,6 @@ export function registerIpc({ window, servers, updater }: Deps): void {
 	handle('desktop:set-badge', fromMainWindow, (_e, count) => {
 		const n = typeof count === 'number' && Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
 		if (process.platform === 'win32') {
-			// Windows has no numeric badge API in Electron; the overlay icon is
-			// the closest thing and is handled by the page-driven flash instead.
 			window.browserWindow?.flashFrame(n > 0);
 			return;
 		}
@@ -100,50 +110,39 @@ export function registerIpc({ window, servers, updater }: Deps): void {
 		});
 		notification.show();
 	});
-	handle('desktop:switch-worker', fromMainWindow, async () => {
-		await servers.clearLast();
-		await window.showConnect();
-	});
+
+	// Worker state is visible to every page; control is too, since the web UI
+	// is the worker's own and restarting it is not a secret.
+	handle('desktop:worker-state', fromMainWindow, () => worker.state());
+	handle('desktop:worker-restart', fromMainWindow, () => worker.restart());
+	handle('desktop:worker-open-logs', fromMainWindow, () => void shell.showItemInFolder(worker.state().logPath));
+	handle('desktop:worker-open-setup', fromMainWindow, () => worker.openSetup());
 
 	// Updates.
 	handle('desktop:update-state', fromMainWindow, () => updater.current);
 	handle('desktop:update-check', fromMainWindow, () => updater.check());
 	handle('desktop:update-install', fromMainWindow, () => updater.install());
 
-	// Connect screen only.
-	handle('desktop:servers-list', fromConnectScreen, () => servers.list());
-	handle('desktop:servers-add', fromConnectScreen, async (_e, input) => {
-		const { url, name } = (input ?? {}) as { url?: unknown; name?: unknown };
-		if (typeof url !== 'string') throw new Error('Enter the worker address.');
-		const parsed = parseServerInput(url);
-		const server = await servers.add({ url: parsed.origin, name: typeof name === 'string' ? name : undefined });
-		return { server, pairingCode: parsed.pairingCode };
+	// Bundled pages only: database setup and the raw log.
+	handle('desktop:settings-get', fromBundledPage, () => ({
+		postgres: settings.postgresPublic(),
+		configured: settings.configured,
+		keyringAvailable,
+		runtimeError: worker.runtimeError
+	}));
+	handle('desktop:db-check', fromBundledPage, (_e, input, action) => {
+		const validated = validatePostgres((input ?? {}) as Record<string, unknown>);
+		if (!validated.ok) return { ok: false, code: 'unknown', error: validated.error };
+		if (!worker.supervisor) return { ok: false, code: 'runtime', error: worker.runtimeError ?? 'The worker runtime is missing.' };
+		return checkPostgres(worker.supervisor.runtime, validated.config, action === 'create' ? 'create' : 'test');
 	});
-	handle('desktop:servers-rename', fromConnectScreen, async (_e, id, name) => {
-		if (typeof id === 'string' && typeof name === 'string') await servers.rename(id, name);
+	handle('desktop:setup-save', fromBundledPage, async (_e, input) => {
+		const validated = validatePostgres((input ?? {}) as Record<string, unknown>);
+		if (!validated.ok) throw new Error(validated.error);
+		await worker.saveAndStart(validated.config);
 	});
-	handle('desktop:servers-remove', fromConnectScreen, async (_e, id) => {
-		if (typeof id === 'string') await servers.remove(id);
-	});
-	handle('desktop:servers-connect', fromConnectScreen, async (_e, id, pairingCode) => {
-		if (typeof id !== 'string') return;
-		const server = servers.get(id);
-		if (!server) throw new Error('That worker is no longer saved.');
-		await servers.markUsed(server.id);
-		const target =
-			typeof pairingCode === 'string' && /^[A-Z0-9]{12}$/.test(pairingCode)
-				? { ...server, url: `${server.url}/pair#token=${pairingCode}` }
-				: server;
-		// loadServer keeps `server.url` as the origin for the navigation policy;
-		// only the first navigation carries the pairing fragment.
-		await window.loadServer(server);
-		if (target !== server) await window.browserWindow?.loadURL(target.url);
-	});
-	handle('desktop:servers-probe', fromConnectScreen, async (_e, url) => {
-		if (typeof url !== 'string') return null;
-		return probe(parseServerInput(url).origin);
-	});
-	handle('desktop:servers-detect-local', fromConnectScreen, () => detectLocal());
+	handle('desktop:setup-cancel', fromBundledPage, () => worker.cancelSetup());
+	handle('desktop:worker-tail', fromBundledPage, () => worker.supervisor?.tail() ?? []);
 }
 
 function isTitleBarTheme(value: unknown): value is TitleBarTheme {

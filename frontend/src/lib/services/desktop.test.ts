@@ -12,7 +12,6 @@ function makeBridge() {
 		version: '1.2.1',
 		platform: 'win32',
 		titleBarHeight: 52,
-		server: { id: 'x', name: 'Homelab' },
 		window: {
 			getState: () => Promise.resolve({ maximized: false, fullscreen: false, focused: true }),
 			onStateChange: () => () => {},
@@ -27,9 +26,15 @@ function makeBridge() {
 			setBadge: () => {},
 			notify: () => {},
 			onNotificationClick: () => () => {},
-			switchWorker: () => {},
 			onCommand: () => () => {},
 			onNativeTheme: () => () => {}
+		},
+		worker: {
+			getState: () => Promise.resolve({ phase: 'ready', port: 8000, url: 'http://127.0.0.1:8000', pid: 1, external: false, error: null, exitCode: null, startedAt: null, logPath: '' }),
+			onState: () => () => {},
+			restart: () => Promise.resolve(),
+			openLogs: () => {},
+			openDatabaseSettings: () => {}
 		},
 		updates: {
 			getState: () => Promise.resolve(idle()),

@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta
+			http-equiv="Content-Security-Policy"
+			content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'none'"
+		/>
+		<title>AI Shuffle</title>
+		<link rel="stylesheet" href="worker.css" />
+	</head>
+	<body>
+		<header class="titlebar" aria-hidden="true">
+			<span class="titlebar-title">AI Shuffle</span>
+		</header>
+
+		<main class="stage">
+			<!-- Database setup: first run, or Worker → Database Connection… -->
+			<section id="setup" class="panel" aria-labelledby="setup-heading" hidden>
+				<div class="brand">
+					<svg class="brand-mark" viewBox="0 0 512 512" aria-hidden="true">
+						<defs>
+							<linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+								<stop offset="0" stop-color="#3E34E2" />
+								<stop offset="1" stop-color="#0289F9" />
+							</linearGradient>
+						</defs>
+						<rect width="512" height="512" rx="96" fill="url(#g)" />
+						<path d="M330 150 H236 a54 54 0 0 0 0 108 h40 a54 54 0 0 1 0 108 H182" fill="none" stroke="#fff" stroke-width="46" stroke-linecap="round" />
+						<path d="M300 110 l50 40 -50 40" fill="none" stroke="#fff" stroke-width="40" stroke-linecap="round" stroke-linejoin="round" />
+						<path d="M212 326 l-50 40 50 40" fill="none" stroke="#fff" stroke-width="40" stroke-linecap="round" stroke-linejoin="round" />
+					</svg>
+					<div>
+						<h1 id="setup-heading">Connect a PostgreSQL database</h1>
+						<p class="lede">
+							AI Shuffle keeps sessions, settings and history in PostgreSQL. Point it at a server you run, on this computer or on your network.
+						</p>
+					</div>
+				</div>
+
+				<div id="setup-error" class="banner banner-error" role="alert" hidden></div>
+				<div id="setup-ok" class="banner banner-ok" role="status" hidden></div>
+
+				<form id="pg-form" class="form" autocomplete="off">
+					<div class="row">
+						<label class="field grow">
+							<span class="label">Host</span>
+							<input id="pg-host" name="host" type="text" spellcheck="false" placeholder="localhost" required />
+						</label>
+						<label class="field field-port">
+							<span class="label">Port</span>
+							<input id="pg-port" name="port" type="number" min="1" max="65535" placeholder="5432" required />
+						</label>
+					</div>
+					<div class="row">
+						<label class="field grow">
+							<span class="label">User</span>
+							<input id="pg-user" name="user" type="text" spellcheck="false" placeholder="ai_shuffle" required />
+						</label>
+						<label class="field grow">
+							<span class="label">Password</span>
+							<input id="pg-password" name="password" type="password" placeholder="••••••••" required />
+						</label>
+					</div>
+					<label class="field">
+						<span class="label">Database</span>
+						<input id="pg-database" name="database" type="text" spellcheck="false" placeholder="ai_shuffle" required />
+					</label>
+					<p id="password-note" class="hint" hidden>
+						This computer has no keyring available, so the password will be stored in a file only your user account can read.
+					</p>
+					<div class="actions">
+						<button id="pg-test" class="btn btn-secondary" type="button">Test connection</button>
+						<button id="pg-create" class="btn btn-secondary" type="button" hidden>Create database</button>
+						<span class="spacer"></span>
+						<button id="pg-cancel" class="btn btn-ghost-text" type="button" hidden>Cancel</button>
+						<button id="pg-save" class="btn btn-primary" type="submit">Save and start</button>
+					</div>
+				</form>
+
+				<details class="help">
+					<summary>Don't have PostgreSQL yet?</summary>
+					<p>Install PostgreSQL 16 or newer, then create a user and a database for AI Shuffle. In <code>psql</code>:</p>
+					<pre><code>CREATE USER ai_shuffle WITH PASSWORD 'choose-a-password';
+CREATE DATABASE ai_shuffle OWNER ai_shuffle;</code></pre>
+					<p>
+						If the user exists but the database does not, the button above can create it. Downloads:
+						<a id="link-pg" href="#">postgresql.org/download</a>.
+					</p>
+				</details>
+			</section>
+
+			<!-- Worker status: starting, stopped, failed -->
+			<section id="status" class="panel panel-status" aria-labelledby="status-heading" hidden>
+				<div class="status-head">
+					<span id="status-dot" class="dot dot-checking" aria-hidden="true"></span>
+					<div>
+						<h1 id="status-heading">Starting the worker…</h1>
+						<p id="status-detail" class="lede"></p>
+					</div>
+				</div>
+				<pre id="status-error" class="error-block" hidden></pre>
+				<div class="log-wrap">
+					<div class="log-head">
+						<span>Worker log</span>
+						<button id="open-logs" class="btn btn-ghost-text" type="button">Open log file</button>
+					</div>
+					<pre id="log" class="log" aria-live="polite"></pre>
+				</div>
+				<div class="actions">
+					<button id="db-settings" class="btn btn-secondary" type="button">Database connection…</button>
+					<span class="spacer"></span>
+					<button id="restart" class="btn btn-primary" type="button" hidden>Restart worker</button>
+				</div>
+			</section>
+		</main>
+
+		<footer class="foot">
+			<span id="version"></span>
+		</footer>
+
+		<script src="worker.js"></script>
+	</body>
+</html>

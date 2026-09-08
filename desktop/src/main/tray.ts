@@ -4,7 +4,8 @@ import path from 'node:path';
 
 export interface TrayActions {
 	show(): void;
-	switchWorker(): void;
+	restartWorker(): void;
+	openInBrowser(): void;
 	checkForUpdates(): void;
 }
 
@@ -19,8 +20,9 @@ export function installTray(actions: TrayActions): Tray | null {
 	tray.setContextMenu(
 		Menu.buildFromTemplate([
 			{ label: 'Open AI Shuffle', click: () => actions.show() },
-			{ label: 'Switch Worker…', click: () => actions.switchWorker() },
+			{ label: 'Open in Browser', click: () => actions.openInBrowser() },
 			{ type: 'separator' },
+			{ label: 'Restart Worker', click: () => actions.restartWorker() },
 			{ label: 'Check for Updates…', click: () => actions.checkForUpdates() },
 			{ type: 'separator' },
 			{ role: 'quit' }

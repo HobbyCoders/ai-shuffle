@@ -41,6 +41,18 @@ export interface DesktopUpdateState {
 	checkedAt: string | null;
 }
 
+export interface DesktopWorkerState {
+	phase: 'idle' | 'starting' | 'ready' | 'stopping' | 'stopped' | 'failed';
+	port: number;
+	url: string;
+	pid: number | null;
+	external: boolean;
+	error: string | null;
+	exitCode: number | null;
+	startedAt: string | null;
+	logPath: string;
+}
+
 export type DesktopCommand =
 	| 'new-session'
 	| 'command-palette'
@@ -54,7 +66,6 @@ export interface ShuffleDesktopBridge {
 	version: string;
 	platform: DesktopPlatform;
 	titleBarHeight: number;
-	server: { id: string; name: string } | null;
 	window: {
 		getState(): Promise<DesktopWindowState>;
 		onStateChange(listener: (state: DesktopWindowState) => void): () => void;
@@ -69,9 +80,16 @@ export interface ShuffleDesktopBridge {
 		setBadge(count: number): void;
 		notify(payload: { title: string; body?: string; tag?: string; silent?: boolean }): void;
 		onNotificationClick(listener: (payload: { tag: string | null }) => void): () => void;
-		switchWorker(): void;
 		onCommand(listener: (command: DesktopCommand | string) => void): () => void;
 		onNativeTheme(listener: (payload: { dark: boolean }) => void): () => void;
+	};
+	/** The local worker this window belongs to. */
+	worker: {
+		getState(): Promise<DesktopWorkerState>;
+		onState(listener: (state: DesktopWorkerState) => void): () => void;
+		restart(): Promise<void>;
+		openLogs(): void;
+		openDatabaseSettings(): void;
 	};
 	updates: {
 		getState(): Promise<DesktopUpdateState>;

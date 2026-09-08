@@ -7,15 +7,15 @@
  * (`navigator.windowControlsOverlay`, `env(titlebar-area-*)`), and the page
  * marks the strip draggable with `-webkit-app-region: drag`.
  *
- * Only two kinds of document ever load here: the bundled connect screen
- * (file://) and the chosen worker's own web UI at its real origin. Loading the
- * worker's origin directly keeps every request same-origin, so the server's
- * CSRF and WebSocket origin checks behave exactly as they do in a browser.
+ * Only two kinds of document ever load here: the bundled setup/status page
+ * (file://) and the local worker's web UI at http://127.0.0.1:<port>.
+ * Loading the worker's origin directly keeps every request same-origin, so
+ * the server's CSRF and WebSocket origin checks behave exactly as they do
+ * in a browser.
  */
 import { app, BrowserWindow, nativeTheme, shell } from 'electron';
 import path from 'node:path';
 import { attachNavigationPolicy } from './navigation';
-import type { SavedServer } from './servers';
 import { WindowStateStore } from './state';
 
 export const PARTITION = 'persist:shuffle';
@@ -29,15 +29,12 @@ export interface TitleBarTheme {
 const DARK_TITLE_BAR: TitleBarTheme = { background: '#000000', symbol: '#e9e9ec' };
 const LIGHT_TITLE_BAR: TitleBarTheme = { background: '#ffffff', symbol: '#1d1d1f' };
 
-export interface ConnectOptions {
-	/** A message to show above the worker list, e.g. why the last load failed. */
-	error?: string;
-	serverId?: string;
-}
+export type PageMode = 'setup' | 'status';
 
 export class MainWindow {
 	private win: BrowserWindow | null = null;
-	private current: SavedServer | null = null;
+	private workerUrl: string | null = null;
+	private page: PageMode | null = null;
 	private readonly stateStore: WindowStateStore;
 
 	constructor(private readonly userData: string) {
@@ -48,8 +45,14 @@ export class MainWindow {
 		return this.win && !this.win.isDestroyed() ? this.win : null;
 	}
 
-	get server(): SavedServer | null {
-		return this.current;
+	/** The worker origin the window is showing, or null on a bundled page. */
+	get currentWorkerUrl(): string | null {
+		return this.page === null ? this.workerUrl : null;
+	}
+
+	/** Which bundled page is showing, or null when the worker UI is. */
+	get currentPage(): PageMode | null {
+		return this.page;
 	}
 
 	isOwnSender(webContentsId: number): boolean {
@@ -93,7 +96,11 @@ export class MainWindow {
 		});
 		this.win = win;
 		this.stateStore.track(win);
-		attachNavigationPolicy(win, () => this.current?.url ?? null, (message) => this.showConnect({ error: message, serverId: this.current?.id }));
+		attachNavigationPolicy(
+			win,
+			() => this.currentWorkerUrl,
+			(message) => this.onLoadFailure(message)
+		);
 
 		win.once('ready-to-show', () => {
 			if (state.maximized) win.maximize();
@@ -112,9 +119,19 @@ export class MainWindow {
 		win.webContents.on('page-title-updated', (event) => {
 			// The document title is the session title; keep the OS title short.
 			event.preventDefault();
-			win.setTitle(this.current ? `${this.current.name} · AI Shuffle` : 'AI Shuffle');
+			win.setTitle('AI Shuffle');
 		});
 		return win;
+	}
+
+	private loadFailureHandler: ((message: string) => void) | null = null;
+
+	onLoadFailed(handler: (message: string) => void): void {
+		this.loadFailureHandler = handler;
+	}
+
+	private onLoadFailure(message: string): void {
+		this.loadFailureHandler?.(message);
 	}
 
 	windowState(): { maximized: boolean; fullscreen: boolean; focused: boolean } {
@@ -126,23 +143,21 @@ export class MainWindow {
 		};
 	}
 
-	async loadServer(server: SavedServer): Promise<void> {
+	async loadWorker(url: string): Promise<void> {
 		const win = await this.ensure();
-		this.current = server;
-		win.setTitle(`${server.name} · AI Shuffle`);
-		await win.loadURL(server.url).catch(() => {
-			/* did-fail-load routes to the connect screen. */
+		this.workerUrl = new URL(url).origin;
+		this.page = null;
+		await win.loadURL(url).catch(() => {
+			/* did-fail-load reports through onLoadFailed. */
 		});
 	}
 
-	async showConnect(options: ConnectOptions = {}): Promise<void> {
+	async showPage(mode: PageMode, query: Record<string, string> = {}): Promise<void> {
 		const win = await this.ensure();
-		this.current = null;
-		win.setTitle('AI Shuffle');
-		const query: Record<string, string> = {};
-		if (options.error) query.error = options.error;
-		if (options.serverId) query.server = options.serverId;
-		await win.loadFile(path.join(app.getAppPath(), 'src/connect/index.html'), { query });
+		this.page = mode;
+		await win.loadFile(path.join(app.getAppPath(), 'src/pages/worker.html'), { query: { mode, ...query } }).catch(() => {
+			/* The window is closing, or a newer navigation replaced this one. */
+		});
 	}
 
 	setTitleBarTheme(theme: TitleBarTheme): void {

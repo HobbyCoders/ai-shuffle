@@ -15,8 +15,9 @@ AI Shuffle puts AI agents in a browser. Instead of a terminal, you get a full GU
 - **Docker** — Self-host on a server or NAS for access from anywhere
 
 **Three ways to open it:** any browser, the [Android app](android/README.md), or
-the [desktop app](desktop/README.md) for Windows, macOS and Linux. Both apps are
-thin shells around the same web UI, served by whichever worker you connect to.
+the [desktop app](desktop/README.md) for Windows, macOS and Linux. The desktop
+app runs the worker on your computer (bring your own PostgreSQL) and shows the
+same web UI in a native window; the Android app connects to your workers.
 
 ---
 
