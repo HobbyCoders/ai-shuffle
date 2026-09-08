@@ -215,10 +215,14 @@ export function initDesktop(): () => void {
 	syncTitleBarTheme();
 	let unsubscribeTheme: (() => void) | null = null;
 	let disposed = false;
-	void import('$lib/stores/theme.svelte').then(({ theme }) => {
-		if (disposed) return;
-		unsubscribeTheme = theme.subscribe(() => requestAnimationFrame(syncTitleBarTheme));
-	});
+	void import('$lib/stores/theme.svelte')
+		.then(({ theme }) => {
+			if (disposed) return;
+			unsubscribeTheme = theme.subscribe(() => requestAnimationFrame(syncTitleBarTheme));
+		})
+		.catch(() => {
+			/* Without the store the controls keep the colours set above. */
+		});
 
 	return () => {
 		disposed = true;

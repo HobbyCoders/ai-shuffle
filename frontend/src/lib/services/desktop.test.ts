@@ -58,6 +58,21 @@ describe('desktop update announcement', () => {
 	beforeEach(() => {
 		vi.resetModules();
 		delete (window as Window & { shuffleDesktop?: unknown }).shuffleDesktop;
+		// The theme store reads the OS colour scheme at import; jsdom has no matchMedia.
+		Object.defineProperty(window, 'matchMedia', {
+			configurable: true,
+			writable: true,
+			value: vi.fn().mockImplementation((query: string) => ({
+				matches: false,
+				media: query,
+				onchange: null,
+				addEventListener: vi.fn(),
+				removeEventListener: vi.fn(),
+				addListener: vi.fn(),
+				removeListener: vi.fn(),
+				dispatchEvent: vi.fn()
+			}))
+		});
 	});
 
 	it('is inert in a browser', async () => {
