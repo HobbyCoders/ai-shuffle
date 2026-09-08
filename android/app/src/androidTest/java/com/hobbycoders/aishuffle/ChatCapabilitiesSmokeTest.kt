@@ -183,7 +183,11 @@ class ChatCapabilitiesSmokeTest {
                       const video = document.createElement('video'); video.preload = 'auto';
                       video.src = '${server.baseUrl}/api/generated-videos/by-path?path=/work/video.mp4'; document.body.append(video); video.load();
                       fetch('${server.baseUrl}/api/generated-videos/by-path?path=/work/range.mp4', {headers:{Range:'bytes=2-4'}})
-                        .then(async r => { assetSmoke.range = r.status === 206 && r.headers.get('Content-Range') === 'bytes 2-4/12' && await r.text() === 'abc'; })
+                        .then(async r => {
+                          assetSmoke.rangeResponse = {status:r.status, contentRange:r.headers.get('Content-Range'), length:r.headers.get('Content-Length')};
+                          const body = await r.text(); assetSmoke.rangeResponse.body = body;
+                          assetSmoke.range = r.status === 206 && r.headers.get('Content-Range') === 'bytes 2-4/12' && body === 'abc';
+                        })
                         .catch(error => assetSmoke.errors.push('range:' + error.message));
                     })()
                 """.trimIndent(), null)
@@ -200,7 +204,7 @@ class ChatCapabilitiesSmokeTest {
                     ready
                 }
             } catch (error: AssertionError) {
-                throw AssertionError("${error.message}; state=$lastState; requested=${seen.map { it.url.encodedPath + "?" + it.url.encodedQuery }}", error)
+                throw AssertionError("${error.message}; state=$lastState; requested=${seen.map { it.url.encodedPath + "?" + it.url.encodedQuery + " Range=" + it.header("Range") }}", error)
             }
             waitFor("Video element did not request its source") { seen.any { it.url.queryParameter("path") == "/work/video.mp4" } }
             for (url in listOf("${server.baseUrl}/api/v1/notes/n/attachments/a/download", "/api/files/by-path?path=/work/report.pdf")) {
