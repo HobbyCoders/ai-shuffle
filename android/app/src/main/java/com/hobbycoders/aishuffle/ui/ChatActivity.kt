@@ -235,7 +235,7 @@ class ChatActivity : NativeScreen() {
         more.setOnClickListener {
             PopupMenu(this, more).apply {
                 menu.add("Refresh chat").setOnMenuItemClickListener { startSession(reload = true); true }
-                menu.add("Devices").setOnMenuItemClickListener { openDevices(); true }
+                menu.add("Workers").setOnMenuItemClickListener { openWorkers(); true }
                 show()
             }
         }
@@ -266,10 +266,9 @@ class ChatActivity : NativeScreen() {
         }
         setContentView(shell)
     }
-    private fun openDevices() {
+    private fun openWorkers() {
         startActivity(Intent(this, ServerListActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            .putExtra(ServerListActivity.EXTRA_SHOW_DEVICES, true))
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
     }
     private fun authorized() = ::sessionOwner.isInitialized && sessionOwner.current()
     private fun validDocument() = ::web.isInitialized && !isFinishing && !isDestroyed &&

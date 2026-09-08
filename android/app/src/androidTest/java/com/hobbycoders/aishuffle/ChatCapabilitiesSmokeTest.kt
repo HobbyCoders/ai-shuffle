@@ -255,7 +255,8 @@ class ChatCapabilitiesSmokeTest {
                 val view = web(activity)
                 val bridgeField = ChatActivity::class.java.getDeclaredField("nativeVoice").apply { isAccessible = true }
                 (bridgeField.get(activity) as com.hobbycoders.aishuffle.ui.NativeVoiceBridge).close()
-                val fixtureBridge = com.hobbycoders.aishuffle.ui.NativeVoiceBridge(activity, view, server.baseUrl, { true }) {
+                // The page is the bundle, so the replacement bridge must be scoped to the bundle's origin as the real one is.
+                val fixtureBridge = com.hobbycoders.aishuffle.ui.NativeVoiceBridge(activity, view, MobileUi.ORIGIN, { true }) {
                     throw IllegalStateException("Fixture activity launch refused")
                 }
                 bridgeField.set(activity, fixtureBridge)
