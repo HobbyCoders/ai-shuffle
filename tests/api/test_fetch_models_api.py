@@ -155,7 +155,7 @@ class TestLiveCatalogs:
         assert body["models"] == [
             {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol",
              "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
-            {"id": "gpt-5.6-terra", "label": "gpt-5.6-terra",
+            {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra",
              "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
         ]
         assert captured["url"].startswith(
@@ -289,7 +289,7 @@ class TestLiveCatalogs:
         resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
         assert resp.status_code == 200, resp.text
         assert resp.json()["models"] == [
-            {"id": "gpt-5.6-sol", "label": "gpt-5.6-sol",
+            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol",
              "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
         ]
         assert calls["n"] == 2
@@ -323,7 +323,7 @@ class TestLiveCatalogs:
              "reasoning_capabilities": {"version": 1,
                  "effort_levels": ["none", "low", "medium", "high", "xhigh", "max"],
                  "default_effort": "medium"}},
-            {"id": "gpt-5.7", "label": "gpt-5.7",
+            {"id": "gpt-5.7", "label": "GPT-5.7",
              "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
         ]
         assert captured["url"] == "https://api.openai.com/v1/models"
@@ -395,7 +395,7 @@ class TestUpstreamPath:
         def _handler(request):
             return httpx.Response(200, json={"data": [
                 {"id": "openai/gpt-5.6", "name": "GPT-5.6"},
-                {"id": "meta-llama/llama-3.1"},  # label falls back to id
+                {"id": "meta-llama/llama-3.1"},  # label is derived from the id
             ]})
 
         _install_mock_transport(monkeypatch, _handler)
@@ -406,7 +406,7 @@ class TestUpstreamPath:
         assert body["models"] == [
             {"id": "openai/gpt-5.6", "label": "GPT-5.6",
              "reasoning_capabilities": {"version": 1, "effort_levels": [], "default_effort": None}},
-            {"id": "meta-llama/llama-3.1", "label": "meta-llama/llama-3.1",
+            {"id": "meta-llama/llama-3.1", "label": "Llama 3.1",
              "reasoning_capabilities": {"version": 1, "effort_levels": [], "default_effort": None}},
         ]
 
@@ -451,7 +451,7 @@ class TestUpstreamPath:
         assert body["models"] == [
             {"id": "a", "label": "Model A",
              "reasoning_capabilities": {"version": 1, "effort_levels": [], "default_effort": None}},
-            {"id": "bare-string-id", "label": "bare-string-id"},
+            {"id": "bare-string-id", "label": "Bare String Id"},
         ]
 
     def test_upstream_500_maps_to_502(self, authenticated_client, mock_db, monkeypatch):
@@ -616,13 +616,25 @@ class TestHelperParsing:
         assert mp_api._parse_models_response({"data": "nope"}) == []
         assert mp_api._parse_models_response(123) == []
 
+    def test_parse_unnamed_models_uses_display_names_and_keeps_ids(self):
+        ids = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+        out = mp_api._parse_models_response(
+            {"data": [{"id": model_id} for model_id in ids]}, provider_type="openai",
+        )
+        assert [model["id"] for model in out] == ids
+        assert [model["label"] for model in out] == [
+            "GPT-6 Astra", "GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna",
+        ]
+        bare = mp_api._parse_models_response(["grok-4.6"], provider_type="xai")
+        assert (bare[0]["id"], bare[0]["label"]) == ("grok-4.6", "Grok 4.6")
+
     def test_parse_codex_models_key(self):
         out = mp_api._parse_models_response({"models": [
             {"id": "gpt-5.6-sol"},
             {"id": "gpt-5.7", "name": "GPT-5.7"},
         ]})
         assert out == [
-            {"id": "gpt-5.6-sol", "label": "gpt-5.6-sol",
+            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol",
              "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
             {"id": "gpt-5.7", "label": "GPT-5.7",
              "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},

@@ -107,6 +107,20 @@ def test_openrouter_display_label_strips_author_prefix():
     assert m.display_provider_model_label(None, "openrouter") is None
 
 
+@pytest.mark.parametrize(("model_id", "label", "expected"), [
+    ("gpt-6-astra", "gpt-6-astra", "GPT-6 Astra"),
+    ("gpt-5.6-sol", "gpt-5.6-sol", "GPT-5.6 Sol"),
+    ("gpt-5.6-terra", None, "GPT-5.6 Terra"),
+    ("gpt-5.6-luna", "", "GPT-5.6 Luna"),
+    ("grok-4.6", "grok-4.6", "Grok 4.6"),
+    ("vendor/my-model_v2:free", "vendor/my-model_v2:free", "My Model V2 (free)"),
+    ("gpt-6-astra", "My fast model", "My fast model"),
+    ("gpt-6-astra", "GPT-6-Astra", "GPT-6-Astra"),
+])
+def test_provider_slug_label_fallback(model_id, label, expected):
+    assert m.display_provider_model_label(label, "custom", model_id) == expected
+
+
 def test_label_and_family_resolve_through_legacy_ids():
     assert m.get_model_label("sonnet") == "Sonnet"
     # No more " 1M" decoration — the window is not a variant any more.
@@ -346,6 +360,16 @@ class TestRegistryPayloadProviders:
         models = m.registry_payload()["providers"][0]["models"]
         assert models[0]["label"] == "Claude Fable 5.1"
         assert models[1]["label"] == "Grok 4.6"
+
+    def test_saved_slug_labels_are_display_names_without_rewriting_storage(self, mock_db):
+        stored = [{"id": "gpt-6-astra", "label": "gpt-6-astra"}]
+        db.create_model_provider(
+            provider_id="slug-label", name="OpenAI", provider_type="openai",
+            base_url="https://api.openai.com/v1", models=stored, enabled=True,
+        )
+        model = m.registry_payload()["providers"][0]["models"][0]
+        assert (model["id"], model["label"]) == ("gpt-6-astra", "GPT-6 Astra")
+        assert db.get_model_provider("slug-label")["models_json"] == stored
 
     def test_model_entries_carry_provider_context_and_output_metadata(self, mock_db):
         """Chunk D.4 additive keys: each model entry echoes the provider row's

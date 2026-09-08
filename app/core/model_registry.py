@@ -19,6 +19,7 @@ commit.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
 
@@ -155,15 +156,26 @@ def get_model_label(value: Optional[str]) -> str:
 def display_provider_model_label(
     label: Any,
     provider_type: Optional[str] = None,
+    model_id: Optional[str] = None,
 ) -> Any:
-    """Picker-facing name for a gateway catalog entry.
+    """Prefer catalog/custom names; prettify IDs only when no name was supplied.
 
-    OpenRouter names models ``{author}: {name}`` (e.g. ``Anthropic: Claude
-    Fable 5.1``). The picker already groups by the OpenRouter row, so the
-    author prefix is noise — drop it. Other provider types, and names that
-    are not in that shape, pass through unchanged. Non-strings are returned
-    as-is so callers can keep ``None`` labels.
+    Apply at discovery and projection so already-saved slug labels are repaired
+    without rewriting storage. IDs remain untouched for routing and search.
+    OpenRouter's ``{author}: {name}`` prefix is omitted from display names.
     """
+    if model_id and (not label or label == model_id):
+        # Provider namespaces and variant suffixes belong to the wire ID, not
+        # the primary name. Keep variants visible to distinguish e.g. free rows.
+        slug, _, variant = model_id.rsplit("/", 1)[-1].partition(":")
+        words = re.split(r"[-_]", slug)
+        acronyms = {"gpt": "GPT", "glm": "GLM"}
+        label = " ".join(
+            acronyms.get(word, word[:1].upper() + word[1:]) for word in words
+        )
+        label = re.sub(r"^GPT (\d)", r"GPT-\1", label)
+        if variant:
+            label += f" ({variant})"
     if not isinstance(label, str) or provider_type != "openrouter":
         return label
     if ": " not in label:
@@ -398,7 +410,7 @@ def _providers_payload() -> List[Dict[str, object]]:
                 {
                     "id": model.get("id"),
                     "label": display_provider_model_label(
-                        model.get("label"), row.get("provider_type")
+                        model.get("label"), row.get("provider_type"), model.get("id")
                     ),
                     # Per-model context window: the model's own value, then the
                     # preset roster, then the row's column (see
