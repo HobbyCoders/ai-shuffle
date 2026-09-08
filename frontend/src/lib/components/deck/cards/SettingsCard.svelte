@@ -4,7 +4,7 @@
 	 * SettingsCard - Redesigned Modern Settings UI
 	 *
 	 * Streamlined categories:
-	 * - Account: General, Security, Connections (merged)
+	 * - Account: Appearance, workspace, and timezone
 	 * - Connections: Claude/GitHub auth + Devices (cluster registry)
 	 * - AI: API Keys & Model Selection (merged, compact)
 	 * - API: Rate limits + API users (admin)
@@ -15,8 +15,7 @@
 	import './card-design-system.css';
 	import { auth, isAdmin } from '$lib/stores/auth.svelte';
 	import { api } from '$lib/api/client';
-	import type { Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
-	import type { Project } from '$lib/stores/types';
+	import type { WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import {
 		getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig
 	} from '$lib/api/auth';
@@ -32,7 +31,6 @@
 	// Sub-components
 	import GeneralSection from './settings/GeneralSection.svelte';
 	import DownloadsSection from './settings/DownloadsSection.svelte';
-	import SecuritySection from './settings/SecuritySection.svelte';
 	import ProvidersSection from './settings/providers/ProvidersSection.svelte';
 	import DevicesSection from './settings/DevicesSection.svelte';
 	import ChatBehaviorSection from './settings/ChatBehaviorSection.svelte';
@@ -79,10 +77,6 @@
 			: [])
 	]);
 
-	// Data state
-	let profiles: Profile[] = $state([]);
-	let projects: Project[] = $state([]);
-	let loading = $state(true);
 	let error = $state('');
 
 	// Workspace state
@@ -144,27 +138,10 @@
 
 	async function loadAllData() {
 		await Promise.all([
-			loadData(),
 			loadAuthStatus(),
 			loadWorkspaceConfig(),
 			loadSecurityInstructions()
 		]);
-	}
-
-	async function loadData(quiet = false) {
-		if (!quiet) loading = true;
-		error = '';
-		try {
-			const [profilesRes, projectsRes] = await Promise.all([
-				api.get<Profile[]>('/agents'),
-				api.get<Project[]>('/projects')
-			]);
-			profiles = profilesRes;
-			projects = projectsRes;
-		} catch (e: any) {
-			error = e.detail || 'Failed to load data';
-		}
-		loading = false;
 	}
 
 	async function loadAuthStatus() {
@@ -328,9 +305,9 @@
 	}
 
 	let remoteChange = $state('');
-	watchResources(['settings', 'agents', 'projects'], async () => {
+	watchResources(['settings'], async () => {
 		await Promise.all([
-			loadData(true), loadAuthStatus(), loadWorkspaceConfig(true),
+			loadAuthStatus(), loadWorkspaceConfig(true),
 			...($isAdmin ? [loadSecurityInstructions(true), providers.refreshAll(), providers.refreshProviders()] : [])
 		]);
 	});
@@ -363,8 +340,6 @@
 							onValidateWorkspace={handleValidateWorkspace}
 							onSaveWorkspace={handleSaveWorkspace}
 						/>
-
-						<SecuritySection />
 					</div>
 				{/if}
 

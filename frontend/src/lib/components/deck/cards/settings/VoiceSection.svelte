@@ -5,14 +5,8 @@
 	 * Runtime-editable knobs backed by `GET/PUT /api/v1/settings/voice`:
 	 * the enable flag, the realtime model, the agent's voice (with a preview
 	 * of the selected one, VM21), which OpenAI API-key provider row funds
-	 * calls, whether the agent may manage app configuration directly, and a
-	 * cap on total call length. Refresh on shared settings changes; the PUT is a
-	 * partial update, and an explicit `null` provider clears the pin.
-	 *
-	 * The section also shows which agents a call can dispatch. That roster is
-	 * NOT edited here: an agent joins it by getting a model under its own
-	 * editor (Agents → Provider models → Voice), so this is a read-only mirror
-	 * with a pointer to the place that configures it.
+	 * calls, and a cap on total call length. Refresh on shared settings changes;
+	 * the PUT is a partial update, and an explicit `null` provider clears the pin.
 	 *
 	 * Two traps this section is written around:
 	 *
@@ -28,24 +22,20 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
-	import { AudioLines, Bot, Play, Square, Wrench } from 'lucide-svelte';
+	import { AudioLines, Play, Square } from 'lucide-svelte';
 	import {
 		VOICE_MODELS,
 		VOICE_VOICES,
-		getVoiceAgents,
 		getVoiceProviders,
 		loadVoiceSettings,
 		previewVoice,
 		saveVoiceSettings,
-		type VoiceAgent,
 		type VoiceProvider,
 		type VoiceSettings,
 	} from '$lib/api/voice';
 
 	let settings = $state<VoiceSettings | null>(null);
 	let providers = $state<VoiceProvider[]>([]);
-	let agents = $state<VoiceAgent[]>([]);
-	let agentsLoaded = $state(false);
 	let loading = $state(true);
 	let saving = $state(false);
 	let error = $state('');
@@ -82,17 +72,13 @@
 	onMount(async () => {
 		await refreshSettings();
 		if (!current()) return;
-		// Both lists are non-fatal: a failed read just shows the setup pointer.
-		const [providerList, agentList] = await Promise.allSettled([
-			getVoiceProviders(),
-			getVoiceAgents(),
-		]);
-		if (!current()) return;
-		if (providerList.status === 'fulfilled') providers = providerList.value;
-		else console.warn('[voice] could not list eligible providers', providerList.reason);
-		if (agentList.status === 'fulfilled') agents = agentList.value;
-		else console.warn('[voice] could not list voice agents', agentList.reason);
-		agentsLoaded = true;
+		// A failed provider read is non-fatal: keep the setup pointer visible.
+		try {
+			const providerList = await getVoiceProviders();
+			if (current()) providers = providerList;
+		} catch (e) {
+			if (current()) console.warn('[voice] could not list eligible providers', e);
+		}
 	});
 
 	async function save(patch: Parameters<typeof saveVoiceSettings>[0]) {
@@ -337,71 +323,6 @@
 	{/if}
 </div>
 
-{#if settings}
-	<div class="set-group" data-testid="voice-agent-section">
-		<div class="set-grouphead">
-			<h3><Bot />What the voice agent can do</h3>
-			<p>
-				The voice agent never edits files or runs commands itself. It hands that work to the
-				agents below and keeps you posted — and, optionally, manages the app directly.
-			</p>
-		</div>
-
-		<div class="set-row">
-			<div class="lab">
-				<h4><Wrench class="inline-icon" />Manage app configuration by voice</h4>
-				<p>
-					Let the agent create and change automations, hooks, agents, MCP servers and connectors
-					during a call. Off: it can only dispatch work and report on it.
-				</p>
-			</div>
-			<div class="ctl">
-				<button
-					type="button"
-					class="switch"
-					class:on={settings.voice_app_tools_enabled}
-					role="switch"
-					aria-checked={settings.voice_app_tools_enabled}
-					aria-label="Manage app configuration by voice"
-					disabled={saving}
-					onclick={() => save({ voice_app_tools_enabled: !settings?.voice_app_tools_enabled })}
-				><i></i></button>
-			</div>
-		</div>
-
-		<div class="set-row stack">
-			<div class="lab">
-				<h4>Agents available in calls</h4>
-				<p>
-					An agent joins this list when it has a model under
-					<strong>Agents → edit agent → Provider models → Voice</strong>. The agent you start the
-					call with is used by default; the rest can be asked for by name.
-				</p>
-			</div>
-			<div class="ctl">
-				{#if !agentsLoaded}
-					<p class="msg dim">Loading agents…</p>
-				{:else if agents.length === 0}
-					<p class="msg warn">
-						No agent has a voice model yet, so the voice agent can't dispatch any work. Open an
-						agent and set one under Provider models → Voice.
-					</p>
-				{:else}
-					<ul class="agent-list">
-						{#each agents as agent (agent.id)}
-							<li class="agent-row">
-								<span class="agent-name">{agent.name}</span>
-								{#if agent.description}<span class="agent-desc">{agent.description}</span>{/if}
-								<span class="agent-leg" title={agent.model}>{agent.provider_name} · {agent.model}</span>
-							</li>
-						{/each}
-					</ul>
-				{/if}
-			</div>
-		</div>
-	</div>
-{/if}
-
 <style>
 	.minutes {
 		width: 110px;
@@ -451,58 +372,6 @@
 		}
 	}
 
-	:global(.inline-icon) {
-		width: 14px;
-		height: 14px;
-		margin-right: 6px;
-		vertical-align: -2px;
-		color: var(--muted-foreground);
-	}
-
-	/* Read-only roster of voice-dispatchable agents. */
-	.agent-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-	.agent-row {
-		display: flex;
-		align-items: baseline;
-		gap: 10px;
-		min-width: 0;
-		padding: 7px 10px;
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
-		font-size: 12.5px;
-	}
-	.agent-name {
-		font-weight: 600;
-		color: var(--foreground);
-		white-space: nowrap;
-	}
-	.agent-desc {
-		flex: 1;
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		color: var(--muted-foreground);
-	}
-	.agent-leg {
-		margin-left: auto;
-		flex-shrink: 0;
-		max-width: 45%;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font-family: var(--font-mono, monospace);
-		font-size: 11px;
-		color: var(--muted-foreground);
-	}
-
 	.msg {
 		margin: 0;
 		font-size: 12.5px;
@@ -512,11 +381,5 @@
 	}
 	.msg.err {
 		color: var(--destructive);
-	}
-	.msg.warn {
-		color: var(--warning, #d97706);
-	}
-	.msg.dim {
-		color: var(--muted-foreground);
 	}
 </style>

@@ -399,7 +399,8 @@ def _parse_models_response(
     ``{"models": [{"slug": ...}]}`` (also ``id`` / ``model``), and a bare list
     of entries. Each entry may be an object (``id`` / ``model`` / ``slug``
     required; ``label`` / ``name`` / ``display_name`` optional, falling back to
-    the id) or a bare string id. Entries without a usable id are skipped.
+    a readable name derived from the id) or a bare string id. Entries without
+    a usable id are skipped.
     The list is capped at ``_FETCH_MODELS_CAP``.
 
     An upstream-advertised per-model window (``context_length`` /
@@ -444,7 +445,7 @@ def _parse_models_response(
             continue
         if not model_id:
             continue
-        label = model_registry.display_provider_model_label(label, provider_type)
+        label = model_registry.display_provider_model_label(label, provider_type, model_id)
         model: Dict[str, Any] = {"id": model_id, "label": label}
         if context_window is not None:
             model["context_window"] = context_window

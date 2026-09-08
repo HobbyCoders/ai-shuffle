@@ -1444,11 +1444,11 @@ class TaskRegistry:
             for task_id in ids - self._wake_suppressed.get(session_id, set())
         )
 
-    def get_all(self, session_id: str, *, limit: int = 50) -> List[Dict[str, Any]]:
+    def get_all(self, session_id: str, *, limit: Optional[int] = 50) -> List[Dict[str, Any]]:
         """Running + recently-finished tasks, newest-first, each as a wire dict.
 
         Ordered by ``updated_at`` so just-finished tasks surface near the top,
-        then truncated to ``limit``.
+        then truncated to ``limit`` (None returns every retained record).
 
         The retention store is merged in behind the live map. ``TaskList`` is how
         a woken parent finds the id of the worker it was woken about, and it used

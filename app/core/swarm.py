@@ -279,30 +279,3 @@ def peer_rows(session_id):
                 rows.append(dict(name=task["id"], ref=target, worker_session_id=target,
                     task_id=task["task_id"], status=task["status"], kind="subagent", description=task["title"]))
     return rows
-
-def make_roster(supplier):
-    def roster(data, ctx):
-        rows = peer_rows(supplier())
-        return [r for r in rows if not data.get("running_only") or r["status"] == "running"]
-    return roster
-
-def make_message(supplier):
-    async def message(data, ctx):
-        from fluid.events.ops import AgentMessage
-        from app.core.session_pool import get_session_pool
-        session_id = supplier()
-        address = str(data.get("to") or "")
-        matches = [r for r in peer_rows(session_id) if address in {
-            r["name"], r["worker_session_id"], f"{r['name']} [{r['ref']}]"}]
-        if len(matches) != 1:
-            return ToolOutcome(text="Unknown or ambiguous swarm peer; use ListAgents", is_error=True)
-        row = matches[0]
-        if row["status"] != "running":
-            return ToolOutcome(text="Swarm peer is not running", is_error=True)
-        state = get_session_pool().get(row["worker_session_id"])
-        engine = getattr(getattr(state, "adapter", None), "engine", None)
-        if engine is None or getattr(state.adapter, "provider_kind", None) == "delegated":
-            return ToolOutcome(text="Peer has no live native messaging engine", is_error=True)
-        await engine.submit(AgentMessage(text=str(data.get("message") or ""), sender=session_id))
-        return ToolOutcome(text=f"Delivered to {row['name']}")
-    return message

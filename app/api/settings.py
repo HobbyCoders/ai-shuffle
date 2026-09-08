@@ -539,12 +539,6 @@ VOICE_VOICE_KEY = "voice_voice"
 VOICE_PROVIDER_ID_KEY = "voice_provider_id"
 VOICE_MAX_CALL_MINUTES_KEY = "voice_max_call_minutes"
 
-# Whether the voice agent may use the app-configuration tools (automations,
-# hooks, agents, MCP servers, connectors, subagents) directly. Off = the agent
-# can only dispatch work and report on it.
-VOICE_APP_TOOLS_KEY = "voice_app_tools_enabled"
-DEFAULT_VOICE_APP_TOOLS = True
-
 
 class VoiceSettingsResponse(BaseModel):
     """Current voice-mode configuration."""
@@ -553,6 +547,7 @@ class VoiceSettingsResponse(BaseModel):
     voice_voice: str
     voice_provider_id: Optional[str] = None
     voice_max_call_minutes: int
+    # Compatibility field for older clients; app tools are no longer a preference.
     voice_app_tools_enabled: bool = True
 
 
@@ -568,6 +563,7 @@ class VoiceSettingsUpdateRequest(BaseModel):
     voice_voice: Optional[str] = None
     voice_provider_id: Optional[str] = None
     voice_max_call_minutes: Optional[int] = None
+    # Deprecated compatibility input: accepted but ignored, including False/null.
     voice_app_tools_enabled: Optional[bool] = None
 
 
@@ -599,27 +595,20 @@ def get_voice_settings() -> dict:
 
     provider_id = (database.get_system_setting(VOICE_PROVIDER_ID_KEY) or "").strip() or None
 
-    raw_app_tools = database.get_system_setting(VOICE_APP_TOOLS_KEY)
-    app_tools = (
-        _truthy_setting(raw_app_tools)
-        if (raw_app_tools or "").strip()
-        else DEFAULT_VOICE_APP_TOOLS
-    )
-
     return {
         "voice_mode_enabled": _truthy_setting(database.get_system_setting(VOICE_MODE_ENABLED_KEY)),
         "voice_model": model,
         "voice_voice": voice,
         "voice_provider_id": provider_id,
         "voice_max_call_minutes": max_minutes,
-        "voice_app_tools_enabled": app_tools,
+        "voice_app_tools_enabled": True,
     }
 
 
 @router.get("/voice", response_model=VoiceSettingsResponse)
 async def get_voice_settings_endpoint(token: str = Depends(require_auth)):
     """Get the current voice-mode settings (defaults applied)."""
-    # get_voice_settings() is six synchronous reads — one hop for all of them.
+    # Keep all synchronous settings reads in one worker hop.
     return VoiceSettingsResponse(**await run_sync(get_voice_settings))
 
 
@@ -679,12 +668,6 @@ async def update_voice_settings(
         if "voice_mode_enabled" in provided:
             database.set_system_setting(
                 VOICE_MODE_ENABLED_KEY, "true" if request.voice_mode_enabled else "false"
-            )
-
-        if "voice_app_tools_enabled" in provided:
-            database.set_system_setting(
-                VOICE_APP_TOOLS_KEY,
-                "true" if request.voice_app_tools_enabled else "false",
             )
 
         if "voice_provider_id" in provided:

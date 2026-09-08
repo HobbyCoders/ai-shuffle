@@ -1023,11 +1023,11 @@ async def attach_voice_call(
 
     # The app-configuration tools the voice agent may use directly. Same
     # admission rule as a chat session's app-config server: never for an
-    # API-key user, and only while the Settings toggle is on. Admin is
-    # asserted for the write tools exactly as chat does (``is_admin=True``)
+    # API-key user. Always available to the owner, independent of legacy
+    # settings. Admin is asserted for write tools as chat does (``is_admin=True``)
     # because the caller has already passed the same cookie/pairing gate.
     app_tools: List[Any] = []
-    if voice_settings.get("voice_app_tools_enabled", True) and not session_row.get("api_user_id"):
+    if not session_row.get("api_user_id"):
         app_tools = await run_sync(
             _voice_app_tools, session_row.get("project_id"),
         )

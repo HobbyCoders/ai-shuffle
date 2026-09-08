@@ -529,7 +529,8 @@ class HarnessAdapter(ProviderAdapter):
             try:
                 from app.core.task_dispatch import make_fluid_dispatcher
 
-                from app.core.swarm import make_handler, make_message, make_roster, make_recovery
+                from app.core.swarm import make_handler, make_recovery
+                from app.core.agent_messaging import make_message, make_roster
                 native_ctx.extra["swarm"] = make_handler(self._resolve_app_session_id)
                 native_ctx.extra["recover_background"] = make_recovery(self._resolve_app_session_id)
                 native_ctx.extra["agent_roster"] = make_roster(self._resolve_app_session_id)

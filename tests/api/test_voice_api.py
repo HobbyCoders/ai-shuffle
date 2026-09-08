@@ -127,6 +127,18 @@ class TestUnauthenticated:
 # ============================================================================
 
 class TestVoiceSettings:
+    def test_api_key_cannot_update_voice_settings(self, client, mock_db):
+        from app.api.auth import hash_api_key
+
+        db.create_api_user("voice-integration", "Integration", hash_api_key("aih_voice_test"))
+        resp = client.put(
+            VOICE_SETTINGS,
+            headers={"Authorization": "Bearer aih_voice_test"},
+            json={"voice_app_tools_enabled": True, "voice_max_call_minutes": 15},
+        )
+        assert resp.status_code == 403, resp.text
+        assert db.get_system_setting("voice_max_call_minutes") is None
+
     def test_defaults(self, authenticated_client, mock_db):
         resp = authenticated_client.get(VOICE_SETTINGS)
         assert resp.status_code == 200, resp.text
@@ -156,9 +168,31 @@ class TestVoiceSettings:
             "voice_voice": "cedar",
             "voice_provider_id": pid,
             "voice_max_call_minutes": 30,
-            "voice_app_tools_enabled": False,
+            "voice_app_tools_enabled": True,
         }
         # Persisted: a fresh GET returns the same values.
+        assert authenticated_client.get(VOICE_SETTINGS).json() == resp.json()
+
+    @pytest.mark.parametrize("stored", [None, "false", "0", "true"])
+    def test_app_tools_ignore_retired_setting(self, authenticated_client, mock_db, stored):
+        if stored is not None:
+            db.set_system_setting("voice_app_tools_enabled", stored)
+        resp = authenticated_client.get(VOICE_SETTINGS)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["voice_app_tools_enabled"] is True
+
+    @pytest.mark.parametrize("legacy_value", [False, True, None])
+    def test_app_tools_legacy_updates_are_ignored(
+        self, authenticated_client, mock_db, legacy_value
+    ):
+        resp = authenticated_client.put(VOICE_SETTINGS, json={
+            "voice_app_tools_enabled": legacy_value,
+            "voice_max_call_minutes": 15,
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["voice_app_tools_enabled"] is True
+        assert resp.json()["voice_max_call_minutes"] == 15
+        assert db.get_system_setting("voice_app_tools_enabled") is None
         assert authenticated_client.get(VOICE_SETTINGS).json() == resp.json()
 
     def test_prompt_overrides_are_gone(self, authenticated_client, mock_db):
@@ -810,10 +844,11 @@ class TestVoiceCallAttach:
     def _tool_names(self, sock):
         return [t["name"] for t in sock.sent[0]["session"]["tools"]]
 
+    @pytest.mark.parametrize("legacy_setting", ["false", "true"])
     def test_browser_attach_declares_app_tools_and_greets(
-        self, authenticated_client, mock_db, sidebands
+        self, authenticated_client, mock_db, sidebands, legacy_setting
     ):
-        _enable_voice()
+        _enable_voice(voice_app_tools_enabled=legacy_setting)
         _make_provider()
         _mk_voice_session()
 
@@ -850,26 +885,17 @@ class TestVoiceCallAttach:
             if f.get("type") == "conversation.item.create"
             and f["item"].get("type") == "message"
         ]
+        assert self._tool_names(sidebands[1]) == names
+        assert voice_bridge.APP_TOOLS_INSTRUCTIONS in sidebands[1].sent[0]["session"]["instructions"]
         authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
 
-    def test_app_tools_toggle_and_api_users_are_dispatch_only(
-        self, authenticated_client, mock_db, sidebands
+    @pytest.mark.parametrize("legacy_setting", ["false", "true"])
+    def test_api_users_are_dispatch_only(
+        self, authenticated_client, mock_db, sidebands, legacy_setting
     ):
-        _enable_voice(voice_app_tools_enabled="false")
+        _enable_voice(voice_app_tools_enabled=legacy_setting)
         _make_provider()
-        _mk_voice_session()
-        authenticated_client.post(
-            f"{VOICE_ROOT}/sessions/{SESSION_ID}/call", json={"call_id": "rtc_1"}
-        )
-        assert self._tool_names(sidebands[0]) == [
-            "dispatch_agent", "check_agent", "list_agents", "message_agent",
-            "stop_agent", "respond_approval", "WebSearch", "WebFetch",
-        ]
-        assert voice_bridge.APP_TOOLS_INSTRUCTIONS not in sidebands[0].sent[0]["session"]["instructions"]
-        authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
-
-        # Toggle on, but an API-key user's session never gets config tools.
-        _enable_voice(voice_app_tools_enabled="true")
+        # An API-key user's session never gets config tools.
         db.create_api_user("api-1", "API One", "hash-1")
         db.create_session(
             session_id="voice-api-user", profile_id="default", title="Voice session",
@@ -878,10 +904,11 @@ class TestVoiceCallAttach:
         authenticated_client.post(
             f"{VOICE_ROOT}/sessions/voice-api-user/call", json={"call_id": "rtc_2"}
         )
-        assert self._tool_names(sidebands[1]) == [
+        assert self._tool_names(sidebands[0]) == [
             "dispatch_agent", "check_agent", "list_agents", "message_agent",
             "stop_agent", "respond_approval", "WebSearch", "WebFetch",
         ]
+        assert voice_bridge.APP_TOOLS_INSTRUCTIONS not in sidebands[0].sent[0]["session"]["instructions"]
         authenticated_client.post(f"{VOICE_ROOT}/sessions/voice-api-user/hangup")
 
     def test_native_tools_cannot_shadow_server_web_tools(

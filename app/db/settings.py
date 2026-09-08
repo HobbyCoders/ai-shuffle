@@ -31,12 +31,20 @@ class UserPreferenceRow(TypedDict):
 # User Preferences Operations
 # ============================================================================
 
+# Read JSONB as JSON text so the code below decodes exactly once. Psycopg
+# otherwise already decodes it, and json.loads("1") corrupts a string preference
+# (notably composer.fastMode) into a number on both SELECT and RETURNING paths.
+_PREFERENCE_COLUMNS = (
+    "id, user_type, user_id, key, CAST(value AS TEXT) AS value, updated_at, revision"
+)
+
+
 def get_user_preference(user_type: str, user_id: str, key: str) -> Optional[UserPreferenceRow]:
     """Get a user preference by key"""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM user_preferences WHERE user_type = %s AND user_id = %s AND key = %s",
+            f"SELECT {_PREFERENCE_COLUMNS} FROM user_preferences WHERE user_type = %s AND user_id = %s AND key = %s",
             (user_type, user_id, key)
         )
         row = cursor.fetchone()
@@ -79,24 +87,24 @@ def set_user_preference(user_type: str, user_id: str, key: str, value: Any, only
 
         if only_if_missing or expected_version is None:
             cursor.execute(
-                """INSERT INTO user_preferences (user_type, user_id, key, value, updated_at, revision)
+                f"""INSERT INTO user_preferences (user_type, user_id, key, value, updated_at, revision)
                    VALUES (%s, %s, %s, %s, %s, %s)
-                   ON CONFLICT(user_type, user_id, key) DO NOTHING RETURNING *""",
+                   ON CONFLICT(user_type, user_id, key) DO NOTHING RETURNING {_PREFERENCE_COLUMNS}""",
                 (user_type, user_id, key, value_json, now, revision),
             )
         elif expected_version is not _UNCONDITIONAL:
             cursor.execute(
-                """UPDATE user_preferences SET value = %s, updated_at = %s, revision = %s
-                   WHERE user_type = %s AND user_id = %s AND key = %s AND revision = %s RETURNING *""",
+                f"""UPDATE user_preferences SET value = %s, updated_at = %s, revision = %s
+                   WHERE user_type = %s AND user_id = %s AND key = %s AND revision = %s RETURNING {_PREFERENCE_COLUMNS}""",
                 (value_json, now, revision, user_type, user_id, key, expected_version))
         else:
             cursor.execute(
-                """INSERT INTO user_preferences (user_type, user_id, key, value, updated_at, revision)
+                f"""INSERT INTO user_preferences (user_type, user_id, key, value, updated_at, revision)
                    VALUES (%s, %s, %s, %s, %s, %s)
                    ON CONFLICT(user_type, user_id, key) DO UPDATE SET
                        value = excluded.value,
                        updated_at = excluded.updated_at,
-                       revision = excluded.revision RETURNING *""",
+                       revision = excluded.revision RETURNING {_PREFERENCE_COLUMNS}""",
                 (user_type, user_id, key, value_json, now, revision)
             )
         result = row_to_dict(cursor.fetchone())
@@ -105,7 +113,7 @@ def set_user_preference(user_type: str, user_id: str, key: str, value: Any, only
             if not only_if_missing:
                 raise PreferenceConflict('Preference changed elsewhere; refresh before editing')
             cursor.execute(
-                "SELECT * FROM user_preferences WHERE user_type = %s AND user_id = %s AND key = %s",
+                f"SELECT {_PREFERENCE_COLUMNS} FROM user_preferences WHERE user_type = %s AND user_id = %s AND key = %s",
                 (user_type, user_id, key),
             )
             result = row_to_dict(cursor.fetchone())
@@ -141,7 +149,7 @@ def get_all_user_preferences(user_type: str, user_id: str) -> List[UserPreferenc
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM user_preferences WHERE user_type = %s AND user_id = %s",
+            f"SELECT {_PREFERENCE_COLUMNS} FROM user_preferences WHERE user_type = %s AND user_id = %s",
             (user_type, user_id)
         )
         rows = rows_to_list(cursor.fetchall())

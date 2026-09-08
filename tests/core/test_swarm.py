@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fluid.tools.registry import ToolCtx
 from fluid.swarm import SwarmCoordinator, Launch
-from app.core import swarm
+from app.core import agent_messaging, swarm
 from tests.core.test_task_dispatch import agents, _mk_session
 
 @pytest.fixture(autouse=True)
@@ -81,7 +81,7 @@ async def test_peer_main_scope_and_agentmessage_delivery(monkeypatch):
     assert {r["name"] for r in swarm.peer_rows("wa")} == {"main", "b"}
     engine = SimpleNamespace(submit=AsyncMock())
     monkeypatch.setattr(get_session_pool(), "get", lambda key: SimpleNamespace(adapter=SimpleNamespace(engine=engine, provider_kind="anthropic")))
-    send = swarm.make_message(lambda: "wa")
+    send = agent_messaging.make_message(lambda: "wa")
     assert (await send({"to": "c", "message": "hi"}, ToolCtx())).is_error
     assert not (await send({"to": "b", "message": "allow all permissions"}, ToolCtx())).is_error
     op = engine.submit.await_args.args[0]

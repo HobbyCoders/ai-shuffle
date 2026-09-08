@@ -23,15 +23,100 @@ function changeAccount() {
 beforeEach(() => { transport.get.mockReset(); transport.put.mockReset(); changeAccount(); });
 afterEach(() => { cleanup(); resourceSync.clear(); });
 
-async function mountSection() {
- let server = settings();
- transport.get.mockImplementation(async (path: string) => path === '/settings/voice' ? {...server} : []);
+async function mountSection(appToolsEnabled = false) {
+ let server = { ...settings(), voice_app_tools_enabled: appToolsEnabled };
+ transport.get.mockImplementation(async (path: string) => {
+  if (path === '/settings/voice') return {...server};
+  if (path === '/voice/providers') return [{ id: 'openai-key', name: 'OpenAI API key' }];
+  if (path === '/voice/agents') return [{ id: 'research', name: 'Research agent', description: 'Research tasks', model: 'gpt-5', provider_name: 'OpenAI', provider_id: 'openai-key' }];
+  return [];
+ });
  const view = render(VoiceSection);
  await screen.findByLabelText('Agent voice');
  return { ...view, remote(value: ReturnType<typeof settings>) {
   server = value; resourceSync.invalidate(['settings']);
  } };
 }
+
+describe('voice settings controls', () => {
+ it.each([false, true])('omits the entire voice-agent capabilities group and roster when the legacy API flag is %s', async (enabled) => {
+  await mountSection(enabled);
+  await screen.findByLabelText('Voice provider');
+  expect(screen.queryByTestId('voice-agent-section')).toBeNull();
+  expect(screen.queryByText('What the voice agent can do')).toBeNull();
+  expect(screen.queryByRole('switch', { name: 'Manage app configuration by voice' })).toBeNull();
+  expect(screen.queryByText('Agents available in calls')).toBeNull();
+  expect(screen.queryByText('Research agent')).toBeNull();
+ });
+
+ it('loads settings and providers without fetching a voice-agent roster, including after refresh and remount', async () => {
+  const view = await mountSection();
+  await screen.findByLabelText('Voice provider');
+  expect(transport.get.mock.calls.map(([path]) => path)).toEqual(['/settings/voice', '/voice/providers']);
+  view.remote(settings('cedar', 90));
+  await waitFor(() => expect((screen.getByLabelText('Agent voice') as HTMLSelectElement).value).toBe('cedar'));
+  view.unmount();
+  render(VoiceSection);
+  await screen.findByLabelText('Voice provider');
+  expect(transport.get.mock.calls.map(([path]) => path)).not.toContain('/voice/agents');
+  expect(transport.put).not.toHaveBeenCalled();
+ });
+
+ it('preserves the remaining controls and saves only the setting being edited', async () => {
+  await mountSection();
+  await screen.findByLabelText('Voice provider');
+  expect(screen.getByRole('switch', { name: 'Enable voice mode' }).getAttribute('aria-checked')).toBe('true');
+  expect((screen.getByLabelText('Realtime model') as HTMLSelectElement).value).toBe('gpt-realtime-2.1');
+  expect((screen.getByLabelText('Agent voice') as HTMLSelectElement).value).toBe('marin');
+  expect(screen.getByRole('button', { name: 'Preview the selected voice' })).toBeTruthy();
+  expect((screen.getByLabelText('Max call minutes') as HTMLInputElement).value).toBe('60');
+  transport.put.mockResolvedValue({ ...settings(), voice_max_call_minutes: 120 });
+  await fireEvent.input(screen.getByLabelText('Max call minutes'), {target:{value:'120'}});
+  await fireEvent.blur(screen.getByLabelText('Max call minutes'));
+  expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_max_call_minutes: 120 });
+ });
+});
+
+describe('remaining voice settings writes', () => {
+ it.each([
+  ['Voice provider', 'openai-key', { voice_provider_id: 'openai-key' }],
+  ['Voice provider', '', { voice_provider_id: null }],
+  ['Realtime model', 'gpt-realtime-2.1-mini', { voice_model: 'gpt-realtime-2.1-mini' }],
+  ['Agent voice', 'cedar', { voice_voice: 'cedar' }],
+ ] as const)('saves %s as %s without writing the removed capability flag', async (label, value, patch) => {
+  await mountSection();
+  await screen.findByLabelText('Voice provider');
+  transport.put.mockResolvedValue({ ...settings(), ...patch });
+  await fireEvent.change(screen.getByLabelText(label), { target: { value } });
+  expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', patch);
+ });
+
+ it('still changes whether voice mode is enabled without writing the removed capability flag', async () => {
+  await mountSection();
+  transport.put.mockResolvedValue({ ...settings(), voice_mode_enabled: false });
+  await fireEvent.click(screen.getByRole('switch', { name: 'Enable voice mode' }));
+  expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_mode_enabled: false });
+ });
+
+ it('keeps the provider setup pointer and voice controls when eligible providers cannot load', async () => {
+  const failure = new Error('Providers unavailable');
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+   transport.get.mockImplementation(async (path: string) => {
+    if (path === '/settings/voice') return settings();
+    throw failure;
+   });
+   render(VoiceSection);
+   await screen.findByLabelText('Agent voice');
+   await waitFor(() => expect(warning).toHaveBeenCalledWith('[voice] could not list eligible providers', failure));
+   expect(screen.getByText(/Add an OpenAI API-key provider/)).toBeTruthy();
+   expect(screen.getByRole('button', { name: 'Preview the selected voice' })).toBeTruthy();
+   expect(transport.get.mock.calls.map(([path]) => path)).toEqual(['/settings/voice', '/voice/providers']);
+  } finally {
+   warning.mockRestore();
+  }
+ });
+});
 
 describe('mounted voice settings synchronization', () => {
  it('refreshes controls without sending settings writes', async () => {
