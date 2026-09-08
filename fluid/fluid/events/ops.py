@@ -91,8 +91,10 @@ class AgentMessage(Op):
     :mod:`fluid.context.peer`). Delivery adapts to what the receiver is doing —
     queued for its next tool result while a turn runs, or appended as a
     peer-wrapped user message if the response ends without another tool call.
-    An idle receiver starts an ordinary user-role turn. During shutdown or
-    the short terminal-publication window, submission raises an explicit
+    An idle receiver starts an ordinary user-role turn unless ``wake=False``;
+    hosts that own turn scheduling can disable that wake, in which case an idle
+    receiver raises RuntimeError without accepting the message. During shutdown
+    or the short terminal-publication window, submission raises an explicit
     error instead of acknowledging traffic the receiver cannot consume.
 
     ``sender`` is the name the receiver sees in the marker. ``id`` is the same
@@ -103,6 +105,7 @@ class AgentMessage(Op):
     text: str
     sender: str
     id: str | None = None
+    wake: bool = True
 
 
 @dataclass(kw_only=True)

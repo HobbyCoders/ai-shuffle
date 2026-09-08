@@ -336,7 +336,12 @@ def test_delegated_argv_emits_allowed_tools() -> None:
     )
     argv = loop._build_argv()
     assert argv[argv.index("--allowed-tools") + 1] == "Read,Grep"
-    assert argv[argv.index("--disallowed-tools") + 1] == "Bash"
+    assert argv[argv.index("--disallowed-tools") + 1] == "Bash,EnterPlanMode,ExitPlanMode"
 
     unrestricted = DelegatedLoop(store=MemoryStore(), model="m")
-    assert "--allowed-tools" not in unrestricted._build_argv()
+    unrestricted_argv = unrestricted._build_argv()
+    assert "--allowed-tools" not in unrestricted_argv
+    assert (
+        unrestricted_argv[unrestricted_argv.index("--disallowed-tools") + 1]
+        == "EnterPlanMode,ExitPlanMode"
+    )

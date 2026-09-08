@@ -1391,7 +1391,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             # awaiting, so a sender never has to check "is it busy?" and race
             # the answer. Busy: queue like a steer, rendered in the peer marker
             # so it cannot borrow the user's authority. Idle: an ordinary turn,
-            # which is what wakes a parked session.
+            # unless the host owns wake scheduling and disables it on the op.
             from fluid.tools.hardening import defang_harness_markers
 
             if self._background_closed or self._interrupted.is_set():
@@ -1402,6 +1402,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                     raise RuntimeError("receiver is finishing its turn; retry the peer message")
                 self._pending_steers.append(replace(op, text=text))
             else:
+                if not op.wake:
+                    raise RuntimeError("no turn is running; peer message was not delivered")
                 from fluid.context.peer import format_peer_message
 
                 self._interrupted.clear()

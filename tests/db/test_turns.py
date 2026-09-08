@@ -441,9 +441,10 @@ def test_requeue_keeps_position_and_frees_slot(mock_db):
 # Reaping dead-lease live turns
 # ---------------------------------------------------------------------------
 
-def test_reap_requeues_user_and_queue_aborts_others(mock_db):
-    # A user turn on a dead (expired) lease -> requeued.
-    tu = turns.enqueue_turn("sUser", "user")
+@pytest.mark.parametrize("source", ["user", "queue", "agent_message"])
+def test_reap_requeues_messages_and_aborts_automatic_work(mock_db, source):
+    # Accepted messages on a dead lease stay queued for the replacement runner.
+    tu = turns.enqueue_turn("sUser", source, prompt="preserve this message")
     run_dead = runs.claim_run("sUser", "runner", -1)  # already-expired lease
     turns.start_turn(tu["id"], run_id=run_dead["id"])
 
@@ -457,12 +458,15 @@ def test_reap_requeues_user_and_queue_aborts_others(mock_db):
 
     assert turns.get_turn(tu["id"])["state"] == "queued"
     assert turns.get_turn(tu["id"])["run_id"] is None
+    assert turns.get_turn(tu["id"])["prompt"] == "preserve this message"
+    assert turns.get_turn(tu["id"])["position"] == tu["position"]
     aborted = turns.get_turn(ta["id"])
     assert aborted["state"] == "aborted"
     assert aborted["stop_reason"] == "lease_expired"
 
 
-def test_reap_aborts_interrupted_user_turns_instead_of_requeueing(mock_db):
+@pytest.mark.parametrize("source", ["user", "queue", "agent_message"])
+def test_reap_aborts_interrupted_messages_instead_of_requeueing(mock_db, source):
     """A dead-lease turn the user asked to STOP must never be retried.
 
     Requeueing an ``interrupting``/``draining`` user turn re-ran the very
@@ -471,12 +475,12 @@ def test_reap_aborts_interrupted_user_turns_instead_of_requeueing(mock_db):
     (the fluid-leg interrupt-replay bug). Only ``running`` user/queue turns
     (a genuine runner crash) are retried.
     """
-    ti = turns.enqueue_turn("sInt", "user")
+    ti = turns.enqueue_turn("sInt", source)
     run_dead = runs.claim_run("sInt", "runner", -1)
     turns.start_turn(ti["id"], run_id=run_dead["id"])
     assert turns.interrupt_turn("sInt", "stop") is not None
 
-    td = turns.enqueue_turn("sDrain", "user")
+    td = turns.enqueue_turn("sDrain", source)
     run_dead2 = runs.claim_run("sDrain", "runner", -1)
     turns.start_turn(td["id"], run_id=run_dead2["id"])
     turns.interrupt_turn("sDrain", "stop")

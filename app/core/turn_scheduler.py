@@ -904,6 +904,23 @@ def _dedupe_frames_by_task_id(
     return out
 
 
+async def on_agent_message(session_id: str, sender: str, text: str) -> str | None:
+    """Queue peer traffic that cannot join an app-owned live turn.
+
+    Keep it separate from terminal task wakes: those merge their prompts from
+    completion frames and must not overwrite a peer's progress message. The
+    shared context-wake path preserves attribution, bindings, and Stop's latch.
+    """
+    from fluid.context.peer import format_peer_message
+    from fluid.tools.hardening import defang_harness_markers
+
+    prompt = format_peer_message(sender, defang_harness_markers(text)).strip()
+    turn = await _enqueue_context_wake(session_id, "agent_message", [], [], prompt)
+    if turn.get("id"):
+        kick(session_id)
+    return turn.get("id")
+
+
 async def _enqueue_context_wake(
     session_id: str,
     source: str,
@@ -921,21 +938,16 @@ async def _enqueue_context_wake(
     row is actually written, so it refuses too. Answers a turn-shaped dict with
     ``id=None`` — the caller only logs the id and kicks — so a refusal enqueues
     nothing and starts nothing."""
-    try:
-        from app.core.task_registry import task_registry
+    from app.core.task_registry import task_registry
 
-        if task_registry.is_user_stopped(session_id):
-            logger.info(
-                "turn_scheduler: refusing a %s wake for %s — the user stopped "
-                "this session (tasks=%s)",
-                source, session_id, task_ids,
-            )
-            return {"id": None, "session_id": session_id, "source": source}
-    except Exception:  # noqa: BLE001 — the guard never breaks an enqueue.
-        logger.debug(
-            "turn_scheduler: stop-latch check failed for %s", session_id,
-            exc_info=True,
+    generation = task_registry.stop_generation(session_id)
+    if task_registry.is_user_stopped(session_id):
+        logger.info(
+            "turn_scheduler: refusing a %s wake for %s — the user stopped "
+            "this session (tasks=%s)",
+            source, session_id, task_ids,
         )
+        return {"id": None, "session_id": session_id, "source": source}
     context = await asyncio.to_thread(_latest_context_turn, session_id) or {}
     payload = _context_payload(context)
     # One task_id, one frame — the wake turn's payload is what a later merge
@@ -983,6 +995,11 @@ async def _enqueue_context_wake(
         payload=payload,
         parent_turn_id=context.get("id"),
     )
+    # Stop may have already drained the queue while the DB work was pending.
+    # A newer user message can clear the latch, but not this generation fence.
+    if task_registry.stop_invalidated(session_id, generation):
+        await asyncio.to_thread(turns_db.remove_queued_turn, turn["id"])
+        return {"id": None, "session_id": session_id, "source": source}
     note_wake_pending(session_id)
     return turn
 

@@ -91,7 +91,9 @@ def make_roster(supplier):
 
 def make_message(supplier):
     async def message(data, ctx):
+        from app.core import session_runtime, turn_scheduler
         from app.core.session_pool import get_session_pool
+        from app.core.task_registry import task_registry
 
         session_id = supplier()
         address = str(data.get("to") or "").strip()
@@ -116,22 +118,38 @@ def make_message(supplier):
                 text=f"Agent {row['name']} is not running; this host cannot resume finished workers",
                 is_error=True,
             )
-        state = get_session_pool().get(row["worker_session_id"])
+        target = row["worker_session_id"]
+        if task_registry.is_user_stopped(target):
+            return ToolOutcome(
+                text=f"Could not deliver to {row['name']}: receiver was stopped",
+                is_error=True,
+            )
+        state = get_session_pool().get(target)
         adapter = getattr(state, "adapter", None)
         engine = getattr(adapter, "engine", None)
-        if engine is None or getattr(adapter, "provider_kind", None) == "delegated":
+        if getattr(adapter, "provider_kind", None) == "delegated":
             return ToolOutcome(
                 text="Peer has no live native messaging engine", is_error=True
             )
-        try:
-            await engine.submit(
-                AgentMessage(text=str(data.get("message") or ""), sender=session_id)
-            )
-        except RuntimeError as exc:
-            # A closing engine can refuse an otherwise valid peer.
+        text = str(data.get("message") or "")
+        if engine is not None and session_runtime.get_live_runtime(target) is not None:
+            try:
+                # Only the app queue may start a turn. The atomic no-wake op
+                # also covers a runtime still starting or an engine just done.
+                await engine.submit(AgentMessage(
+                    text=text, sender=session_id, wake=False,
+                ))
+            except RuntimeError:
+                # Refusal means not accepted; keep it on the durable queue.
+                pass
+            else:
+                return ToolOutcome(text=f"Delivered to {row['name']}")
+        turn_id = await turn_scheduler.on_agent_message(target, session_id, text)
+        if not turn_id:
             return ToolOutcome(
-                text=f"Could not deliver to {row['name']}: {exc}", is_error=True
+                text=f"Could not deliver to {row['name']}: receiver was stopped",
+                is_error=True,
             )
-        return ToolOutcome(text=f"Delivered to {row['name']}")
+        return ToolOutcome(text=f"Queued for {row['name']}")
 
     return message

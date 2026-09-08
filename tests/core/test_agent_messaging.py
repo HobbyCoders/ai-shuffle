@@ -10,7 +10,7 @@ from fluid.swarm import Launch, SwarmCoordinator
 from fluid.tools.registry import ToolCtx
 
 from app.core import agent_messaging as messaging
-from app.core import swarm
+from app.core import session_runtime, swarm, turn_scheduler
 from app.core import task_registry as registry_module
 from app.core.session_pool import get_session_pool
 
@@ -23,6 +23,7 @@ def runtime(monkeypatch):
     monkeypatch.setattr(swarm, "coordinators", {})
     engines = {}
     monkeypatch.setattr(get_session_pool(), "get", engines.get)
+    monkeypatch.setattr(session_runtime, "get_live_runtime", engines.get)
     return registry, engines
 
 
@@ -48,6 +49,7 @@ async def test_task_roster_and_delivery(runtime, address):
     op = engine.submit.await_args.args[0]
     assert isinstance(op, AgentMessage)
     assert op.sender == "parent" and op.text == "Check the failure"
+    assert op.wake is False
 
 
 async def test_duplicate_names_require_exact_ref_even_beyond_list_limit(runtime):
@@ -112,30 +114,62 @@ async def test_swarm_scope_and_mixed_roster_deduplicate_worker_identity(runtime)
         assert (await restricted({"to": address, "message": "hi"}, ToolCtx())).is_error
 
 
-@pytest.mark.parametrize("state", ["completed", "missing", "delegated", "closing"])
+@pytest.mark.parametrize("state", ["completed", "delegated", "stopped"])
 async def test_unavailable_targets_report_errors(runtime, state):
     registry, engines = runtime
     engine = worker(runtime, "parent", "worker")
     if state == "completed":
         registry.complete_task("parent", "worker", "completed")
-    elif state == "missing":
-        engines.clear()
     elif state == "delegated":
         engines["worker"].adapter.provider_kind = "delegated"
     else:
-        engine.submit.side_effect = RuntimeError("engine closed")
+        registry.mark_user_stopped("worker")
     result = await messaging.make_message(lambda: "parent")(
         {"to": "Helper", "message": "hi"}, ToolCtx()
     )
     assert result.is_error
-    if state != "closing":
-        engine.submit.assert_not_awaited()
+    engine.submit.assert_not_awaited()
     if state == "completed":
         assert (
             messaging.make_roster(lambda: "parent")({"running_only": True}, ToolCtx())
             == []
         )
         assert messaging.peer_rows("parent")[0]["status"] == "completed"
+
+
+@pytest.mark.parametrize("state", ["missing", "closing", "parked"])
+async def test_unavailable_live_delivery_queues_without_claiming_delivered(
+    runtime, monkeypatch, state
+):
+    _, engines = runtime
+    engine = worker(runtime, "parent", "worker")
+    enqueue = AsyncMock(return_value="queued-turn")
+    monkeypatch.setattr(turn_scheduler, "on_agent_message", enqueue)
+    if state == "missing":
+        engines.clear()
+    elif state == "parked":
+        monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: None)
+    else:
+        engine.submit.side_effect = RuntimeError("receiver is finishing its turn")
+    result = await messaging.make_message(lambda: "parent")(
+        {"to": "Helper", "message": "hi", "sender": "forged"}, ToolCtx()
+    )
+    assert not result.is_error
+    assert result.text == "Queued for Helper"
+    enqueue.assert_awaited_once_with("worker", "parent", "hi")
+    if state != "closing":
+        engine.submit.assert_not_awaited()
+
+
+async def test_queue_stop_refusal_is_not_reported_as_delivery(runtime, monkeypatch):
+    worker(runtime, "parent", "worker")
+    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: None)
+    monkeypatch.setattr(turn_scheduler, "on_agent_message", AsyncMock(return_value=None))
+    result = await messaging.make_message(lambda: "parent")(
+        {"to": "Helper", "message": "hi"}, ToolCtx()
+    )
+    assert result.is_error
+    assert "stopped" in result.text
 
 
 def test_missing_caller_and_non_agent_tasks_do_not_grant_access(runtime):
