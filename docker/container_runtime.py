@@ -583,4 +583,8 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # Entrypoint and maintenance commands execute this absolute script. Python
+    # otherwise searches only /app/docker, not the sibling application package.
+    # Anchor imports to the installed script, never to a caller's working folder.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     sys.exit(main())

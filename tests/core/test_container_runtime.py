@@ -64,6 +64,28 @@ def test_sqlite_rejected_even_with_external_config(settings_factory, tmp_path):
     assert not (tmp_path / "postgres").exists()
 
 
+@pytest.mark.parametrize("working_directory", ["project", "elsewhere"])
+def test_direct_runtime_cli_loads_app_without_pythonpath(settings_factory, tmp_path, working_directory):
+    import subprocess
+    import sys
+
+    project = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.update(AI_SHUFFLE_ENV_FILE="/dev/null", DATABASE_MODE="invalid-probe")
+    result = subprocess.run(
+        [sys.executable, "-I", str(project / "docker/container_runtime.py"), "run"],
+        cwd=project if working_directory == "project" else tmp_path,
+        env=env, capture_output=True, text=True, timeout=20,
+    )
+    # Reach configuration validation without opening a database or starting the
+    # app. The image invokes this absolute script, not an imported test module.
+    assert result.returncode == 1
+    assert "DATABASE_MODE must be auto, embedded, or external" in result.stderr
+    assert "ModuleNotFoundError" not in result.stderr
+    assert not (tmp_path / "postgres").exists()
+
+
 def test_main_diagnostics_keep_type_and_call_site_but_not_secret_values(monkeypatch, capsys):
     def fail_settings():
         raise PermissionError("postgresql://user:private-test-password@host/database")
@@ -310,8 +332,9 @@ def test_real_pg_retains_identity_authenticates_and_dumps_online_offline(setting
         import subprocess
         import sys
         env = {k: v for k, v in os.environ.items() if not k.startswith("POSTGRES_") and k not in {"DATABASE_URL", "DATABASE_MODE", "AI_SHUFFLE_ENV_FILE"}}
-        env.update(AI_SHUFFLE_ENV_FILE="/dev/null", DATA_DIR=str(tmp_path), PYTHONPATH=str(Path(__file__).resolve().parents[2]))
-        streamed = subprocess.run([sys.executable, str(Path(runtime.__file__)), "dump", "--file", "-"], env=env, capture_output=True, timeout=20)
+        env.pop("PYTHONPATH", None)
+        env.update(AI_SHUFFLE_ENV_FILE="/dev/null", DATA_DIR=str(tmp_path))
+        streamed = subprocess.run([sys.executable, "-I", str(Path(runtime.__file__)), "dump", "--file", "-"], env=env, capture_output=True, timeout=20)
         assert streamed.returncode == 0, streamed.stderr.decode()
         assert streamed.stdout.startswith(b"PGDMP")
         assert db.password.encode() not in streamed.stderr
