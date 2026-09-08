@@ -54,6 +54,17 @@ jobs:
     needs: build-frontend
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
+      - name: Normalise release version
+        # Accept v0.8.5, V0.8.5 or 0.8.5 from the dispatch box; tags are already vX.Y.Z.
+        shell: bash
+        run: |
+          raw="$(printf '%s' "$VERSION" | tr -d '[:space:]')"
+          raw="${raw#v}"; raw="${raw#V}"
+          normalised="v${raw}"
+          [[ "$normalised" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo "::error::Invalid release version '$VERSION' (expected vX.Y.Z)"; exit 1; }
+          echo "VERSION=$normalised" >> "$GITHUB_ENV"
+          echo "Releasing $normalised"
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -69,9 +80,7 @@ jobs:
           python-version: '3.12'
 
       - name: Prepare base staging directory
-        run: |
-          [[ "$VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo 'Invalid release version'; exit 1; }
-          python scripts/stage_release.py "staging/ai-shuffle-${VERSION}"
+        run: python scripts/stage_release.py "staging/ai-shuffle-${VERSION}"
 
       - name: Create Windows package
         run: |
@@ -372,6 +381,17 @@ jobs:
     needs: create-release-packages
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
+      - name: Normalise release version
+        # Accept v0.8.5, V0.8.5 or 0.8.5 from the dispatch box; tags are already vX.Y.Z.
+        shell: bash
+        run: |
+          raw="$(printf '%s' "$VERSION" | tr -d '[:space:]')"
+          raw="${raw#v}"; raw="${raw#V}"
+          normalised="v${raw}"
+          [[ "$normalised" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo "::error::Invalid release version '$VERSION' (expected vX.Y.Z)"; exit 1; }
+          echo "VERSION=$normalised" >> "$GITHUB_ENV"
+          echo "Releasing $normalised"
+
       - name: Download release packages
         uses: actions/download-artifact@v4
         with:
@@ -456,6 +476,17 @@ jobs:
       # look for one and fail the macOS build.
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
+      - name: Normalise release version
+        # Accept v0.8.5, V0.8.5 or 0.8.5 from the dispatch box; tags are already vX.Y.Z.
+        shell: bash
+        run: |
+          raw="$(printf '%s' "$VERSION" | tr -d '[:space:]')"
+          raw="${raw#v}"; raw="${raw#V}"
+          normalised="v${raw}"
+          [[ "$normalised" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo "::error::Invalid release version '$VERSION' (expected vX.Y.Z)"; exit 1; }
+          echo "VERSION=$normalised" >> "$GITHUB_ENV"
+          echo "Releasing $normalised"
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
