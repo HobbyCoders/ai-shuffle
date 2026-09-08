@@ -124,7 +124,9 @@ jobs:
 
       - name: Stamp version from the release tag
         shell: bash
-        run: npm version --no-git-tag-version "${VERSION#v}"
+        # The package may already carry the release version; npm refuses a no-op
+        # without --allow-same-version.
+        run: npm version --no-git-tag-version --allow-same-version "${VERSION#v}"
 
       - name: Assemble the worker runtime
         shell: bash
