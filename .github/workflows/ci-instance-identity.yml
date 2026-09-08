@@ -38,9 +38,26 @@ jobs:
           python-version: '3.12'
           cache: pip
       - name: Install isolated identity test dependencies
-        run: >-
-          python -m pip install -c requirements.txt -c requirements-dev.txt
-          pydantic-settings pytest pytest-timeout
+        # Requirement files contain extras and cannot be used as pip constraints.
+        # Select the existing pins rather than duplicating them in this workflow.
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+
+          wanted = {"pydantic", "pydantic-settings", "pytest", "pytest-timeout"}
+          selected = {}
+          for filename in ("requirements.txt", "requirements-dev.txt"):
+              for line in Path(filename).read_text(encoding="utf-8").splitlines():
+                  line = line.split("#", 1)[0].strip()
+                  name = re.split(r"[<>=!~\[]", line, maxsplit=1)[0].strip()
+                  if name in wanted:
+                      selected[name] = line
+          if set(selected) != wanted:
+              raise RuntimeError(f"Missing identity test requirements: {wanted - set(selected)}")
+          subprocess.run([sys.executable, "-m", "pip", "install", *selected.values()], check=True)
       - name: Exercise native thread and process identity publication
         # Runner paths exist only in step-level expression context.
         env:
