@@ -10,6 +10,9 @@ Set LOCAL_MODE=true environment variable to force local mode.
 
 import logging
 import os
+import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 from pydantic import AliasChoices, Field
@@ -132,6 +135,7 @@ def normalize_database_url(db_url: str) -> str:
 
 
 _cached_persisted_instance_id: Optional[str] = None
+_persisted_instance_id_lock = threading.Lock()
 
 # Set by Settings._import_legacy_database_url when it filled POSTGRES_* fields
 # from a legacy DATABASE_URL — lets startup logging distinguish an explicitly
@@ -139,38 +143,91 @@ _cached_persisted_instance_id: Optional[str] = None
 legacy_database_url_imported = False
 
 
-def _get_or_create_persisted_instance_id(data_dir: Path, service_name: str) -> str:
-    """Return a stable instance ID persisted to data_dir/.instance_id.
+@contextmanager
+def _lock_instance_id_file(path: Path):
+    """Serialize initial publication across processes, including on Windows.
 
-    On first startup a new ID is generated from service_name + a short UUID
-    suffix (e.g. "ai-shuffle-a1b2c3d4"). The file lives inside the Docker
-    volume so it survives container rebuilds while remaining unique per device.
+    Keep this sidecar: unlinking a lock file can let waiters lock different
+    inodes. The identity itself is replaced atomically, never used as the lock.
+    """
+    with path.open("a+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _get_or_create_persisted_instance_id(data_dir: Path, service_name: str) -> str:
+    """Return one process-stable ID, persisted to data_dir/.instance_id.
+
+    The mutex covers the cache AND the nonfatal in-memory fallback. A sidecar
+    file lock and atomic rename additionally make first use safe for multiple
+    processes sharing a volume. Existing nonempty IDs are never replaced.
     """
     global _cached_persisted_instance_id
-    if _cached_persisted_instance_id is not None:
-        return _cached_persisted_instance_id
+    with _persisted_instance_id_lock:
+        if _cached_persisted_instance_id is not None:
+            return _cached_persisted_instance_id
 
-    id_file = data_dir / ".instance_id"
-    try:
-        if id_file.exists():
+        id_file = data_dir / ".instance_id"
+        try:
             stored = id_file.read_text().strip()
             if stored:
                 _cached_persisted_instance_id = stored
-                return stored
-    except OSError:
-        pass
+                return stored  # Reading an established ID needs no writable lock.
+        except OSError:
+            pass
 
-    # Generate a new stable ID
-    import uuid
-    new_id = f"{service_name}-{uuid.uuid4().hex[:8]}"
-    try:
-        data_dir.mkdir(parents=True, exist_ok=True)
-        id_file.write_text(new_id + "\n")
-    except OSError:
-        pass  # Non-fatal: worst case we regenerate next time
+        import uuid
+        new_id = f"{service_name}-{uuid.uuid4().hex[:8]}"
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+            with _lock_instance_id_file(data_dir / ".instance_id.lock"):
+                # Another process may have published while we waited. Only an
+                # absent or empty file is repairable, not an unreadable one.
+                try:
+                    stored = id_file.read_text().strip()
+                except FileNotFoundError:
+                    stored = ""
+                if stored:
+                    new_id = stored
+                else:
+                    temporary = None
+                    try:
+                        with tempfile.NamedTemporaryFile(
+                            mode="w", encoding="utf-8", dir=data_dir,
+                            prefix=".instance_id-", delete=False,
+                        ) as stream:
+                            temporary = Path(stream.name)
+                            stream.write(new_id + "\n")
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                        os.replace(temporary, id_file)
+                    finally:
+                        if temporary is not None:
+                            temporary.unlink(missing_ok=True)
+        except OSError as exc:
+            # Keep startup nonfatal on unwritable storage, but never change
+            # identity between callers in this process. Cross-process stability
+            # requires a writable volume (or an explicit INSTANCE_ID).
+            logger.warning("Cannot persist instance ID; using a process-local ID: %s", exc)
 
-    _cached_persisted_instance_id = new_id
-    return new_id
+        _cached_persisted_instance_id = new_id
+        return new_id
 
 
 class Settings(BaseSettings):

@@ -1,0 +1,51 @@
+name: Instance identity contracts
+
+on:
+  pull_request:
+    paths:
+      - 'app/core/config.py'
+      - 'tests/core/test_instance_identity.py'
+      - 'requirements.txt'
+      - 'requirements-dev.txt'
+      - '.github/workflows/ci-instance-identity.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: instance-identity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  identity:
+    name: Instance identity (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux is covered by CI Backend; exercise the native desktop paths too.
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    env:
+      TESTING: '1'
+      ALLOW_REAL_PG: '0'
+      PYTHONPATH: .
+      AI_SHUFFLE_ENV_FILE: '${{ runner.temp }}/nonexistent-identity-test.env'
+      DATA_DIR: '${{ runner.temp }}/shuffle-identity-data'
+      WORKSPACE_DIR: '${{ runner.temp }}/shuffle-identity-workspace'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install isolated identity test dependencies
+        run: >-
+          python -m pip install -c requirements.txt -c requirements-dev.txt
+          pydantic-settings pytest pytest-timeout
+      - name: Exercise native thread and process identity publication
+        # Do not load the unrelated backend/database fixtures or plugins.
+        run: >-
+          python -m pytest tests/core/test_instance_identity.py
+          --confcutdir=tests/core -o addopts="" -p no:cacheprovider --timeout=60 -q
