@@ -185,8 +185,16 @@ async def billing_browser(websocket: WebSocket, provider_id: str, token: Optiona
     except HTTPException:
         await websocket.close(code=4403, reason="Credit connection unavailable")
         return
-    if openai_billing_browser.status(provider_id).get("status") not in {"pending", "ready"}:
+    state = openai_billing_browser.status(provider_id)
+    if state.get("status") not in {"pending", "ready"} or not state.get("flow_id"):
         await websocket.close(code=4404, reason="Start a credit sign-in first")
         return
+
+    async def login_input(command: dict) -> None:
+        await openai_billing_browser.dispatch_input(provider_id, state["flow_id"], command)
+
     await websocket.accept()
-    await serve_browser_panel(websocket, openai_billing_browser.panel_key(provider_id), login_only=True)
+    await serve_browser_panel(
+        websocket, openai_billing_browser.panel_key(provider_id),
+        login_only=True, login_input=login_input,
+    )

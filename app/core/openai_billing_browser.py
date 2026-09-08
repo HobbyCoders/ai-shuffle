@@ -147,6 +147,38 @@ class OpenAIBillingBrowser:
         finally:
             session.replies.pop(command_id, None)
 
+    async def dispatch_input(self, provider_id: str, flow_id: str, command: dict) -> None:
+        """Send translated login controls to this flow's owned CDP session.
+
+        The shared screencast hub is read-only. A viewer from an old flow must
+        never send input to a replacement tab or a background credit refresh.
+        """
+        async with self.operation_lock(provider_id):
+            session = self._sessions.get(provider_id)
+            if (
+                session is None or not self._current(session)
+                or session.flow_id != flow_id
+                or session.status not in {"pending", "ready"}
+                or session.expected_org is not None or session.ws is None
+            ):
+                raise BillingBrowserError("billing_browser_unavailable")
+            method = command.get("method")
+            if method not in {
+                "Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText",
+                "Emulation.setDeviceMetricsOverride", "Page.reload", "Page.stopLoading",
+                "Page.getNavigationHistory",
+            }:
+                raise BillingBrowserError("billing_invalid_input")
+            result = await self._call(session, method, command.get("params", {}))
+            if method == "Page.getNavigationHistory":
+                offset = command.get("__history_offset__")
+                if offset not in (-1, 1):
+                    raise BillingBrowserError("billing_invalid_input")
+                entries = result.get("entries", [])
+                index = result.get("currentIndex", 0) + offset
+                if 0 <= index < len(entries):
+                    await self._call(session, "Page.navigateToHistoryEntry", {"entryId": entries[index]["id"]})
+
     async def _open(self, session: _Session) -> None:
         target = await native_chrome.create_page("about:blank")
         if not target or not target.get("id"):

@@ -2,16 +2,20 @@
 
 import asyncio
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
 from app.core import openai_billing_browser as mod
+from app.core.browser_stream import translate_input
 
 
 @pytest.fixture
-def browser():
-    return mod.OpenAIBillingBrowser()
+def browser(monkeypatch):
+    broker = Mock(side_effect=AssertionError("Billing must not allocate a workspace broker"))
+    monkeypatch.setattr("app.core.browser_control.get", broker)
+    yield mod.OpenAIBillingBrowser()
+    broker.assert_not_called()
 
 
 @pytest.fixture
@@ -290,3 +294,167 @@ async def test_extra_info_org_header_is_used_without_retaining_other_headers(bro
     await asyncio.gather(*session.body_tasks)
     assert session.observation["organization_id"] == "org-test"
     assert "test-secret" not in json.dumps(session.extra_orgs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["pending", "ready"])
+@pytest.mark.parametrize("payload,method,params", [
+    ({"type": "viewport", "width": 390, "height": 844},
+     "Emulation.setDeviceMetricsOverride",
+     {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": False}),
+    ({"type": "input", "kind": "text", "text": "login@example.test"},
+     "Input.insertText", {"text": "login@example.test"}),
+    ({"type": "input", "kind": "mouse", "event": "down", "x": 400, "y": 50, "clickCount": 1},
+     "Input.dispatchMouseEvent",
+     {"type": "mousePressed", "x": 390.0, "y": 50.0, "button": "left", "clickCount": 1, "modifiers": 0}),
+    ({"type": "input", "kind": "key", "event": "down", "key": "Enter", "code": "Enter", "keyCode": 13},
+     "Input.dispatchKeyEvent",
+     {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "modifiers": 0, "text": "\r"}),
+    ({"type": "command", "command": "reload"}, "Page.reload", {"ignoreCache": False}),
+    ({"type": "command", "command": "stop"}, "Page.stopLoading", {}),
+])
+async def test_login_input_uses_owned_cdp_under_operation_lock(
+    browser, session, status, payload, method, params,
+):
+    session.status = status
+    session.ws = AsyncMock()
+    other = mod._Session("other-provider", ws=AsyncMock())
+    browser._sessions[other.provider_id] = other
+
+    async def reply(raw):
+        assert browser.operation_lock(session.provider_id).locked()
+        command = json.loads(raw)
+        session.replies[command["id"]].set_result({})
+
+    session.ws.send.side_effect = reply
+    command = translate_input(payload, bounds=(390, 844))
+    await browser.dispatch_input(session.provider_id, session.flow_id, command)
+
+    session.ws.send.assert_awaited_once()
+    assert json.loads(session.ws.send.await_args.args[0]) == {
+        "id": 1, "method": method, "params": params,
+    }
+    other.ws.send.assert_not_awaited()
+    assert not session.replies
+    assert not browser.operation_lock(session.provider_id).locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction,index,entry_id", [
+    ("back", 1, 11), ("forward", 1, 33),
+    ("back", 0, None), ("forward", 2, None),
+    ("back", None, None), ("forward", None, None),
+])
+async def test_login_input_history_uses_owned_entries_and_respects_boundaries(
+    browser, session, monkeypatch, direction, index, entry_id,
+):
+    session.ws = AsyncMock()
+
+    async def history(owner, method, params):
+        assert owner is session
+        assert browser.operation_lock(session.provider_id).locked()
+        return {
+            "currentIndex": index or 0,
+            "entries": [{"id": 11}, {"id": 22}, {"id": 33}] if index is not None else [],
+        }
+
+    send = AsyncMock(side_effect=history)
+    monkeypatch.setattr(browser, "_call", send)
+    command = translate_input({"type": "command", "command": direction})
+    await browser.dispatch_input(session.provider_id, session.flow_id, command)
+
+    expected = [call(session, "Page.getNavigationHistory", {})]
+    if entry_id is not None:
+        expected.append(call(session, "Page.navigateToHistoryEntry", {"entryId": entry_id}))
+    assert send.await_args_list == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", [
+    "missing", "other-provider", "stale-flow", "closed", "no-socket",
+    "connected", "refresh-pending", "refresh-ready", "unavailable", "reconnect_required",
+])
+async def test_login_input_rejects_noninteractive_or_unowned_flow(
+    browser, session, monkeypatch, state,
+):
+    session.ws = AsyncMock()
+    provider_id, flow_id = session.provider_id, session.flow_id
+    if state == "missing":
+        browser._sessions.clear()
+    elif state == "other-provider":
+        provider_id = "other-provider"
+    elif state == "stale-flow":
+        flow_id = "old-flow"
+    elif state == "closed":
+        session.closed = True
+    elif state == "no-socket":
+        session.ws = None
+    elif state.startswith("refresh-"):
+        session.status = state.removeprefix("refresh-")
+        session.expected_org = "org-test"
+    else:
+        session.status = state
+    send = AsyncMock()
+    monkeypatch.setattr(browser, "_call", send)
+
+    with pytest.raises(mod.BillingBrowserError, match="^billing_browser_unavailable$"):
+        await browser.dispatch_input(provider_id, flow_id, {"method": "Page.reload"})
+
+    send.assert_not_awaited()
+    assert not browser.operation_lock(provider_id).locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["replace", "close", "confirm", "refresh"])
+async def test_login_input_cannot_survive_flow_lifecycle_change(
+    browser, session, monkeypatch, transition,
+):
+    session.ws = AsyncMock()
+    flow_id = session.flow_id
+
+    async def open_session(owner):
+        owner.ws = AsyncMock()
+        if owner.expected_org:
+            owner.observation = mod._observation({"total_available": 21.09}, "org-test")
+            owner.changed.set()
+
+    monkeypatch.setattr(browser, "_open", open_session)
+    send = AsyncMock(return_value={"body": json.dumps({"total_available": 21.09})})
+    monkeypatch.setattr(browser, "_call", send)
+    try:
+        if transition == "replace":
+            replacement = await browser.start(session.provider_id)
+            assert replacement["flow_id"] != flow_id
+        elif transition == "close":
+            await browser.close(session.provider_id)
+        elif transition == "confirm":
+            record = request(browser, session)
+            record["status"] = 200
+            await browser._capture(session, "req", record)
+            browser.confirm(session.provider_id, flow_id, session.observation_id, "org-test")
+        else:
+            await browser.close(session.provider_id)
+            await browser.refresh(session.provider_id, "org-test")
+            assert browser._sessions[session.provider_id].expected_org == "org-test"
+
+        send.reset_mock()
+        with pytest.raises(mod.BillingBrowserError, match="^billing_browser_unavailable$"):
+            await browser.dispatch_input(session.provider_id, flow_id, {"method": "Page.reload"})
+        send.assert_not_awaited()
+    finally:
+        await browser.close(session.provider_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", [
+    "Page.navigate", "Page.navigateToHistoryEntry", "Runtime.evaluate", "Browser.close",
+])
+async def test_login_input_rejects_unexpected_cdp_method(browser, session, monkeypatch, method):
+    session.ws = AsyncMock()
+    send = AsyncMock()
+    monkeypatch.setattr(browser, "_call", send)
+
+    with pytest.raises(mod.BillingBrowserError, match="^billing_invalid_input$"):
+        await browser.dispatch_input(session.provider_id, session.flow_id, {"method": method})
+
+    send.assert_not_awaited()

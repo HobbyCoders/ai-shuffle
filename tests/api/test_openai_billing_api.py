@@ -203,7 +203,7 @@ def test_browser_is_provider_scoped_and_redacted(authenticated_client, provider,
     monkeypatch.setattr(api, "authenticate_websocket", AsyncMock(return_value=(True, None)))
     authenticated_client.post(f"{ROOT}/{provider}/openai-billing/connect")
 
-    async def serve(ws, key, *, login_only):
+    async def serve(ws, key, *, login_only, login_input):
         assert key == "openai-billing:" + provider
         assert login_only is True
         await ws.send_json({"type": "hello"})
@@ -212,3 +212,44 @@ def test_browser_is_provider_scoped_and_redacted(authenticated_client, provider,
     monkeypatch.setattr(api, "serve_browser_panel", serve)
     with authenticated_client.websocket_connect(f"{ROOT}/{provider}/openai-billing/browser") as ws:
         assert ws.receive_json() == {"type": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_initial_viewport_and_typing_reach_the_owned_login_tab(monkeypatch):
+    """Do not mock hub.dispatch_input: it rejects all workspace mutations."""
+    import json
+
+    from app.api import browser_panel as panel
+    from app.core import openai_billing_browser as billing_module
+    from app.core.browser_stream import BrowserStreamHub, _Viewer
+
+    service = billing_module.OpenAIBillingBrowser()
+    session = billing_module._Session("provider", target_id="login-target", ws=object())
+    service._sessions["provider"] = session
+    call = AsyncMock(return_value={})
+    monkeypatch.setattr(service, "_call", call)
+    monkeypatch.setattr(api, "openai_billing_browser", service)
+    monkeypatch.setattr(api, "_provider", AsyncMock(return_value={"id": "provider"}))
+    monkeypatch.setattr(api, "authenticate_websocket", AsyncMock(return_value=(True, None)))
+    monkeypatch.setattr(panel, "_initial_status", AsyncMock(return_value={"type": "status", "state": "live"}))
+    socket = AsyncMock()
+    socket.receive_text.side_effect = [
+        json.dumps({"type": "viewport", "width": 390, "height": 844}),
+        json.dumps({"type": "input", "kind": "text", "text": "login test"}),
+        WebSocketDisconnect(),
+    ]
+    hub = BrowserStreamHub(service.panel_key("provider"))
+    viewer = _Viewer(socket, redact_urls=True)
+    monkeypatch.setattr(panel.browser_stream, "attach_viewer", AsyncMock(return_value=(hub, viewer)))
+    detach = AsyncMock()
+    monkeypatch.setattr(panel.browser_stream, "detach_viewer", detach)
+
+    await api.billing_browser(socket, "provider", token=None)
+
+    assert [entry.args[1] for entry in call.await_args_list] == [
+        "Emulation.setDeviceMetricsOverride", "Input.insertText",
+    ]
+    assert all(entry.args[0] is session for entry in call.await_args_list)
+    assert call.await_args_list[0].args[2]["width"] == 390
+    socket.close.assert_not_awaited()
+    detach.assert_awaited_once_with(service.panel_key("provider"), viewer)
