@@ -58,6 +58,16 @@ internal class WorkerAssetLoader(private val client: WorkerDownloadClient = Work
                 if (response.code in listOf(401, 403)) status(AUTH_MESSAGE)
                 val body = requireNotNull(response.body)
                 val mime = body.contentType()
+                val range = if (response.code == 206 && headers.keys.any { it.equals("Range", true) }) {
+                    val match = Regex("bytes ([0-9]+)-([0-9]+)/([0-9]+)").matchEntire(response.header("Content-Range").orEmpty())
+                        ?: throw IOException("Invalid partial file response")
+                    match.groupValues.drop(1).map { it.toLong() }.also { (start, end, total) ->
+                        require(start <= end && end < total) { "Invalid partial file bounds" }
+                    }
+                } else null
+                val resourceSize = range?.get(2) ?: response.header("Content-Length")?.toLongOrNull() ?: body.contentLength()
+                var initialSkipCredit = range?.get(0) ?: 0L
+                var reading = false
                 val responseHeaders = linkedMapOf(
                     "Cache-Control" to "no-store",
                     "Access-Control-Allow-Origin" to MobileUi.ORIGIN,
@@ -65,13 +75,32 @@ internal class WorkerAssetLoader(private val client: WorkerDownloadClient = Work
                     "Access-Control-Expose-Headers" to "Content-Length, Content-Range, Accept-Ranges, Content-Disposition, ETag, Last-Modified",
                 )
                 // Do not install worker cookies or forward hop-by-hop/redirect headers into the bundle.
-                for (name in listOf("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Content-Disposition", "ETag", "Last-Modified", "Content-Encoding")) {
+                for (name in listOf("Content-Type", "Content-Range", "Accept-Ranges", "Content-Disposition", "ETag", "Last-Modified", "Content-Encoding")) {
                     response.header(name)?.let { responseHeaders[name] = it }
                 }
+                // Chromium's InputStreamReader::Seek computes bounds from available(),
+                // then skips the request's original offset even for a supplied 206. Expose
+                // the full resource size and credit that initial skip: the worker has
+                // already selected the window. Otherwise bytes 2-4 = "abc" becomes "c".
+                // Chromium also emits Content-Length; forwarding it creates duplicates.
                 val stream = object : FilterInputStream(body.byteStream()) {
-                    override fun read(): Int { checkOwner(); return super.read().also { checkOwner() } }
+                    override fun available(): Int {
+                        checkOwner()
+                        return if (!reading && resourceSize >= 0) resourceSize.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                        else super.available()
+                    }
+                    override fun skip(count: Long): Long {
+                        checkOwner()
+                        val credit = count.coerceAtLeast(0).coerceAtMost(initialSkipCredit)
+                        initialSkipCredit -= credit
+                        val skipped = credit + if (count > credit) super.skip(count - credit) else 0L
+                        checkOwner()
+                        return skipped
+                    }
+                    private fun beginRead() { checkOwner(); reading = true; initialSkipCredit = 0L }
+                    override fun read(): Int { beginRead(); return super.read().also { checkOwner() } }
                     override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
-                        checkOwner(); return super.read(bytes, offset, length).also { checkOwner() }
+                        beginRead(); return super.read(bytes, offset, length).also { checkOwner() }
                     }
                     private fun checkOwner() {
                         if (!allowed()) { close(); throw IOException("Chat authorization changed") }

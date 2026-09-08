@@ -142,6 +142,9 @@ class ChatCapabilitiesSmokeTest {
             putShort(1); putShort(1); putInt(8000); putInt(8000); putShort(1); putShort(8)
             put("data".toByteArray()); putInt(8000); repeat(8000) { put(128.toByte()) }
         }.array()
+        // Synthetic 64x64 red H.264 baseline, 5 frames/1s; generated with FFmpeg
+        // color=c=red:s=64x64:r=5 -t 1 -c:v libx264 -pix_fmt yuv420p -profile:v baseline -movflags +faststart -an.
+        val videoBytes = InstrumentationRegistry.getInstrumentation().context.assets.open("native-media.mp4").use { it.readBytes() }
         val http = OkHttpClient.Builder().addInterceptor { chain ->
             val request = chain.request(); seen.add(request)
             val path = request.url.encodedPath
@@ -149,7 +152,7 @@ class ChatCapabilitiesSmokeTest {
             val (bytes, mime) = when {
                 ranged -> "abc".toByteArray() to "video/mp4"
                 path.contains("generated-audio") -> wav to "audio/wav"
-                path.contains("generated-videos") -> "video transport fixture".toByteArray() to "video/mp4"
+                path.contains("generated-videos") -> videoBytes to "video/mp4"
                 path.contains("generated-images") || path.contains("files/by-path") && request.url.queryParameter("path")!!.endsWith(".png") -> png to "image/png"
                 else -> "benign attachment".toByteArray() to "application/pdf"
             }
@@ -166,7 +169,7 @@ class ChatCapabilitiesSmokeTest {
                 downloads.javaClass.getDeclaredField("client").apply { isAccessible = true }.set(downloads, transport)
                 web(activity).evaluateJavascript("""
                     (() => {
-                      window.assetSmoke = {images:0, audio:false, range:false, errors:[]};
+                      window.assetSmoke = {images:0, audio:false, video:false, range:false, errors:[]};
                       for (const src of [
                         '${server.baseUrl}/api/generated-images/by-path?path=/work/image.png',
                         '${server.baseUrl}/api/files/by-path?path=/work/chip.png',
@@ -179,14 +182,15 @@ class ChatCapabilitiesSmokeTest {
                       audio.onloadedmetadata = () => { assetSmoke.audioDuration = audio.duration; assetSmoke.audio = audio.duration === 1; };
                       audio.onerror = () => assetSmoke.errors.push('audio:' + audio.error?.code);
                       audio.src = '${server.baseUrl}/api/generated-audio/by-path?path=/work/audio.wav'; document.body.append(audio); audio.load();
-                      // The video element's transport is asserted below; this is not a video-decoder fixture.
                       const video = document.createElement('video'); video.preload = 'auto';
+                      video.onloadeddata = () => { assetSmoke.video = video.videoWidth === 64 && video.videoHeight === 64 && video.duration === 1; };
+                      video.onerror = () => assetSmoke.errors.push('video:' + video.error?.code);
                       video.src = '${server.baseUrl}/api/generated-videos/by-path?path=/work/video.mp4'; document.body.append(video); video.load();
                       fetch('${server.baseUrl}/api/generated-videos/by-path?path=/work/range.mp4', {headers:{Range:'bytes=2-4'}})
                         .then(async r => {
                           assetSmoke.rangeResponse = {status:r.status, contentRange:r.headers.get('Content-Range'), length:r.headers.get('Content-Length')};
                           const body = await r.text(); assetSmoke.rangeResponse.body = body;
-                          assetSmoke.range = r.status === 206 && r.headers.get('Content-Range') === 'bytes 2-4/12' && body === 'abc';
+                          assetSmoke.range = r.status === 206 && r.headers.get('Content-Range') === 'bytes 2-4/12' && r.headers.get('Content-Length') === '3' && body === 'abc';
                         })
                         .catch(error => assetSmoke.errors.push('range:' + error.message));
                     })()
@@ -199,7 +203,7 @@ class ChatCapabilitiesSmokeTest {
                     scenario.onActivity { web(it).evaluateJavascript("JSON.stringify(assetSmoke)") { raw ->
                         lastState = org.json.JSONTokener(raw).nextValue().toString()
                         val state = org.json.JSONObject(lastState)
-                        ready = state.optInt("images") == 3 && state.optBoolean("audio") && state.optBoolean("range")
+                        ready = state.optInt("images") == 3 && state.optBoolean("audio") && state.optBoolean("video") && state.optBoolean("range")
                     } }
                     ready
                 }
