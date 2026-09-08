@@ -476,6 +476,9 @@ jobs:
       # look for one and fail the macOS build.
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Normalise release version
         # Accept v0.8.5, V0.8.5 or 0.8.5 from the dispatch box; tags are already vX.Y.Z.
         shell: bash
@@ -486,9 +489,6 @@ jobs:
           [[ "$normalised" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo "::error::Invalid release version '$VERSION' (expected vX.Y.Z)"; exit 1; }
           echo "VERSION=$normalised" >> "$GITHUB_ENV"
           echo "Releasing $normalised"
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
