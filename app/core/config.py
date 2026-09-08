@@ -204,7 +204,7 @@ class Settings(BaseSettings):
 
     # Service info
     service_name: str = "ai-shuffle"
-    version: str = "1.2.1"
+    version: str = "0.8.5"
 
     # Deployment mode (auto-detected if not set)
     local_mode: Optional[bool] = None  # None = auto-detect, True = local, False = docker
