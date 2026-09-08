@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { NO_ADJUSTABLE_EFFORT } from '$lib/constants/model-effort';
-	import { attachPanelDismiss } from './mobile-panel-gesture';
 	import { isMobileUi } from '$lib/stores/platform.svelte';
 	import { ArrowLeft, ChevronRight, Zap } from 'lucide-svelte';
 	import ContextPillBar from './ContextPillBar.svelte';
@@ -54,9 +53,6 @@
 	let panelRef = $state<HTMLElement | null>(null);
 	let modelButtonRef = $state<HTMLButtonElement | null>(null);
 	let panelHeight = $state(0);
-	let dragOffset = $state(0);
-	let dragging = $state(false);
-	let cancelGesture: (() => void) | undefined;
 
 	const railGroups = $derived.by<PickerGroup[]>(() => {
 		if (modelGroups?.length) return modelGroups;
@@ -145,23 +141,8 @@
 			}
 		};
 	}
-	function panelGestures(node: HTMLElement) {
-		const action = attachPanelDismiss(node, {
-			enabled: () => open && !inertToolbar,
-			height: () => panelHeight,
-			onDrag: (offset, active) => { dragOffset = offset; dragging = active; },
-			onDismiss: closePanel
-		});
-		cancelGesture = action.cancel;
-		return action;
-	}
 	$effect(() => {
-		if (!open) {
-			cancelGesture?.();
-			page = 'overview';
-			dragging = false;
-			dragOffset = 0;
-		}
+		if (!open) page = 'overview';
 	});
 </script>
 
@@ -170,15 +151,13 @@
 <div class="mobile-composer-controls" onkeydown={handleKeydown} role="group" aria-label="Composer controls">
 	<div
 		class="panel-reveal"
-		class:dragging
-		style:height={`${Math.max(0, (open ? panelHeight : 0) - dragOffset)}px`}
+		style:height={`${open ? panelHeight : 0}px`}
 		inert={!open || inertToolbar}
 		aria-hidden={!open}
 	>
 		<section
 			id={panelId}
 			bind:this={panelRef}
-			use:panelGestures
 			use:emptyPanelBudget={open}
 			bind:clientHeight={panelHeight}
 			class="controls-panel"
@@ -247,7 +226,6 @@
 	:global(html[data-platform='mobile']) .mobile-composer-controls { display: block; min-width: 0; }
 	.panel-reveal { overflow: hidden; transition: height 280ms cubic-bezier(0.22, 1, 0.36, 1); border-radius: 0 0 20px 20px; background: var(--popover); }
 	.panel-reveal[aria-hidden='false'] { box-shadow: inset 0 1px 0 var(--border); }
-	.panel-reveal.dragging { transition: none; }
 	.controls-panel {
 		--mobile-panel-limit: min(calc(var(--app-viewport-height, 100dvh) * 0.48), max(72px, calc(var(--app-viewport-height, 100dvh) - 420px)), 390px);
 		--composer-control-bg: var(--card);

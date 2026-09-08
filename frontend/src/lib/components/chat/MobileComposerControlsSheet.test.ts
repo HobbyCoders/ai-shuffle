@@ -136,6 +136,23 @@ function props(overrides: Record<string, unknown> = {}) {
 }
 
 describe('integrated mobile composer controls', () => {
+	it.each(['overview', 'models'])('keeps upward and downward swipes on the %s drawer native', async page => {
+		const onClose = vi.fn();
+		render(MobileComposerControlsSheet, { props: props({ onClose }) });
+		if (page === 'models') await fireEvent.click(screen.getByRole('button', { name: /model: sonnet/i }));
+		const panel = screen.getByRole('region', { name: page === 'models' ? 'Choose model' : 'Chat controls' });
+		const target = page === 'models' ? screen.getByRole('option', { name: /sonnet/i }) : panel;
+		for (const dy of [-90, 90]) {
+			for (const [type, y] of [['touchstart', 100], ['touchmove', 100 + dy], ['touchend', 100 + dy]] as const) {
+				const point = { identifier: 1, clientX: 100, clientY: y };
+				const event = new Event(type, { bubbles: true, cancelable: true });
+				Object.assign(event, { touches: type === 'touchend' ? [] : [point], changedTouches: [point] });
+				await fireEvent(target, event);
+				expect(event.defaultPrevented).toBe(false);
+			}
+			expect(onClose).not.toHaveBeenCalled();
+		}
+	});
 	it('renders in place without a modal, backdrop, scroll lock, or focus theft', async () => {
 		const editor = document.createElement('textarea');
 		document.body.append(editor);

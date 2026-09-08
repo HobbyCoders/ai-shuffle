@@ -139,10 +139,7 @@
 
 	let mobileSheetOpen = $state(false);
 	const mobilePanelId = $props.id();
-	export function openMobileSheet() {
-		setMobileSheetOpen(true);
-	}
-	function setMobileSheetOpen(open: boolean) {
+	export function setMobileSheetOpen(open: boolean) {
 		closePopover();
 		if (!open && document.activeElement?.closest('.mobile-composer-controls')) {
 			dockRef?.querySelector<HTMLButtonElement>('.mobile-settings-trigger')?.focus({ preventScroll: true });

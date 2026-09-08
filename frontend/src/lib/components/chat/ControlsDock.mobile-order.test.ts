@@ -1,6 +1,7 @@
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import ControlsDock from './ControlsDock.svelte';
+import { tick } from 'svelte';
 import '../../test-stubs/composer-dom';
 
 vi.hoisted(() => {
@@ -27,6 +28,30 @@ afterEach(() => cleanup());
 afterAll(() => vi.unstubAllGlobals());
 
 describe('ControlsDock mobile control order', () => {
+	it('uses the same exported setter for gestures, preserving outside focus and restoring panel focus', async () => {
+		const outside = document.createElement('button');
+		document.body.append(outside);
+		outside.focus();
+		const onSheetOpenChange = vi.fn();
+		const { component, container } = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn(), onSheetOpenChange } });
+		const trigger = container.querySelector('.mobile-settings-trigger')!;
+		component.setMobileSheetOpen(true);
+		await tick();
+		expect(trigger.getAttribute('aria-expanded')).toBe('true');
+		expect(document.activeElement).toBe(outside);
+		component.setMobileSheetOpen(false);
+		await tick();
+		expect(document.activeElement).toBe(outside);
+		component.setMobileSheetOpen(true);
+		await tick();
+		(container.querySelector('.controls-panel') as HTMLElement).focus();
+		component.setMobileSheetOpen(false);
+		await tick();
+		expect(trigger.getAttribute('aria-expanded')).toBe('false');
+		expect(document.activeElement).toBe(trigger);
+		expect(onSheetOpenChange.mock.calls).toEqual([[true], [false], [true], [false]]);
+		outside.remove();
+	});
 	it('toggles closed from settings even when the panel is scrolled', async () => {
 		const onSheetOpenChange = vi.fn();
 		const { container } = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn(), onSheetOpenChange } });

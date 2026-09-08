@@ -211,7 +211,16 @@ export function attachPanelDismiss(panel: HTMLElement, options: DismissOptions) 
 interface ComposerOpenOptions {
 	enabled: () => boolean;
 	allowEditor: () => boolean;
-	onOpen: () => void;
+	open: () => boolean;
+	openDirection: () => 'up' | 'down';
+	onOpenChange: (open: boolean) => void;
+}
+interface ComposerGestureIntent {
+	target: EventTarget | null;
+	eligible: boolean;
+	direction: number;
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
 }
 
 /** Editor eligibility is sampled before pointerdown expands the collapsed form.
@@ -229,10 +238,12 @@ export function canStartComposerOpen(target: EventTarget | null, composer: HTMLE
 	return false;
 }
 
-/** Upward counterpart, deliberately separate from panel dismissal. Touch events
- * arbitrate before native pan; Pointer Events only snapshot pre-reflow eligibility. */
+/** Both opening and closing belong to the composer, never the controls panel.
+ * Touch Events arbitrate before native pan; Pointer Events snapshot eligibility,
+ * layout and requested state before the collapsed composer can reflow. */
 export function attachComposerOpen(composer: HTMLElement, options: ComposerOpenOptions) {
-	let snapshot: { target: EventTarget | null; eligible: boolean } | null = null;
+	let snapshot: ComposerGestureIntent | null = null;
+	let intent: ComposerGestureIntent | null = null;
 	let gesture: PanelGesture | null = null;
 	let identifier = -1;
 	let origin: EventTarget | null = null;
@@ -240,38 +251,47 @@ export function attachComposerOpen(composer: HTMLElement, options: ComposerOpenO
 	let dragged = false;
 	let exceededTapSlop = false;
 	let suppressClickUntil = 0;
-	const point = (x: number, y: number) => ({ x, y: -y, time: performance.now() });
+	const point = (x: number, y: number) => ({ x, y: y * intent!.direction, time: performance.now() });
 	function clear() {
-		gesture = null; snapshot = null; identifier = -1; origin = null;
+		gesture = null; snapshot = null; intent = null; identifier = -1; origin = null;
 		consumed = false; dragged = false; exceededTapSlop = false;
 	}
 	function cancel() {
 		if (consumed) suppressClickUntil = performance.now() + 500;
 		clear();
 	}
-	function eligible(target: EventTarget | null) {
-		return options.enabled() && canStartComposerOpen(target, composer, options.allowEditor());
+	function sample(target: EventTarget | null): ComposerGestureIntent {
+		const open = !options.open();
+		const openingDirection = options.openDirection() === 'up' ? -1 : 1;
+		return {
+			target,
+			eligible: options.enabled() && canStartComposerOpen(target, composer, options.allowEditor()),
+			direction: open ? openingDirection : -openingDirection,
+			open,
+			onOpenChange: options.onOpenChange
+		};
 	}
 	function pointerDown(event: PointerEvent) {
 		if (event.pointerType !== 'touch') return;
 		if (gesture || event.isPrimary === false) { cancel(); return; }
 		// A fresh touch is intentional, not the previous drag's synthetic click.
 		suppressClickUntil = 0;
-		snapshot = { target: event.target, eligible: eligible(event.target) };
+		snapshot = sample(event.target);
 	}
 	function start(event: TouchEvent) {
 		if (event.touches.length !== 1) { cancel(); return; }
 		if (gesture) return;
-		const allowed = snapshot?.target === event.target ? snapshot.eligible : eligible(event.target);
+		const sampled = snapshot?.target === event.target ? snapshot : sample(event.target);
 		snapshot = null;
-		if (!allowed || !options.enabled()) return;
+		if (!sampled.eligible || !options.enabled()) return;
+		intent = sampled;
 		const touch = event.touches[0];
 		identifier = touch.identifier; origin = event.target; suppressClickUntil = 0;
 		gesture = createPanelGesture({ ...point(touch.clientX, touch.clientY), eligible: true });
 	}
 	function move(event: TouchEvent) {
 		if (!gesture) return;
-		if (event.touches.length !== 1 || !options.enabled() || !event.cancelable) { cancel(); return; }
+		if (event.touches.length !== 1 || !options.enabled() || !event.cancelable || !canStartComposerOpen(origin, composer, true)) { cancel(); return; }
 		const touch = Array.from(event.touches).find(t => t.identifier === identifier);
 		if (!touch) { cancel(); return; }
 		const next = point(touch.clientX, touch.clientY);
@@ -294,10 +314,10 @@ export function attachComposerOpen(composer: HTMLElement, options: ComposerOpenO
 		const element = origin instanceof Element ? origin : null;
 		const tap = consumed && !dragged && !exceededTapSlop && withinSlop && next.time - gesture.start.time < 500 && options.enabled()
 			? element?.closest<HTMLElement>('button, a[href], [role="button"], [role="checkbox"]') : null;
-		const open = options.enabled() && dragged && finishPanelGesture(gesture, next, 0);
+		const change = options.enabled() && dragged && finishPanelGesture(gesture, next, 0) ? intent : null;
 		if (consumed) suppressClickUntil = performance.now() + 500;
 		clear();
-		if (open) options.onOpen();
+		if (change) change.onOpenChange(change.open);
 		else if (tap && composer.contains(tap)) tap.click();
 	}
 	function click(event: MouseEvent) {

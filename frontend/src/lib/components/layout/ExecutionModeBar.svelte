@@ -620,9 +620,13 @@
 
 	.sheet-mode .branch-wt-row {
 		grid-column: 1 / -1;
-		display: flex;
-		align-items: center;
+		display: grid;
+		/* The repository snippet spans both columns; branch and worktree share
+		   the next row without competing with a full-width repository chip. */
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: start;
 		gap: 8px;
+		min-width: 0;
 		width: 100%;
 	}
 
@@ -634,7 +638,7 @@
 	.sheet-mode .branch-wt-row .branch-selector,
 	.sheet-mode .branch-wt-row :global(.branch-selector) {
 		position: relative;
-		flex: 1 1 0;
+		grid-column: 1;
 		min-width: 0;
 		width: auto;
 	}
@@ -652,8 +656,8 @@
 	}
 
 	.sheet-mode .wt-chip {
+		grid-column: 2;
 		width: auto;
-		flex: 0 0 auto;
 		height: 44px;
 		padding: 0 12px;
 		gap: 8px;
