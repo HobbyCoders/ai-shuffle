@@ -514,7 +514,10 @@ def run(settings, action, filename=None):
         if action == "restore":
             if db.mode == "external":
                 raise RuntimeFailure("external restore is forbidden")
-            source = open(filename, "rb")
+            # pg_restore inherits the OS descriptor, not Python's buffered
+            # position. Header validation must not leave native reads at the
+            # buffer's read-ahead offset after seek(0).
+            source = open(filename, "rb", buffering=0)
             if not stat.S_ISREG(os.fstat(source.fileno()).st_mode) or source.read(5) != b"PGDMP":
                 raise RuntimeFailure("restore requires a custom-format PostgreSQL logical archive")
             source.seek(0)

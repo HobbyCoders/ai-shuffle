@@ -395,7 +395,30 @@ def test_real_pg_failed_role_ddl_never_logs_generated_password(settings_factory,
         db.close()
 
 
-def test_real_pg_restore_empty_only_and_failure_fence(settings_factory, tmp_path, pg_enabled):
+def test_restore_preflight_and_restore_share_rewound_native_descriptor(monkeypatch, tmp_path, settings_factory):
+    archive = tmp_path / "buffered.dump"
+    archive.write_bytes(b"PGDMP" + b"synthetic archive bytes" * 300)
+    db = Mock(mode="embedded")
+    native_reads = []
+
+    def read_native_header(source):
+        # pg_restore inherits the raw descriptor, not Python's buffered cursor.
+        native_reads.append(os.read(source.fileno(), 5))
+        assert native_reads[-1] == b"PGDMP"
+
+    def preflight(args, *, source, timeout):
+        assert args == ["pg_restore", "--list"]
+        read_native_header(source)
+
+    db.command.side_effect = preflight
+    db.restore.side_effect = read_native_header
+    monkeypatch.setattr(runtime, "Database", lambda settings: db)
+    assert runtime.run(settings_factory(), "restore", str(archive)) == 0
+    assert native_reads == [b"PGDMP", b"PGDMP"]
+    db.close.assert_called_once()
+
+
+def test_real_pg_restore_empty_only_and_failure_fence(settings_factory, tmp_path, pg_enabled, monkeypatch):
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     source = runtime.Database(settings_factory(data_dir=source_dir), port=pg_enabled)
@@ -408,11 +431,16 @@ def test_real_pg_restore_empty_only_and_failure_fence(settings_factory, tmp_path
         source.close()
     target_dir = tmp_path / "target"
     target_dir.mkdir()
-    target = runtime.Database(settings_factory(data_dir=target_dir), port=pg_enabled)
+    target_settings = settings_factory(data_dir=target_dir)
+    database_type = runtime.Database
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "Database", lambda settings: database_type(settings, port=pg_enabled))
+        # Exercise the CLI entry point's header check, native --list preflight,
+        # descriptor rewind and actual restore, rather than skipping preflight.
+        assert runtime.run(target_settings, "restore", str(archive)) == 0
+    target = runtime.Database(target_settings, port=pg_enabled)
     try:
         target.open(purpose="restore")
-        with archive.open("rb") as stream:
-            target.restore(stream)
         assert target.query("SELECT value FROM restored_probe") == "synthetic-only"
         assert not (target.pg / "restore-incomplete").exists()
         with archive.open("rb") as stream:
