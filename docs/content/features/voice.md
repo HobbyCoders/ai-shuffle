@@ -19,13 +19,13 @@ It can do the things you would expect of an assistant you talk to:
 - **Stop a worker** when you cancel.
 - **Check on progress** and report what landed.
 - **Relay permission prompts.** When a worker needs approval for a tool, the voice agent reads the request to you and acts only on your spoken yes or no.
-- **Manage the app**, when enabled: create and change automations, hooks, agents, MCP servers and connectors during the call. It says what it is about to do first and waits for a yes before anything destructive.
+- **Manage the app**: create and change automations, hooks, agents, MCP servers and connectors during the call. This is always available to the owner, but never to API-key users. It says what it is about to do first and waits for a yes before anything destructive.
 
 ## Setup
 
 1. **Add an OpenAI API-key provider** under Settings → Providers. Realtime is API-key only; a ChatGPT-subscription login cannot fund calls.
 2. **Turn on voice mode** under Settings → Voice and pick the provider, model, and voice. Press play next to the voice dropdown to hear a sample.
-3. **Give at least one agent a voice model.** Open the agent, go to *Provider models*, and set the **Voice** row. This is the model (native Claude, or a model on any configured provider) the agent runs on when the voice agent hands it work. An agent with no voice model is never offered in a call. Settings → Voice lists the agents that currently qualify.
+3. **Give at least one agent a voice model.** Open the agent, go to *Provider models*, and set the **Voice** row. This is the model (native Claude, or a model on any configured provider) the agent runs on when the voice agent hands it work. An agent with no voice model is never offered in a call.
 
 ## Starting a call
 
@@ -46,7 +46,6 @@ Hanging up ends the call only. Dispatched workers keep running and their results
 | Model | The speech-to-speech model. Billed per minute of conversation. |
 | Voice | How the agent sounds. |
 | Max call minutes | Total length cap for one call. OpenAI's own 60-minute session wall is bridged automatically. |
-| Manage app configuration by voice | Whether the agent may change automations, hooks, agents, MCP servers and connectors directly. Off means it can only dispatch work and report on it. Never available to API-key users. |
 
 ## API
 
