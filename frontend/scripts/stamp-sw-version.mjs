@@ -5,7 +5,7 @@
  * Runs as the npm "postbuild" step (after `vite build`). Rewrites the
  * `const CACHE_VERSION = ...;` line in build/sw.js (the build OUTPUT copy,
  * not the tracked static/sw.js source) with a value derived from
- * package.json version + git short SHA, e.g. "1.2.1-a2850458". If any single
+ * package.json version + git short SHA, e.g. "0.8.5-a2850458". If any single
  * build changes app code, the SHA changes → CACHE_VERSION changes → clients
  * drop the old cache on activate.
  *

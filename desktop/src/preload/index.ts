@@ -28,7 +28,7 @@ const info = ipcRenderer.sendSync('desktop:info') as {
 } | null;
 
 const bridge = {
-	/** Shell version, e.g. `1.2.1`. */
+	/** Shell version, e.g. `0.8.5`. */
 	version: info?.version ?? '0.0.0',
 	platform: info?.platform ?? process.platform,
 	titleBarHeight: info?.titleBarHeight ?? 52,

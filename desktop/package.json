@@ -1,6 +1,6 @@
 {
   "name": "ai-shuffle-desktop",
-  "version": "1.2.1",
+  "version": "0.8.5",
   "private": true,
   "description": "AI Shuffle desktop app: a native window around the web UI of any AI Shuffle worker",
   "author": "HobbyCoders",
