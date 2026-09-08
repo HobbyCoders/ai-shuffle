@@ -76,6 +76,18 @@ class TestReadinessReady:
 
 
 class TestReadinessNotReady:
+    def test_database_credentials_are_not_exposed_by_either_public_probe(self):
+        client = _client()
+        with patch("app.api.system._probe_db", side_effect=Exception(
+            "cannot connect to postgresql://worker:private-test-password@localhost/db"
+        )), patch("app.core.session_pool.get_session_pool", return_value=_FakePool()):
+            for path in ("/health/ready", "/api/v1/health/ready"):
+                response = client.get(path)
+                assert response.status_code == 503
+                assert response.json()["checks"]["database"] == "error"
+                assert "private-test-password" not in response.text
+                assert "postgresql://" not in response.text
+
     def test_db_down_returns_503_with_reason(self):
         client = _client()
         with patch("app.api.system._probe_db",

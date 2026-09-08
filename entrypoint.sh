@@ -1,23 +1,35 @@
 #!/bin/bash
 set -e
 
+# Direct --user launches cannot mutate accounts. The Python runtime validates
+# identity and mount ownership and gives a clear error instead of chowning data.
+if [ "$(id -u)" != "0" ]; then
+    exec python /app/docker/container_runtime.py "$@"
+fi
+
 # Get PUID and PGID from environment, default to 99:100 (Unraid)
 PUID=${PUID:-99}
 PGID=${PGID:-100}
+case "$PUID:$PGID" in
+    *[!0-9:]*|0:*|*:0|:*|*:) echo "PUID/PGID must be non-root numeric IDs" >&2; exit 1 ;;
+esac
 
-# Check if updates are enabled (default: true)
-AUTO_UPDATE=${AUTO_UPDATE:-true}
+# Image pulls deliver updates. Startup is offline-capable by default; the
+# legacy GitHub CLI updater remains explicit opt-in, never a boot dependency.
+AUTO_UPDATE=${AUTO_UPDATE:-false}
 
-echo "Starting with PUID=${PUID} and PGID=${PGID}"
+echo "Starting with PUID=${PUID} and PGID=${PGID}" >&2
 
 # Update GitHub CLI if enabled. Provider runtimes remain pinned to the image
 # and are never rewritten by startup scripts.
-if [ "$AUTO_UPDATE" = "true" ]; then
+if [ "$AUTO_UPDATE" = "true" ] && [ "${1:-run}" = "run" ]; then
     echo "Checking for updates..."
 
     # Update GitHub CLI
     echo "Updating GitHub CLI..."
-    apt-get update -qq && apt-get install -y --only-upgrade gh 2>/dev/null || echo "GitHub CLI update check failed (continuing anyway)"
+    if ! timeout 60s bash -c 'apt-get update -qq && apt-get install -y --only-upgrade gh' 2>/dev/null; then
+        echo "GitHub CLI update check failed or timed out (continuing anyway)" >&2
+    fi
 
     # Clean up apt cache
     rm -rf /var/lib/apt/lists/* 2>/dev/null || true
@@ -32,7 +44,7 @@ CURRENT_GID=$(id -g appuser)
 
 # Only modify user if PUID/PGID differs from current
 if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
-    echo "Adjusting appuser UID:GID from ${CURRENT_UID}:${CURRENT_GID} to ${PUID}:${PGID}"
+    echo "Adjusting appuser UID:GID from ${CURRENT_UID}:${CURRENT_GID} to ${PUID}:${PGID}" >&2
 
     # Modify group first
     groupmod -o -g "$PGID" appuser
@@ -41,15 +53,21 @@ if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
     usermod -o -u "$PUID" appuser
 
     # Fix ownership of critical directories (skip node_modules to avoid slow recursive chown)
-    echo "Updating ownership of /app and /home/appuser"
+    echo "Updating ownership of /app and /home/appuser" >&2
     chown -R appuser:appuser /home/appuser
     # Only chown app code and static assets, not the massive node_modules trees
-    chown -R appuser:appuser /app/app /data /workspace
+    chown -R appuser:appuser /app/app
+    # Retained DATA_DIR/postgres is validated by the runtime, never chowned.
     chown appuser:appuser /app /app/.env.example 2>/dev/null || true
     find /opt/ai-tools -not -path "*/node_modules/*" -exec chown appuser:appuser {} + 2>/dev/null || true
 else
-    echo "UID/GID already correct, skipping user modification"
+    echo "UID/GID already correct, skipping user modification" >&2
 fi
+
+# Maintenance never starts provider setup, Chromium or application services.
+case "${1:-run}" in
+    dump|restore) exec python /app/docker/container_runtime.py "$@" ;;
+esac
 
 # Ensure config directories exist with correct permissions
 mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.claude /home/appuser/.config/gh
@@ -144,53 +162,13 @@ if [ -d /opt/ai-tools ] && [ -f /opt/ai-tools/package.json ] && [ ! -d /opt/ai-t
     cd /app
 fi
 
-# Ensure data and workspace directories are writable
-chown -R appuser:appuser /data /workspace
+# Mount roots and retained database permissions are handled non-recursively
+# by the Python runtime after resolving DATA_DIR through Settings.
 
 # Final ownership fix for active Fluid settings and provider compatibility data.
 chown -R appuser:appuser /home/appuser/.fluid /home/appuser/.config /home/appuser/.claude 2>/dev/null || true
 
-# =============================================================================
-# Browser-automation browser
-# =============================================================================
-# Launch the headless Chromium as appuser (the same user the app runs as) so the
-# built-in browser MCP server (browser-mcp) has a browser to drive over CDP.
-# Supervised so a crash auto-restarts.
-# The browser profile lives in a NON-default dir (~/chrome-profile) so Chrome
-# 136+ keeps honoring --remote-debugging-port (the loopback CDP surface the
-# browser-mcp server attaches to).
-mkdir -p /home/appuser/chrome-profile
-chown -R appuser:appuser /home/appuser/chrome-profile 2>/dev/null || true
-if [ "${START_CHROME:-1}" = "1" ]; then
-echo "Starting Chromium for browser automation (CHROME_CDP=${CHROME_CDP:-1}, port ${CHROME_CDP_PORT:-9221})..."
-# The supervisor loop lives in /usr/local/bin/chrome-supervisor (see
-# docker/chrome-supervisor.sh) — it captures the real Chrome exit status,
-# applies the circuit breaker + exponential backoff, and (crucially) drops
-# into slow-retry instead of permanently disabling Chrome, as defense in
-# depth against crashes (the known deterministic first-run-suppression
-# SIGTRAP is already fixed in start-chrome.sh). We launch it here
-# backgrounded with the same log redirection and pass the same env defaults
-# through; the supervisor itself does the setpriv drop to appuser.
-CHROME_MAX_RESTARTS="${CHROME_MAX_RESTARTS:-8}" \
-CHROME_HEALTHY_SECS="${CHROME_HEALTHY_SECS:-60}" \
-CHROME_BACKOFF_MAX="${CHROME_BACKOFF_MAX:-300}" \
-CHROME_SLOW_RETRY_SECS="${CHROME_SLOW_RETRY_SECS:-300}" \
-CHROME_CDP="${CHROME_CDP:-1}" \
-CHROME_CDP_PORT="${CHROME_CDP_PORT:-9221}" \
-CHROME_DEBUG="${CHROME_DEBUG:-0}" \
-CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-9222}" \
-CHROME_EXECUTABLE="${CHROME_EXECUTABLE:-/usr/bin/google-chrome-stable}" \
-    chrome-supervisor > /home/appuser/.config/chrome.log 2>&1 &
-echo "Chrome supervisor started (logs: /home/appuser/.config/chrome.log). Diagnose with: chrome-doctor" 
-else
-    echo "Chromium disabled (START_CHROME=${START_CHROME:-0})"
-fi
-
-# =============================================================================
-# Start Application
-# =============================================================================
-echo ""
-echo "=========================================="
-echo "Starting AI Hub as appuser (${PUID}:${PGID})"
-echo "=========================================="
-exec setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser python -m app.main
+# Python owns PostgreSQL, the existing Chromium supervisor, and the app. It
+# drops root itself after safely preparing empty mount roots. tini must forward
+# only to this supervisor (not -g), so application cleanup precedes PG shutdown.
+exec python /app/docker/container_runtime.py "$@"

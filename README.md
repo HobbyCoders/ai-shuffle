@@ -72,7 +72,7 @@ Global markdown notes with tags, pinning, and search. Each note backed by a phys
 Full documentation rendered in-app covering getting started, all features, connectors, and API reference.
 
 ### Worker network
-Every worker runs by itself with its own PostgreSQL (the desktop app bundles one). Workers connect into one network by pairing on the local network or by signing every worker into the same Shuffle account, and then converge on the same settings, provider keys, profiles, preferences, UI state, notes, plugins, memory and session catalog. A session executes on exactly one worker; any worker's UI can see every session and drive any runner, and forks the transcript when an owner is offline. Everything synced is end-to-end encrypted with one network key; the account keeps an encrypted copy so a new device restores from a recovery key when every worker is off. See [docs/network/README.md](docs/network/README.md).
+Every worker runs by itself with its own PostgreSQL (the desktop app and Docker image both bundle one). Workers connect into one network by pairing on the local network or by signing every worker into the same Shuffle account, and then converge on the same settings, provider keys, profiles, preferences, UI state, notes, plugins, memory and session catalog. A session executes on exactly one worker; any worker's UI can see every session and drive any runner, and forks the transcript when an owner is offline. Everything synced is end-to-end encrypted with one network key; the account keeps an encrypted copy so a new device restores from a recovery key when every worker is off. See [docs/network/README.md](docs/network/README.md).
 
 ### Mobile & PWA
 The web UI served by workers is the desktop layout at every window size; narrow windows collapse the sidebar into an overlay and tighten spacing. The Android app bundles its own mobile UI (`mobile/`) and talks to workers only through their APIs, so a worker's version never changes what the phone shows. PWA install support and offline detection work in the web UI. See [docs/mobile-desktop-ui-split.md](docs/mobile-desktop-ui-split.md).
@@ -123,29 +123,62 @@ Open `http://localhost:8000`. Choose your workspace and connect your development
 
 ### Docker
 
-```bash
-# Configure secrets first — compose fails fast if POSTGRES_PASSWORD is unset
-cp .env.example .env
-# edit .env: set POSTGRES_PASSWORD
+**Upgrading an existing two-container Compose install?** Before upgrading, select
+both files below and keep the **same Compose project name** (including any old
+`-p` / `COMPOSE_PROJECT_NAME` setting):
 
-# Bring up the app together with its bundled PostgreSQL
-docker compose up -d
+```bash
+docker compose -f docker-compose.yml -f docker-compose.external.yml up -d --build
 ```
 
-The compose stack provisions PostgreSQL for you (`postgres:16-alpine`); the app
-waits for the database to be healthy before starting. Open `http://localhost:8000`
-and choose your workspace and model providers. No local username, password, or Shuffle account is required.
+That compatibility overlay retains the `postgres` service, `ai-shuffle-postgres`
+container and `postgres-data` volume. Continue selecting it for future operations.
+Do **not** use `down -v`, `--remove-orphans`, rename volumes, or remove database
+configuration as a shortcut to embedded mode. Moving databases requires an
+explicit, tested logical restore; the old volume is not automatically imported.
+
+For a **fresh installation**, Docker Compose 2.24 or newer needs no `.env` or
+database password:
+
+```bash
+docker compose up -d --build
+```
+
+This starts **one container**, including managed PostgreSQL **16**. Open
+`http://localhost:8000` and choose your workspace and model providers. No local
+username, password, or Shuffle account is required. An optional `.env` can set
+other options; `.env.example` does not activate placeholder database credentials.
+
+Keep the existing `ai-shuffle-data:/data` mount: it contains the database at
+`/data/postgres/data`, private lifecycle files in `/data/postgres`, app credential
+keys, memory and identity. PostgreSQL is private to the container; publish only
+the app port. Keep the workspace and existing auth/settings/browser mounts too.
+Compose allows **90 seconds** for ordered shutdown; use `docker stop --time 90
+ai-shuffle` (or longer) with plain Docker, and set the equivalent stop timeout in
+Unraid. A ten-second default stop can interrupt database shutdown.
+
+`DATABASE_MODE=auto` uses embedded PostgreSQL only for a fresh or recognized
+embedded data directory with no external database configuration. An existing
+`DATABASE_URL` or explicit `POSTGRES_*` settings selects external mode; invalid or
+unreachable external configuration fails instead of creating an empty local DB.
+Put component settings in the optional `.env` for Compose, or pass them with
+`docker run -e` for a separately managed server. The legacy URL keeps precedence.
+Explicit embedded mode rejects conflicting external settings. Ambiguous retained
+state, missing lifecycle credentials or another PostgreSQL major version fails
+closed; image replacement is **not** a PostgreSQL major upgrade or downgrade.
+See [backup and recovery](docs/RESTORE.md) before changing storage or DB mode.
 
 **Key environment variables:**
 
 | Variable | Default | Description |
 |---|---|---|
-| `POSTGRES_PASSWORD` | — | **Required.** Database password — compose fails fast if unset. The app builds its own connection URL from the `POSTGRES_*` pieces |
-| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_DB` | `postgres` / `5432` / `ai_shuffle` / `ai_shuffle` | Remaining connection pieces — only set them if your database lives outside the bundled compose service |
-| `DATABASE_URL` | — | *Legacy.* Full connection string from pre-split installs — auto-imported into the `POSTGRES_*` values at startup, so a `.env` with only this set is fully configured (no re-setup needed); still wins at connect time when explicit pieces are also present |
+| `DATABASE_MODE` | `auto` | Docker: `auto`, `embedded`, or `external`; native/local installs still need their own PostgreSQL |
+| `POSTGRES_PASSWORD` | unset | External DB only; required for the legacy Compose `postgres` service, never required for fresh embedded installs |
+| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_DB` | `postgres` / `5432` / `ai_shuffle` / `ai_shuffle` (external) | External connection pieces; leave **all** unset for embedded mode |
+| `DATABASE_URL` | unset | Existing full connection string remains authoritative over components; supplied from `.env` or the Compose shell environment |
 | `ADMIN_PASSWORD` | — | Upgrade only: unlock legacy ciphertext for its first verified key adoption, then remove. Never needed on a fresh installation |
 | `SHUFFLE_LOCAL_ACCESS` | `true` | Allow owner access on the local/LAN listener. Set `false` during a staged upgrade until managed tunnel ingress is verified |
-| `PUID` / `PGID` | `1000` | Runtime user/group for file permissions (Unraid: `99` / `100`) |
+| `PUID` / `PGID` | `99` / `100` (Compose) | Non-root runtime user/group for persistent volume permissions; retain existing custom mappings |
 | `AUTO_UPDATE` | `true` | Auto-update the GitHub CLI on startup (the Claude engine ships with `claude-agent-sdk`) |
 | `LOCAL_MODE` | `false` | Use local filesystem paths |
 | `COMMAND_TIMEOUT` | `300` | Subprocess timeout (seconds) |
@@ -207,7 +240,7 @@ would allow it.
 
 - **Python 3.12+**
 - **Node.js 22.12+** — For building the frontend and the bundled `browser-mcp` server
-- **PostgreSQL** — The database backend (provisioned automatically by Docker Compose)
+- **PostgreSQL 16** — Included and managed by the Docker image. Source deployments need a configured PostgreSQL server.
 - **GitHub CLI** — [Download](https://cli.github.com/) (used for PR reviews, issue management, etc.)
 
 ---

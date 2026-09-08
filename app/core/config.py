@@ -245,6 +245,8 @@ class Settings(BaseSettings):
     #                       user's complete previous config). New installs use
     #                       the pieces above; setup comments the legacy URL out
     #                       when it writes new values.
+    # Interpreted only by the Docker lifecycle supervisor, not app startup.
+    database_mode: str = "auto"  # auto | embedded | external
     postgres_host: Optional[str] = None
     postgres_port: int = 5432
     postgres_user: str = "ai_shuffle"

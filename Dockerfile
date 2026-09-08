@@ -50,7 +50,7 @@ RUN npm run build && npm prune --omit=dev
 # ============================================================================
 FROM cloudflare/cloudflared:2026.8.3@sha256:51c9cefcb4569df44e1ad403ab1d3d8065aa8e84339bcfc6aee75502e1140339 AS tunnel-client
 
-FROM python:3.12-slim
+FROM python:3.12-slim-trixie
 
 # The account-approved connection runs inside Shuffle. No sidecar, credentials
 # entered on the phone, or manual tunnel configuration is required.
@@ -75,6 +75,19 @@ RUN apt-get update && \
     ripgrep \
     tini \
     libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Private PostgreSQL 16, managed by our unprivileged lifecycle supervisor ──
+# Fix the major, but receive 16.x security updates on image rebuilds. Do not
+# create a distro-owned cluster in the image or install anything at runtime.
+RUN mkdir -p /etc/apt/keyrings /etc/postgresql-common \
+    && curl -fsSLo /etc/apt/keyrings/postgresql.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && printf '%s\n' 'deb [signed-by=/etc/apt/keyrings/postgresql.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main' > /etc/apt/sources.list.d/postgresql.list \
+    && printf '%s\n' 'create_main_cluster = false' > /etc/postgresql-common/createcluster.conf \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends postgresql-16 postgresql-client-16 \
+    && test -f /usr/share/postgresql/16/extension/pg_trgm.control \
+    && test -z "$(pg_lsclusters --no-header)" \
     && rm -rf /var/lib/apt/lists/*
 
 # ── GitHub CLI ──
@@ -102,7 +115,7 @@ RUN node --version && npm --version && gh --version
 # chrome-supervisor owns the process (see docker/start-chrome.sh). No browser
 # extension, no native-messaging host, and no --chrome CLI flag are involved.
 #
-# BOTH arches install Debian **Chromium** (this is python:3.12-slim / bookworm,
+# BOTH arches install Debian **Chromium** (the runtime is pinned to trixie,
 # package name `chromium`) and symlink it to /usr/bin/google-chrome-stable so
 # CHROME_EXECUTABLE and start-chrome.sh resolve unchanged. We switched amd64 off
 # full Google Chrome because full Chrome was consuming ~5GB RAM for a single tab
@@ -167,6 +180,7 @@ COPY --chown=appuser:appuser .env.example .
 
 # Copy entrypoint + browser (Chromium supervisor) helper scripts
 COPY entrypoint.sh /entrypoint.sh
+COPY --chown=appuser:appuser docker/container_runtime.py ./docker/container_runtime.py
 COPY docker/start-chrome.sh /usr/local/bin/start-chrome
 COPY docker/chrome-supervisor.sh /usr/local/bin/chrome-supervisor
 COPY docker/chrome-doctor.sh /usr/local/bin/chrome-doctor
@@ -189,7 +203,9 @@ RUN printf '%s\n' "$GIT_SHA" > /app/GIT_SHA
 # Anything the agent installs for itself at runtime (`pip install --user`, an
 # npm prefix in its home) lands in ~/.local/bin. Off PATH those binaries are on
 # disk but "not found", which reads as a failed install.
-ENV PATH="/home/appuser/.local/bin:${PATH}"
+ENV PATH="/home/appuser/.local/bin:/usr/lib/postgresql/16/bin:${PATH}"
+ENV DATA_DIR=/data
+VOLUME ["/data"]
 
 # ── Browser-automation defaults ──
 # START_CHROME=1 launches the supervised headless Chromium at container start so
@@ -214,6 +230,7 @@ HEALTHCHECK --interval=120s --timeout=10s --start-period=40s --retries=3 \
 # Without this, the app process (PID 1) inherits every orphan but never wait()s
 # on them, so defunct chromium/chrome_crashpad corpses accumulate until the
 # container's pids cgroup fills and ALL forks fail (provider/MCP spawns, git worktree,
-# even `docker exec`). `-g` forwards signals to the whole process group so a
-# `docker stop` shuts the app down cleanly.
-ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/entrypoint.sh"]
+# even `docker exec`). Forward only to the lifecycle supervisor: it must stop
+# the app before PostgreSQL so database-dependent app shutdown can finish.
+# Use --stop-timeout 90 (Compose already sets stop_grace_period: 90s).
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]

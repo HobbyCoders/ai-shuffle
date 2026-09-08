@@ -66,9 +66,10 @@ async def _readiness_report() -> tuple[bool, dict]:
     try:
         await asyncio.to_thread(_probe_db)
         checks["database"] = "ok"
-    except Exception as e:  # noqa: BLE001 — a probe must never 500
+    except Exception:  # noqa: BLE001 — a probe must never 500
         checks["database"] = "error"
-        reasons.append(f"database unreachable: {e}")
+        # This probe is public. Connection exceptions may contain a complete DSN.
+        reasons.append("database unreachable")
 
     # 2) Session pool headroom: reject only when wedged at the hard cap
     #    (no new top-level session could be admitted right now).
