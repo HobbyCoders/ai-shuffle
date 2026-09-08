@@ -62,6 +62,12 @@ android {
     testOptions {
         unitTests.isIncludeAndroidResources = true
     }
+
+    androidResources {
+        // Keep Svelte's _app directory. AAPT's default <dir>_* filter otherwise
+        // strips every JS/CSS/font file while retaining a misleading HTML shell.
+        ignoreAssetsPattern = "!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~"
+    }
 }
 
 // The APK ships its own build of the mobile UI (see android/scripts/sync-mobile-ui.sh).

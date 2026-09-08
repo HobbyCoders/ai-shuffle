@@ -82,10 +82,16 @@ class ChatCapabilitiesSmokeTest {
             ActivityScenario.launch<ChatActivity>(Intent(context, ChatActivity::class.java).putExtra(ChatActivity.EXTRA_SERVER_ID, server.id)).use { scenario ->
                 beforeReady(scenario)
                 // The document is the app's own bundle; the worker only answered the session mint.
-                waitFor("Bundled UI never loaded") {
-                    var ready = false
-                    scenario.onActivity { ready = it.hasWindowFocus() && web(it).url == MobileUi.INDEX_URL && it.findViewById<TextView>(R.id.screenStatus).text.isEmpty() }
-                    ready
+                var runtimeReady = false
+                waitFor("Bundled UI JavaScript never initialized") {
+                    scenario.onActivity {
+                        if (it.hasWindowFocus() && web(it).url == MobileUi.INDEX_URL && it.findViewById<TextView>(R.id.screenStatus).text.isEmpty()) {
+                            web(it).evaluateJavascript("document.readyState === 'complete' && typeof window.shuffleMobileSetToken === 'function'") { raw ->
+                                runtimeReady = raw == "true"
+                            }
+                        }
+                    }
+                    runtimeReady
                 }
                 block(scenario, server)
             }
@@ -160,32 +166,41 @@ class ChatCapabilitiesSmokeTest {
                 downloads.javaClass.getDeclaredField("client").apply { isAccessible = true }.set(downloads, transport)
                 web(activity).evaluateJavascript("""
                     (() => {
-                      window.assetSmoke = {images:0, audio:false, range:false};
+                      window.assetSmoke = {images:0, audio:false, range:false, errors:[]};
                       for (const src of [
                         '${server.baseUrl}/api/generated-images/by-path?path=/work/image.png',
                         '${server.baseUrl}/api/files/by-path?path=/work/chip.png',
                         '/api/files/by-path?path=/work/legacy.png']) {
                         const image = new Image(); image.onload = () => { if (image.naturalWidth === 1) assetSmoke.images++; };
+                        image.onerror = () => assetSmoke.errors.push('image:' + src);
                         image.src = src; document.body.append(image);
                       }
                       const audio = document.createElement('audio'); audio.preload = 'auto';
-                      audio.onloadedmetadata = () => { assetSmoke.audio = audio.duration === 1; };
+                      audio.onloadedmetadata = () => { assetSmoke.audioDuration = audio.duration; assetSmoke.audio = audio.duration === 1; };
+                      audio.onerror = () => assetSmoke.errors.push('audio:' + audio.error?.code);
                       audio.src = '${server.baseUrl}/api/generated-audio/by-path?path=/work/audio.wav'; document.body.append(audio); audio.load();
                       // The video element's transport is asserted below; this is not a video-decoder fixture.
                       const video = document.createElement('video'); video.preload = 'auto';
                       video.src = '${server.baseUrl}/api/generated-videos/by-path?path=/work/video.mp4'; document.body.append(video); video.load();
                       fetch('${server.baseUrl}/api/generated-videos/by-path?path=/work/range.mp4', {headers:{Range:'bytes=2-4'}})
-                        .then(async r => { assetSmoke.range = r.status === 206 && r.headers.get('Content-Range') === 'bytes 2-4/12' && await r.text() === 'abc'; });
+                        .then(async r => { assetSmoke.range = r.status === 206 && r.headers.get('Content-Range') === 'bytes 2-4/12' && await r.text() === 'abc'; })
+                        .catch(error => assetSmoke.errors.push('range:' + error.message));
                     })()
                 """.trimIndent(), null)
             }
             var ready = false
-            waitFor("WebView did not decode images/audio and preserve the ranged response") {
-                scenario.onActivity { web(it).evaluateJavascript("JSON.stringify(assetSmoke)") { raw ->
-                    val state = org.json.JSONObject(org.json.JSONTokener(raw).nextValue() as String)
-                    ready = state.optInt("images") == 3 && state.optBoolean("audio") && state.optBoolean("range")
-                } }
-                ready
+            var lastState = "No JavaScript callback"
+            try {
+                waitFor("WebView did not decode images/audio and preserve the ranged response") {
+                    scenario.onActivity { web(it).evaluateJavascript("JSON.stringify(assetSmoke)") { raw ->
+                        lastState = org.json.JSONTokener(raw).nextValue().toString()
+                        val state = org.json.JSONObject(lastState)
+                        ready = state.optInt("images") == 3 && state.optBoolean("audio") && state.optBoolean("range")
+                    } }
+                    ready
+                }
+            } catch (error: AssertionError) {
+                throw AssertionError("${error.message}; state=$lastState; requested=${seen.map { it.url.encodedPath + "?" + it.url.encodedQuery }}", error)
             }
             waitFor("Video element did not request its source") { seen.any { it.url.queryParameter("path") == "/work/video.mp4" } }
             for (url in listOf("${server.baseUrl}/api/v1/notes/n/attachments/a/download", "/api/files/by-path?path=/work/report.pdf")) {
