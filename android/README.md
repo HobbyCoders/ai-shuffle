@@ -6,7 +6,9 @@ The Android companion and account hub live in this repository alongside the serv
 
 **[Download latest Android APK](https://github.com/HobbyCoders/ai-shuffle/releases/download/android-latest/AI-Shuffle-Android.apk)** · [Version, build details and checksum](https://github.com/HobbyCoders/ai-shuffle/releases/tag/android-latest)
 
-Requires Android 8.0 or newer. Open `AI-Shuffle-Android.apk` on your phone and allow installation from your browser if Android asks. The same link is available in the worker's **Settings → Downloads**, the Android app's **Settings → Android APK**, and on the account hub's home page. Public release downloads do not require GitHub sign-in or ZIP extraction.
+Requires Android 8.0 or newer. Open `AI-Shuffle-Android.apk` on your phone and allow installation from your browser if Android asks. The same link is available in the worker's **Settings → Downloads**, the Android app's **Settings → Android APK**, and in the account hub's home-page source. Release downloads do not require ZIP extraction.
+
+**GitHub access:** this repository is private, so sign in to GitHub in your browser with an account that has repository access before downloading. GitHub may show a 404 page when you are signed out or lack access. The APK release link is permanent; it does not bypass repository permissions.
 
 The app keeps the same application ID and release signing key as the former standalone repository, so a signed update can preserve existing app data. Do not uninstall the app as an update step.
 
@@ -15,7 +17,7 @@ The app keeps the same application ID and release signing key as the former stan
 - Android changes on `main` run [Android CI](https://github.com/HobbyCoders/ai-shuffle/actions/workflows/android.yml). After unit tests, lint, hub tests and emulator checks pass, CI updates the **Android — latest verified APK** prerelease at `android-latest`. This is a rolling main build; its notes identify the exact source commit. It does not replace the latest stable desktop release.
 - Versioned project releases build and verify Android from the same checkout, then attach `AI-Shuffle-Android.apk`, its SHA-256 checksum and `android-build.json` to that release.
 - Pull requests run verification but never publish downloads. Fork pull requests skip release signing because repository secrets are unavailable.
-- CI also keeps the original `ai-shuffle-release-apk` workflow artifact for troubleshooting. Actions artifacts require sign-in and expire; the public release downloads remain available.
+- CI also keeps the original `ai-shuffle-release-apk` workflow artifact for troubleshooting. Actions artifacts require sign-in and expire; release downloads remain available under the repository's access rules.
 
 Locally, `./gradlew assembleRelease` produces `app/build/outputs/apk/release/app-release.apk` when signing is configured. Debug builds use `./gradlew assembleDebug` and produce `app/build/outputs/apk/debug/app-debug.apk`.
 
