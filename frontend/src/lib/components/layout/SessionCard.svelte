@@ -447,7 +447,9 @@
 				<span class="l2">
 					<span class="seg"><span class="proj">{projectLabel}</span></span>
 					<span class="dot" aria-hidden="true"></span>
-					<span class="st {statusTone}">{statusWord}</span>
+					<span class="st {statusTone}">{statusWord}{#if status === 'working'}<span class="working-dots" aria-hidden="true">
+							<span></span><span></span><span></span>
+						</span>{/if}</span>
 					{#if showPr}
 						<span class="dot" aria-hidden="true"></span>
 						<span class="st {stageTone}">{prText}</span>
@@ -698,6 +700,27 @@
 	.st.green { color: var(--success); }
 	.st.purple { color: var(--status-merged); }
 	.st.muted { color: var(--muted-foreground); }
+	.working-dots {
+		display: inline-flex;
+		align-items: center;
+		gap: 2px;
+		margin-left: 4px;
+		vertical-align: middle;
+	}
+	.working-dots > span {
+		width: 3px;
+		height: 3px;
+		border-radius: 50%;
+		background: currentColor;
+		opacity: 0.65;
+		animation: working-dot-pulse 1.2s ease-in-out infinite;
+	}
+	.working-dots > span:nth-child(2) { animation-delay: 0.16s; }
+	.working-dots > span:nth-child(3) { animation-delay: 0.32s; }
+	@keyframes working-dot-pulse {
+		0%, 60%, 100% { opacity: 0.35; }
+		30% { opacity: 1; }
+	}
 	.diff {
 		flex: none;
 		font-family: var(--font-mono);
@@ -853,6 +876,7 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.pip,
+		.working-dots > span,
 		.title :global(.warn) { animation: none; }
 		.scard { transition: none; }
 	}

@@ -58,7 +58,11 @@ export interface MobileComposerToolbarPointerState {
 export interface ComposerOpenOptions {
 	enabled: () => boolean;
 	allowEditor: () => boolean;
-	onOpen: () => void;
+	/** Whether the controls sheet is open right now; the gesture toggles it. */
+	open: () => boolean;
+	/** Which way a swipe opens the sheet for the visible layout; closing is the reverse. */
+	openDirection: () => 'up' | 'down';
+	onOpenChange: (open: boolean) => void;
 }
 
 export interface ComposerGestureHandle {

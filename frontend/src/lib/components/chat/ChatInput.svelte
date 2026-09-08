@@ -288,9 +288,11 @@
 	let controlsDockRef = $state<ControlsDock | null>(null);
 	function composerOpenGesture(node: HTMLFormElement) {
 		return composerShell().attachComposerOpen(node, {
-			enabled: () => isMobileComposerViewport() && !mobileControlsOpen,
-			allowEditor: () => mobileCollapsed && !inputValue.trim() && !composerFocused,
-			onOpen: () => controlsDockRef?.openMobileSheet()
+			enabled: () => isMobileComposerViewport(),
+			allowEditor: () => !inputValue.trim() && !composerFocused,
+			open: () => mobileControlsOpen,
+			openDirection: () => compact ? 'up' : 'down',
+			onOpenChange: (open) => controlsDockRef?.setMobileSheetOpen(open)
 		});
 	}
 	let commandJustSelected = false;

@@ -466,6 +466,40 @@ describe('SessionCard git state', () => {
 		expect(meta?.textContent).toContain('feat/x');
 	});
 
+	it.each([true, false])('adds three decorative dots beside Working (selected: %s)', (active) => {
+		const { container } = renderCard({ is_active: true }, { status: 'working', active });
+		const status = container.querySelector('.l2 .st');
+		const dots = status?.querySelector('.working-dots');
+
+		expect(status?.textContent).toBe('Working');
+		expect(dots?.getAttribute('aria-hidden')).toBe('true');
+		expect(dots?.querySelectorAll('span')).toHaveLength(3);
+	});
+
+	it.each(['needs_permission', 'has_question', 'await', 'pr', 'pr_merged', 'done', 'idle'])(
+		'does not show working dots for %s sessions',
+		(status) => {
+			const { container } = renderCard({ is_active: true }, { status });
+			expect(container.querySelector('.working-dots')).toBeNull();
+		}
+	);
+
+	it('removes the working dots when the session finishes', async () => {
+		const { container, rerender } = renderCard({ is_active: true }, { status: 'working' });
+		expect(container.querySelector('.working-dots')).toBeTruthy();
+
+		await rerender({ status: 'done' });
+
+		expect(container.querySelector('.working-dots')).toBeNull();
+		expect(container.querySelector('.l2 .st')?.textContent).toBe('Done');
+	});
+
+	it('keeps compact cards free of the working status and dots', () => {
+		const { container } = renderCard({}, { status: 'working', compact: true });
+		expect(container.querySelector('.l2')).toBeNull();
+		expect(container.querySelector('.working-dots')).toBeNull();
+	});
+
 	it('marks a working row with the live pip and a parked row with the warning', () => {
 		const working = renderCard({ is_active: true }, { status: 'working' });
 		expect(working.container.querySelector('.title .pip')).toBeTruthy();

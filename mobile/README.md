@@ -17,3 +17,17 @@ npm run check
 npm test
 npm run build    # -> build/ ; android/scripts/sync-mobile-ui.sh copies it into the APK
 ```
+
+## Browser regression for the composer gesture
+
+`tests/composer-gesture.html` mounts the shared composer inside the mobile
+shell with isolated transports; `tests/verify-composer-gesture.mjs` drives it
+with Playwright (touch swipes in both layouts and both sheet states, native
+draft scrolling, the controls drawer, the context row geometry). Needs
+`browser-mcp`'s `playwright-core` (`cd ../browser-mcp && npm ci`) and a
+Chromium binary.
+
+```sh
+npx vite dev --config tests/vite.composer-gesture.config.js --port 5181 --strictPort
+CHROMIUM_PATH=/usr/bin/chromium node tests/verify-composer-gesture.mjs
+```
