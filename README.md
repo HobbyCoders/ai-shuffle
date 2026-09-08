@@ -3,7 +3,7 @@
 > A self-hosted web UI for AI Agents — run locally on your desktop or deploy via Docker for remote access from any device.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.8.5-green.svg)](https://github.com/HobbyCoders/ai-shuffle/releases)
+[![Version](https://img.shields.io/badge/version-0.8.6-green.svg)](https://github.com/HobbyCoders/ai-shuffle/releases)
 
 ## What Is AI Shuffle?
 
