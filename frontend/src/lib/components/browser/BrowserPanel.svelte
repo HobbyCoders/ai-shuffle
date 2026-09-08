@@ -69,7 +69,10 @@
 		sessionId: string;
 	}
 
-	let { sessionId }: Props = $props();
+	let { sessionId: requestedSessionId }: Props = $props();
+	// LazyPanel spreads a fresh props object on chat updates. Compare the ID
+	// value before effects read it so typing/streaming cannot reconnect the feed.
+	const sessionId = $derived(requestedSessionId);
 
 	const panel = $derived(browserPanel.forSession(sessionId));
 	const open = $derived(panel.open);

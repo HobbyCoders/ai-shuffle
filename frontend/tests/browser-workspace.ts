@@ -273,6 +273,8 @@ Object.assign(window, {
 			activeSession.current.sessionId = id;
 			activeSession.setWorktreeBranch('fixture');
 		},
+		setDraft(text: string) { activeSession.setDraft(text); },
+		setScrollTop(top: number) { activeSession.setScrollTop(top); },
 		churn(index: number) {
 			activeSession.setWorktreeBranch(`stream-update-${index}`);
 			state = { ...state, revision: state.revision + 1, busy: index % 2 === 0 };

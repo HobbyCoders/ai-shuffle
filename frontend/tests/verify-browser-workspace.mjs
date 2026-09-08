@@ -103,6 +103,32 @@ try {
 		const sample = await page.evaluate(() => { window.canvasObserver.disconnect(); return window.frameSample; });
 		assert.equal(sample.removals, 0); assert.ok(sample.draws > 0); assert.equal(sample.clears, sample.draws, 'every clear is paired with a paint');
 		await page.getByRole('button', { name: 'Hide keyboard', exact: true }).click();
+		// Chat updates must not reset page loading, even transiently. Watch the
+		// actual toolbar attribute so a flip back before the assertion cannot hide.
+		for (const loading of [true, false]) {
+			await page.evaluate(loading => window.browserFixture.page(loading), loading);
+			const label = loading ? 'Stop loading' : 'Reload page';
+			await page.getByRole('button', { name: label, exact: true }).waitFor();
+			await page.evaluate(label => {
+				window.loadingChanges = 0;
+				window.loadingObserver = new MutationObserver(records => { window.loadingChanges += records.length; });
+				window.loadingObserver.observe(document.querySelector(`button[aria-label="${label}"]`), {
+					attributes: true, attributeFilter: ['aria-label'],
+				});
+			}, label);
+			for (let i = 0; i < 4; i++) {
+				await page.evaluate(i => window.browserFixture.setDraft(`Typing ${i}`), i);
+				await page.waitForTimeout(20);
+				await page.evaluate(i => window.browserFixture.setScrollTop(i * 100), i);
+				await page.waitForTimeout(20);
+				await page.evaluate(i => window.browserFixture.churn(i), i);
+				await page.waitForTimeout(20);
+			}
+			assert.equal(await page.getByRole('button', { name: label, exact: true }).count(), 1);
+			assert.equal(await page.evaluate(() => { window.loadingObserver.disconnect(); return window.loadingChanges; }), 0, 'chat activity must not swap reload/stop');
+			assert.equal(await page.evaluate(() => window.browserFixture.socketCount), 1, 'chat activity must not reconnect the browser');
+			assert.equal(await page.evaluate(() => document.querySelector('canvas') === window.sampledCanvas), true);
+		}
 		await page.locator('.address-display').click();
 		const address = page.getByRole('textbox', { name: 'Page address' });
 		await address.fill('https://draft.test/not-yet-sent');
@@ -183,6 +209,7 @@ try {
 				sessionSwitch: 'visibility and dismissal isolated; no frame in closed session',
 				canvasSample: sample,
 				stickyKeyboard: true,
+				chatActivity: 'typing, scrolling and streaming preserve connection, canvas and reload/stop',
 				expandedBounds: 'chat only; restore preserves width',
 				presets: true,
 				orientation: true,
