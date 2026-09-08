@@ -1,9 +1,9 @@
 # AI Shuffle Desktop
 
 The desktop app runs an AI Shuffle worker on this computer and shows its web
-UI in a native window, for Windows, macOS and Linux. It is the desktop
-counterpart of the Android app: the same UI, served by the worker the app
-starts, so the two never drift apart.
+UI in a native window, for Windows x64, Apple Silicon macOS and Linux x64. It
+is the desktop counterpart of the Android app: the same UI, served by the
+worker the app starts, so the two never drift apart.
 
 ## What the app does
 
@@ -26,7 +26,7 @@ starts, so the two never drift apart.
   `$lib/stores/page-header.svelte`.
 - Native menu with the usual accelerators, native notifications, window
   placement that survives restarts, and auto-update through electron-updater,
-  fed by the GitHub release that matches the server's `v*` tag.
+  fed by the GitHub release for the app's `v*` tag.
 
 Other workers (a homelab box, a remote managed worker) are managed inside the
 web UI under Devices, as on the web and on Android. The app itself only ever
@@ -46,8 +46,8 @@ ships under `resources/worker`:
 | `manifest.json` | versions and build time |
 
 PostgreSQL is not bundled. The runtime is built on a runner of the target
-architecture: Windows x64, macOS arm64 and x64, Linux x64. Installers are
-large (several hundred MB); updates download only the changed blocks.
+architecture: Windows x64, macOS arm64, Linux x64. Installers are large
+(several hundred MB); updates download only the changed blocks.
 
 Optional tools the worker looks for on PATH, as on any native install: the
 GitHub CLI for pull-request features, and a Chrome, Chromium or Edge for
@@ -96,10 +96,18 @@ assembles a real one on Linux.
 
 ## Release
 
-`.github/workflows/release.yml` builds the installers on all four targets
-after the server packages and uploads them, with the `latest*.yml` update
-metadata, to the same GitHub release. The desktop version is stamped from the
-tag, so the app carries the same version number as the server it ships.
+`.github/workflows/release.yml` creates the GitHub release, then assembles the
+runtime and builds the installer on each supported target and uploads them,
+with the `latest*.yml` update metadata, to that release. The desktop version
+is stamped from the tag, so the app carries the same version number as the
+server it ships. Supported downloads are the Windows x64 EXE, the macOS arm64
+DMG (plus an arm64 ZIP for updates), and the Linux x64 AppImage or amd64
+Debian package. The workflow no longer publishes standalone server archives;
+Docker remains the headless option.
+
+Older releases may retain Windows ARM update files so the shared Windows
+update feed does not hand an ARM client an x64 installer. Windows ARM is no
+longer built or listed as a supported download.
 
 Code signing is not configured yet. Windows and Linux builds install and
 update unsigned (Windows shows a SmartScreen prompt on first install). macOS

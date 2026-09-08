@@ -4,8 +4,7 @@
 # (latest.yml, latest-mac.yml, latest-linux.yml) are generated next to them
 # because a publish provider is configured, even when `--publish never` is
 # used; the release workflow uploads everything to the GitHub release for the
-# same v* tag that ships the server packages, which is where electron-updater
-# looks for updates.
+# app's v* tag, which is where electron-updater looks for updates.
 appId: com.hobbycoders.aishuffle.desktop
 productName: AI Shuffle
 copyright: Copyright © 2026 HobbyCoders
@@ -44,12 +43,11 @@ protocols:
 win:
   target:
     - target: nsis
-      arch: [x64, arm64]
+      arch: [x64]
   icon: build/icon.png
 
 nsis:
-  # One installer per architecture instead of a combined x64+arm64 one, so
-  # each download is half the size and the updater fetches only its own.
+  # Keep per-architecture installer naming for updater compatibility.
   buildUniversalInstaller: false
   oneClick: false
   perMachine: false
@@ -61,9 +59,9 @@ mac:
   category: public.app-category.developer-tools
   target:
     - target: dmg
-      arch: [x64, arm64]
+      arch: [arm64]
     - target: zip
-      arch: [x64, arm64]
+      arch: [arm64]
   icon: build/icon.png
   hardenedRuntime: true
   gatekeeperAssess: false
@@ -88,7 +86,7 @@ linux:
   icon: build/icon.png
   target:
     - target: AppImage
-      arch: [x64, arm64]
+      arch: [x64]
     - target: deb
       arch: [x64]
   desktop:

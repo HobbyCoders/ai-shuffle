@@ -18,367 +18,9 @@ env:
   VERSION: ${{ github.event.inputs.version || github.ref_name }}
 
 jobs:
-  # Job 1: Build frontend once (platform-agnostic static files)
-  build-frontend:
-    timeout-minutes: 60
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Build frontend
-        working-directory: frontend
-        run: npm run build
-
-      - name: Upload frontend build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-build
-          path: frontend/build/
-          retention-days: 1
-
-  # Job 2: Create platform-specific release packages
-  create-release-packages:
-    timeout-minutes: 60
-    needs: build-frontend
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    steps:
-      - name: Normalise release version
-        # Accept v0.8.5, V0.8.5 or 0.8.5 from the dispatch box; tags are already vX.Y.Z.
-        shell: bash
-        run: |
-          raw="$(printf '%s' "$VERSION" | tr -d '[:space:]')"
-          raw="${raw#v}"; raw="${raw#V}"
-          normalised="v${raw}"
-          [[ "$normalised" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo "::error::Invalid release version '$VERSION' (expected vX.Y.Z)"; exit 1; }
-          echo "VERSION=$normalised" >> "$GITHUB_ENV"
-          echo "Releasing $normalised"
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download frontend build
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-build
-          path: frontend/build/
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Prepare base staging directory
-        run: python scripts/stage_release.py "staging/ai-shuffle-${VERSION}"
-
-      - name: Create Windows package
-        run: |
-          STAGING="staging/ai-shuffle-${VERSION}"
-
-          # Copy Windows launcher
-          cp run_local.bat "${STAGING}/"
-
-          # Create Windows-specific INSTALL.md
-          cat > "${STAGING}/INSTALL.md" << 'INSTALL_EOF'
-          # AI Shuffle - Windows Installation
-
-          ## Prerequisites
-
-          Before running AI Shuffle, install these dependencies:
-
-          1. **Python 3.12+**: Download from https://python.org/downloads/
-             - During installation, check "Add Python to PATH"
-
-          2. **Node.js 22.12+**: Download from https://nodejs.org/
-             - Required for bundled browser and AI tools
-
-          3. **Claude CLI**: Open Command Prompt or PowerShell and run:
-             ```
-             npm install -g @anthropic-ai/claude-code
-             ```
-
-          4. **Claude Authentication**: Run once to authenticate:
-             ```
-             claude login
-             ```
-
-          ## Quick Start
-
-          1. Extract this zip file to a folder (e.g., `C:\ai-shuffle`)
-
-          2. Open Command Prompt in that folder
-
-          3. Run first-time setup:
-             ```
-             python run_local.py --setup
-             ```
-
-          4. Start the server:
-             ```
-             run_local.bat
-             ```
-             Or: `python run_local.py`
-
-          5. Open http://localhost:8000 in your browser
-
-          ## Options
-
-          - Different port: `python run_local.py --port 3000`
-          - No browser auto-open: `python run_local.py --no-browser`
-          - Check prerequisites: `python run_local.py --check`
-
-          ## Troubleshooting
-
-          - **"python is not recognized"**: Reinstall Python with "Add to PATH" checked
-          - **"claude is not recognized"**: Reinstall Claude CLI with `npm install -g @anthropic-ai/claude-code`
-          - **Frontend not loading**: Run `python run_local.py --update` to refresh dependencies; reinstall the archive to replace its pre-built frontend
-
-          ## Notes
-
-          - The frontend is pre-built; Node.js is required to build and run bundled browser and AI tools
-          - Data uses PostgreSQL and the platform-specific app data directory; setup asks for your PostgreSQL connection
-          - Virtual environment is created in `venv/` on first run
-          INSTALL_EOF
-
-          # Create zip (Windows format)
-          cd staging
-          zip -r "../ai-shuffle-${{ env.VERSION }}-windows.zip" "ai-shuffle-${{ env.VERSION }}"
-          cd ..
-
-          # Remove Windows-specific files for next package
-          rm "${STAGING}/run_local.bat"
-          rm "${STAGING}/INSTALL.md"
-
-      - name: Create macOS package
-        run: |
-          STAGING="staging/ai-shuffle-${VERSION}"
-
-          # Copy Unix launcher
-          cp run_local.sh "${STAGING}/"
-          chmod +x "${STAGING}/run_local.sh"
-
-          # Create macOS-specific INSTALL.md
-          cat > "${STAGING}/INSTALL.md" << 'INSTALL_EOF'
-          # AI Shuffle - macOS Installation
-
-          ## Prerequisites
-
-          Before running AI Shuffle, install these dependencies:
-
-          1. **Python 3.12+**:
-             ```bash
-             brew install python@3.12
-             ```
-             Or download from https://python.org/downloads/
-
-          2. **Node.js 22.12+** (for bundled browser and AI tools):
-             ```bash
-             brew install node
-             ```
-             Or download from https://nodejs.org/
-
-          3. **Claude CLI**:
-             ```bash
-             npm install -g @anthropic-ai/claude-code
-             ```
-
-          4. **Claude Authentication** (run once):
-             ```bash
-             claude login
-             ```
-
-          ## Quick Start
-
-          1. Extract the archive:
-             ```bash
-             tar -xzf ai-shuffle-vX.X.X-macos.tar.gz
-             cd ai-shuffle-vX.X.X
-             ```
-
-          2. Run first-time setup:
-             ```bash
-             python3 run_local.py --setup
-             ```
-
-          3. Start the server:
-             ```bash
-             ./run_local.sh
-             ```
-             Or: `python3 run_local.py`
-
-          4. Open http://localhost:8000 in your browser
-
-          ## Options
-
-          - Different port: `python3 run_local.py --port 3000`
-          - No browser auto-open: `python3 run_local.py --no-browser`
-          - Check prerequisites: `python3 run_local.py --check`
-
-          ## Troubleshooting
-
-          - **Permission denied**: Run `chmod +x run_local.sh`
-          - **python3 not found**: Install Python via Homebrew or python.org
-          - **claude not found**: Ensure Node.js is installed, then reinstall Claude CLI
-
-          ## Notes
-
-          - The frontend is pre-built; Node.js is required to build and run bundled browser and AI tools
-          - Data uses PostgreSQL and the platform-specific app data directory; setup asks for your PostgreSQL connection
-          - Virtual environment is created in `venv/` on first run
-          INSTALL_EOF
-
-          # Create tarball (preserves permissions)
-          cd staging
-          tar -czvf "../ai-shuffle-${{ env.VERSION }}-macos.tar.gz" "ai-shuffle-${{ env.VERSION }}"
-          cd ..
-
-          # Remove macOS-specific INSTALL.md for Linux (keep run_local.sh)
-          rm "${STAGING}/INSTALL.md"
-
-      - name: Create Linux package
-        run: |
-          STAGING="staging/ai-shuffle-${VERSION}"
-
-          # run_local.sh already present from macOS step
-          chmod +x "${STAGING}/run_local.sh"
-
-          # Create Linux-specific INSTALL.md
-          cat > "${STAGING}/INSTALL.md" << 'INSTALL_EOF'
-          # AI Shuffle - Linux Installation
-
-          ## Prerequisites
-
-          Before running AI Shuffle, install these dependencies:
-
-          ### Ubuntu/Debian
-          ```bash
-          sudo apt update
-          sudo apt install python3.12 python3.12-venv python3-pip nodejs npm
-          ```
-
-          ### Fedora
-          ```bash
-          sudo dnf install python3.12 nodejs npm
-          ```
-
-          ### Arch Linux
-          ```bash
-          sudo pacman -S python nodejs npm
-          ```
-
-          ### Claude CLI (all distros)
-          ```bash
-          npm install -g @anthropic-ai/claude-code
-          ```
-
-          ### Claude Authentication (run once)
-          ```bash
-          claude login
-          ```
-
-          ## Quick Start
-
-          1. Extract the archive:
-             ```bash
-             tar -xzf ai-shuffle-vX.X.X-linux.tar.gz
-             cd ai-shuffle-vX.X.X
-             ```
-
-          2. Run first-time setup:
-             ```bash
-             python3 run_local.py --setup
-             ```
-
-          3. Start the server:
-             ```bash
-             ./run_local.sh
-             ```
-             Or: `python3 run_local.py`
-
-          4. Open http://localhost:8000 in your browser
-
-          ## Options
-
-          - Different port: `python3 run_local.py --port 3000`
-          - Different host: `python3 run_local.py --host 0.0.0.0`
-          - No browser auto-open: `python3 run_local.py --no-browser`
-          - Check prerequisites: `python3 run_local.py --check`
-
-          ## Running as a Service (systemd)
-
-          1. Create service file:
-             ```bash
-             sudo nano /etc/systemd/system/ai-shuffle.service
-             ```
-
-          2. Add content:
-             ```ini
-             [Unit]
-             Description=AI Shuffle
-             After=network.target
-
-             [Service]
-             Type=simple
-             User=your-username
-             WorkingDirectory=/path/to/ai-shuffle
-             ExecStart=/path/to/ai-shuffle/venv/bin/python -m app.main
-             Restart=on-failure
-             Environment=HOST=127.0.0.1
-             Environment=PORT=8000
-
-             [Install]
-             WantedBy=multi-user.target
-             ```
-
-          3. Enable and start:
-             ```bash
-             sudo systemctl enable ai-shuffle
-             sudo systemctl start ai-shuffle
-             ```
-
-          ## Troubleshooting
-
-          - **Permission denied**: Run `chmod +x run_local.sh`
-          - **python3.12 not found**: Use `python3` instead, or install python3.12
-          - **venv module not found**: Install python3-venv package
-
-          ## Notes
-
-          - The frontend is pre-built; Node.js is required to build and run bundled browser and AI tools
-          - Data uses PostgreSQL and the platform-specific app data directory; setup asks for your PostgreSQL connection
-          - Virtual environment is created in `venv/` on first run
-          INSTALL_EOF
-
-          # Create tarball
-          cd staging
-          tar -czvf "../ai-shuffle-${{ env.VERSION }}-linux.tar.gz" "ai-shuffle-${{ env.VERSION }}"
-          cd ..
-
-      - name: Upload release packages
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-packages
-          path: |
-            ai-shuffle-*-windows.zip
-            ai-shuffle-*-macos.tar.gz
-            ai-shuffle-*-linux.tar.gz
-          retention-days: 5
-
-  # Job 3: Create GitHub Release with all packages
+  # Create the release before uploading desktop installers and update metadata.
   create-release:
     timeout-minutes: 60
-    needs: create-release-packages
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Normalise release version
@@ -390,15 +32,8 @@ jobs:
           normalised="v${raw}"
           [[ "$normalised" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo "::error::Invalid release version '$VERSION' (expected vX.Y.Z)"; exit 1; }
           echo "VERSION=$normalised" >> "$GITHUB_ENV"
+          echo "DESKTOP_VERSION=$raw" >> "$GITHUB_ENV"
           echo "Releasing $normalised"
-
-      - name: Download release packages
-        uses: actions/download-artifact@v4
-        with:
-          name: release-packages
-
-      - name: List packages
-        run: ls -la ai-shuffle-*
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -408,60 +43,30 @@ jobs:
           draft: false
           prerelease: ${{ contains(env.VERSION, '-') }}
           generate_release_notes: true
-          files: |
-            ai-shuffle-*-windows.zip
-            ai-shuffle-*-macos.tar.gz
-            ai-shuffle-*-linux.tar.gz
           body: |
-            ## AI Shuffle ${{ env.VERSION }}
+            ## AI Shuffle Desktop ${{ env.VERSION }}
 
-            ### Downloads
+            ### Desktop downloads
 
-            | Platform | Archive | Size |
-            |----------|---------|------|
-            | **Windows** | `ai-shuffle-${{ env.VERSION }}-windows.zip` | Extract and run `run_local.bat` |
-            | **macOS** | `ai-shuffle-${{ env.VERSION }}-macos.tar.gz` | Extract and run `./run_local.sh` |
-            | **Linux** | `ai-shuffle-${{ env.VERSION }}-linux.tar.gz` | Extract and run `./run_local.sh` |
+            Choose the installer for your operating system and processor.
 
-            ### Prerequisites
+            | Platform | Processor | Download |
+            |----------|-----------|----------|
+            | **Windows** | Intel / AMD (x64) | [Windows installer (.exe)](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Desktop-${{ env.DESKTOP_VERSION }}-win-x64.exe) |
+            | **macOS** | Apple silicon (arm64) | [Mac installer (.dmg)](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Desktop-${{ env.DESKTOP_VERSION }}-mac-arm64.dmg) |
+            | **Linux** | Intel / AMD (x64) | [AppImage](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Desktop-${{ env.DESKTOP_VERSION }}-linux-x86_64.AppImage) / [Debian package (.deb)](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Desktop-${{ env.DESKTOP_VERSION }}-linux-amd64.deb) |
 
-            - **Python 3.12+** - [Download](https://python.org/downloads/)
-            - **Node.js 22.12+** - [Download](https://nodejs.org/) (for bundled browser and AI tools)
-            - **Claude CLI** - `npm install -g @anthropic-ai/claude-code`
-            - **Claude Auth** - Run `claude login` once to authenticate
+            The app runs an AI Shuffle worker on your computer and opens its web UI.
+            It bundles Python and Node; you need a PostgreSQL server, which the app
+            asks for on first run. Other workers are managed inside the app under
+            Devices. Docker users: `ghcr.io/hobbycoders/ai-shuffle:${{ env.VERSION }}`.
 
-            ### Quick Start
+            Installers become available as each desktop build finishes.
 
-            ```bash
-            # 1. Extract the archive for your platform
-            # 2. Run first-time setup
-            python run_local.py --setup
-
-            # 3. Start the server
-            python run_local.py
-
-            # 4. Open http://localhost:8000
-            ```
-
-            ### What's Included
-
-            - Pre-built frontend (no `npm run build` needed)
-            - Python backend with all modules
-            - Platform-specific launcher scripts
-            - Example environment configuration
-
-            See the included `INSTALL.md` for detailed platform-specific instructions.
-
-            ---
-
-            **Docker users**: Use `ghcr.io/hobbycoders/ai-shuffle:${{ env.VERSION }}` instead.
-
-  # Job 4: Desktop installers. Built after the release exists so the
-  # installers and their electron-updater metadata land on the same release
-  # as the server packages, which is where the app looks for updates. Each
-  # installer carries the worker runtime for its platform (Python with the
-  # server's dependencies, Node, the server itself), assembled by
-  # desktop/scripts/build-worker.mjs on a runner of that architecture.
+  # Package the desktop app for each supported target and upload to the
+  # release above. Each installer carries the worker runtime for its target
+  # (Python with the server's dependencies, Node, the server itself), assembled
+  # by desktop/scripts/build-worker.mjs on a runner of that architecture.
   desktop:
     name: Desktop (${{ matrix.target }})
     timeout-minutes: 90
@@ -476,9 +81,6 @@ jobs:
           - target: mac-arm64
             os: macos-latest
             arch: arm64
-          - target: mac-x64
-            os: macos-15-intel
-            arch: x64
           - target: linux-x64
             os: ubuntu-latest
             arch: x64
@@ -512,11 +114,10 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
-      - name: Download frontend build
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-build
-          path: frontend/build/
+      - name: Build frontend
+        working-directory: frontend
+        shell: bash
+        run: npm ci && npm run build
 
       - name: Install desktop dependencies
         run: npm ci

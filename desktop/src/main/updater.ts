@@ -1,9 +1,9 @@
 /**
  * Auto-update through electron-updater.
  *
- * Updates are read from the GitHub release that matches the server's `v*`
+ * Updates are read from the GitHub release that matches the app's `v*`
  * tags: the release workflow uploads the installers and their `latest*.yml`
- * metadata next to the server packages, and electron-updater downloads a new
+ * metadata to that release, and electron-updater downloads a new
  * shell quietly in the background. The page shows the "Update ready" state
  * through the bridge and asks the shell to restart when the person is ready;
  * otherwise the update installs on the next quit.
