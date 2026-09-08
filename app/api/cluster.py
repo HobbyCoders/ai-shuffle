@@ -261,6 +261,23 @@ async def git_state(
     installs = await run_sync(database.get_installs)
     me = _self_install_id()
 
+    from app.network import engine, git as network_git
+    if engine.context() is not None:
+        out, recent = [], []
+        for install in installs:
+            entry = {**install, "is_self": install.get("id") == me,
+                     "eligible": False, "checkouts": []}
+            if pv2_id and (entry["is_self"] or install.get("online")):
+                try:
+                    owned = await network_git.state(install["id"], pv2_id)
+                    entry.update(eligible=owned["eligible"], checkouts=owned["checkouts"])
+                    recent.extend(owned.get("recent_ops", []))
+                except Exception:
+                    logger.warning("Cannot read Git state from worker %s", install["id"], exc_info=True)
+                    entry["availability_error"] = "Worker Git state is unavailable"
+            out.append(entry)
+        return {"project_v2_id": pv2_id, "installs": out, "recent_ops": recent}
+
     if pv2_id:
         rows = await run_sync(checkouts_db.list_checkouts, pv2_id)
         recent = await run_sync(git_ops_db.list_recent_for_project, pv2_id, 20)
@@ -351,6 +368,14 @@ async def refresh_git_state(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="not a git project",
         )
+
+    from app.network import engine, git as network_git
+    if engine.context() is not None:
+        try:
+            op = await network_git.enqueue(runner_id, "refresh_status", project_v2_id=pv2["id"])
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail="Selected worker is unavailable or has no base checkout") from exc
+        return {"ops": [op]}
 
     op = await run_sync(
         git_ops_db.insert_op,

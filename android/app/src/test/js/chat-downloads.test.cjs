@@ -1,4 +1,37 @@
 const {test} = require('node:test');
+test('ordinary Notes attachments and relative markdown file links use authenticated native save', async () => {
+  const location = {origin: 'https://appassets.androidplatform.net', href: 'https://appassets.androidplatform.net/assets/mobile-ui/'};
+  const runtime = {apiOrigin: 'https://worker.example', token: 'never-in-the-url'};
+  for (const [href, expected] of [
+    ['https://worker.example/api/v1/notes/n/attachments/a/download', 'https://worker.example/api/v1/notes/n/attachments/a/download'],
+    ['https://appassets.androidplatform.net/api/files/by-path?path=%2Fwork%2Freport.pdf', 'https://worker.example/api/files/by-path?path=%2Fwork%2Freport.pdf'],
+    ['https://worker.example/api/generated-images/by-path?path=%2Fwork%2Fimage.png', 'https://worker.example/api/generated-images/by-path?path=%2Fwork%2Fimage.png']
+  ]) {
+    const f = fixture(undefined, {location, runtime});
+    const anchor = new f.Anchor(href, null);
+    let prevented = false;
+    f.handlers.click({target: anchor, defaultPrevented: false, preventDefault() { prevented = true; }});
+    await settled();
+    assert.equal(prevented, true, href);
+    assert.equal(f.messages[0].type, 'url');
+    assert.equal(f.messages[0].url, expected);
+    assert.ok(!JSON.stringify(f.messages).includes(runtime.token));
+  }
+});
+test('credential-bearing URLs are never sent to native save and external ordinary links stay untouched', async () => {
+  const runtime = {apiOrigin: 'https://worker.example'};
+  const f = fixture(undefined, {runtime});
+  new f.Anchor('https://name:password@worker.example/api/files/by-path?path=x').click();
+  await settled();
+  assert.equal(f.messages[0].type, 'error');
+  for (const href of ['https://outside.example/file', 'http://worker.example/file', 'https://worker.example:8443/file', 'https://worker.example.evil/file']) {
+    const g = fixture(undefined, {runtime});
+    g.handlers.click({target: new g.Anchor(href, null), defaultPrevented: false, preventDefault() { assert.fail('External navigation was captured'); }});
+    await settled();
+    assert.equal(g.messages.length, 0);
+  }
+});
+
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
@@ -10,7 +43,7 @@ function fixture(rejectType, options = {}) {
   let sequence = 0, receiver;
   class Anchor {
     constructor(href, download = 'fixture.txt') { this.href = href; this.download = download; }
-    hasAttribute(name) { return name === 'download'; }
+    hasAttribute(name) { return name === 'download' && this.download !== null; }
     closest() { return this; }
     click() { throw Error('Browser download should have been intercepted'); }
   }

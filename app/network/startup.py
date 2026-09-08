@@ -27,9 +27,22 @@ logger = logging.getLogger(__name__)
 _tasks: List[asyncio.Task] = []
 
 
+class PrivateDatabaseRequiredError(RuntimeError):
+    """Starting work against another device's network database is unsafe."""
+
+
 def initialize() -> Optional[engine.NetworkContext]:
     ident = identity_mod.load()
     logger.info("Device identity %s (%s)", ident.device_id, ident.fingerprint)
+    state = store.get_state()
+    if state is not None and not any(
+        row["device_id"] == ident.device_id for row in store.list_members()
+    ):
+        raise PrivateDatabaseRequiredError(
+            "A worker network requires a private database and its matching device keys. "
+            "Do not point another worker at this database; migrate it to a fresh database "
+            "or restore the matching .credential-keys backup."
+        )
     ctx = engine.load_context()
     if ctx is None and _is_existing_install():
         ctx = _migrate_single_install()
@@ -47,6 +60,12 @@ def initialize() -> Optional[engine.NetworkContext]:
 def _is_existing_install() -> bool:
     """A database that already served a user gets a network of one silently."""
     try:
+        with store.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) AS n FROM installs")
+            if int(cursor.fetchone()["n"]) > 1:
+                logger.warning("Shared database detected; automatic network enrollment is disabled. Follow the migration runbook.")
+                return False
         if database.get_system_setting("onboarding_complete") in ("true", "1", "True"):
             return True
         with store.get_db() as conn:
@@ -124,10 +143,24 @@ def _install_resource_hook() -> None:
     resource_sync._network_hooked = True
 
 
+async def _reconcile_owned_connectors() -> None:
+    """Close connections when committed membership changes fence this worker."""
+    from app.core.connectors.manager import connector_manager
+    from app.network import ownership
+    if not ownership.can_execute_local():
+        await connector_manager.stop_all()
+    else:
+        await connector_manager.start_all()
+
+
 def _on_applied(touched) -> None:
     """Remote records landed: tell connected UIs so they refresh, and materialize side effects."""
     from app.core.global_events import global_events
     resources = set()
+    if any(collection == "membership" for collection, _record, _op in touched):
+        loop = getattr(global_events, "_loop", None)
+        if loop and not loop.is_closed():
+            asyncio.run_coroutine_threadsafe(_reconcile_owned_connectors(), loop)
     memory_ids = [r for c, r, _ in touched if c == "memory"]
     plugin_ids = [r for c, r, _ in touched if c == "plugins_desired"]
     if memory_ids:

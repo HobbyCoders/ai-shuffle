@@ -32,14 +32,33 @@ def my_device_id() -> Optional[str]:
     return ctx.device_id if ctx else None
 
 
+def execution_eligible() -> bool:
+    """Whether this enrolled worker may execute or claim network-owned work.
+
+    Presence of a context is deliberately not enough: a worker that has been
+    revoked retains it to decrypt history, but it must not run new work.
+    """
+    ctx = engine.context()
+    if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+        return False
+    me = ctx.member(ctx.device_id)
+    from app.network import crypto, keyring
+    return bool(me and me.status == engine.membership.STATUS_ACTIVE and ctx.key_version in ctx.keyring
+                and keyring.safe(ctx, crypto.sha256_hex(ctx.network_key)))
+
+
+# Public alias for execution-boundary callers in services owned elsewhere.
+can_execute_local = execution_eligible
+
+
 def owner_of(row: Mapping[str, Any]) -> Optional[str]:
     return (row or {}).get("owner_device_id") or None
 
 
 def owns(row: Mapping[str, Any]) -> bool:
-    """True when this device is the definition's owner."""
+    """True when this eligible device is the definition's owner."""
     me = my_device_id()
-    return bool(me) and owner_of(row) == me
+    return execution_eligible() and bool(me) and owner_of(row) == me
 
 
 def is_unowned(row: Mapping[str, Any]) -> bool:
@@ -49,7 +68,7 @@ def is_unowned(row: Mapping[str, Any]) -> bool:
 def claim(table: str, row_id: str) -> bool:
     """Take ownership of an unowned definition (race-safe: only the first UPDATE wins)."""
     me = my_device_id()
-    if table not in OWNED_TABLES or not me:
+    if table not in OWNED_TABLES or not me or not execution_eligible():
         return False
     with get_db() as conn:
         cursor = conn.cursor()
@@ -66,8 +85,10 @@ def assign(table: str, row_id: str, device_id: Optional[str]) -> dict:
     if table not in OWNED_TABLES:
         raise ValueError("Not an owned definition table")
     ctx = engine.require_context()
-    if device_id is not None and ctx.member(device_id) is None:
-        raise KeyError("Unknown device")
+    if device_id is not None:
+        member = ctx.member(device_id)
+        if member is None or member.status != engine.membership.STATUS_ACTIVE:
+            raise KeyError("Owner must be an active device")
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(f"UPDATE {table} SET owner_device_id = %s, updated_at = NOW() WHERE id = %s", (device_id, row_id))
@@ -81,6 +102,8 @@ def decide_automation(automation: Mapping[str, Any]) -> Optional[Tuple[bool, str
     """Network rule for a scheduled fire, or None to let the legacy election decide."""
     if not enrolled():
         return None
+    if not execution_eligible():
+        return False, "this device is not eligible to execute network work"
     owner = owner_of(automation)
     me = my_device_id()
     if owner == me:
@@ -96,6 +119,8 @@ def decide_connector(row: Mapping[str, Any]) -> Optional[str]:
     """'start' | 'claim' | 'skip' for a connector row, or None for the legacy rule."""
     if not enrolled():
         return None
+    if not execution_eligible():
+        return "skip"
     owner = owner_of(row)
     if owner == my_device_id():
         return "start"

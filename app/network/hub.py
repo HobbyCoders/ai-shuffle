@@ -210,10 +210,19 @@ def schedule_recovery_upload() -> None:
 
 
 def _upload_recovery() -> None:
+    """Upload a new wrap or durably tombstone an invalidated one."""
     global _recovery_upload_due
     state = store.get_state() or {}
     wrap = state.get("recovery")
     if not wrap:
+        _recovery_upload_due = False
+        return
+    if wrap.get("stale"):
+        if not wrap.get("hub_tombstoned"):
+            _call("POST", "recovery", {"recovery": None})
+            wrap = dict(wrap)
+            wrap["hub_tombstoned"] = True
+            store.update_state(recovery=wrap)
         _recovery_upload_due = False
         return
     _call("POST", "recovery", {"recovery": wrap})
@@ -330,7 +339,8 @@ async def _loop_body() -> bool:
             return False
         if not hub_state.get("registered"):
             await asyncio.to_thread(register)
-        if _recovery_upload_due:
+        recovery_wrap = (store.get_state() or {}).get("recovery") or {}
+        if _recovery_upload_due or (recovery_wrap.get("stale") and not recovery_wrap.get("hub_tombstoned")):
             await asyncio.to_thread(_upload_recovery)
         if ctx.bootstrap_state == engine.BOOTSTRAP_READY:
             sent = await asyncio.to_thread(push_once)

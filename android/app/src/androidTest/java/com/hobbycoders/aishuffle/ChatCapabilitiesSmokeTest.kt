@@ -22,6 +22,8 @@ import com.hobbycoders.aishuffle.tools.DeviceToolsRuntime
 import com.hobbycoders.aishuffle.tools.ToolsPreferences
 import com.hobbycoders.aishuffle.ui.ChatActivity
 import com.hobbycoders.aishuffle.ui.MobileUi
+import com.hobbycoders.aishuffle.ui.WorkerAssetLoader
+import com.hobbycoders.aishuffle.ui.WorkerDownloadClient
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
@@ -123,6 +125,88 @@ class ChatCapabilitiesSmokeTest {
             val decoded = android.graphics.BitmapFactory.decodeByteArray(image, 0, image.size)
             assertNotNull(decoded); assertEquals(1, decoded.width); assertEquals(1, decoded.height); decoded.recycle()
             assertEquals(listOf("fixture.txt", "image.png"), chosen.toList())
+        }
+    }
+    @Test fun workerMediaElementsAndOrdinaryAttachmentLinksUseAuthenticatedNativeTransport() {
+        val seen = CopyOnWriteArrayList<okhttp3.Request>()
+        val png = java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        // A valid, silent PCM WAV: lets the real WebView decode audio metadata, not just fetch bytes.
+        val wav = java.nio.ByteBuffer.allocate(8044).order(java.nio.ByteOrder.LITTLE_ENDIAN).apply {
+            put("RIFF".toByteArray()); putInt(8036); put("WAVEfmt ".toByteArray()); putInt(16)
+            putShort(1); putShort(1); putInt(8000); putInt(8000); putShort(1); putShort(8)
+            put("data".toByteArray()); putInt(8000); repeat(8000) { put(128.toByte()) }
+        }.array()
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request(); seen.add(request)
+            val path = request.url.encodedPath
+            val ranged = request.header("Range") == "bytes=2-4"
+            val (bytes, mime) = when {
+                ranged -> "abc".toByteArray() to "video/mp4"
+                path.contains("generated-audio") -> wav to "audio/wav"
+                path.contains("generated-videos") -> "video transport fixture".toByteArray() to "video/mp4"
+                path.contains("generated-images") || path.contains("files/by-path") && request.url.queryParameter("path")!!.endsWith(".png") -> png to "image/png"
+                else -> "benign attachment".toByteArray() to "application/pdf"
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(if (ranged) 206 else 200).message("Fixture")
+                .header("Content-Type", mime).header("Content-Length", bytes.size.toString()).header("Accept-Ranges", "bytes")
+                .apply { if (ranged) header("Content-Range", "bytes 2-4/12") }.body(bytes.toResponseBody(mime.toMediaType())).build()
+        }.build()
+        fixture({ _, _ -> Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(destination)) }) { scenario, server ->
+            scenario.onActivity { activity ->
+                val transport = WorkerDownloadClient(http)
+                ChatActivity::class.java.getDeclaredField("workerAssets").apply { isAccessible = true }
+                    .set(activity, WorkerAssetLoader(transport))
+                val downloads = ChatActivity::class.java.getDeclaredField("downloads").apply { isAccessible = true }.get(activity)
+                downloads.javaClass.getDeclaredField("client").apply { isAccessible = true }.set(downloads, transport)
+                web(activity).evaluateJavascript("""
+                    (() => {
+                      window.assetSmoke = {images:0, audio:false, range:false};
+                      for (const src of [
+                        '${server.baseUrl}/api/generated-images/by-path?path=/work/image.png',
+                        '${server.baseUrl}/api/files/by-path?path=/work/chip.png',
+                        '/api/files/by-path?path=/work/legacy.png']) {
+                        const image = new Image(); image.onload = () => { if (image.naturalWidth === 1) assetSmoke.images++; };
+                        image.src = src; document.body.append(image);
+                      }
+                      const audio = document.createElement('audio'); audio.preload = 'auto';
+                      audio.onloadedmetadata = () => { assetSmoke.audio = audio.duration === 1; };
+                      audio.src = '${server.baseUrl}/api/generated-audio/by-path?path=/work/audio.wav'; document.body.append(audio); audio.load();
+                      // The video element's transport is asserted below; this is not a video-decoder fixture.
+                      const video = document.createElement('video'); video.preload = 'auto';
+                      video.src = '${server.baseUrl}/api/generated-videos/by-path?path=/work/video.mp4'; document.body.append(video); video.load();
+                      fetch('${server.baseUrl}/api/generated-videos/by-path?path=/work/range.mp4', {headers:{Range:'bytes=2-4'}})
+                        .then(async r => { assetSmoke.range = r.status === 206 && r.headers.get('Content-Range') === 'bytes 2-4/12' && await r.text() === 'abc'; });
+                    })()
+                """.trimIndent(), null)
+            }
+            var ready = false
+            waitFor("WebView did not decode images/audio and preserve the ranged response") {
+                scenario.onActivity { web(it).evaluateJavascript("JSON.stringify(assetSmoke)") { raw ->
+                    val state = org.json.JSONObject(org.json.JSONTokener(raw).nextValue() as String)
+                    ready = state.optInt("images") == 3 && state.optBoolean("audio") && state.optBoolean("range")
+                } }
+                ready
+            }
+            waitFor("Video element did not request its source") { seen.any { it.url.queryParameter("path") == "/work/video.mp4" } }
+            for (url in listOf("${server.baseUrl}/api/v1/notes/n/attachments/a/download", "/api/files/by-path?path=/work/report.pdf")) {
+                val before = seen.size
+                val expected = if (url.startsWith("/")) server.baseUrl + url else url
+                scenario.onActivity { web(it).evaluateJavascript("""
+                    (() => { const a=document.createElement('a'); a.href=${org.json.JSONObject.quote(url)};
+                    a.target='_blank'; a.textContent='report.pdf'; document.body.append(a);
+                    a.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true})); })()
+                """.trimIndent(), null) }
+                waitFor("Native attachment download was not requested") { seen.drop(before).any { it.url.toString() == expected } }
+                status(scenario, "File saved.")
+                assertEquals("benign attachment", context.contentResolver.openInputStream(destination)!!.bufferedReader().use { it.readText() })
+                scenario.onActivity { assertEquals(MobileUi.INDEX_URL, web(it).url) }
+            }
+            assertTrue(seen.any { it.url.encodedPath.contains("notes/") })
+            seen.forEach {
+                assertEquals("chat-fixture.example", it.url.host)
+                assertEquals("Bearer fixture-cookie", it.header("Authorization"))
+                assertFalse(it.url.toString().contains("fixture-cookie"))
+            }
         }
     }
     @Test fun cancellationAndRemovedWorkerNeverPersistDownloadedBytes() {

@@ -1,11 +1,13 @@
 # Account hub: network API contract
 
-The account hub is the Cloudflare Worker at `MOBILE_ACCOUNT_HUB_URL` (D1 for
-accounts and devices, one Durable Object per network for the feed, R2 for
-segments and blobs). Its source lives outside this repository; this file is
-the contract the worker-side client in `app/network/hub.py` implements and
-the in-memory reference implementation used by the tests
-(`tests/core/network/fake_hub.py`) follows.
+The account hub is the Cloudflare Worker at `MOBILE_ACCOUNT_HUB_URL`. Its
+production source is `android/hub`: D1 stores accounts, linked servers, network
+admission state, opaque recovery wraps, and the append-only encrypted feed.
+Migration `0007_network_feed.sql` creates the network tables; the existing `DB`
+D1 binding and deployment migration step apply them. This file is the contract
+the worker-side client in `app/network/hub.py` implements and the in-memory
+reference implementation used by the tests (`tests/core/network/fake_hub.py`)
+follows.
 
 The hub is zero-knowledge for payloads. It stores ciphertext envelopes,
 cursors, device descriptions (public keys, names, platforms) and the public
@@ -16,9 +18,12 @@ network ids are visible to it.
 
 Every route below is under `/v1/servers/{server_id}/network...` and is
 authenticated exactly like the existing server routes: `Authorization: Bearer
-<server secret>` (the secret issued at worker linking). The `server_id` binds
-the call to one signed-in worker; the hub maps the server to its account and
-the account to its single network.
+<server secret>` (the secret issued at worker linking). The server must be
+active and not revoked; its immutable account binding selects that account's
+single network. A secret cannot address another server or account. Summary and
+approval pickup are available to the linked server for bootstrap; pending-list,
+admission, recovery writes, feed push, and feed pull additionally require that
+server's network device to be `active`.
 
 Responses are JSON objects. Errors use HTTP status codes; bodies are never
 echoed back by the worker.
@@ -26,21 +31,22 @@ echoed back by the worker.
 ## Data model (D1)
 
 ```
-networks         id, account_id, network_id, founder_device_id, generation,
-                 name, recovery_wrap (JSON, public), created_at
-network_devices  id, network_id, device_id, server_id, signing_public,
-                 encryption_public, name, platform, kind, incarnation,
-                 version, status ('pending'|'approved'|'active'|'rejected'|'revoked'),
-                 approval (JSON join response, deleted after pickup), created_at
-servers          + network_id
+networks         id, account_id (unique), network_id, founder_device_id,
+                 generation, recovery_json, cursor_head, stored_ops,
+                 stored_bytes, daily_upload_day, daily_upload_bytes
+network_devices  network_hub_id, device_id, server_id, signing_public,
+                 encryption_public, name, platform, kind, incarnation, version,
+                 status ('pending'|'approved'|'active'|'rejected'|'revoked'),
+                 approval_json (one-time join response)
+network_feed     network_hub_id, cursor, origin_device_id, origin_incarnation,
+                 origin_seq, envelope (opaque JSON ciphertext), bytes
 ```
 
-Feed storage lives in the network's Durable Object: an append-only list of
-envelopes with a committed cursor (`cursor` = count of committed envelopes),
-deduplicated on `(origin_device_id, origin_incarnation, origin_seq)`. Old
-segments compact into R2; a `GET feed` from a cursor older than the retained
-window answers `snapshot_required: true` and the worker re-bootstraps from a
-member.
+Feed storage is D1-backed and append-only. Cursors are dense and scoped to one
+network; envelopes are deduplicated by `(origin_device_id, origin_incarnation,
+origin_seq)` and returned in committed cursor order. D1 currently retains the
+entire feed until a quota is reached, so `snapshot_required` is always `false`.
+No Durable Object or R2 binding is required by this implementation.
 
 ## Routes
 
@@ -121,7 +127,8 @@ the recovery key can verify the whole chain from nothing.
 Body `{"recovery": <public recovery wrap>}`: `{v, network_id, key_version,
 wrapped: {alg, nonce, ct}, check, created_at, created_by}`. Stored on the
 network; returned in the summary so a fresh device can unlock offline of every
-other worker.
+other worker. An active device may explicitly clear stale recovery material with
+`{"recovery": null}`; subsequent summaries return `recovery: null`.
 
 ### `POST .../network/blobs` and `GET .../network/blobs/{hash}` (later)
 
@@ -131,8 +138,11 @@ served worker to worker.
 
 ## Quotas
 
-Per network: total stored envelopes/bytes and daily upload bytes. Over quota
-the hub answers `quota_exceeded`; workers keep syncing with each other and show
+Per network: 200,000 stored envelopes, 512 MiB stored ciphertext JSON, and
+64 MiB of newly accepted ciphertext JSON per UTC day. The D1 quota trigger
+checks an upload atomically: if any new envelope would exceed a quota, it rolls
+back the whole batch and the hub answers `quota_exceeded` with `accepted: 0`.
+Duplicates do not consume quota. Workers keep syncing with each other and show
 the cloud backlog in Settings > Devices.
 
 ## Failure cases the worker handles
@@ -142,6 +152,6 @@ the cloud backlog in Settings > Devices.
 | Hub unreachable | Retries on the loop cadence; LAN sync unaffected; `last_error` shown. |
 | 401/403 | Binding treated as revoked by the existing account code; loop idles. |
 | Quota exceeded | Backlog counted from `pushed_ingest_id`; nothing is dropped. |
-| `snapshot_required` | Worker re-bootstraps from an online member and resumes from the new cursor head. |
+| `snapshot_required` | Reserved for a future retention migration; the current D1 feed always returns `false`. |
 | Approval response for another device id | Rejected by `enroll_from_response` (the certificate must admit this device). |
 | Feed envelope that fails verification | Rejected and counted; never advances the origin's watermark past it. |

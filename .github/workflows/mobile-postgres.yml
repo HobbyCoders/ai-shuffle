@@ -5,6 +5,8 @@ on:
     paths:
       - 'app/**'
       - 'tests/integration/test_mobile_postgres.py'
+      - 'tests/integration/test_network_migration_postgres.py'
+      - 'scripts/network_migrate.py'
       - 'requirements*.txt'
       - 'fluid/**'
       - '.github/workflows/mobile-postgres.yml'
@@ -63,3 +65,22 @@ jobs:
           python -m pytest tests/integration/test_mobile_postgres.py
           --confcutdir=tests/integration -o addopts="" -p no:cacheprovider
           --timeout=60 -v
+
+      - name: Create disposable network migration database
+        env:
+          PGPASSWORD: mobile-test-only
+        run: |
+          psql -h 127.0.0.1 -U shuffle_mobile_test -d shuffle_mobile_test -v ON_ERROR_STOP=1 -c "CREATE USER shuffle_network_test WITH PASSWORD 'network-test-only'"
+          psql -h 127.0.0.1 -U shuffle_mobile_test -d shuffle_mobile_test -v ON_ERROR_STOP=1 -c "CREATE DATABASE shuffle_network_test OWNER shuffle_network_test"
+      - name: Verify network migration on real PostgreSQL
+        env:
+          TESTING: '1'
+          ALLOW_REAL_PG: '1'
+          NETWORK_POSTGRES_TEST: '1'
+          NETWORK_PG_PORT: '5432'
+          AI_SHUFFLE_ENV_FILE: /dev/null
+          PYTHONPATH: .
+        run: >-
+          python -m pytest tests/integration/test_network_migration_postgres.py
+          --confcutdir=tests/integration -o addopts="" -p no:cacheprovider
+          --timeout=120 -v

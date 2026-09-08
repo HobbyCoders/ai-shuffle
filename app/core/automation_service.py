@@ -128,8 +128,9 @@ def should_run_scheduled_here(automation: Dict[str, Any]) -> Tuple[bool, str]:
     try:
         from app.network import ownership
         decided = ownership.decide_automation(automation)
-    except Exception:  # noqa: BLE001 — the network layer must never block a fire
-        decided = None
+    except Exception:  # noqa: BLE001 — fail closed rather than duplicate external work
+        logger.exception("Network ownership unavailable; skipping automation fire")
+        return False, "network ownership unavailable"
     if decided is not None:
         return decided
     try:

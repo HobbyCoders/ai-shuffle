@@ -836,21 +836,18 @@ class ChatWebSocketHandler:
             from app.db import checkouts as checkouts_db
 
             try:
-                if not await run_sync(
-                    checkouts_db.has_active_base_checkout,
-                    project_v2_id,
-                    target_instance_id,
-                ):
+                from app.network import git as network_git
+                if not await network_git.eligible(target_instance_id, project_v2_id):
                     return await _refuse(
                         f"This project isn't checked out on {device} yet. Open "
                         "the project there once (or clone it), then try again."
                     )
-            except Exception:  # noqa: BLE001 — fail open on lookup trouble
+            except Exception:  # noqa: BLE001 — do not strand work on an unknown owner
                 logger.warning(
-                    "Device-pick preflight errored for project_v2 %s on %s; "
-                    "proceeding fail-open", project_v2_id, target_instance_id,
-                    exc_info=True,
+                    "Device-pick preflight failed for project_v2 %s on %s",
+                    project_v2_id, target_instance_id, exc_info=True,
                 )
+                return await _refuse("Couldn't reach the selected device. Bring it online and retry.")
         return True
 
     async def _lift_uploads(

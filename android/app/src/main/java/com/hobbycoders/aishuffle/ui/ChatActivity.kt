@@ -65,7 +65,10 @@ class ChatActivity : NativeScreen() {
     private lateinit var web: WebView
     private lateinit var assetLoader: WebViewAssetLoader
     private var bootstrap: ScriptHandler? = null
-    private var sessionToken: String? = null
+    @Volatile private var sessionToken: String? = null
+    @Volatile private var workerDocumentAllowed = false
+    private val workerAssets = WorkerAssetLoader()
+    private var assetFailure: String? = null
     private var sessionJob: Job? = null
     private var sessionAttempt = 0
     private lateinit var sessionOwner: ChatSessionOwner
@@ -76,7 +79,7 @@ class ChatActivity : NativeScreen() {
     private lateinit var downloads: ChatDownloads
     private lateinit var nativeVoice: NativeVoiceBridge
     private var switchJob: Job? = null
-    private var document = 0
+    @Volatile private var document = 0
     private var fileDocument = -1
     private var fileChooserOpen = false
     private var fileCallback: ValueCallback<Array<Uri>>? = null
@@ -167,6 +170,13 @@ class ChatActivity : NativeScreen() {
         }
         web.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                // Worker links (including old /api attachment links) save through SAF, never
+                // navigate the privileged document or open an unauthenticated browser tab.
+                val asset = WorkerAssetLoader.workerUrl(server.baseUrl, request.url.toString())
+                if (asset != null) {
+                    if (request.isForMainFrame && request.hasGesture()) downloads.fromUrl(asset, null, null, null, -1)
+                    return true
+                }
                 // The bundle is a single page; its own in-app routes are the only navigation it may perform.
                 if (MobileUi.isAssetOrigin(request.url.toString())) return false
                 if (request.isForMainFrame && request.hasGesture() && request.url.scheme == "https") {
@@ -179,26 +189,41 @@ class ChatActivity : NativeScreen() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
                 val url = request.url
                 return when {
+                    WorkerAssetLoader.workerUrl(server.baseUrl, url.toString()) != null -> {
+                        if (request.isForMainFrame) blocked("Chat opens from the app, not from the worker.")
+                        // Explicitly authenticated fetch/SSE keep their existing API/CORS path.
+                        // Element loads have no Authorization header and need the native stream.
+                        else if (PairingInput.sameOrigin(server.baseUrl, url.toString()) &&
+                            (request.method !in listOf("GET", "HEAD") || request.requestHeaders.keys.any { it.equals("Authorization", true) })) null
+                        else {
+                            val generation = document
+                            val token = sessionToken
+                            workerAssets.load(server, url.toString(), request.method, request.requestHeaders, token,
+                                CookieManager.getInstance().getCookie(server.baseUrl),
+                                request.requestHeaders.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value ?: "AI-Shuffle-Android",
+                                { workerDocumentAllowed && generation == document && token == sessionToken && authorized() }) { message ->
+                                view.post { if (generation == document && workerDocumentAllowed) { assetFailure = message; status.text = message } }
+                            }
+                        }
+                    }
                     MobileUi.isAssetOrigin(url.toString()) -> {
                         if (request.method != "GET") blocked("Blocked")
                         else if (MobileUi.isIndexPath(url.path)) index()
                         else assetLoader.shouldInterceptRequest(url) ?: blocked("This content is blocked.")
                     }
-                    // API traffic (fetch, SSE, media) to the paired worker goes through
-                    // untouched. A document from the worker is never shown.
-                    PairingInput.sameOrigin(server.baseUrl, url.toString()) ->
-                        if (request.isForMainFrame) blocked("Chat opens from the app, not from the worker.") else null
                     else -> blocked("External content blocked")
                 }
             }
             override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
                 document++
+                workerDocumentAllowed = MobileUi.isAssetOrigin(url) && WorkerAssetLoader.workerUrl(server.baseUrl, url) == null
+                workerAssets.cancel()
                 downloads.navigating()
                 nativeVoice.navigating()
                 cancelPagePermissions()
                 if (!MobileUi.isAssetOrigin(url)) { view.stopLoading(); return }
             }
-            override fun onPageFinished(view: WebView, url: String) { if (MobileUi.isAssetOrigin(url)) status.text = "" }
+            override fun onPageFinished(view: WebView, url: String) { if (MobileUi.isAssetOrigin(url)) status.text = assetFailure.orEmpty() }
             override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: android.net.http.SslError) {
                 handler.cancel(); status.text = "HTTPS verification failed. Fix the server certificate before reconnecting."
             }
@@ -331,6 +356,7 @@ class ChatActivity : NativeScreen() {
             status.text = "Update Android System WebView, then refresh chat."
             return false
         }
+        workerAssets.cancel()
         bootstrap?.remove()
         bootstrap = WebViewCompat.addDocumentStartJavaScript(web,
             MobileUi.bootstrapScript(server.baseUrl, token, appVersionName(), android.os.Build.MODEL, server.hasCfAccess), setOf(MobileUi.ORIGIN))
@@ -348,6 +374,7 @@ class ChatActivity : NativeScreen() {
             lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
         sessionJob = lifecycleScope.launch {
             repairButton.visibility = View.GONE
+            assetFailure = null
             status.text = "Opening a secure chat…"
             if (server.hasCfAccess) ApiClient.fetchCfAuthorizationCookie(server)?.let { cookie ->
                 // Cross-site from the bundle's origin, so SameSite=None; still HttpOnly and worker-only.
@@ -420,6 +447,8 @@ class ChatActivity : NativeScreen() {
         }
     }
     override fun onDestroy() {
+        workerDocumentAllowed = false
+        workerAssets.cancel()
         WebSessionBootstrap.cancel(sharedAttempt)
         cancelPagePermissions()
         switchJob?.cancel()

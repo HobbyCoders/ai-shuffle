@@ -76,6 +76,9 @@ class NetworkContext:
     members: Dict[str, Member]
     bootstrap_state: str
     legacy_instance_map: Dict[str, str] = field(default_factory=dict)
+    key_candidates: Dict[int, Dict[str, bytes]] = field(default_factory=dict)
+    key_recipients: Dict[str, set] = field(default_factory=dict)
+    key_generations: Dict[str, int] = field(default_factory=dict)
 
     @property
     def device_id(self) -> str:
@@ -119,6 +122,8 @@ def _member_from_row(row: Mapping[str, Any]) -> Member:
 def _unwrap_keyring(wrapped: Mapping[str, Any], device_identity: identity_mod.DeviceIdentity) -> Dict[int, bytes]:
     keyring: Dict[int, bytes] = {}
     for version, wrap in (wrapped or {}).items():
+        if not str(version).isdigit():
+            continue
         try:
             keyring[int(version)] = crypto.unwrap_key(device_identity.encryption_private, wrap)
         except (crypto.CryptoError, ValueError, TypeError):
@@ -144,6 +149,8 @@ def load_context(_conn=None) -> Optional[NetworkContext]:
         bootstrap_state=state.get("bootstrap_state") or BOOTSTRAP_READY,
         legacy_instance_map=dict(state.get("legacy_instance_map") or {}),
     )
+    from app.network import keyring as keyring_store
+    keyring_store.restore(ctx, state.get("keyring") or {})
     if ctx.key_version not in keyring:
         logger.error("Network key version %d is not available on this device", ctx.key_version)
     with _lock:
@@ -309,9 +316,9 @@ def content_hash(coll: policy.Collection, record: Mapping[str, Any]) -> str:
 
 
 def _column_value(coll: policy.Collection, name: str, value: Any, encrypted_columns: Sequence[str]) -> Any:
-    if name in coll.json_fields and value is not None and not isinstance(value, str):
-        return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
-    if name in coll.json_fields and isinstance(value, (list, dict)):
+    if name in coll.json_fields:
+        # Wire values are already decoded JSON, including scalar strings/null.
+        # Passing a string through produces invalid JSONB (or unparseable text).
         return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
     if name in encrypted_columns and isinstance(value, str) and value:
         if not encryption.is_encryption_ready():
@@ -400,6 +407,10 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
     ctx = ctx or context()
     if ctx is None or ctx.bootstrap_state != BOOTSTRAP_READY or ctx.key_version not in ctx.keyring:
         return None
+    if collection != "membership":
+        from app.network.keyring import safe
+        if not safe(ctx, crypto.sha256_hex(ctx.network_key)):
+            return None
     coll = policy.collection(collection)
     plaintext = serialize_row(coll, row) if row is not None else None
     if row is not None and plaintext is None:
@@ -437,7 +448,8 @@ def record_membership(cursor, membership_record: Mapping[str, Any], *, ctx: Opti
     elif kind == membership.TYPE_REVOCATION:
         record_id = f"rev:{membership_record['device_id']}:{membership_record['generation']}"
     elif kind == membership.TYPE_KEY:
-        record_id = f"key:{membership_record['key_version']}"
+        from app.network.keyring import record_id as key_record_id
+        record_id = key_record_id(membership_record)
     else:
         raise ValueError("Unknown membership record")
     store.put_membership_record(record_id, dict(membership_record), _conn=_CursorConn(cursor))
@@ -521,6 +533,7 @@ def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = Tr
     ctx = ctx or context()
     if ctx is None:
         return 0
+    ctx = _ensure_safe_write_key(ctx)
     total = 0
     for name in policy.SCANNED_COLLECTIONS:
         try:
@@ -585,11 +598,12 @@ def _verify_recovery_origin(ctx: NetworkContext, env: Envelope) -> Member:
     if env.collection != "membership" or env.key_version not in ctx.keyring:
         raise ApplyError("unknown origin")
     try:
-        row = env.open(ctx.keyring[env.key_version])
+        from app.network.keyring import open_envelope
+        row, decryption_key = open_envelope(ctx, env)
         record_data = _parse_json((row or {}).get("record"))
         member = membership.verify_certificate(record_data, network_id=ctx.network_id, members=ctx.members,
                                                founder_device_id=ctx.founder_device_id,
-                                               network_key=ctx.keyring[env.key_version])
+                                               network_key=decryption_key)
     except (crypto.CryptoError, envelope_mod.EnvelopeError, membership.MembershipError, AttributeError, TypeError) as exc:
         raise ApplyError("unknown origin") from exc
     if member.device_id != env.origin_device_id:
@@ -671,7 +685,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         return "applied"
     store.observe_clock(cursor, env.clock)
     try:
-        plaintext = env.open(ctx.keyring[env.key_version])
+        from app.network.keyring import open_envelope
+        plaintext, _decryption_key = open_envelope(ctx, env)
     except (crypto.CryptoError, envelope_mod.EnvelopeError) as exc:
         raise ApplyError("cannot open payload") from exc
 
@@ -793,6 +808,11 @@ def _apply_membership(cursor, ctx: NetworkContext, plaintext: Mapping[str, Any])
                             last_seq_accepted=member.last_seq_accepted, _conn=conn)
         if member.device_id == ctx.device_id:
             logger.error("This device was removed from network %s", ctx.network_id)
+        # A recovery certificate under a predecessor key is no longer an
+        # authority after any membership revocation.  Keep this in the same
+        # transaction as the learned revocation.
+        from app.network import recovery
+        recovery.refresh_wrap_after_rotation(_conn=conn)
     elif kind == membership.TYPE_KEY:
         version = int(record_data["key_version"])
         try:
@@ -800,17 +820,48 @@ def _apply_membership(cursor, ctx: NetworkContext, plaintext: Mapping[str, Any])
         except crypto.CryptoError as exc:
             raise ApplyError("key record does not open") from exc
         if key is not None:
-            state = store.get_state(conn)
-            keyring = dict((state or {}).get("keyring") or {})
-            keyring[str(version)] = record_data["wraps"][ctx.device_id]
-            store.update_state(_conn=conn, keyring=keyring, key_version=max(version, ctx.key_version))
-            ctx.keyring[version] = key
-            ctx.key_version = max(version, ctx.key_version)
+            from app.network import keyring as keyring_store
+            ctx.members = members
+            keyring_store.install(ctx, record_data, key, conn)
     if generation > ctx.generation:
         ctx.generation = generation
         store.update_state(_conn=conn, generation=generation)
     ctx.members = members
     # The membership record itself is materialized by the generic path.
+
+
+def _ensure_safe_write_key(ctx: NetworkContext) -> NetworkContext:
+    """Reconcile concurrent revocations without choosing a key known to an exile."""
+    from app.network import keyring as keyring_store
+    me = ctx.member(ctx.device_id)
+    if (ctx.bootstrap_state != BOOTSTRAP_READY or me is None
+            or me.status != membership.STATUS_ACTIVE or ctx.key_version not in ctx.keyring):
+        return ctx
+    if keyring_store.safe(ctx, crypto.sha256_hex(ctx.network_key)):
+        return ctx
+    with get_db() as conn:
+        cursor = conn.cursor()
+        store.lock_state(cursor)
+        current = load_context(conn)
+        if keyring_store.select(current):
+            keyring_store.persist_choice(current, dict(store.get_state(conn)["keyring"]), conn)
+        else:
+            version = max(current.key_candidates, default=current.key_version) + 1
+            key = crypto.generate_network_key()
+            record_data = membership.issue_key_record(
+                network_id=current.network_id, issuer_device_id=current.device_id,
+                issuer_signing_private=current.identity.signing_private,
+                key_version=version, generation=current.generation, new_key=key,
+                recipients={m.device_id: m.encryption_public for m in current.active_members()},
+            )
+            # Only the wraps travel under a predecessor key. Subsequent user
+            # operations use the fresh key, which excludes ALL known revocations.
+            record_membership(cursor, record_data, ctx=current)
+            keyring_store.install(current, record_data, key, conn)
+            from app.network import recovery
+            recovery.refresh_wrap_after_rotation(_conn=conn)
+    kick()
+    return current
 
 
 def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: Optional[NetworkContext] = None) -> ApplyResult:
@@ -842,7 +893,8 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: Optional[Network
     if result.touched:
         touched = list(result.touched)
         if any(c == "membership" for c, _, _ in touched):
-            load_context()
+            ctx = load_context()
+            _ensure_safe_write_key(ctx)
         _notify(touched)
     return result
 
@@ -915,9 +967,9 @@ def open_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext) -> dic
             raise ApplyError("snapshot signature is invalid")
         if chunk["network_id"] != ctx.network_id:
             raise ApplyError("snapshot belongs to another network")
-        key = ctx.keyring[int(chunk["key_version"])]
+        from app.network.keyring import open_payload
         aad = crypto.canonical_json({"collection": chunk["collection"], "offset": chunk["offset"], "network_id": ctx.network_id})
-        plaintext = crypto.decrypt_payload(key, chunk["ciphertext"], aad)
+        plaintext = open_payload(ctx, int(chunk["key_version"]), chunk["ciphertext"], aad)
         if crypto.sha256_hex(plaintext) != chunk["content_hash"]:
             raise ApplyError("snapshot hash mismatch")
         return json.loads(plaintext.decode("utf-8"))
@@ -1052,7 +1104,8 @@ def admit_device(*, device_id: str, signing_public: bytes, encryption_public: by
 def join_response(*, device_id: str, encryption_public: bytes, certificate: Mapping[str, Any]) -> dict:
     """Everything a new device needs: keys wrapped to it, the members, the trust roots."""
     ctx = require_context()
-    keyring = {str(version): crypto.wrap_key(encryption_public, key) for version, key in ctx.keyring.items()}
+    from app.network.keyring import for_recipient
+    keyring = for_recipient(ctx, encryption_public)
     return {
         "network_id": ctx.network_id,
         "name": ctx.name,
@@ -1120,7 +1173,8 @@ def enroll_from_response(response: Mapping[str, Any], *, device_name: str,
             elif kind == membership.TYPE_REVOCATION:
                 record_id = f"rev:{record_data['device_id']}:{record_data['generation']}"
             else:
-                record_id = f"key:{record_data['key_version']}"
+                from app.network.keyring import record_id as key_record_id
+                record_id = key_record_id(record_data)
             store.put_membership_record(record_id, dict(record_data), _conn=conn)
         if device_identity.device_id not in members:
             raise RuntimeError("The join response does not admit this device")
@@ -1185,11 +1239,11 @@ def revoke_device(device_id: str, *, reason: str = "") -> dict:
             issuer_signing_private=ctx.identity.signing_private, key_version=new_version, generation=generation,
             new_key=new_key, recipients=recipients)
         record_membership(cursor, key_record, ctx=ctx)  # sealed under the old key so members can read it
-        keyring = dict(state.get("keyring") or {})
-        keyring[str(new_version)] = key_record["wraps"][ctx.device_id]
-        store.update_state(_conn=conn, keyring=keyring, key_version=new_version)
-        ctx.keyring[new_version] = new_key
-        ctx.key_version = new_version
+        from app.network import keyring as keyring_store
+        keyring_store.install(ctx, key_record, new_key, conn)
+        from app.network import recovery
+        recovery.refresh_wrap_after_rotation(_conn=conn)
+    _notify([("membership", f"rev:{device_id}:{generation}", "upsert")])
     kick()
     return {"device_id": device_id, "generation": generation, "key_version": new_version}
 

@@ -103,8 +103,13 @@ def store_fetched(hash_value: str, data: bytes) -> bool:
             wrote = True
         except Exception:  # noqa: BLE001
             logger.warning("Could not store fetched artifact %s", hash_value[:12], exc_info=True)
-    store.upsert_blob(hash_value, size=len(data), present=True)
-    return wrote
+            # A matching note may have been written, but artifact consumers need
+            # the disk copy too. Keep retrying until every referenced sink exists.
+            store.upsert_blob(hash_value, size=len(data), present=False)
+            return False
+    present = wrote or read_local(hash_value) is not None
+    store.upsert_blob(hash_value, size=len(data), present=present)
+    return present
 
 
 # ---------------------------------------------------------------------------

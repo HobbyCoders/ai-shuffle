@@ -163,11 +163,13 @@ async def lifespan(app: FastAPI):
 
     # Startup phases
     init_core()
-    # Worker network: device identity, network of one for an existing
-    # install, owner_device_id backfill. Never blocks boot.
+    # A network database and its device keys belong together. Do not start
+    # schedulers/connector workers against another device's private database.
+    from app.network import startup as network_startup
     try:
-        from app.network import startup as network_startup
         network_startup.initialize()
+    except network_startup.PrivateDatabaseRequiredError:
+        raise
     except Exception:
         logger.exception("Worker network initialization failed (non-fatal)")
     # Now that the DB pool is up, funnel backend ERROR+ logs into error_log so

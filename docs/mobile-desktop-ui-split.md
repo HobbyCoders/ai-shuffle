@@ -125,9 +125,25 @@ reload. On the worker, `Authorization: Bearer shc_…` is accepted by every
 allow-list (`app/core/cors.py`); the chat / global / browser WebSockets take
 `?token=`.
 
-Known gap: `<img>`/`<a download>` loads (artifact screenshots, generated
-media, file thumbnails) cannot carry the Bearer header. They resolve to the
-worker origin but need a cookie-less credential — a follow-up.
+Worker-hosted media uses `WorkerAssetLoader` in the native WebView client.
+It intercepts approved file/media URLs (including legacy root-relative `/api/`
+URLs at the bundle origin), supplies the paired Bearer token through the existing
+worker HTTP client, and streams responses with Range/206 headers intact. It does
+not put tokens in URLs or grant worker documents the native bridge. Redirects and
+credentials remain restricted to the paired origin; token/worker changes cancel
+in-flight transfers. Ordinary note attachment links, as well as download anchors,
+use the native save bridge. Only the Cloudflare Access cookie is forwarded when
+needed, not a worker session cookie.
+
+### Release ordering
+
+Merging no longer publishes an APK automatically. First deploy compatible workers
+(the bundle origin must be allowed by CORS) and the account hub migrations/API,
+then verify pairing, API requests, inline media and attachment downloads. A manual
+Android workflow may publish only with `publish_download=true`. Versioned releases
+also require the repository variable `ANDROID_WORKERS_READY=true`; leave it unset
+until that rollout has been verified. Building an APK or Docker image does not
+update running workers.
 
 ## Rules for component code
 

@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 JOIN_PURPOSE = "network:join"
 JOIN_TTL_MINUTES = 30
 POLL_INTERVAL_SECONDS = 3.0
+SNAPSHOT_RETRY_ATTEMPTS = 3
 _task: Optional[asyncio.Task] = None
 
 
@@ -286,23 +287,55 @@ async def _wait_for_approval(join_id: str, endpoint: str, poll_secret: str, devi
                 continue
             if status == "approved" and data.get("response"):
                 try:
-                    await asyncio.to_thread(complete_enrollment, data["response"], client=None,
-                                            endpoint=endpoint, device_name=device_name,
-                                            legacy_instance_id=legacy_instance_id)
-                    store.update_join(join_id, status="complete", error=None)
+                    # Store the approved response before state installation so a
+                    # snapshot interruption is retryable after a restart.
+                    store.update_join(join_id, status="syncing", response=data["response"], error=None)
+                    await _bootstrap_join(join_id, endpoint, device_name, legacy_instance_id)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("Enrollment failed")
-                    store.update_join(join_id, status="failed", error=str(exc)[:200])
+                    store.update_join(join_id, status="syncing", error=str(exc)[:200])
                 return
             store.update_join(join_id, status=status or "failed", error=data.get("error"))
             return
     store.update_join(join_id, status="expired", error="Approval timed out")
 
 
+async def _bootstrap_join(join_id: str, endpoint: str, device_name: str,
+                          legacy_instance_id: Optional[str]) -> None:
+    """Retry a persisted snapshot bootstrap without repeating enrollment."""
+    for attempt in range(SNAPSHOT_RETRY_ATTEMPTS):
+        join = store.get_join(join_id) or {}
+        response = join.get("response")
+        if not response:
+            raise EnrollmentError("Approved enrollment response is unavailable")
+        try:
+            await asyncio.to_thread(complete_enrollment, response, client=None, endpoint=endpoint,
+                                    device_name=device_name, legacy_instance_id=legacy_instance_id,
+                                    join_id=join_id)
+            return
+        except Exception as exc:  # noqa: BLE001
+            store.update_join(join_id, status="syncing", error=str(exc)[:200])
+            if attempt + 1 == SNAPSHOT_RETRY_ATTEMPTS:
+                raise
+            await asyncio.sleep(min(2 ** attempt, 4))
+
+
 def complete_enrollment(response: Dict[str, Any], *, client, endpoint: str, device_name: str,
-                        legacy_instance_id: Optional[str]) -> None:
-    """Install the response, copy a snapshot over the peer API, then go Ready."""
-    ctx = engine.enroll_from_response(response, device_name=device_name, legacy_instance_id=legacy_instance_id)
+                        legacy_instance_id: Optional[str], join_id: Optional[str] = None) -> None:
+    """Install or resume an approved response, then copy its snapshot exactly once."""
+    device_id = identity_mod.load().device_id
+    if join_id:
+        join = store.get_join(join_id)
+        if join is None or join.get("role") != "joiner" or join.get("device_id") != device_id:
+            raise EnrollmentError("Enrollment job does not belong to this device")
+        store.update_join(join_id, status="syncing", response=response, error=None)
+    ctx = engine.context()
+    if ctx is None:
+        ctx = engine.enroll_from_response(response, device_name=device_name, legacy_instance_id=legacy_instance_id)
+    elif ctx.network_id != response.get("network_id") or ctx.device_id != device_id:
+        raise EnrollmentError("A different enrollment is already installed")
+    if ctx.bootstrap_state == engine.BOOTSTRAP_READY:
+        return
     issuer = response.get("issuer") or {}
     issuer_id = issuer.get("device_id")
     endpoints = [endpoint] + [e for e in (issuer.get("endpoints") or []) if e != endpoint]
@@ -310,8 +343,15 @@ def complete_enrollment(response: Dict[str, Any], *, client, endpoint: str, devi
         store.touch_member(issuer_id, endpoints=endpoints)
     _copy_snapshot_sync(ctx, issuer_id, endpoints)
     engine.finish_bootstrap()
-    engine.publish_presence(version=settings.version)
-    engine.kick()
+    if join_id:
+        store.update_join(join_id, status="complete", response=None, error=None)
+    # Presence failure is non-fatal to a completed snapshot and must not make
+    # the persisted enrollment job appear retryable.
+    try:
+        engine.publish_presence(version=settings.version)
+        engine.kick()
+    except Exception:  # noqa: BLE001
+        logger.warning("Enrollment completed but initial presence publication failed", exc_info=True)
 
 
 def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: Optional[str], endpoints: list) -> None:
@@ -343,7 +383,10 @@ def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: Optional[str], en
                         engine.apply_snapshot_chunk(chunk, ctx=ctx)
                         if not chunk.get("more"):
                             break
-                        offset += int(chunk.get("count") or 0)
+                        count = int(chunk.get("count") or 0)
+                        if count <= 0:
+                            raise EnrollmentError("Snapshot pagination made no progress")
+                        offset += count
                 engine.adopt_watermarks(manifest.get("watermarks") or {}, ctx=ctx)
                 return
             except (httpx.HTTPError, KeyError, ValueError, EnrollmentError, engine.ApplyError) as exc:
@@ -353,12 +396,24 @@ def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: Optional[str], en
 
 
 def resume_enrollment() -> bool:
-    """After a restart, keep waiting for an approval that was still pending."""
+    """Resume a pending approval or a persisted, incomplete snapshot after restart."""
     global _task
+    if _task is not None and not _task.done():
+        return False
+    joins = store.list_joins(role="joiner")
+    syncing = [j for j in joins if j["status"] == "syncing" and j.get("response")]
+    if syncing:
+        join = syncing[0]
+        ctx = engine.context()
+        if ctx is not None and (ctx.network_id != join["response"].get("network_id") or ctx.device_id != join["device_id"]):
+            return False
+        _task = asyncio.create_task(_bootstrap_join(join["id"], join["endpoint_url"], join["name"],
+                                                    join.get("legacy_instance_id")))
+        return True
     if engine.context() is not None:
         return False
-    pending = [j for j in store.list_joins(role="joiner") if j["status"] == "pending"]
-    if not pending or (_task is not None and not _task.done()):
+    pending = [j for j in joins if j["status"] == "pending"]
+    if not pending:
         return False
     join = pending[0]
     _task = asyncio.create_task(_wait_for_approval(join["id"], join["endpoint_url"], join["poll_secret_hash"],
@@ -367,12 +422,17 @@ def resume_enrollment() -> bool:
 
 
 def cancel_enrollment() -> bool:
+    """Cancel only an unapproved wait; never discard a syncing resume descriptor."""
     global _task
     removed = False
     for join in store.list_joins(role="joiner"):
+        if join["status"] == "syncing" and join.get("response"):
+            # State was already installed. Deleting the sole response would
+            # require re-enrollment after a process interruption.
+            continue
         store.delete_join(join["id"])
         removed = True
-    if _task is not None and not _task.done():
+    if removed and _task is not None and not _task.done():
         _task.cancel()
     _task = None
     return removed

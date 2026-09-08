@@ -68,7 +68,8 @@ jobs:
             [Download Android APK](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Android.apk) · [Latest verified Android build](https://github.com/${{ github.repository }}/releases/tag/android-latest)
 
             Requires Android 8.0 or newer. Install over the existing app to keep
-            your accounts and workers. The APK appears after Android verification passes.
+            your accounts and workers. The APK appears after Android verification passes
+            and the compatible-worker rollout is approved (`ANDROID_WORKERS_READY=true`).
 
   android:
     name: Android APK
@@ -76,6 +77,7 @@ jobs:
     uses: ./.github/workflows/android.yml
     with:
       release_tag: ${{ github.event.inputs.version || github.ref_name }}
+      publish_download: ${{ vars.ANDROID_WORKERS_READY == 'true' }}
     secrets: inherit
 
   # Package the desktop app for each supported target and upload to the

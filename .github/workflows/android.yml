@@ -4,7 +4,8 @@ name: Android CI
 # filtered like the other CI workflows: a PR that touches nothing under
 # android/, frontend/ or mobile/ never starts it (the APK bundles the mobile
 # UI built from mobile/ and the shared frontend/src/lib). The push-to-main leg keeps producing the signed
-# release APK artifact and publishes a permanent download after all checks pass.
+# release APK artifact. Publishing additionally requires explicit rollout approval:
+# a merge must not ship a client before its workers support the bundled UI.
 on:
   push:
     branches: [ main ]
@@ -20,8 +21,17 @@ on:
       - 'mobile/**'
       - '.github/workflows/android.yml'
   workflow_dispatch:
+    inputs:
+      publish_download:
+        description: Publish only after compatible workers and account hub are deployed and verified
+        type: boolean
+        default: false
   workflow_call:
     inputs:
+      publish_download:
+        description: Compatible workers and account hub have been deployed and verified
+        type: boolean
+        default: false
       release_tag:
         description: Existing versioned release to attach the verified APK to
         type: string
@@ -244,7 +254,7 @@ jobs:
   publish:
     name: Publish verified Android download
     needs: [account-hub, build, android-ui]
-    if: github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+    if: inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

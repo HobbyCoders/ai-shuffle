@@ -52,16 +52,33 @@
     for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
     return new Blob([bytes], {type: match[1]});
   }
+  function workerUrl(href) {
+    try {
+      const url = new URL(href, location.href);
+      if (url.username || url.password || url.protocol !== 'https:') return null;
+      if (url.origin === workerOrigin()) return url.href;
+      // Markdown generated before the app-bundled UI used root-relative /api URLs.
+      if (url.origin === location.origin && url.pathname.startsWith('/api/')) {
+        const worker = new URL(workerOrigin());
+        if (worker.protocol === 'https:' && !worker.username && !worker.password) {
+          return worker.origin + url.pathname + url.search;
+        }
+      }
+    } catch (_) { /* Not a worker file. */ }
+    return null;
+  }
   async function save(anchor) {
     const id = crypto.randomUUID();
     let started = false;
     try {
       const href = anchor.href;
-      const name = anchor.download || 'download';
       const url = new URL(href, location.href);
-      if (url.protocol === 'https:' && url.origin === workerOrigin()) {
+      const filename = url.searchParams.get('path')?.split(/[/\\]/).pop();
+      const name = anchor.download || filename || anchor.textContent?.trim() || 'download';
+      const worker = workerUrl(href);
+      if (worker) {
         started = true;
-        await request({type: 'url', id, url: href, name});
+        await request({type: 'url', id, url: worker, name});
         return;
       }
       // Capture the Blob synchronously: existing frontend code revokes its URL after click().
@@ -90,7 +107,7 @@
   }
   function handles(anchor) {
     return anchor instanceof HTMLAnchorElement && (anchor.hasAttribute('download') ||
-      anchor.href.startsWith('blob:') || anchor.href.startsWith('data:'));
+      anchor.href.startsWith('blob:') || anchor.href.startsWith('data:') || workerUrl(anchor.href) !== null);
   }
   const click = HTMLAnchorElement.prototype.click;
   HTMLAnchorElement.prototype.click = function () {

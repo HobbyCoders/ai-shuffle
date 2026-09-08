@@ -127,6 +127,10 @@ async def hydrate(device_id: str, session_id: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 async def handle(action: str, body: Dict[str, Any], *, from_device: str) -> Dict[str, Any]:
+    if action in {"git-state", "git-op"}:
+        from app.network import git
+        handler = git.handle_state if action == "git-state" else git.handle_op
+        return await handler(body, from_device)
     handler = _HANDLERS.get(action)
     if handler is None:
         raise KeyError(action)
@@ -176,6 +180,12 @@ async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
                                        is_active=True, **fields)
 
     row = await run_sync(_create)
+    _require_owned(session_id)
+    if session.get("branch"):
+        await run_sync(database.set_session_branch, session_id, str(session["branch"]), session.get("project_v2_id"))
+    if body.get("uploads"):
+        from app.network import git
+        await run_sync(git.import_uploads, session_id, body["uploads"])
     result = {"session_id": row["id"], "owner_device_id": row.get("owner_device_id")}
     turn = body.get("turn")
     if turn:

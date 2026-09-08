@@ -41,6 +41,9 @@ SESSION_TABLES = (
     ("session_store_entries", "session_id"),
     ("session_store_summaries", "session_id"),
     ("session_tags", "session_id"),
+    ("queued_messages", "session_id"),
+    ("connector_sessions", "session_id"),
+    ("upload_blobs", "session_id"),
     ("pending_interactions", "session_id"),
     ("usage_log", "session_id"),
 )
@@ -74,13 +77,19 @@ def _decode(value: Any) -> Any:
 
 
 def _table_exists(cursor, table: str) -> bool:
-    from app.db.base import table_exists
-    return table_exists(cursor, table)
+    cursor.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = current_schema() AND table_name = %s", (table,),
+    )
+    return cursor.fetchone() is not None
 
 
 def _column_exists(cursor, table: str, column: str) -> bool:
-    from app.db.base import column_exists
-    return column_exists(cursor, table, column)
+    cursor.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = %s AND column_name = %s", (table, column),
+    )
+    return cursor.fetchone() is not None
 
 
 def _rows(cursor, table: str, column: str, ids: List[str]) -> List[Dict[str, Any]]:
@@ -98,11 +107,21 @@ def export_bundle(instance_id: str) -> Dict[str, Any]:
     bundle: Dict[str, Any] = {"version": BUNDLE_VERSION, "instance_id": instance_id, "tables": {}}
     with get_db() as conn:
         cursor = conn.cursor()
+        # Export one consistent snapshot, not independently committed tables.
+        cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         cursor.execute("SELECT id, sdk_session_id FROM sessions WHERE instance_id = %s", (instance_id,))
         sessions = [dict(r) for r in cursor.fetchall()]
         session_ids = [s["id"] for s in sessions]
         sdk_ids = [s["sdk_session_id"] for s in sessions if s.get("sdk_session_id")]
         bundle["session_ids"] = session_ids
+        if session_ids and _table_exists(cursor, "turns"):
+            placeholders = ", ".join("%s" for _ in session_ids)
+            cursor.execute(
+                f"SELECT COUNT(*) AS n FROM turns WHERE session_id IN ({placeholders}) "
+                "AND state IN ('queued', 'running', 'interrupting', 'draining')", tuple(session_ids),
+            )
+            if int(cursor.fetchone()["n"]):
+                raise RuntimeError("Drain queued/running turns and stop all shared-database writers before export")
         for table, column in SESSION_TABLES:
             if _table_exists(cursor, table) and session_ids:
                 bundle["tables"][table] = _rows(cursor, table, column, session_ids)
@@ -131,7 +150,7 @@ def import_bundle(bundle: Dict[str, Any], *, dry_run: bool = False) -> Dict[str,
             ctx = None
         device_id = ctx.device_id if ctx else None
         for table in order:
-            rows = bundle.get("tables", {}).get(table) or []
+            rows = [dict(row) for row in bundle.get("tables", {}).get(table) or []]
             if not rows or not _table_exists(cursor, table):
                 counts[table] = 0
                 continue
@@ -141,14 +160,25 @@ def import_bundle(bundle: Dict[str, Any], *, dry_run: bool = False) -> Dict[str,
                     row["owner_device_id"] = device_id
             inserted = 0
             for row in rows:
-                if dry_run:
-                    inserted += 1
-                    continue
                 values = tuple(_decode(row.get(c)) for c in columns)
                 cursor.execute(
                     f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))}) "
                     f"ON CONFLICT DO NOTHING", values)
                 inserted += cursor.rowcount or 0
+                if table == "sessions":
+                    # Joining has already created a catalog mirror, but it
+                    # deliberately omits execution-local state such as the SDK
+                    # resume handle. Restore missing local fields without
+                    # overwriting newer shared metadata or an existing resume.
+                    from app.network import policy
+                    local_columns = [c for c in policy.collection("sessions").local_fields if c in columns]
+                    if local_columns:
+                        cursor.execute(
+                            "UPDATE sessions SET " + ", ".join(
+                                f"{c} = COALESCE({c}, %s)" for c in local_columns
+                            ) + " WHERE id = %s",
+                            tuple(_decode(row.get(c)) for c in local_columns) + (row["id"],),
+                        )
             counts[table] = inserted
         if dry_run:
             conn.rollback()

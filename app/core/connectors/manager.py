@@ -141,6 +141,17 @@ class ConnectorManager:
                 logger.error(f"Connector not found in DB: {connector_id}")
                 return None
 
+            from app.network import ownership
+            try:
+                decision = ownership.decide_connector(connector_row)
+                if decision == "skip":
+                    return None
+                if decision == "claim" and not ownership.claim("connectors", connector_id):
+                    return None
+            except Exception:
+                logger.exception("Network ownership unavailable; refusing connector start")
+                return None
+
             connector_type = connector_row["type"]
             config = connector_row.get("config", {}) or {}
 
@@ -475,6 +486,17 @@ class ConnectorManager:
         Now the second one queues behind the live turn and runs when it settles.
         """
         try:
+            from app.network import ownership
+
+            def _can_receive():
+                row = database.get_connector(message.connector_id)
+                return not ownership.enrolled() or bool(row and ownership.owns(row))
+
+            # An existing connection can still deliver callbacks after revocation.
+            # Fail closed before the very first external acknowledgment.
+            if not await run_sync(_can_receive):
+                return
+
             # Get the connector instance early for ack/typing/read
             async with self._lock:
                 instance = self._connectors.get(message.connector_id)
