@@ -1,9 +1,9 @@
 # AI Shuffle Desktop
 
 The desktop app is a native window around the web UI of any AI Shuffle worker,
-for Windows, macOS and Linux. It is the desktop counterpart of the Android app:
-one thin shell per platform, with the UI itself always served by the worker so
-the two never drift apart.
+for Windows x64, Apple Silicon macOS and Linux x64. It is the desktop
+counterpart of the Android app: one thin shell per platform, with the UI
+itself always served by the worker so the two never drift apart.
 
 ## What the shell does
 
@@ -25,8 +25,8 @@ the two never drift apart.
 - Native menu with the usual accelerators (new session, command palette,
   toggle sidebar, settings, zoom, full screen), a tray icon, native
   notifications, and window placement that survives restarts.
-- Auto-update through electron-updater, fed by the GitHub release that
-  matches the server's `v*` tag.
+- Auto-update through electron-updater, fed by the GitHub release for the
+  app's `v*` tag.
 
 ## The bridge
 
@@ -65,10 +65,17 @@ builds the installers.
 
 ## Release
 
-`.github/workflows/release.yml` builds the installers on all three platforms
-after the server packages and uploads them, with the `latest*.yml` update
-metadata, to the same GitHub release. The desktop version is stamped from the
-tag, so the shell carries the same version number as the server it ships with.
+`.github/workflows/release.yml` builds only desktop installers on all three
+platforms and uploads them, with the `latest*.yml` update metadata, to the
+GitHub release. The desktop version is stamped from the release tag.
+Supported downloads are Windows x64 EXE, macOS arm64 DMG, and Linux x64
+AppImage or amd64 Debian package. macOS also builds an arm64 ZIP for updates.
+The app bundles its connection screen and loads the web UI from the selected
+worker, so this workflow does not build the frontend or package the server.
+
+Older releases may retain Windows ARM update files to prevent the shared
+Windows update feed from falling back to an x64 installer on ARM clients.
+Windows ARM is no longer built or listed as a supported download.
 
 Code signing is not configured yet. Windows and Linux builds install and
 update unsigned (Windows shows a SmartScreen prompt on first install). macOS
