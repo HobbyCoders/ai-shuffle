@@ -145,13 +145,16 @@ its original encryption password once. Protect all archives as sensitive data.
    docker run --rm --network none --entrypoint tar \
      -v ai-shuffle-recovery-data:/data -v "$RECOVERY_FILES:/restore:ro" \
      "$IMAGE" -xzf /restore/ai-shuffle-data-TIMESTAMP.tar.gz -C /data \
-     --exclude=./postgres --exclude=postgres \
+     --numeric-owner --exclude=./postgres --exclude=postgres \
      --exclude=./database-mode.json --exclude=database-mode.json
    ```
 
    Extract media into the recovery workspace and settings into its active Fluid
    settings volume. Preserve the original mapped ownership, directory modes and
-   private key modes. Restore the matching app keys/identity before any normal app
+   private key modes. `--numeric-owner` is required because bypassing the entrypoint
+   also bypasses UID mapping: resolving the archived `appuser` name would use the
+   image's UID 1000 instead of the backup's UID (99 by default). Start the recovered
+   app with the original `PUID`/`PGID`. Restore matching app keys/identity before any normal app
    startup; do not overwrite the new `postgres/` or `database-mode.json` afterward.
 4. Attach only these recovery volumes to an **isolated** disposable app. Review
    connector/automation/network configuration before letting it start; normal boot

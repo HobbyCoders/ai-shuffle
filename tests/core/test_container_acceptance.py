@@ -29,3 +29,16 @@ def test_backup_helper_uses_a_real_isolated_compose_service(monkeypatch, tmp_pat
     assert calls == [("compose", "--project-name", check.prefix, "--file", str(compose_file),
                       "up", "--detach", "--no-build", "--pull", "never")]
     assert check.containers == [container]  # Standard evidence/cleanup owns it.
+
+
+def test_app_data_recovery_keeps_numeric_owners_in_image_and_runbook():
+    import inspect
+    from scripts.verify_container_postgres import ROOT
+
+    # Recovery bypasses the normal entrypoint's UID mapping. Resolving the
+    # archive's appuser name would change UID 99 (or a custom UID) to image UID
+    # 1000; the actual-image restore test verifies the resulting permissions.
+    assert "'--numeric-owner'" in inspect.getsource(Check.fresh_persistence_and_restore)
+    runbook = (ROOT / "docs/RESTORE.md").read_text()
+    restore_command = runbook.split('"$IMAGE" -xzf', 1)[1].split("```", 1)[0]
+    assert "--numeric-owner" in restore_command

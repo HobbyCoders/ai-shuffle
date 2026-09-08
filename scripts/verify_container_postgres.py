@@ -233,8 +233,10 @@ class Check:
             "from pathlib import Path; import subprocess; "
             "archives=list(Path('/source/acceptance-backups').glob('ai-shuffle-data-*.tar.gz')); "
             "assert len(archives)==1; "
-            "subprocess.run(['tar','-xzf',str(archives[0]),'-C','/data',"
-            "'--exclude=./postgres','--exclude=./database-mode.json'],check=True)"
+            "subprocess.run(['tar','-xzf',str(archives[0]),'-C','/data','--numeric-owner',"
+            "'--exclude=./postgres','--exclude=./database-mode.json'],check=True); "
+            "assert Path('/data').stat().st_uid==Path('/source').stat().st_uid; "
+            "assert Path('/data/.credential-keys').stat().st_uid==Path('/source/.credential-keys').stat().st_uid"
         )
         self.docker("run", "--rm", "--network", "none", "--entrypoint", "python",
                     "--mount", f"type=volume,src={volume},dst=/source,readonly",
