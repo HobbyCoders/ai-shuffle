@@ -377,8 +377,7 @@
 							onDisconnectGithub={disconnectGithub}
 						/>
 
-						<!-- Devices (cluster registry) — cross-install / cloud-offload UI.
-						     Admin-gated: it surfaces and rotates the shared cluster secret. -->
+						<!-- Device management is admin-only: account linking, pairing, and runner access. -->
 						{#if $isAdmin}
 							<DevicesSection />
 						{/if}

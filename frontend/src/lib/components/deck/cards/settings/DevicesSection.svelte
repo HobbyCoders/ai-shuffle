@@ -1,583 +1,378 @@
 <script lang="ts">
-	import { watchResources } from '$lib/services/watch-resources';
-	/**
-	 * DevicesSection — the cluster registry panel.
-	 *
-	 * On a shared database every AI Shuffle install self-registers here. This panel
-	 * lists those installs (online state, platform/version, reachability), lets the
-	 * user rename or prune a device, and shows/rotates the shared cluster secret
-	 * that authorizes cross-install control. Sessions from every install show up in
-	 * the sidebar and any online install can be driven from here — send/interrupt
-	 * ride the shared DB (runs lease + pending_interactions), so control needs no
-	 * ``base_url``. A device's advertised address only governs whether its artifact
-	 * links open on other devices.
-	 */
 	import { onMount } from 'svelte';
-	import { MonitorSmartphone, RefreshCw, Pencil, Trash2, Check, X, KeyRound, Globe, ShieldCheck, ShieldOff } from 'lucide-svelte';
+	import { MonitorSmartphone, Server, Smartphone, Globe, Plus, Pencil, Trash2, Check, X, ShieldCheck, ShieldOff } from 'lucide-svelte';
+	import { watchResources } from '$lib/services/watch-resources';
 	import { getErrorMessage } from '$lib/api/client';
+	import { appData } from '$lib/stores/app-data.svelte';
+	import { listPairedClients, revokePairedClient, type PairedClient } from '$lib/api/pairing';
+	import {
+		listInstalls, renameInstall, deleteInstall, setInstallApproval,
+		getAdvertiseStatus, setAdvertiseUrl, testAdvertiseReachability,
+		type Install, type AdvertiseStatus, type AdvertiseReachability
+	} from '$lib/api/installs';
 	import PairingPanel from './PairingPanel.svelte';
 	import AccountConnection from './AccountConnection.svelte';
-	import { appData } from '$lib/stores/app-data.svelte';
-	import {
-		listInstalls,
-		renameInstall,
-		deleteInstall,
-		setInstallApproval,
-		getClusterSecretStatus,
-		regenerateClusterSecret,
-		getAdvertiseStatus,
-		setAdvertiseUrl,
-		testAdvertiseReachability,
-		type Install,
-		type ClusterSecretStatus,
-		type AdvertiseStatus,
-		type AdvertiseReachability
-	} from '$lib/api/installs';
 
 	let installs = $state<Install[]>([]);
+	let clients = $state<PairedClient[]>([]);
 	let selfId = $state('');
-	let secret = $state<ClusterSecretStatus | null>(null);
+	let workersLoaded = $state(false);
+	let clientsLoaded = $state(false);
+	let workersError = $state('');
+	let clientsError = $state('');
+	let advertiseError = $state('');
+	let error = $state('');
+	let success = $state('');
+	let showPairing = $state(false);
+	let pairingMounted = $state(false);
+	let editingId = $state<string | null>(null);
+	let editName = $state('');
+	let removedDraft = $state<Install | null>(null);
+	let draftNotice = $state('');
+	let savingKey = $state<string | null>(null);
+	let confirmation = $state<{ key: string; action: 'revoke' | 'remove' } | null>(null);
 	let advertise = $state<AdvertiseStatus | null>(null);
 	let advertiseInput = $state('');
 	let savingAdvertise = $state(false);
 	let testingAdvertise = $state(false);
 	let reachability = $state<AdvertiseReachability | null>(null);
-	let loading = $state(true);
-	let error = $state('');
-	let success = $state('');
+	let stopped = false;
+	let workersVersion = 0;
+	let clientsVersion = 0;
+	let advertiseVersion = 0;
+	let pendingWorkers = 0;
+	let pendingClients = 0;
+	let flashTimer: ReturnType<typeof setTimeout> | undefined;
 
-	// Inline rename state (one device at a time).
-	let editingId = $state<string | null>(null);
-	let editName = $state('');
-	let savingId = $state<string | null>(null);
-
-	// Delete confirmation (two-step, no native confirm dialog).
-	let confirmDeleteId = $state<string | null>(null);
-	let confirmRevokeId = $state<string | null>(null);
-
-	let regenerating = $state(false);
-	let confirmRegen = $state(false);
-
-	const onlineCount = $derived(installs.filter((i) => i.online && i.approved !== false).length);
+	// Only API identity determines row identity: names and IDs can overlap across sources.
+	type DeviceRow = { key: string; kind: 'worker'; device: Install; draft?: boolean }
+		| { key: string; kind: 'client'; device: PairedClient };
+	const devices = $derived<DeviceRow[]>([
+		...installs.map((device) => ({ key: `worker:${device.id}`, kind: 'worker' as const, device })),
+		...clients.map((device) => ({ key: `client:${device.id}`, kind: 'client' as const, device })),
+		...(removedDraft ? [{ key: `worker:${removedDraft.id}`, kind: 'worker' as const, device: removedDraft, draft: true }] : [])
+	]);
+	const total = $derived(installs.length + clients.length);
+	const complete = $derived(workersLoaded && clientsLoaded && !workersError && !clientsError);
+	const workerName = $derived(installs.find(isSelf)?.device_name || 'My worker');
 
 	onMount(() => {
-		load();
+		void load();
+		// Pairing completion has no dedicated resource event. Refresh both sources while
+		// this view is mounted, including when the enrollment panel has been collapsed.
+		const poll = setInterval(() => {
+			// Do not repeatedly supersede a slow response with another poll.
+			if (!pendingWorkers) void loadWorkers();
+			if (!pendingClients) void loadClients();
+		}, 10_000);
+		return () => {
+			stopped = true; workersVersion++; clientsVersion++; advertiseVersion++;
+			clearInterval(poll); clearTimeout(flashTimer);
+		};
 	});
+	watchResources(['settings'], load);
 
-	async function load(quiet = false) {
-		const selected = installs.find((install) => install.id === editingId);
+	async function load() {
+		await Promise.all([loadWorkers(), loadClients(), loadAdvertise()]);
+	}
+
+	async function loadWorkers() {
+		if (savingKey?.startsWith('worker:')) return;
+		const version = ++workersVersion;
+		pendingWorkers++;
+		const selected = installs.find((install) => `worker:${install.id}` === editingId) || removedDraft;
 		const nameBefore = editName;
-		const before = advertiseInput;
-		const clean = !savingAdvertise && advertiseInput === (advertise?.override || '');
-		if (!quiet) loading = true;
-		error = '';
 		try {
-			const [resp, sec, adv] = await Promise.all([
-				listInstalls(),
-				getClusterSecretStatus(),
-				getAdvertiseStatus()
-			]);
-			installs = resp.installs;
-			if (quiet && selected && editingId === selected.id) {
+			const response = await listInstalls();
+			if (stopped || version !== workersVersion) return;
+			installs = response.installs;
+			selfId = response.self_instance_id;
+			workersLoaded = true; workersError = '';
+			if (selected && editingId === `worker:${selected.id}`) {
 				const fresh = installs.find((install) => install.id === selected.id);
-				if (!savingId && editName === nameBefore && editName === selected.device_name) {
+				const clean = editName === nameBefore && editName === selected.device_name;
+				if (clean) {
 					if (fresh) editName = fresh.device_name;
-					else editingId = null;
+					else cancelEdit();
 				} else if (!fresh) {
-					installs = [...installs, selected];
-					error = 'This device was removed elsewhere. Copy your unsaved name before leaving.';
-				} else if (fresh.device_name !== selected.device_name) error = 'This device changed elsewhere. Your unsaved name is kept here.';
+					removedDraft = selected;
+					draftNotice = 'This device was removed elsewhere. Copy your unsaved name before closing it.';
+				} else if (fresh.device_name !== selected.device_name) {
+					draftNotice = 'This device changed elsewhere. Your unsaved name is kept here.';
+				}
+				if (fresh) removedDraft = null;
 			}
-			selfId = resp.self_instance_id;
-			secret = sec;
-			advertise = adv;
-			if (!quiet || (clean && !savingAdvertise && advertiseInput === before)) advertiseInput = adv.override || '';
-		} catch (e: unknown) {
-			error = getErrorMessage(e, 'Failed to load devices');
-		} finally {
-			loading = false;
-		}
+		} catch (e) {
+			if (!stopped && version === workersVersion) workersError = getErrorMessage(e, 'Could not load workers');
+		} finally { pendingWorkers--; }
 	}
 
-	async function saveAdvertise() {
-		const url = advertiseInput.trim();
-		if (url && !/^https?:\/\//.test(url)) {
-			error = 'URL must start with http:// or https://';
-			return;
-		}
-		savingAdvertise = true;
-		error = '';
+	async function loadClients() {
+		if (savingKey?.startsWith('client:')) return;
+		const version = ++clientsVersion;
+		pendingClients++;
 		try {
-			advertise = await setAdvertiseUrl(url);
-			advertiseInput = advertise.override || '';
-			// Reflect the new base_url on this install's row right away.
-			installs = installs.map((i) => (i.id === selfId ? { ...i, base_url: advertise!.url } : i));
-			reachability = null; // the address changed — any prior test result is stale
-			flash(url ? 'Address override saved' : 'Reverted to auto-detected address');
-		} catch (e: unknown) {
-			error = getErrorMessage(e, 'Failed to save address');
-		} finally {
-			savingAdvertise = false;
-		}
+			const response = await listPairedClients();
+			if (stopped || version !== clientsVersion) return;
+			clients = response; clientsLoaded = true; clientsError = '';
+		} catch (e) {
+			if (!stopped && version === clientsVersion) clientsError = getErrorMessage(e, 'Could not load phones and browsers');
+		} finally { pendingClients--; }
 	}
 
-	async function testAdvertise() {
-		testingAdvertise = true;
-		error = '';
+	async function loadAdvertise() {
+		if (savingAdvertise) return;
+		const version = ++advertiseVersion;
+		const before = advertiseInput;
+		const clean = advertiseInput === (advertise?.override || '');
 		try {
-			reachability = await testAdvertiseReachability();
-		} catch (e: unknown) {
-			error = getErrorMessage(e, 'Failed to test reachability');
-		} finally {
-			testingAdvertise = false;
+			const next = await getAdvertiseStatus();
+			if (stopped || version !== advertiseVersion) return;
+			advertise = next; advertiseError = '';
+			if (clean && advertiseInput === before) advertiseInput = next.override || '';
+		} catch (e) {
+			if (!stopped && version === advertiseVersion) advertiseError = getErrorMessage(e, 'Could not load connection settings');
 		}
 	}
 
-	function flash(msg: string) {
-		success = msg;
-		setTimeout(() => (success = ''), 3000);
+	function isSelf(install: Install) { return install.id === selfId || install.is_self === true; }
+	function clientKind(client: PairedClient) {
+		// Older browser registrations used the default mobile client_type.
+		if (/browser/i.test(client.platform) || ['browser', 'pwa'].includes(client.client_type)) return 'Browser';
+		return client.client_type === 'mobile' ? 'Phone' : 'Device';
 	}
-
+	function flash(message: string) {
+		clearTimeout(flashTimer); success = message;
+		flashTimer = setTimeout(() => { success = ''; }, 4000);
+	}
 	function startEdit(install: Install) {
-		editingId = install.id;
-		editName = install.device_name;
-		confirmDeleteId = null;
+		editingId = `worker:${install.id}`; editName = install.device_name;
+		confirmation = null; removedDraft = null; draftNotice = '';
 	}
-
-	function cancelEdit() {
-		editingId = null;
-		editName = '';
-	}
+	function cancelEdit() { editingId = null; editName = ''; removedDraft = null; draftNotice = ''; }
 
 	async function saveEdit(id: string) {
 		const name = editName.trim();
-		if (!name) return;
-		savingId = id;
-		error = '';
+		if (!name || savingKey || removedDraft) return;
+		savingKey = `worker:${id}`; workersVersion++; error = '';
 		try {
 			const updated = await renameInstall(id, name);
-			installs = installs.map((i) => (i.id === id ? { ...i, ...updated } : i));
-			cancelEdit();
-			flash('Device renamed');
-		} catch (e: unknown) {
-			error = getErrorMessage(e, 'Failed to rename device');
-		} finally {
-			savingId = null;
-		}
-	}
-
-	async function remove(id: string) {
-		savingId = id;
-		error = '';
-		try {
-			await deleteInstall(id);
-			installs = installs.filter((i) => i.id !== id);
-			appData.dropDeviceSessions(id);
-			confirmDeleteId = null;
-			flash('Device removed');
-		} catch (e: unknown) {
-			error = getErrorMessage(e, 'Failed to remove device');
-		} finally {
-			savingId = null;
-		}
-	}
-
-	async function changeApproval(id: string, approved: boolean) {
-		savingId = id;
-		error = '';
-		try {
-			const updated = await setInstallApproval(id, approved);
 			installs = installs.map((install) => install.id === id ? { ...install, ...updated } : install);
-			confirmRevokeId = null;
-			flash(approved
-				? (updated.restart_required ? 'Runner approved — restart it to begin execution' : 'Runner approved')
-				: 'Runner revoked and removed from new execution placement');
-		} catch (e: unknown) {
-			error = getErrorMessage(e, approved ? 'Failed to approve runner' : 'Failed to revoke runner');
-		} finally {
-			savingId = null;
-		}
+			cancelEdit(); flash('Device renamed');
+		} catch (e) { error = getErrorMessage(e, 'Could not rename device'); }
+		finally { savingKey = null; }
 	}
 
-	async function regenerate() {
-		regenerating = true;
-		error = '';
+	async function remove(install: Install) {
+		if (savingKey || isSelf(install)) return;
+		savingKey = `worker:${install.id}`; workersVersion++; error = '';
 		try {
-			const res = await regenerateClusterSecret();
-			confirmRegen = false;
-			if (res.env_pinned) {
-				flash('Secret is pinned via CLUSTER_SECRET env — nothing to rotate');
-			} else {
-				flash('Cluster secret rotated. Restart the other installs so they pick it up.');
-			}
-			secret = await getClusterSecretStatus();
-		} catch (e: unknown) {
-			error = getErrorMessage(e, 'Failed to rotate cluster secret');
-		} finally {
-			regenerating = false;
-		}
+			await deleteInstall(install.id);
+			installs = installs.filter((item) => item.id !== install.id);
+			appData.dropDeviceSessions(install.id);
+			confirmation = null; flash('Device removed');
+		} catch (e) { error = getErrorMessage(e, 'Could not remove device'); }
+		finally { savingKey = null; }
 	}
 
-	function relTime(input: string | null): string {
-		if (!input) return 'never';
-		const ms = new Date(input).getTime();
-		if (!ms) return 'never';
-		const diff = Date.now() - ms;
-		const min = Math.floor(diff / 60000);
-		const hr = Math.floor(diff / 3600000);
-		const day = Math.floor(diff / 86400000);
-		if (min < 1) return 'just now';
-		if (min < 60) return `${min}m ago`;
-		if (hr < 24) return `${hr}h ago`;
-		if (day < 30) return `${day}d ago`;
-		return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+	async function changeApproval(install: Install, approved: boolean) {
+		if (savingKey || (!approved && isSelf(install))) return;
+		savingKey = `worker:${install.id}`; workersVersion++; error = '';
+		try {
+			const updated = await setInstallApproval(install.id, approved);
+			installs = installs.map((item) => item.id === install.id ? { ...item, ...updated } : item);
+			confirmation = null;
+			flash(approved ? (updated.restart_required ? 'Worker approved. Restart it to begin execution.' : 'Worker approved') : 'Worker access revoked');
+		} catch (e) { error = getErrorMessage(e, approved ? 'Could not approve worker' : 'Could not revoke worker'); }
+		finally { savingKey = null; }
 	}
-	watchResources(['settings'], () => load(true));
+
+	async function revokeClient(client: PairedClient) {
+		if (savingKey) return;
+		savingKey = `client:${client.id}`; clientsVersion++; error = '';
+		try {
+			await revokePairedClient(client.id);
+			clients = clients.filter((item) => item.id !== client.id);
+			confirmation = null; flash('Device access revoked');
+		} catch (e) { error = getErrorMessage(e, 'Could not revoke device'); }
+		finally { savingKey = null; }
+	}
+
+	async function saveAdvertise() {
+		if (!advertise || savingAdvertise || advertise.env_pinned) return;
+		const url = advertiseInput.trim();
+		if (url && !/^https?:\/\//.test(url)) { error = 'URL must start with http:// or https://'; return; }
+		savingAdvertise = true; advertiseVersion++; error = '';
+		try {
+			advertise = await setAdvertiseUrl(url);
+			advertiseInput = advertise.override || '';
+			reachability = null;
+			flash(url ? 'Address saved' : 'Using the auto-detected address');
+		} catch (e) { error = getErrorMessage(e, 'Could not save address'); }
+		finally { savingAdvertise = false; }
+	}
+	async function testAdvertise() {
+		testingAdvertise = true; error = '';
+		try { reachability = await testAdvertiseReachability(); }
+		catch (e) { error = getErrorMessage(e, 'Could not test address'); }
+		finally { testingAdvertise = false; }
+	}
+	function seen(input: string | null): string {
+		if (!input) return 'Not seen yet';
+		const timestamp = new Date(input).getTime();
+		if (!Number.isFinite(timestamp)) return 'Last seen unknown';
+		const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60_000));
+		if (minutes < 1) return 'Seen just now';
+		if (minutes < 60) return `Seen ${minutes}m ago`;
+		if (minutes < 1440) return `Seen ${Math.floor(minutes / 60)}h ago`;
+		return `Seen ${Math.floor(minutes / 1440)}d ago`;
+	}
 </script>
 
-<div class="set-group">
-	<div class="set-grouphead">
-		<h3><MonitorSmartphone />Devices
-			<span class="b b-muted">{onlineCount}/{installs.length} online</span>
-		</h3>
-		<p>Every AI&nbsp;Shuffle install on this shared database registers itself here. Their sessions appear in your sidebar, and any <strong>online</strong> device can be controlled from here — no manual server setup. A device's advertised address only affects whether its artifact links open on your other devices.</p>
-	</div>
-
-	{#if loading}
-		<div class="sg-body"><p class="muted">Loading…</p></div>
-	{:else}
-		<AccountConnection />
-		<PairingPanel />
-
-		<!-- Cluster secret -->
-		<div class="set-row">
-			<div class="lab">
-				<h4><KeyRound size={13} /> Cluster secret</h4>
-				<p>Shared key that authorizes installs to control each other. {#if secret?.env_pinned}Pinned via the <code>CLUSTER_SECRET</code> env var.{:else}Auto-generated and stored in the shared database.{/if}</p>
-			</div>
-			<div class="ctl secret-ctl">
-				{#if secret?.configured}<span class="b b-on">Active</span>{:else}<span class="b b-muted">Not set</span>{/if}
-				{#if confirmRegen}
-					<button type="button" class="ed-btn danger" onclick={regenerate} disabled={regenerating}>
-						{regenerating ? 'Rotating…' : 'Confirm rotate'}
-					</button>
-					<button type="button" class="ed-btn" onclick={() => (confirmRegen = false)} disabled={regenerating}>Cancel</button>
-				{:else}
-					<button
-						type="button"
-						class="ed-btn"
-						onclick={() => (confirmRegen = true)}
-						disabled={secret?.env_pinned}
-						title={secret?.env_pinned ? 'Pinned via env — edit CLUSTER_SECRET to change' : 'Rotate the shared secret'}
-					>
-						<RefreshCw size={13} /> Rotate
-					</button>
-				{/if}
-			</div>
+<section class="devices-section" aria-labelledby="devices-heading">
+	<header class="devices-header">
+		<div class="heading"><h3 id="devices-heading"><MonitorSmartphone size={18} /> Devices</h3>
+			<span class="device-count">{#if complete}{total} {total === 1 ? 'device' : 'devices'}{:else if workersLoaded || clientsLoaded || workersError || clientsError}{total} loaded{:else}Loading…{/if}</span>
 		</div>
+		<button type="button" class="device-button add-button" aria-expanded={showPairing} aria-controls="device-enrollment" onclick={() => { pairingMounted = true; showPairing = !showPairing; }}>
+			{#if showPairing}<X size={15} /> Close{:else}<Plus size={15} /> Add device{/if}
+		</button>
+	</header>
+	<AccountConnection {workerName} />
+	<div id="device-enrollment" hidden={!showPairing}>{#if pairingMounted}<PairingPanel />{/if}</div>
 
-		<!-- This install's advertised address -->
-		<div class="set-row">
-			<div class="lab">
-				<h4><Globe size={13} /> This install's address</h4>
-				<p>The address other devices use to open artifact links served by this install. {#if advertise?.env_pinned}Pinned via <code>CLUSTER_ADVERTISE_URL</code>.{:else if advertise?.source === 'guess'}Auto-detected — override if other devices can't reach it.{:else if advertise && !advertise.url}Not advertised — artifact links from here may not open on your other devices.{/if}</p>
-			</div>
-			<div class="ctl secret-ctl">
-				<input
-					type="text"
-					class="inp adv-in"
-					bind:value={advertiseInput}
-					placeholder={advertise?.url || 'https://this-install.example.com'}
-					disabled={advertise?.env_pinned || savingAdvertise}
-					autocomplete="off"
-				/>
-				<button
-					type="button"
-					class="ed-btn"
-					onclick={testAdvertise}
-					disabled={testingAdvertise || !advertise?.url}
-					title={advertise?.url ? 'Check that the advertised address resolves and responds' : 'No address to test'}
-				>{testingAdvertise ? 'Testing…' : 'Test'}</button>
-				<button
-					type="button"
-					class="ed-btn primary"
-					onclick={saveAdvertise}
-					disabled={advertise?.env_pinned || savingAdvertise || advertiseInput.trim() === (advertise?.override || '')}
-				>{savingAdvertise ? 'Saving…' : 'Save'}</button>
-			</div>
-		</div>
+	{#if workersError}<div class="load-error"><p role="alert">Workers: {workersError}</p><button type="button" class="device-button" onclick={loadWorkers}>Retry workers</button></div>{/if}
+	{#if clientsError}<div class="load-error"><p role="alert">Phones and browsers: {clientsError}</p><button type="button" class="device-button" onclick={loadClients}>Retry phones and browsers</button></div>{/if}
+	{#if !workersLoaded && !workersError}<p class="list-message" role="status">Loading workers…</p>{/if}
+	{#if !clientsLoaded && !clientsError}<p class="list-message" role="status">Loading phones and browsers…</p>{/if}
 
-		<!-- Reachability warning + self-test result for the advertised address -->
-		{#if !advertise?.env_pinned && advertise && !advertise.url}
-			<div class="adv-warn" role="status">
-				This install has no advertised address, so <strong>artifact links</strong>
-				it serves may not open on your other devices. Set a
-				<code>http://&lt;lan-ip&gt;:port</code> URL above so they resolve.
-			</div>
-		{/if}
-		{#if reachability}
-			<div class="adv-result" class:ok={reachability.ok} role="status">
-				{reachability.detail}
-			</div>
-		{/if}
-
-		<!-- Device list -->
-		{#if installs.length === 0}
-			<div class="sg-body"><p class="muted">No installs registered yet.</p></div>
-		{:else}
-			<div class="dev-list">
-				{#each installs as inst (inst.id)}
-					<div class="dev-row" class:self={inst.id === selfId} class:pending={inst.approved === false}>
-						<span class="dev-dot" class:online={inst.online} title={inst.online ? 'Online' : 'Offline'}></span>
-						<div class="dev-main">
-							<div class="dev-line1">
-								{#if editingId === inst.id}
-									<input
-										class="inp dev-name-input"
-										bind:value={editName}
-										maxlength="60"
-										onkeydown={(e) => { if (e.key === 'Enter') saveEdit(inst.id); if (e.key === 'Escape') cancelEdit(); }}
-									/>
-									<button type="button" class="ic-btn" title="Save" onclick={() => saveEdit(inst.id)} disabled={savingId === inst.id || !editName.trim()}><Check size={14} /></button>
-									<button type="button" class="ic-btn" title="Cancel" onclick={cancelEdit} disabled={savingId === inst.id}><X size={14} /></button>
-								{:else}
-									<span class="dev-name">{inst.device_name}</span>
-									{#if inst.id === selfId}<span class="b b-on">This install</span>{/if}
-									{#if inst.approved === false}<span class="b b-warn">Approval needed</span>{/if}
-									{#if !inst.base_url}<span class="b b-muted" title="No address advertised — artifact links from this device may not open on your other devices">No address</span>{/if}
-								{/if}
+	{#if devices.length}
+		<ul class="device-list" aria-label="Devices">
+			{#each devices as item (item.key)}
+				<li class="device-row" data-device-key={item.key}>
+					<span class="device-icon" aria-hidden="true">{#if item.kind === 'worker'}<Server size={18} />{:else if clientKind(item.device) === 'Phone'}<Smartphone size={18} />{:else}<Globe size={18} />{/if}</span>
+					<div class="device-main">
+						{#if item.kind === 'worker' && editingId === item.key}
+							<div class="name-editor">
+								<input class="device-input" aria-label="Device name" bind:value={editName} maxlength="60" disabled={savingKey !== null} onkeydown={(event) => { if (event.key === 'Enter') void saveEdit(item.device.id); if (event.key === 'Escape' && !savingKey) cancelEdit(); }} />
+								<button type="button" class="device-button icon-button" aria-label="Save name" title="Save name" disabled={savingKey !== null || !editName.trim() || !!removedDraft} onclick={() => saveEdit(item.device.id)}><Check size={15} /></button>
+								<button type="button" class="device-button icon-button" aria-label="Cancel rename" title="Cancel rename" disabled={savingKey !== null} onclick={cancelEdit}><X size={15} /></button>
 							</div>
-							<div class="dev-line2">
-								{#if inst.platform}<span>{inst.platform}</span>{/if}
-								{#if inst.version}<span class="sep">·</span><span>v{inst.version}</span>{/if}
-								<span class="sep">·</span>
-								<span>{inst.online ? 'online' : `seen ${relTime(inst.last_seen)}`}</span>
+						{:else}
+							<div class="name-line"><span class="device-name">{item.device.device_name}</span>{#if item.kind === 'worker' && isSelf(item.device)}<span class="self-label">This device</span>{/if}</div>
+						{/if}
+						<div class="device-meta">
+							<span>{item.kind === 'worker' ? 'Worker' : clientKind(item.device)}</span>
+							{#if item.device.platform && !/^(browser|pwa|mobile)$/i.test(item.device.platform)}<span>{item.device.platform.replace(/-browser$/i, '')}</span>{/if}
+							{#if item.kind === 'worker'}
+								{#if item.draft}<span>Removed elsewhere</span>{:else if item.device.approved === false}<span class="approval-needed">Approval needed</span>{:else}<span>{item.device.online ? 'Online' : seen(item.device.last_seen)}</span>{/if}
+							{:else}<span>{seen(item.device.last_seen)}</span>{/if}
+						</div>
+					</div>
+					{#if editingId !== item.key && confirmation?.key !== item.key}
+						<div class="device-actions">
+							{#if item.kind === 'worker'}
+								{@const install = item.device}
+								{#if install.approved === false}
+									<button type="button" class="device-button" aria-label={`Approve ${install.device_name}`} disabled={savingKey !== null} onclick={() => changeApproval(install, true)}><ShieldCheck size={15} /> Approve</button>
+								{:else}
+									<button type="button" class="device-button icon-button" aria-label={`Rename ${install.device_name}`} title="Rename device" disabled={savingKey !== null} onclick={() => startEdit(install)}><Pencil size={15} /></button>
+								{/if}
+								{#if !isSelf(install)}
+									{#if install.approved !== false}<button type="button" class="device-button icon-button" aria-label={`Revoke ${install.device_name}`} title="Revoke worker access" disabled={savingKey !== null} onclick={() => { confirmation = { key: item.key, action: 'revoke' }; }}><ShieldOff size={15} /></button>{/if}
+									<button type="button" class="device-button icon-button" aria-label={`Remove ${install.device_name}`} title="Remove device" disabled={savingKey !== null} onclick={() => { confirmation = { key: item.key, action: 'remove' }; }}><Trash2 size={15} /></button>
+								{/if}
+							{:else}
+								<button type="button" class="device-button icon-button" aria-label={`Revoke ${item.device.device_name}`} title="Revoke device access" disabled={savingKey !== null} onclick={() => { confirmation = { key: item.key, action: 'revoke' }; }}><ShieldOff size={15} /></button>
+							{/if}
+						</div>
+					{/if}
+					{#if confirmation?.key === item.key}
+						<div class="confirmation">
+							<p>{confirmation.action === 'remove' ? 'Remove this device from the list? It may reappear if it reconnects.' : item.kind === 'worker' ? 'Revoke access? This worker will no longer receive new tasks.' : 'Revoke access? This device will need to pair again.'}</p>
+							<div class="confirmation-actions">
+								<button type="button" class="device-button danger" disabled={savingKey !== null} onclick={() => { if (item.kind === 'client') void revokeClient(item.device); else if (confirmation?.action === 'remove') void remove(item.device); else void changeApproval(item.device, false); }}>{confirmation.action === 'remove' ? 'Confirm remove' : 'Confirm revoke'}</button>
+								<button type="button" class="device-button" disabled={savingKey !== null} onclick={() => { confirmation = null; }}>Cancel</button>
 							</div>
 						</div>
-						{#if editingId !== inst.id}
-							<div class="dev-actions">
-								{#if inst.approved === false}
-									<button type="button" class="ed-btn approve" title="Approve this runner" onclick={() => changeApproval(inst.id, true)} disabled={savingId === inst.id}><ShieldCheck size={13} /> Approve</button>
-								{:else}
-									<button type="button" class="ic-btn" title="Rename" onclick={() => startEdit(inst)}><Pencil size={13} /></button>
-								{/if}
-								{#if inst.id !== selfId}
-									{#if inst.approved !== false}
-										{#if confirmRevokeId === inst.id}
-											<button type="button" class="ic-btn danger" title="Confirm revoke" onclick={() => changeApproval(inst.id, false)} disabled={savingId === inst.id}><ShieldOff size={14} /></button>
-											<button type="button" class="ic-btn" title="Cancel" onclick={() => (confirmRevokeId = null)}><X size={14} /></button>
-										{:else}
-											<button type="button" class="ic-btn" title="Revoke runner access" onclick={() => { confirmRevokeId = inst.id; confirmDeleteId = null; }}><ShieldOff size={13} /></button>
-										{/if}
-									{/if}
-									{#if confirmDeleteId === inst.id}
-										<button type="button" class="ic-btn danger" title="Confirm remove" onclick={() => remove(inst.id)} disabled={savingId === inst.id}><Check size={14} /></button>
-										<button type="button" class="ic-btn" title="Cancel" onclick={() => (confirmDeleteId = null)}><X size={14} /></button>
-									{:else}
-										<button type="button" class="ic-btn" title="Remove from registry" onclick={() => { confirmDeleteId = inst.id; editingId = null; }}><Trash2 size={13} /></button>
-									{/if}
-								{/if}
-							</div>
-						{/if}
-					</div>
-				{/each}
-			</div>
-		{/if}
+					{/if}
+				</li>
+			{/each}
+		</ul>
+	{:else if complete}<p class="list-message">No devices yet. Add a device to get started.</p>{/if}
+	{#if draftNotice}<p class="list-message" role="status">{draftNotice}</p>{/if}
+	{#if error}<p class="feedback error" role="alert">{error}</p>{/if}
+	{#if success}<p class="feedback" role="status">{success}</p>{/if}
+	{#if advertiseError}<div class="load-error"><p role="alert">Connection settings: {advertiseError}</p><button type="button" class="device-button" onclick={loadAdvertise}>Retry connection settings</button></div>{/if}
 
-		{#if error}<div class="kc-foot err">{error}</div>{/if}
-		{#if success}<div class="kc-foot ok">{success}</div>{/if}
-	{/if}
-</div>
+	<details class="connection-settings">
+		<summary>Connection settings</summary>
+		<div class="address-settings">
+			<label for="device-address">This worker's address</label>
+			<p id="device-address-help">Used to open this worker's files from other devices. {#if advertise?.env_pinned}Set by CLUSTER_ADVERTISE_URL.{:else}Leave blank to detect automatically.{/if}</p>
+			<div class="address-controls">
+				<input id="device-address" class="device-input" type="url" bind:value={advertiseInput} placeholder={advertise?.url || 'https://worker.example.com'} aria-describedby="device-address-help" disabled={!advertise || advertise.env_pinned || savingAdvertise} autocomplete="off" />
+				<button type="button" class="device-button" disabled={testingAdvertise || savingAdvertise || !advertise?.url} onclick={testAdvertise}>{testingAdvertise ? 'Testing…' : 'Test address'}</button>
+				<button type="button" class="device-button" disabled={!advertise || advertise.env_pinned || savingAdvertise || advertiseInput.trim() === (advertise.override || '')} onclick={saveAdvertise}>{savingAdvertise ? 'Saving…' : 'Save address'}</button>
+			</div>
+			{#if reachability}<p class:error={!reachability.ok} role="status">{reachability.detail}</p>{/if}
+		</div>
+	</details>
+</section>
 
 <style>
-	.sg-body {
-		padding: 14px 18px 16px;
-	}
-	.muted {
-		margin: 0;
-		font-size: 13px;
-		color: var(--muted-foreground);
-	}
-	.secret-ctl {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex-wrap: wrap;
-	}
-	.adv-in {
-		width: 280px;
-		max-width: 100%;
-	}
-	.adv-warn,
-	.adv-result {
-		margin: 8px 12px 0;
-		padding: 8px 12px;
-		border-radius: 8px;
-		font-size: 0.8125rem;
-		line-height: 1.35;
-	}
-	.adv-warn {
-		color: var(--warning-foreground, var(--warning));
-		background: color-mix(in oklch, var(--warning) 12%, transparent);
-		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
-	}
-	.adv-warn code {
-		font-size: 0.75rem;
-	}
-	.adv-result {
-		color: var(--destructive);
-		background: color-mix(in oklch, var(--destructive) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--destructive) 28%, transparent);
-	}
-	.adv-result.ok {
-		color: var(--success, #16a34a);
-		background: color-mix(in oklch, var(--success, #16a34a) 12%, transparent);
-		border-color: color-mix(in oklch, var(--success, #16a34a) 30%, transparent);
-	}
-	.dev-list {
-		display: flex;
-		flex-direction: column;
-		padding: 4px 8px 8px;
-	}
-	.dev-row {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		padding: 10px 10px;
-		border-radius: 10px;
-	}
-	.dev-row:hover {
-		background: var(--hover-overlay);
-	}
-	.dev-row.self {
-		background: color-mix(in oklch, var(--primary) 6%, transparent);
-	}
-	.dev-row.pending {
-		background: color-mix(in oklch, var(--warning, #d97706) 8%, transparent);
-	}
-	.dev-dot {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		flex-shrink: 0;
-		background: var(--muted-foreground);
-	}
-	.dev-dot.online {
-		background: color-mix(in oklch, var(--primary) 70%, #22c55e);
-		box-shadow: 0 0 5px color-mix(in oklch, var(--primary) 50%, #22c55e);
-	}
-	.dev-main {
-		flex: 1;
-		min-width: 0;
-	}
-	.dev-line1 {
-		display: flex;
-		align-items: center;
-		gap: 7px;
-		flex-wrap: wrap;
-	}
-	.dev-name {
-		font-size: 13.5px;
-		font-weight: 600;
-		color: var(--foreground);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-	.dev-name-input {
-		width: 220px;
-		max-width: 100%;
-	}
-	.dev-line2 {
-		display: flex;
-		align-items: center;
-		gap: 5px;
-		margin-top: 2px;
-		font-size: 11.5px;
-		color: var(--muted-foreground);
-		text-transform: capitalize;
-	}
-	.dev-line2 .sep {
-		opacity: 0.5;
-	}
-	.dev-actions {
-		display: flex;
-		align-items: center;
-		gap: 2px;
-		flex-shrink: 0;
-	}
-	.ic-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 28px;
-		height: 28px;
-		border: none;
-		border-radius: 7px;
-		background: transparent;
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: all 120ms ease;
-	}
-	.ic-btn:hover:not(:disabled) {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-	.ic-btn.danger:hover:not(:disabled) {
-		color: var(--destructive);
-		background: color-mix(in oklch, var(--destructive) 12%, transparent);
-	}
-	.ic-btn:disabled {
-		opacity: 0.5;
-		cursor: default;
-	}
-	.ed-btn.danger {
-		color: var(--destructive);
-		border-color: color-mix(in oklch, var(--destructive) 40%, transparent);
-	}
-	.ed-btn.approve {
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
-		color: var(--primary);
-		border-color: color-mix(in oklch, var(--primary) 35%, transparent);
-	}
-	.b {
-		font-family: var(--font-mono, monospace);
-		font-size: 10px;
-		font-weight: 600;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
-		padding: 2px 7px;
-		border-radius: 999px;
-	}
-	.b-on {
-		color: var(--primary-foreground);
-		background: var(--primary);
-	}
-	.b-muted {
-		color: var(--muted-foreground);
-		background: var(--muted);
-	}
-	.b-warn {
-		color: var(--warning-foreground, #92400e);
-		background: color-mix(in oklch, var(--warning, #d97706) 18%, transparent);
-	}
-	.kc-foot {
-		padding: 8px 18px 12px;
-		font-size: 12.5px;
-	}
-	.kc-foot.ok {
-		color: var(--success, #16a34a);
-	}
-	.kc-foot.err {
-		color: var(--destructive);
-	}
-	code {
-		font-family: var(--font-mono, monospace);
-		font-size: 11px;
-		padding: 1px 4px;
-		border-radius: 4px;
-		background: var(--muted);
+	.devices-section { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); color: var(--foreground); min-width: 0; }
+	.devices-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+	.heading { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; min-width: 0; }
+	h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-family: var(--font-display); font-size: 18px; font-weight: 600; letter-spacing: -.02em; }
+	.device-count { color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+	.device-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--foreground); font: inherit; font-size: 12px; line-height: 1.4; cursor: pointer; }
+	.device-button:hover:not(:disabled) { background: var(--hover-overlay); }
+	.device-button:disabled { opacity: .5; cursor: default; }
+	.device-button:focus-visible, .device-input:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.add-button { flex-shrink: 0; color: var(--primary); }
+	.icon-button { width: 40px; padding: 0; border-color: transparent; color: var(--muted-foreground); flex-shrink: 0; }
+	.device-button.danger, .error { color: var(--destructive); }
+	.device-list { list-style: none; margin: 0; padding: 0 18px; }
+	.device-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 8px 10px; padding: 14px 0; }
+	.device-row + .device-row { border-top: 1px solid var(--border); }
+	.device-icon { display: flex; color: var(--muted-foreground); }
+	.device-main { min-width: 0; }
+	.name-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
+	.device-name { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+	.self-label { font-size: 11px; color: var(--primary); white-space: nowrap; }
+	.device-meta { display: flex; flex-wrap: wrap; gap: 2px 8px; margin-top: 3px; font-size: 11px; line-height: 1.5; color: var(--muted-foreground); }
+	.device-meta span { overflow-wrap: anywhere; }
+	.device-meta span + span::before { content: '·'; margin-right: 8px; }
+	.approval-needed { color: var(--warning-foreground, var(--warning)); }
+	.device-actions, .confirmation-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+	.device-input { box-sizing: border-box; min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--foreground); font: inherit; font-size: 13px; }
+	.device-input:disabled { opacity: .55; }
+	.name-editor { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+	.name-editor .device-input { flex: 1 1 120px; width: 100%; }
+	.confirmation { grid-column: 2 / -1; }
+	.confirmation p, .load-error p, .address-settings p { margin: 0 0 8px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+	.list-message, .feedback { margin: 0; padding: 12px 18px; font-size: 12px; line-height: 1.5; color: var(--muted-foreground); }
+	.feedback { color: var(--primary); }
+	.feedback.error { color: var(--destructive); }
+	.load-error { padding: 12px 18px; color: var(--destructive); }
+	.connection-settings { padding: 0 18px; border-top: 1px solid var(--border); }
+	summary { padding: 14px 0; font-size: 12px; color: var(--muted-foreground); cursor: pointer; min-height: 44px; box-sizing: border-box; }
+	.address-settings { padding: 0 0 16px; }
+	.address-settings label { font-size: 13px; font-weight: 600; }
+	.address-settings p { margin-top: 6px; color: var(--muted-foreground); }
+	.address-settings p.error { color: var(--destructive); }
+	.address-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+	.address-controls .device-input { flex: 1 1 220px; width: 100%; }
+	@media (max-width: 560px) {
+		.devices-header { padding: 12px; }
+		.heading { flex-direction: column; align-items: flex-start; }
+		.device-list { padding: 0 12px; }
+		.device-row { grid-template-columns: 20px minmax(0, 1fr); gap: 6px 8px; }
+		.device-actions { grid-column: 2; justify-content: flex-end; }
+		.device-button, .device-input { min-height: 44px; }
+		.icon-button { width: 44px; }
+		.connection-settings { padding: 0 12px; }
+		.load-error, .list-message, .feedback { padding: 12px; }
 	}
 </style>
