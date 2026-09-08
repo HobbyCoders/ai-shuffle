@@ -172,8 +172,12 @@ class Check:
         host_backup = self.artifacts / "host-helper.dump"
         helper_env = dict(os.environ, COMPOSE_PROJECT_NAME=self.prefix,
                           COMPOSE_FILE=str(ROOT / "docker-compose.yml"))
-        subprocess.run(["bash", str(ROOT / "tools/backup-db.sh"), str(host_backup)], env=helper_env,
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=120)
+        helper = subprocess.run(["bash", str(ROOT / "tools/backup-db.sh"), str(host_backup)], env=helper_env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        helper_log = re.sub(rb"postgres(?:ql)?://[^\s]+", b"[redacted-database-url]",
+                            helper.stdout + helper.stderr)
+        (self.artifacts / "host-helper.log").write_bytes(helper_log)
+        assert helper.returncode == 0, "Host backup helper failed: " + helper_log.decode(errors="replace")
         with host_backup.open("rb") as stream:
             assert stream.read(5) == b"PGDMP", "Host backup helper corrupted the custom dump"
         host_backup.unlink()
