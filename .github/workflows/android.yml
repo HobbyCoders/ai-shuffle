@@ -3,7 +3,7 @@ name: Android CI
 # Android app (android/) and the Cloudflare account hub (android/hub). Paths-
 # filtered like the other CI workflows: a PR that touches nothing under
 # android/ never starts it. The push-to-main leg keeps producing the signed
-# release APK artifact that the standalone android repo used to publish.
+# release APK artifact and publishes a permanent download after all checks pass.
 on:
   push:
     branches: [ main ]
@@ -15,13 +15,19 @@ on:
       - 'android/**'
       - '.github/workflows/android.yml'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Existing versioned release to attach the verified APK to
+        type: string
+        required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: android-${{ github.ref }}
-  cancel-in-progress: true
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   account-hub:
@@ -70,7 +76,10 @@ jobs:
         run: chmod +x gradlew
 
       - name: Unit tests and Android lint
-        run: ./gradlew testDebugUnitTest lintDebug --stacktrace
+        run: |
+          python3 ci/test-apk-download.py
+          python3 ci/test-publish-apk.py
+          ./gradlew testDebugUnitTest lintDebug --stacktrace
 
       - name: Build instrumentation APKs
         run: ./gradlew assembleDebug assembleDebugAndroidTest --max-workers=2 --stacktrace
@@ -85,6 +94,7 @@ jobs:
           if-no-files-found: error
 
       - name: Decode release keystore
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
@@ -95,24 +105,50 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
 
       - name: Build release APK
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         env:
           KEYSTORE_PATH: ${{ runner.temp }}/release.jks
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew assembleRelease --stacktrace
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          # Minutes since the Unix epoch fit Android's versionCode range and
+          # increase across both main CI and the separate release workflow.
+          export ANDROID_VERSION_CODE=$(( $(date +%s) / 60 ))
+          if [ -n "$RELEASE_TAG" ]; then
+            version="$(printf '%s' "$RELEASE_TAG" | tr -d '[:space:]')"
+            version="${version#v}"; version="${version#V}"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || exit 1
+            export ANDROID_VERSION_NAME="$version"
+          fi
+          ./gradlew assembleRelease --stacktrace
 
       - name: Verify APK is signed with the release key
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         run: |
           APK=app/build/outputs/apk/release/app-release.apk
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)"
           "$APKSIGNER" verify --print-certs "$APK"
 
+      - name: Prepare public APK download
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: python3 ci/prepare-apk-download.py
+
       - name: Upload release APK
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/upload-artifact@v4
         with:
           name: ai-shuffle-release-apk
           path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      - name: Upload public download files
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-download
+          path: android/app/build/outputs/download/
           if-no-files-found: error
 
   android-ui:
@@ -184,3 +220,27 @@ jobs:
             android/app/build/outputs/ui-screenshots/
             android/app/build/outputs/connected_android_test_additional_output/
           if-no-files-found: warn
+
+  publish:
+    name: Publish verified Android download
+    needs: [account-hub, build, android-ui]
+    if: github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    # Never interrupt an asset upload midway through replacing the rolling APK.
+    concurrency:
+      group: android-download-${{ inputs.release_tag || 'android-latest' }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-download
+          path: android-download
+      - name: Publish APK and checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bash android/ci/publish-apk.sh android-download

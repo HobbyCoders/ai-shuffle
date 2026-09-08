@@ -4,9 +4,20 @@ The Android companion and account hub live in this repository alongside the serv
 
 ## Install or update
 
-Open [Android CI](https://github.com/HobbyCoders/ai-shuffle/actions/workflows/android.yml), select a successful run for `main`, and download the `ai-shuffle-release-apk` artifact. Extract and install `app-release.apk`. GitHub requires sign-in to download workflow artifacts.
+**[Download latest Android APK](https://github.com/HobbyCoders/ai-shuffle/releases/download/android-latest/AI-Shuffle-Android.apk)** · [Version, build details and checksum](https://github.com/HobbyCoders/ai-shuffle/releases/tag/android-latest)
+
+Requires Android 8.0 or newer. Open `AI-Shuffle-Android.apk` on your phone and allow installation from your browser if Android asks. The same link is available in the worker's **Settings → Downloads**, the Android app's **Settings → Android APK**, and on the account hub's home page. Public release downloads do not require GitHub sign-in or ZIP extraction.
 
 The app keeps the same application ID and release signing key as the former standalone repository, so a signed update can preserve existing app data. Do not uninstall the app as an update step.
+
+### Where builds go
+
+- Android changes on `main` run [Android CI](https://github.com/HobbyCoders/ai-shuffle/actions/workflows/android.yml). After unit tests, lint, hub tests and emulator checks pass, CI updates the **Android — latest verified APK** prerelease at `android-latest`. This is a rolling main build; its notes identify the exact source commit. It does not replace the latest stable desktop release.
+- Versioned project releases build and verify Android from the same checkout, then attach `AI-Shuffle-Android.apk`, its SHA-256 checksum and `android-build.json` to that release.
+- Pull requests run verification but never publish downloads. Fork pull requests skip release signing because repository secrets are unavailable.
+- CI also keeps the original `ai-shuffle-release-apk` workflow artifact for troubleshooting. Actions artifacts require sign-in and expire; the public release downloads remain available.
+
+Locally, `./gradlew assembleRelease` produces `app/build/outputs/apk/release/app-release.apk` when signing is configured. Debug builds use `./gradlew assembleDebug` and produce `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Build and test
 
@@ -18,6 +29,8 @@ node --test app/src/test/js/chat-downloads.test.cjs
 ```
 
 Release builds use `KEYSTORE_PATH`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, and `KEY_PASSWORD`. GitHub Actions reconstructs the keystore from the repository's `KEYSTORE_BASE64` secret. Never commit a keystore or its passwords.
+
+CI sets `ANDROID_VERSION_CODE` to the build time in Unix minutes so signed updates advance across main and versioned release workflows. `ANDROID_VERSION_NAME` follows the release tag for versioned releases; main builds use the version in Gradle. `android-build.json` records both versions, source commit, verification run and APK SHA-256.
 
 CI helpers are in `ci/`; run them from this directory. Instrumentation tests reset app state and belong on a disposable emulator, not a phone with saved accounts.
 

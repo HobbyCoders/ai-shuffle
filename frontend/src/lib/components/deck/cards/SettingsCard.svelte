@@ -27,10 +27,11 @@
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import { User, MessageSquare, KeyRound, Plug, SlidersHorizontal, ScrollText, Code2, AudioLines } from 'lucide-svelte';
+	import { User, MessageSquare, KeyRound, Plug, SlidersHorizontal, ScrollText, Code2, AudioLines, Download } from 'lucide-svelte';
 
 	// Sub-components
 	import GeneralSection from './settings/GeneralSection.svelte';
+	import DownloadsSection from './settings/DownloadsSection.svelte';
 	import SecuritySection from './settings/SecuritySection.svelte';
 	import ProvidersSection from './settings/providers/ProvidersSection.svelte';
 	import DevicesSection from './settings/DevicesSection.svelte';
@@ -50,7 +51,7 @@
 	}: Props = $props();
 
 	// Navigation — rail mirrors the mockup's information architecture.
-	type Tab = 'account' | 'chat' | 'voice' | 'providers' | 'connectors' | 'api' | 'system' | 'logs';
+	type Tab = 'account' | 'chat' | 'voice' | 'providers' | 'downloads' | 'connectors' | 'api' | 'system' | 'logs';
 	let activeTab: Tab = $state('account');
 
 	interface RailItem {
@@ -66,6 +67,7 @@
 		{ id: 'chat', label: 'Chat & Input', icon: MessageSquare },
 		{ id: 'voice', label: 'Voice', icon: AudioLines },
 		{ id: 'providers', label: 'Providers', icon: KeyRound },
+		{ id: 'downloads', label: 'Downloads', icon: Download },
 		...($isAdmin
 			? [
 					{ id: 'admin-divider', label: 'Admin', heading: true } as RailItem,
@@ -363,6 +365,13 @@
 						/>
 
 						<SecuritySection />
+					</div>
+				{/if}
+
+				<!-- DOWNLOADS -->
+				{#if activeTab === 'downloads'}
+					<div class="tab-content" transition:fade={{ duration: 150 }}>
+						<DownloadsSection />
 					</div>
 				{/if}
 

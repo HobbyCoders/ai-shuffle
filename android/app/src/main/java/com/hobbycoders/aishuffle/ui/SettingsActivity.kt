@@ -1,6 +1,8 @@
 package com.hobbycoders.aishuffle.ui
 
 import android.content.Intent
+import android.content.ActivityNotFoundException
+import android.net.Uri
 import com.hobbycoders.aishuffle.R
 import com.hobbycoders.aishuffle.account.AccountRepository
 
@@ -18,6 +20,21 @@ class SettingsActivity : NativeScreen() {
         section("THIS PHONE")
         row("Phone tools", "App control, timers and permissions", R.drawable.ic_phone) {
             startActivity(Intent(this, ToolSettingsActivity::class.java))
+        }
+        section("ANDROID APK")
+        row("Download latest APK", "Install over this app to keep your accounts and workers", R.drawable.ic_refresh) {
+            openDownloadPage("https://github.com/HobbyCoders/ai-shuffle/releases/download/android-latest/AI-Shuffle-Android.apk")
+        }
+        link("Version and release notes") {
+            openDownloadPage("https://github.com/HobbyCoders/ai-shuffle/releases/tag/android-latest")
+        }
+    }
+
+    private fun openDownloadPage(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (_: ActivityNotFoundException) {
+            status.text = "Install a browser to open the Android download."
         }
     }
 }

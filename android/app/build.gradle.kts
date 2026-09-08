@@ -11,8 +11,8 @@ android {
         applicationId = "com.hobbycoders.aishuffle"
         minSdk = 26
         targetSdk = 34
-        versionCode = 12
-        versionName = "0.8.2"
+        versionCode = System.getenv("ANDROID_VERSION_CODE")?.toInt() ?: 12
+        versionName = System.getenv("ANDROID_VERSION_NAME") ?: "0.8.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["appAuthRedirectScheme"] = "com.hobbycoders.aishuffle"

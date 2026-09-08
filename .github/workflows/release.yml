@@ -44,7 +44,7 @@ jobs:
           prerelease: ${{ contains(env.VERSION, '-') }}
           generate_release_notes: true
           body: |
-            ## AI Shuffle Desktop ${{ env.VERSION }}
+            ## AI Shuffle ${{ env.VERSION }}
 
             ### Desktop downloads
 
@@ -62,6 +62,21 @@ jobs:
             Devices. Docker users: `ghcr.io/hobbycoders/ai-shuffle:${{ env.VERSION }}`.
 
             Installers become available as each desktop build finishes.
+
+            ### Android APK
+
+            [Download Android APK](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Android.apk) · [Latest verified Android build](https://github.com/${{ github.repository }}/releases/tag/android-latest)
+
+            Requires Android 8.0 or newer. Install over the existing app to keep
+            your accounts and workers. The APK appears after Android verification passes.
+
+  android:
+    name: Android APK
+    needs: create-release
+    uses: ./.github/workflows/android.yml
+    with:
+      release_tag: ${{ github.event.inputs.version || github.ref_name }}
+    secrets: inherit
 
   # Package the desktop app for each supported target and upload to the
   # release above. Each installer carries the worker runtime for its target
