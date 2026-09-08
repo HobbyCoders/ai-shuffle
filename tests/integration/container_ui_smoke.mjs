@@ -21,7 +21,7 @@ try {
     await page.getByRole('button', { name: 'Continue', exact: true }).click();
   }
   await page.getByRole('heading', { name: 'Select Workspace Folder', exact: true }).waitFor();
-  await page.getByLabel('Or type a path manually').fill('/workspace');
+  await page.getByLabel('Or type a path manually').fill('/workspace/container-onboarding-check');
   const saved = page.waitForResponse(response => response.url().endsWith('/workspace/config') && response.request().method() === 'POST');
   await page.getByRole('button', { name: 'Continue', exact: true }).click();
   const response = await saved;
@@ -31,7 +31,7 @@ try {
     if (!current.ok) throw new Error(`Workspace consumer returned ${current.status}`);
     return current.json();
   }, response.url());
-  assert.equal(config.workspace_path, '/workspace');
+  assert.equal(config.workspace_path, '/workspace/container-onboarding-check');
   await page.getByText('Connect your development tools', { exact: true }).waitFor();
   assert.deepEqual(pageErrors, [], 'Bundled UI raised JavaScript errors');
   console.log('Bundled UI rendered; network/workspace onboarding persisted through real APIs.');

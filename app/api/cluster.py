@@ -34,6 +34,20 @@ router = APIRouter(prefix="/api/v1/cluster", tags=["Cluster"])
 # Admin endpoints (normal auth) — power the Devices UI
 # ============================================================================
 
+def _require_legacy_install_target(install_id: str) -> None:
+    """A network directory id is not authority to mutate the old registry."""
+    from app.network import engine, runners
+
+    ctx = engine.context()
+    if ctx is not None:
+        device_id = runners.resolve_runner_id(install_id)
+        if ctx.member(device_id) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Use network membership controls to manage enrolled workers.",
+            )
+
+
 class InstallRenameRequest(BaseModel):
     device_name: str
 
@@ -404,6 +418,7 @@ async def update_install(
     """Rename a device (the user-friendly name shown on its sessions)."""
     if not rename or not (rename.device_name or "").strip():
         raise HTTPException(status_code=400, detail="device_name is required")
+    _require_legacy_install_target(install_id)
     updated = await run_sync(database.set_install_name, install_id, rename.device_name.strip())
     if not updated:
         raise HTTPException(status_code=404, detail="Install not found")
@@ -429,6 +444,7 @@ async def update_install_approval(
             status_code=400,
             detail="You cannot revoke the install serving this admin session",
         )
+    _require_legacy_install_target(install_id)
     updated = await run_sync(database.set_install_approval, install_id, body.approved)
     if updated is None:
         raise HTTPException(status_code=404, detail="Install not found")
@@ -443,6 +459,7 @@ async def delete_install(install_id: str, token: str = Depends(require_admin)) -
     Deleting this install's own row is allowed but pointless — it re-registers
     on its next heartbeat. Mainly for pruning devices that are gone for good.
     """
+    _require_legacy_install_target(install_id)
     ok = await run_sync(database.delete_install, install_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Install not found")

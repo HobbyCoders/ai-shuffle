@@ -64,6 +64,18 @@ def test_sqlite_rejected_even_with_external_config(settings_factory, tmp_path):
     assert not (tmp_path / "postgres").exists()
 
 
+def test_main_diagnostics_keep_type_and_call_site_but_not_secret_values(monkeypatch, capsys):
+    def fail_settings():
+        raise PermissionError("postgresql://user:private-test-password@host/database")
+    monkeypatch.setattr(runtime, "load_settings", fail_settings)
+    monkeypatch.setattr(runtime.signal, "signal", lambda *args: None)
+    assert runtime.main(["run"]) == 1
+    output = capsys.readouterr().err
+    assert "PermissionError at container_runtime.py:" in output
+    assert "private-test-password" not in output
+    assert "postgresql://" not in output
+
+
 def test_external_never_inspects_managed_storage(settings_factory, tmp_path, monkeypatch):
     forbidden = tmp_path / "postgres"
     forbidden.symlink_to("/definitely/not/a/cluster")

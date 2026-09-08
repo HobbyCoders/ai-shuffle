@@ -377,9 +377,7 @@
 							onDisconnectGithub={disconnectGithub}
 						/>
 
-						<!-- Devices — the worker network (identity, members, approvals, recovery
-						     key, sync) plus the runner registry. Admin-gated: it approves devices
-						     and rotates keys. -->
+						<!-- Admin-only: worker network membership/recovery, account linking, pairing, and runner access. -->
 						{#if $isAdmin}
 							<DevicesSection />
 						{/if}

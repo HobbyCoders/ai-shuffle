@@ -39,6 +39,7 @@ class Check:
         self.volumes = []
         self.networks = []
         self.results = []
+        self.workspaces = {}
 
     def docker(self, *args, input=None, check=True, timeout=120):
         result = subprocess.run(["docker", *map(str, args)], input=input,
@@ -57,6 +58,8 @@ class Check:
 
     def launch(self, volume, *, env=None, command=(), user=None, network="none", chrome=False, mounts=()):
         name = self.prefix + "-c" + str(len(self.containers))
+        if volume not in self.workspaces:
+            self.workspaces[volume] = self.volume()
         args = ["run", "-d", "--name", name, "--network", network,
                 "--stop-timeout", "90", "--shm-size", "256m",
                 "--label", f"com.docker.compose.project={self.prefix}",
@@ -64,6 +67,7 @@ class Check:
                 "--label", "com.docker.compose.container-number=1",
                 "--label", "com.docker.compose.oneoff=False",
                 "--mount", f"type=volume,src={volume},dst=/data",
+                "--mount", f"type=volume,src={self.workspaces[volume]},dst=/workspace",
                 "-e", "START_CHROME=" + ("1" if chrome else "0")]
         for key, value in (env or {}).items():
             args.extend(["-e", f"{key}={value}"])
@@ -138,6 +142,8 @@ class Check:
         self.passed("fresh one-container boot, PG16 clients/extension, non-superuser role and private storage")
 
         # Real local browser: render and operate the actual bundled UI/backend.
+        self.docker("exec", "--user", "99:100", app, "python", "-c",
+                    "from pathlib import Path; Path('/workspace/container-onboarding-check').mkdir(exist_ok=True)")
         script = ROOT / "tests/integration/container_ui_smoke.mjs"
         self.docker("cp", script, app + ":/tmp/container-ui-smoke.mjs")
         self.docker("exec", "--user", "99:100", app, "node", "/tmp/container-ui-smoke.mjs", timeout=120)
@@ -153,7 +159,11 @@ class Check:
         self.ready(recreated)
         assert self.system_id(recreated) == identity
         assert self.sql(recreated, "SELECT value FROM container_persistence_check;") == "retained"
-        self.passed("graceful restart and container recreation preserve cluster identity and committed data")
+        self.docker("exec", "--user", "99:100", recreated, "python", "-c",
+                    "import json,urllib.request; "
+                    "data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/v1/workspace/config')); "
+                    "assert data['workspace_path']=='/workspace/container-onboarding-check'")
+        self.passed("graceful restart and recreation preserve cluster identity, data and UI-authored workspace settings")
 
         # Dump stdout must be only the custom archive, not entrypoint diagnostics.
         archive = self.docker("exec", "--user", "99:100", recreated, "python", RUNTIME,
@@ -310,6 +320,17 @@ class Check:
             logs = captured.stdout + captured.stderr
             logs = re.sub(rb"postgres(?:ql)?://[^\s]+", b"[redacted-database-url]", logs)
             (self.artifacts / (name + ".log")).write_bytes(logs)
+            state = self.docker("inspect", "--format", "{{json .State}}", name, check=False)
+            (self.artifacts / (name + ".state.json")).write_bytes(state.stdout)
+            if name != self.prefix + "-external":
+                metadata = self.docker("run", "--rm", "--network", "none", "--volumes-from", name,
+                    "--entrypoint", "python", self.image, "-c",
+                    "from pathlib import Path; import json; "
+                    "paths=[Path('/data'),Path('/workspace')]+list(Path('/data').glob('*'))[:12]; "
+                    "print(json.dumps([{'path':str(p),'uid':p.lstat().st_uid,'gid':p.lstat().st_gid,"
+                    "'mode':oct(p.lstat().st_mode & 0o777),'bytes':p.lstat().st_size} "
+                    "for p in paths if p.exists()]))", check=False)
+                (self.artifacts / (name + ".storage.json")).write_bytes(metadata.stdout)
             self.docker("rm", "--force", "--volumes", name, check=False)
         for name in self.volumes:
             self.docker("volume", "rm", name, check=False)

@@ -568,9 +568,17 @@ def main(argv=None):
         return run(settings, args.action or "run", getattr(args, "file", None))
     except RuntimeFailure as error:
         log(str(error))
-    except Exception:
-        # ValidationError, libpq errors, filenames and URLs can contain secrets.
-        log("operation failed; check configuration, permissions, and retained state (details suppressed)")
+    except Exception as error:
+        # Never include exception text, source lines or locals: those may hold a
+        # DSN/password. The type and our own call site still make CI actionable.
+        trace = error.__traceback__
+        line = 0
+        while trace is not None:
+            if trace.tb_frame.f_code.co_filename == __file__:
+                line = trace.tb_lineno
+            trace = trace.tb_next
+        log(f"operation failed ({type(error).__name__} at container_runtime.py:{line}); "
+            "check configuration, permissions, and retained state (details suppressed)")
     return 1
 
 

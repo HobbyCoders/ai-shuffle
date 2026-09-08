@@ -20,7 +20,7 @@ import json
 import logging
 import uuid
 from contextlib import suppress
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from fastapi import (
     APIRouter,
@@ -262,7 +262,9 @@ async def serve_browser_panel(
     session_id: str,
     *,
     login_only: bool = False,
+    login_input: Optional[Callable[[dict], Awaitable[None]]] = None,
 ) -> None:
+    """Login controls belong to the provider flow, not the read-only stream hub."""
     # Handshake: hello, then the initial status (sent directly — no viewer
     # sender is running yet, so there is no concurrent writer to race).
     viewer_id = None if login_only else str(uuid.uuid4())
@@ -336,7 +338,17 @@ async def serve_browser_panel(
                     await websocket.close(code=4400, reason="Protocol violation")
                     break
                 if cdp_cmd is not None:
-                    await hub.dispatch_input(cdp_cmd)
+                    try:
+                        if login_input is None:
+                            raise ValueError("Missing login input owner")
+                        await login_input(cdp_cmd)
+                    except Exception:
+                        await hub.send_to_viewer(viewer, {
+                            "type": "error",
+                            "message": "The sign-in browser is unavailable. Close this dialog and try again.",
+                        })
+                        await websocket.close(code=1011, reason="Sign-in browser unavailable")
+                        break
                 continue
             if mtype in (
                 "workspace-command",
