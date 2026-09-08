@@ -158,6 +158,10 @@ export interface ActiveSessionState {
 	wsConnected: boolean;
 	wsReconnectRequired: boolean;
 	error: string | null;
+	/** Session the server offered to fork locally: an `error` frame with
+	 *  `offer_fork` means the worker that owns the session is unreachable.
+	 *  Cleared together with `error`. */
+	forkOfferSessionId?: string | null;
 	profile: string;
 	sessionProfileId: string | null;
 	currentQueryProfileId: string | null;
@@ -327,6 +331,7 @@ function defaultState(): ActiveSessionState {
 		wsConnected: false,
 		wsReconnectRequired: false,
 		error: null,
+		forkOfferSessionId: null,
 		profile: getPersistedProfile(),
 		sessionProfileId: null,
 		currentQueryProfileId: null,

@@ -430,8 +430,6 @@
 		.top-row :global(.top-arrow) { opacity: 1; }
 	}
 
-	:global(html[data-platform='mobile']) .top-row :global(.top-arrow) { opacity: 1; }
-
 	/* Tablet: 2-col grid */
 	@media (max-width: 860px) {
 		.bento { grid-template-columns: 1fr 1fr; }

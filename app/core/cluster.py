@@ -1,5 +1,13 @@
 """Cross-install cluster primitives: shared secret, peer auth, advertise URL.
 
+TRANSITION WINDOW (worker network, 2026-09). Installs that have joined a
+network no longer share a database: the runner directory comes from
+``app.network.runners`` (``get_installs`` returns it when enrolled), pairing
+codes are hashed under a local pairing key, and peers authenticate with
+signed device tokens. What remains here serves installs that have not
+enrolled yet and the legacy artifact redirect. Retire once every deployment
+reports Ready in Settings > Devices. See docs/network/README.md.
+
 When multiple AI Shuffle installs share one database they form a cluster. They
 authenticate to each other with a single shared *cluster secret* (every install
 on the shared DB converges on the same value) rather than per-peer API keys.

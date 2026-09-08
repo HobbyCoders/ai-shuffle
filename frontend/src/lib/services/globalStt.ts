@@ -13,6 +13,7 @@
  */
 
 import { writable, get } from 'svelte/store';
+import { apiBase, authHeaders, requestCredentials } from '$lib/api/runtime';
 import { browser } from '$app/environment';
 import { registerShortcut, type ShortcutRegistration } from './keyboard';
 import { hotkeyPreferences, type HotkeyConfig } from '$lib/stores/hotkeyPreferences.svelte';
@@ -808,8 +809,9 @@ function post(blob: Blob, name: string): Promise<TranscribeResponse> {
 
 		const xhr = new XMLHttpRequest();
 		uploadRequest = xhr;
-		xhr.open('POST', '/api/v1/settings/transcribe');
-		xhr.withCredentials = true;
+		xhr.open('POST', `${apiBase()}/settings/transcribe`);
+		xhr.withCredentials = requestCredentials() === 'include';
+		for (const [name, value] of Object.entries(authHeaders())) xhr.setRequestHeader(name, value);
 
 		globalSttUpload.set(0);
 		xhr.upload.onprogress = (event) => {

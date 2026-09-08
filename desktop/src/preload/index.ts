@@ -79,6 +79,7 @@ if (window.location.protocol === 'file:') {
 		getSettings: () => ipcRenderer.invoke('desktop:settings-get'),
 		checkDatabase: (config: unknown, action: 'test' | 'create') => ipcRenderer.invoke('desktop:db-check', config, action),
 		saveAndStart: (config: unknown) => ipcRenderer.invoke('desktop:setup-save', config),
+		useBundled: () => ipcRenderer.invoke('desktop:setup-use-bundled'),
 		cancelSetup: () => void ipcRenderer.invoke('desktop:setup-cancel'),
 		openSetup: () => void ipcRenderer.invoke('desktop:worker-open-setup'),
 		getState: () => ipcRenderer.invoke('desktop:worker-state'),

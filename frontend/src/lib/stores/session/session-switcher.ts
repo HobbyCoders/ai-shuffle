@@ -9,6 +9,7 @@
  *   worktree/cloud fields).
  */
 
+import { apiBase, withAuth } from '$lib/api/runtime';
 import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
@@ -421,12 +422,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// (b) Server device key: unchanged behavior (debounce/keepalive intact).
 		try {
 			const prefKey = serverPrefKey();
-			await fetch(`/api/v1/preferences/${encodeURIComponent(prefKey)}`, {
+			await fetch(`${apiBase()}/preferences/${encodeURIComponent(prefKey)}`, withAuth({
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
 				body: JSON.stringify({ key: prefKey, value }),
-			});
+			}));
 		} catch (e) {
 			console.error('[ActiveSession] Failed to persist session:', e);
 		}

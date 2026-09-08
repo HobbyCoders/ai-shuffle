@@ -8,6 +8,7 @@
 	 * toolbar. Reuses the `files` store for all data + operations. Theme tokens only.
 	 */
 	import { onMount } from 'svelte';
+	import { apiBase, withAuth } from '$lib/api/runtime';
 	import {
 		Folder, File as FileIcon, FileCode, FileText, FileImage, FileVideo, FileAudio,
 		FileArchive, FileSpreadsheet, Database, Settings, Package,
@@ -51,7 +52,7 @@
 	async function loadRootDirs() {
 		try {
 			const params = new URLSearchParams({ path: '', show_hidden: String($files.showHidden) });
-			const res = await fetch(`/api/v1/workspace/files?${params}`, { credentials: 'include' });
+			const res = await fetch(`${apiBase()}/workspace/files?${params}`, withAuth({ }));
 			if (res.ok) {
 				const data = await res.json();
 				rootDirs = (data.files as FileItem[])

@@ -314,6 +314,12 @@ class Settings(BaseSettings):
     # Security - CORS (comma-separated origins, or "*" for development only)
     cors_origins: str = "http://localhost:8000,http://127.0.0.1:8000"
 
+    # The Android app ships its own build of the mobile UI and loads it from
+    # this origin (WebViewAssetLoader). It talks to a worker only through the
+    # HTTP/WebSocket APIs, authenticated with a Bearer paired-session token, so
+    # this origin is always allowed for CORS regardless of `cors_origins`.
+    mobile_app_origin: str = "https://appassets.androidplatform.net"
+
     # Security - Cookie settings
     cookie_secure: bool = True  # Set to False only for local HTTP development
 

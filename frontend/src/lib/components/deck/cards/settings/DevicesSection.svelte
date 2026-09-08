@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { watchResources } from '$lib/services/watch-resources';
 	/**
-	 * DevicesSection — the cluster registry panel.
+	 * DevicesSection — the worker network plus the runner registry.
 	 *
-	 * On a shared database every AI Shuffle install self-registers here. This panel
-	 * lists those installs (online state, platform/version, reachability), lets the
-	 * user rename or prune a device, and shows/rotates the shared cluster secret
+	 * The NetworkPanel on top is the source of truth (device identity, members,
+	 * approvals, invites, recovery key, sync). Below it, for the transition window,
+	 * the legacy runner registry still lists the same rows through
+	 * `GET /cluster/installs` (online state, platform/version, reachability), lets
+	 * the user rename or prune a runner, and shows/rotates the shared cluster secret
 	 * that authorizes cross-install control. Sessions from every install show up in
 	 * the sidebar and any online install can be driven from here — send/interrupt
 	 * ride the shared DB (runs lease + pending_interactions), so control needs no
@@ -16,6 +18,7 @@
 	import { MonitorSmartphone, RefreshCw, Pencil, Trash2, Check, X, KeyRound, Globe, ShieldCheck, ShieldOff } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
 	import PairingPanel from './PairingPanel.svelte';
+	import NetworkPanel from './NetworkPanel.svelte';
 	import AccountConnection from './AccountConnection.svelte';
 	import { appData } from '$lib/stores/app-data.svelte';
 	import {
@@ -232,22 +235,29 @@
 		if (day < 30) return `${day}d ago`;
 		return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 	}
-	watchResources(['settings'], () => load(true));
+	watchResources(['settings', 'network'], () => load(true));
 </script>
 
 <div class="set-group">
 	<div class="set-grouphead">
-		<h3><MonitorSmartphone />Devices
-			<span class="b b-muted">{onlineCount}/{installs.length} online</span>
-		</h3>
-		<p>Every AI&nbsp;Shuffle install on this shared database registers itself here. Their sessions appear in your sidebar, and any <strong>online</strong> device can be controlled from here — no manual server setup. A device's advertised address only affects whether its artifact links open on your other devices.</p>
+		<h3><MonitorSmartphone />Devices</h3>
+		<p>Your workers form a network that syncs settings, profiles and keys; each session runs on one worker and is mirrored on the others. Pair phones and browsers below, and sign in to your account for remote access.</p>
 	</div>
+
+	<NetworkPanel />
 
 	{#if loading}
 		<div class="sg-body"><p class="muted">Loading…</p></div>
 	{:else}
 		<AccountConnection />
 		<PairingPanel />
+
+		<div class="set-row runners-head">
+			<div class="lab">
+				<h4><MonitorSmartphone size={13} /> Runners <span class="b b-muted">{onlineCount}/{installs.length} online</span></h4>
+				<p>Workers that can execute sessions — the same rows the composer's runner picker shows. Any <strong>online</strong> runner can be controlled from here; a runner's advertised address only affects whether its artifact links open on your other devices.</p>
+			</div>
+		</div>
 
 		<!-- Cluster secret -->
 		<div class="set-row">
@@ -323,7 +333,7 @@
 
 		<!-- Device list -->
 		{#if installs.length === 0}
-			<div class="sg-body"><p class="muted">No installs registered yet.</p></div>
+			<div class="sg-body"><p class="muted">No runners registered yet.</p></div>
 		{:else}
 			<div class="dev-list">
 				{#each installs as inst (inst.id)}
@@ -342,7 +352,7 @@
 									<button type="button" class="ic-btn" title="Cancel" onclick={cancelEdit} disabled={savingId === inst.id}><X size={14} /></button>
 								{:else}
 									<span class="dev-name">{inst.device_name}</span>
-									{#if inst.id === selfId}<span class="b b-on">This install</span>{/if}
+									{#if inst.id === selfId}<span class="b b-on">This worker</span>{/if}
 									{#if inst.approved === false}<span class="b b-warn">Approval needed</span>{/if}
 									{#if !inst.base_url}<span class="b b-muted" title="No address advertised — artifact links from this device may not open on your other devices">No address</span>{/if}
 								{/if}
@@ -392,6 +402,11 @@
 <style>
 	.sg-body {
 		padding: 14px 18px 16px;
+	}
+	.runners-head .lab h4 {
+		display: flex;
+		align-items: center;
+		gap: 6px;
 	}
 	.muted {
 		margin: 0;

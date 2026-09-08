@@ -24,6 +24,7 @@
  * consume it and delete the lifted originals.
  */
 
+import { apiBase, withAuth } from '$lib/api/runtime';
 import { auth } from './auth.svelte';
 import { rateLimit } from './rate-limit';
 import { createSubscribers } from './store-utils';
@@ -516,7 +517,7 @@ export const providers = {
 	 */
 	async loadIntegrations() {
 		try {
-			const res = await fetch('/api/v1/settings/integrations', { credentials: 'include' });
+			const res = await fetch(`${apiBase()}/settings/integrations`, withAuth({ }));
 			if (!res.ok) return;
 			const data = await res.json();
 			_update((s) => ({
@@ -543,17 +544,16 @@ export const providers = {
 		if (!trimmed) return;
 		let res: Response;
 		try {
-			res = await fetch('/api/v1/settings/integrations/anthropic', {
+			res = await fetch(`${apiBase()}/settings/integrations/anthropic`, withAuth({
 				method: 'POST',
-				credentials: 'include',
 				headers: { 'content-type': 'application/json' },
 				body: JSON.stringify({ api_key: trimmed })
-			});
+			}));
 		} catch (e) {
 			throw new Error(e instanceof Error ? e.message : 'Network error');
 		}
 		if (!res.ok) {
-			const body = await res.json().catch(() => ({}));
+			const body = await res.json().catch(() => ({ }));
 			throw new Error(body.detail ?? `Save failed (${res.status})`);
 		}
 		await providers.loadIntegrations();
@@ -566,10 +566,8 @@ export const providers = {
 	async clearAnthropicKey() {
 		let res: Response;
 		try {
-			res = await fetch('/api/v1/settings/integrations/anthropic', {
-				method: 'DELETE',
-				credentials: 'include'
-			});
+			res = await fetch(`${apiBase()}/settings/integrations/anthropic`, withAuth({
+				method: 'DELETE' }));
 		} catch (e) {
 			throw new Error(e instanceof Error ? e.message : 'Network error');
 		}

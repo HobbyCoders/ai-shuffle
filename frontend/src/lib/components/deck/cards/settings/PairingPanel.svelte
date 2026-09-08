@@ -174,7 +174,7 @@
 		</div>
 	{/if}
 
-	<div class="safety"><ShieldCheck size={14} /><span>Pairing creates a scoped controller session. Admin credentials, connectors, cluster secrets, and future device pairing remain admin-only.</span></div>
+	<div class="safety"><ShieldCheck size={14} /><span>Pairing creates a scoped controller session. Admin credentials, connectors, network keys, and future device pairing remain admin-only.</span></div>
 	{#if error}<p class="error" role="alert">{error}</p>{/if}
 
 	{#if clients.length > 0}

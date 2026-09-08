@@ -71,10 +71,13 @@ Global markdown notes with tags, pinning, and search. Each note backed by a phys
 ### Built-in Documentation
 Full documentation rendered in-app covering getting started, all features, connectors, and API reference.
 
-### Mobile & PWA
-The web UI is the desktop layout at every window size; narrow windows collapse the sidebar into an overlay and tighten spacing. The Android app renders a separate mobile shell with a compact app bar, slide-in drawer, collapsing composer and 44px touch targets. PWA install support, offline detection, and push notifications work in both. See [docs/mobile-desktop-ui-split.md](docs/mobile-desktop-ui-split.md).
+### Worker network
+Every worker runs by itself with its own PostgreSQL (the desktop app bundles one). Workers connect into one network by pairing on the local network or by signing every worker into the same Shuffle account, and then converge on the same settings, provider keys, profiles, preferences, UI state, notes, plugins, memory and session catalog. A session executes on exactly one worker; any worker's UI can see every session and drive any runner, and forks the transcript when an owner is offline. Everything synced is end-to-end encrypted with one network key; the account keeps an encrypted copy so a new device restores from a recovery key when every worker is off. See [docs/network/README.md](docs/network/README.md).
 
-Pair another browser, phone, tablet, or cluster runner with a short-lived,
+### Mobile & PWA
+The web UI served by workers is the desktop layout at every window size; narrow windows collapse the sidebar into an overlay and tighten spacing. The Android app bundles its own mobile UI (`mobile/`) and talks to workers only through their APIs, so a worker's version never changes what the phone shows. PWA install support and offline detection work in the web UI. See [docs/mobile-desktop-ui-split.md](docs/mobile-desktop-ui-split.md).
+
+Pair another browser, phone, tablet, or worker with a short-lived,
 one-time code or locally rendered QR. Local/LAN use requires no Shuffle account; optionally link a worker to an account for managed remote access.
 
 ### Security

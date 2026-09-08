@@ -232,20 +232,6 @@
 		to { transform: rotate(360deg); }
 	}
 
-	/* Mobile shell: escape the header's horizontal scroll rail by pinning as a
-	   fixed panel just below the header (mirrors .branch-dropdown's escape hatch). */
-	:global(html[data-platform='mobile']) .git-progress {
-		position: fixed;
-		top: 100px;
-		left: 8px;
-		right: 8px;
-		bottom: auto;
-		min-width: 0;
-		max-width: none;
-		max-height: 60vh;
-		z-index: 200;
-	}
-
 	@media (prefers-reduced-motion: reduce) {
 		.git-progress { animation: none; }
 		:global(.spin) { animation: none; }

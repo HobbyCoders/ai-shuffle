@@ -5,6 +5,13 @@
  * safeStorage (DPAPI on Windows, Keychain on macOS, the keyring on Linux) and
  * kept as base64; where no keyring is available it is stored as plain text
  * and the file says so, so the setup screen can tell the person.
+ *
+ * The connection is either the app's own bundled PostgreSQL (`managed: true`,
+ * written by the Postgres supervisor with a generated password and port) or
+ * an external server the person entered on the setup page (`managed: false`).
+ * A file with no connection at all means the bundled server is wanted, which
+ * is also what a first run gets. Files written before the bundled server
+ * existed carry no `managed` flag; they only ever held external servers.
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -15,6 +22,8 @@ export interface PostgresConfig {
 	user: string;
 	password: string;
 	database: string;
+	/** True for the bundled server the app runs itself; absent or false for an external one. */
+	managed?: boolean;
 }
 
 interface StoredFile {
@@ -25,6 +34,7 @@ interface StoredFile {
 		user: string;
 		database: string;
 		password: { encrypted: string } | { plain: string } | null;
+		managed?: boolean;
 	} | null;
 }
 
@@ -57,7 +67,9 @@ export function validatePostgres(input: Partial<Record<keyof PostgresConfig, unk
 	if (!database) return { ok: false, error: 'Enter the database name.' };
 	if (!IDENTIFIER.test(database)) return { ok: false, error: 'The database name may contain letters, digits and underscores, and must not start with a digit.' };
 	if (!password) return { ok: false, error: 'Enter the database password.' };
-	return { ok: true, config: { host, port, user, password, database } };
+	const config: PostgresConfig = { host, port, user, password, database };
+	if (input.managed !== undefined) config.managed = input.managed === true;
+	return { ok: true, config };
 }
 
 export class SettingsStore {
@@ -80,6 +92,11 @@ export class SettingsStore {
 		return this.data.postgres !== null && this.data.postgres.password !== null;
 	}
 
+	/** True when the bundled server is wanted: nothing configured yet, or a connection the supervisor wrote. */
+	get managed(): boolean {
+		return !this.configured || this.data.postgres?.managed === true;
+	}
+
 	/** True when the stored password could not be protected by the OS keyring. */
 	get passwordStoredPlain(): boolean {
 		const p = this.data.postgres?.password;
@@ -97,7 +114,7 @@ export class SettingsStore {
 		} catch {
 			return null;
 		}
-		return { host: stored.host, port: stored.port, user: stored.user, database: stored.database, password };
+		return { host: stored.host, port: stored.port, user: stored.user, database: stored.database, password, managed: stored.managed === true };
 	}
 
 	/** The connection without its password, for prefilling the form. */
@@ -113,8 +130,18 @@ export class SettingsStore {
 			: { plain: config.password };
 		this.data = {
 			version: 1,
-			postgres: { host: config.host, port: config.port, user: config.user, database: config.database, password }
+			postgres: { host: config.host, port: config.port, user: config.user, database: config.database, password, managed: config.managed === true }
 		};
+		await this.save();
+	}
+
+	/**
+	 * Back to the bundled server. An external connection is dropped so the
+	 * supervisor starts from a clean slate; a managed one is kept as it is.
+	 */
+	async useBundled(): Promise<void> {
+		if (this.data.postgres === null || this.data.postgres.managed === true) return;
+		this.data = { version: 1, postgres: null };
 		await this.save();
 	}
 
@@ -132,6 +159,7 @@ function isStoredPostgres(value: unknown): value is NonNullable<StoredFile['post
 	const v = value as Record<string, unknown>;
 	if (typeof v.host !== 'string' || typeof v.user !== 'string' || typeof v.database !== 'string') return false;
 	if (typeof v.port !== 'number') return false;
+	if (v.managed !== undefined && typeof v.managed !== 'boolean') return false;
 	const p = v.password;
 	if (p === null) return true;
 	if (!p || typeof p !== 'object') return false;

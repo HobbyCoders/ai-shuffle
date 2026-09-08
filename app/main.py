@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings
+from app.core.cors import configured_origins
 
 # Import API routers
 from app.api import auth, claude_accounts, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, permission_rules, import_export, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, webhooks, security, rate_limits, github, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, teams, model_registry, computer_use, cluster, notifications, usage, voice
@@ -24,6 +25,7 @@ from app.api import voice_context
 from app.api import tools as tools_api
 from app.api import events as events_api
 from app.api import artifacts as artifacts_api
+from app.api import network as network_api
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -161,6 +163,13 @@ async def lifespan(app: FastAPI):
 
     # Startup phases
     init_core()
+    # Worker network: device identity, network of one for an existing
+    # install, owner_device_id backfill. Never blocks boot.
+    try:
+        from app.network import startup as network_startup
+        network_startup.initialize()
+    except Exception:
+        logger.exception("Worker network initialization failed (non-fatal)")
     # Now that the DB pool is up, funnel backend ERROR+ logs into error_log so
     # the GetAppErrors MCP tool and admin UI can surface them.
     from app.core.error_log_handler import install_error_log_handler
@@ -205,6 +214,14 @@ async def lifespan(app: FastAPI):
     init_encryption_and_sessions()
     init_workspace()
     check_prerequisites()
+    # Sync, scan and presence loops need unlocked credential storage (secrets
+    # travel decrypted under the network key), so they start after phase 2.
+    network_tasks = []
+    try:
+        from app.network import startup as network_startup
+        network_tasks = await network_startup.start()
+    except Exception:
+        logger.exception("Worker network loops failed to start (non-fatal)")
     bg_tasks = []
     monitor_task = None
     plugin_task = None
@@ -258,6 +275,12 @@ async def lifespan(app: FastAPI):
         await cluster_heartbeat_task
     except asyncio.CancelledError:
         pass
+    if network_tasks:
+        try:
+            from app.network import startup as network_startup
+            await network_startup.stop()
+        except Exception:
+            logger.exception("Worker network shutdown failed")
     for task in bg_tasks:
         task.cancel()
         try:
@@ -433,7 +456,8 @@ app.add_middleware(CSRFProtectionMiddleware)
 
 # CORS middleware - configure origins via CORS_ORIGINS environment variable
 # Use "*" only for development; in production, specify exact origins
-cors_origins = [origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
+# CORS_ORIGINS plus the Android app's bundled-UI origin (see app/core/cors.py).
+cors_origins = configured_origins()
 
 # If "*" is in the list, we need to handle it specially
 # Note: allow_credentials=True is incompatible with allow_origins=["*"] in production
@@ -514,6 +538,7 @@ app.include_router(logs.router)
 app.include_router(model_registry.router)
 app.include_router(computer_use.router)
 app.include_router(cluster.router)
+app.include_router(network_api.router)
 app.include_router(notifications.router)
 app.include_router(usage.router)
 app.include_router(voice.router)

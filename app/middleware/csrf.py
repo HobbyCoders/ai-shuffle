@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings
+from app.core.cors import configured_origins
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,10 @@ def _get_allowed_origins() -> Set[str]:
     Returns normalized origin strings (scheme + host + port, no trailing slash).
     """
     origins = set()
-    for raw in settings.cors_origins.split(","):
+    # Same list as the CORS middleware: CORS_ORIGINS plus the Android app's
+    # bundled-UI origin (whose requests are Bearer-authenticated and therefore
+    # CSRF-exempt anyway; this keeps the two allow-lists consistent).
+    for raw in configured_origins():
         raw = raw.strip()
         if not raw or raw == "*":
             continue

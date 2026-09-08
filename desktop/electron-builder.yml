@@ -20,11 +20,15 @@ files:
   - package.json
 
 # The worker runtime assembled by scripts/build-worker.mjs: Python with the
-# server's dependencies, Node, and the server itself. Kept outside the asar
-# so the interpreters can run from disk.
+# server's dependencies, Node, and the server itself, plus the PostgreSQL
+# distribution the app runs for its database. Kept outside the asar so the
+# interpreters and the server can run from disk. A build made with --stub or
+# --skip-postgres has no postgres/ directory; electron-builder skips it.
 extraResources:
   - from: worker
     to: worker
+  - from: postgres
+    to: postgres
 
 asar: true
 compression: normal

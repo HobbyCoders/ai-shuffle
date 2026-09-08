@@ -76,28 +76,21 @@ describe('ChatView — the composer gate', () => {
 	});
 });
 
-describe('ChatView — stable mobile empty layout', () => {
-	it('retains the action-applied panel-flow fallback in compiled CSS', () => {
-		const { css, warnings } = compile(chatView, { filename: 'ChatView.svelte' });
-		expect(css?.code).toMatch(/[^{}]*\[data-panel-flow\][^{}]*\{\s*position: static;/);
-		expect(warnings.filter((warning) =>
-			warning.code === 'css_unused_selector' && warning.message.includes('data-panel-flow')
-		)).toEqual([]);
+describe('ChatView — stable empty layout', () => {
+	// The mobile empty-surface rules (scrolling hero, sticky composer, the
+	// data-panel-flow fallback) are the mobile app's: mobile/src/mobile.css,
+	// covered by mobile/src/shell/chatview-mobile-empty-layout.test.ts. The web
+	// build carries none of them (frontend/scripts/check-no-mobile-ui.mjs).
+	it('carries no mobile-shell CSS', () => {
+		const { css } = compile(chatView, { filename: 'ChatView.svelte' });
+		expect(css?.code ?? '').not.toContain('data-platform');
 	});
 	it('never compacts or hides the hero based on height or controls', () => {
 		expect(codeOnly).not.toMatch(/short-surface|keyboard-surface|mobile-controls-open|controls-panel\.models|logo-mark/);
 		expect(codeOnly).toContain('bind:clientHeight={surfaceHeight}');
 		expect(codeOnly).toContain('style:--chat-surface-height=');
 	});
-	it('scrolls the empty surface with a nonshrinking top-aligned invitation', () => {
-		expect(codeOnly).toMatch(/\.chat-view\.is-empty\s*\{\s*overflow-y: auto;/);
-		expect(codeOnly).toMatch(/\.is-empty \.empty-hero\s*\{[^}]*flex: 0 0 auto;[^}]*justify-content: flex-start;[^}]*padding-top: 1rem;/);
-		expect(codeOnly).toMatch(/\.is-empty \.empty-bottom-spacer\s*\{ display: none;/);
-	});
-	it('keeps a sticky, unclipped composer with a normal-flow overflow fallback', () => {
-		expect(codeOnly).toMatch(/\.input-slot\.empty-input-layout\s*\{[^}]*position: sticky;[^}]*bottom: 0;/);
-		expect(codeOnly).toMatch(/\.empty-input-layout\.composer-overflow\s*\{ position: static;/);
-		expect(codeOnly).toMatch(/\.empty-input-layout:global\(\[data-panel-flow\]\)\s*\{ position: static;/);
+	it('keeps the composer wiring the mobile layout relies on', () => {
 		expect(codeOnly).toContain("focused.scrollIntoView({ block: 'nearest' })");
 		expect(codeOnly.match(/<ChatInput\s/g)).toHaveLength(1);
 		expect(codeOnly).toContain('{onBrowserToggle} {onBrowserPreload} {browserOpen}');

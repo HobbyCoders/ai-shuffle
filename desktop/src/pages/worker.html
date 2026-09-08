@@ -16,7 +16,7 @@
 		</header>
 
 		<main class="stage">
-			<!-- Database setup: first run, or Worker → Database Connection… -->
+			<!-- External database setup: Worker → Advanced → Use external PostgreSQL… -->
 			<section id="setup" class="panel" aria-labelledby="setup-heading" hidden>
 				<div class="brand">
 					<svg class="brand-mark" viewBox="0 0 512 512" aria-hidden="true">
@@ -32,9 +32,10 @@
 						<path d="M212 326 l-50 40 50 40" fill="none" stroke="#fff" stroke-width="40" stroke-linecap="round" stroke-linejoin="round" />
 					</svg>
 					<div>
-						<h1 id="setup-heading">Connect a PostgreSQL database</h1>
+						<h1 id="setup-heading">Use an external PostgreSQL</h1>
 						<p class="lede">
-							AI Shuffle keeps sessions, settings and history in PostgreSQL. Point it at a server you run, on this computer or on your network.
+							AI Shuffle keeps sessions, settings and history in PostgreSQL and runs its own copy for you. Point it at a server you run
+							instead, on this computer or on your network.
 						</p>
 					</div>
 				</div>
@@ -74,19 +75,30 @@
 						<button id="pg-test" class="btn btn-secondary" type="button">Test connection</button>
 						<button id="pg-create" class="btn btn-secondary" type="button" hidden>Create database</button>
 						<span class="spacer"></span>
-						<button id="pg-cancel" class="btn btn-ghost-text" type="button" hidden>Cancel</button>
+						<button id="pg-cancel" class="btn btn-ghost-text" type="button">Cancel</button>
 						<button id="pg-save" class="btn btn-primary" type="submit">Save and start</button>
 					</div>
 				</form>
 
+				<div class="bundled">
+					<p id="bundled-note" class="hint">
+						<strong>Using the bundled PostgreSQL.</strong> Its data lives in the app's data folder; nothing to configure.
+					</p>
+					<p id="bundled-switch" class="hint" hidden>
+						Done with the external server? <button id="pg-bundled" class="btn btn-secondary" type="button">Use bundled PostgreSQL</button>
+					</p>
+					<p id="bundled-missing" class="hint" hidden></p>
+				</div>
+
 				<details class="help">
-					<summary>Don't have PostgreSQL yet?</summary>
+					<summary>Setting up an external server</summary>
 					<p>Install PostgreSQL 16 or newer, then create a user and a database for AI Shuffle. In <code>psql</code>:</p>
 					<pre><code>CREATE USER ai_shuffle WITH PASSWORD 'choose-a-password';
 CREATE DATABASE ai_shuffle OWNER ai_shuffle;</code></pre>
 					<p>
 						If the user exists but the database does not, the button above can create it. Downloads:
-						<a id="link-pg" href="#">postgresql.org/download</a>.
+						<a id="link-pg" href="#">postgresql.org/download</a>. The external server keeps its own data; switching back to the
+						bundled one returns to the data stored there.
 					</p>
 				</details>
 			</section>
@@ -98,6 +110,7 @@ CREATE DATABASE ai_shuffle OWNER ai_shuffle;</code></pre>
 					<div>
 						<h1 id="status-heading">Starting the worker…</h1>
 						<p id="status-detail" class="lede"></p>
+						<p id="status-postgres" class="hint"></p>
 					</div>
 				</div>
 				<pre id="status-error" class="error-block" hidden></pre>
@@ -109,7 +122,7 @@ CREATE DATABASE ai_shuffle OWNER ai_shuffle;</code></pre>
 					<pre id="log" class="log" aria-live="polite"></pre>
 				</div>
 				<div class="actions">
-					<button id="db-settings" class="btn btn-secondary" type="button">Database connection…</button>
+					<button id="db-settings" class="btn btn-secondary" type="button">Use external PostgreSQL…</button>
 					<span class="spacer"></span>
 					<button id="restart" class="btn btn-primary" type="button" hidden>Restart worker</button>
 				</div>

@@ -306,6 +306,17 @@ cd ..
 rm -rf app/static/_app && cp -r frontend/build/* app/static/
 ```
 
+## Worker Network
+
+A native install is one worker in a worker network. On first run it offers to
+start a new network, join another worker with a code and fingerprint check, or
+sign in to a Shuffle account. Workers in one network share settings, provider
+keys, profiles, preferences, notes and the session catalog, all end-to-end
+encrypted; each session runs on the worker that owns it. Settings > Devices
+manages members, invites, the recovery key and sync conflicts. The desktop app
+bundles PostgreSQL; a native install like this one uses the PostgreSQL you
+configured above. See `docs/network/README.md`.
+
 ## Security Notes
 
 - Local mode binds to `127.0.0.1` by default (localhost only)

@@ -1,0 +1,8 @@
+/* The mobile app's stylesheet is the shared design system plus the mobile
+   shell rules (mobile.css, imported last by the page so it lands after the
+   shared component styles). */
+@import '../../frontend/src/app.css';
+
+/* Tailwind scans from this project root; the shared library is one level up. */
+@source '../../frontend/src/lib';
+@source not '../../frontend/src/lib/docs/content';

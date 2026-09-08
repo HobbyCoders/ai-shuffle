@@ -2,6 +2,7 @@ import {
 	isBrowserWorkspaceState,
 	type BrowserWorkspaceState,
 } from './workspace';
+import { wsUrl } from '$lib/api/runtime';
 /**
  * Browser screencast WebSocket client.
  *
@@ -97,15 +98,11 @@ export interface BrowserStreamClient {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function buildUrl(sessionId: string | undefined, token: string | null, providerId?: string): string {
-	const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-	const host = window.location.host;
 	if (!providerId && !sessionId) throw new Error('A browser session or provider is required');
 	const path = providerId
 		? `/api/v1/model-providers/${encodeURIComponent(providerId)}/openai-billing/browser`
 		: `/api/v1/ws/browser/${encodeURIComponent(sessionId!)}`;
-	let url = `${protocol}//${host}${path}`;
-	if (token) url += `?token=${encodeURIComponent(token)}`;
-	return url;
+	return wsUrl(path, { token });
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────

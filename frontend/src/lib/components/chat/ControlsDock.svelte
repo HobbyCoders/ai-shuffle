@@ -39,7 +39,8 @@
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort } from '$lib/constants/model-effort';
-	import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
+	// The controls sheet is the mobile app's; the web build registers none.
+	import { composerShell } from './composer-shell';
 	import { Globe, Plus, SlidersHorizontal } from 'lucide-svelte';
 	import {
 		getModelLabel,
@@ -139,6 +140,7 @@
 
 	let mobileSheetOpen = $state(false);
 	const mobilePanelId = $props.id();
+	const ControlsSheet = composerShell().ControlsSheet;
 	export function openMobileSheet() {
 		setMobileSheetOpen(true);
 	}
@@ -151,7 +153,7 @@
 		onSheetOpenChange?.(open);
 	}
 	// The controls sheet belongs to the mobile shell, which CSS hides outside
-	// `html[data-platform='mobile']`. The shell is fixed for the life of the
+	// the mobile platform attribute. The shell is fixed for the life of the
 	// page, so there is no resize that can strand an open sheet on desktop.
 
 	// Model / effort / permission are the SESSION's run binding, not an override
@@ -562,7 +564,8 @@
 	</div>
 </div>
 
-<MobileComposerControlsSheet
+{#if ControlsSheet}
+<ControlsSheet
 	open={mobileSheetOpen}
 	panelId={mobilePanelId}
 	{inertToolbar}
@@ -588,6 +591,7 @@
 	onPermissionSelect={(value) => activeSession.setPermissionModeOverride(value)}
 	showCodeControls={isCodeLane}
 />
+{/if}
 
 <style>
 	/* ===== CONTROLS ROW (mockup `.controls`) =====
@@ -882,43 +886,4 @@
 		color: var(--warning, var(--primary));
 	}
 
-	/* Mobile shell only: the dock becomes the composer's bottom edge and swaps
-	   the desktop control row for the settings-sheet trigger. */
-	:global(html[data-platform='mobile']) .controls-dock {
-		gap: 3px;
-		padding: 5px 6px 7px;
-		background: var(--card);
-		border-radius: 0 0 20px 20px;
-		box-shadow: 0 6px 10px -8px color-mix(in oklch, var(--foreground) 20%, transparent);
-	}
-
-	:global(html[data-platform='mobile']) .desktop-controls {
-		display: none;
-	}
-
-	:global(html[data-platform='mobile']) .composer-mobile-only {
-		display: grid;
-	}
-
-	:global(html[data-platform='mobile']) .mobile-controls {
-		display: flex;
-		margin-left: auto;
-	}
-
-	/* Settings · voice · call · attach on the left; usage on the right. */
-	:global(html[data-platform='mobile']) .dock-left {
-		gap: 0;
-	}
-
-	:global(html[data-platform='mobile']) .dock-ico,
-	:global(html[data-platform='mobile']) .dock-left :global(.voice-btn),
-	:global(html[data-platform='mobile']) .dock-left :global(.voice-call-btn) {
-		width: 36px;
-		height: 36px;
-		border-radius: 11px;
-	}
-
-	:global(html[data-platform='mobile']) .dock-left :global(.voice-btn-wrapper) {
-		border-radius: 11px;
-	}
 </style>

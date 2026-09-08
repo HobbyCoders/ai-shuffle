@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/v1/pairing", tags=["Pairing"])
 class PairingGrantCreate(BaseModel):
     endpoint_url: Optional[str] = Field(default=None, max_length=2048)
     device_label: Optional[str] = Field(default=None, max_length=100)
-    purpose: Literal["controller", "runner"] = "controller"
+    purpose: Literal["controller", "runner", "network:join"] = "controller"
 
 
 class PairingExchange(BaseModel):

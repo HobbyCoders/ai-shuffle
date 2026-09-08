@@ -1,4 +1,5 @@
 import { Node, mergeAttributes } from '@tiptap/core';
+import { apiUrl } from '$lib/api/runtime';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
 
 /**
@@ -300,11 +301,12 @@ function isImageFile(filename: string): boolean {
 }
 
 /**
- * Build the URL used to fetch the image thumbnail. The endpoint authenticates
- * via the session cookie that is already present on same-origin requests.
+ * Build the URL used to fetch the image thumbnail. On the web UI the endpoint
+ * authenticates via the session cookie that is already present on same-origin
+ * requests; the bundled mobile UI resolves it against the worker origin.
  */
 function buildThumbnailUrl(fullPath: string): string {
-	return `/api/files/by-path?path=${encodeURIComponent(fullPath)}`;
+	return apiUrl(`/api/files/by-path?path=${encodeURIComponent(fullPath)}`);
 }
 
 /**

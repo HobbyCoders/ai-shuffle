@@ -6,7 +6,7 @@
 	 * Routes between ChatView, SettingsView, and other feature pages
 	 * based on the layout store's activeView state.
 	 */
-	import { untrack } from 'svelte';
+	import { untrack, type Snippet } from 'svelte';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { projects, sessions } from '$lib/stores/app-data.svelte';
@@ -49,7 +49,8 @@
 	import { gitOperations, gitOperationRunning } from '$lib/stores/gitOperations.svelte';
 	import GitProgressPopover from '$lib/components/git/GitProgressPopover.svelte';
 	import ChatView from './ChatView.svelte';
-	import PageHeader from './PageHeader.svelte';
+	import { platform } from '$lib/stores/platform.svelte';
+	import type { MainPanelHeaderContext } from './main-panel-header';
 	import StudioTopBar from './StudioTopBar.svelte';
 	import FeaturePanelHost from './FeaturePanelHost.svelte';
 	import { pageHeader } from '$lib/stores/page-header.svelte';
@@ -90,7 +91,11 @@
 		onOpenPlugins?: () => void;
 		onNewSession?: () => void;
 		onNewSessionForProject?: (projectId: string) => void;
-		isMobile?: boolean;
+		/**
+		 * Replaces the StudioTopBar with the shell's own header. The mobile app
+		 * uses this for its PageHeader; the web UI leaves it unset.
+		 */
+		header?: Snippet<[MainPanelHeaderContext]>;
 		/** Desktop shell: sidebar state + toggle, surfaced in the top bar. */
 		sidebarCollapsed?: boolean;
 		onToggleSidebar?: () => void;
@@ -101,10 +106,13 @@
 		onOpenPlugins,
 		onNewSession,
 		onNewSessionForProject,
-		isMobile = false,
+		header,
 		sidebarCollapsed = false,
 		onToggleSidebar
 	}: Props = $props();
+
+	// Shared behaviour switches read the build's platform (see platform.svelte.ts).
+	const isMobile = $derived(platform.isMobile);
 
 	// View type → page title mapping
 	const viewTitles: Record<string, string> = {
@@ -857,8 +865,9 @@
 
 <!--
 	Header actions are declared once and rendered by whichever bar is on screen:
-	the desktop StudioTopBar or the mobile PageHeader. The git cluster is the
-	existing GitHeaderActions instance with its existing handlers.
+	the desktop StudioTopBar, or the shell's own `header` snippet (the mobile
+	app's PageHeader). The git cluster is the existing GitHeaderActions
+	instance with its existing handlers.
 -->
 {#snippet downloadAction()}
 	{#if $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}
@@ -911,7 +920,16 @@
 {/snippet}
 
 <div class="main-panel">
-	{#if !isMobile}
+	{#if header}
+		<!-- The shell owns the header (mobile app: PageHeader with these actions). -->
+		{@render header({
+			title: headerTitle,
+			isSessionView: $activeView?.type === 'session',
+			embedded: $activeView ? embeddedViews.has($activeView.type) : false,
+			downloadAction,
+			headerActions
+		})}
+	{:else}
 		<!-- Desktop: one bar for the whole main panel — sidebar toggle,
 		     breadcrumbs, and the action cluster. -->
 		<StudioTopBar
@@ -934,21 +952,6 @@
 	{/if}
 
 	{#if $activeView}
-		<!-- Mobile keeps the PageHeader for session views and non-embedded pages -->
-		{#if isMobile && ($activeView.type === 'session' || !embeddedViews.has($activeView.type))}
-			<PageHeader
-				title={headerTitle}
-				{isMobile}
-				hideGlobalStt={$activeView?.type === 'session'}
-			>
-				{#snippet leftActions()}
-					{@render downloadAction()}
-				{/snippet}
-				{#snippet actions()}
-					{@render headerActions()}
-				{/snippet}
-			</PageHeader>
-		{/if}
 		{#if showChatSurface}
 			<div class="chat-row">
 				<div class="chat-browser-underlay" inert={sessionBrowser.open && sessionBrowser.expanded}>
@@ -1110,7 +1113,7 @@
 		align-items: center;
 	}
 
-	/* Download chat history button — matches PageHeader's .header-btn styling */
+	/* Download chat history button — matches the mobile PageHeader's .header-btn styling */
 	.download-jsonl-btn {
 		display: flex;
 		align-items: center;

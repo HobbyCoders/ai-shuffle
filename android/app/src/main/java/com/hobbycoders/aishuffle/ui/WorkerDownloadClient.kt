@@ -8,7 +8,7 @@ import java.io.OutputStream
 import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 
-/** Cookies and optional Access headers are only ever sent to this worker's exact HTTPS origin. */
+/** The paired-session Bearer, cookies and optional Access headers are only ever sent to this worker's exact HTTPS origin. */
 internal class WorkerDownloadClient(
     client: OkHttpClient = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS).callTimeout(5, TimeUnit.MINUTES).build()
@@ -16,12 +16,13 @@ internal class WorkerDownloadClient(
     private val http = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
 
     fun save(server: Server, url: String, cookie: String?, userAgent: String, output: OutputStream,
-             allowed: () -> Boolean, onCall: (Call) -> Unit) {
+             allowed: () -> Boolean, onCall: (Call) -> Unit, authorization: String? = null) {
         var next = url
         repeat(6) { attempt ->
             require(ChatDownloadPolicy.url(server.baseUrl, next)) { "Only files from this worker can be saved." }
             if (!allowed()) throw CancellationException("Download cancelled")
             val request = Request.Builder().url(next).header("User-Agent", userAgent).apply {
+                authorization?.let { header("Authorization", it) }
                 cookie?.let { header("Cookie", it) }
                 if (server.hasCfAccess) {
                     header("CF-Access-Client-Id", server.cfAccessClientId!!)

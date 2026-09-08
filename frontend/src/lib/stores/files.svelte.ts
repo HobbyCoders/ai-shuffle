@@ -1,4 +1,5 @@
 import { preferenceSync } from '$lib/services/preferences';
+import { apiBase, withAuth } from '$lib/api/runtime';
 /**
  * Files Store - State management for the Files workspace
  *
@@ -220,9 +221,7 @@ export const files = {
 				show_hidden: showHidden.toString(),
 			});
 
-			const response = await fetch(`/api/v1/workspace/files?${params}`, {
-				credentials: 'include',
-			});
+			const response = await fetch(`${apiBase()}/workspace/files?${params}`, withAuth({ }));
 
 			if (!response.ok) {
 				const error = await response.json();
@@ -255,14 +254,13 @@ export const files = {
 		try {
 			const params = new URLSearchParams({ path: currentPath });
 
-			const response = await fetch(`/api/v1/workspace/files/folder?${params}`, {
+			const response = await fetch(`${apiBase()}/workspace/files/folder?${params}`, withAuth({
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
 				},
-				credentials: 'include',
 				body: JSON.stringify({ name }),
-			});
+			}));
 
 			if (!response.ok) {
 				const error = await response.json();
@@ -282,14 +280,13 @@ export const files = {
 		try {
 			const params = new URLSearchParams({ path });
 
-			const response = await fetch(`/api/v1/workspace/files/rename?${params}`, {
+			const response = await fetch(`${apiBase()}/workspace/files/rename?${params}`, withAuth({
 				method: 'PUT',
 				headers: {
 					'Content-Type': 'application/json',
 				},
-				credentials: 'include',
 				body: JSON.stringify({ new_name: newName }),
-			});
+			}));
 
 			if (!response.ok) {
 				const error = await response.json();
@@ -309,10 +306,9 @@ export const files = {
 		try {
 			const params = new URLSearchParams({ path });
 
-			const response = await fetch(`/api/v1/workspace/files?${params}`, {
+			const response = await fetch(`${apiBase()}/workspace/files?${params}`, withAuth({
 				method: 'DELETE',
-				credentials: 'include',
-			});
+			}));
 
 			if (!response.ok) {
 				const error = await response.json();
@@ -362,11 +358,10 @@ export const files = {
 				formData.append('file', file);
 				formData.append('path', currentPath);
 
-				const response = await fetch(`/api/v1/workspace/upload`, {
+				const response = await fetch(`${apiBase()}/workspace/upload`, withAuth({
 					method: 'POST',
-					credentials: 'include',
 					body: formData,
-				});
+				}));
 
 				if (!response.ok) {
 					const error = await response.json();
@@ -403,9 +398,7 @@ export const files = {
 		try {
 			const params = new URLSearchParams({ path });
 
-			const response = await fetch(`/api/v1/workspace/files/download?${params}`, {
-				credentials: 'include',
-			});
+			const response = await fetch(`${apiBase()}/workspace/files/download?${params}`, withAuth({ }));
 
 			if (!response.ok) {
 				const error = await response.json();

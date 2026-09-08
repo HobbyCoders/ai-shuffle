@@ -7,19 +7,39 @@
  * but never read the database credentials this app holds.
  */
 import { app, ipcMain, Notification, shell, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron';
+import type { PostgresPhase } from './postgres';
 import { validatePostgres, type PostgresConfig, type SettingsStore } from './settings';
 import type { Updater } from './updater';
 import { MainWindow, TITLE_BAR_HEIGHT, type TitleBarTheme } from './window';
 import { checkPostgres, type WorkerState, type WorkerSupervisor } from './worker';
 
+/** The database behind the worker, as the status page shows it. */
+export interface PostgresStatus {
+	/** True when the app's own bundled PostgreSQL is in use. */
+	managed: boolean;
+	/** The supervisor's phase, or `external` for a server the person configured. */
+	phase: PostgresPhase | 'external';
+	host: string | null;
+	port: number | null;
+	error: string | null;
+	logPath: string | null;
+}
+
+export type DesktopState = WorkerState & { postgres: PostgresStatus };
+
 export interface WorkerControl {
 	supervisor: WorkerSupervisor | null;
 	/** Why no supervisor exists (runtime missing), shown on the status page. */
 	runtimeError: string | null;
-	state(): WorkerState;
+	/** Whether the bundled PostgreSQL can be used, and if not, why. */
+	bundledPostgresError: string | null;
+	state(): DesktopState;
+	/** The supervisor lines followed by the worker's, for the status page log. */
+	tail(): string[];
 	openSetup(): Promise<void>;
 	cancelSetup(): Promise<void>;
 	saveAndStart(config: PostgresConfig): Promise<void>;
+	useBundled(): Promise<void>;
 	restart(): Promise<void>;
 }
 
@@ -127,6 +147,9 @@ export function registerIpc({ window, settings, updater, worker, keyringAvailabl
 	handle('desktop:settings-get', fromBundledPage, () => ({
 		postgres: settings.postgresPublic(),
 		configured: settings.configured,
+		managed: settings.managed,
+		bundledAvailable: worker.bundledPostgresError === null,
+		bundledError: worker.bundledPostgresError,
 		keyringAvailable,
 		runtimeError: worker.runtimeError
 	}));
@@ -142,7 +165,8 @@ export function registerIpc({ window, settings, updater, worker, keyringAvailabl
 		await worker.saveAndStart(validated.config);
 	});
 	handle('desktop:setup-cancel', fromBundledPage, () => worker.cancelSetup());
-	handle('desktop:worker-tail', fromBundledPage, () => worker.supervisor?.tail() ?? []);
+	handle('desktop:setup-use-bundled', fromBundledPage, () => worker.useBundled());
+	handle('desktop:worker-tail', fromBundledPage, () => worker.tail());
 }
 
 function isTitleBarTheme(value: unknown): value is TitleBarTheme {

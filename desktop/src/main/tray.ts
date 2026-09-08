@@ -5,6 +5,7 @@ import path from 'node:path';
 export interface TrayActions {
 	show(): void;
 	restartWorker(): void;
+	openDatabaseSettings(): void;
 	openInBrowser(): void;
 	checkForUpdates(): void;
 }
@@ -24,6 +25,8 @@ export function installTray(actions: TrayActions): Tray | null {
 			{ type: 'separator' },
 			{ label: 'Restart Worker', click: () => actions.restartWorker() },
 			{ label: 'Check for Updates…', click: () => actions.checkForUpdates() },
+			{ type: 'separator' },
+			{ label: 'Advanced', submenu: [{ label: 'Use external PostgreSQL…', click: () => actions.openDatabaseSettings() }] },
 			{ type: 'separator' },
 			{ role: 'quit' }
 		])

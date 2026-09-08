@@ -253,28 +253,4 @@
 		background: var(--scrollbar-thumb-hover);
 	}
 
-	/* Mobile shell layout adjustments */
-	/* In the app the pill bar wraps onto multiple lines, so the profile pill is
-	   free to grow — show the full profile name instead of truncating it.
-	   Bound to the viewport (minus the bar's padding) so a pathologically long
-	   name can't overflow horizontally; normal names show in full. */
-	:global(html[data-platform='mobile']) .selector-text {
-		font-size: 12px;
-		max-width: calc(100vw - 4rem);
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	/* In the pill bar the dropdown opens upward; keep it within the viewport
-	   by anchoring to the bar's full width. */
-	:global(html[data-platform='mobile']) .selector-wrapper {
-		position: static;
-	}
-
-	:global(html[data-platform='mobile']) .selector-dropdown {
-		left: 12px;
-		right: 12px;
-		min-width: 0;
-		max-width: none;
-	}
 </style>

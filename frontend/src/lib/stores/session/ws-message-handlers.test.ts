@@ -897,6 +897,27 @@ describe('ws-message-handlers', () => {
 			expect(deps.update).not.toHaveBeenCalled();
 		});
 
+		it('offers a local fork when the owning worker is unreachable', () => {
+			// The backend stamps `offer_fork: true` on the error frame when the
+			// session's owner cannot be reached; the chat renders a "Fork here"
+			// action from `forkOfferSessionId`. A plain error must NOT offer it.
+			const state = mockState();
+			state.sessionId = 'session-1';
+			let applied: ActiveSessionState | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { applied = fn(state); return applied; }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'error', session_id: 'session-1', message: 'owner offline', offer_fork: true });
+			expect(applied?.error).toBe('owner offline');
+			expect(applied?.forkOfferSessionId).toBe('session-1');
+
+			handlers.handleMessage({ type: 'error', session_id: 'session-1', message: 'plain failure' });
+			expect(applied?.forkOfferSessionId).toBeNull();
+		});
+
 		it('treats an error with no session_id as the active session', () => {
 			// Backward-compat: a synchronous pre-stream command error (e.g. an empty
 			// prompt) carries no session_id and still applies to the session in view.

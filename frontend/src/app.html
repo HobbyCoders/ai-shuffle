@@ -1,41 +1,14 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-platform="desktop">
 	<head>
 		<meta charset="utf-8" />
 		<link rel="icon" href="%sveltekit.assets%/favicon.svg" />
 		<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
 		<title>AI Shuffle</title>
 
-		<!-- Pick the UI shell before first paint. Mirrors src/lib/utils/platform.ts:
-		     ?ui=mobile|desktop|auto override (persisted), else the Android app's
-		     user-agent token, else desktop. Width never decides this. -->
-		<script>
-			(function () {
-				var doc = document.documentElement;
-				var platform = 'desktop';
-				try {
-					var key = 'ai-shuffle-ui-platform';
-					var query = new URLSearchParams(location.search).get('ui');
-					var override = null;
-					if (query === 'mobile' || query === 'desktop') {
-						localStorage.setItem(key, query);
-						override = query;
-					} else if (query === 'auto') {
-						localStorage.removeItem(key);
-					} else {
-						override = localStorage.getItem(key);
-					}
-					if (override === 'mobile' || override === 'desktop') {
-						platform = override;
-					} else if (/\bAIShuffleAndroid\//.test(navigator.userAgent)) {
-						platform = 'mobile';
-					}
-				} catch (e) {
-					/* storage or URL APIs unavailable: desktop shell */
-				}
-				doc.setAttribute('data-platform', platform);
-			})();
-		</script>
+		<!-- The worker-served web UI is desktop-only; the mobile shell ships as
+		     its own bundle inside the Android app (see mobile/ and
+		     docs/mobile-desktop-ui-split.md). No user-agent or query sniffing. -->
 
 		<!-- PWA Configuration -->
 		<link rel="manifest" href="/manifest.json" />

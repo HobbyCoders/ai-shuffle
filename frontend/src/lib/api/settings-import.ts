@@ -1,6 +1,8 @@
 import type { ApiError } from './client';
+import { apiUrl, withAuth } from './runtime';
 
-const SETTINGS_IMPORT_BASE = '/api/settings/import';
+// Outside /api/v1 — resolved against the runtime API origin per request.
+const settingsImportBase = () => apiUrl('/api/settings/import');
 
 export const SETTINGS_IMPORT_PROVIDERS = ['codex', 'claude'] as const;
 
@@ -317,14 +319,13 @@ function selectedProviders(providers?: SettingsImportProvider[]): SettingsImport
 }
 
 async function post<T>(path: string, body: unknown, normalize: (payload: unknown) => T): Promise<T> {
-	const response = await fetch(`${SETTINGS_IMPORT_BASE}${path}`, {
+	const response = await fetch(`${settingsImportBase()}${path}`, withAuth({
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		credentials: 'include',
 		body: JSON.stringify(body)
-	});
+	}));
 
-	const payload = await response.json().catch(() => ({}));
+	const payload = await response.json().catch(() => ({ }));
 	if (!response.ok) {
 		const data = record(payload);
 		throw {

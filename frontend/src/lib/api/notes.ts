@@ -2,6 +2,7 @@
  * Notes API types and functions (Global notes - not project-scoped)
  */
 
+import { apiBase, withAuth } from './runtime';
 import { api } from './client';
 
 // ============================================================================
@@ -130,8 +131,6 @@ export async function getNotesAutocomplete(
 // Note Attachments
 // ============================================================================
 
-const API_BASE = '/api/v1';
-
 /**
  * List all files attached to a note.
  */
@@ -150,11 +149,10 @@ export async function uploadNoteAttachment(
 	const formData = new FormData();
 	formData.append('file', file);
 
-	const response = await fetch(`${API_BASE}/notes/${noteId}/attachments`, {
+	const response = await fetch(`${apiBase()}/notes/${noteId}/attachments`, withAuth({
 		method: 'POST',
-		credentials: 'include',
 		body: formData
-	});
+	}));
 
 	if (!response.ok) {
 		let detail = `Upload failed (HTTP ${response.status})`;
@@ -181,5 +179,5 @@ export async function deleteNoteAttachment(noteId: string, attachmentId: string)
  * Build the download URL for an attachment (clickable link in rendered notes).
  */
 export function noteAttachmentDownloadUrl(noteId: string, attachmentId: string): string {
-	return `${API_BASE}/notes/${noteId}/attachments/${attachmentId}/download`;
+	return `${apiBase()}/notes/${noteId}/attachments/${attachmentId}/download`;
 }

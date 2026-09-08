@@ -16,13 +16,28 @@ import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.voice.VoiceCallActivity
 import com.hobbycoders.aishuffle.model.Server
 import com.hobbycoders.aishuffle.presence.PresenceState
+import com.hobbycoders.aishuffle.presence.ProbeResult
 import com.hobbycoders.aishuffle.presence.WorkerPresence
 import com.hobbycoders.aishuffle.presence.WorkerPresenceMonitor
+import com.hobbycoders.aishuffle.presence.WorkerPresenceProbe
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
+/**
+ * Launch screen. With workers paired it first looks for one that is online and
+ * opens chat there (the most recently used first); the full list lives under
+ * "Devices" and is the landing screen only when nothing is online, when the
+ * user asks for it, or when there is nothing to open yet.
+ */
 class ServerListActivity : NativeScreen() {
     private class StatusRow(val server: Server, val label: TextView, val dot: View)
     private val statusRows = mutableMapOf<String, StatusRow>()
     private val presence by lazy { WorkerPresenceMonitor(this, lifecycleScope, ::updatePresence) }
+    /** One home-worker auto-pick per launch; Devices shows the list afterwards. */
+    private var autoPickDone = false
+    private var autoPick: Job? = null
     private fun updatePresence(server: Server, observed: WorkerPresence) {
         val row = statusRows[server.id]?.takeIf { it.server == server } ?: return
         val affiliation = if (server.accountId == null) "This phone" else "Your account"
@@ -40,10 +55,11 @@ class ServerListActivity : NativeScreen() {
         }
     }
     private fun refreshPresence() { presence.start(statusRows.values.map { it.server }, AccountRepository(this).store.session()) }
-    override fun onStop() { presence.stop(); super.onStop() }
+    override fun onStop() { presence.stop(); autoPick?.cancel(); autoPick = null; super.onStop() }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent) }
     override fun onResume() {
         super.onResume()
+        if (intent.getBooleanExtra(EXTRA_SHOW_DEVICES, false)) { autoPickDone = true; intent.removeExtra(EXTRA_SHOW_DEVICES) }
         render()
         if (intent.getBooleanExtra("auth_expired", false)) {
             status.text = "Your sign-in expired. Sign in again to restore your workers."
@@ -54,6 +70,34 @@ class ServerListActivity : NativeScreen() {
     }
     private fun openAccount(mode: String) { startActivity(Intent(this, AccountActivity::class.java).putExtra("mode", mode)) }
     private fun addWorker() { startActivity(Intent(this, AddServerActivity::class.java)) }
+    /**
+     * Probe every worker at once and open the first online one in most-recently-
+     * used order. Falls through to the Devices list when none answers in time.
+     */
+    private fun renderAutoPick(servers: List<Server>) {
+        navigation("Shuffle", back = false)
+        navigationAction(R.drawable.ic_settings, "Settings") { startActivity(Intent(this, SettingsActivity::class.java)) }
+        content.removeAllViews(); status.text = ""
+        heading("Connecting", "Looking for a worker that is online…")
+        link("Devices") { autoPickDone = true; autoPick?.cancel(); render() }
+        val candidates = ServerStore.get(this).orderedByRecentUse(servers)
+        autoPick?.cancel()
+        autoPick = lifecycleScope.launch {
+            val chosen = withTimeoutOrNull(8_000) {
+                val probes = candidates.map { candidate -> async { candidate to WorkerPresenceProbe.check(candidate) } }
+                // Await in preference order: the most recently used worker wins when it is online.
+                probes.firstNotNullOfOrNull { probe -> probe.await().let { (candidate, result) -> candidate.takeIf { result == ProbeResult.ONLINE } } }
+            }
+            autoPickDone = true
+            if (isFinishing || isDestroyed || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return@launch
+            if (chosen != null && ServerStore.get(this@ServerListActivity).getById(chosen.id) == chosen) {
+                startActivity(Intent(this@ServerListActivity, ChatActivity::class.java).putExtra(ChatActivity.EXTRA_SERVER_ID, chosen.id))
+            } else {
+                render()
+                status.text = "No worker is online right now. Pick one below to try anyway."
+            }
+        }
+    }
     private fun render() {
         presence.stop()
         statusRows.clear()
@@ -90,7 +134,8 @@ class ServerListActivity : NativeScreen() {
             }
             return
         }
-        navigation("Workers", back = false)
+        if (!autoPickDone && servers.isNotEmpty()) { renderAutoPick(servers); return }
+        navigation("Devices", back = false)
         navigationAction(R.drawable.ic_settings, "Settings") { startActivity(Intent(this, SettingsActivity::class.java)) }
         navigationAction(R.drawable.ic_refresh, "Refresh workers") {
             refreshPresence()
@@ -157,5 +202,9 @@ class ServerListActivity : NativeScreen() {
             link("Use another device") { openAccount("pair") }
         }
         refreshPresence()
+    }
+    companion object {
+        /** Open the Devices list directly instead of auto-picking an online worker. */
+        const val EXTRA_SHOW_DEVICES = "show_devices"
     }
 }

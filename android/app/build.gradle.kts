@@ -64,6 +64,25 @@ android {
     }
 }
 
+// The APK ships its own build of the mobile UI (see android/scripts/sync-mobile-ui.sh).
+// Never assemble without it: the WebView has nothing to load and a worker must
+// never be asked for the UI instead.
+val mobileUiIndex = layout.projectDirectory.file("src/main/assets/mobile-ui/index.html")
+val checkMobileUi by tasks.registering {
+    description = "Fails when the bundled mobile UI (src/main/assets/mobile-ui) is missing."
+    group = "verification"
+    doLast {
+        if (!mobileUiIndex.asFile.exists()) {
+            throw GradleException(
+                "The bundled mobile UI is missing: ${mobileUiIndex.asFile}\n" +
+                    "Run `bash android/scripts/sync-mobile-ui.sh` (or `npm run sync:mobile` in frontend/) " +
+                    "before building the APK. The app ships its own UI; workers never serve it."
+            )
+        }
+    }
+}
+tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(checkMobileUi) }
+
 dependencies {
     implementation("net.openid:appauth:0.11.1")
     implementation("androidx.core:core-ktx:1.13.1")

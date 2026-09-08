@@ -32,11 +32,9 @@
 	import { notify } from '$lib/stores/notifications';
 	import { evaluateSubmitGuards } from './submit-guards';
 	import { attachmentBlockReason } from './attach-disable';
-	import {
-		reconcileMobileComposerExpanded,
-		shouldBlockMobileComposerToolbarPointer,
-		shouldCollapseMobileComposer
-	} from './mobile-composer-collapse';
+	// Collapse / gesture / sheet behaviour is the mobile app's; the web build
+	// gets the desktop no-op defaults (see composer-shell.ts).
+	import { composerShell } from './composer-shell';
 	import { platform } from '$lib/stores/platform.svelte';
 	import Banner from '$lib/components/Banner.svelte';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
@@ -46,7 +44,6 @@
 	import VoiceCallButton from './VoiceCallButton.svelte';
 	import StopButton from './StopButton.svelte';
 	import ControlsDock from './ControlsDock.svelte';
-	import { attachComposerOpen } from './mobile-panel-gesture';
 	import ContextPillBar from './ContextPillBar.svelte';
 	import { CornerDownLeft } from 'lucide-svelte';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips } from './tiptap/serialization';
@@ -274,7 +271,6 @@
 		activeSession.clearPendingRestorePrompt();
 	});
 
-
 	let fileInputRef = $state<HTMLInputElement | null>(null);
 
 	// Voice recording state (bindable from VoiceRecorder)
@@ -291,7 +287,7 @@
 	let mobileControlsOpen = $state(false);
 	let controlsDockRef = $state<ControlsDock | null>(null);
 	function composerOpenGesture(node: HTMLFormElement) {
-		return attachComposerOpen(node, {
+		return composerShell().attachComposerOpen(node, {
 			enabled: () => isMobileComposerViewport() && !mobileControlsOpen,
 			allowEditor: () => mobileCollapsed && !inputValue.trim() && !composerFocused,
 			onOpen: () => controlsDockRef?.openMobileSheet()
@@ -312,7 +308,7 @@
 	// as a session has messages. Collapse / toolbar-inert is mobile-shell only.
 	const mobileViewport = $derived(platform.isMobile);
 	const mobileCollapsed = $derived(
-		shouldCollapseMobileComposer({
+		composerShell().shouldCollapse({
 			compact,
 			mobileViewport,
 			hasDraft: inputValue.trim().length > 0,
@@ -325,7 +321,7 @@
 	);
 	let expandPointerActive = $state(false);
 	const toolbarPointerBlocked = $derived(
-		shouldBlockMobileComposerToolbarPointer({
+		composerShell().shouldBlockToolbarPointer({
 			collapsed: mobileCollapsed,
 			expandPointerActive,
 			mobileViewport
@@ -345,7 +341,7 @@
 
 	function reconcileMobileComposer() {
 		if (!isMobileComposerViewport()) return;
-		mobileComposerExpanded = reconcileMobileComposerExpanded(
+		mobileComposerExpanded = composerShell().reconcileExpanded(
 			mobileComposerExpanded,
 			{
 				compact,
@@ -598,7 +594,7 @@
 
 		const collapseMobileComposer = () => {
 			if (!isMobileComposerViewport()) return;
-			mobileComposerExpanded = reconcileMobileComposerExpanded(
+			mobileComposerExpanded = composerShell().reconcileExpanded(
 				mobileComposerExpanded,
 				{
 					compact,
@@ -1288,87 +1284,6 @@
 	@keyframes fadeIn {
 		from { opacity: 0; }
 		to { opacity: 1; }
-	}
-
-	/* T3-style mobile composer: an idle chat shrinks to a single input line with
-	   the send glyph at its end. Focusing restores the controls row; a
-	   successful send blurs it again. Mobile shell only — the desktop shell
-	   keeps the full composer at every window width. */
-	:global(html[data-platform='mobile']) .chat-input-wrapper {
-		padding: 12px 0.5rem calc(0.5rem + env(safe-area-inset-bottom, 0px));
-		background: linear-gradient(to top, var(--background) 68%, transparent);
-	}
-
-	:global(html[data-platform='mobile']) .chat-island {
-		border-radius: 20px;
-		background: var(--popover);
-		transition:
-			border-radius 180ms ease,
-			border-color 180ms ease;
-	}
-
-	/* Profile, branch and worktree setup live in the mobile controls sheet. */
-	:global(html[data-platform='mobile']) .context-pill-row {
-		display: none;
-	}
-
-	:global(html[data-platform='mobile']) .input-area {
-		min-height: 56px;
-		padding: 10px 10px 4px 12px;
-		background: var(--card);
-		border-radius: 20px 20px 0 0;
-	}
-
-	/* Leave room for the integrated panel while a draft grows above the
-	   software keyboard. The editor keeps its own text scrolling. */
-	:global(html[data-platform='mobile'])
-		.mobile-controls-open
-		.textarea-wrapper
-		:global(.tiptap-editor) {
-		max-height: min(150px, calc(var(--app-viewport-height, 100dvh) * 0.15));
-	}
-
-	/* Thumb-sized primary action. */
-	:global(html[data-platform='mobile']) .send-btn,
-	:global(html[data-platform='mobile']) .send-cluster :global(.stop-btn) {
-		width: 34px;
-		height: 34px;
-		border-radius: 10px;
-	}
-
-	:global(html[data-platform='mobile']) .mobile-collapsed .chat-island {
-		min-height: 50px;
-		border-radius: 14px;
-	}
-
-	:global(html[data-platform='mobile']) .mobile-collapsed .context-pill-row {
-		display: none;
-	}
-
-	/* Collapsed: the controls row goes away entirely. The send / stop
-	   cluster lives in the input area, so the primary action stays on the
-	   single remaining line. */
-	:global(html[data-platform='mobile']) .mobile-collapsed :global(.controls-dock) {
-		display: none;
-		pointer-events: none;
-	}
-
-	:global(html[data-platform='mobile']) .mobile-collapsed :global(.mobile-composer-controls) {
-		display: none;
-	}
-
-	/* Expanding on pointerdown reflows this row under the still-down finger.
-	   Keep it un-hittable until that pointer's click has been delivered. */
-	:global(html[data-platform='mobile']) .mobile-toolbar-blocked :global(.controls-dock) {
-		pointer-events: none;
-	}
-
-	:global(html[data-platform='mobile']) .mobile-collapsed .input-area {
-		border-radius: 14px;
-		min-width: 0;
-		min-height: 48px;
-		align-items: center;
-		padding: 7px 8px 7px 16px;
 	}
 
 	@media (prefers-reduced-motion: reduce) {

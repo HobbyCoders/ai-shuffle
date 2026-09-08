@@ -73,7 +73,7 @@ test('buildWorkerEnv sets local mode, the database and the bundled PATH, and dro
 		const runtime = resolveRuntime({ packaged: true, resourcesPath: dir, repoDir: '/nowhere', platform: 'win32' });
 		const env = buildWorkerEnv({
 			runtime,
-			postgres,
+			postgres: { ...postgres, managed: true },
 			port: 8000,
 			envFile: 'C:\\data\\.env',
 			platform: 'win32',
@@ -85,6 +85,7 @@ test('buildWorkerEnv sets local mode, the database and the bundled PATH, and dro
 		assert.equal(env.POSTGRES_HOST, 'db');
 		assert.equal(env.POSTGRES_PASSWORD, 'pw');
 		assert.equal(env.POSTGRES_DB, 'd');
+		assert.equal(env.POSTGRES_MANAGED, undefined, 'the managed flag is the shell\'s, not the worker\'s');
 		assert.equal(env.DATABASE_URL, undefined);
 		assert.equal(env.PYTHONPATH, undefined);
 		assert.equal(env.HOME, 'h');

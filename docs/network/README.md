@@ -1,0 +1,180 @@
+# Worker network
+
+Status: implemented 2026-09-08 (this pull request). Supersedes the shared-database
+cluster. The design document that led here is `docs/network/plan.md`; this file
+describes what was built, where it lives, and where it deviates from the plan.
+
+## What a worker is now
+
+- A worker runs by itself on any device with its **own PostgreSQL**. The desktop
+  app bundles and supervises PostgreSQL (`desktop/src/main/postgres.ts`); Docker
+  and server installs keep the external `postgres` service from `docker-compose.yml`.
+- Every worker has a **device identity**: an Ed25519 signing key and an X25519
+  encryption key under `<data_dir>/.credential-keys/device-identity.key`
+  (`app/network/identity.py`, same custody as the credential key: owner-only
+  file, DPAPI on Windows). The device id is `dev_` + 24 hex of the signing key's
+  digest, so it is self-certifying. Its fingerprint (8 groups of 4 hex) is what
+  people compare on two screens.
+- Workers connected into one **network** converge on the same settings, keys,
+  profiles, preferences, UI state, notes, plugins, memory facts, skills and
+  session catalog. Each session executes on exactly one **owner device**;
+  every worker can see it and drive it.
+
+## Code map
+
+| Module | Role |
+|---|---|
+| `app/network/crypto.py` | Ed25519, X25519+HKDF+AES-GCM key wrap, AES-256-GCM payloads, recovery key format. WebCrypto-compatible; vectors in `tests/core/network/vectors.json` are checked by `tools/scripts/verify-network-vectors.mjs`. |
+| `app/network/envelope.py` | The signed, encrypted operation envelope. |
+| `app/network/membership.py` | Certificates, revocations, key rotations, recovery certificates. |
+| `app/network/policy.py` | The sharing policy: every synced collection, its columns, secrets, mode; `is_shared_setting_key()` for `system_settings`. |
+| `app/db/network.py` | Local tables: `network_state`, `network_members`, `sync_ops`, `sync_records`, `sync_watermarks`, `sync_pending`, `sync_conflicts`, `sync_peers`, `network_joins`, `network_presence`, `network_catalog_cursors`, `sync_blobs`, plus the record tables for membership, plugins and memory. |
+| `app/network/engine.py` | Outbox (`record`, `scan_collection`), inbox (`apply_envelope`, `apply_batch`), snapshots, membership actions (`admit_device`, `revoke_device`), presence. |
+| `app/network/transport.py` | Peer delivery over the worker API with device tokens; sync, scan and presence loops; restore-from-backup detection. |
+| `app/network/tokens.py` | Challenge-signed, short-lived device tokens; `require_device` dependency. |
+| `app/network/enrollment.py` | The `network:join` pairing purpose, both sides. |
+| `app/network/hub.py` | The account hub feed client (register, push, pull, approvals, recovery restore). Contract in `hub-api.md`. |
+| `app/network/recovery.py` | Recovery key creation and unlock. |
+| `app/network/runners.py` | The runner directory that replaces `installs`. |
+| `app/network/catalog.py` | Owner-ordered session catalog, tags, prompts and transcript mirrors. |
+| `app/network/control.py` | Driving a session on another device: turns, session creation, interrupt, prompt answers, hydrate; fork on offline. |
+| `app/network/ownership.py` | Which device fires an automation or holds a connector. |
+| `app/network/memory_records.py` | Facts and skills as records. |
+| `app/network/plugins_sync.py` | Desired plugin state. |
+| `app/network/blobs.py` | Content-addressed bytes for artifacts and note attachments. |
+| `app/network/startup.py` | Boot wiring, single-install migration, resource hooks. |
+| `app/api/network.py` | `/api/v1/network/*`: status, members, joins, enrollment, recovery, conflicts, runners, owners, peer plane, control plane, blobs. |
+| `scripts/network_migrate.py` | Moves an install's session state out of a shared database. See `migration.md`. |
+
+Frontend: `frontend/src/lib/api/network.ts`, `NetworkPanel.svelte` under Settings >
+Devices, the first-run choices in `routes/setup`, and the runner picker, which
+now lists network runners (`GET /api/v1/cluster/installs` returns them when the
+worker is enrolled).
+
+## How sync works
+
+1. **Writing.** Domain code writes rows as before. `engine.scan_collection`
+   compares each shared row (its content hash over the policy's columns) with
+   `sync_records` and appends an envelope for every change; hot paths can call
+   `engine.record()` in their own transaction. The scanner runs every two
+   seconds and immediately after any registered resource mutation.
+2. **Envelope.** Header in the clear (network id, collection, record id, op,
+   Lamport clock, origin device, incarnation, origin sequence, order sequence,
+   schema version, key version, content hash, display timestamp), payload
+   AES-256-GCM under the network key with the header as associated data,
+   Ed25519 signature over the canonical header.
+3. **Delivery.** Each worker keeps `sync_ops` (its own and everything it
+   received, so any member can forward any other's operations unchanged) and a
+   watermark per (origin, incarnation). A pass with a peer is one `exchange`
+   (send my watermarks, get what I lack, learn theirs) followed by pushes of
+   what the peer lacks. The same operation arriving over LAN and the hub applies
+   once. Idle cadence is 10 s; after a local write the pass runs at once, so two
+   workers on a LAN converge within about two seconds.
+4. **Applying.** Verify signature against the members table, reject a revoked
+   origin past its `last_seq_accepted`, order per stream (holes wait in
+   `sync_pending`), decrypt, last-writer-wins on (clock, device id), materialize
+   into the domain table, keep the loser in `sync_conflicts` for 30 days,
+   advance the watermark. All in one transaction per envelope.
+5. **Bootstrap.** A joiner installs the join response (keys wrapped to it, the
+   membership chain), copies signed snapshot chunks from the inviter, adopts the
+   inviter's watermarks, then flips from `syncing` to `ready`. Its outbox is
+   disabled until then, so an empty worker never publishes its absence of
+   records as deletions.
+6. **Owner-ordered collections.** Sessions, tags, prompts and events are
+   published by the owner device only, events with their dense `seq` as
+   `order_seq`. Mirrors are read-only; the UI drives the owner through
+   `control`. Transcripts older than 30 days are published on demand
+   (`POST /api/v1/network/runners/{device}/sessions/{id}/hydrate`).
+7. **Blobs.** Artifacts and note attachments travel as records naming a hash;
+   bytes are fetched from any online holder at `/peer/blob/{hash}` and stored
+   locally. An artifact download on a mirror fetches on demand.
+
+## Trust
+
+- **Pairing.** A member creates a `network:join` grant; the QR/link carries the
+  endpoint, the code and the inviter's fingerprint. The joiner posts its public
+  keys with the code and the fingerprint it verified; the inviter refuses a
+  wrong fingerprint before consuming the code. An administrator compares the
+  joiner's fingerprint on both screens and approves; the certificate and the
+  wrapped keys are handed back once through the poll secret. Pairing codes are
+  hashed under a local pairing key (`network_pairing_key`), no longer the
+  cluster secret.
+- **Account.** A signed-in worker registers its device with the hub; the first
+  creates the account's network, later ones wait for an online member's
+  approval (fingerprint shown) or unlock with the recovery key.
+- **Device tokens.** Peers prove key possession with a signed challenge and get
+  a five-minute HMAC token; every authenticated request re-checks membership, so
+  revocation takes effect within one token lifetime.
+- **Revocation.** Publishes a signed revocation carrying the last accepted
+  sequence of the removed device and rotates the network key for the rest
+  (wrapped to each remaining member, sealed under the previous key so members can
+  read it). The UI recommends rotating provider keys.
+- **Recovery.** A 128-bit recovery key (`A1-XXXXX-...`) wraps the network key
+  through HKDF-SHA256 + AES-GCM; the wrap is public data kept locally and at the
+  hub. Unlocking self-issues a certificate whose proof is an AES-GCM tag under
+  the network key, which only a key holder can make; members accept it from the
+  device's first operation.
+- **Restore from backup.** A peer that holds more of our current stream than we
+  do proves our sequence went backwards; the device bumps its incarnation and
+  starts a fresh stream.
+
+## Deviations from the plan
+
+- **Change capture is a scanner, not per-function hooks.** The plan wanted
+  every domain write to call `sync.record` in its own transaction. With 1240 SQL
+  call sites the hook approach was the riskiest change in the tree; the scanner
+  reaches the same outcome (crash-safe, no SQL on the wire, sub-second latency
+  after a write thanks to the resource-invalidation kick) with zero edits to
+  domain code. `engine.record()` exists for hot paths.
+- **Existing preference keys keep their names.** UI state already flowed through
+  `user_preferences` before this change; renaming 29 keys to a `ui:` prefix
+  would have forced a data migration for nothing. New UI state goes through the
+  `persisted()` helper (`frontend/src/lib/stores/persisted.ts`), which prefixes
+  `ui:` when asked.
+- **The journal stays local.** Facts (`memories.json`) and skills sync; the
+  episodic journal is each worker's synthesizer input, and syncing it would make
+  every worker consolidate the same episodes twice.
+- **Remote turns are forwarded, not streamed back.** The owner enqueues the turn
+  and its events return through the transcript mirror rather than a proxied SSE
+  stream; the effect for the user is the same and no proxying of long-lived
+  streams was needed.
+- **Mirrors keep no coordination rows.** Runs, turns and wakeups never leave the
+  owner, so a mirror never claims a turn.
+- **Attachments sent to a session owned elsewhere are not forwarded yet.** The
+  upload lift used the shared `upload_blobs` table; a turn with attachments for
+  a remote-owned session is refused with a clear message until uploads travel as
+  blobs (next milestone of this work).
+- **The mobile UI leaves the workers.** After this change the worker serves the
+  desktop web UI only; the Android app bundles its own build of the mobile UI
+  (`mobile/`) and talks to workers through their APIs, so worker version skew
+  never changes what the phone shows. See `docs/mobile-desktop-ui-split.md`.
+
+## Transition window
+
+`app/core/cluster.py`, the `installs` table and the cluster secret remain for
+installs that have not joined a network. When a worker is enrolled,
+`get_installs()` returns the network runner directory and the cluster secret is
+only used by the legacy artifact redirect. Remove them once every deployment
+reports Ready in Settings > Devices.
+
+## Test scenarios (as automated)
+
+`tests/core/network/` runs several independent workers in one process, each with
+its own database, data directory and identity:
+
+| Scenario | Test |
+|---|---|
+| Fresh install, no network | `test_collections.py::test_fresh_install_waits_for_the_first_run_choice`, existing install migration next to it |
+| A sets a value, B has it after one exchange | `test_engine.py::test_join_snapshot_and_tail_converge` |
+| Partitioned edits, higher clock wins, loser listed on both | `test_engine.py::test_partitioned_edits_resolve_by_clock_with_conflicts_on_both` |
+| Key added on A, A off, C joins from B | `test_engine.py::test_secret_added_on_a_is_usable_on_c_joined_from_b` |
+| Same op over two routes applies once | `test_engine.py::test_same_operation_over_two_routes_applies_once` |
+| Out-of-order delivery held | `test_engine.py::test_out_of_order_delivery_is_held_until_the_hole_fills` |
+| Device removed while offline, its writes rejected, new key unreadable | `test_engine.py::test_revoked_device_is_rejected_and_cannot_read_new_records` |
+| Recovery certificate with every worker off | `test_engine.py`, `test_hub.py::test_recovery_key_restores_a_clean_device_with_every_worker_off` |
+| Restore from backup bumps incarnation | `test_transport.py::test_peer_link_exchanges_both_ways_and_detects_rollback` |
+| Join over HTTP with fingerprint check, then sync | `test_transport.py::test_enrollment_over_http_then_sync` |
+| Hub register/push/pull, device approval, quota exceeded keeps LAN sync | `test_hub.py` |
+| Session on A mirrored to B, driven from B, forked when offline | `test_control.py` |
+| Facts, skills, plugins, blobs, owners | `test_collections.py` |
+| Shared-database cluster migration | `test_migrate.py` |

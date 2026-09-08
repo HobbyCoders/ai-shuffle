@@ -168,8 +168,6 @@
 		.mode { height: 40px; }
 	}
 
-	:global(html[data-platform='mobile']) .mode { height: 40px; }
-
 	@media (prefers-reduced-motion: reduce) {
 		.mode, .thumb { transition: none; }
 	}

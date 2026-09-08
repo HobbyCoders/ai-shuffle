@@ -124,6 +124,14 @@ def should_run_scheduled_here(automation: Dict[str, Any]) -> Tuple[bool, str]:
     Returns (should_run, reason) where *reason* is for logging.
     """
     me = settings.effective_instance_id
+    # Worker network: exactly one owner device fires a definition.
+    try:
+        from app.network import ownership
+        decided = ownership.decide_automation(automation)
+    except Exception:  # noqa: BLE001 — the network layer must never block a fire
+        decided = None
+    if decided is not None:
+        return decided
     try:
         installs = database.get_installs_map()
     except Exception as e:  # noqa: BLE001 — registry trouble must not kill the fire

@@ -99,6 +99,22 @@ def _normalize_placement(raw: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _self_normalized(runner_id: str) -> str:
+    """Map this worker's own network device id (or a legacy alias) to ``me``."""
+    if not runner_id:
+        return runner_id
+    try:
+        from app.network import runners
+        if runners.self_device_id() == runner_id:
+            return settings.effective_instance_id
+        resolved = runners.resolve_runner_id(runner_id)
+        if resolved and resolved == runners.self_device_id():
+            return settings.effective_instance_id
+    except Exception:  # noqa: BLE001 — never let the network layer break resolution
+        pass
+    return runner_id
+
+
 def _installs_map(preloaded: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The install registry snapshot to resolve against.
 
@@ -274,7 +290,10 @@ def resolve_placement(
         # pin arm below: online + capability only (`capable_runners(None, {})`,
         # A10 — no checkout filter), owner offline → "none". Only an ownerless
         # row (instance_id empty/None) is truly local-default.
-        owner = (session_row.get("instance_id") or "").strip()
+        # Worker network: a mirrored session carries no instance_id but names
+        # its owner device; our own device id means "me".
+        owner = _self_normalized((session_row.get("instance_id") or "").strip()
+                                 or (session_row.get("owner_device_id") or "").strip())
         if owner:
             if owner in capable_runners(None, {}, installs_map):
                 return PlacementDecision(
@@ -290,7 +309,7 @@ def resolve_placement(
     project_v2_id = session_row.get("project_v2_id")
 
     if where.startswith("runner:"):
-        pinned = where[len("runner:"):].strip()
+        pinned = _self_normalized(where[len("runner:"):].strip())
         # A10: validate the pin against online + capability constraints ONLY
         # (`capable_runners(None, …)`) — NO checkout filter. Checkout rows
         # materialize lazily via Phase-3 Step-E adoption, so a legacy pin whose

@@ -54,8 +54,10 @@ services:
       # so the placeholder pieces are never actually connected with).
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-${DATABASE_URL:?set POSTGRES_PASSWORD or DATABASE_URL in .env}}
       - SERVICE_NAME=${SERVICE_NAME:-ai-shuffle}
-      # Instance ID isolates projects/sessions when multiple devices share one DB.
-      # Defaults to SERVICE_NAME. Set a unique value per device if needed.
+      # Every worker owns its own database and joins other workers as a
+      # network device (Settings > Devices). INSTANCE_ID is only the legacy
+      # install id kept for migrating a shared-database cluster; leave it unset
+      # on a new install. See docs/network/migration.md.
       - INSTANCE_ID=${INSTANCE_ID:-}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-300}

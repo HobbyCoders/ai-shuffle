@@ -321,6 +321,15 @@ input:focus-visible {
 	border-color: oklch(0.76 0.15 155 / 0.35);
 	color: oklch(0.88 0.1 155);
 }
+.bundled {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.bundled .btn {
+	margin-left: 6px;
+	vertical-align: middle;
+}
 .help {
 	border-top: 1px solid var(--border);
 	padding-top: 12px;

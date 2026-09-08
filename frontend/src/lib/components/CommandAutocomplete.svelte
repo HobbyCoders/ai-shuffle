@@ -1,5 +1,6 @@
 <script lang="ts">
   import './autocomplete/autocomplete-design-system.css';
+  import { apiBase, withAuth } from '$lib/api/runtime';
 
   interface Command {
     name: string;
@@ -124,9 +125,9 @@
   async function fetchCommands(params: URLSearchParams, signal: AbortSignal, generation: number) {
     loading = true;
     try {
-      const response = await fetch(`/api/v1/commands/?${params}`, {
-        credentials: 'include', signal
-      });
+      const response = await fetch(`${apiBase()}/commands/?${params}`, withAuth({
+         signal
+      }));
 
       if (response.ok) {
         const data = await response.json();
@@ -307,10 +308,4 @@
     background: var(--popover, var(--card));
   }
 
-  /* Mobile shell: break out of textarea-wrapper to span full chat island width */
-  :global(html[data-platform='mobile']) .command-autocomplete-panel {
-    left: -15px; /* -(island .input-area padding 14px + island border 1px) */
-    right: auto;
-    width: calc(100vw - 1.5rem); /* viewport minus chat-input-wrapper horizontal padding */
-  }
 </style>

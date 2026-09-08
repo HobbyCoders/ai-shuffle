@@ -54,10 +54,29 @@ class ConnectorManager:
             f"Evaluating {len(connectors)} active connector(s) for runner {me}"
         )
 
+        from app.network import ownership
+
         for conn_row in connectors:
             cid = conn_row["id"]
             runner_id = conn_row.get("runner_id")
             try:
+                # Worker network: the owner device runs the connector; an
+                # unowned definition is claimed by the first device to see it,
+                # and a definition owned elsewhere stays inactive here.
+                network_rule = ownership.decide_connector(conn_row)
+                if network_rule == "start":
+                    await self.start_connector(cid)
+                    continue
+                if network_rule == "claim":
+                    if await run_sync(ownership.claim, "connectors", cid):
+                        logger.info(f"Claimed unowned connector {cid} for device {ownership.my_device_id()}")
+                        await self.start_connector(cid)
+                    else:
+                        logger.info(f"Connector {cid} claimed by another device — skipping start")
+                    continue
+                if network_rule == "skip":
+                    logger.info(f"Connector {cid} is owned by device {conn_row.get('owner_device_id')} — skipping start")
+                    continue
                 if runner_id == me:
                     await self.start_connector(cid)
                 elif runner_id is None:
@@ -246,7 +265,12 @@ class ConnectorManager:
         from app.core.connectors.lifecycle_relay import publish
 
         subscribed = await run_sync(database.get_connectors_for_event, event_type)
+        from app.network import ownership
         for conn_row in subscribed:
+            if ownership.enrolled() and not ownership.owns(conn_row):
+                # Another device holds this connector's session; it sees its
+                # own sessions' events, so there is nothing to relay.
+                continue
             owner = conn_row.get("runner_id")
             if owner and owner != settings.effective_instance_id:
                 try:
@@ -275,8 +299,11 @@ class ConnectorManager:
         from app.core.config import settings
 
         row = await run_sync(database.get_connector, connector_id)
+        from app.network import ownership
+        if ownership.enrolled() and row and not ownership.owns(row):
+            return
         if (not row or not row.get("is_active")
-                or row.get("runner_id") != settings.effective_instance_id
+                or (not ownership.enrolled() and row.get("runner_id") != settings.effective_instance_id)
                 or event_type not in (row.get("events") or [])):
             return
         await self._deliver_connector_event(row, event_type, data)

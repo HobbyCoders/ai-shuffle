@@ -152,6 +152,20 @@ async def download_artifact(hash: str, request: Request, session_id: Optional[st
         filename = (row.get("filename") if row else None) or hash
         return FileResponse(path, media_type=media_type, filename=filename)
 
+    # Worker network: ask an online holder for the bytes with a device token,
+    # store them here, and serve. The legacy shared-database proxy below only
+    # applies to installs that have not joined a network.
+    try:
+        from app.network import blobs as network_blobs, engine as network_engine
+        if network_engine.context() is not None and await network_blobs.fetch_one(hash):
+            path = artifact_path(hash)
+            if path is not None:
+                media_type = (row.get("mime") if row else None) or "application/octet-stream"
+                filename = (row.get("filename") if row else None) or hash
+                return FileResponse(path, media_type=media_type, filename=filename)
+    except Exception:  # noqa: BLE001 — fall through to the legacy path
+        logger.debug("network blob fetch failed for %s", hash[:12], exc_info=True)
+
     # Bytes are not on this install's disk. Fetch (or, with the flag off,
     # 307) from the holder if it is a different, online install with a
     # reachable base_url; otherwise 404.

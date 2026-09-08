@@ -634,8 +634,22 @@ def create_session(
     # unknown string is filed as code rather than persisted verbatim.
     resolved_mode = storage_session_mode(normalize_session_mode(mode))
     _ph = ph()
-    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "context_window", "fast", "mode", "hidden", "is_worker"]
-    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_context_window, selected_fast, resolved_mode, hidden, bool(is_worker)]
+    # Worker network: the device this session executes on. A target that is
+    # a network device id (the composer's runner picker) owns the row; a
+    # legacy instance id maps through the network's legacy map; otherwise the
+    # row is ours.
+    owner_device_id = None
+    try:
+        from app.network import runners as _runners
+        if target_instance_id:
+            resolved = _runners.resolve_runner_id(target_instance_id)
+            owner_device_id = resolved if _runners.find(resolved) else None
+        else:
+            owner_device_id = _runners.self_device_id()
+    except Exception:  # noqa: BLE001 — stamping is best-effort; NULL means "this worker"
+        owner_device_id = None
+    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "owner_device_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "context_window", "fast", "mode", "hidden", "is_worker"]
+    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, owner_device_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_context_window, selected_fast, resolved_mode, hidden, bool(is_worker)]
     if target_instance_id:
         # Serialized to a JSON string (not a dict) so the SQLite test shim, which
         # stores JSONB columns as TEXT, round-trips identically to Postgres —

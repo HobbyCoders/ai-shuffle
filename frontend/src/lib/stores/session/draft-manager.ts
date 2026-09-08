@@ -50,7 +50,7 @@ export function createDraftManager(deps: DraftManagerDeps) {
 		},
 
 		clearError() {
-			update(s => ({ ...s, error: null }));
+			update(s => ({ ...s, error: null, forkOfferSessionId: null }));
 		},
 
 		clearWorktreeError() {

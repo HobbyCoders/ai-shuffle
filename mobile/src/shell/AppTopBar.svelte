@@ -1,0 +1,274 @@
+<script lang="ts">
+	/**
+	 * AppTopBar - compact mobile app bar + navigation drawer.
+	 *
+	 * Rendered only on the mobile shell (the Android app's WebView); AppLayout
+	 * owns that platform decision — never a viewport width, so a narrow desktop
+	 * browser keeps the desktop shell. The bar carries ☰ menu + current-page
+	 * title, and every navigation destination lives in the slide-in drawer,
+	 * which hosts the same Sidebar component the desktop shell shows beside the
+	 * main panel.
+	 *
+	 * The notification bell moved into that sidebar's header, so on this bar it
+	 * is represented by a dot on the ☰ while the drawer is closed. Unread state
+	 * therefore stays visible without a second bell, and opening the drawer puts
+	 * the real bell one row away.
+	 *
+	 * On desktop the sidebar itself replaces this bar's old tab row, and the main
+	 * panel's StudioTopBar carries the breadcrumbs and actions.
+	 */
+	import { Menu, X } from 'lucide-svelte';
+	import { activeView } from '$lib/stores/layout.svelte';
+	import type { ViewType } from '$lib/stores/layout.svelte';
+	import { activeSession } from '$lib/stores/active-session';
+	import { unreadCount } from '$lib/stores/notifications';
+	import Sidebar from '$lib/components/layout/Sidebar.svelte';
+	import SessionTitleMenu from '$lib/components/layout/SessionTitleMenu.svelte';
+	import { chatHeaderTitle } from '$lib/components/layout/chat-empty-state';
+
+	interface Props {
+		isAdmin?: boolean;
+		onNewSession: () => void;
+		onSettledOpenSession: () => void;
+		onOpenSession: (sessionId: string) => void;
+		onOpenFeature: (type: ViewType) => void;
+		onOpenSpotlight?: () => void;
+	}
+
+	let {
+		isAdmin = false,
+		onNewSession,
+		onSettledOpenSession,
+		onOpenSession,
+		onOpenFeature,
+		onOpenSpotlight
+	}: Props = $props();
+
+	const BUILD_MEMBERS: ViewType[] = ['build', 'profile', 'mcp', 'plugins', 'hooks'];
+	const currentType = $derived($activeView?.type ?? null);
+	const buildActive = $derived(currentType ? BUILD_MEMBERS.includes(currentType) : false);
+
+	// Current-page title shown beside the ☰ on the mobile bar.
+	const TITLES: Record<string, string> = {
+		'file-browser': 'Files',
+		notes: 'Notes',
+		automations: 'Automations',
+		project: 'Projects',
+		docs: 'Docs',
+		stats: 'Stats',
+		settings: 'Settings'
+	};
+	// In a chat, the mobile bar shows the chat name (the old PageHeader title row
+	// is dropped on mobile, so the name lives here, centered). Mirrors MainPanel's
+	// headerTitle derivation.
+	const boundChatId = $derived(
+		currentType === 'session' ? ($activeSession.sessionId ?? null) : null
+	);
+	const chatTitle = $derived.by(() => {
+		const s = $activeSession;
+		return chatHeaderTitle({
+			sessionId: s?.sessionId,
+			title: s?.title,
+			messageCount: s?.messages?.length ?? 0
+		});
+	});
+	const mobileTitle = $derived.by(() => {
+		if (currentType === 'session') return chatTitle;
+		if (currentType === 'board') return 'Sessions';
+		if (buildActive) return 'Build';
+		return (currentType && TITLES[currentType]) || 'AI Shuffle';
+	});
+
+	// Navigation drawer state
+	let drawerOpen = $state(false);
+
+	function handleWindowKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') drawerOpen = false;
+	}
+
+	// Run a drawer action and dismiss the drawer in one step.
+	function drawerGo<T extends unknown[]>(action: (...args: T) => void) {
+		return (...args: T) => {
+			drawerOpen = false;
+			action(...args);
+		};
+	}
+</script>
+
+<svelte:window onkeydown={handleWindowKeydown} />
+
+<header class="topbar topbar-mobile">
+	<button
+		class="tb-hamburger"
+		onclick={() => (drawerOpen = true)}
+		aria-label={$unreadCount > 0 ? `Open menu (${$unreadCount} unread notifications)` : 'Open menu'}
+		aria-expanded={drawerOpen}
+	>
+		<Menu size={20} strokeWidth={1.8} />
+		{#if !drawerOpen && $unreadCount > 0}
+			<span class="tb-unread" aria-hidden="true"></span>
+		{/if}
+	</button>
+
+	{#if boundChatId}
+		<SessionTitleMenu title={mobileTitle} sessionId={boundChatId} variant="mobile" />
+	{:else}
+		<span class="tb-context-title">{mobileTitle}</span>
+	{/if}
+
+	<!-- Balances the ☰ so the title stays optically centered now that the bell
+	     it used to sit beside lives in the sidebar. -->
+	<span class="tb-spacer" aria-hidden="true"></span>
+</header>
+
+<!-- Slide-in navigation drawer: hosts the full sidebar -->
+{#if drawerOpen}
+	<div
+		class="drawer-overlay"
+		role="button"
+		tabindex="-1"
+		aria-label="Close menu"
+		onclick={() => (drawerOpen = false)}
+		onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') drawerOpen = false; }}
+	></div>
+	<aside class="drawer" aria-label="Navigation">
+		<Sidebar
+			{isAdmin}
+			onNewSession={drawerGo(onNewSession)}
+			onSettledOpenSession={drawerGo(onSettledOpenSession)}
+			onOpenSession={drawerGo(onOpenSession)}
+			onOpenFeature={drawerGo(onOpenFeature)}
+			onOpenSpotlight={onOpenSpotlight ? drawerGo(onOpenSpotlight) : undefined}
+		>
+			{#snippet headerAction()}
+				<button class="drawer-close" onclick={() => (drawerOpen = false)} aria-label="Close menu">
+					<X size={18} strokeWidth={1.8} />
+				</button>
+			{/snippet}
+		</Sidebar>
+	</aside>
+{/if}
+
+<style>
+	.topbar {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		height: 52px;
+		flex-shrink: 0;
+		padding: 0 6px 0 4px;
+		background: var(--background);
+		border-bottom: 1px solid var(--border);
+		position: relative;
+		z-index: 40;
+	}
+
+	.tb-hamburger {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 40px;
+		height: 40px;
+		flex-shrink: 0;
+		background: transparent;
+		border: none;
+		border-radius: 8px;
+		color: var(--foreground);
+		cursor: pointer;
+		transition: color 120ms ease, background-color 120ms ease;
+		-webkit-tap-highlight-color: transparent;
+	}
+	.tb-hamburger:hover { color: var(--foreground); background: var(--accent); }
+
+	/* A dot, not a count: the exact number is one tap away on the bell inside the
+	   drawer, and a badge on a navigation control reads as a nav badge. */
+	.tb-unread {
+		position: absolute;
+		top: 7px;
+		right: 7px;
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: var(--destructive);
+		box-shadow: 0 0 0 2px var(--background);
+		pointer-events: none;
+	}
+
+	.tb-spacer { width: 40px; flex-shrink: 0; }
+
+	/* Title fills the space between the ☰ (left) and the notification bell
+	   (right), so it sits visually centered, and ellipsizes for long chat names. */
+	.tb-context-title {
+		flex: 1 1 auto;
+		min-width: 0;
+		text-align: center;
+		padding: 0 4px;
+		font-size: 14px;
+		font-weight: 600;
+		letter-spacing: -0.01em;
+		color: var(--foreground);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	/* Drawer */
+	.drawer-overlay {
+		position: fixed;
+		inset: 0;
+		background: color-mix(in oklch, var(--background) 55%, transparent);
+		backdrop-filter: blur(2px);
+		-webkit-backdrop-filter: blur(2px);
+		z-index: 90;
+		animation: drawer-fade 160ms ease;
+	}
+
+	.drawer {
+		position: fixed;
+		top: 0;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		width: 100%;
+		display: flex;
+		flex-direction: column;
+		background: var(--sidebar);
+		border-right: none;
+		box-shadow: none;
+		z-index: 100;
+		overflow: hidden;
+		animation: drawer-slide 200ms cubic-bezier(0.16, 1, 0.3, 1);
+	}
+
+	.drawer-close {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 30px;
+		height: 30px;
+		background: transparent;
+		border: none;
+		border-radius: 8px;
+		color: var(--sidebar-muted);
+		cursor: pointer;
+		transition: color 120ms ease, background-color 120ms ease;
+	}
+	.drawer-close:hover { color: var(--foreground); background: var(--sidebar-accent); }
+
+	@keyframes drawer-fade {
+		from { opacity: 0; }
+		to { opacity: 1; }
+	}
+	@keyframes drawer-slide {
+		from { transform: translateX(-100%); }
+		to { transform: translateX(0); }
+	}
+
+	:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+	@media (prefers-reduced-motion: reduce) {
+		.drawer,
+		.drawer-overlay { animation: none; }
+	}
+</style>

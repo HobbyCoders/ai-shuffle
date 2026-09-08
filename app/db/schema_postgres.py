@@ -20,7 +20,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 86
+SCHEMA_VERSION = 87
 
 
 def create_postgres_schema(cursor) -> None:
@@ -37,6 +37,10 @@ def create_postgres_schema(cursor) -> None:
     # Account hub tables have no ordering dependencies.
     from app.db.mobile_hub import create_schema as create_mobile_hub_schema
     create_mobile_hub_schema(cursor)
+    # Worker-network tables (device membership, sync log, conflicts). Local
+    # to this worker's database; nothing in them depends on other tables.
+    from app.db.network import create_schema as create_network_schema
+    create_network_schema(cursor)
 
     # 1. Schema version
     # ------------------------------------------------------------------
@@ -255,6 +259,10 @@ def create_postgres_schema(cursor) -> None:
             pr_number INTEGER,
             pr_url TEXT,
             pr_state TEXT,
+            -- Worker network: the device this session executes on. Replaces
+            -- instance_id as the owner; NULL means "this worker" until the
+            -- startup backfill stamps it.
+            owner_device_id TEXT,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
             FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
@@ -609,6 +617,8 @@ def create_postgres_schema(cursor) -> None:
             content_type TEXT,
             size_bytes INTEGER DEFAULT 0,
             data BYTEA,
+            -- Worker network: content hash of ``data`` so peers fetch bytes on demand.
+            blob_hash TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
         )
@@ -1068,6 +1078,8 @@ def create_postgres_schema(cursor) -> None:
             last_event_at TIMESTAMP WITH TIME ZONE,
             failure_count INTEGER DEFAULT 0,
             runner_id TEXT,
+            -- Worker network: the device that runs this connector's session.
+            owner_device_id TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL
@@ -1141,6 +1153,9 @@ def create_postgres_schema(cursor) -> None:
             requires_approval BOOLEAN DEFAULT FALSE,
             action_steps TEXT DEFAULT NULL,
             triggers TEXT DEFAULT NULL,
+            -- Worker network: the device that fires this automation. A synced
+            -- definition with no local owner stays inactive until assigned.
+            owner_device_id TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE RESTRICT,
@@ -1815,6 +1830,8 @@ def create_postgres_schema(cursor) -> None:
             filename TEXT,
             created_by_session TEXT,
             runner_id TEXT,
+            -- Worker network: the device that first stored the bytes.
+            owner_device_id TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)

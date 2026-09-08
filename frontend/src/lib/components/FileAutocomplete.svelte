@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getWorktreeFiles } from '$lib/api/git';
+  import { apiBase, withAuth } from '$lib/api/runtime';
   import { getNotesAutocomplete, getSubagentsForAutocomplete } from '$lib/api/client';
   import { extractAtMentionQuery } from '$lib/components/chat/tiptap/serialization';
   import './autocomplete/autocomplete-design-system.css';
@@ -282,9 +283,7 @@
           params.set('session_id', sessionId);
         }
 
-        const response = await fetch(`/api/v1/projects/${projectId}/files?${params}`, {
-          credentials: 'include'
-        });
+        const response = await fetch(`${apiBase()}/projects/${projectId}/files?${params}`, withAuth({ }));
 
         if (response.ok) {
           const data = await response.json();
@@ -345,9 +344,7 @@
         params.set('session_id', sessionId);
       }
 
-      const response = await fetch(`/api/v1/projects/${projectId}/chat-history?${params}`, {
-        credentials: 'include'
-      });
+      const response = await fetch(`${apiBase()}/projects/${projectId}/chat-history?${params}`, withAuth({ }));
 
       if (fetchId !== fetchCounter) return;
 
@@ -867,13 +864,6 @@
     max-height: 20rem;
     z-index: 50;
     background: var(--popover, var(--card));
-  }
-
-  /* Mobile shell: break out of textarea-wrapper to span full chat island width */
-  :global(html[data-platform='mobile']) .file-autocomplete-panel {
-    left: -15px; /* -(island .input-area padding 14px + island border 1px) */
-    right: auto;
-    width: calc(100vw - 1.5rem); /* viewport minus chat-input-wrapper horizontal padding */
   }
 
   .file-autocomplete-list {

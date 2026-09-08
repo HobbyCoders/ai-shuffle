@@ -19,8 +19,10 @@ export type DesktopCommand =
 export interface MenuActions {
 	command(name: DesktopCommand): void;
 	restartWorker(): void;
+	/** The setup page for an external PostgreSQL; the bundled one needs no settings. */
 	openDatabaseSettings(): void;
 	showLogs(): void;
+	showPostgresLogs(): void;
 	openInBrowser(): void;
 	checkForUpdates(): void;
 	reload(): void;
@@ -108,8 +110,15 @@ export function installMenu(actions: MenuActions): void {
 			{ label: 'Restart Worker', click: () => actions.restartWorker() },
 			{ label: 'Open in Browser', click: () => actions.openInBrowser() },
 			{ type: 'separator' },
-			{ label: 'Database Connection…', click: () => actions.openDatabaseSettings() },
-			{ label: 'Show Worker Log', click: () => actions.showLogs() }
+			{ label: 'Show Worker Log', click: () => actions.showLogs() },
+			{ type: 'separator' },
+			{
+				label: 'Advanced',
+				submenu: [
+					{ label: 'Use external PostgreSQL…', click: () => actions.openDatabaseSettings() },
+					{ label: 'Show PostgreSQL Log', click: () => actions.showPostgresLogs() }
+				]
+			}
 		]
 	};
 

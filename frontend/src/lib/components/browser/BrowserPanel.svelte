@@ -986,17 +986,6 @@
 		padding-bottom: env(safe-area-inset-bottom, 0px);
 	}
 
-	/* Mobile shell: fullscreen even before hydration sets .fullscreen. */
-	:global(html[data-platform='mobile']) .browser-panel {
-		position: absolute;
-		inset: 0;
-		z-index: 95;
-		width: 100% !important;
-		border-left: none;
-		padding-top: env(safe-area-inset-top, 0px);
-		padding-bottom: env(safe-area-inset-bottom, 0px);
-	}
-
 	/* ── Resize handle (left edge) ─────────────────────────────────────── */
 	.resize-handle {
 		position: absolute;
@@ -1421,12 +1410,6 @@
 		background: var(--hover-overlay);
 	}
 
-	/* 16px stops mobile browsers zooming into the textarea on focus. Applies on
-	   the mobile shell, and in any narrow window where the keyboard is touch. */
-	:global(html[data-platform='mobile']) .composer-input {
-		font-size: 16px;
-	}
-
 	@media (max-width: 639px) {
 		.composer-input {
 			font-size: 16px;
@@ -1480,12 +1463,4 @@
 			transition: none;
 		}
 	}
-	/* Mobile shell: compact toolbar, with the forward button always shown. */
-	:global(html[data-platform='mobile']) .panel-header { gap: 2px; padding: 3px 4px; min-height: 34px; }
-	:global(html[data-platform='mobile']) .tool-btn { width: 26px; height: 30px; }
-	:global(html[data-platform='mobile']) .nav-forward { display: flex; }
-	:global(html[data-platform='mobile']) .address-bar { min-width: 32px; }
-	:global(html[data-platform='mobile']) .address-display,
-	:global(html[data-platform='mobile']) .address-input { height: 30px; font-size: 0.75rem; }
-	:global(html[data-platform='mobile']) .address-display { padding-inline: 5px; }
 </style>

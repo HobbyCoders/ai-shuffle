@@ -27,7 +27,7 @@ import com.hobbycoders.aishuffle.net.ApiClient
 import com.hobbycoders.aishuffle.tools.DeviceToolsRuntime
 import com.hobbycoders.aishuffle.tools.ToolsPreferences
 import com.hobbycoders.aishuffle.ui.ChatActivity
-import com.hobbycoders.aishuffle.ui.ContainedDocument
+import com.hobbycoders.aishuffle.ui.MobileUi
 import com.hobbycoders.aishuffle.voice.VoiceCallActivity
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -39,7 +39,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.concurrent.atomic.AtomicInteger
 
-/** Uses the real native shell and contained WebView with local HTTP fixtures. */
+/** Uses the real native shell and the bundled UI in the WebView, with local HTTP fixtures for the worker API. */
 @RunWith(AndroidJUnit4::class)
 class ChatToolbarSmokeTest {
     private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
@@ -59,8 +59,6 @@ class ChatToolbarSmokeTest {
         val sessions = AtomicInteger()
         val apiField = ApiClient::class.java.getDeclaredField("client\$delegate").apply { isAccessible = true }
         val oldApi = apiField.get(null)
-        val documentField = ContainedDocument::class.java.getDeclaredField("http").apply { isAccessible = true }
-        val oldDocument = documentField.get(null)
         val api = OkHttpClient.Builder().addInterceptor { chain ->
             if (chain.request().url.encodedPath == "/api/v1/mobile/web-session/reservations")
                 return@addInterceptor Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(404).message("Legacy fixture")
@@ -72,14 +70,6 @@ class ChatToolbarSmokeTest {
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("Fixture")
                 .body("{\"session_token\":\"fixture-session\"}".toResponseBody("application/json".toMediaType())).build()
         }.build()
-        val document = OkHttpClient.Builder().addInterceptor { chain ->
-            val request = chain.request()
-            check(request.url.toString() == "${server.baseUrl}/")
-            check(request.header("Cookie")?.contains("session=fixture-session") == true)
-            Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("Fixture")
-                .body("<html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body>Chat fixture</body></html>"
-                    .toResponseBody("text/html".toMediaType())).build()
-        }.build()
         val voiceLaunches = AtomicInteger()
         val monitor = object : Instrumentation.ActivityMonitor() {
             override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
@@ -89,7 +79,7 @@ class ChatToolbarSmokeTest {
                 return Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null)
             }
         }
-        apiField.set(null, lazyOf(api)); documentField.set(null, document); instrumentation.addMonitor(monitor)
+        apiField.set(null, lazyOf(api)); instrumentation.addMonitor(monitor)
         try {
             ActivityScenario.launch<ChatActivity>(Intent(context, ChatActivity::class.java).putExtra(ChatActivity.EXTRA_SERVER_ID, server.id)).use { scenario ->
                 fun loaded(orientation: Int) = waitFor("Chat did not load in the expected viewport") {
@@ -99,7 +89,7 @@ class ChatToolbarSmokeTest {
                         val shell = status.parent as LinearLayout
                         val web = (0 until shell.childCount).map { shell.getChildAt(it) }.filterIsInstance<WebView>().single()
                         ready = activity.hasWindowFocus() && activity.resources.configuration.orientation == orientation &&
-                            status.visibility == View.GONE && web.url == server.baseUrl + "/" && web.height > 0
+                            status.visibility == View.GONE && web.url == MobileUi.INDEX_URL && web.height > 0
                     }
                     ready
                 }
@@ -164,7 +154,7 @@ class ChatToolbarSmokeTest {
                 }
             }
         } finally {
-            instrumentation.removeMonitor(monitor); apiField.set(null, oldApi); documentField.set(null, oldDocument)
+            instrumentation.removeMonitor(monitor); apiField.set(null, oldApi)
             instrumentation.runOnMainSync { DeviceToolsRuntime.stop(); ServerStore.get(context).remove(server.id) }
         }
     }

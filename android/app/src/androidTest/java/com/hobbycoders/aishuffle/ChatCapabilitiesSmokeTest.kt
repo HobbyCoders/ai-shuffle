@@ -21,7 +21,7 @@ import com.hobbycoders.aishuffle.net.ApiClient
 import com.hobbycoders.aishuffle.tools.DeviceToolsRuntime
 import com.hobbycoders.aishuffle.tools.ToolsPreferences
 import com.hobbycoders.aishuffle.ui.ChatActivity
-import com.hobbycoders.aishuffle.ui.ContainedDocument
+import com.hobbycoders.aishuffle.ui.MobileUi
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
@@ -32,7 +32,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.concurrent.CopyOnWriteArrayList
 
-/** Real WebView + native activity callbacks, local intercepted HTTP and a test-only SAF destination. */
+/** Real WebView loading the bundled UI + native activity callbacks, local intercepted HTTP for the worker API and a test-only SAF destination. */
 @RunWith(AndroidJUnit4::class)
 class ChatCapabilitiesSmokeTest {
     private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
@@ -60,8 +60,6 @@ class ChatCapabilitiesSmokeTest {
         context.contentResolver.delete(destination, null, null)
         val apiField = ApiClient::class.java.getDeclaredField("client\$delegate").apply { isAccessible = true }
         val oldApi = apiField.get(null)
-        val docField = ContainedDocument::class.java.getDeclaredField("http").apply { isAccessible = true }
-        val oldDoc = docField.get(null)
         fun response(request: okhttp3.Request, text: String, mime: String) = Response.Builder().request(request)
             .protocol(Protocol.HTTP_1_1).code(200).message("Fixture").body(text.toResponseBody(mime.toMediaType())).build()
         val sessions = java.util.concurrent.atomic.AtomicInteger()
@@ -73,27 +71,24 @@ class ChatCapabilitiesSmokeTest {
             beforeSession(sessions.incrementAndGet())
             response(chain.request(), "{\"session_token\":\"fixture-cookie\"}", "application/json")
         }.build()
-        val doc = OkHttpClient.Builder().addInterceptor { chain ->
-            check(chain.request().url.host == "chat-fixture.example")
-            response(chain.request(), "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body>Benign file and permission fixture</body></html>", "text/html")
-        }.build()
         val monitor = object : Instrumentation.ActivityMonitor() {
             override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? =
                 if (intent.action == Intent.ACTION_CREATE_DOCUMENT || intent.action == Intent.ACTION_GET_CONTENT) picker(intent, server) else null
         }
-        apiField.set(null, lazyOf(api)); docField.set(null, doc); instrumentation.addMonitor(monitor)
+        apiField.set(null, lazyOf(api)); instrumentation.addMonitor(monitor)
         try {
             ActivityScenario.launch<ChatActivity>(Intent(context, ChatActivity::class.java).putExtra(ChatActivity.EXTRA_SERVER_ID, server.id)).use { scenario ->
                 beforeReady(scenario)
-                waitFor("Fixture document never loaded") {
+                // The document is the app's own bundle; the worker only answered the session mint.
+                waitFor("Bundled UI never loaded") {
                     var ready = false
-                    scenario.onActivity { ready = it.hasWindowFocus() && web(it).url == server.baseUrl + "/" && it.findViewById<TextView>(R.id.screenStatus).text.isEmpty() }
+                    scenario.onActivity { ready = it.hasWindowFocus() && web(it).url == MobileUi.INDEX_URL && it.findViewById<TextView>(R.id.screenStatus).text.isEmpty() }
                     ready
                 }
                 block(scenario, server)
             }
         } finally {
-            instrumentation.removeMonitor(monitor); apiField.set(null, oldApi); docField.set(null, oldDoc)
+            instrumentation.removeMonitor(monitor); apiField.set(null, oldApi)
             instrumentation.runOnMainSync { DeviceToolsRuntime.stop(); ServerStore.get(context).remove(server.id) }
             context.contentResolver.delete(destination, null, null)
         }
@@ -152,11 +147,14 @@ class ChatCapabilitiesSmokeTest {
         fixture({ _, server -> ServerStore.get(context).remove(server.id); Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(destination)) }) { scenario, server ->
             scenario.onActivity { activity ->
                 val view = web(activity); val chrome = requireNotNull(view.webChromeClient)
-                val audio = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+                val audio = Permission(Uri.parse(MobileUi.ORIGIN), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
                 chrome.onPermissionRequest(audio); assertArrayEquals(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE), audio.granted)
                 val outside = Permission(Uri.parse("https://outside.example"), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
                 chrome.onPermissionRequest(outside); assertTrue(outside.denied)
-                val mixed = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE, PermissionRequest.RESOURCE_VIDEO_CAPTURE))
+                // The worker is an API origin, never the document: it cannot hold the microphone either.
+                val worker = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+                chrome.onPermissionRequest(worker); assertTrue(worker.denied)
+                val mixed = Permission(Uri.parse(MobileUi.ORIGIN), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE, PermissionRequest.RESOURCE_VIDEO_CAPTURE))
                 chrome.onPermissionRequest(mixed); assertTrue(mixed.denied)
             }
             var delivered = false; var selected: Array<Uri>? = null
@@ -188,12 +186,12 @@ class ChatCapabilitiesSmokeTest {
                 complete.invoke(activity)
             }
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
-            val audio = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+            val audio = Permission(Uri.parse(MobileUi.ORIGIN), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
             scenario.onActivity { pending(it, audio); assertNull(audio.granted); assertFalse(audio.denied) }
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
             waitFor("Pending audio permission was not completed on resume") { audio.granted != null }
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
-            val stale = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+            val stale = Permission(Uri.parse(MobileUi.ORIGIN), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
             scenario.onActivity {
                 pending(it, stale); assertNull(stale.granted)
                 ServerStore.get(context).remove(server.id)

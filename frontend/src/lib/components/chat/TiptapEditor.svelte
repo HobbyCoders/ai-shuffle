@@ -482,10 +482,4 @@
 		background: var(--muted);
 	}
 
-	/* Mobile shell: reduce max-height so the chat island stays within viewport
-	   bounds. ChatInput applies the taller min-height to .tiptap-editor on the
-	   desktop shell only, so this compact cap covers the mobile counterpart. */
-	:global(html[data-platform='mobile']) .tiptap-editor {
-		max-height: 150px;
-	}
 </style>

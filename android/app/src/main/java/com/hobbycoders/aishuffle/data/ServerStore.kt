@@ -28,6 +28,18 @@ class ServerStore private constructor(private val prefs: SharedPreferences) {
 
     fun getById(id: String): Server? = getAll().firstOrNull { it.id == id }
 
+    /** The worker most recently opened in chat; ServerListActivity tries it first on launch. */
+    var lastUsedServerId: String?
+        get() = prefs.getString(KEY_LAST_USED, null)
+        set(value) { prefs.edit().putString(KEY_LAST_USED, value).apply() }
+    fun markUsed(id: String) { lastUsedServerId = id }
+
+    /** [servers] with the most recently used worker first, then insertion order. */
+    fun orderedByRecentUse(servers: List<Server>): List<Server> {
+        val recent = lastUsedServerId ?: return servers
+        return servers.sortedBy { if (it.id == recent) 0 else 1 }
+    }
+
     var selectedToolsServerId: String?
         get() = prefs.getString("selected_tools_server", null)
         set(value) { prefs.edit().putString("selected_tools_server", value).commit() }
@@ -48,6 +60,7 @@ class ServerStore private constructor(private val prefs: SharedPreferences) {
 
     fun remove(id: String) {
         save(getAll().filterNot { it.id == id })
+        if (lastUsedServerId == id) lastUsedServerId = null
     }
 
     fun removeAccountServers() { save(com.hobbycoders.aishuffle.account.AccountBoundary.directOnly(getAll())) }
@@ -75,6 +88,7 @@ class ServerStore private constructor(private val prefs: SharedPreferences) {
         private const val PREFS_NAME = "ai_shuffle_secure_prefs"
         private const val KEY_SERVERS = "servers"
         private const val KEY_UP_ENDPOINT = "unifiedpush_endpoint"
+        private const val KEY_LAST_USED = "last_used_server"
 
         @Volatile
         private var instance: ServerStore? = null

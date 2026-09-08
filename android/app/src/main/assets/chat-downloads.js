@@ -1,7 +1,15 @@
-/* Injected at document start only on the connected HTTPS worker. No credential access. */
+/* Injected at document start on the app's bundled UI (its asset origin). No credential access. */
 (() => {
   if (window !== window.top || !window.shuffleFileSave) return;
   const bridge = window.shuffleFileSave;
+  // Files come from the paired worker, whose origin the app hands the page as
+  // window.__SHUFFLE_MOBILE__.apiOrigin (frontend/src/lib/api/runtime.ts). Read
+  // it per click: the bootstrap script and this one are both document-start
+  // scripts, and the page may not have run either yet when this evaluates.
+  const workerOrigin = () => {
+    const runtime = window.__SHUFFLE_MOBILE__;
+    return runtime && typeof runtime.apiOrigin === 'string' ? runtime.apiOrigin.replace(/\/+$/, '') : location.origin;
+  };
   const limit = 128 * 1024 * 1024;
   const chunkSize = 32 * 1024;
   const blobs = new Map();
@@ -51,7 +59,7 @@
       const href = anchor.href;
       const name = anchor.download || 'download';
       const url = new URL(href, location.href);
-      if (url.protocol === 'https:' && url.origin === location.origin) {
+      if (url.protocol === 'https:' && url.origin === workerOrigin()) {
         started = true;
         await request({type: 'url', id, url: href, name});
         return;

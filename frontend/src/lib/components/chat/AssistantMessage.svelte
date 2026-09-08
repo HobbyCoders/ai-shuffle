@@ -3,6 +3,7 @@
 	 * AssistantMessage - Assistant message with markdown rendering and hover-only action buttons
 	 */
 	import { onDestroy } from 'svelte';
+	import { apiBase, withAuth } from '$lib/api/runtime';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { rewriteMediaMarkdown, clampRevealToMediaBoundary } from '$lib/utils/media';
 	import { renderChatMarkdown } from '$lib/utils/chat-markdown';
@@ -398,17 +399,14 @@
 		let audioUrl: string | null = null;
 
 		try {
-			const response = await fetch('/api/v1/settings/tts/stream', {
+			const response = await fetch(`${apiBase()}/settings/tts/stream`, withAuth({
 				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}`
-				},
+				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					text: ttsText,
 					output_format: 'mp3'
 				})
-			});
+			}));
 
 			if (!response.ok) {
 				throw new Error(`TTS request failed: ${response.status}`);

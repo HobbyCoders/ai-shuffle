@@ -7,6 +7,7 @@
 	 * always reveals where you are. Recurses by importing itself. Theme tokens.
 	 */
 	import { untrack } from 'svelte';
+	import { apiBase, withAuth } from '$lib/api/runtime';
 	import { ChevronRight, Folder } from 'lucide-svelte';
 	import type { FileItem } from '$lib/stores/files.svelte';
 	import FilesTreeNode from './FilesTreeNode.svelte';
@@ -36,7 +37,7 @@
 		loading = true;
 		try {
 			const params = new URLSearchParams({ path, show_hidden: String(showHidden) });
-			const res = await fetch(`/api/v1/workspace/files?${params}`, { credentials: 'include' });
+			const res = await fetch(`${apiBase()}/workspace/files?${params}`, withAuth({ }));
 			if (res.ok) {
 				const data = await res.json();
 				children = (data.files as FileItem[])

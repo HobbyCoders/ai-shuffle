@@ -28,13 +28,18 @@
 		create: $('pg-create'),
 		cancel: $('pg-cancel'),
 		save: $('pg-save'),
-		note: $('password-note')
+		note: $('password-note'),
+		bundledNote: $('bundled-note'),
+		bundledSwitch: $('bundled-switch'),
+		bundledMissing: $('bundled-missing'),
+		useBundled: $('pg-bundled')
 	};
 	const status = {
 		section: $('status'),
 		dot: $('status-dot'),
 		heading: $('status-heading'),
 		detail: $('status-detail'),
+		postgres: $('status-postgres'),
 		error: $('status-error'),
 		log: $('log'),
 		restart: $('restart'),
@@ -114,14 +119,30 @@
 		setup.user.value = current.postgres.user;
 		setup.database.value = current.postgres.database;
 		setup.note.hidden = current.keyringAvailable;
-		setup.cancel.hidden = !current.configured;
+		// The bundled server is the default; the way back to it shows once an external one is in use.
+		setup.bundledNote.hidden = !current.managed || !current.bundledAvailable;
+		setup.bundledSwitch.hidden = current.managed || !current.bundledAvailable;
+		setup.bundledMissing.hidden = current.bundledAvailable;
+		if (!current.bundledAvailable) setup.bundledMissing.textContent = current.bundledError || 'The bundled PostgreSQL is not available.';
 		if (params.get('error')) showSetupMessage('error', params.get('error'));
 		setup.section.hidden = false;
-		(current.configured ? setup.password : setup.host).focus();
+		(current.configured && !current.managed ? setup.password : setup.host).focus();
 
 		setup.test.addEventListener('click', () => void runCheck('test'));
 		setup.create.addEventListener('click', () => void runCheck('create'));
 		setup.cancel.addEventListener('click', () => worker.cancelSetup());
+		setup.useBundled.addEventListener('click', async () => {
+			if (busy) return;
+			setSetupBusy(true, 'Switching…');
+			setup.useBundled.disabled = true;
+			try {
+				await worker.useBundled();
+			} catch (error) {
+				showSetupMessage('error', stripIpcPrefix(error && error.message ? error.message : 'Could not switch to the bundled PostgreSQL.'));
+				setSetupBusy(false);
+				setup.useBundled.disabled = false;
+			}
+		});
 		setup.form.addEventListener('submit', async (event) => {
 			event.preventDefault();
 			if (busy) return;
@@ -136,10 +157,45 @@
 		});
 	}
 
+	function describePostgres(pg) {
+		if (!pg) return '';
+		if (!pg.managed) return `External PostgreSQL at ${pg.host}:${pg.port}.`;
+		switch (pg.phase) {
+			case 'starting':
+				return 'Bundled PostgreSQL: starting…';
+			case 'ready':
+				return `Bundled PostgreSQL: running on ${pg.host}:${pg.port}.`;
+			case 'stopped':
+				return 'Bundled PostgreSQL: stopped.';
+			case 'failed':
+				return 'Bundled PostgreSQL: could not start.';
+			default:
+				return 'Bundled PostgreSQL.';
+		}
+	}
+
 	function renderState(state) {
 		status.dot.className = 'dot';
 		status.restart.hidden = true;
 		status.error.hidden = true;
+		const pg = state.postgres;
+		status.postgres.textContent = describePostgres(pg);
+		// The database comes first: while it starts or when it fails, the worker has not been asked yet.
+		if (pg && pg.managed && (state.phase === 'idle' || state.phase === 'stopped') && (pg.phase === 'starting' || pg.phase === 'failed')) {
+			if (pg.phase === 'starting') {
+				status.dot.classList.add('dot-checking');
+				status.heading.textContent = 'Starting PostgreSQL…';
+				status.detail.textContent = 'The first start creates the database cluster and can take a moment.';
+			} else {
+				status.dot.classList.add('dot-bad');
+				status.heading.textContent = 'The bundled PostgreSQL could not start';
+				status.detail.textContent = 'Check the message and the log, then restart. Worker → Advanced switches to an external server.';
+				status.error.textContent = pg.error || '';
+				status.error.hidden = !pg.error;
+				status.restart.hidden = false;
+			}
+			return;
+		}
 		switch (state.phase) {
 			case 'starting':
 				status.dot.classList.add('dot-checking');
