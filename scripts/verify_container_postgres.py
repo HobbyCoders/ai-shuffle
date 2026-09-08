@@ -62,10 +62,6 @@ class Check:
             self.workspaces[volume] = self.volume()
         args = ["run", "-d", "--name", name, "--network", network,
                 "--stop-timeout", "90", "--shm-size", "256m",
-                "--label", f"com.docker.compose.project={self.prefix}",
-                "--label", "com.docker.compose.service=ai-shuffle",
-                "--label", "com.docker.compose.container-number=1",
-                "--label", "com.docker.compose.oneoff=False",
                 "--mount", f"type=volume,src={volume},dst=/data",
                 "--mount", f"type=volume,src={self.workspaces[volume]},dst=/workspace",
                 "-e", "START_CHROME=" + ("1" if chrome else "0")]
@@ -78,6 +74,29 @@ class Check:
         self.containers.append(name)
         self.docker(*args, self.image, *command)
         return name
+
+    def launch_compose(self, volume):
+        # Exercise Compose's real producer, not a docker-run fixture pretending
+        # to have Compose's internal discovery labels. Only owned fixture data
+        # is reused; no host .env, interpolated settings or credentials enter it.
+        name = self.prefix + "-c" + str(len(self.containers))
+        compose_file = self.artifacts / "backup-compose.json"
+        compose_file.write_text(json.dumps({
+            "services": {"ai-shuffle": {
+                "image": self.image, "container_name": name,
+                "network_mode": "none", "stop_grace_period": "90s", "shm_size": "256m",
+                "environment": {"START_CHROME": "0"},
+                "volumes": ["data:/data", "workspace:/workspace"],
+            }},
+            "volumes": {
+                "data": {"external": True, "name": volume},
+                "workspace": {"external": True, "name": self.workspaces[volume]},
+            },
+        }))
+        self.containers.append(name)
+        self.docker("compose", "--project-name", self.prefix, "--file", str(compose_file),
+                    "up", "--detach", "--no-build", "--pull", "never")
+        return name, compose_file
 
     def state(self, container):
         return json.loads(self.docker("inspect", "--format", "{{json .State}}", container).stdout)
@@ -169,18 +188,28 @@ class Check:
         archive = self.docker("exec", "--user", "99:100", recreated, "python", RUNTIME,
                               "dump", "--file", "-").stdout
         assert archive.startswith(b"PGDMP"), "Dump stream is not a PostgreSQL custom archive"
+        self.stop(recreated)
+        compose_app, compose_file = self.launch_compose(volume)
+        self.ready(compose_app)
+        assert self.sql(compose_app, "SELECT value FROM container_persistence_check;") == "retained"
         host_backup = self.artifacts / "host-helper.dump"
         helper_env = dict(os.environ, COMPOSE_PROJECT_NAME=self.prefix,
-                          COMPOSE_FILE=str(ROOT / "docker-compose.yml"))
+                          COMPOSE_FILE=str(compose_file))
         helper = subprocess.run(["bash", str(ROOT / "tools/backup-db.sh"), str(host_backup)], env=helper_env,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
         helper_log = re.sub(rb"postgres(?:ql)?://[^\s]+", b"[redacted-database-url]",
                             helper.stdout + helper.stderr)
         (self.artifacts / "host-helper.log").write_bytes(helper_log)
         assert helper.returncode == 0, "Host backup helper failed: " + helper_log.decode(errors="replace")
-        with host_backup.open("rb") as stream:
-            assert stream.read(5) == b"PGDMP", "Host backup helper corrupted the custom dump"
+        # Restore the helper's actual artifact below, not a separately seeded
+        # archive that would prove only the consumer's half of this path.
+        archive = host_backup.read_bytes()
+        assert archive.startswith(b"PGDMP"), "Host backup helper corrupted the custom dump"
         host_backup.unlink()
+        self.stop(compose_app)
+        self.docker("start", recreated)
+        self.ready(recreated)
+        self.passed("host backup helper discovers a real Compose service and emits a custom dump")
         fixture = self.volume()
         self.inspect_volume(fixture, "from pathlib import Path; import sys; p=Path('/data/fixture.dump'); p.write_bytes(sys.stdin.buffer.read()); p.chmod(0o644)", input=archive)
         self.docker("exec", "-e", "BACKUP_DIR=/data/acceptance-backups", recreated,
