@@ -58,6 +58,11 @@ class AccountRepository(private val context: Context) {
             pending.copy(apiKey = enrolled.getString("api_key"))
         }
     }
+    suspend fun remove(server: Server): Boolean {
+        val session = store.session()
+        return AccountWorkerRemoval.remove(server, session,
+            { session != null && store.matches(session) }, { servers.remove(it) })
+    }
     suspend fun link(server: Server) {
         val session = store.session() ?: throw IllegalStateException("Sign in before sharing a server.")
         val registered = store.pendingLink(server.id, session)?.getJSONObject("registration")

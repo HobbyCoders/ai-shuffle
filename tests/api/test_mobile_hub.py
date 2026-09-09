@@ -110,7 +110,7 @@ def admin_client():
     return TestClient(app)
 
 
-def test_account_profile_proxies_only_the_owning_account_and_its_workers(setup, monkeypatch):
+def test_account_profile_proxies_only_owning_account_inventory_metadata(setup, monkeypatch):
     assert setup.get('/api/v1/mobile/hub/account').status_code == 403  # owner access only
     setup = admin_client()
     assert setup.get('/api/v1/mobile/hub/account').status_code == 409
@@ -127,21 +127,28 @@ def test_account_profile_proxies_only_the_owning_account_and_its_workers(setup, 
                 'servers': [{'id': SERVER, 'name': 'Desk', 'url': 'https://desk.example', 'current': True},
                             {'id': DEVICE, 'name': 'Laptop', 'url': None, 'current': False},
                             {'id': 'not-a-server', 'name': 'x'}, 'garbage'],
-                'devices': [{'id': DEVICE, 'secret': 'never'}]}
+                'devices': [{'id': DEVICE, 'name': 'Phone', 'platform': 'android', 'secret': 'never', 'sessions': ['never']},
+                            {'id': 'invalid', 'name': 'Bad'}, 'garbage']}
 
     monkeypatch.setattr(account_hub, 'call', hub)
     profile = setup.get('/api/v1/mobile/hub/account')
     assert profile.status_code == 200, profile.text
     assert profile.json() == {'account': {'id': ACCOUNT, 'username': 'owner', 'profile_complete': False},
                               'servers': [{'id': SERVER, 'name': 'Desk', 'url': 'https://desk.example', 'current': True},
-                                          {'id': DEVICE, 'name': 'Laptop', 'url': None, 'current': False}]}
-    assert 'devices' not in profile.json() and 'never' not in profile.text
+                                          {'id': DEVICE, 'name': 'Laptop', 'url': None, 'current': False}],
+                              'devices': [{'id': DEVICE, 'name': 'Phone', 'platform': 'android'}]}
+    assert 'secret' not in profile.text and 'sessions' not in profile.text and 'never' not in profile.text
     assert setup.patch('/api/v1/mobile/hub/account', json={'username': '!bad'}).status_code == 400
     assert setup.patch('/api/v1/mobile/hub/account', json={'username': 'taken'}).status_code == 409
     renamed = setup.patch('/api/v1/mobile/hub/account', json={'username': ' Desk.Owner '})
     assert renamed.status_code == 200 and renamed.json()['account'] == {'id': ACCOUNT, 'username': 'desk.owner', 'profile_complete': True}
     assert seen[-1] == ('PATCH', 'account', {'username': 'desk.owner'})
     assert len([call for call in seen if call[0] == 'PATCH']) == 2  # the invalid name never reached the hub
+
+
+def test_account_profile_preserves_unknown_devices_for_older_hubs():
+    result = mobile_hub._profile({'account': {'id': ACCOUNT, 'username': 'owner'}, 'servers': []})
+    assert 'devices' not in result
 
 
 def test_connection_offers_sign_in_and_sign_up_links_for_the_same_code(setup, monkeypatch):

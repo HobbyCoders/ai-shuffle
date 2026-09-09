@@ -159,10 +159,22 @@ class ServerListActivity : NativeScreen() {
                             runWork { repo.link(server); repo.sync(); render(); status.text = "Worker linked to your account." }
                         }; true
                     }
-                    menu.add("Remove from this phone").setOnMenuItemClickListener {
-                        confirm("Remove ${server.name}?", "This removes its saved connection from this phone. The worker keeps running.") {
-                            com.hobbycoders.aishuffle.tools.DeviceToolsRuntime.stop()
-                            ServerStore.get(this@ServerListActivity).remove(server.id); render()
+                    val accountWorker = server.accountId != null
+                    menu.add(if (accountWorker) "Remove from account" else "Remove from this phone").setOnMenuItemClickListener {
+                        val message = if (accountWorker)
+                            "This removes ${server.name} from your account on all devices and revokes its account access and managed remote connection. Direct pairings stay saved. To restore it, sign in again on that worker."
+                        else "This removes its saved connection from this phone. The worker keeps running."
+                        confirm("Remove ${server.name}?", message) {
+                            runWork {
+                                val cleanupPending = repo.remove(server)
+                                com.hobbycoders.aishuffle.tools.DeviceToolsRuntime.stop()
+                                render()
+                                status.text = when {
+                                    cleanupPending -> "Worker removed from your account. Remote connection cleanup is still pending."
+                                    accountWorker -> "Worker removed from your account."
+                                    else -> "Worker removed from this phone."
+                                }
+                            }
                         }; true
                     }
                     show()

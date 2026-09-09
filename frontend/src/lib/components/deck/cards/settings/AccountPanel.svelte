@@ -20,6 +20,9 @@
 	let { workerName = 'My worker', variant = 'settings' }: { workerName?: string; variant?: 'settings' | 'setup' } = $props();
 
 	const POLL_MS = 4000;
+	const INVENTORY_MS = 30_000;
+	let profileCheckedAt = 0;
+	let loadingProfile = $state(false);
 	let connection = $state<AccountConnection | null>(null);
 	let profile = $state<AccountProfile | null>(null);
 	let checking = $state(true);
@@ -42,7 +45,7 @@
 	const canStart = $derived(connection !== null && connection.status !== 'locked' && connection.status !== 'unavailable');
 	const signedIn = $derived(Boolean(connection?.signed_in));
 	const needsUsername = $derived(signedIn && profile !== null && !profile.account.profile_complete);
-	const otherWorkers = $derived((profile?.servers ?? []).filter((worker) => !worker.current));
+	const accountWorkers = $derived(profile?.servers ?? []);
 	const browserSignedInThroughAccount = $derived(variant === 'settings' && auth.current.status?.auth_mode === 'account');
 	const remoteAccess = $derived.by(() => {
 		switch (connection?.status) {
@@ -70,8 +73,9 @@
 			statusError = '';
 			if (next.signed_in) {
 				intent = null; showPhone = false;
-				if (!wasSignedIn || profile === null) void loadProfile();
-			} else if (profile !== null) {
+				if (!wasSignedIn || Date.now() - profileCheckedAt >= INVENTORY_MS) void loadProfile();
+			} else {
+				profileVersion++; profileCheckedAt = 0;
 				profile = null; editingName = false;
 			}
 		} catch (e) {
@@ -82,6 +86,9 @@
 	}
 
 	async function loadProfile() {
+		if (loadingProfile || savingUsername || !connection?.signed_in) return;
+		loadingProfile = true;
+		profileCheckedAt = Date.now();
 		const version = ++profileVersion;
 		try {
 			const next = await getAccountProfile();
@@ -90,7 +97,7 @@
 			if (!next.account.profile_complete && !editingName) usernameInput = next.account.username;
 		} catch (e) {
 			if (!stopped && version === profileVersion) profileError = getErrorMessage(e, 'Could not load the account profile');
-		}
+		} finally { loadingProfile = false; }
 	}
 
 	onMount(() => {
@@ -227,14 +234,24 @@
 		{#if profile}
 			<div class="workers">
 				<span class="muted"><Server size={13} /> Workers on this account</span>
-				{#if otherWorkers.length === 0}
-					<span class="muted">Only this worker so far. Sign in on another worker to sync settings with it.</span>
+				<ul aria-label="Workers on this account">
+					{#each accountWorkers as worker (worker.id)}<li>{worker.name}{worker.current ? ' (this worker)' : ''}</li>{/each}
+				</ul>
+			</div>
+			<div class="workers">
+				<span class="muted"><Smartphone size={13} /> Phones and browsers on this account</span>
+				{#if profile.devices === undefined}
+					<span class="muted">Update the account service to see its phones and browsers here.</span>
+				{:else if profile.devices.length === 0}
+					<span class="muted">No phones or browsers registered to this account.</span>
 				{:else}
-					<ul aria-label="Workers on this account">
-						{#each otherWorkers as worker (worker.id)}<li>{worker.name}</li>{/each}
+					<ul aria-label="Phones and browsers on this account">
+						{#each profile.devices as device (device.id)}<li>{device.name || 'Unnamed device'}{device.platform ? ` · ${device.platform}` : ''}</li>{/each}
 					</ul>
 				{/if}
 			</div>
+			<p class="muted">These are account registrations, including offline devices. {variant === 'settings' ? 'Local network members and direct pairings are listed separately below.' : 'Local network members and direct pairings are separate from account registrations.'}</p>
+			<button type="button" class="btn subtle" disabled={loadingProfile || busy || savingUsername} onclick={loadProfile}>{loadingProfile ? 'Refreshing…' : 'Refresh account devices'}</button>
 		{/if}
 		{#if remoteAccess}<p class="muted">{remoteAccess}</p>{/if}
 		{#if profileError}<div class="error-row"><p role="alert">{profileError}</p><button type="button" class="btn" onclick={loadProfile}>Retry profile</button></div>{/if}

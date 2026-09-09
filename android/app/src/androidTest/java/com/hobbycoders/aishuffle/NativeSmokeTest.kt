@@ -285,7 +285,9 @@ class NativeSmokeTest {
         val device = store.beginSignIn()
         val session = com.hobbycoders.aishuffle.account.AccountSession(AccountStore.DEFAULT_HUB, "test-only", java.time.Instant.now().plusSeconds(3600).toString(), device, "test-account", "alex")
         store.save(session)
-        ServerStore.get(context).add(com.hobbycoders.aishuffle.model.Server.create("Home workstation", "https://worker.example.com", "test-only").copy(accountId = session.accountId, hubUrl = session.hub))
+        ServerStore.get(context).add(com.hobbycoders.aishuffle.model.Server.create("Home workstation", "https://worker.example.com", "test-only").copy(accountId = session.accountId, hubUrl = session.hub, hubServerId = "worker-one"))
+        val direct = com.hobbycoders.aishuffle.model.Server.create("Direct workstation", "https://direct.example.com", "test-only")
+        ServerStore.get(context).add(direct)
         ActivityScenario.launch(ServerListActivity::class.java).use { scenario ->
             awaitFocused(scenario)
             instrumentation.uiAutomation.waitForIdle(500, 5_000)
@@ -293,7 +295,18 @@ class NativeSmokeTest {
             onView(withText("Home workstation")).check(matches(isDisplayed()))
             onView(withContentDescription("Options for Home workstation")).perform(click())
             onView(withText("Start voice chat")).check(matches(isDisplayed()))
-            androidx.test.espresso.Espresso.pressBack()
+            onView(withText("Remove from account")).perform(click())
+            onView(withText("This removes Home workstation from your account on all devices and revokes its account access and managed remote connection. Direct pairings stay saved. To restore it, sign in again on that worker.")).check(matches(isDisplayed()))
+            TestScreenshots.capture("remove-worker-account-confirmation")
+            onView(withText("Cancel")).perform(click())
+            Assert.assertEquals(2, ServerStore.get(context).getAll().size)
+            onView(withContentDescription("Options for Direct workstation")).perform(click())
+            onView(withText("Remove from this phone")).perform(click())
+            onView(withText("This removes its saved connection from this phone. The worker keeps running.")).check(matches(isDisplayed()))
+            TestScreenshots.capture("remove-worker-local-confirmation")
+            onView(withText("Continue")).perform(click())
+            awaitCondition("Direct worker was not removed") { ServerStore.get(context).getById(direct.id) == null }
+            onView(withText("Home workstation")).check(matches(isDisplayed()))
             variants(scenario, "workers")
         }
     }

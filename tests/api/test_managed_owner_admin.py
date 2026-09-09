@@ -99,6 +99,30 @@ def test_existing_managed_owner_gets_all_admin_settings_and_keeps_device_identit
     assert change_voice(fresh, headers={'Authorization': 'Bearer ' + token}).status_code == 200
 
 
+@pytest.mark.parametrize('transport', ['cookie', 'bearer'])
+def test_managed_account_session_reads_account_wide_inventory(owner_app, monkeypatch, transport):
+    hub = bind_and_enroll(monkeypatch)
+    client, token = web_session(owner_app)
+    if transport == 'bearer':
+        client.cookies.clear()
+        client.headers['Authorization'] = 'Bearer ' + token
+    inventory = {
+        'account': {'id': ACCOUNT, 'username': 'owner', 'profile_complete': True},
+        'servers': [{'id': SERVER, 'name': 'This worker', 'url': None, 'current': True},
+                    {'id': OTHER, 'name': 'Other worker', 'url': None, 'current': False}],
+        'devices': [{'id': DEVICE, 'name': 'Owner phone', 'platform': 'android'}],
+    }
+    hub.side_effect = lambda binding, method, suffix, *args, **kwargs: inventory if suffix == 'account' else {
+        'active': True, 'account_id': ACCOUNT, 'device_id': DEVICE}
+    response = client.get('/api/v1/mobile/hub/account')
+    assert response.status_code == 200, response.text
+    assert response.json() == inventory
+    # Revocation immediately removes the right to read the shared inventory too.
+    hub.side_effect = None
+    hub.return_value = {'active': False}
+    assert client.get('/api/v1/mobile/hub/account').status_code == 403
+
+
 @pytest.mark.parametrize('linked_by', ['pcl_direct-controller', 'managed:another-install'])
 def test_manual_link_or_other_install_never_promotes(owner_app, monkeypatch, linked_by):
     bind_and_enroll(monkeypatch, linked_by)

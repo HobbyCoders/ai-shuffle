@@ -59,14 +59,14 @@ it.each(['locked', 'unavailable'])('disables both entry points when the link is 
 	expect(signIn.getAttribute('aria-describedby')).toBe('account-panel-error');
 });
 
-it('shows the username, the other workers on the account and signs out', async () => {
+it('shows the username, every worker on the account and signs out', async () => {
 	reads('', { ...disconnected, signed_in: true, status: 'connected' });
 	api.delete.mockResolvedValue(disconnected);
 	render(AccountPanel);
 	expect(await screen.findByText('@desk.owner')).toBeTruthy();
 	const workers = screen.getByRole('list', { name: 'Workers on this account' });
 	expect(within(workers).getByText('Laptop')).toBeTruthy();
-	expect(within(workers).queryByText('Desk')).toBeNull();
+	expect(within(workers).getByText('Desk (this worker)')).toBeTruthy();
 	expect(screen.getByText('Remote access is on')).toBeTruthy();
 	expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
 	expect(screen.queryByRole('button', { name: 'Sign this browser out' })).toBeNull();
@@ -146,4 +146,32 @@ it('does not guess the account state before the first answer arrives', async () 
 	reads('', disconnected);
 	await fireEvent.click(screen.getByRole('button', { name: 'Retry account status' }));
 	expect(await screen.findByRole('button', { name: 'Sign in' })).toBeTruthy();
+});
+
+it.each(['settings', 'setup'] as const)('refreshes account-wide workers and devices in the %s panel without losing offline registrations', async (variant) => {
+	vi.useFakeTimers();
+	let inventory = { ...profile, devices: [{ id: 'phone', name: 'Phone', platform: 'android' }] };
+	api.get.mockImplementation(async (p: string) => p === '/mobile/hub/connection'
+		? { ...disconnected, signed_in: true, status: 'connected' } : inventory);
+	render(AccountPanel, { variant });
+	await tick(); await vi.advanceTimersByTimeAsync(0);
+	expect(within(screen.getByRole('list', { name: 'Phones and browsers on this account' })).getByText('Phone · android')).toBeTruthy();
+	inventory = { ...profile, servers: [profile.servers[0]], devices: [{ id: 'browser', name: 'Browser', platform: 'web' }] };
+	await vi.advanceTimersByTimeAsync(32_000);
+	expect(screen.queryByText('Laptop')).toBeNull();
+	expect(screen.queryByText('Phone · android')).toBeNull();
+	expect(screen.getByText('Browser · web')).toBeTruthy();
+	inventory = { ...inventory, servers: [...profile.servers, { id: 'offline', name: 'Offline PC', url: null, current: false }] };
+	await fireEvent.click(screen.getByRole('button', { name: 'Refresh account devices' }));
+	await tick();
+	expect(screen.getByText('Offline PC')).toBeTruthy();
+});
+
+it('distinguishes an old hub from an account with no phone or browser registrations', async () => {
+	reads('', { ...disconnected, signed_in: true, status: 'connected' });
+	render(AccountPanel);
+	expect(await screen.findByText('Update the account service to see its phones and browsers here.')).toBeTruthy();
+	reads('', { ...disconnected, signed_in: true, status: 'connected' }, { ...profile, devices: [] });
+	await fireEvent.click(screen.getByRole('button', { name: 'Refresh account devices' }));
+	expect(await screen.findByText('No phones or browsers registered to this account.')).toBeTruthy();
 });

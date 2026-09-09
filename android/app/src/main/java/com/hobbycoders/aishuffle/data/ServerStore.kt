@@ -61,6 +61,7 @@ class ServerStore private constructor(private val prefs: SharedPreferences) {
     fun remove(id: String) {
         save(getAll().filterNot { it.id == id })
         if (lastUsedServerId == id) lastUsedServerId = null
+        if (selectedToolsServerId == id) selectedToolsServerId = null
     }
 
     fun removeAccountServers() { save(com.hobbycoders.aishuffle.account.AccountBoundary.directOnly(getAll())) }

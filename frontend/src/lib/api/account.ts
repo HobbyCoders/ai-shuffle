@@ -51,8 +51,10 @@ export interface AccountWorker {
 
 export interface AccountProfile {
 	account: { id: string | null; username: string; profile_complete: boolean };
-	/** Every worker linked to the account (phones and browsers are never listed). */
+	/** Every registered worker, independent of this worker's local network. */
 	servers: AccountWorker[];
+	/** Account-wide phone/browser metadata. Absent when the hub predates this inventory. */
+	devices?: { id: string; name: string; platform: string }[];
 }
 
 export async function getAccountConnection(): Promise<AccountConnection> {

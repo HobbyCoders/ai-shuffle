@@ -65,11 +65,10 @@ def _active_binding():
 
 @router.get('/account')
 def account_profile(_admin=Depends(require_admin)):
-    """The account that owns this worker: username setup state and its other workers.
+    """Account inventory, scoped by the hub to this worker's owning account.
 
-    Phones, browsers and their sessions are never listed; the hub scopes the
-    answer to the linked account. Any account can use this: the local owner
-    of a linked worker already controls its account connection.
+    Only display metadata is returned for workers, phones and browsers, never
+    their credentials or sessions. Local owner access is required.
     """
     binding = _active_binding()
     return JSONResponse(_profile(account_hub.call(binding, 'GET', 'account')), headers={'Cache-Control': 'no-store'})
@@ -99,9 +98,23 @@ def _profile(result):
             continue
         servers.append({'id': server_id, 'name': str(item.get('name') or '')[:80], 'url': item.get('url') if isinstance(item.get('url'), str) else None,
                         'current': bool(item.get('current'))})
-    return {'account': {'id': account.get('id'), 'username': account['username'],
-                        'profile_complete': bool(account.get('profile_complete'))},
-            'servers': servers}
+    profile = {'account': {'id': account.get('id'), 'username': account['username'],
+                           'profile_complete': bool(account.get('profile_complete'))},
+               'servers': servers}
+    # Absence means an older hub, not that the account has no phones/browsers.
+    if isinstance(result.get('devices'), list):
+        devices = []
+        for item in result['devices']:
+            if not isinstance(item, dict):
+                continue
+            try:
+                device_id = account_hub.identifier(item.get('id'))
+            except ValueError:
+                continue
+            devices.append({'id': device_id, 'name': str(item.get('name') or '')[:80],
+                            'platform': str(item.get('platform') or '')[:32]})
+        profile['devices'] = devices
+    return profile
 
 
 @router.get('/endpoint')
