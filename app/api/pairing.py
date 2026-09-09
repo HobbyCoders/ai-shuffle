@@ -11,7 +11,8 @@ from typing import Any, Deque, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from app.api.auth import get_client_ip, require_admin
+from app.api.auth import require_admin
+from app.core.request_identity import get_client_ip
 from app.core import pairing
 from app.core.config import settings
 from app.db import database

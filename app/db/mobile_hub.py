@@ -108,7 +108,6 @@ def disconnect():
         for key in (secret_key(), 'mobile_managed_pending:' + settings.effective_instance_id,
                     'mobile_managed_credential:' + settings.effective_instance_id):
             c.execute('DELETE FROM system_settings WHERE key=%s', (key,))
-        c.execute('DELETE FROM owner_browser_requests WHERE instance_id=%s', (settings.effective_instance_id,))
 
 
 def local_device_id(server_id, hub_device_id):
@@ -141,7 +140,7 @@ def ownership(device_id=None, *, paired_client_id=None):
         return None
 
 
-def enroll(identity, info, key_hash, expires_at, scopes, *, session_token_hash=None, login_proof=None, scoped=False):
+def enroll(identity, info, key_hash, expires_at, scopes, *, session_token_hash=None, scoped=False):
     """Never upsert: all three rows commit together or none do.
 
     Tombstone authorizations are intentionally retained after local deletion.
@@ -159,13 +158,6 @@ def enroll(identity, info, key_hash, expires_at, scopes, *, session_token_hash=N
         c = conn.cursor()
         from app.db.device_identity import lock_device_identity
         lock_device_identity(c, device_id)
-        if login_proof:
-            from app.core.config import settings
-            c.execute('''DELETE FROM owner_browser_requests WHERE proof_hash=%s
-                AND instance_id=%s AND server_id=%s AND expires_at>%s RETURNING proof_hash''',
-                (login_proof, settings.effective_instance_id, identity['server_id'], now))
-            if not c.fetchone():
-                raise ValueError('Browser sign-in expired or already consumed')
         for table in ('mobile_devices', 'paired_clients', 'mobile_hub_authorizations', 'mobile_worker_authorizations'):
             c.execute(f"SELECT device_id FROM {table} WHERE device_id = %s", (device_id,))
             if c.fetchone():

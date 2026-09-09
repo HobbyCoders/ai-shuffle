@@ -19,7 +19,7 @@ vi.mock('$lib/api/auth', () => ({ getWorkspaceConfig: mocks.workspace, setWorksp
 	getGithubAuthStatus: mocks.githubStatus, startGithubWebLogin: mocks.githubWeb, loginGithubWithToken: mocks.githubToken }));
 vi.mock('$lib/stores/auth.svelte', () => ({
 	auth: { checkAuth: mocks.checkAuth, current: { status: { setup_required: true, auth_mode: 'local' } }, logout: vi.fn(),
-		subscribe(run: (v: unknown) => void) { run({ status: { account_sign_in_available: true } }); return () => {}; } },
+		subscribe(run: (v: unknown) => void) { run({ status: { auth_mode: 'local' } }); return () => {}; } },
 	anyCredential: { subscribe(run: (v: boolean) => void) { run(mocks.hasCredential); return () => {}; } }
 }));
 vi.mock('$lib/stores/providers.svelte', () => ({ providers: { current: { get providers() { return mocks.providers; } }, ensureLoaded: vi.fn(), refreshProviders: vi.fn() } }));

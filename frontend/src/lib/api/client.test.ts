@@ -3,15 +3,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ApiClient, redirectToLoginOn401 } from './client';
+import { ApiClient, recheckAuthOn401 } from './client';
 import { auth } from '$lib/stores/auth.svelte';
-
-// The 401 interceptor dynamically imports `$app/navigation` and calls goto().
-// Mock it so we can assert the redirect fires (or doesn't) without a real router.
-const gotoMock = vi.fn(async (_url?: string | URL) => {});
-vi.mock('$app/navigation', () => ({
-	goto: (url?: string | URL) => gotoMock(url)
-}));
 
 describe('ApiClient', () => {
 	let client: ApiClient;
@@ -267,7 +260,9 @@ describe('ApiClient', () => {
 		});
 	});
 
-	// ── Phase 3.2: global 401 → /login interceptor ─────────────────────────
+	// ── Phase 3.2: global 401 → fresh worker auth check ─────────────────────
+	// There is no login page. A 401 re-checks the worker session so the root
+	// layout can react to the refreshed auth store; nothing navigates.
 	describe('401 interceptor', () => {
 		function set401(): void {
 			fetchMock.mockResolvedValueOnce({
@@ -284,30 +279,32 @@ describe('ApiClient', () => {
 			});
 		}
 
+		const statusCalls = () => fetchMock.mock.calls.filter(([url]) => url === '/api/v1/auth/status');
+
 		beforeEach(() => {
-			gotoMock.mockClear();
-			setPathname('/'); // default: an app page, not login/setup
+			setPathname('/'); // default: an app page, not setup/pair
 		});
 
-		it('redirects to /login when a fresh worker check confirms an unauthenticated session', async () => {
+		it('records a confirmed unauthenticated session after a fresh worker check', async () => {
 			set401();
 			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: false }));
 			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 });
-			await redirectToLoginOn401();
-			expect(gotoMock).toHaveBeenCalledExactlyOnceWith('/login');
+			await recheckAuthOn401();
+			expect(auth.current.status?.authenticated).toBe(false);
+			expect(window.location.assign).not.toHaveBeenCalled();
 			expect(fetchMock).toHaveBeenLastCalledWith('/api/v1/auth/status', expect.objectContaining({
 				credentials: 'include', cache: 'no-store'
 			}));
 		});
 
-		it('preserves worker login on a provider-specific 401 without replaying the operation', async () => {
+		it('preserves worker auth on a provider-specific 401 without replaying the operation', async () => {
 			fetchMock.mockResolvedValueOnce(Response.json({ detail: 'GitHub CLI not authenticated' }, { status: 401 }));
 			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: true }));
 			await expect(client.post('/github/create-pr', { title: 'test' })).rejects.toMatchObject({
 				status: 401, detail: 'GitHub CLI not authenticated'
 			});
-			await redirectToLoginOn401();
-			expect(gotoMock).not.toHaveBeenCalled();
+			await recheckAuthOn401();
+			expect(auth.current.status?.authenticated).toBe(true);
 			expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/api/v1/github/create-pr', '/api/v1/auth/status']);
 		});
 
@@ -321,12 +318,11 @@ describe('ApiClient', () => {
 			const rejected = expect(oldRequest).rejects.toMatchObject({ status: 401 });
 			finishOld(Response.json({ detail: 'Expired old session' }, { status: 401 }));
 			await rejected;
-			await redirectToLoginOn401();
-			expect(gotoMock).not.toHaveBeenCalled();
+			await recheckAuthOn401();
 			expect(auth.current.status?.authenticated).toBe(true);
 		});
 
-		it.each(['503', 'network'])('does not redirect when the fresh status check fails (%s)', async (failure) => {
+		it.each(['503', 'network'])('keeps the prior status and reports the failed fresh check (%s)', async (failure) => {
 			// An older anonymous status must not substitute for the failed check.
 			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: false }));
 			await auth.checkAuth();
@@ -334,12 +330,12 @@ describe('ApiClient', () => {
 			if (failure === '503') fetchMock.mockResolvedValueOnce(Response.json({ detail: 'Hub unavailable' }, { status: 503 }));
 			else fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'));
 			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 });
-			await redirectToLoginOn401();
-			expect(gotoMock).not.toHaveBeenCalled();
+			await recheckAuthOn401();
+			expect(auth.current.error).toBe('Failed to check auth status');
 			expect(window.location.assign).not.toHaveBeenCalled();
 		});
 
-		it('deduplicates concurrent HTTP and socket failures into one current auth check and redirect', async () => {
+		it('deduplicates concurrent HTTP and socket failures into one current auth check', async () => {
 			let finishStatus!: (response: Response) => void;
 			fetchMock.mockImplementation((url) => url === '/api/v1/auth/status'
 				? new Promise<Response>((resolve) => { finishStatus = resolve; })
@@ -348,72 +344,65 @@ describe('ApiClient', () => {
 				expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 }),
 				expect(client.get('/projects')).rejects.toMatchObject({ status: 401 })
 			]);
-			const socketFailure = redirectToLoginOn401();
+			const socketFailure = recheckAuthOn401();
 			await vi.waitFor(() => expect(finishStatus).toBeTypeOf('function'));
-			expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/auth/status')).toHaveLength(1);
+			expect(statusCalls()).toHaveLength(1);
 			finishStatus(Response.json({ authenticated: false }));
 			await socketFailure;
-			expect(gotoMock).toHaveBeenCalledExactlyOnceWith('/login');
+			expect(statusCalls()).toHaveLength(1);
+			expect(auth.current.status?.authenticated).toBe(false);
 		});
 
-		it('does not redirect when a newer successful auth check overtakes its anonymous result', async () => {
+		it('lets a newer successful auth check overtake an older anonymous result', async () => {
 			let finishStatus!: (response: Response) => void;
 			fetchMock.mockReturnValueOnce(new Promise<Response>((resolve) => { finishStatus = resolve; }));
-			const confirmation = redirectToLoginOn401();
+			const confirmation = recheckAuthOn401();
 			await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 			fetchMock.mockResolvedValueOnce(Response.json({ authenticated: true }));
 			await auth.checkAuth();
 			finishStatus(Response.json({ authenticated: false }));
 			await confirmation;
-			expect(gotoMock).not.toHaveBeenCalled();
 			expect(auth.current.status?.authenticated).toBe(true);
 		});
 
-		// Give any (erroneously scheduled) dynamic-import redirect a real chance to
+		// Give any (erroneously scheduled) dynamic-import re-check a real chance to
 		// run before asserting it did NOT fire — otherwise "not called" is trivial.
 		async function flush() {
 			await new Promise((r) => setTimeout(r, 0));
 			await new Promise((r) => setTimeout(r, 0));
 		}
 
-		it('does NOT redirect on a 401 from an auth endpoint (/auth/*)', async () => {
+		it('does NOT re-check on a 401 from an auth endpoint (/auth/*)', async () => {
 			set401();
 			await expect(client.get('/auth/status')).rejects.toMatchObject({ status: 401 });
 			await flush();
-			expect(gotoMock).not.toHaveBeenCalled();
+			expect(fetchMock).toHaveBeenCalledTimes(1);
 		});
 
-		it('does NOT redirect on a 401 from the /auth/login endpoint', async () => {
-			set401();
-			await expect(client.post('/auth/login', { u: 'x' })).rejects.toMatchObject({ status: 401 });
-			await flush();
-			expect(gotoMock).not.toHaveBeenCalled();
-		});
-
-		it('does NOT redirect on a 401 from a /workspace/* probe endpoint', async () => {
+		it('does NOT re-check on a 401 from a /workspace/* probe endpoint', async () => {
 			set401();
 			await expect(client.get('/workspace/validate')).rejects.toMatchObject({ status: 401 });
 			await flush();
-			expect(gotoMock).not.toHaveBeenCalled();
+			expect(fetchMock).toHaveBeenCalledTimes(1);
 		});
 
-		it('does NOT redirect when already on /login (loop guard)', async () => {
-			setPathname('/login');
-			set401();
-			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 });
-			await flush();
-			expect(gotoMock).not.toHaveBeenCalled();
-		});
-
-		it('does NOT redirect when already on /setup (loop guard)', async () => {
+		it('does NOT re-check when already on /setup (loop guard)', async () => {
 			setPathname('/setup');
 			set401();
 			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 });
 			await flush();
-			expect(gotoMock).not.toHaveBeenCalled();
+			expect(fetchMock).toHaveBeenCalledTimes(1);
 		});
 
-		it('does NOT redirect on a non-401 error from a non-auth endpoint', async () => {
+		it('does NOT re-check when already on /pair (loop guard)', async () => {
+			setPathname('/pair');
+			set401();
+			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 401 });
+			await flush();
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('does NOT re-check on a non-401 error from a non-auth endpoint', async () => {
 			fetchMock.mockResolvedValueOnce({
 				ok: false,
 				status: 403,
@@ -421,7 +410,7 @@ describe('ApiClient', () => {
 			});
 			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 403 });
 			await flush();
-			expect(gotoMock).not.toHaveBeenCalled();
+			expect(fetchMock).toHaveBeenCalledTimes(1);
 		});
 	});
 });

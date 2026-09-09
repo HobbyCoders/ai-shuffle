@@ -15,7 +15,7 @@ import type {
 	UsageSnapshot,
 	ProviderUsageEntry,
 } from '$lib/stores/rate-limit';
-import { apiBase, isBundledMobile, withAuth } from './runtime';
+import { apiBase, withAuth } from './runtime';
 
 
 export interface ApiError {
@@ -25,10 +25,10 @@ export interface ApiError {
 
 /**
  * Auth-related endpoint path prefixes (relative to API_BASE). A 401 from any of
- * these is EXPECTED during the login / setup / status-check flow (expired sign-in,
- * not-yet-authenticated status poll, etc.) — redirecting on those would create a
- * redirect loop off the very page that needs to render the 401. Other endpoints
- * can also report provider authentication failures, so confirm worker auth first.
+ * these is EXPECTED during the setup / status-check flow (not-yet-authenticated
+ * status poll, workspace probes, etc.) — re-checking auth on those would loop on
+ * the very page that needs to render the 401. Other endpoints can also report
+ * provider authentication failures, so confirm worker auth first.
  */
 const AUTH_PATH_PREFIXES = ['/auth/', '/workspace/', '/pairing/exchange'];
 
@@ -39,44 +39,33 @@ function isAuthPath(path: string): boolean {
 	return AUTH_PATH_PREFIXES.some((prefix) => clean.startsWith(prefix));
 }
 
-let pendingAuthRedirect: Promise<void> | null = null;
+let pendingAuthCheck: Promise<void> | null = null;
 
-function isLoginFlow(): boolean {
-	return ['/login', '/setup', '/pair'].includes(window.location?.pathname ?? '');
+function isSetupFlow(): boolean {
+	return ['/setup', '/pair'].includes(window.location?.pathname ?? '');
 }
 
 /**
  * A failed request/socket can belong to an old cookie or to a provider login.
- * Check the current worker session before navigating, sharing one check across
- * concurrent failures. The failed operation is still rejected, never replayed.
+ * Re-check the current worker session, sharing one check across concurrent
+ * failures. There is no login page to send anyone to: the root layout reacts to
+ * the refreshed auth store (the local-network notice, or the mobile app's own
+ * reconnect message). The failed operation is still rejected, never replayed.
  */
-export function redirectToLoginOn401(): Promise<void> {
-	if (typeof window === 'undefined' || isLoginFlow()) return Promise.resolve();
-	if (pendingAuthRedirect) return pendingAuthRedirect;
-	pendingAuthRedirect = (async () => {
+export function recheckAuthOn401(): Promise<void> {
+	if (typeof window === 'undefined' || isSetupFlow()) return Promise.resolve();
+	if (pendingAuthCheck) return pendingAuthCheck;
+	pendingAuthCheck = (async () => {
 		try {
 			// Reuse the store's account/logout epoch fencing. Import lazily because the
 			// auth API itself uses this client.
 			const { auth } = await import('$lib/stores/auth.svelte');
-			const status = await auth.checkAuth();
-			const stillUnauthenticated = () => status?.authenticated === false
-				&& auth.current.status?.authenticated === false
-				&& !auth.current.loading && !auth.current.error && !isLoginFlow();
-			if (!stillUnauthenticated()) return;
-			// The bundled mobile UI has no login route: the app owns the session
-			// and shows its own reconnect UI once the auth store reports it.
-			if (isBundledMobile()) return;
-			try {
-				const { goto } = await import('$app/navigation');
-				if (stillUnauthenticated()) await goto('/login');
-			} catch {
-				if (stillUnauthenticated()) window.location.assign('/login');
-			}
+			await auth.checkAuth();
 		} catch {
 			// A network/status failure does not establish that the session was revoked.
 		}
-	})().finally(() => { pendingAuthRedirect = null; });
-	return pendingAuthRedirect;
+	})().finally(() => { pendingAuthCheck = null; });
+	return pendingAuthCheck;
 }
 
 /**
@@ -178,7 +167,7 @@ export class ApiClient {
 			// Confirm worker authentication separately from provider-specific or stale
 			// failures. Auth endpoints render their own expected authentication errors.
 			if (response.status === 401 && !isAuthPath(path)) {
-				redirectToLoginOn401();
+				recheckAuthOn401();
 			}
 			throw {
 				detail,
@@ -312,10 +301,7 @@ export interface AuthStatus {
 	auth_mode?: 'local' | 'account';
 	local_access?: boolean;
 	owner_linked?: boolean;
-	account_sign_in_available?: boolean;
 	credential_storage?: { ready: boolean; state: string };
-	local_recovery?: boolean;
-	local_recovery_available?: boolean;
 	claude_authenticated: boolean;
 	/** True only when the Claude OAuth token is present AND not expired.
 	 *  May be undefined on older backends — treat undefined as "unknown". */
@@ -427,9 +413,7 @@ export interface HealthResponse {
 	auth_mode?: 'local' | 'account';
 	local_access?: boolean;
 	owner_linked?: boolean;
-	account_sign_in_available?: boolean;
 	credential_storage?: { ready: boolean; state: string };
-	local_recovery?: boolean;
 	claude_authenticated: boolean;
 }
 

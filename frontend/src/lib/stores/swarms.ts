@@ -1,7 +1,7 @@
 import { writable, get } from 'svelte/store';
 import { apiUrl, withAuth } from '$lib/api/runtime';
 import { parseSwarm, newestSwarm, type SwarmSnapshot } from '$lib/utils/swarm';
-import { redirectToLoginOn401 } from '$lib/api/client';
+import { recheckAuthOn401 } from '$lib/api/client';
 
 interface SwarmState { bySession: Record<string, Record<string, SwarmSnapshot>>; errors: Record<string, string>; }
 const state = writable<SwarmState>({ bySession: {}, errors: {} });
@@ -10,7 +10,7 @@ const pending = new Map<string, Promise<void>>();
 const base = (id: string) => apiUrl(`/api/sessions/${encodeURIComponent(id)}/swarms`);
 async function request(url: string, method = 'GET'): Promise<unknown> {
  const response = await fetch(url, withAuth({ method, headers: { Accept: 'application/json' } }));
- if (response.status === 401) redirectToLoginOn401();
+ if (response.status === 401) recheckAuthOn401();
  if (!response.ok) throw new Error(`Swarm request failed (${response.status}). Try again.`);
  return response.json();
 }

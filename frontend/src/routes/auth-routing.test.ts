@@ -30,7 +30,6 @@ vi.mock('$lib/stores/layout.svelte', () => ({ layout: { openChat: vi.fn() },
 vi.mock('$lib/components/InstallPrompt.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/BannerHost.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/ComputerUseBanner.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
-vi.mock('$lib/components/OwnerSignIn.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/layout/AppLayout.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/voice/ActiveVoiceCallBar.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/voice/GlobalVoiceInput.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
@@ -55,6 +54,8 @@ let router: typeof import('$lib/test-stubs/app-stores');
 let statusRequests: Mock<() => Promise<Response>>;
 const signedIn = { authenticated: true, setup_required: false, onboarding_complete: true };
 const anonymous = { authenticated: false, setup_required: false, onboarding_complete: true };
+// There is no login page: a browser the worker does not trust sees this notice in place.
+const DENIED = 'AI Shuffle only accepts direct connections from its local network.';
 function deferred() {
 	let resolve!: (value: Response) => void;
 	const promise = new Promise<Response>((done) => { resolve = done; });
@@ -79,7 +80,7 @@ beforeEach(async () => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-it.each(['503', 'network', 'empty-json', 'invalid-boolean', 'html'])('keeps a failed fresh bootstrap out of login, then recovers on resume (%s)', async failure => {
+it.each(['503', 'network', 'empty-json', 'invalid-boolean', 'html'])('keeps a failed fresh bootstrap out of the local-network notice, then recovers on resume (%s)', async failure => {
 	if (failure === '503') statusRequests.mockResolvedValueOnce(Response.json({ detail: 'Unavailable' }, { status: 503 }));
 	else if (failure === 'network') statusRequests.mockRejectedValueOnce(new TypeError('Failed to fetch'));
 	else if (failure === 'empty-json') statusRequests.mockResolvedValueOnce(Response.json({}));
@@ -95,7 +96,7 @@ it.each(['503', 'network', 'empty-json', 'invalid-boolean', 'html'])('keeps a fa
 	resume();
 	await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
 	expect(get(router.page).url.pathname).toBe('/');
-	expect(mocks.goto).not.toHaveBeenCalledWith('/login');
+	expect(mocks.goto).not.toHaveBeenCalled();
 });
 
 it('retries an unavailable bootstrap only on explicit retry or resume, and still honors denial', async () => {
@@ -104,9 +105,9 @@ it('retries an unavailable bootstrap only on explicit retry or resume, and still
 	await waitFor(() => expect(auth.current.error).not.toBeNull());
 	statusRequests.mockResolvedValueOnce(Response.json(anonymous));
 	await fireEvent.click(view.getByRole('button', { name: 'Try again' }));
-	await waitFor(() => expect(get(router.page).url.pathname).toBe('/login'));
+	await waitFor(() => expect(view.getByText(DENIED)).toBeTruthy());
 	expect(statusRequests).toHaveBeenCalledTimes(2);
-	expect(mocks.init).not.toHaveBeenCalled();
+	expect(mocks.goto).not.toHaveBeenCalled(); expect(mocks.init).not.toHaveBeenCalled();
 });
 
 it('does not route on an older status continuation while a newer check is pending', async () => {
@@ -127,28 +128,32 @@ it('does not route on an older status continuation while a newer check is pendin
 	expect(mocks.goto).not.toHaveBeenCalled();
 	newer.resolve(Response.json(signedIn)); await checking;
 	await waitFor(() => expect(auth.current.loading).toBe(false));
-	expect(mocks.goto).not.toHaveBeenCalledWith('/login');
+	expect(mocks.goto).not.toHaveBeenCalled();
 });
 
 it.each([
 	[signedIn, '/'], [{ ...signedIn, setup_required: true }, '/setup'],
 	[{ ...signedIn, onboarding_complete: false }, '/setup'],
 	[{ authenticated: true, setup_required: false }, '/']
-])('recovers an already mounted login page after a fresh successful check (%j)', async (status, target) => {
-	navigate('/login'); statusRequests.mockResolvedValueOnce(Response.json(anonymous));
+])('recovers from the local-network notice after a fresh successful check (%j)', async (status, target) => {
+	statusRequests.mockResolvedValueOnce(Response.json(anonymous));
 	const view = render(Harness);
-	await waitFor(() => expect(view.getByText('Sign in with the account that owns this worker.')).toBeTruthy());
+	await waitFor(() => expect(view.getByText(DENIED)).toBeTruthy());
+	expect(mocks.goto).not.toHaveBeenCalled(); expect(mocks.init).not.toHaveBeenCalled();
 	statusRequests.mockResolvedValueOnce(Response.json(status));
 	resume();
 	await waitFor(() => expect(get(router.page).url.pathname).toBe(target));
-	expect(mocks.goto).not.toHaveBeenCalledWith('/login');
+	await waitFor(() => expect(view.queryByText(DENIED)).toBeNull());
+	if (target === '/') await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
 });
 
-it('redirects a previously authenticated route when the current worker explicitly denies it', async () => {
+it('replaces a previously authenticated route with the local-network notice when the current worker explicitly denies it', async () => {
 	statusRequests.mockResolvedValueOnce(Response.json(signedIn));
-	render(Harness); await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+	const view = render(Harness); await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
 	statusRequests.mockResolvedValueOnce(Response.json(anonymous)); resume();
-	await waitFor(() => expect(get(router.page).url.pathname).toBe('/login'));
+	await waitFor(() => expect(view.getByText(DENIED)).toBeTruthy());
+	expect(mocks.goto).not.toHaveBeenCalled();
+	expect(get(router.page).url.pathname).toBe('/');
 });
 
 it('keeps the existing authenticated page mounted through a failed refresh', async () => {

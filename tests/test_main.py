@@ -324,12 +324,15 @@ class TestRouterRegistration:
         assert str(app.url_path_for("api_health_check")) == "/api/v1/health"
 
     def test_auth_router_registered(self):
-        """Auth router should be registered."""
+        """Auth router should be registered without any owner login endpoint."""
+        from starlette.routing import NoMatchFound
         from app.main import app
         assert str(app.url_path_for("get_auth_status")) == "/api/v1/auth/status"
-        # Password login is a retired 410 endpoint, not the account entry point.
-        assert str(app.url_path_for("start_account_login")) == "/api/v1/auth/account/start"
-        assert str(app.url_path_for("poll_account_login")) == "/api/v1/auth/account/poll"
+        assert str(app.url_path_for("configure_local_install")) == "/api/v1/auth/setup"
+        # Shuffle never asks its owner to sign in: no password, account or recovery login route exists.
+        for name in ("retired_password_login", "start_account_login", "poll_account_login", "local_recovery"):
+            with pytest.raises(NoMatchFound):
+                app.url_path_for(name)
 
     def test_agents_router_registered(self):
         """Agents router should be registered."""

@@ -20,7 +20,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from app.api.auth import get_client_ip, require_admin, require_auth
+from app.api.auth import require_admin, require_auth
+from app.core.request_identity import get_client_ip
 from app.api.pairing import _ExchangeRateLimiter
 from app.core.config import settings
 from app.db import network as store

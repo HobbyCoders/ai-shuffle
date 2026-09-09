@@ -1,13 +1,11 @@
 """Security actions must reach the durable audit sink, without secret material."""
 from unittest.mock import MagicMock
-from datetime import timedelta
 
 import pytest
-from fastapi import HTTPException, Request, Response
+from fastapi import Request, Response
 
 from app.api import auth, api_users
 from app.core import owner_auth
-from app.db import pairing as pairing_store, mobile_hub
 from app.core.models import ApiUserCreate, ApiUserUpdate
 
 
@@ -47,67 +45,6 @@ async def test_logout_records_valid_admin_session(audit, http_request, monkeypat
     assert audit.call_args.kwargs["event_type"] == "logout"
     assert audit.call_args.kwargs["user_id"] == "admin"
     assert "test-session" not in str(audit.call_args)
-
-
-async def test_retired_password_endpoints_do_not_mutate_or_audit_success(audit, monkeypatch):
-    mutate = MagicMock()
-    monkeypatch.setattr(auth.db, 'update_admin_password', mutate)
-    monkeypatch.setattr(auth.encryption, 'set_encryption_key', mutate)
-    with pytest.raises(HTTPException) as rejected:
-        await auth.retired_password_login()
-    assert rejected.value.status_code == 410
-    mutate.assert_not_called()
-    audit.assert_not_called()
-
-
-async def test_account_login_audits_immutable_account_without_proofs(audit, http_request, monkeypatch):
-    secret = 'shc_' + 's' * 43
-    monkeypatch.setattr(owner_auth, 'poll_browser', lambda *a: (secret, owner_auth.now() + timedelta(days=1)))
-    monkeypatch.setattr(pairing_store, 'get_paired_client_by_session_hash', lambda *a: {'id': 'paired-browser'})
-    monkeypatch.setattr(mobile_hub, 'ownership', lambda **kw: {'account_id': 'immutable-account-id'})
-    result = await auth.poll_account_login(auth.BrowserPollRequest(completion_secret='c' * 43), http_request, Response())
-    assert result == {'status': 'authenticated'}
-    assert audit.call_args.kwargs['event_type'] == 'login_success'
-    assert audit.call_args.kwargs['user_id'] == 'immutable-account-id'
-    assert audit.call_args.kwargs['user_type'] == 'account'
-    assert audit.call_args.kwargs['details'] == {'method': 'account'}
-    assert secret not in str(audit.call_args) and 'c' * 43 not in str(audit.call_args)
-
-
-async def test_pending_account_login_does_not_audit_success(audit, http_request, monkeypatch):
-    monkeypatch.setattr(owner_auth, 'poll_browser', lambda *a: None)
-    assert await auth.poll_account_login(auth.BrowserPollRequest(), http_request, Response()) == {'status': 'pending'}
-    audit.assert_not_called()
-
-
-async def test_local_recovery_audits_identity_without_code(audit, http_request, monkeypatch):
-    code = 'r' * 43
-    secret = 'shr_' + 's' * 43
-    monkeypatch.setattr(owner_auth, 'consume_console_grant', lambda *a: (secret, owner_auth.now() + timedelta(minutes=15)))
-    result = await auth.local_recovery(auth.LocalRecoveryRequest(code=code), http_request, Response())
-    assert result['local_recovery']
-    assert audit.call_args.kwargs['event_type'] == 'login_success'
-    assert audit.call_args.kwargs['user_id'] == 'admin'
-    assert audit.call_args.kwargs['details'] == {'method': 'local_recovery'}
-    assert code not in str(audit.call_args) and secret not in str(audit.call_args)
-
-
-@pytest.mark.parametrize('method', ['account', 'local_recovery'])
-async def test_rejected_owner_login_audits_only_fixed_reason(audit, http_request, monkeypatch, method):
-    proof = 'p' * 43
-    rejected = MagicMock(side_effect=HTTPException(401, 'Unsafe provider detail ' + proof))
-    if method == 'account':
-        monkeypatch.setattr(owner_auth, 'poll_browser', rejected)
-        operation = auth.poll_account_login(auth.BrowserPollRequest(completion_secret=proof), http_request, Response())
-    else:
-        monkeypatch.setattr(owner_auth, 'consume_console_grant', rejected)
-        operation = auth.local_recovery(auth.LocalRecoveryRequest(code=proof), http_request, Response())
-    with pytest.raises(HTTPException):
-        await operation
-    assert audit.call_args.kwargs['event_type'] == 'login_failure'
-    assert audit.call_args.kwargs['user_id'] is None
-    assert audit.call_args.kwargs['details'] == {'method': method, 'reason': 'rejected'}
-    assert proof not in str(audit.call_args) and 'Unsafe provider' not in str(audit.call_args)
 
 
 async def test_api_key_lifecycle_audits_identity_not_key(audit, http_request, monkeypatch):

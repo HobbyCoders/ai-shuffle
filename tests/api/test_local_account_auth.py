@@ -1,15 +1,18 @@
 """Local transport ownership is distinct from optional remote account access."""
-import json
+import secrets
+import sqlite3
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from fastapi import FastAPI, Depends, Request, WebSocket, HTTPException
+from fastapi import FastAPI, Depends, Request, WebSocket
 from fastapi.testclient import TestClient
 
 from app.api import auth, ws_auth
 from app.core import owner_auth, encryption, account_hub, pairing
 from app.core.config import settings
+from app.core.models import DeviceCapabilities
 from app.db import database, mobile_hub, mobile, pairing as pairing_store
 
 SERVER = '11111111-1111-1111-1111-111111111111'
@@ -75,28 +78,28 @@ def bind():
     mobile_hub.activate()
 
 
-def hub_mock(monkeypatch, identity=None):
+def hub_mock(monkeypatch):
     def call(binding, method, suffix, body=None):
-        if suffix == 'browser-logins':
-            assert body['device_name'] == 'Web browser'
-            assert len(body['poll_challenge']) == 64
-            return {'request_id': 'r' * 43,
-                    'authorization_url': 'https://shuffle-connect.unraidhomeserver.com/browser/login?request_id='+'r'*43,
-                    'expires_at': (owner_auth.now() + timedelta(minutes=10)).isoformat()}
-        if suffix == 'browser-logins/poll':
-            if 'completion_secret' not in body:
-                assert set(body) == {'request_id', 'poll_secret'}
-                return {'status': 'pending'}
-            assert set(body) == {'request_id', 'poll_secret', 'completion_secret'}
-            if body['completion_secret'] != 'c' * 43:
-                raise HTTPException(401, 'Completion proof rejected')
-            return {'status': 'approved', 'account_id': (identity or ACCOUNT), 'device_id': DEVICE,
-                    'device_name': 'Owner browser'}
         assert suffix == 'devices/' + DEVICE
         return {'active': True, 'account_id': ACCOUNT, 'device_id': DEVICE}
     mock = Mock(side_effect=call)
     monkeypatch.setattr(account_hub, 'call', mock)
     return mock
+
+
+def paired_browser(app, monkeypatch):
+    """A remote browser the account hub authorized as this worker's owner (a paired controller)."""
+    bind()
+    hub_mock(monkeypatch)
+    token = pairing.generate_controller_session()
+    mobile_hub.enroll({'account_id': ACCOUNT, 'device_id': DEVICE, 'server_id': SERVER, 'device_name': 'Web browser'},
+                      SimpleNamespace(platform='browser', capabilities=DeviceCapabilities()),
+                      owner_auth.digest(secrets.token_hex(32)), owner_auth.now() + timedelta(days=7),
+                      ['controller', 'web:session'], session_token_hash=pairing.hash_controller_session(token),
+                      scoped=True)
+    c = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
+    c.cookies.set('session', token)
+    return c
 
 
 def test_fresh_lan_setup_needs_no_password_or_account(app):
@@ -112,7 +115,7 @@ def test_fresh_lan_setup_needs_no_password_or_account(app):
     assert c.post('/owner').status_code == 200
 
 
-def test_unlinked_local_owner_can_start_account_connection_without_browser_signin(app, monkeypatch):
+def test_unlinked_local_owner_can_start_account_connection(app, monkeypatch):
     from app.api import mobile_hub as hub_api
     from app.core import managed_connection
 
@@ -128,7 +131,7 @@ def test_unlinked_local_owner_can_start_account_connection_without_browser_signi
     assert local.post('/api/v1/auth/setup', json={}).status_code == 200
     status = local.get('/api/v1/auth/status').json()
     assert status['authenticated'] and status['is_admin'] and status['local_access']
-    assert not status['owner_linked'] and not status['account_sign_in_available']
+    assert not status['owner_linked']
     assert local.get('/api/v1/mobile/hub/connection').json()['status'] == 'disconnected'
 
     remote = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
@@ -146,7 +149,6 @@ def test_unlinked_local_owner_can_start_account_connection_without_browser_signi
     assert hub_call.call_args.args[1]['name'] == 'Unraid'
     assert mobile_hub.get_binding() is None
     assert local.get('/owner').status_code == 200
-    assert not local.get('/api/v1/auth/status').json()['account_sign_in_available']
 
 
 def test_workspace_metadata_needs_local_access_or_authenticated_remote(app, tmp_path, monkeypatch):
@@ -206,14 +208,15 @@ def test_local_websocket_requires_listener_and_matching_origin(app):
             assert ws.receive_json()['authenticated'] is allowed
 
 
-def test_passwords_and_legacy_sessions_no_longer_authenticate(app):
+def test_passwords_legacy_sessions_and_login_endpoints_are_gone(app):
     database.create_admin('old-owner', 'not-a-real-hash')
     database.create_auth_session('legacy-token', owner_auth.now() + timedelta(days=1))
     c = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
     c.cookies.set('session', 'legacy-token')
     assert c.get('/owner').status_code == 403
-    for path in ('login', 'change-password'):
-        assert c.post('/api/v1/auth/' + path, json={'username': 'old-owner', 'password': 'anything'}).status_code == 410
+    # Shuffle never asks its owner to sign in: no password, account or recovery login route exists.
+    for path in ('login', 'change-password', 'account/start', 'account/poll', 'recovery'):
+        assert c.post('/api/v1/auth/' + path, json={}).status_code == 404
     assert database.get_auth_session('legacy-token') is None
     assert auth.auth_service.login('old-owner', 'anything') is None
 
@@ -227,46 +230,8 @@ def test_preference_identity_preserves_legacy_history_and_is_stable(app):
     assert owner_auth.preference_identity() == 'original-user'
 
 
-def test_browser_signin_is_cookie_bound_one_use_and_uses_live_device_proof(app, monkeypatch, test_db):
-    bind()
-    hub_mock(monkeypatch)
-    c = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
-    start = c.post('/api/v1/auth/account/start', json={})
-    assert start.status_code == 200
-    assert set(start.json()) == {'request_id', 'authorization_url', 'expires_at'}
-    assert 'HttpOnly' in start.headers['set-cookie']
-    assert '; Secure' in start.headers['set-cookie']  # even with COOKIE_SECURE=false
-    stored = test_db.execute('SELECT * FROM owner_browser_requests').fetchone()
-    assert stored['encrypted_request'].startswith('enc:')
-    assert len(stored['proof_hash']) == 64
-    other = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
-    assert other.post('/api/v1/auth/account/poll', json={}).status_code == 401
-    assert c.post('/api/v1/auth/account/poll', json={}).json() == {'status': 'pending'}
-    assert c.post('/api/v1/auth/account/poll', json={'completion_secret': 'x' * 43}).status_code == 401
-    assert c.post('/api/v1/auth/account/poll', json={'completion_secret': 'c' * 43}).json() == {'status': 'authenticated'}
-    assert c.get('/owner').status_code == 200
-    token = c.cookies.get('session')
-    assert token.startswith('shc_')
-    assert database.get_auth_session(token) is None
-    row = mobile.get_mobile_device(mobile_hub.local_device_id(SERVER, DEVICE))
-    assert row['platform'] == 'browser' and row['scopes'] == ['controller', 'web:session']
-    assert test_db.execute('SELECT COUNT(*) FROM owner_browser_requests').fetchone()[0] == 0
-    assert c.post('/api/v1/auth/account/poll', json={}).status_code == 401
-    monkeypatch.setattr(account_hub, 'call', lambda *a, **k: {'active': False})
-    assert c.get('/owner').status_code == 403
-
-
-def browser_login(app, monkeypatch):
-    bind()
-    hub_mock(monkeypatch)
-    c = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
-    assert c.post('/api/v1/auth/account/start', json={}).status_code == 200
-    assert c.post('/api/v1/auth/account/poll', json={'completion_secret': 'c' * 43}).status_code == 200
-    return c
-
-
 def test_invalid_query_token_cannot_bypass_cookie_origin(app, monkeypatch):
-    c = browser_login(app, monkeypatch)
+    c = paired_browser(app, monkeypatch)
     with c.websocket_connect('wss://worker.example.com/ws?token=invalid', headers={'Origin': 'https://evil.example.com'}) as ws:
         assert ws.receive_json()['authenticated'] is False
     with c.websocket_connect('wss://worker.example.com/ws?token=invalid') as ws:
@@ -290,7 +255,7 @@ def test_recovery_cookie_with_invalid_token_still_requires_origin(app):
 def test_local_account_chat_continuation_preserves_provenance(app, monkeypatch, test_db):
     from app.core import mobile_tool_identity as identity
     from app.db import mobile_tool_identity as provenance
-    c = browser_login(app, monkeypatch)
+    c = paired_browser(app, monkeypatch)
     token = c.cookies.get('session')
     browser = auth.get_paired_client_from_token(token)
     remote = identity.principal('paired', browser['id'], token)
@@ -309,7 +274,7 @@ def test_local_account_chat_continuation_preserves_provenance(app, monkeypatch, 
 def test_local_and_account_preference_identity_match_without_device_or_worker_keys(app, monkeypatch):
     from app.core.preference_identity import principal_preference_identity, request_preference_identity
     from types import SimpleNamespace
-    c = browser_login(app, monkeypatch)
+    c = paired_browser(app, monkeypatch)
     paired = auth.get_paired_client_from_token(c.cookies.get('session'))
     expected = ('account', 'https://hub.example.com#' + ACCOUNT)
     assert principal_preference_identity({'kind': 'admin'}) == expected
@@ -324,7 +289,7 @@ def test_local_and_account_preference_identity_match_without_device_or_worker_ke
 def test_owner_browser_can_authorize_only_same_account_native_targets(app, monkeypatch):
     from app.core import mobile_tool_identity as identity
     from app.core.models import DeviceInfo
-    c = browser_login(app, monkeypatch)
+    c = paired_browser(app, monkeypatch)
     token = c.cookies.get('session')
     browser = auth.get_paired_client_from_token(token)
     database.create_session('browser-chat', 'default')
@@ -340,63 +305,6 @@ def test_owner_browser_can_authorize_only_same_account_native_targets(app, monke
     assert browser['device_id'] not in identity.authorized_device_ids('browser-chat')
     mobile_hub.disconnect()
     assert identity.authorized_device_ids('browser-chat') == []
-
-
-@pytest.mark.parametrize('hub_result', ['denied', 'approved_without_completion_proof'])
-def test_browser_status_only_poll_reports_denial_but_cannot_enroll(app, monkeypatch, test_db, hub_result):
-    bind()
-    hub_mock(monkeypatch)
-    c = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
-    assert c.post('/api/v1/auth/account/start', json={}).status_code == 200
-
-    def status_only(binding, method, suffix, body):
-        assert suffix == 'browser-logins/poll'
-        assert set(body) == {'request_id', 'poll_secret'}
-        if hub_result == 'denied':
-            raise HTTPException(403, 'Account authorization denied.')
-        return {'status': 'approved', 'account_id': ACCOUNT, 'device_id': DEVICE}
-
-    monkeypatch.setattr(account_hub, 'call', status_only)
-    response = c.post('/api/v1/auth/account/poll', json={})
-    assert response.status_code == (403 if hub_result == 'denied' else 401)
-    assert not c.cookies.get('session')
-    assert test_db.execute('SELECT COUNT(*) FROM mobile_worker_authorizations').fetchone()[0] == 0
-    assert test_db.execute('SELECT COUNT(*) FROM owner_browser_requests').fetchone()[0] == 1
-
-
-@pytest.mark.parametrize('failure', ['wrong_account', 'expired', 'wrong_worker', 'wrong_instance', 'bad_origin'])
-def test_browser_transaction_fails_closed(app, monkeypatch, test_db, failure):
-    bind()
-    hub_mock(monkeypatch, OTHER if failure == 'wrong_account' else None)
-    c = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
-    assert c.post('/api/v1/auth/account/start', json={}).status_code == 200
-    if failure == 'expired':
-        test_db.execute("UPDATE owner_browser_requests SET expires_at='2000-01-01'")
-    elif failure == 'wrong_worker':
-        test_db.execute('UPDATE owner_browser_requests SET server_id=?', (OTHER,))
-    elif failure == 'wrong_instance':
-        test_db.execute("UPDATE owner_browser_requests SET instance_id='other'")
-    response = c.post('/api/v1/auth/account/poll', json={'completion_secret': 'c' * 43},
-                      headers={'Origin': 'https://attacker.example'} if failure == 'bad_origin' else {})
-    assert response.status_code in (401, 403)
-    assert test_db.execute('SELECT COUNT(*) FROM mobile_worker_authorizations').fetchone()[0] == 0
-
-
-def test_console_recovery_is_one_use_loopback_only_and_short_lived(app, monkeypatch, test_db):
-    monkeypatch.setattr(owner_auth.settings, 'shuffle_local_access', False)
-    code = owner_auth.issue_console_grant('recovery')
-    remote = client(app, 'remote', '127.0.0.1', 'http://localhost:8001')
-    assert remote.post('/api/v1/auth/recovery', json={'code': code}).status_code == 403
-    local = client(app, 'local', '127.0.0.1', 'http://localhost:8000')
-    response = local.post('/api/v1/auth/recovery', json={'code': code})
-    assert response.status_code == 200
-    assert local.get('/owner').status_code == 200
-    assert local.post('/api/v1/auth/recovery', json={'code': code}).status_code == 401
-    token = local.cookies.get('session')
-    remote.cookies.set('session', token)
-    assert remote.get('/owner').status_code == 403
-    test_db.execute("UPDATE owner_local_sessions SET expires_at='2000-01-01'")
-    assert local.get('/owner').status_code == 403
 
 
 def test_api_user_web_login_cannot_be_enabled():
@@ -448,10 +356,13 @@ def test_imported_owner_schema_changes_migration_fingerprint(monkeypatch):
     assert before and database.migrations_fingerprint() != before
 
 
-def test_existing_schema_upgrade_creates_owner_tables(test_db):
-    for table in ('owner_browser_requests', 'owner_local_sessions', 'owner_console_grants'):
-        test_db.execute('DROP TABLE ' + table)
+def test_existing_schema_upgrade_creates_owner_table_and_drops_login_stores(test_db):
+    test_db.execute('DROP TABLE owner_local_sessions')
+    for table in ('owner_browser_requests', 'owner_console_grants'):
+        test_db.execute('CREATE TABLE ' + table + ' (token_hash TEXT PRIMARY KEY)')
     database.set_system_setting(database.MIGRATIONS_FINGERPRINT_KEY, 'previous-build')
     database.init_database()
-    for table in ('owner_browser_requests', 'owner_local_sessions', 'owner_console_grants'):
-        assert test_db.execute('SELECT COUNT(*) FROM ' + table).fetchone()[0] == 0
+    assert test_db.execute('SELECT COUNT(*) FROM owner_local_sessions').fetchone()[0] == 0
+    for table in ('owner_browser_requests', 'owner_console_grants'):
+        with pytest.raises(sqlite3.OperationalError):
+            test_db.execute('SELECT COUNT(*) FROM ' + table)

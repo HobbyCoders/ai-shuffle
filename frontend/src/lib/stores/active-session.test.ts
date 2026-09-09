@@ -47,7 +47,8 @@ vi.mock('./session/ws-connection', () => ({
 vi.mock('$app/navigation', () => ({ goto: hoisted.goto }));
 
 import { activeSession } from './active-session';
-import { redirectToLoginOn401 } from '$lib/api/client';
+import { recheckAuthOn401 } from '$lib/api/client';
+import { auth } from '$lib/stores/auth.svelte';
 
 describe('chat authentication close recovery', () => {
 	afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
@@ -56,7 +57,7 @@ describe('chat authentication close recovery', () => {
 		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ authenticated })));
 		Object.defineProperty(window, 'location', { configurable: true, value: { pathname: '/', assign: vi.fn() } });
 		hoisted.onDisconnected!(4001, 'Authentication required', true);
-		await redirectToLoginOn401();
+		await recheckAuthOn401();
 		expect(fetch).toHaveBeenCalledExactlyOnceWith('/api/v1/auth/status', expect.objectContaining({ cache: 'no-store' }));
 		expect(activeSession.current.wsConnected).toBe(false);
 		expect(activeSession.current.isRestoringSession).toBe(false);
@@ -70,7 +71,10 @@ describe('chat authentication close recovery', () => {
 			hoisted.onConnected!();
 			expect(activeSession.current.wsReconnectRequired).toBe(false);
 		} else {
-			expect(hoisted.goto).toHaveBeenCalledExactlyOnceWith('/login');
+			// No login page exists: the refreshed auth store drives the root layout instead.
+			expect(hoisted.goto).not.toHaveBeenCalled();
+			expect(auth.current.status?.authenticated).toBe(false);
+			expect(activeSession.current.wsReconnectRequired).toBe(true);
 		}
 	});
 });

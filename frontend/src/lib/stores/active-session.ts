@@ -17,7 +17,7 @@
  */
 
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest, Profile } from '$lib/api/client';
-import { api, redirectToLoginOn401 } from '$lib/api/client';
+import { api, recheckAuthOn401 } from '$lib/api/client';
 import { acceptUserEvent } from '$lib/services/user-event-dedupe';
 import type { SessionAttention } from './session/ws-message-handlers';
 import type { SdkContextUsage } from '$lib/api/sessions';
@@ -564,7 +564,7 @@ const wsConn: WsConnection = createWsConnection({
 			// draft available for the existing manual Reconnect action if worker
 			// authentication is still valid (or cannot currently be checked).
 			_update(s => ({ ...s, wsReconnectRequired: true, isRestoringSession: false }));
-			void redirectToLoginOn401();
+			void recheckAuthOn401();
 		}
 	},
 	isStreaming: () => {

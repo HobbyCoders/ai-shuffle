@@ -3,10 +3,12 @@
 	 * RootLayout — bootstrap shared by the worker web UI and the mobile app:
 	 * theme, live sync, error reporting, the auth poll and the loading gate.
 	 *
-	 * `mobileApp` marks the app-bundled build: there are no /login, /setup or
-	 * /pair routes there (the app owns the session and passes a Bearer token),
-	 * there is no service worker, and an expired session shows a reconnect
-	 * message instead of navigating.
+	 * `mobileApp` marks the app-bundled build: there are no /setup or /pair
+	 * routes there (the app owns the session and passes a Bearer token), there
+	 * is no service worker, and an expired session shows a reconnect message.
+	 *
+	 * There is no sign-in anywhere: the worker trusts its local listener, so a
+	 * browser it does not recognise sees a local-network notice, never a login.
 	 */
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
@@ -72,10 +74,10 @@
 		// The mobile app has no auth routes: a lost session is reported below.
 		if (mobileApp) return null;
 		if (!initialized || loading || error || !status || path === '/pair') return null;
-		if (status.authenticated === false) return path === '/login' ? null : '/login';
+		// A denied browser stays where it is and sees the local-network notice below.
 		if (status.authenticated !== true) return null;
 		if (status.setup_required || status.onboarding_complete === false) return path === '/setup' ? null : '/setup';
-		return path === '/login' || path === '/setup' ? '/' : null;
+		return path === '/setup' ? '/' : null;
 	});
 	$effect(() => {
 		if (authDestination) void goto(authDestination);
@@ -197,7 +199,16 @@
 			<button type="button" class="btn" onclick={() => void refreshAuth()}>Try again</button>
 		</div>
 	</div>
-{:else if (mobileApp && !initialized) || (!mobileApp && currentPath !== '/pair' && (!initialized || authDestination || (!['/login', '/setup'].includes(currentPath) && !$isAuthenticated)))}
+{:else if !mobileApp && currentPath !== '/pair' && initialized && !$auth.loading && !$auth.error && $auth.status?.authenticated === false}
+	<!-- No sign-in exists: only the trusted local listener makes a browser the owner. -->
+	<div class="min-h-screen flex items-center justify-center p-4">
+		<div class="text-center max-w-md">
+			<p role="status" class="text-foreground mb-2">AI Shuffle only accepts direct connections from its local network.</p>
+			<p class="text-muted-foreground mb-4">Open it on this machine or your LAN using localhost, the worker's IP address, or a hostname allowed by SHUFFLE_LOCAL_HOSTNAMES. Connections through proxies or tunnels are not treated as local.</p>
+			<button type="button" class="btn" onclick={() => void refreshAuth()}>Try again</button>
+		</div>
+	</div>
+{:else if (mobileApp && !initialized) || (!mobileApp && currentPath !== '/pair' && (!initialized || authDestination || (currentPath !== '/setup' && !$isAuthenticated)))}
 	<div class="min-h-screen flex items-center justify-center">
 		<div class="text-center">
 			{#if $auth.error && !$auth.loading}

@@ -9,11 +9,9 @@ import logging
 import uuid as _uuid
 from pathlib import Path
 from typing import Optional
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Response, Request, Depends, status
 
-from pydantic import BaseModel, Field, ConfigDict
 from app.core import owner_auth
 from app.core.auth import (
     auth_service,
@@ -22,10 +20,7 @@ from app.core.auth import (
     set_github_auth_cached,
 )
 from app.core.oauth import direct_oauth
-from app.core.config import settings
-from app.core import encryption
 from app.core import audit_service
-from app.core.request_identity import get_client_ip
 from app.core import auth as _auth_module
 from app.db import database as db
 from app.db.async_database import run_sync
@@ -72,89 +67,6 @@ def _seed_claude_account_safe() -> None:
         seed_from_credentials_file()
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Claude account seed failed (ignored): {e}")
-
-
-def check_rate_limit(request: Request, username: Optional[str] = None) -> None:
-    """Check if the request is rate limited. Raises HTTPException if blocked."""
-    client_ip = get_client_ip(request)
-
-    # Check if IP is locked out
-    ip_lockout = db.is_ip_locked(client_ip)
-    if ip_lockout:
-        locked_until = datetime.fromisoformat(ip_lockout["locked_until"])
-        remaining_minutes = int((locked_until - datetime.now(timezone.utc)).total_seconds() / 60)
-        logger.warning(f"Blocked login attempt from locked IP: {client_ip}")
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Too many failed login attempts. Try again in {remaining_minutes} minutes."
-        )
-
-    # Check if username is locked out (if provided)
-    if username:
-        username_lockout = db.is_username_locked(username)
-        if username_lockout:
-            locked_until = datetime.fromisoformat(username_lockout["locked_until"])
-            remaining_minutes = int((locked_until - datetime.now(timezone.utc)).total_seconds() / 60)
-            logger.warning(f"Blocked login attempt for locked user: {username}")
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Account temporarily locked. Try again in {remaining_minutes} minutes."
-            )
-
-    # Check current failed attempts count
-    failed_count = db.get_failed_attempts_count(
-        client_ip,
-        settings.login_attempt_window_minutes
-    )
-    if failed_count >= settings.max_login_attempts:
-        # Create lockout
-        db.create_lockout(
-            ip_address=client_ip,
-            username=None,
-            duration_minutes=settings.lockout_duration_minutes,
-            reason="Too many failed login attempts from IP"
-        )
-        logger.warning(f"IP {client_ip} locked out after {failed_count} failed attempts")
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Too many failed login attempts. Try again in {settings.lockout_duration_minutes} minutes."
-        )
-
-
-def record_login_result(request: Request, username: Optional[str], success: bool) -> None:
-    """Record the result of a login attempt"""
-    client_ip = get_client_ip(request)
-    db.record_login_attempt(client_ip, username, success)
-
-    if not success:
-        # Check if we should lock out after this failure
-        failed_count = db.get_failed_attempts_count(
-            client_ip,
-            settings.login_attempt_window_minutes
-        )
-        if failed_count >= settings.max_login_attempts:
-            db.create_lockout(
-                ip_address=client_ip,
-                username=None,
-                duration_minutes=settings.lockout_duration_minutes,
-                reason="Too many failed login attempts from IP"
-            )
-            logger.warning(f"IP {client_ip} locked out after {failed_count} failed attempts")
-
-        # Also check username-specific failures
-        if username:
-            username_failures = db.get_failed_attempts_for_username(
-                username,
-                settings.login_attempt_window_minutes
-            )
-            if username_failures >= settings.max_login_attempts:
-                db.create_lockout(
-                    ip_address=None,
-                    username=username,
-                    duration_minutes=settings.lockout_duration_minutes,
-                    reason="Too many failed login attempts for username"
-                )
-                logger.warning(f"Username {username} locked out after {username_failures} failed attempts")
 
 
 def get_session_token(request: Request) -> Optional[str]:
@@ -421,10 +333,7 @@ async def get_auth_status(request: Request, response: Response = None):
         "local_access": local,
         "auth_mode": 'local' if local else 'account',
         "owner_linked": owner_auth.linked_binding() is not None,
-        "account_sign_in_available": owner_auth.linked_binding() is not None and encryption.is_encryption_ready(),
         "credential_storage": owner_auth.storage_status(),
-        "local_recovery": bool(token and owner_auth.loopback_request(request) and owner_auth.local_session(token)),
-        "local_recovery_available": owner_auth.loopback_request(request),
         "is_admin": is_admin_authenticated,
         "paired_client": is_paired_authenticated,
         "preference_identity": {
@@ -449,51 +358,15 @@ async def get_auth_status(request: Request, response: Response = None):
     }
 
 
-class LocalRecoveryRequest(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    code: str = Field(min_length=43, max_length=43)
-
-
-class BrowserPollRequest(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    completion_secret: Optional[str] = Field(default=None, pattern=r'^[A-Za-z0-9_-]{43}$')
-
-
-def _secure_cookie(request):
-    if request.scope.get('shuffle.ingress') == 'remote':
-        return True
-    if owner_auth.local_access(request) or owner_auth.loopback_request(request):
-        return request.url.scheme in ('https', 'wss')
-    return True
-
-
-def _account_cookie(request, response, token, expires):
-    response.set_cookie('session', token, httponly=True, secure=_secure_cookie(request),
-                        samesite='strict', max_age=max(1, int((expires-owner_auth.now()).total_seconds())))
-    response.headers['Cache-Control'] = 'no-store'
-
-
-def _audit_owner_action(request, event_type, method, session_token=None):
-    """Record immutable actor IDs and fixed action names, never login proofs."""
+def _audit_owner_action(request, event_type, method):
+    """Record immutable actor IDs and fixed action names."""
     try:
-        user_type = 'admin'
-        if method == 'account':
-            from app.core import pairing
-            from app.db import pairing as pairing_store, mobile_hub
-            client = pairing_store.get_paired_client_by_session_hash(pairing.hash_controller_session(session_token))
-            owner = mobile_hub.ownership(paired_client_id=client['id']) if client else None
-            if not owner:
-                raise ValueError('Completed browser session has no owner identity')
-            user_id = owner['account_id']
-            user_type = 'account'
-        else:
-            user_id = owner_auth.preference_identity()
-        audit_service.log_event(event_type, request=request, user_id=user_id,
-                                user_type=user_type, details={'method': method})
+        audit_service.log_event(event_type, request=request, user_id=owner_auth.preference_identity(),
+                                user_type='admin', details={'method': method})
     except Exception:
-        # Audit failures must not consume a one-use grant while losing its login
-        # response; the audit sink itself records persistence failures safely.
-        logger.warning('Owner authentication audit recording failed', exc_info=True)
+        # Audit failures must not lose the owner's response; the audit sink
+        # itself records persistence failures safely.
+        logger.warning('Owner action audit recording failed', exc_info=True)
 
 
 @router.post('/setup')
@@ -502,64 +375,6 @@ async def configure_local_install(request: Request, _: str = Depends(require_adm
     await run_sync(owner_auth.configure_installation)
     await run_sync(_audit_owner_action, request, audit_service.AuditEventType.INSTALLATION_SETUP, 'local_setup')
     return {'status': 'ok'}
-
-
-@router.post('/login')
-@router.post('/change-password')
-async def retired_password_login():
-    raise HTTPException(410, 'Shuffle uses local access or account sign-in; worker passwords are retired.')
-
-
-@router.post('/account/start')
-async def start_account_login(request: Request, response: Response):
-    owner_auth.same_origin(request)
-    from app.api.mobile_hub import _limiter
-    _limiter.check('browser-start:' + get_client_ip(request))
-    request_origin = request.headers.get('origin')
-    if not request_origin:
-        # Loopback command-line clients cannot complete a browser login.
-        raise HTTPException(400, 'Start account sign-in in a browser.')
-    proof, result = await run_sync(owner_auth.begin_browser, request_origin)
-    response.set_cookie(owner_auth.COOKIE, proof, httponly=True, secure=_secure_cookie(request),
-                        samesite='strict', max_age=600, path='/api/v1/auth/account')
-    response.headers['Cache-Control'] = 'no-store'
-    return result
-
-
-@router.post('/account/poll')
-async def poll_account_login(body: BrowserPollRequest, request: Request, response: Response):
-    owner_auth.same_origin(request)
-    try:
-        result = await run_sync(owner_auth.poll_browser, request.cookies.get(owner_auth.COOKIE), body.completion_secret)
-    except HTTPException as error:
-        if error.status_code in (401, 403):
-            await run_sync(audit_service.log_event, audit_service.AuditEventType.LOGIN_FAILURE,
-                           request=request, user_type='account', details={'method': 'account', 'reason': 'rejected'})
-        raise
-    response.headers['Cache-Control'] = 'no-store'
-    if result is None:
-        return {'status': 'pending'}
-    token, expires = result
-    _account_cookie(request, response, token, expires)
-    response.delete_cookie(owner_auth.COOKIE, path='/api/v1/auth/account')
-    await run_sync(_audit_owner_action, request, audit_service.AuditEventType.LOGIN_SUCCESS, 'account', token)
-    return {'status': 'authenticated'}
-
-
-@router.post('/recovery')
-async def local_recovery(body: LocalRecoveryRequest, request: Request, response: Response):
-    owner_auth.require_local_request(request)
-    owner_auth.same_origin(request)
-    try:
-        token, expires = await run_sync(owner_auth.consume_console_grant, body.code, 'recovery')
-    except HTTPException as error:
-        if error.status_code in (401, 403):
-            await run_sync(audit_service.log_event, audit_service.AuditEventType.LOGIN_FAILURE,
-                           request=request, details={'method': 'local_recovery', 'reason': 'rejected'})
-        raise
-    _account_cookie(request, response, token, expires)
-    await run_sync(_audit_owner_action, request, audit_service.AuditEventType.LOGIN_SUCCESS, 'local_recovery')
-    return {'status': 'authenticated', 'local_recovery': True, 'expires_at': expires.isoformat()}
 
 
 @router.post("/logout")

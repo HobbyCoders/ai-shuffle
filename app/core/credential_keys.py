@@ -27,7 +27,6 @@ _TABLES = (
     ('api_user_credentials', ('encrypted_value',), ()),
     ('claude_accounts', ('credentials',), ()),
     ('model_providers', ('auth_token', 'codex_access_token', 'codex_refresh_token'), ()),
-    ('owner_browser_requests', ('encrypted_request',), ()),
 )
 
 

@@ -13,12 +13,12 @@ continue to work; supplying an integration credential retains its restricted
 role. Public hostnames, public source addresses, forwarded proxy requests, and
 cross-site browser requests do not receive automatic local authority.
 
-For remote access, open **Devices → Remote access**, name the worker, and link it
-to your Shuffle account in the browser or Android app. Shuffle configures its
-managed tunnel automatically. Remote users must prove that their account owns
-the worker. A browser opens the account service in another tab and accepts the
-completion proof only from that tab and service. If browser isolation blocks
-that handoff, paste the one-use completion code into the original worker tab.
+Shuffle is not hosted on the internet and never asks its owner to sign in: there
+is no login page, password, or browser account sign-in. For phone access, open
+**Devices → Remote access**, name the worker, and link it to your Shuffle account
+from the Android app. Shuffle configures its managed tunnel automatically. The
+remote listener accepts only devices paired that way; browsers must use the
+local listener.
 
 ## Listener boundary
 
@@ -50,7 +50,7 @@ launching the bare ASGI app with a custom server does not grant local access.
    the hub's monotonic upgrade to that origin, and verifies the public route
    reaches the same worker through protected ingress. Existing tunnel identity
    and device authorization are retained.
-4. Verify remote sign-in and existing phone access. Enable local access, remove
+4. Verify existing phone access. Enable local access, remove
    the legacy password from deployment configuration, and verify a fresh-process
    restart reads the stored credentials through its persistent key.
 5. Retain a matched recovery set. See [restore and key recovery](RESTORE.md).
@@ -59,12 +59,7 @@ Keep the old backup/configuration matched to its old data generation. Do not
 launch an old application image against the migrated live database to test
 rollback. Test rollback and fresh installation with isolated copies first.
 
-## Local access recovery
-
-If local access is deliberately disabled and account access needs repair, run
-`python -m app.core.owner_auth recovery` in the worker's local console. Open
-`/login` through localhost (or an SSH forward terminating inside the same
-container network namespace), expand **Local recovery**, and enter the code.
-It expires after ten minutes and can be used once, giving fifteen minutes of
-local access. This option is unavailable through the public tunnel or LAN.
-Credential-key recovery is separate and is described in the restore guide.
+Local access is the only way a browser operates the worker: with
+`SHUFFLE_LOCAL_ACCESS=false` the web UI is unavailable until it is enabled
+again. Credential-key recovery is separate and is described in the restore
+guide.

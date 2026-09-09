@@ -16,9 +16,9 @@ http://localhost:8000/api/v1
 
 ## Authentication
 
-### Local access and owner browser sessions
+### Local access
 
-The local listener grants owner access to direct localhost/LAN requests without a login. To use a worker remotely, link it through **Devices → Remote access**, then start account sign-in from the worker's browser page. Clerk verifies the worker's owner and a one-use browser completion proof authorizes the session cookie. See [Authentication](/docs/api-reference/authentication) for the full flow.
+The local listener grants owner access to direct localhost/LAN requests without a login; Shuffle has no sign-in page. Phones reach a worker through **Devices → Remote access** and their own pairing. See [Authentication](/docs/api-reference/authentication) for the details.
 
 ```bash
 # Direct request to the enabled trusted local listener

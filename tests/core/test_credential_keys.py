@@ -299,15 +299,6 @@ def test_file_sync_failure_never_publishes_a_key_or_activates_db(monkeypatch):
     assert encryption.initialize_server_key(db, PASSWORD)
 
 
-def test_new_browser_login_store_also_participates_in_fail_closed_verification():
-    seed()
-    with db.get_db() as conn:
-        conn.cursor().execute('INSERT INTO owner_browser_requests VALUES(%s,%s,%s,%s,%s)',
-                              ('proof', 'instance', 'server', 'enc:corrupt', '2099-01-01'))
-    assert not encryption.initialize_server_key(db, PASSWORD)
-    assert metadata()['wrapped_dek'] is None
-
-
 def test_fresh_interpreter_reloads_database_and_key_without_password(test_db, tmp_path):
     seed()
     assert encryption.initialize_server_key(db, PASSWORD)
