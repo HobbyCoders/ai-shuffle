@@ -36,9 +36,13 @@ export function postgresChecksumUrl(version, target) {
 	return `${postgresArchiveUrl(version, target)}.sha256`;
 }
 
-/** The sidecar is either a bare digest or `sha256sum` output (`<digest>  <file>`). */
+/** Accept bare/GNU digests and the Windows release's three-line CertUtil output. */
 export function parseSha256Sidecar(text, name) {
-	const token = String(text ?? '').trim().split(/\s+/)[0] ?? '';
+	const lines = String(text ?? '').trim().split(/\r?\n/);
+	const certUtil = lines.length === 3
+		&& lines[0] === `SHA256 hash of ${name}:`
+		&& lines[2] === 'CertUtil: -hashfile command completed successfully.';
+	const token = certUtil ? lines[1] : (lines.length === 1 ? lines[0].split(/\s+/)[0] : '');
 	if (!/^[0-9a-fA-F]{64}$/.test(token)) throw new Error(`no sha256 digest for ${name} in its .sha256 sidecar`);
 	return token.toLowerCase();
 }

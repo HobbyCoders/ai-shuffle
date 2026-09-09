@@ -333,7 +333,7 @@ class Check:
             "assert c['user']=='ai_shuffle'; "
             "assert not any(k.startswith(('database_','postgres_')) for k in type(settings).model_fields)"
         )
-        self.docker("exec", app, "python", "-c", probe)
+        self.docker("exec", "--user", "99:100", app, "python", "-c", probe)
         self.stop(app)
         self.inspect_volume(volume, "from pathlib import Path; assert not Path('/data/managed-postgres.json').exists()")
         retained = self.volume()

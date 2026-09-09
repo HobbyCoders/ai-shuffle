@@ -44,6 +44,20 @@ test('the sha256 sidecar is read whether bare or in sha256sum form', () => {
 	assert.throws(() => parseSha256Sidecar('', 'x'), /no sha256 digest/);
 });
 
+test('the Windows release CertUtil sidecar is parsed without bypassing SHA256', () => {
+	const name = 'postgresql-16.10.0-x86_64-pc-windows-msvc.tar.gz';
+	const digest = 'c49ab81118d409a02e77b131de7d78a648da31ce159d0cca59298a80468f857d';
+	const sidecar = `SHA256 hash of ${name}:\r\n${digest}\r\nCertUtil: -hashfile command completed successfully.\r\n`;
+	assert.equal(parseSha256Sidecar(sidecar, name), digest);
+	for (const invalid of [
+		sidecar.replace(name, 'another-file.tar.gz'),
+		sidecar.replace('SHA256 hash', 'MD5 hash'),
+		sidecar.replace(digest, digest.slice(1)),
+		sidecar.replace(digest, `${digest}\r\n${digest}`),
+		sidecar.replace('completed successfully.', 'failed.')
+	]) assert.throws(() => parseSha256Sidecar(invalid, name), /no sha256 digest/);
+});
+
 test('the manifest entry names version and target', () => {
 	assert.deepEqual(postgresManifestEntry('16.10.0', 'x86_64-unknown-linux-gnu'), {
 		version: '16.10.0',
