@@ -99,6 +99,7 @@ interface ProvidersState {
 	// ----- Anthropic API key integration (from /settings/integrations) -----
 	/** True when an Anthropic API key is stored (overrides the connected account). */
 	anthropicKeySet: boolean;
+	falKeySet: boolean;
 	/** Masked form of the stored key, or null when none is set. */
 	anthropicKeyMasked: string | null;
 	/** Which auth method Claude Code runs with: 'api_key' overrides 'account'. */
@@ -139,6 +140,7 @@ const initialState: ProvidersState = {
 	togglingProviderId: null,
 
 	anthropicKeySet: false,
+	falKeySet: false,
 	anthropicKeyMasked: null,
 	claudeCodeAuthMethod: null,
 	integrationsError: null
@@ -523,6 +525,7 @@ export const providers = {
 			_update((s) => ({
 				...s,
 				anthropicKeySet: !!data.anthropic_api_key_set,
+				falKeySet: !!data.fal_api_key_set,
 				anthropicKeyMasked: data.anthropic_api_key_masked ?? null,
 				claudeCodeAuthMethod:
 					data.claude_code_auth_method ?? (data.anthropic_api_key_set ? 'api_key' : 'account'),

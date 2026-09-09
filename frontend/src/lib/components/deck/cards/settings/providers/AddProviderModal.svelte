@@ -8,27 +8,28 @@
 		| 'grok-sub'
 		| 'claude-key'
 		| 'claude-sub'
-		| 'openrouter-key';
+		| 'openrouter-key'
+		| 'fal-key';
 </script>
 
 <script lang="ts">
 	/**
-	 * AddProviderModal — the "Add a provider" modal (plan §1.2).
+	 * AddProviderModal — shared by setup and Settings.
 	 *
 	 * A `role="dialog"` modal following the `McpServerForm` precedent: self-contained
 	 * Tailwind utility classes, so it is immune to the shell-owned `.ed-content`
 	 * global CSS (landmine L3). Fullscreen on the mobile shell; a centred card,
 	 * clamped to the viewport, on the desktop shell at every width.
 	 *
-	 * Internal step machine: `choose` (five friendly cards) → one step per flow.
+	 * Internal step machine: chooser → credentials → model selection where supported.
 	 * Each flow gets `{ onDone, onCancel, onBusyChange }`:
 	 *   - `onDone`   closes the modal (a provider/credential was added).
 	 *   - `onCancel` returns to `choose`.
 	 *   - `onBusyChange` reports whether a flow has an in-flight operation; Esc and
 	 *     backdrop close are guarded while busy.
 	 *
-	 * The Codex ("OpenAI subscription") card routes to `ChatGptDeviceFlow`, a stub
-	 * this chunk — Chunk 6 wires the real device flow.
+	 * New ChatGPT and Grok subscriptions continue from device sign-in to the
+	 * same model picker used by API keys. Reconnect flows keep their saved roster.
 	 */
 	import { onMount } from 'svelte';
 	import { X, ArrowLeft, Sparkles, MessageSquare, KeyRound, Bot, Network, Zap } from 'lucide-svelte';
@@ -40,6 +41,8 @@
 	import ClaudeApiKeyFlow from './flows/ClaudeApiKeyFlow.svelte';
 	import ClaudeSubscriptionFlow from './flows/ClaudeSubscriptionFlow.svelte';
 	import OpenRouterKeyFlow from './flows/OpenRouterKeyFlow.svelte';
+	import FalAiKeyFlow from './flows/FalAiKeyFlow.svelte';
+	import ProviderModelsFlow from './flows/ProviderModelsFlow.svelte';
 
 	interface Props {
 		/** Close the modal (from a completed flow, Esc, backdrop, or the ✕). */
@@ -62,6 +65,7 @@
 	const pinnedToStep = initialStep !== undefined && initialStep !== 'choose';
 	// True while the active flow has an operation in flight — guards Esc/backdrop.
 	let busy = $state(false);
+	let modelsProviderId = $state<string | null>(null);
 
 	// Fullscreen on the mobile shell only (mirrors the drawer convention).
 	const fullscreen = $derived(platform.isMobile);
@@ -82,21 +86,26 @@
 		'grok-sub': 'Grok subscription',
 		'claude-key': 'Anthropic API key',
 		'claude-sub': 'Claude Code subscription',
-		'openrouter-key': 'OpenRouter API key'
+		'openrouter-key': 'OpenRouter API key',
+		'fal-key': 'fal.ai API key'
 	};
 
 	const CHOICES: { step: Step; icon: typeof KeyRound; name: string; subtitle: string }[] = [
-		{ step: 'openai-key', icon: Sparkles, name: 'OpenAI API key', subtitle: 'Paste a key. Models are set up for you.' },
+		{ step: 'openai-key', icon: Sparkles, name: 'OpenAI API key', subtitle: 'Paste a key and choose your models.' },
 		{ step: 'openai-sub', icon: MessageSquare, name: 'OpenAI subscription', subtitle: 'Sign in with ChatGPT. No key needed.' },
-		{ step: 'grok-key', icon: Zap, name: 'Grok API key', subtitle: 'Paste a key. Models are set up for you.' },
+		{ step: 'grok-key', icon: Zap, name: 'Grok API key', subtitle: 'Paste a key and choose your models.' },
 		{ step: 'grok-sub', icon: Sparkles, name: 'Grok subscription', subtitle: 'Sign in with SuperGrok. No key needed.' },
 		{ step: 'claude-key', icon: KeyRound, name: 'Anthropic API key', subtitle: 'Paste an Anthropic key for Claude Code.' },
 		{ step: 'claude-sub', icon: Bot, name: 'Claude Code subscription', subtitle: 'Sign in with your Claude account.' },
-		{ step: 'openrouter-key', icon: Network, name: 'OpenRouter API key', subtitle: 'One key, hundreds of models to choose from.' }
+		{ step: 'openrouter-key', icon: Network, name: 'OpenRouter API key', subtitle: 'One key, hundreds of models to choose from.' },
+		{ step: 'fal-key', icon: Sparkles, name: 'fal.ai API key', subtitle: 'Choose models for image, video, audio and 3D tools.' }
 	];
 
 	function onDone() {
 		onClose();
+	}
+	function onConnected(providerId: string) {
+		modelsProviderId = providerId;
 	}
 	function onCancel() {
 		if (pinnedToStep) onClose();
@@ -111,7 +120,7 @@
 	}
 	function goBack() {
 		if (busy) return;
-		if (pinnedToStep) onClose();
+		if (pinnedToStep || modelsProviderId) onClose();
 		else step = 'choose';
 	}
 	function handleKeydown(event: KeyboardEvent) {
@@ -124,7 +133,7 @@
 	class="fixed inset-0 z-50 flex items-center justify-center {fullscreen ? 'p-0' : 'p-4'}"
 	role="dialog"
 	aria-modal="true"
-	aria-label={TITLES[step]}
+	aria-label={modelsProviderId ? 'Choose models' : TITLES[step]}
 	onkeydown={handleKeydown}
 	tabindex="-1"
 >
@@ -139,7 +148,7 @@
 	<div
 		class="relative flex flex-col bg-card border border-border shadow-xl {fullscreen
 			? 'w-full h-full max-w-none rounded-none'
-			: 'w-full max-w-lg max-h-[90vh] rounded-xl'}"
+			: `w-full ${step === 'fal-key' ? 'max-w-3xl' : 'max-w-lg'} max-h-[90vh] rounded-xl`}"
 	>
 		<!-- Header -->
 		<div class="flex items-center gap-2 px-6 py-4 border-b border-border">
@@ -154,7 +163,7 @@
 					<ArrowLeft class="w-5 h-5 text-muted-foreground" />
 				</button>
 			{/if}
-			<h2 class="flex-1 text-lg font-semibold text-foreground">{TITLES[step]}</h2>
+			<h2 class="flex-1 text-lg font-semibold text-foreground">{modelsProviderId ? 'Choose models' : TITLES[step]}</h2>
 			<button
 				type="button"
 				onclick={requestClose}
@@ -168,7 +177,9 @@
 
 		<!-- Content -->
 		<div class="flex-1 overflow-y-auto p-6">
-			{#if step === 'choose'}
+			{#if modelsProviderId}
+				<ProviderModelsFlow providerId={modelsProviderId} {onDone} {onBusyChange} />
+			{:else if step === 'choose'}
 				<div class="flex flex-col gap-2.5">
 					{#each CHOICES as choice (choice.step)}
 						{@const Icon = choice.icon}
@@ -190,17 +201,19 @@
 			{:else if step === 'openai-key'}
 				<OpenAiKeyFlow {onDone} {onCancel} {onBusyChange} />
 			{:else if step === 'openai-sub'}
-				<ChatGptDeviceFlow {onDone} {onCancel} {onBusyChange} />
+				<ChatGptDeviceFlow {onDone} {onCancel} {onBusyChange} {onConnected} />
 			{:else if step === 'grok-key'}
 				<GrokKeyFlow {onDone} {onCancel} {onBusyChange} />
 			{:else if step === 'grok-sub'}
-				<GrokDeviceFlow {onDone} {onCancel} {onBusyChange} />
+				<GrokDeviceFlow {onDone} {onCancel} {onBusyChange} {onConnected} />
 			{:else if step === 'claude-key'}
 				<ClaudeApiKeyFlow {onDone} {onCancel} {onBusyChange} />
 			{:else if step === 'claude-sub'}
 				<ClaudeSubscriptionFlow {onDone} {onCancel} {onBusyChange} />
 			{:else if step === 'openrouter-key'}
 				<OpenRouterKeyFlow {onDone} {onCancel} {onBusyChange} />
+			{:else if step === 'fal-key'}
+				<FalAiKeyFlow {onDone} {onCancel} {onBusyChange} />
 			{/if}
 		</div>
 	</div>

@@ -20,12 +20,13 @@
 
 	interface Props {
 		onDone: () => void;
+		onConnected?: (providerId: string) => void;
 		onCancel: () => void;
 		onBusyChange?: (busy: boolean) => void;
 		existingProviderId?: string | null;
 	}
 
-	let { onDone, onCancel, onBusyChange, existingProviderId }: Props = $props();
+	let { onDone, onCancel, onBusyChange, existingProviderId, onConnected }: Props = $props();
 
 	const ownsRow = !existingProviderId;
 
@@ -123,7 +124,7 @@
 		clearPollTimer();
 		phase = 'finishing';
 		setBusy(true);
-		await seedModels();
+		if (!onConnected) await seedModels();
 		try {
 			await providers.refreshProviders();
 		} catch {
@@ -131,7 +132,8 @@
 		}
 		if (destroyed) return;
 		setBusy(false);
-		onDone();
+		if (onConnected && providerId) onConnected(providerId);
+		else onDone();
 	}
 
 	async function seedModels() {

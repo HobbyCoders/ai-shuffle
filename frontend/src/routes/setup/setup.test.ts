@@ -7,7 +7,10 @@ const mocks = vi.hoisted(() => ({
 	get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn(), goto: vi.fn(),
 	workspace: vi.fn(), saveWorkspace: vi.fn(), setup: vi.fn(), complete: vi.fn(), checkAuth: vi.fn(),
 	githubStatus: vi.fn(), githubWeb: vi.fn(), githubToken: vi.fn(),
-	hasCredential: false, providers: [] as { id: string; name: string; provider_type: string }[]
+	hasCredential: false, providers: [] as { id: string; name: string; provider_type: string }[],
+	claudeAuthenticated: false, claudeSubscribers: new Set<(v: boolean) => void>(),
+	claudeAccounts: [] as { id: string }[], anthropicKeySet: false, falKeySet: false,
+	refreshProviders: vi.fn(), loadClaudeAccounts: vi.fn(), loadIntegrations: vi.fn()
 }));
 vi.mock('$app/navigation', () => ({ goto: mocks.goto }));
 vi.mock('$lib/api/network', () => ({ getNetworkStatus: mocks.getStatus, createNetwork: mocks.create,
@@ -20,11 +23,15 @@ vi.mock('$lib/api/auth', () => ({ getWorkspaceConfig: mocks.workspace, setWorksp
 vi.mock('$lib/stores/auth.svelte', () => ({
 	auth: { checkAuth: mocks.checkAuth, current: { status: { setup_required: true, auth_mode: 'local' } }, logout: vi.fn(),
 		subscribe(run: (v: unknown) => void) { run({ status: { auth_mode: 'local' } }); return () => {}; } },
-	anyCredential: { subscribe(run: (v: boolean) => void) { run(mocks.hasCredential); return () => {}; } }
+	anyCredential: { subscribe(run: (v: boolean) => void) { run(mocks.hasCredential); return () => {}; } },
+	claudeAuthenticated: { subscribe(run: (v: boolean) => void) { mocks.claudeSubscribers.add(run); run(mocks.claudeAuthenticated); return () => mocks.claudeSubscribers.delete(run); } }
 }));
-vi.mock('$lib/stores/providers.svelte', () => ({ providers: { current: { get providers() { return mocks.providers; } }, ensureLoaded: vi.fn(), refreshProviders: vi.fn() } }));
+vi.mock('$lib/stores/providers.svelte', () => ({ providers: { current: {
+	get providers() { return mocks.providers; }, get claudeAccounts() { return mocks.claudeAccounts; },
+	get anthropicKeySet() { return mocks.anthropicKeySet; }, get falKeySet() { return mocks.falKeySet; }
+}, ensureLoaded: vi.fn(), refreshProviders: mocks.refreshProviders, loadClaudeAccounts: mocks.loadClaudeAccounts, loadIntegrations: mocks.loadIntegrations } }));
 vi.mock('$lib/components/DirectoryBrowser.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
-vi.mock('$lib/components/deck/cards/settings/providers/AddProviderModal.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
+vi.mock('$lib/components/deck/cards/settings/providers/AddProviderModal.svelte', () => import('$lib/test-stubs/CompleteProviderModal.svelte'));
 import Setup from './+page.svelte';
 
 const fingerprint = 'abcd-1234-abcd-1234-abcd-1234-abcd-1234';
@@ -41,6 +48,8 @@ let connection: Record<string, unknown>;
 
 beforeEach(() => {
 	vi.resetAllMocks(); status = fresh(); connection = disconnected; mocks.hasCredential = false; mocks.providers = [];
+	mocks.claudeAuthenticated = false; mocks.claudeAccounts = []; mocks.anthropicKeySet = false; mocks.falKeySet = false;
+	mocks.refreshProviders.mockResolvedValue(undefined); mocks.loadClaudeAccounts.mockResolvedValue(undefined); mocks.loadIntegrations.mockResolvedValue(undefined);
 	mocks.getStatus.mockImplementation(async () => status);
 	mocks.create.mockImplementation(async () => { status = enrolled(); return { network: status.network }; });
 	mocks.workspace.mockResolvedValue({ workspace_path: 'D:\\Work', default_path: 'D:\\Work', is_local_mode: true });
@@ -65,6 +74,32 @@ async function continueToProviders() {
 }
 
 describe('first-run setup', () => {
+	it.each(['subscription', 'saved-account', 'api-key', 'fal'] as const)('shows a native %s provider without a gateway row', async (kind) => {
+		mocks.claudeAuthenticated = kind === 'subscription';
+		mocks.claudeAccounts = kind === 'saved-account' ? [{ id: 'claude' }] : [];
+		mocks.anthropicKeySet = kind === 'api-key'; mocks.falKeySet = kind === 'fal';
+		await cleanInstall(); await continueToProviders();
+		expect(screen.getByText(kind === 'fal' ? 'fal.ai' : kind === 'api-key' ? 'Anthropic' : 'Claude Code')).toBeTruthy();
+		expect(screen.queryByText(/Connect a Claude/)).toBeNull();
+	});
+
+	it('shows Claude immediately after completing Add provider alongside existing gateways', async () => {
+		mocks.providers = [{ id: 'or', name: 'OpenRouter', provider_type: 'openrouter' }];
+		await cleanInstall(); await continueToProviders();
+		expect(screen.queryByText('Claude Code')).toBeNull();
+		mocks.checkAuth.mockImplementation(async () => {
+			mocks.claudeAuthenticated = true;
+			for (const run of mocks.claudeSubscribers) run(true);
+		});
+		await fireEvent.click(screen.getByRole('button', { name: 'Add provider' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Complete provider connection' }));
+		expect(await screen.findByText('Claude Code')).toBeTruthy();
+		expect(screen.getByText('OpenRouter')).toBeTruthy();
+		expect(screen.getByText('Subscription added')).toBeTruthy();
+		expect(mocks.loadClaudeAccounts).toHaveBeenCalledWith(true);
+		expect(mocks.loadIntegrations).toHaveBeenCalledOnce();
+	});
+
 	it('offers exactly three ways to start and lists three steps', async () => {
 		render(Setup);
 		expect(await screen.findByRole('button', { name: /Clean install/ })).toBeTruthy();

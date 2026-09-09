@@ -177,4 +177,21 @@ describe('ChatGptDeviceFlow — model seeding on completion', () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it('continues a new subscription to model selection without auto-saving the full catalog', async () => {
+		vi.useFakeTimers();
+		try {
+			mocks.createModelProvider.mockResolvedValue({ id: 'draft-1' });
+			mocks.codexDevicePoll.mockResolvedValue({ status: 'complete' });
+			const onDone = vi.fn();
+			const onConnected = vi.fn();
+			render(ChatGptDeviceFlow, { props: { onDone, onConnected, onCancel: vi.fn() } });
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(onConnected).toHaveBeenCalledWith('draft-1');
+			expect(onDone).not.toHaveBeenCalled();
+			expect(mocks.updateModelProvider).not.toHaveBeenCalled();
+			expect(mocks.refreshProviders).toHaveBeenCalled();
+		} finally { vi.useRealTimers(); }
+	});
 });
