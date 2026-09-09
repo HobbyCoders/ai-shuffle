@@ -596,6 +596,9 @@
 
 		const collapseMobileComposer = () => {
 			if (!isMobileComposerViewport()) return;
+			// The dock owns the drawer state; resetting the expansion latch alone
+			// leaves the drawer open and prevents the composer from collapsing.
+			controlsDockRef?.setMobileSheetOpen(false);
 			mobileComposerExpanded = composerShell().reconcileExpanded(
 				mobileComposerExpanded,
 				{
