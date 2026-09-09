@@ -61,6 +61,39 @@ def no_gateway_thread():
 # submit + kick
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("async_call", [False, True])
+@pytest.mark.parametrize("state", ["running", "parked", "completed"])
+async def test_send_now_preserves_queue_and_kicks_even_without_live_turn(mock_db, async_call, state):
+    first = turns.enqueue_turn("s-send-now", "user", prompt="first")
+    turns.start_turn(first["id"], None, "runner")
+    queued = turns.enqueue_turn("s-send-now", "user", prompt="must survive")
+    if state == "parked":
+        turns.park_turn(first["id"], ["background-task"])
+    elif state == "completed":
+        turns.settle_turn(first["id"], "completed")
+    kicked, interrupted = [], []
+    turn_manager.register_kick(kicked.append)
+    turn_manager.register_interrupt_executor(lambda *args: interrupted.append(args))
+    if async_call:
+        await turn_manager.interrupt_async("s-send-now", "send_now", turn_id=first["id"])
+    else:
+        turn_manager.interrupt("s-send-now", "send_now", turn_id=first["id"])
+    assert kicked == ["s-send-now"]
+    assert bool(interrupted) == (state == "running")
+    assert turns.get_turn(queued["id"])["state"] == "queued"
+    assert not turns.get_turn(first["id"])["stop_background"]
+
+
+def test_plain_stop_does_not_kick_parked_queue(mock_db):
+    first = turns.enqueue_turn("s-stop-parked", "user", prompt="first")
+    turns.start_turn(first["id"], None, "runner")
+    turns.park_turn(first["id"], ["background-task"])
+    kicked = []
+    turn_manager.register_kick(kicked.append)
+    turn_manager.interrupt("s-stop-parked", "stop")
+    assert kicked == []
+
+
 def test_submit_enqueues_and_kicks(mock_db):
     kicked = []
     turn_manager.register_kick(lambda sid: kicked.append(sid))

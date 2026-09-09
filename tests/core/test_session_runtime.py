@@ -374,6 +374,50 @@ async def test_reader_token_serializes_pump_and_idle_reader(mock_db):
 # 3. Park gate — both branches
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("enqueue_at_park", [False, True])
+async def test_parking_drains_user_messages_before_background_completion(mock_db, enqueue_at_park):
+    from app.core import turn_manager, turn_scheduler
+
+    sid = "park-drain"
+    first = turns_db.enqueue_turn(sid, "user", prompt="launch background work")
+    delivered = []
+    queued = []
+    second_started = asyncio.Event()
+
+    def enqueue():
+        queued.append(turns_db.enqueue_turn(sid, "user", prompt="answer me now"))
+
+    async def pump(**kwargs):
+        delivered.append(kwargs["prompt"])
+        if len(delivered) == 1:
+            if not enqueue_at_park:
+                enqueue()
+        else:
+            second_started.set()
+        yield {"type": "done", "metadata": {}}
+
+    async def on_park(*args):
+        if enqueue_at_park and not queued:
+            enqueue()
+
+    with _runtime_env(pump=pump, bg_work=[{"id": "still-running"}]) as env:
+        env["record_parked"].side_effect = on_park
+        session_runtime.register_scheduler(turn_scheduler.on_turn_settled)
+        turn_manager.register_kick(turn_scheduler.kick)
+        try:
+            assert await session_runtime.execute(first) == "parked"
+            await asyncio.wait_for(second_started.wait(), 3)
+            # Await scheduler-owned execution so the successor also releases its lease.
+            while turn_scheduler._kick_tasks:
+                await asyncio.gather(*list(turn_scheduler._kick_tasks))
+        finally:
+            turn_manager.register_kick(None)
+    assert delivered == ["launch background work", "answer me now"]
+    assert turns_db.get_turn(queued[0]["id"])["state"] == "parked"
+    assert turns_db.get_queued_turns(sid) == []
+    assert turns_db.get_turn(first["id"])["payload"]["task_ids"] == ["still-running"]
+
+
 async def test_finalize_parks_when_background_work_survives(mock_db):
     turn = turns_db.enqueue_turn("s3", "user", prompt="hi")
 

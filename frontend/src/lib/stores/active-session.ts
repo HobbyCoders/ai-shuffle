@@ -755,6 +755,7 @@ export const activeSession = {
 		messageSender.sendMessage(prompt, options),
 
 	stopGeneration: () => messageSender.stopGeneration(),
+	interruptForQueuedMessages: () => messageSender.interruptForQueuedMessages(),
 
 	// ── Permission & Question Responses (delegated to permission-handler) ──
 

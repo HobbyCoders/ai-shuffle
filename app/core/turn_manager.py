@@ -380,6 +380,11 @@ def interrupt(
     )
     if row is not None:
         _fire_interrupt_executor(session_id, mode, turn_id)
+    if mode == "send_now":
+        # Parking releases the live slot. There may be nothing to interrupt,
+        # but the user's already-queued messages still need a scheduling tick.
+        # A live turn keeps the early kick out; its settlement drains as usual.
+        _kick(session_id)
     return row
 
 
@@ -406,6 +411,11 @@ async def interrupt_async(
     )
     if row is not None:
         _fire_interrupt_executor(session_id, mode, turn_id)
+    if mode == "send_now":
+        # Parking releases the live slot. There may be nothing to interrupt,
+        # but the user's already-queued messages still need a scheduling tick.
+        # A live turn keeps the early kick out; its settlement drains as usual.
+        _kick(session_id)
     return row
 
 # ---------------------------------------------------------------------------

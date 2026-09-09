@@ -1574,18 +1574,27 @@ class ChatWebSocketHandler:
             if owner_device:
                 from app.network import control
                 try:
-                    await control.interrupt(owner_device, session_id, "send_now")
+                    await control.interrupt(
+                        owner_device, session_id, "send_now",
+                        turn_id=data.get("turn_id") or None,
+                    )
                 except (control.RunnerUnreachable, control.ControlRefused) as exc:
                     logger.info("send_now forward to %s failed: %s", owner_device, exc)
-            flipped = await turn_manager.interrupt_async(session_id, "send_now")
+            flipped = await turn_manager.interrupt_async(
+                session_id, "send_now", turn_id=data.get("turn_id") or None,
+            )
             if flipped is not None:
                 # Cross-runner wake (see handle_stop) — latency only.
                 from app.core import turn_claim
                 await run_sync(turn_claim.notify_turns_changed, session_id)
 
             async def _settled_or_draining() -> bool:
-                live = await run_sync(turns_db.get_live_turn, session_id)
-                return live is None or live.get("state") == "draining"
+                if flipped is None:
+                    return True  # Already parked/settled, or a stale turn id.
+                target = await run_sync(turns_db.get_turn, flipped["id"])
+                return target is None or target.get("state") in (
+                    *turns_db.TERMINAL_STATES, "draining",
+                )
 
             loop = asyncio.get_event_loop()
             deadline = loop.time() + _INTERRUPT_DRAIN_TIMEOUT_SECONDS

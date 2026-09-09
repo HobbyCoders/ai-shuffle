@@ -24,6 +24,7 @@ The legacy (flag-OFF) rollback path stays covered by test_busy_write_guard_ws.py
 test_chat_ws_handler_queue.py and test_chat_ws_queue_race_gaps.py.
 """
 
+import asyncio
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -531,6 +532,50 @@ async def test_interrupt_for_query_send_now_confirms(mock_db, monkeypatch):
     assert _sent(handler, "interrupt_confirmed") == [
         {"type": "interrupt_confirmed", "session_id": "sess-1"}
     ]
+
+
+async def test_pending_interrupt_while_parked_preserves_queue_and_kicks(mock_db):
+    from app.core import turn_manager
+
+    _make_session("sess-1")
+    live = turns_db.enqueue_turn("sess-1", "user", prompt="background work")
+    turns_db.start_turn(live["id"], None, "runner")
+    queued = turns_db.enqueue_turn("sess-1", "user", prompt="answer now")
+    turns_db.park_turn(live["id"], ["task-still-running"])
+    kicked = []
+    turn_manager.register_kick(kicked.append)
+    try:
+        with _Patches(), patch(
+            "app.core.query_session_lifecycle.stop_all_background_tasks", new=AsyncMock(),
+        ) as stop_bg:
+            handler = _make_handler()
+            await handler.handle_interrupt_for_query({
+                "session_id": "sess-1", "turn_id": live["id"],
+            })
+    finally:
+        turn_manager.register_kick(None)
+    stop_bg.assert_not_awaited()
+    assert kicked == ["sess-1"]
+    assert turns_db.get_turn(queued["id"])["state"] == "queued"
+    assert turns_db.get_turn(live["id"])["state"] == "parked"
+    assert not _sent(handler, "interrupt_failed")
+    assert _sent(handler, "interrupt_confirmed")
+
+
+async def test_pending_interrupt_stale_turn_spares_successor(mock_db):
+    _make_session("sess-1")
+    old = turns_db.enqueue_turn("sess-1", "user", prompt="old")
+    turns_db.start_turn(old["id"], None, "runner")
+    turns_db.park_turn(old["id"], ["task-still-running"])
+    successor = turns_db.enqueue_turn("sess-1", "user", prompt="answer now")
+    turns_db.start_turn(successor["id"], None, "runner")
+    with _Patches():
+        handler = _make_handler()
+        await asyncio.wait_for(handler.handle_interrupt_for_query({
+            "session_id": "sess-1", "turn_id": old["id"],
+        }), 1)
+    assert turns_db.get_turn(successor["id"])["state"] == "running"
+    assert _sent(handler, "interrupt_confirmed")
 
 
 async def test_interrupt_for_query_idle_confirms_immediately(mock_db):

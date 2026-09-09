@@ -525,6 +525,27 @@ describe('message-sender worktreeDeleted no longer triggers a pre-send reopen', 
  * stopped before output" bug). Once a sessionId exists, the stop goes out
  * immediately.
  */
+describe('message-sender pending-message Interrupt', () => {
+	it.each([true, false])('preserves the queue when streaming=%s', (isStreaming) => {
+		const queuedMessages = [{ id: 'turn-q', content: 'answer this', queuedAt: 1 }];
+		const { deps, wsConn, getState } = makeDeps(baseState({
+			sessionId: 'ses-1', isStreaming, liveTurnId: 'turn-parked', queuedMessages,
+		}));
+		createMessageSender(deps).interruptForQueuedMessages();
+		expect(wsConn.send).toHaveBeenCalledExactlyOnceWith({
+			type: 'interrupt_for_query', session_id: 'ses-1', turn_id: 'turn-parked',
+		});
+		expect(getState().queuedMessages).toEqual(queuedMessages);
+		expect(getState().isStreaming).toBe(isStreaming);
+	});
+
+	it('does nothing when the pending message has already been delivered', () => {
+		const { deps, wsConn } = makeDeps(baseState({ sessionId: 'ses-1' }));
+		createMessageSender(deps).interruptForQueuedMessages();
+		expect(wsConn.send).not.toHaveBeenCalled();
+	});
+});
+
 describe('message-sender stopGeneration deferral', () => {
 	function stopSends(wsConn: { send: { mock: { calls: unknown[][] } } }) {
 		return wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'stop');

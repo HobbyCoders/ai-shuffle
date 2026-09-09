@@ -1827,7 +1827,7 @@
 				<PendingMessages
 					messages={pendingMessages}
 					onRemove={(id) => activeSession.removeQueuedMessage(id)}
-					onInterrupt={() => activeSession.stopGeneration()}
+					onInterrupt={() => activeSession.interruptForQueuedMessages()}
 				/>
 			{/if}
 

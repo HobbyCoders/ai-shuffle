@@ -887,6 +887,17 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 		// ── Pending Messages (server-side queue) ────────────────────────
 
+		/** Deliver the existing queue; unlike Stop, preserve messages and background work. */
+		interruptForQueuedMessages() {
+			const state = getState();
+			if (!state.sessionId || !state.queuedMessages.length) return;
+			wsConn.send({
+				type: 'interrupt_for_query',
+				session_id: state.sessionId,
+				...(state.liveTurnId ? { turn_id: state.liveTurnId } : {}),
+			});
+		},
+
 		/** Unsend a message that hasn't reached the model yet. */
 		removeQueuedMessage(id: string) {
 			const _state = getState();
