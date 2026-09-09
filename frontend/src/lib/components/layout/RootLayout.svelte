@@ -204,7 +204,7 @@
 	<div class="min-h-screen flex items-center justify-center p-4">
 		<div class="text-center max-w-md">
 			<p role="status" class="text-foreground mb-2">AI Shuffle only accepts direct connections from its local network.</p>
-			<p class="text-muted-foreground mb-4">Open it on this machine or your LAN using localhost, the worker's IP address, or a hostname allowed by SHUFFLE_LOCAL_HOSTNAMES. Connections through proxies or tunnels are not treated as local.</p>
+			<p class="text-muted-foreground mb-4">Open it on this machine, your LAN, or your Tailscale network using localhost, the worker's IP or Tailscale address, or a hostname allowed by SHUFFLE_LOCAL_HOSTNAMES. Connections through reverse proxies or public tunnels are not treated as local.</p>
 			<button type="button" class="btn" onclick={() => void refreshAuth()}>Try again</button>
 		</div>
 	</div>

@@ -7,11 +7,13 @@ providers and GitHub. It does not create a username or password and does not
 require a Shuffle account.
 
 The local listener (port 8000 by default) grants owner access to direct local/LAN
-requests. Everyone allowed to reach that trusted interface on your LAN can
-operate the installation. Existing Devices and scoped integration API keys
-continue to work; supplying an integration credential retains its restricted
-role. Public hostnames, public source addresses, forwarded proxy requests, and
-cross-site browser requests do not receive automatic local authority.
+requests. Tailscale counts as local: peers in 100.64.0.0/10 and MagicDNS names
+under `ts.net` are trusted like LAN addresses. Everyone allowed to reach that
+trusted interface on your LAN or tailnet can operate the installation. Existing
+Devices and scoped integration API keys continue to work; supplying an
+integration credential retains its restricted role. Public hostnames, public
+source addresses, forwarded proxy requests, and cross-site browser requests do
+not receive automatic local authority.
 
 Shuffle is not hosted on the internet and never asks its owner to sign in: there
 is no login page, password, or browser account sign-in. For phone access, open

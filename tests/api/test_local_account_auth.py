@@ -13,7 +13,7 @@ from app.api import auth, ws_auth
 from app.core import owner_auth, encryption, account_hub, pairing
 from app.core.config import settings
 from app.core.models import DeviceCapabilities
-from app.db import database, mobile_hub, mobile, pairing as pairing_store
+from app.db import database, mobile_hub
 
 SERVER = '11111111-1111-1111-1111-111111111111'
 ACCOUNT = '22222222-2222-2222-2222-222222222222'
@@ -170,8 +170,9 @@ def test_workspace_metadata_needs_local_access_or_authenticated_remote(app, tmp_
     (None, '127.0.0.1', 'http://localhost:8000', {}),
     ('local', '8.8.8.8', 'http://192.168.1.20:8000', {}),
     ('local', '169.254.1.1', 'http://192.168.1.20:8000', {}),
-    ('local', '100.64.1.1', 'http://192.168.1.20:8000', {}),
     ('local', '192.168.1.50', 'http://attacker.example:8000', {}),
+    ('local', '100.101.102.103', 'http://tower.ts.net.attacker.example:8000', {}),
+    ('local', '8.8.8.8', 'http://100.88.77.66:8000', {}),
     ('local', '192.168.1.50', 'http://192.168.1.20:8000', {'X-Forwarded-For': '127.0.0.1'}),
     ('local', '192.168.1.50', 'http://192.168.1.20:8000', {'X-Forwarded-Host': 'localhost'}),
     ('local', '192.168.1.50', 'http://192.168.1.20:8000', {'Forwarded': 'for=127.0.0.1'}),
@@ -184,6 +185,17 @@ def test_untrusted_requests_cannot_become_local_owner(app, ingress, peer, origin
     c = client(app, ingress, peer, origin)
     assert c.get('/owner', headers=extra).status_code == 403
     assert c.post('/api/v1/auth/setup', headers=extra, json={}).status_code == 403
+
+
+@pytest.mark.parametrize('origin', ['http://100.88.77.66:8000', 'http://tower.tail1234.ts.net:8000'])
+def test_tailscale_peer_is_a_local_owner(app, origin):
+    """Shuffle is reached over the owner's own networks only; a tailnet is one of them."""
+    c = client(app, 'local', '100.101.102.103', origin)
+    status = c.get('/api/v1/auth/status').json()
+    assert status['authenticated'] and status['is_admin'] and status['local_access']
+    assert c.post('/owner').status_code == 200
+    with c.websocket_connect(origin.replace('http', 'ws') + '/ws', headers={'Origin': origin}) as ws:
+        assert ws.receive_json() == {'authenticated': True, 'kind': 'admin'}
 
 
 def test_local_disable_flag_and_integration_key_are_respected(app, monkeypatch):

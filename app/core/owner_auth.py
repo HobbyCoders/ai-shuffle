@@ -77,8 +77,11 @@ def local_access(request):
             or any(h in request.headers for h in ('forwarded', 'x-forwarded-for',
                        'x-forwarded-host', 'x-forwarded-proto', 'cf-connecting-ip', 'cf-ray'))):
         return False
+    # Tailscale addresses (CGNAT 100.64.0.0/10) are part of the owner's own
+    # network: the worker is reached directly, never through the internet.
     networks = tuple(ipaddress.ip_network(n) for n in
-                     ('127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '::1/128', 'fc00::/7'))
+                     ('127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10',
+                      '::1/128', 'fc00::/7'))
     try:
         peer = ipaddress.ip_address(request.client.host)
         if not any(peer in network for network in networks):
@@ -92,7 +95,8 @@ def local_access(request):
         except ValueError:
             names = {'localhost', socket.gethostname().lower(), socket.gethostname().lower() + '.local'}
             names.update(x.strip().lower() for x in settings.shuffle_local_hostnames.split(',') if x.strip())
-            host_ok = hostname.lower() in names
+            # Tailscale MagicDNS names only ever resolve to tailnet addresses.
+            host_ok = hostname.lower() in names or hostname.lower().endswith('.ts.net')
         if not host_ok or request.headers.get('sec-fetch-site') == 'cross-site':
             return False
         origin = request.headers.get('origin')
