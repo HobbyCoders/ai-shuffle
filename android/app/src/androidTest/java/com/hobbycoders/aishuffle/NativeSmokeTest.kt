@@ -209,6 +209,8 @@ class NativeSmokeTest {
     }
     @Test fun welcomePairingOpensWithoutStartingBrowserSignIn() = withInterceptedOAuth { starts, requests ->
         ActivityScenario.launch(ServerListActivity::class.java).use { scenario ->
+            awaitFocused(scenario)
+            instrumentation.uiAutomation.waitForIdle(500, 5_000)
             onView(withText("Use another device")).perform(scrollTo(), click())
             onView(withHint("Account pairing code")).check(matches(isDisplayed()))
             onView(withText("Scan account QR")).check(matches(isDisplayed()))
