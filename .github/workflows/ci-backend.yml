@@ -82,7 +82,9 @@ jobs:
     # Keep a hard job timeout to bound silent backend wedges and surface a useful failure rather than waiting
     # for the platform default.
     timeout-minutes: 20
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # Size the runner for the pytest-xdist workers below so resource starvation does not cause fixture timeouts
+    # or teardown races.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
@@ -112,15 +114,7 @@ jobs:
           pip install -e ./fluid
 
       - name: Run fast test subset
-        # The suite uses an in-memory SQLite shim — no Postgres service needed.
-        # addopts="" overrides any pytest.ini addopts so this never fails on coverage.
-        # --timeout=120 bounds the rare hard-wedge per test: a wedged run fails
-        # in ~2 minutes with the hung test named, instead of billing the full
-        # 20-minute job timeout with no diagnosis.
-        # -n 4 (pytest-xdist) oversubscribes the 2 vCPUs on purpose: the suite
-        # is dominated by app start/stop and short waits, not CPU, so four
-        # workers hide most of that wall-clock (4.3x faster than serial when
-        # measured locally).
+        # Run the fast pytest subset with xdist for parallel execution.
         run: python -m pytest tests/api tests/core tests/db tests/middleware tests/contract tests/performance -o addopts="" -q -p no:cacheprovider --timeout=120 -n 4
 
       - name: Packaging and backup regression checks
