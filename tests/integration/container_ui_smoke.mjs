@@ -38,14 +38,21 @@ try {
   const auth = await (await context.request.get('http://127.0.0.1:8000/api/v1/auth/status')).json();
   assert.equal(auth.local_access, true);
   assert.equal(auth.owner_linked, false);
-  assert.equal(auth.account_sign_in_available, false, 'Fresh worker must not allow remote owner browser sign-in');
+  // Shuffle never asks its owner to sign in: status offers no browser sign-in and the login routes are gone.
+  assert.equal('account_sign_in_available' in auth, false, 'Fresh worker must not offer remote owner browser sign-in');
+  for (const route of ['login', 'account/start', 'recovery']) {
+    const removed = await context.request.post(`http://127.0.0.1:8000/api/v1/auth/${route}`, {
+      data: {}, headers: { Origin: 'http://127.0.0.1:8000' }
+    });
+    assert.equal(removed.status(), 404, `Owner login route ${route} must not exist`);
+  }
   await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'More', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Settings', exact: true }).click();
   await page.getByRole('button', { name: 'Providers', exact: true }).click();
   const account = page.getByRole('region', { name: 'Shuffle account', exact: true });
   const login = account.getByRole('button', { name: 'Sign in', exact: true });
   await login.waitFor();
-  assert.equal(await login.isEnabled(), true, 'Fresh local owner must be able to sign in to an account before owner browser sign-in is available');
+  assert.equal(await login.isEnabled(), true, 'Fresh local owner must be able to link a Shuffle account for phone access');
   assert.equal(await account.getByRole('button', { name: 'Create account', exact: true }).isEnabled(), true, 'Fresh local owner must be able to create an account');
   assert.equal(await page.getByText(/Pending approvals/).count(), 0, 'Devices must not show an approval queue');
   assert.equal(await account.getByText(/Ask the operator to enable it/).count(), 0);
