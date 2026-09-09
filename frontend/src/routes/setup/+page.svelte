@@ -204,8 +204,8 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
 </svelte:head>
 
-<div class="min-h-screen flex items-center justify-center p-4">
-	<div class="card p-6 sm:p-8 w-full transition-all duration-300 {currentStep === 'workspace' || currentStep === 'start' ? 'max-w-xl' : 'max-w-lg'}">
+<div class="setup-viewport flex flex-col items-center overflow-y-auto p-4">
+	<div class="card my-auto shrink-0 p-6 sm:p-8 w-full transition-all duration-300 {currentStep === 'workspace' || currentStep === 'start' ? 'max-w-xl' : 'max-w-lg'}">
 		{#if loadingConfig}
 			<div class="text-center py-8">
 				<Loader2 size={32} strokeWidth={1.5} class="mx-auto mb-4 animate-spin text-muted-foreground" />
@@ -418,3 +418,12 @@
 		{/if}
 	</div>
 </div>
+
+<style>
+	/* The app disables document scrolling, so setup owns its scroll area.
+	   Auto margins center a short card and collapse when it needs to scroll. */
+	.setup-viewport {
+		height: 100vh;
+		height: var(--app-viewport-height, 100dvh);
+	}
+</style>
