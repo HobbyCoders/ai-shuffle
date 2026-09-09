@@ -135,7 +135,9 @@ jobs:
           sudo systemctl start postgresql.service
           sudo -u postgres psql -v ON_ERROR_STOP=1 \
             -c "CREATE USER shuffle_mobile_test WITH PASSWORD 'mobile-test-only'" \
-            -c "CREATE DATABASE shuffle_mobile_test OWNER shuffle_mobile_test" \n            -c "CREATE USER shuffle_network_test WITH PASSWORD 'network-test-only'" \n            -c "CREATE DATABASE shuffle_network_test OWNER shuffle_network_test"
+            -c "CREATE DATABASE shuffle_mobile_test OWNER shuffle_mobile_test" \
+            -c "CREATE USER shuffle_network_test WITH PASSWORD 'network-test-only'" \
+            -c "CREATE DATABASE shuffle_network_test OWNER shuffle_network_test"
           pg_isready -h 127.0.0.1 -p 5432
 
       - name: Mobile PostgreSQL contracts
