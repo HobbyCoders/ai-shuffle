@@ -63,8 +63,8 @@ jobs:
     if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.canary-gate.outputs.changed == 'true') }}
     # Choose a frontend runner suited to the suite parallelism and keep a bounded job timeout.
     timeout-minutes: 20
-    # Use the smaller frontend runner for mostly single-threaded build, type-check and test work.
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # Choose a frontend runner suited to the suite parallelism and keep a bounded job timeout.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     defaults:
       run:
         working-directory: frontend
