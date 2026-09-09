@@ -80,21 +80,23 @@ async def test_register_push_pull_and_device_approval(workers, fake):
         assert hub.status()["cursor"] == len(fake.feed)
     assert fake.network["network_id"] and fake.devices[a.device_id]["status"] == "active"
 
-    # B is signed in to the same account but has no network yet: it waits for approval.
+    # B is signed in to the same account but has no network yet: it waits for a member to be online.
     with b.active():
         _signed_in(fake, b)
         assert await hub._loop_body() is False
         assert fake.devices[b.device_id]["status"] == "pending"
         assert engine.context() is None
+        waiting = hub.status()["account_network"]
+        assert waiting["network_id"] == fake.network["network_id"]
+        assert [d["name"] for d in waiting["devices"] if d["status"] == "active"] == ["A"]
+    # A's next pass admits B without anyone comparing fingerprints (the account is the authorization).
     with a.active():
         _signed_in(fake, a)
-        pending = hub.pending_devices()
-        assert [d["device_id"] for d in pending] == [b.device_id]
-        with pytest.raises(hub.HubError):
-            hub.approve_device(b.device_id, fingerprint_confirmed=False)
-        hub.approve_device(b.device_id, fingerprint_confirmed=True)
+        assert [d["device_id"] for d in hub.pending_devices()] == [b.device_id]
+        await hub._loop_body()
         assert fake.devices[b.device_id]["status"] == "approved"
-        hub.push_once()  # B's certificate reaches the feed
+        assert hub.status()["pending_devices"] == []
+        assert engine.context().member(b.device_id).status == "active"
     with b.active():
         _signed_in(fake, b)
         assert await hub._loop_body() is True
@@ -113,6 +115,72 @@ async def test_register_push_pull_and_device_approval(workers, fake):
         assert hub.pull_once() >= 1
     assert _pref(a, "from_b") == 1
     assert exchange(b, a).applied == 0
+
+
+async def test_first_worker_to_sign_in_founds_the_account_network(workers, fake):
+    a = workers("a")
+    with a.active():
+        _signed_in(fake, a)
+        assert engine.context() is None
+        assert await hub._loop_body() is True
+        ctx = engine.context()
+        assert ctx is not None and ctx.founder_device_id == a.device_id and ctx.bootstrap_state == "ready"
+        assert fake.network["network_id"] == ctx.network_id
+        assert fake.devices[a.device_id]["status"] == "active"
+        assert hub.status()["registered"] and hub.status()["status"] == "active"
+        # Later passes just sync.
+        database.set_system_setting("tts_model", "voice-founder")
+        engine.scan_all()
+        assert await hub._loop_body() is False
+        assert hub.status()["backlog"] == 0 and len(fake.feed) >= 2
+
+
+async def test_worker_with_its_own_network_is_reported_as_conflict_and_can_adopt(workers, fake):
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        database.set_system_setting("tts_model", "voice-a")
+        engine.scan_all()
+        _signed_in(fake, a)
+        hub.register()
+        hub.push_once()
+    with b.active():
+        engine.create_network("Laptop", device_name="B")
+        database.set_system_setting("tts_model", "voice-b")
+        database.set_system_setting("only_on_b", "yes")
+        engine.scan_all()
+        own_network = engine.context().network_id
+        _signed_in(fake, b)
+        assert await hub._loop_body() is False
+        status = hub.status()
+        assert status["status"] == "conflict" and not status["registered"]
+        assert status["account_network"]["network_id"] == fake.network["network_id"]
+        assert b.device_id not in fake.devices
+        # Nothing of B's reached the account while the owner had not decided.
+        assert all(env["origin_device_id"] == a.device_id for env in fake.feed)
+        result = await hub.adopt_account_network()
+        assert result["adopted"] and result["status"] == "pending"
+        assert engine.context() is None and fake.devices[b.device_id]["status"] == "pending"
+        assert b.sql("SELECT COUNT(*) AS n FROM sync_ops")[0]["n"] == 0
+    with a.active():
+        _signed_in(fake, a)
+        await hub._loop_body()
+        assert fake.devices[b.device_id]["status"] == "approved"
+    with b.active():
+        _signed_in(fake, b)
+        assert await hub._loop_body() is True
+        ctx = engine.context()
+        assert ctx.network_id == fake.network["network_id"] != own_network
+        # The account's copy wins; B's own row for the same key is gone.
+        assert database.get_system_setting("tts_model") == "voice-a"
+        # Rows only B had are merged into the account's network.
+        engine.scan_all()
+        assert hub.push_once() >= 1
+    with a.active():
+        _signed_in(fake, a)
+        hub.pull_once()
+        assert database.get_system_setting("only_on_b") == "yes"
+        assert database.get_system_setting("tts_model") == "voice-a"
 
 
 async def test_quota_exceeded_keeps_lan_sync_and_shows_backlog(workers, fake):
@@ -198,11 +266,9 @@ def test_hub_device_routes_approve_and_reject_through_the_api(workers, fake):
         _signed_in(fake, a)
         listed = client.get("/api/v1/network/hub/devices").json()["devices"]
         assert [d["device_id"] for d in listed] == [b.device_id]
-        assert client.post(f"/api/v1/network/hub/devices/{b.device_id}/approve",
-                           json={"fingerprint_confirmed": False}).status_code == 400
-        approved = client.post(f"/api/v1/network/hub/devices/{b.device_id}/approve",
-                               json={"fingerprint_confirmed": True})
+        approved = client.post(f"/api/v1/network/hub/devices/{b.device_id}/approve", json={})
         assert approved.status_code == 200 and approved.json()["status"] == "approved"
+        assert client.post(f"/api/v1/network/hub/devices/{b.device_id}/approve", json={}).status_code == 400
         assert client.post("/api/v1/network/hub/devices/dev_nobody/reject", json={}).status_code == 200
         status = client.get("/api/v1/network/status").json()
         assert status["hub"]["linked"] and status["hub"]["registered"]

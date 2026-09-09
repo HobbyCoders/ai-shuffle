@@ -2,9 +2,9 @@
  * Request-shape tests for the worker-network API client.
  *
  * The `api` client is mocked: each function must hit the documented path with
- * the documented verb and body. Approval calls MUST carry
- * `fingerprint_confirmed: true` (the server refuses anything else) and the
- * join grant MUST be minted with `purpose: 'network:join'`.
+ * the documented verb and body. Admission calls carry an empty body (the
+ * one-time code or the account is the authorization; nothing is compared)
+ * and the join grant MUST be minted with `purpose: 'network:join'`.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -141,10 +141,10 @@ describe('inviting (this worker is the inviter)', () => {
 		expect(api.get).toHaveBeenCalledWith('/network/joins');
 	});
 
-	it('approves only with fingerprint_confirmed: true and rejects with an empty body', async () => {
+	it('admits a parked join and rejects, both with an empty body', async () => {
 		api.post.mockResolvedValue({ status: 'approved' });
 		await approveJoin('j 1');
-		expect(api.post).toHaveBeenCalledWith('/network/joins/j%201/approve', { fingerprint_confirmed: true });
+		expect(api.post).toHaveBeenCalledWith('/network/joins/j%201/approve', {});
 		await rejectJoin('j1');
 		expect(api.post).toHaveBeenLastCalledWith('/network/joins/j1/reject', {});
 	});
@@ -185,10 +185,10 @@ describe('account (hub) device approvals', () => {
 		expect(api.get).toHaveBeenCalledWith('/network/hub/devices');
 	});
 
-	it('approves with fingerprint_confirmed: true and rejects', async () => {
+	it('admits an account device and rejects, both with an empty body', async () => {
 		api.post.mockResolvedValue({ status: 'approved' });
 		await approveHubDevice('h1');
-		expect(api.post).toHaveBeenCalledWith('/network/hub/devices/h1/approve', { fingerprint_confirmed: true });
+		expect(api.post).toHaveBeenCalledWith('/network/hub/devices/h1/approve', {});
 		await rejectHubDevice('h1');
 		expect(api.post).toHaveBeenLastCalledWith('/network/hub/devices/h1/reject', {});
 	});

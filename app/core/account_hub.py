@@ -23,6 +23,16 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_HUB = 'https://shuffle-account-hub.example.workers.dev'
 
+# Username rules mirror the hub's PATCH .../account validation.
+USERNAME_PATTERN = re.compile(r'^[a-z0-9][a-z0-9_.-]{2,63}$')
+USERNAME_HINT = 'Use 3–64 letters, numbers, underscores, periods or hyphens, starting with a letter or number.'
+ACCOUNT_PROFILE_ERRORS = {
+    400: USERNAME_HINT,
+    401: 'This worker is no longer linked to its account. Sign in again.',
+    409: 'That username is already taken.',
+    429: 'Too many username changes. Try again in a few minutes.',
+}
+
 # Recent positive device verdicts: (server_id, hub_device_id, account_id) -> monotonic
 # time of the last hub confirmation. Every paired-client request (middleware,
 # route dependency, WebSocket handshake) used to make its own live hub call, and
@@ -136,6 +146,9 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
         if response.status != 200:
             if suffix.startswith('browser-logins') and response.status in (401, 403):
                 raise HTTPException(response.status, 'Account sign-in expired or authorization was rejected.')
+            if suffix == 'account' and response.status in ACCOUNT_PROFILE_ERRORS:
+                # Fixed messages: the hub body is never echoed.
+                raise HTTPException(response.status, ACCOUNT_PROFILE_ERRORS[response.status])
             if response.status == 429:
                 detail = 'Account hub is rate limiting this worker'
             raise ValueError(f'hub answered HTTP {response.status}')

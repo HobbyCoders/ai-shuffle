@@ -5,7 +5,7 @@ import pytest
 from fastapi import FastAPI, HTTPException, WebSocketException
 from fastapi.testclient import TestClient
 from app.api import mobile, mobile_hub
-from app.api.auth import get_paired_client_from_token, hash_api_key
+from app.api.auth import get_paired_client_from_token, hash_api_key, require_admin
 from app.core import account_hub, encryption, pairing
 from app.core.models import DeviceInfo
 from app.db import mobile_hub as store, database
@@ -101,6 +101,58 @@ def test_outbound_fail_closed_no_redirect(setup, monkeypatch, status):
     assert 'secret' not in exc.value.detail
     assert conn.request.call_count == 1
     conn.close.assert_called_once()
+
+
+def admin_client():
+    app = FastAPI()
+    app.include_router(mobile.router)
+    app.dependency_overrides[require_admin] = lambda: 'admin'
+    return TestClient(app)
+
+
+def test_account_profile_proxies_only_the_owning_account_and_its_workers(setup, monkeypatch):
+    assert setup.get('/api/v1/mobile/hub/account').status_code == 403  # owner access only
+    setup = admin_client()
+    assert setup.get('/api/v1/mobile/hub/account').status_code == 409
+    bind()
+    seen = []
+
+    def hub(binding, method, suffix, body=None, **kwargs):
+        seen.append((method, suffix, body))
+        assert binding['server_id'] == SERVER and suffix == 'account'
+        username = (body or {}).get('username', 'owner')
+        if username == 'taken':
+            raise HTTPException(409, 'That username is already taken.')
+        return {'account': {'id': ACCOUNT, 'username': username, 'profile_complete': username != 'owner'},
+                'servers': [{'id': SERVER, 'name': 'Desk', 'url': 'https://desk.example', 'current': True},
+                            {'id': DEVICE, 'name': 'Laptop', 'url': None, 'current': False},
+                            {'id': 'not-a-server', 'name': 'x'}, 'garbage'],
+                'devices': [{'id': DEVICE, 'secret': 'never'}]}
+
+    monkeypatch.setattr(account_hub, 'call', hub)
+    profile = setup.get('/api/v1/mobile/hub/account')
+    assert profile.status_code == 200, profile.text
+    assert profile.json() == {'account': {'id': ACCOUNT, 'username': 'owner', 'profile_complete': False},
+                              'servers': [{'id': SERVER, 'name': 'Desk', 'url': 'https://desk.example', 'current': True},
+                                          {'id': DEVICE, 'name': 'Laptop', 'url': None, 'current': False}]}
+    assert 'devices' not in profile.json() and 'never' not in profile.text
+    assert setup.patch('/api/v1/mobile/hub/account', json={'username': '!bad'}).status_code == 400
+    assert setup.patch('/api/v1/mobile/hub/account', json={'username': 'taken'}).status_code == 409
+    renamed = setup.patch('/api/v1/mobile/hub/account', json={'username': ' Desk.Owner '})
+    assert renamed.status_code == 200 and renamed.json()['account'] == {'id': ACCOUNT, 'username': 'desk.owner', 'profile_complete': True}
+    assert seen[-1] == ('PATCH', 'account', {'username': 'desk.owner'})
+    assert len([call for call in seen if call[0] == 'PATCH']) == 2  # the invalid name never reached the hub
+
+
+def test_connection_offers_sign_in_and_sign_up_links_for_the_same_code(setup, monkeypatch):
+    from app.core import managed_connection
+    monkeypatch.setattr(managed_connection, 'status', lambda: {'signed_in': False, 'status': 'waiting', 'code': 'ABCDEFG23456', 'error': None, 'url': None, 'expires_at': None})
+    response = admin_client().get('/api/v1/mobile/hub/connection')
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['authorization_url'].endswith('/browser/claim?code=ABCDEFG23456')
+    assert body['signup_url'] == body['authorization_url'] + '&screen=signup'
+    assert body['qr_svg'].startswith('<svg')
 
 
 def test_link_requires_real_mobile_controller(setup):

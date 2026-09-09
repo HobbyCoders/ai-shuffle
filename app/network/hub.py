@@ -5,14 +5,21 @@ and R2; see docs/network/hub-api.md) stores ciphertext and cursors only. A
 worker signed into the account:
 
 - registers its device in the account's network (``register``); the first
-  worker creates the network, later ones wait for approval from an online
-  member or unlock with the recovery key
+  worker to sign in founds the account's network, later ones are admitted
+  by whichever member is online (``admit_pending_devices``) or unlock with
+  the recovery key when every other worker is off
 - pushes every operation in its log in ingest order (``push``); the hub
   deduplicates on (origin, incarnation, seq)
 - pulls the feed from its cursor (``pull``) and applies it like any peer
   delivery; the same operation over LAN and hub applies once
-- approves pending devices (``approve_device``) by handing the hub a join
-  response wrapped to that device's keys
+- admits devices that registered through the account (``approve_device``)
+  by handing the hub a join response wrapped to that device's keys. Signing
+  in to the account is the authorization; no one compares fingerprints.
+
+A worker that already has its own network and signs in to an account whose
+network was founded elsewhere is reported as ``conflict``; the owner may
+adopt the account's network (``adopt_account_network``), which replaces the
+local network bookkeeping and merges local-only rows into the account's.
 
 Quota errors stop cloud durability, never LAN sync: the backlog is shown
 in the status and retried.
@@ -125,7 +132,14 @@ def status() -> dict:
         "last_error": _state.get("last_error"),
         "quota": hub_state.get("quota"),
         "pending_devices": _state.get("pending_devices") or [],
+        "account_network": _state.get("account_network"),
     }
+
+
+def forget_network() -> None:
+    """The worker left its network: drop what was learned about the account's."""
+    for key in ("status", "pending_devices", "account_network", "last_error"):
+        _state.pop(key, None)
 
 
 def _backlog(hub_state: dict) -> int:
@@ -157,10 +171,33 @@ def register() -> dict:
             body["recovery"] = state["recovery"]
     result = _call("POST", "", body)
     _state["status"] = result.get("status")
+    if result.get("status") == "conflict":
+        # The account's network was founded elsewhere; remember whose so the
+        # owner can decide, and keep the feed idle until they do.
+        _state["account_network"] = _account_network(_summary_or_none())
     if ctx is not None:
-        _save_hub_state(registered=True, status=result.get("status"), network_hub_id=result.get("network_hub_id"),
-                        quota=result.get("quota"))
+        _save_hub_state(registered=result.get("status") != "conflict", status=result.get("status"),
+                        network_hub_id=result.get("network_hub_id"), quota=result.get("quota"))
     return result
+
+
+def _summary_or_none() -> Optional[dict]:
+    try:
+        return _call("GET", "", None, max_bytes=1 << 20)
+    except HubError:
+        return None
+
+
+def _account_network(info: Optional[dict]) -> Optional[dict]:
+    """What the UI needs to explain who can admit this worker."""
+    if not info:
+        return None
+    devices = []
+    for device in info.get("devices") or []:
+        devices.append({k: device.get(k) for k in ("device_id", "name", "platform", "kind", "status", "version")})
+    return {"network_id": info.get("network_id"), "name": info.get("name"),
+            "founder_device_id": info.get("founder_device_id"), "devices": devices,
+            "recovery_available": bool(info.get("recovery"))}
 
 
 def pending_devices() -> List[dict]:
@@ -170,15 +207,25 @@ def pending_devices() -> List[dict]:
     return devices
 
 
-def approve_device(device_id: str, *, fingerprint_confirmed: bool) -> dict:
-    """Admit a device that registered through the account."""
-    if not fingerprint_confirmed:
-        raise HubError("Confirm the device's fingerprint before approving")
+def approve_device(device_id: str, *, fingerprint_confirmed: bool = True) -> dict:
+    """Admit a device that registered through the account.
+
+    The account sign-in is the authorization: the hub only lists devices
+    registered with a server secret bound to this same account.
+    """
     device = next((d for d in pending_devices() if d.get("device_id") == device_id), None)
     if device is None:
         raise HubError("No such pending device")
-    signing_public = crypto.b64u_decode(device["signing_public"])
-    encryption_public = crypto.b64u_decode(device["encryption_public"])
+    return _admit(device)
+
+
+def _admit(device: dict) -> dict:
+    device_id = device["device_id"]
+    try:
+        signing_public = crypto.b64u_decode(device["signing_public"])
+        encryption_public = crypto.b64u_decode(device["encryption_public"])
+    except (KeyError, TypeError, crypto.CryptoError) as exc:
+        raise HubError("Pending device has malformed keys") from exc
     if membership.device_id_for(signing_public) != device_id:
         raise HubError("Pending device id does not match its key")
     response = engine.admit_device(device_id=device_id, signing_public=signing_public,
@@ -188,6 +235,23 @@ def approve_device(device_id: str, *, fingerprint_confirmed: bool) -> dict:
     _call("POST", f"devices/{device_id}/approve", {"response": response}, max_bytes=65536)
     kick()
     return {"device_id": device_id, "status": "approved"}
+
+
+def admit_pending_devices() -> int:
+    """Admit every device waiting through the account. Returns how many were admitted."""
+    admitted = []
+    for device in pending_devices():
+        try:
+            _admit(device)
+            admitted.append(device.get("device_id"))
+        except (HubError, engine.NotEnrolled) as exc:
+            logger.warning("Could not admit account device %s: %s", device.get("device_id"), exc)
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not admit account device %s", device.get("device_id"), exc_info=True)
+    if admitted:
+        _state["pending_devices"] = [d for d in (_state.get("pending_devices") or [])
+                                     if d.get("device_id") not in admitted]
+    return len(admitted)
 
 
 def reject_device(device_id: str) -> dict:
@@ -228,6 +292,47 @@ def _upload_recovery() -> None:
         return
     _call("POST", "recovery", {"recovery": wrap})
     _recovery_upload_due = False
+
+
+def found_account_network(*, device_name: Optional[str] = None) -> dict:
+    """First worker on this account: create the network here and register it."""
+    if engine.context() is not None:
+        raise HubError("This worker already belongs to a network")
+    engine.create_network(None, device_name=device_name, legacy_instance_id=settings.effective_instance_id)
+    result = register()
+    if result.get("status") != "active":
+        raise HubError("The account did not accept this worker's network")
+    try:
+        engine.publish_presence(version=settings.version)
+    except Exception:  # noqa: BLE001
+        logger.debug("Presence after founding failed", exc_info=True)
+    kick()
+    return result
+
+
+async def adopt_account_network(*, device_name: Optional[str] = None) -> dict:
+    """Leave this worker's own network and join the account's instead.
+
+    Records already in the account's network win over local copies with the
+    same id; rows only this worker holds are published once it is admitted.
+    """
+    if _binding() is None:
+        raise HubError("This worker is not signed in to a Shuffle account")
+    info = await asyncio.to_thread(_call, "GET", "", None, max_bytes=1 << 20)
+    if not info.get("network_id"):
+        raise HubError("The account has no network to adopt")
+    ctx = engine.context()
+    if ctx is not None:
+        if ctx.network_id == info["network_id"]:
+            return {"adopted": False, "status": _state.get("status")}
+        try:
+            await asyncio.to_thread(engine.leave_network)
+        except RuntimeError as exc:
+            raise HubError(str(exc)) from exc
+    result = await asyncio.to_thread(register)
+    _state["account_network"] = _account_network(info)
+    kick()
+    return {"adopted": True, "status": result.get("status")}
 
 
 async def restore_with_recovery(recovery_key_text: str, *, device_name: Optional[str] = None) -> dict:
@@ -368,7 +473,9 @@ async def _loop_body() -> bool:
             _state["last_error"] = None
             return resumed
         if ctx is None:
-            # Signed in but not enrolled: register and wait for an approval.
+            # Signed in but not enrolled: register, then either found the
+            # account's network (nobody has yet) or wait to be admitted by an
+            # online member.
             result = await asyncio.to_thread(register)
             if result.get("status") == "approved" or result.get("response"):
                 response = result.get("response") or await asyncio.to_thread(_await_approval_sync)
@@ -376,6 +483,12 @@ async def _loop_body() -> bool:
                     await _bootstrap_from_hub(response)
                     return True
             elif result.get("status") == "pending":
+                info = await asyncio.to_thread(_summary_or_none)
+                _state["account_network"] = _account_network(info)
+                if info is not None and not info.get("network_id"):
+                    await asyncio.to_thread(found_account_network)
+                    _state["last_error"] = None
+                    return True
                 response = await asyncio.to_thread(_await_approval_sync)
                 if response:
                     await _bootstrap_from_hub(response)
@@ -383,7 +496,12 @@ async def _loop_body() -> bool:
             _state["last_error"] = None
             return False
         if not hub_state.get("registered"):
-            await asyncio.to_thread(register)
+            result = await asyncio.to_thread(register)
+            if result.get("status") == "conflict":
+                _state["last_error"] = None
+                return False
+        elif hub_state.get("status") == "conflict":
+            return False
         recovery_wrap = (store.get_state() or {}).get("recovery") or {}
         if _recovery_upload_due or (recovery_wrap.get("stale") and not recovery_wrap.get("hub_tombstoned")):
             await asyncio.to_thread(_upload_recovery)
@@ -391,7 +509,10 @@ async def _loop_body() -> bool:
             sent = await asyncio.to_thread(push_once)
             received = await asyncio.to_thread(pull_once)
             try:
-                await asyncio.to_thread(pending_devices)
+                # Devices that signed in to this account are admitted here.
+                admitted = await asyncio.to_thread(admit_pending_devices)
+                if admitted:
+                    sent += await asyncio.to_thread(push_once)
             except HubError:
                 pass
             _state["last_error"] = None

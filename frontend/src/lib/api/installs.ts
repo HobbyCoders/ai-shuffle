@@ -12,7 +12,7 @@ import { api } from './client';
 
 export interface Install {
 	id: string; // instance_id for legacy installs; device_id for network workers
-	device_id?: string; // present on network directory rows; managed through NetworkPanel
+	device_id?: string; // present on network directory rows; managed through the Devices workers list
 	legacy_instance_id?: string | null;
 	device_name: string;
 	base_url: string | null; // null = view-only (no peer control / offload target)

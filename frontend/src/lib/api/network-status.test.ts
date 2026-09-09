@@ -72,18 +72,24 @@ describe('deriveNetworkState', () => {
 		expect(deriveNetworkState(status({ enrolled: false, network: undefined, enrollment: null }))).toBe('needs-setup');
 	});
 
-	it('is Needs approval while a join or an account registration is pending', () => {
+	it('is Joining while an invite is being collected or the account has yet to admit this worker', () => {
 		const pending = { id: 'j', status: 'pending', endpoint_url: 'x', inviter_fingerprint: 'y', fingerprint: 'z', error: null };
-		expect(deriveNetworkState(status({ enrolled: false, network: undefined, enrollment: pending }))).toBe('needs-approval');
+		expect(deriveNetworkState(status({ enrolled: false, network: undefined, enrollment: pending }))).toBe('waiting');
+		expect(deriveNetworkState(status({ enrolled: false, network: undefined, enrollment: { ...pending, status: 'syncing' } }))).toBe('waiting');
 		expect(
-			deriveNetworkState(status({ enrolled: false, network: undefined, enrollment: null, hub: { linked: true, registered: true, status: 'pending' } }))
-		).toBe('needs-approval');
+			deriveNetworkState(status({ enrolled: false, network: undefined, enrollment: null, hub: { linked: true, registered: false, status: 'pending' } }))
+		).toBe('waiting');
 		const failed = { ...pending, status: 'failed', error: 'nope' };
 		expect(deriveNetworkState(status({ enrolled: false, network: undefined, enrollment: failed }))).toBe('needs-setup');
 	});
+
+	it('is Account differs when the account already has a network founded elsewhere', () => {
+		expect(deriveNetworkState(status({ hub: { linked: true, registered: false, status: 'conflict' } }))).toBe('conflict');
+		expect(deriveNetworkState(status({ hub: { linked: true, registered: true, status: 'active' } }))).toBe('ready');
+	});
 });
 
-describe('pendingApprovalCount', () => {
+describe('joiningDeviceCount (pendingApprovalCount alias)', () => {
 	it('adds joins and account-pending devices, but only when enrolled', () => {
 		const join = { id: 'j', status: 'pending', device_id: 'd', name: 'n', platform: null, fingerprint: null, legacy_instance_id: null, created_at: null, expires_at: null };
 		const device = { device_id: 'h', name: 'phone', platform: 'android', signing_public: 'AAAA' };

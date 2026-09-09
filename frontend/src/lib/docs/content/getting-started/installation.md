@@ -75,11 +75,11 @@ construct, edit or publish that descriptor yourself.
 
 On first launch, you'll be directed to the setup page where you:
 
-1. **Choose a workspace** — Set the working directory for projects.
-2. **Connect development tools** — Connect Claude or add another supported model provider. GitHub setup is optional.
-3. **Configure providers** — Review the models and credentials available to your worker.
+1. **Start** — Choose a clean install, sign in to your Shuffle account to sync settings from your other workers (a new account starts clean), or join another worker with the invite it shows under Settings → Devices → Add device.
+2. **Choose a workspace** — Set the working directory for projects.
+3. **Providers & GitHub** — Add a model provider (Claude, OpenAI, Grok or OpenRouter) and sign in to GitHub for repository features. Both are optional and also live in Settings.
 
-Local setup and trusted local-network use require no username, password, or Shuffle account. For optional remote access, open **Devices → Remote access** and link the worker to your account in the browser or Android app. Shuffle creates the managed tunnel automatically. Remote browsers sign in with the account that owns that worker.
+Local setup and trusted local-network use require no username, password, or Shuffle account. You can sign in to, create, or sign out of a Shuffle account at any time under **Settings → Devices**. Signing in links the worker to your account for remote access, lists it in the Shuffle app on your phone, and syncs its settings with your other workers with nothing to approve. Remote browsers sign in with the account that owns that worker.
 
 ## Configuration
 

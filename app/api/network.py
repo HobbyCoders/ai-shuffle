@@ -8,6 +8,9 @@ Three audiences share the ``/api/v1/network`` prefix:
   ``/peer/*`` exchange, ops, snapshot, ping
 - a joining worker with a pairing code (unauthenticated, rate limited):
   ``POST /join`` and ``GET /join/{id}``
+
+A valid one-time code admits the joiner on contact; account sign-in admits
+devices through the hub. Neither needs a second approval on another screen.
 """
 from __future__ import annotations
 
@@ -59,7 +62,8 @@ class JoinRequest(BaseModel):
 
 
 class ApproveJoin(BaseModel):
-    fingerprint_confirmed: bool = False
+    # Kept for older clients; the one-time code (or the account) is the authorization.
+    fingerprint_confirmed: bool = True
 
 
 class EnrollRequest(BaseModel):
@@ -68,6 +72,9 @@ class EnrollRequest(BaseModel):
     inviter_fingerprint: Optional[str] = Field(default=None, max_length=64)
     link: Optional[str] = Field(default=None, max_length=4096)
     device_name: Optional[str] = Field(default=None, max_length=100)
+    # An enrolled worker may leave its own network to join the invited one;
+    # the account's or inviter's records win over local copies with the same id.
+    replace: bool = False
 
 
 class ChallengeRequest(BaseModel):
@@ -326,6 +333,20 @@ async def hub_reject_device(device_id: str, _: str = Depends(require_admin)) -> 
         raise HTTPException(400, str(exc)) from exc
 
 
+class AdoptAccountNetwork(BaseModel):
+    device_name: Optional[str] = Field(default=None, max_length=100)
+
+
+@router.post("/hub/adopt")
+async def hub_adopt_account_network(body: AdoptAccountNetwork, _: str = Depends(require_admin)) -> dict:
+    """Leave this worker's own network and join the account's (its records win)."""
+    from app.network import hub
+    try:
+        return await hub.adopt_account_network(device_name=body.device_name)
+    except hub.HubError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Joining another worker (this worker is the joiner)
 # ---------------------------------------------------------------------------
@@ -341,11 +362,13 @@ async def enroll(body: EnrollRequest, _: str = Depends(require_admin)) -> dict:
         endpoint = endpoint or parsed["endpoint"]
         code = code or parsed["code"]
         fingerprint = fingerprint or parsed["fingerprint"]
-    if not endpoint or not code or not fingerprint:
-        raise HTTPException(400, "Endpoint, code and the inviter's fingerprint are all required")
+    if not endpoint or not code:
+        raise HTTPException(400, "The worker address and the join code are required")
+    if engine.context() is not None and not body.replace:
+        raise HTTPException(409, "This worker already belongs to a network. Confirm replacing its settings to join another.")
     try:
-        return await enrollment.start_enrollment(endpoint_url=endpoint, code=code, inviter_fingerprint=fingerprint,
-                                                 device_name=body.device_name)
+        return await enrollment.start_enrollment(endpoint_url=endpoint, code=code, inviter_fingerprint=fingerprint or None,
+                                                 device_name=body.device_name, leave_current=body.replace)
     except enrollment.EnrollmentError as exc:
         raise HTTPException(400, str(exc)) from exc
 

@@ -105,9 +105,10 @@ or desktop app. See [Android installation and builds](android/README.md).
 
 Install the [desktop app](desktop/README.md) for your operating system. It bundles
 PostgreSQL and supervises the worker; no database setup, credentials or import is
-needed for a fresh installation. Choose your workspace and connect your development
-tools or model providers on first launch. No local username, password, or Shuffle
-account is required.
+needed for a fresh installation. On first launch choose a clean install, sign in
+to your Shuffle account, or join another worker with its invite; then pick your
+workspace and add model providers or GitHub. No local username, password, or
+Shuffle account is required.
 
 For source development, `python run_local.py --setup` installs dependencies and
 builds assets; it does not create a standalone database. Worker startup requires

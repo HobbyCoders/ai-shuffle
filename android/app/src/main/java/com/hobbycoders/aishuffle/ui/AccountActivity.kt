@@ -255,7 +255,7 @@ class AccountActivity : NativeScreen() {
         val code = PairingInput.code(grant.getString("code"))
         val pairing = PairingInput.parse(grant.getString("pairing_url"))
         require(pairing.origin == session.hub && pairing.code == code) { "Hub returned an invalid pairing link." }
-        heading("Add a trusted device", "Expires ${grant.getString("expires_at")}\nScan or enter this code on the new device. You must approve its name here.")
+        heading("Add a trusted device", "Expires ${grant.getString("expires_at")}\nScan or enter this code on the new device. The first device to use it is trusted right away; the code then stops working.")
         text(code.chunked(6).joinToString("  "), 28f).typeface = android.graphics.Typeface.MONOSPACE
         // Product QR contains only the short-lived code. It cannot choose an account server.
         require(session.hub == AccountStore.DEFAULT_HUB) { "Sign in to Shuffle again to pair another device." }
@@ -264,12 +264,19 @@ class AccountActivity : NativeScreen() {
         for (y in 0 until 480) for (x in 0 until 480) bitmap.setPixel(x, y, if (bits[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
         content.addView(ImageView(this).apply { setImageBitmap(bitmap); adjustViewBounds = true; contentDescription = "Account pairing QR. The same code is printed above." }, android.widget.LinearLayout.LayoutParams(-1, (260 * resources.displayMetrics.density).toInt()))
         button("Back to account") { manage() }
-        status.text = "Waiting for a device request. Keep this screen open."
+        status.text = "Waiting for the new device. Keep this screen open."
         while (Instant.now().isBefore(expiry)) {
             delay(2000)
             val requests = HubClient.call(session.hub, "/v1/pairing/${HubClient.segment(grant.getString("id"))}/requests", token = session.token).getJSONArray("requests")
             check(repo.store.matches(session))
-            val pending = (0 until requests.length()).map { requests.getJSONObject(it) }.filter { it.optString("status") == "pending" }
+            val all = (0 until requests.length()).map { requests.getJSONObject(it) }
+            // The hub trusts the first device that presents the code; show who it was.
+            val trusted = all.firstOrNull { it.optString("status") == "approved" }
+            if (trusted != null) {
+                manage(); status.text = "${trusted.getString("device_name")} is now a trusted device. The pairing code stopped working."
+                return
+            }
+            val pending = all.filter { it.optString("status") == "pending" }
             if (pending.isNotEmpty()) {
                 heading("Review device request", "Code expires ${grant.getString("expires_at")}. Approve only a phone you are pairing now. Approval invalidates this code and other requests.")
                 for (request in pending) {

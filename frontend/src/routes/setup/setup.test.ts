@@ -4,21 +4,21 @@ import type { NetworkStatus } from '$lib/api/network';
 
 const mocks = vi.hoisted(() => ({
 	getStatus: vi.fn(), create: vi.fn(), enroll: vi.fn(), cancel: vi.fn(), unlock: vi.fn(),
-	get: vi.fn(), post: vi.fn(), delete: vi.fn(), goto: vi.fn(),
+	get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn(), goto: vi.fn(),
 	workspace: vi.fn(), saveWorkspace: vi.fn(), setup: vi.fn(), complete: vi.fn(), checkAuth: vi.fn(),
+	githubStatus: vi.fn(), githubWeb: vi.fn(), githubToken: vi.fn(),
 	hasCredential: false, providers: [] as { id: string; name: string; provider_type: string }[]
 }));
 vi.mock('$app/navigation', () => ({ goto: mocks.goto }));
 vi.mock('$lib/api/network', () => ({ getNetworkStatus: mocks.getStatus, createNetwork: mocks.create,
 	startEnrollment: mocks.enroll, cancelEnrollment: mocks.cancel, unlockWithRecoveryKey: mocks.unlock }));
-vi.mock('$lib/api/client', () => ({ api: { get: mocks.get, post: mocks.post, delete: mocks.delete },
+vi.mock('$lib/api/client', () => ({ api: { get: mocks.get, post: mocks.post, patch: mocks.patch, delete: mocks.delete },
 	getErrorMessage: (e: { detail?: string; message?: string }, fallback: string) => e.detail || e.message || fallback }));
 vi.mock('$lib/api/auth', () => ({ getWorkspaceConfig: mocks.workspace, setWorkspaceConfig: mocks.saveWorkspace,
 	setupInstallation: mocks.setup, completeOnboarding: mocks.complete,
-	getClaudeAuthStatus: async () => ({ authenticated: false }), getGithubAuthStatus: async () => ({ authenticated: false }),
-	startClaudeLogin: vi.fn(), completeClaudeLogin: vi.fn(), pollClaudeLogin: vi.fn(), startGithubWebLogin: vi.fn(), loginGithubWithToken: vi.fn() }));
+	getGithubAuthStatus: mocks.githubStatus, startGithubWebLogin: mocks.githubWeb, loginGithubWithToken: mocks.githubToken }));
 vi.mock('$lib/stores/auth.svelte', () => ({
-	auth: { checkAuth: mocks.checkAuth, current: { status: { setup_required: true } },
+	auth: { checkAuth: mocks.checkAuth, current: { status: { setup_required: true, auth_mode: 'local' } }, logout: vi.fn(),
 		subscribe(run: (v: unknown) => void) { run({ status: { account_sign_in_available: true } }); return () => {}; } },
 	anyCredential: { subscribe(run: (v: boolean) => void) { run(mocks.hasCredential); return () => {}; } }
 }));
@@ -28,157 +28,177 @@ vi.mock('$lib/components/deck/cards/settings/providers/AddProviderModal.svelte',
 import Setup from './+page.svelte';
 
 const fingerprint = 'abcd-1234-abcd-1234-abcd-1234-abcd-1234';
-const fresh = (): NetworkStatus => ({ device: { device_id: 'local-device', fingerprint }, enrolled: false, platform: 'windows', version: 'test', instance_id: 'local-install' });
-const enrolled = (): NetworkStatus => ({ ...fresh(), enrolled: true, network: {
+const fresh = (): NetworkStatus => ({ device: { device_id: 'local-device', fingerprint }, enrolled: false, platform: 'windows', version: 'test', instance_id: 'local-install', enrollment: null, hub: { linked: false } });
+const enrolled = (): NetworkStatus => ({ ...fresh(), enrollment: undefined, enrolled: true, network: {
 	network_id: 'network', name: 'Home', device_id: 'local-device', fingerprint, founder_device_id: 'local-device',
 	generation: 0, key_version: 1, bootstrap_state: 'ready', member_count: 1
-} });
+}, hub: { linked: false } });
 const disconnected = { signed_in: false, status: 'disconnected', code: null, qr_svg: null, error: null };
+const waiting = { ...disconnected, status: 'waiting', code: 'TESTONLYCODE', authorization_url: 'https://account.example.com/claim?code=TESTONLYCODE', signup_url: 'https://account.example.com/claim?code=TESTONLYCODE&screen=signup' };
+const link = 'shuffle://network/join?endpoint=http%3A%2F%2F10.0.0.5%3A8000&code=ABCD-EFGH-JKLM&fp=' + fingerprint;
 let status: NetworkStatus;
+let connection: Record<string, unknown>;
 
 beforeEach(() => {
-	vi.resetAllMocks(); status = fresh(); mocks.hasCredential = false; mocks.providers = [];
+	vi.resetAllMocks(); status = fresh(); connection = disconnected; mocks.hasCredential = false; mocks.providers = [];
 	mocks.getStatus.mockImplementation(async () => status);
 	mocks.create.mockImplementation(async () => { status = enrolled(); return { network: status.network }; });
 	mocks.workspace.mockResolvedValue({ workspace_path: 'D:\\Work', default_path: 'D:\\Work', is_local_mode: true });
 	mocks.saveWorkspace.mockResolvedValue({}); mocks.checkAuth.mockResolvedValue(undefined);
-	mocks.get.mockResolvedValue(disconnected);
+	mocks.githubStatus.mockResolvedValue({ authenticated: false, user: null });
+	mocks.get.mockImplementation(async (path: string) => {
+		if (path === '/mobile/hub/connection') return connection;
+		if (path === '/mobile/hub/account') return { account: { id: 'a', username: 'owner', profile_complete: true }, servers: [] };
+		throw new Error('Unexpected GET ' + path);
+	});
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
-async function openFresh() {
+async function cleanInstall() {
 	render(Setup);
-	await fireEvent.click(await screen.findByRole('button', { name: /Start fresh/ }));
+	await fireEvent.click(await screen.findByRole('button', { name: /Clean install/ }));
 	await screen.findByLabelText('Or type a path manually');
 }
 async function continueToProviders() {
 	await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-	await fireEvent.click(await screen.findByRole('button', { name: 'Skip for now' }));
-	await screen.findByRole('button', { name: 'Finish Setup' });
-}
-async function openAccountSync() {
-	render(Setup);
-	await fireEvent.click(await screen.findByRole('button', { name: /Sync settings from an existing worker/ }));
-	await fireEvent.click(screen.getByRole('button', { name: 'Find it through my Shuffle account' }));
+	await screen.findByRole('button', { name: 'Add provider' });
 }
 
-describe('local worker onboarding', () => {
-	it.each([false, true])('configures model providers only in Providers while tool connections remain optional (existing credential: %s)', async existingCredential => {
+describe('first-run setup', () => {
+	it('offers exactly three ways to start and lists three steps', async () => {
+		render(Setup);
+		expect(await screen.findByRole('button', { name: /Clean install/ })).toBeTruthy();
+		expect(screen.getByRole('button', { name: /Sign in to your Shuffle account/ })).toBeTruthy();
+		expect(screen.getByRole('button', { name: /Join with an invite/ })).toBeTruthy();
+		const progress = screen.getByRole('navigation', { name: 'Setup progress' });
+		expect(progress.textContent).toContain('Start');
+		expect(progress.textContent).toContain('Workspace');
+		expect(progress.textContent).toContain('Providers & GitHub');
+		expect(screen.queryByText(/Claude Code/)).toBeNull();
+	});
+
+	it.each([false, true])('finishes a clean install with workspace, providers and GitHub only (existing credential: %s)', async (existingCredential) => {
 		mocks.hasCredential = existingCredential;
 		if (existingCredential) mocks.providers = [{ id: 'openai', name: 'My OpenAI account', provider_type: 'openai' }];
-		await openFresh();
-		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-		await screen.findByRole('button', { name: 'Connect Claude Code' });
-		expect(screen.getByText('GitHub', { exact: true })).toBeTruthy();
-		expect(screen.queryByRole('button', { name: /Add.*provider/i })).toBeNull();
-		expect(screen.queryByText('My OpenAI account')).toBeNull();
-		await fireEvent.click(screen.getByRole('button', { name: existingCredential ? 'Continue' : 'Skip for now' }));
-		expect(screen.getAllByRole('button', { name: 'Add provider' })).toHaveLength(1);
-		if (existingCredential) expect(screen.getByText('My OpenAI account')).toBeTruthy();
-		expect(screen.queryByRole('button', { name: 'Connect Claude Code' })).toBeNull();
-		await fireEvent.click(screen.getByRole('button', { name: 'Finish Setup' }));
-		await waitFor(() => expect(mocks.complete).toHaveBeenCalledOnce());
-		expect(mocks.post).not.toHaveBeenCalled(); expect(mocks.get).not.toHaveBeenCalled();
-	});
-
-	it('completes a standalone installation without account, remote, recovery or provider calls', async () => {
-		await openFresh(); await continueToProviders();
-		await fireEvent.click(screen.getByRole('button', { name: 'Finish Setup' }));
-		await waitFor(() => expect(mocks.goto).toHaveBeenCalledWith('/'));
+		await cleanInstall();
 		expect(mocks.create).toHaveBeenCalledExactlyOnceWith();
+		await continueToProviders();
+		expect(screen.getByText('GitHub', { exact: true })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Login with Browser' })).toBeTruthy();
+		expect(screen.queryByText(/Claude Code/)).toBeNull();
+		expect(screen.queryByText(/Connect Claude/)).toBeNull();
+		if (existingCredential) expect(screen.getByText('My OpenAI account')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: existingCredential ? 'Finish Setup' : 'Finish without a provider' }));
+		await waitFor(() => expect(mocks.goto).toHaveBeenCalledWith('/'));
 		expect(mocks.saveWorkspace).toHaveBeenCalledWith('D:\\Work');
 		expect(mocks.setup).toHaveBeenCalledOnce(); expect(mocks.complete).toHaveBeenCalledOnce();
-		expect(mocks.get).not.toHaveBeenCalled(); expect(mocks.post).not.toHaveBeenCalled();
-		expect(mocks.enroll).not.toHaveBeenCalled(); expect(mocks.unlock).not.toHaveBeenCalled();
+		expect(mocks.post).not.toHaveBeenCalled(); expect(mocks.enroll).not.toHaveBeenCalled(); expect(mocks.unlock).not.toHaveBeenCalled();
 	});
 
-	it('resumes initialized settings and saved workspace after closing unfinished setup', async () => {
-		await openFresh(); cleanup(); render(Setup);
+	it('connects GitHub with a token during the last step', async () => {
+		mocks.githubToken.mockResolvedValue({ success: true });
+		mocks.githubStatus.mockResolvedValueOnce({ authenticated: false, user: null }).mockResolvedValue({ authenticated: true, user: 'octocat' });
+		await cleanInstall(); await continueToProviders();
+		await fireEvent.click(screen.getByRole('button', { name: 'Access Token' }));
+		await fireEvent.input(screen.getByLabelText('GitHub access token'), { target: { value: 'ghp_secret' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+		expect(mocks.githubToken).toHaveBeenCalledWith('ghp_secret');
+		expect(await screen.findByText('GitHub is connected as @octocat')).toBeTruthy();
+	});
+
+	it('resumes an initialized worker at the workspace step', async () => {
+		await cleanInstall(); cleanup(); render(Setup);
 		expect((await screen.findByLabelText('Or type a path manually') as HTMLInputElement).value).toBe('D:\\Work');
-		expect(screen.queryByRole('button', { name: /Start fresh/ })).toBeNull();
-		await continueToProviders(); await fireEvent.click(screen.getByRole('button', { name: 'Finish Setup' }));
+		expect(screen.queryByRole('button', { name: /Clean install/ })).toBeNull();
+		await continueToProviders(); await fireEvent.click(screen.getByRole('button', { name: 'Finish without a provider' }));
 		await waitFor(() => expect(mocks.complete).toHaveBeenCalledOnce());
 		expect(mocks.create).toHaveBeenCalledOnce();
 	});
 
-	it('retries local initialization after a failed response without recreating persisted settings', async () => {
+	it('retries a clean install after a failed response without recreating persisted settings', async () => {
 		mocks.create.mockImplementationOnce(async () => { status = enrolled(); throw new Error('Response lost'); });
-		render(Setup); await fireEvent.click(await screen.findByRole('button', { name: /Start fresh/ }));
+		render(Setup); await fireEvent.click(await screen.findByRole('button', { name: /Clean install/ }));
 		await screen.findByRole('alert');
-		await fireEvent.click(screen.getByRole('button', { name: /Start fresh/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /Clean install/ }));
 		await screen.findByLabelText('Or type a path manually'); expect(mocks.create).toHaveBeenCalledOnce();
 	});
 
-	it.each(['unavailable', 'locked'])('lets an optional account %s error be skipped and setup finish', async connectionStatus => {
-		mocks.get.mockResolvedValue({ ...disconnected, status: connectionStatus, error: 'Remote connection unavailable' });
-		await openFresh(); await continueToProviders();
-		await fireEvent.click(screen.getByRole('button', { name: 'Sign in or create a Shuffle account (optional)' }));
-		await screen.findByRole('alert');
-		await fireEvent.click(screen.getByRole('button', { name: 'Skip account for now' }));
-		expect(screen.queryByRole('alert')).toBeNull();
-		await fireEvent.click(screen.getByRole('button', { name: 'Back' }));
-		await fireEvent.click(screen.getByRole('button', { name: 'Skip for now' }));
-		await fireEvent.click(screen.getByRole('button', { name: 'Finish Setup' }));
-		await waitFor(() => expect(mocks.complete).toHaveBeenCalledOnce());
-		expect(mocks.post).not.toHaveBeenCalled(); expect(mocks.create).toHaveBeenCalledOnce();
-	});
-
-	it('keeps a rejected optional sign-in scoped to the account panel', async () => {
-		mocks.post.mockRejectedValue(new Error('Sign-in service unavailable'));
-		await openFresh(); await continueToProviders();
-		await fireEvent.click(screen.getByRole('button', { name: 'Sign in or create a Shuffle account (optional)' }));
-		await fireEvent.click(await screen.findByRole('button', { name: 'Log in' }));
-		await screen.findByRole('alert');
-		await fireEvent.click(screen.getByRole('button', { name: 'Finish Setup' }));
-		await waitFor(() => expect(mocks.complete).toHaveBeenCalledOnce());
-	});
-
-	it('lets a first account with no approving worker continue with fresh settings', async () => {
-		mocks.get.mockResolvedValue({ ...disconnected, signed_in: true });
-		await openAccountSync();
-		await screen.findByText('Approve settings sync on an existing worker');
-		await fireEvent.click(screen.getByRole('button', { name: 'Use fresh settings instead' }));
+	it('signs in to an account, waits for another worker without any approval step, and lets setup continue', async () => {
+		render(Setup);
+		await fireEvent.click(await screen.findByRole('button', { name: /Sign in to your Shuffle account/ }));
+		await fireEvent.input(screen.getByLabelText('Name for this worker'), { target: { value: 'Studio laptop' } });
+		mocks.post.mockResolvedValue(waiting);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Create account' }));
+		expect(mocks.post).toHaveBeenCalledWith('/mobile/hub/connection', { name: 'Studio laptop' });
+		expect((await screen.findByRole('link', { name: 'Create account in browser' })).getAttribute('href')).toBe(waiting.signup_url);
+		// The owner finished in the browser: the account now has a network founded on another worker.
+		connection = { ...disconnected, signed_in: true, status: 'connecting' };
+		status = { ...fresh(), hub: { linked: true, registered: false, status: 'pending', account_network: { network_id: 'n', name: null, founder_device_id: 'x', devices: [{ device_id: 'x', name: 'Office PC', platform: 'windows', kind: 'worker', status: 'active' }], recovery_available: true } } };
+		expect((await screen.findByText(/already syncs settings between/, {}, { timeout: 5000 })).textContent).toContain('Office PC');
+		expect(screen.queryByText(/fingerprint/i)).toBeNull();
+		expect(screen.queryByText(/Pending approvals/)).toBeNull();
+		expect(screen.getByRole('button', { name: /Use your recovery key/ })).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Continue setup' }));
 		await screen.findByLabelText('Or type a path manually');
-		expect(mocks.create).toHaveBeenCalledOnce(); expect(mocks.unlock).not.toHaveBeenCalled();
+		expect(mocks.create).not.toHaveBeenCalled(); expect(mocks.unlock).not.toHaveBeenCalled();
 	});
 
-	it('allows back and fresh setup when account access cannot start', async () => {
-		mocks.get.mockResolvedValue({ ...disconnected, status: 'unavailable', error: 'Missing remote connector' });
-		await openAccountSync(); await screen.findByText('Missing remote connector');
-		await fireEvent.click(screen.getByRole('button', { name: 'Back' }));
-		await fireEvent.click(screen.getByRole('button', { name: 'Back' }));
-		expect(screen.queryByText('Missing remote connector')).toBeNull();
-		await fireEvent.click(screen.getByRole('button', { name: /Start fresh/ }));
-		await screen.findByLabelText('Or type a path manually');
+	it('shows the worker as ready once the account admitted it', async () => {
+		connection = { ...disconnected, signed_in: true, status: 'connected' };
+		status = { ...fresh(), hub: { linked: true, registered: false, status: 'pending' } };
+		render(Setup);
+		expect(await screen.findByText(/Joining your account's network/)).toBeTruthy();
+		status = { ...enrolled(), network: { ...enrolled().network!, founder_device_id: 'other', member_count: 2 }, hub: { linked: true, registered: true, status: 'active' } };
+		expect(await screen.findByText(/This worker now syncs settings with/, {}, { timeout: 5000 })).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+		expect((await screen.findByLabelText('Or type a path manually') as HTMLInputElement).value).toBe('D:\\Work');
 	});
 
-	it('requires a complete compared fingerprint for settings sync and keeps this machine local', async () => {
-		render(Setup); await fireEvent.click(await screen.findByRole('button', { name: /Sync settings from an existing worker/ }));
-		await fireEvent.input(screen.getByLabelText('Worker address'), { target: { value: 'https://existing.example' } });
-		await fireEvent.input(screen.getByLabelText('Join code'), { target: { value: 'ABCD-EFGH-JKLM' } });
-		const submit = screen.getByRole('button', { name: 'Sync settings' }) as HTMLButtonElement;
-		expect(submit.disabled).toBe(true);
-		await fireEvent.input(screen.getByLabelText(/Inviter fingerprint \(read/), { target: { value: fingerprint } });
-		expect(submit.disabled).toBe(true);
-		await fireEvent.click(screen.getByRole('checkbox'));
-		mocks.enroll.mockImplementation(async () => { status = { ...enrolled(), network: { ...enrolled().network!, founder_device_id: 'other-device', member_count: 2 } }; return { inviter: {} }; });
-		await fireEvent.click(submit);
-		await screen.findByText(/This local worker now syncs/);
-		expect(screen.getByText(/Workspace folder — where checkouts live on this machine/)).toBeTruthy();
-		expect(screen.getByText(/Claude Code and GitHub logins are per machine/)).toBeTruthy();
+	it('unlocks with the recovery key when no other worker can admit this one', async () => {
+		connection = { ...disconnected, signed_in: true, status: 'connected' };
+		status = { ...fresh(), hub: { linked: true, registered: false, status: 'pending', account_network: { network_id: 'n', name: null, founder_device_id: 'x', devices: [], recovery_available: true } } };
+		mocks.unlock.mockImplementation(async () => { status = enrolled(); return { restored: true, network: status.network }; });
+		render(Setup);
+		await fireEvent.click(await screen.findByRole('button', { name: /Use your recovery key/ }));
+		await fireEvent.input(screen.getByLabelText('Recovery key'), { target: { value: 'A1-AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-A' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
+		expect(mocks.unlock).toHaveBeenCalledWith('A1-AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-A', 'My worker');
+		expect(await screen.findByText(/This worker now syncs settings with/)).toBeTruthy();
+	});
+
+	it('joins from an invite link without a fingerprint checkbox and keeps this machine local', async () => {
+		render(Setup); await fireEvent.click(await screen.findByRole('button', { name: /Join with an invite/ }));
+		const join = screen.getByRole('button', { name: 'Join' }) as HTMLButtonElement;
+		expect(join.disabled).toBe(true);
+		expect(screen.queryByRole('checkbox')).toBeNull();
+		await fireEvent.input(screen.getByLabelText('Invite link or code'), { target: { value: link } });
+		expect(join.disabled).toBe(false);
+		mocks.enroll.mockImplementation(async () => { status = { ...enrolled(), network: { ...enrolled().network!, founder_device_id: 'other-device', member_count: 2 } }; return { join_id: 'j', status: 'approved', inviter: {}, your_fingerprint: fingerprint }; });
+		await fireEvent.click(join);
+		expect(mocks.enroll).toHaveBeenCalledWith({ link, device_name: 'My worker' });
+		await screen.findByText(/This worker now syncs settings with/);
 		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
 		expect((screen.getByLabelText('Or type a path manually') as HTMLInputElement).value).toBe('D:\\Work');
-		expect(mocks.enroll).toHaveBeenCalledWith({ endpoint_url: 'https://existing.example', code: 'ABCD-EFGH-JKLM', inviter_fingerprint: fingerprint });
 		expect(mocks.create).not.toHaveBeenCalled(); expect(mocks.goto).not.toHaveBeenCalled();
 	});
 
-	it('continues local setup while an approved sync is unfinished and its remote worker is offline', async () => {
+	it('continues local setup while an admitted join is still copying settings from an offline worker', async () => {
 		status = { ...enrolled(), network: { ...enrolled().network!, bootstrap_state: 'syncing' } };
-		render(Setup); await screen.findByText(/Settings sync is approved/);
-		await fireEvent.click(screen.getByRole('button', { name: 'Continue local setup' }));
-		await continueToProviders(); await fireEvent.click(screen.getByRole('button', { name: 'Finish Setup' }));
+		render(Setup); await screen.findByText(/Copying settings from your other worker/);
+		await fireEvent.click(screen.getByRole('button', { name: 'Continue setup' }));
+		await continueToProviders(); await fireEvent.click(screen.getByRole('button', { name: 'Finish without a provider' }));
 		await waitFor(() => expect(mocks.complete).toHaveBeenCalledOnce());
-		expect(status.network?.bootstrap_state).toBe('syncing');
 		expect(mocks.cancel).not.toHaveBeenCalled(); expect(mocks.create).not.toHaveBeenCalled();
+	});
+
+	it('goes back from the account path to the three choices', async () => {
+		connection = { ...disconnected, status: 'unavailable', error: 'Missing remote connector' };
+		render(Setup); await fireEvent.click(await screen.findByRole('button', { name: /Sign in to your Shuffle account/ }));
+		await screen.findByText('Missing remote connector');
+		expect((screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement).disabled).toBe(true);
+		await fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+		expect(screen.queryByText('Missing remote connector')).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: /Clean install/ }));
+		await screen.findByLabelText('Or type a path manually');
 	});
 });

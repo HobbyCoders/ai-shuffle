@@ -251,6 +251,47 @@ def create_network(name: Optional[str] = None, *, device_name: Optional[str] = N
     return context(refresh=True)
 
 
+def leave_network() -> dict:
+    """Forget this worker's network so it can join another one.
+
+    Domain rows stay where they are. The sync bookkeeping of the old network
+    is dropped: its operations cannot verify under another network's members,
+    and its record hashes would otherwise stop the scanner from publishing
+    local rows the new network lacks. After the next enrollment, records
+    applied from the joined network overwrite same-id local rows (the joined
+    network wins) and rows only this worker holds are published to it.
+    """
+    global _context
+    ctx = context()
+    if ctx is None:
+        raise RuntimeError("This worker does not belong to a network")
+    if ctx.bootstrap_state != BOOTSTRAP_READY:
+        raise RuntimeError("Wait for the current settings sync to finish before switching networks")
+    left = {"network_id": ctx.network_id, "name": ctx.name, "member_count": len(ctx.active_members())}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for table in ("sync_pending", "sync_conflicts", "sync_watermarks", "sync_records", "sync_ops",
+                      "sync_peers", "network_presence", "network_catalog_cursors", "network_membership_records",
+                      "network_joins", "network_members"):
+            cursor.execute(f"DELETE FROM {table}")
+        cursor.execute("DELETE FROM sync_blobs WHERE present = FALSE")
+        store.delete_state(_conn=conn)
+    with _lock:
+        _context = None
+    try:
+        from app.network import transport
+        transport.forget_peers()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from app.network import hub
+        hub.forget_network()
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info("Left network %s", left["network_id"])
+    return left
+
+
 def _default_device_name() -> str:
     from app.core.cluster import default_device_name
     return default_device_name()

@@ -74,9 +74,14 @@ Rules:
 - Body names the account's network: mark the device `active`, bump the
   generation to the maximum seen; reply `active`.
 - Body names no network but the account has one: the device is `pending`
-  until an online member approves it (`devices/{id}/approve`) or it unlocks
-  with the recovery key. Reply `{"status": "pending"}` (or `approved` once an
-  approval waits for pickup).
+  until an online member admits it (`devices/{id}/approve`; members do this
+  on their own in the sync loop, the account sign-in being the
+  authorization) or it unlocks with the recovery key. Reply
+  `{"status": "pending"}` (or `approved` once an approval waits for pickup).
+- Body names a network that is not the account's: nothing is stored; reply
+  `{"status": "conflict", "network_id": "<the account's network>"}`. The
+  worker's owner chooses to adopt the account's network (the worker leaves
+  its own and registers again without one) or to keep it apart.
 
 ### `GET .../network` — network summary
 

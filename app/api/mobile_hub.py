@@ -47,8 +47,61 @@ def _connection_response(result):
     from app.core.owner_auth import claim_url
     code = result.get('code')
     result['authorization_url'] = claim_url(code)
+    result['signup_url'] = claim_url(code, 'signup')
     result['qr_svg'] = pairing.render_qr_svg('aishuffle://worker/link#code=' + code) if code else None
     return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+
+
+class UsernameUpdate(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+
+
+def _active_binding():
+    binding = store.get_binding()
+    if not binding or not binding['active']:
+        raise HTTPException(409, 'Sign in to a Shuffle account first')
+    return binding
+
+
+@router.get('/account')
+def account_profile(_admin=Depends(require_admin)):
+    """The account that owns this worker: username setup state and its other workers.
+
+    Phones, browsers and their sessions are never listed; the hub scopes the
+    answer to the linked account. Any account can use this: the local owner
+    of a linked worker already controls its account connection.
+    """
+    binding = _active_binding()
+    return JSONResponse(_profile(account_hub.call(binding, 'GET', 'account')), headers={'Cache-Control': 'no-store'})
+
+
+@router.patch('/account')
+def update_account_username(body: UsernameUpdate, _admin=Depends(require_admin)):
+    username = body.username.strip().lower()
+    if not account_hub.USERNAME_PATTERN.fullmatch(username):
+        raise HTTPException(400, account_hub.USERNAME_HINT)
+    binding = _active_binding()
+    return JSONResponse(_profile(account_hub.call(binding, 'PATCH', 'account', {'username': username})),
+                        headers={'Cache-Control': 'no-store'})
+
+
+def _profile(result):
+    account = result.get('account') if isinstance(result, dict) else None
+    if not isinstance(account, dict) or not isinstance(account.get('username'), str):
+        raise HTTPException(503, 'Account profile unavailable')
+    servers = []
+    for item in result.get('servers') or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            server_id = account_hub.identifier(item.get('id'))
+        except ValueError:
+            continue
+        servers.append({'id': server_id, 'name': str(item.get('name') or '')[:80], 'url': item.get('url') if isinstance(item.get('url'), str) else None,
+                        'current': bool(item.get('current'))})
+    return {'account': {'id': account.get('id'), 'username': account['username'],
+                        'profile_complete': bool(account.get('profile_complete'))},
+            'servers': servers}
 
 
 @router.get('/endpoint')

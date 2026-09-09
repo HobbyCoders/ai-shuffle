@@ -46,10 +46,14 @@ describes what was built, where it lives, and where it deviates from the plan.
 | `app/api/network.py` | `/api/v1/network/*`: status, members, joins, enrollment, recovery, conflicts, runners, owners, peer plane, control plane, blobs. |
 | `scripts/network_migrate.py` | Moves an install's session state out of a shared database. See `migration.md`. |
 
-Frontend: `frontend/src/lib/api/network.ts`, `NetworkPanel.svelte` under Settings >
-Devices, the first-run choices in `routes/setup`, and the runner picker, which
-now lists network runners (`GET /api/v1/cluster/installs` returns them when the
-worker is enrolled).
+Frontend: `frontend/src/lib/api/network.ts` and `account.ts`; under Settings >
+Devices `DevicesSection.svelte` composes `AccountPanel` (sign in, create
+account, username, the account's workers, sign out), `AddDevicePanel` (worker
+invite or phone/browser code), `JoinNetworkPanel` and `NetworkAdvanced`
+(recovery key, address, sync health, conflicts); the first-run choices in
+`routes/setup` (clean install, sign in, join with an invite); and the runner
+picker, which lists network runners (`GET /api/v1/cluster/installs` returns
+them when the worker is enrolled).
 
 ## How sync works
 
@@ -93,15 +97,23 @@ worker is enrolled).
 
 - **Pairing.** A member creates a `network:join` grant; the QR/link carries the
   endpoint, the code and the inviter's fingerprint. The joiner posts its public
-  keys with the code and the fingerprint it verified; the inviter refuses a
-  wrong fingerprint before consuming the code. An administrator compares the
-  joiner's fingerprint on both screens and approves; the certificate and the
-  wrapped keys are handed back once through the poll secret. Pairing codes are
-  hashed under a local pairing key (`network_pairing_key`), no longer the
-  cluster secret.
-- **Account.** A signed-in worker registers its device with the hub; the first
-  creates the account's network, later ones wait for an online member's
-  approval (fingerprint shown) or unlock with the recovery key.
+  keys with the code and (when it came from a link) the inviter's fingerprint;
+  the inviter refuses a wrong fingerprint before consuming the code. The
+  consumed one-time code is the authorization: the inviter issues the
+  certificate and wraps the keys at once, and the joiner picks the response up
+  once through its poll secret. Nobody compares fingerprints or approves on a
+  second screen (`approve_join` remains only for a join that could not be
+  admitted on contact). Pairing codes are hashed under a local pairing key
+  (`network_pairing_key`), no longer the cluster secret.
+- **Account.** A signed-in worker registers its device with the hub. The first
+  worker on an account founds the network (`hub.found_account_network`);
+  every later one is admitted by whichever member is online
+  (`hub.admit_pending_devices` runs in the sync loop; the hub only lists
+  devices whose server secret is bound to the same account) or unlocks with
+  the recovery key when every worker is off. A worker that already has its
+  own network is answered `conflict`; its owner may adopt the account's
+  network (`hub.adopt_account_network`: `engine.leave_network` then a fresh
+  registration; the account's records win, local-only rows are merged in).
 - **Device tokens.** Peers prove key possession with a signed challenge and get
   a five-minute HMAC token; every authenticated request re-checks membership, so
   revocation takes effect within one token lifetime.

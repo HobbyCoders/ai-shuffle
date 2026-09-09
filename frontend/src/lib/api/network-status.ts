@@ -11,12 +11,13 @@ import type { NetworkStatus } from './network';
 
 // ─── State pill ──────────────────────────────────────────────────────────────
 
-export type NetworkUiState = 'ready' | 'syncing' | 'needs-approval' | 'needs-setup' | 'offline';
+export type NetworkUiState = 'ready' | 'syncing' | 'waiting' | 'conflict' | 'needs-setup' | 'offline';
 
 export const NETWORK_STATE_LABELS: Record<NetworkUiState, string> = {
 	ready: 'Ready',
 	syncing: 'Syncing',
-	'needs-approval': 'Needs approval',
+	waiting: 'Joining',
+	conflict: 'Account differs',
 	'needs-setup': 'Needs local setup',
 	offline: 'Offline'
 };
@@ -24,7 +25,8 @@ export const NETWORK_STATE_LABELS: Record<NetworkUiState, string> = {
 export const NETWORK_STATE_HINTS: Record<NetworkUiState, string> = {
 	ready: 'This worker is enrolled and in sync with its network.',
 	syncing: 'This worker is still catching up on the network history.',
-	'needs-approval': 'Waiting for another worker to approve this device.',
+	waiting: 'Joining: another worker on the network admits this one as soon as it is online.',
+	conflict: 'This worker has its own settings while the account already syncs settings between other workers.',
 	'needs-setup': 'This worker does not belong to a network yet.',
 	offline: 'The worker did not answer — showing the last saved data.'
 };
@@ -39,19 +41,28 @@ export function deriveNetworkState(status: NetworkStatus | null | undefined, sta
 	if (stale) return 'offline';
 	if (!status) return 'offline';
 	if (!status.enrolled) {
-		if (status.enrollment?.status === 'pending') return 'needs-approval';
-		if (status.hub?.linked && status.hub.registered && status.hub.status === 'pending') return 'needs-approval';
+		if (status.enrollment?.status === 'pending' || status.enrollment?.status === 'syncing') return 'waiting';
+		if (status.hub?.linked && status.hub.status === 'pending') return 'waiting';
 		return 'needs-setup';
 	}
+	if (status.hub?.linked && status.hub.status === 'conflict') return 'conflict';
 	if (status.network && status.network.bootstrap_state !== 'ready') return 'syncing';
 	if ((status.sync?.holes?.length ?? 0) > 0) return 'syncing';
 	return 'ready';
 }
 
-/** Joins parked here plus devices waiting through the account. */
-export function pendingApprovalCount(status: NetworkStatus | null | undefined): number {
+/** Devices this worker is admitting right now: joins parked here plus devices arriving through the account. */
+export function joiningDeviceCount(status: NetworkStatus | null | undefined): number {
 	if (!status?.enrolled) return 0;
 	return (status.pending_joins?.length ?? 0) + (status.hub?.pending_devices?.length ?? 0);
+}
+
+/** @deprecated use joiningDeviceCount — nothing waits for an approval any more. */
+export const pendingApprovalCount = joiningDeviceCount;
+
+/** `/pair#token=…` (a phone/browser pairing link) is not a worker invite. */
+export function looksLikePairingLink(value: string): boolean {
+	return /\/pair#token=/.test(value.trim());
 }
 
 // ─── Fingerprints ────────────────────────────────────────────────────────────

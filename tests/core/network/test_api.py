@@ -152,15 +152,15 @@ def test_join_flow_end_to_end(workers, make_client, monkeypatch):
         assert posted.status_code == 202, posted.text
         join = posted.json()
         assert join["inviter"]["device_id"] == a.device_id and join["joiner_fingerprint"] == b.identity.fingerprint
-        # The code is single use.
+        # The consumed code admitted the laptop at once: no approval queue, and the code is single use.
+        assert join["status"] == "approved"
         assert client.post("/api/v1/network/join", json={"code": parsed["code"], "device": device}).status_code == 400
-        pending = client.get("/api/v1/network/joins").json()["joins"]
-        assert pending[0]["fingerprint"] == b.identity.fingerprint and pending[0]["name"] == "Laptop"
+        assert client.get("/api/v1/network/joins").json()["joins"] == []
+        assert engine.context().member(b.device_id).status == "active"
         assert client.get(f"/api/v1/network/join/{join['join_id']}", params={"secret": "wrong"}).status_code == 404
-        assert client.get(f"/api/v1/network/join/{join['join_id']}", params={"secret": join["poll_secret"]}).json()["status"] == "pending"
-        assert client.post(f"/api/v1/network/joins/{join['join_id']}/approve", json={"fingerprint_confirmed": False}).status_code == 400
-        approved = client.post(f"/api/v1/network/joins/{join['join_id']}/approve", json={"fingerprint_confirmed": True})
-        assert approved.status_code == 200, approved.text
+        # Approving again is harmless for older clients that still call it.
+        approved = client.post(f"/api/v1/network/joins/{join['join_id']}/approve", json={})
+        assert approved.status_code == 200 and approved.json()["status"] == "approved", approved.text
         picked = client.get(f"/api/v1/network/join/{join['join_id']}", params={"secret": join["poll_secret"]}).json()
         assert picked["status"] == "approved" and picked["response"]["network_id"]
         response = picked["response"]
@@ -195,7 +195,7 @@ def test_enrollment_status_and_cancel(workers, make_client):
         assert client.get("/api/v1/network/enroll").json() == {"enrollment": None, "enrolled": False}
         bad = client.post("/api/v1/network/enroll", json={"link": "not a link"})
         assert bad.status_code == 400
-        missing = client.post("/api/v1/network/enroll", json={"endpoint_url": "http://x", "code": "AAAA"})
+        missing = client.post("/api/v1/network/enroll", json={"endpoint_url": "http://x"})
         assert missing.status_code == 400
         assert client.delete("/api/v1/network/enroll").status_code == 204
 

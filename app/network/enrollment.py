@@ -1,18 +1,24 @@
 """Enrollment by pairing: the ``network:join`` grant, both sides.
 
+The one-time code is the authorization. Whoever holds a live invite (the QR
+or link an administrator just created on a member) is admitted as soon as
+the inviter consumes the code; there is no second approval step.
+
 Inviter (an existing member)
     1. creates a pairing grant with purpose ``network:join`` (Devices page);
        the QR / link carries its endpoint, the code and its fingerprint
-    2. ``receive_join`` consumes the code the joiner posts, records a pending
-       join with the joiner's public keys and fingerprint
-    3. an administrator compares the fingerprint on both screens and
-       approves; ``approve_join`` issues the certificate and wraps the keys
-    4. the joiner polls with its poll secret and picks up the response
+    2. ``receive_join`` consumes the code the joiner posts, issues the
+       certificate and wraps the keys to the joiner's public keys right away
+    3. the joiner polls with its poll secret and picks up the response once
+
+    ``approve_join`` remains for a join that could not be admitted at once
+    (for example when the inviter's keys were unavailable at that moment).
 
 Joiner (a fresh worker)
-    ``start_enrollment`` posts its public keys to the inviter, verifies the
-    inviter's fingerprint against the one the user saw, then waits for
-    approval, installs the response, copies a snapshot and starts tailing.
+    ``start_enrollment`` posts its public keys to the inviter, checks the
+    inviter's fingerprint against the one carried by the link when there is
+    one, then collects the response, installs it, copies a snapshot and
+    starts tailing.
 """
 from __future__ import annotations
 
@@ -89,7 +95,7 @@ def parse_join_link(value: str) -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 
 def receive_join(*, code: str, device: Dict[str, Any], inviter_fingerprint: Optional[str]) -> dict:
-    """Consume a join code and park the request for approval."""
+    """Consume a join code and admit the device that presented it."""
     ctx = engine.context()
     if ctx is None:
         raise EnrollmentError("This worker has no network to join")
@@ -123,8 +129,18 @@ def receive_join(*, code: str, device: Dict[str, Any], inviter_fingerprint: Opti
     })
     existing = ctx.member(device_id)
     if existing is not None and existing.status == membership.STATUS_ACTIVE:
-        # Already a member (re-enrollment): approval is still explicit.
         logger.info("Device %s asked to join again", device_id)
+    # The consumed code authorizes the join: admit the device now. A failure
+    # here leaves the request pending for ``approve_join`` instead of losing it.
+    status = "pending"
+    try:
+        response = engine.admit_device(
+            device_id=device_id, signing_public=signing_public, encryption_public=encryption_public, name=name,
+            kind=membership.KIND_WORKER, platform=platform, legacy_instance_id=legacy)
+        store.update_join(join_id, status="approved", response=response)
+        status = "approved"
+    except Exception:  # noqa: BLE001
+        logger.exception("Automatic admission of %s failed; the join waits for manual approval", device_id)
     from app.core.global_events import global_events
     try:
         global_events.resources_changed("network")
@@ -133,7 +149,7 @@ def receive_join(*, code: str, device: Dict[str, Any], inviter_fingerprint: Opti
     return {
         "join_id": join_id,
         "poll_secret": poll_secret,
-        "status": "pending",
+        "status": status,
         "inviter": {"device_id": ctx.device_id, "fingerprint": ctx.identity.fingerprint,
                     "name": ctx.member(ctx.device_id).name if ctx.member(ctx.device_id) else None,
                     "network_name": ctx.name},
@@ -156,12 +172,13 @@ def poll_join(join_id: str, poll_secret: str) -> dict:
     return out
 
 
-def approve_join(join_id: str, *, fingerprint_confirmed: bool) -> dict:
-    if not fingerprint_confirmed:
-        raise EnrollmentError("Confirm the joiner's fingerprint before approving")
+def approve_join(join_id: str, *, fingerprint_confirmed: bool = True) -> dict:
+    """Admit a join that is still parked (normally ``receive_join`` already did)."""
     join = store.get_join(join_id)
     if join is None or join["role"] != "inviter":
         raise EnrollmentError("Unknown join request")
+    if join["status"] in ("approved", "complete"):
+        return {"join_id": join_id, "status": join["status"], "device_id": join["device_id"]}
     if join["status"] != "pending":
         raise EnrollmentError("Join request is no longer pending")
     response = engine.admit_device(
@@ -205,17 +222,32 @@ def enrollment_status() -> Optional[dict]:
                                      "error", "created_at", "updated_at")}
 
 
-async def start_enrollment(*, endpoint_url: str, code: str, inviter_fingerprint: str,
-                           device_name: Optional[str] = None, legacy_instance_id: Optional[str] = None) -> dict:
-    """Post our keys to the inviter and start waiting for approval in the background."""
+async def start_enrollment(*, endpoint_url: str, code: str, inviter_fingerprint: Optional[str] = None,
+                           device_name: Optional[str] = None, legacy_instance_id: Optional[str] = None,
+                           leave_current: bool = False) -> dict:
+    """Post our keys to the inviter and collect the join response in the background.
+
+    ``inviter_fingerprint`` is what the invite link carries. When it is given
+    the inviter must match it; a code typed by hand may omit it, in which case
+    the inviter's fingerprint is recorded on first contact.
+
+    ``leave_current`` lets an enrolled worker move to the invited network: its
+    own network is left only after the inviter accepted the code, so a bad
+    code never costs the current membership.
+    """
     global _task
-    if engine.context() is not None:
-        raise EnrollmentError("This worker already belongs to a network")
+    current = engine.context()
+    if current is not None:
+        if not leave_current:
+            raise EnrollmentError("This worker already belongs to a network")
+        if current.bootstrap_state != engine.BOOTSTRAP_READY:
+            raise EnrollmentError("Wait for the current settings sync to finish before switching networks")
     endpoint = pairing_core.sanitize_endpoint_url(endpoint_url)
     if not endpoint:
         raise EnrollmentError("An endpoint is required")
-    if not inviter_fingerprint or len("".join(ch for ch in inviter_fingerprint if ch.isalnum())) < 32:
-        raise EnrollmentError("Verify the inviting worker's fingerprint first")
+    inviter_fingerprint = (inviter_fingerprint or "").strip() or None
+    if inviter_fingerprint and len(_normalize_fp(inviter_fingerprint)) < 32:
+        raise EnrollmentError("The inviter's fingerprint is incomplete")
     device_identity = identity_mod.load()
     name = (device_name or "").strip() or engine._default_device_name()
     for old in store.list_joins(role="joiner"):
@@ -245,9 +277,14 @@ async def start_enrollment(*, endpoint_url: str, code: str, inviter_fingerprint:
         raise EnrollmentError(str(detail or f"Inviter answered HTTP {response.status_code}"))
     data = response.json()
     inviter = data.get("inviter") or {}
-    if _normalize_fp(inviter.get("fingerprint")) != _normalize_fp(inviter_fingerprint):
-        raise EnrollmentError("The inviter's fingerprint does not match the one you verified")
+    if inviter_fingerprint and _normalize_fp(inviter.get("fingerprint")) != _normalize_fp(inviter_fingerprint):
+        raise EnrollmentError("The inviter's fingerprint does not match the one in the invite")
+    if len(_normalize_fp(inviter.get("fingerprint"))) < 32:
+        raise EnrollmentError("The inviter did not identify itself")
     join_id = data["join_id"]
+    if engine.context() is not None:
+        # The inviter admitted us: only now give up the network we had.
+        engine.leave_network()
     store.create_join({
         "id": join_id, "role": "joiner", "status": "pending", "device_id": device_identity.device_id, "name": name,
         "endpoint_url": endpoint, "inviter_fingerprint": _normalize_fp(inviter.get("fingerprint")),
@@ -270,9 +307,13 @@ def _normalize_fp(value: Optional[str]) -> str:
 async def _wait_for_approval(join_id: str, endpoint: str, poll_secret: str, device_name: str,
                              legacy_instance_id: Optional[str]) -> None:
     deadline = asyncio.get_running_loop().time() + JOIN_TTL_MINUTES * 60
+    first = True
     async with httpx.AsyncClient(follow_redirects=False, timeout=20.0) as client:
         while asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+            # The inviter admits on contact, so the first pickup happens at once.
+            if not first:
+                await asyncio.sleep(POLL_INTERVAL_SECONDS)
+            first = False
             try:
                 response = await client.get(endpoint + f"/api/v1/network/join/{join_id}", params={"secret": poll_secret})
                 if response.status_code >= 400:

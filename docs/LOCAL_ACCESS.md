@@ -1,8 +1,10 @@
 # Local setup and optional remote access
 
 Start Shuffle with its normal desktop launcher or Docker entrypoint. First-time
-setup asks for the workspace and development tools/model providers. It does not
-create a username or password and does not require a Shuffle account.
+setup asks how to start (clean install, sign in to a Shuffle account, or join
+another worker with its invite), then for the workspace and, optionally, model
+providers and GitHub. It does not create a username or password and does not
+require a Shuffle account.
 
 The local listener (port 8000 by default) grants owner access to direct local/LAN
 requests. Everyone allowed to reach that trusted interface on your LAN can

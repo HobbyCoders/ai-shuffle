@@ -115,7 +115,7 @@ export interface RecoveryStatus {
 	key_version: number | null;
 }
 
-/** A device that registered through the account and awaits admission. */
+/** A device that registered through the account; an online member admits it automatically. */
 export interface HubPendingDevice {
 	device_id: string;
 	name: string | null;
@@ -124,6 +124,15 @@ export interface HubPendingDevice {
 	encryption_public?: string;
 	legacy_instance_id?: string | null;
 	created_at?: string | null;
+}
+
+/** What the hub knows about the account's network (for a worker waiting to be admitted). */
+export interface AccountNetworkInfo {
+	network_id: string | null;
+	name: string | null;
+	founder_device_id: string | null;
+	devices: { device_id: string; name: string | null; platform: string | null; kind: string | null; status: string | null; version?: string | null }[];
+	recovery_available: boolean;
 }
 
 export interface HubStatus {
@@ -139,6 +148,8 @@ export interface HubStatus {
 	last_error?: string | null;
 	quota?: Record<string, unknown> | null;
 	pending_devices?: HubPendingDevice[];
+	/** Present while this worker waits on the account (status pending) or clashes with it (conflict). */
+	account_network?: AccountNetworkInfo | null;
 }
 
 export interface NetworkStatus {
@@ -307,9 +318,9 @@ export async function listPendingJoins(): Promise<PendingJoin[]> {
 	return response.joins;
 }
 
-/** Approve a join. Only call after the user explicitly compared the fingerprints. */
+/** Admit a join that is still parked (the inviter admits on contact; this is the fallback). */
 export async function approveJoin(joinId: string): Promise<{ join_id: string; status: string; device_id: string }> {
-	return api.post(`/network/joins/${encodeURIComponent(joinId)}/approve`, { fingerprint_confirmed: true });
+	return api.post(`/network/joins/${encodeURIComponent(joinId)}/approve`, {});
 }
 
 export async function rejectJoin(joinId: string): Promise<{ join_id: string; status: string }> {
@@ -319,27 +330,33 @@ export async function rejectJoin(joinId: string): Promise<{ join_id: string; sta
 // ─── Joining from another worker (this worker is fresh) ─────────────────────
 
 export type EnrollInput =
-	| { link: string; device_name?: string }
-	| { endpoint_url: string; code: string; inviter_fingerprint: string; device_name?: string };
+	| { link: string; device_name?: string; replace?: boolean }
+	| { endpoint_url: string; code: string; inviter_fingerprint?: string; device_name?: string; replace?: boolean };
 
 export interface EnrollStarted {
 	join_id: string;
-	status: 'pending';
+	/** The inviter admits on contact; `pending` only means the response is still being collected. */
+	status: 'pending' | 'approved' | (string & {});
 	inviter: { device_id: string; fingerprint: string; name: string | null; network_name: string | null };
-	/** This worker's fingerprint for the approver to compare. */
 	your_fingerprint: string;
 }
 
+/**
+ * Join the network behind an invite. The one-time code in the link is the
+ * authorization; nobody approves on the other side. `replace` lets an
+ * already-enrolled worker leave its own network for the invited one.
+ */
 export async function startEnrollment(input: EnrollInput): Promise<EnrollStarted> {
-	const body: Record<string, string> = {};
+	const body: Record<string, string | boolean> = {};
 	if ('link' in input) {
 		body.link = input.link.trim();
 	} else {
 		body.endpoint_url = input.endpoint_url.trim();
 		body.code = input.code.trim();
-		body.inviter_fingerprint = input.inviter_fingerprint.trim();
+		if (input.inviter_fingerprint?.trim()) body.inviter_fingerprint = input.inviter_fingerprint.trim();
 	}
 	if (input.device_name?.trim()) body.device_name = input.device_name.trim();
+	if (input.replace) body.replace = true;
 	return api.post<EnrollStarted>('/network/enroll', body);
 }
 
@@ -351,16 +368,23 @@ export async function cancelEnrollment(): Promise<void> {
 	await api.delete('/network/enroll');
 }
 
-// ─── Account (hub) device approvals ─────────────────────────────────────────
+// ─── Account (hub) devices ──────────────────────────────────────────────────
 
 export async function listHubPendingDevices(): Promise<HubPendingDevice[]> {
 	const response = await api.get<{ devices: HubPendingDevice[] }>('/network/hub/devices');
 	return response.devices;
 }
 
-/** Admit a device that registered through the account. Only after the user compared fingerprints. */
+/** Admit a device that registered through the account (the sync loop does this on its own). */
 export async function approveHubDevice(deviceId: string): Promise<{ device_id: string; status: string }> {
-	return api.post(`/network/hub/devices/${encodeURIComponent(deviceId)}/approve`, { fingerprint_confirmed: true });
+	return api.post(`/network/hub/devices/${encodeURIComponent(deviceId)}/approve`, {});
+}
+
+/** Leave this worker's own network and join the account's; the account's records win. */
+export async function adoptAccountNetwork(deviceName?: string): Promise<{ adopted: boolean; status: string | null }> {
+	const body: Record<string, string> = {};
+	if (deviceName?.trim()) body.device_name = deviceName.trim();
+	return api.post('/network/hub/adopt', body);
 }
 
 export async function rejectHubDevice(deviceId: string): Promise<{ device_id: string; status: string }> {

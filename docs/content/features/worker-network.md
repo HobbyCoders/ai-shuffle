@@ -20,16 +20,21 @@ new device can restore when every worker is off; it cannot read anything.
 
 On first run a worker offers three choices:
 
-- **Start a new worker.** Creates a network of one. Save the recovery key it
-  shows; it is displayed once.
-- **Join from another worker.** On an existing worker open Settings > Devices
-  and choose *Invite another worker*. Scan the QR or type the code and the
-  endpoint on the new worker, then compare the **fingerprint** shown on both
-  screens. Approve on the existing worker. The new worker copies a snapshot
-  and starts syncing.
-- **Sign in to Shuffle.** Sign the worker into the same account as your other
-  workers. An online worker shows the new device with its fingerprint and
-  approves it. If none is online, enter the recovery key.
+- **Clean install.** Fresh settings on this computer. You can sign in or
+  connect other devices at any time from Settings > Devices.
+- **Sign in to your Shuffle account.** Sign the worker into the same account
+  as your other workers. The first worker on an account founds its network;
+  every later worker is admitted by whichever of your workers is online, with
+  nothing to approve. If none is online, enter the recovery key. Phones signed
+  in to the account see and control every worker on it.
+- **Join with an invite.** On an existing worker open Settings > Devices >
+  *Add device* > *Worker*. Scan the QR code or paste the link on the new
+  worker. The one-time code is the authorization: the new worker joins as
+  soon as it reaches the inviter, copies a snapshot and starts syncing.
+
+Adding a phone or browser works the same way: *Add device* > *Phone or
+browser* shows a QR code and link that connect it immediately, and a phone
+signed in to your account needs no code at all.
 
 Existing managed embedded installations join a network of one on upgrade;
 external/shared-database installations are not automatically converted. Preserve
@@ -70,10 +75,20 @@ write; the losing version is listed under Settings > Devices > Conflicts for
 
 ## Removing a device
 
-Remove a device from Settings > Devices. The network key rotates for the
-remaining members and the removed device's later writes are rejected. Any
-secret it had already received should be treated as compromised; rotate
-provider keys from Settings > Providers.
+Remove a worker, phone or browser from Settings > Devices. A removed worker
+stops receiving your settings and its later writes are rejected; the
+remaining workers switch to a fresh network key on their own. Any secret the
+worker had already received should be treated as compromised; rotate provider
+keys from Settings > Providers.
+
+## Switching a worker to your account
+
+A worker set up with a clean install that later signs in to an account which
+already syncs other workers is shown as *Account differs*. Choose *Use my
+account's settings* to move it into the account's network: settings the
+account already has replace the worker's copies, and anything only that worker
+has is added to the account. The same applies to *Join a different worker's
+network* under Settings > Devices > Advanced.
 
 ## Existing shared-database installations
 

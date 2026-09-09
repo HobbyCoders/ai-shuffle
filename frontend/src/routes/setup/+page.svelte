@@ -1,270 +1,138 @@
 <script lang="ts">
+	/**
+	 * First-run setup for a worker (the desktop app and Docker both land here).
+	 *
+	 * 1. Start — a clean install, sign in to a Shuffle account to sync settings
+	 *    from your other workers, or join another worker with its invite.
+	 * 2. Workspace — where project checkouts live on this machine.
+	 * 3. Providers & GitHub — model providers and the GitHub login used for
+	 *    repository features. Both are optional and live in Settings later.
+	 *
+	 * Nothing here waits for an approval on another device: a clean install is
+	 * immediate, an invite admits this worker on contact, and an account admits
+	 * it as soon as one of your other workers is online.
+	 */
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
 	import { auth, anyCredential } from '$lib/stores/auth.svelte';
 	import {
-		getWorkspaceConfig,
-		setupInstallation,
-		setWorkspaceConfig,
-		getClaudeAuthStatus,
-		startClaudeLogin,
-		completeClaudeLogin,
-		pollClaudeLogin,
-		getGithubAuthStatus,
-		startGithubWebLogin,
-		loginGithubWithToken,
-		completeOnboarding
+		getWorkspaceConfig, setupInstallation, setWorkspaceConfig,
+		getGithubAuthStatus, startGithubWebLogin, loginGithubWithToken, completeOnboarding
 	} from '$lib/api/auth';
-	import { api, getErrorMessage, type WorkspaceConfig } from '$lib/api/client';
-	import {
-		cancelEnrollment,
-		createNetwork,
-		getNetworkStatus,
-		startEnrollment,
-		unlockWithRecoveryKey,
-		type EnrollStarted,
-		type NetworkStatus
-	} from '$lib/api/network';
-	import { isCompleteFingerprint, parseJoinLink } from '$lib/api/network-status';
+	import { getErrorMessage, type WorkspaceConfig } from '$lib/api/client';
+	import { createNetwork, getNetworkStatus, unlockWithRecoveryKey, type NetworkStatus } from '$lib/api/network';
 	import SetupProgress from '$lib/components/SetupProgress.svelte';
-	import AccountConnection from '$lib/components/deck/cards/settings/AccountConnection.svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
 	import AddProviderModal from '$lib/components/deck/cards/settings/providers/AddProviderModal.svelte';
+	import AccountPanel from '$lib/components/deck/cards/settings/AccountPanel.svelte';
+	import JoinNetworkPanel from '$lib/components/deck/cards/settings/JoinNetworkPanel.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
-	import { Check, ChevronRight, Terminal, Github, FolderOpen, Copy, ExternalLink, Loader2, Plus, Network, Users, Smartphone, KeyRound, ShieldCheck, AlertTriangle } from 'lucide-svelte';
+	import { Check, Github, FolderOpen, Copy, ExternalLink, Loader2, Plus, Sparkles, UserRound, Link2, KeyRound, AlertTriangle, ChevronLeft } from 'lucide-svelte';
 
-	// ── Step management ──────────────────────────────────────────────────
-	type SetupStep = 'network' | 'workspace' | 'cli-auth' | 'providers';
-
+	// ── Steps ────────────────────────────────────────────────────────────────
+	type SetupStep = 'start' | 'workspace' | 'providers';
 	let currentStep = $state<SetupStep>('workspace');
 	let completedSteps = $state(new Set<SetupStep>());
 	let loadingConfig = $state(true);
 	let setupError = $state('');
-
-	// Workspace config
-	let workspaceConfig = $state<WorkspaceConfig | null>(null);
-	let isLocalMode = $derived(workspaceConfig?.is_local_mode ?? false);
-
+	let startStepNeeded = $state(false);
 	let steps = $derived.by(() => {
 		const s: { id: SetupStep; label: string }[] = [];
-		// Existing installs are already enrolled — the network step is skipped for them.
-		if (networkStepNeeded) s.push({ id: 'network', label: 'Settings' });
+		if (startStepNeeded) s.push({ id: 'start', label: 'Start' });
 		s.push({ id: 'workspace', label: 'Workspace' });
-		s.push({ id: 'cli-auth', label: 'Connect' });
-		s.push({ id: 'providers', label: 'Providers' });
+		s.push({ id: 'providers', label: 'Providers & GitHub' });
 		return s;
 	});
-	// ── Providers step state ─────────────────────────────────────────────
-	let addProviderOpen = $state(false);
-	let showAccount = $state(false);
 
-	// Refresh any credentials added during setup.
-	function closeAddProvider() {
-		addProviderOpen = false;
-		auth.checkAuth().catch(() => {});
-		providers.refreshProviders().catch(() => {});
-	}
-
-	// ── Network step state ───────────────────────────────────────────────
-	// Both choices configure this worker. Account linking is optional; only
-	// importing existing settings requires approval or a recovery key.
-	type NetworkChoice = 'join' | 'account';
-	type HubConnection = { authorization_url?: string | null; signed_in: boolean; status: string; code: string | null; qr_svg: string | null; error: string | null };
-	const REMAINING_LOCAL_STEPS = [
-		'Workspace folder — where checkouts live on this machine',
-		'Connect — Claude Code and GitHub logins are per machine',
-		'Providers — review the provider keys synced from the network'
-	];
-
-	let networkStepNeeded = $state(false);
+	// ── Start step ───────────────────────────────────────────────────────────
+	type StartChoice = 'clean' | 'account' | 'invite';
+	let choice = $state<StartChoice | null>(null);
 	let networkStatus = $state<NetworkStatus | null>(null);
-	let networkChoice = $state<NetworkChoice | null>(null);
-	let networkError = $state('');
 	let networkBusy = $state(false);
-	let networkPoll: ReturnType<typeof setInterval> | null = null;
-	/** Set once this worker is enrolled through the join/account path — shows the "what remains" panel. */
-	let joinedNetworkName = $state<string | null>(null);
-
-	// join
-	let joinInput = $state('');
-	let joinEndpoint = $state('');
-	let joinCode = $state('');
-	let joinFingerprint = $state('');
-	let joinCompared = $state(false);
-	let joinStarted = $state<EnrollStarted | null>(null);
-	let joinParsed = $derived(parseJoinLink(joinInput));
-	let joinReady = $derived(
-		joinParsed
-			? joinCompared && isCompleteFingerprint(joinParsed.fingerprint)
-			: Boolean(joinEndpoint.trim() && joinCode.trim()) && isCompleteFingerprint(joinFingerprint) && joinCompared
-	);
-	let enrollmentPending = $derived(networkStatus !== null && !networkStatus.enrolled && networkStatus.enrollment?.status === 'pending');
-	let settingsSyncing = $derived(networkStatus?.network?.bootstrap_state === 'syncing');
-
-	// account
-	let hubConnection = $state<HubConnection | null>(null);
-	let hubWorkerName = $state('My worker');
-	let hubCodeCopied = $state(false);
-	let showRecoveryUnlock = $state(false);
+	let networkError = $state('');
+	let workerName = $state('My worker');
 	let recoveryKeyInput = $state('');
-	let hubLinked = $derived(Boolean(networkStatus?.hub?.linked || hubConnection?.signed_in || hubConnection?.status === 'connected'));
+	let showRecovery = $state(false);
+	let networkPoll: ReturnType<typeof setInterval> | null = null;
 
-	function stopNetworkPoll() {
-		if (networkPoll) clearInterval(networkPoll);
-		networkPoll = null;
-	}
+	let workspaceConfig = $state<WorkspaceConfig | null>(null);
+	const enrolled = $derived(Boolean(networkStatus?.enrolled));
+	const syncing = $derived(enrolled && networkStatus?.network?.bootstrap_state === 'syncing');
+	const ready = $derived(enrolled && !syncing);
+	const linked = $derived(Boolean(networkStatus?.hub?.linked));
+	const waitingOnAccount = $derived(!enrolled && linked && networkStatus?.hub?.status === 'pending');
+	const accountWorkers = $derived((networkStatus?.hub?.account_network?.devices ?? []).filter((d) => d.status === 'active' && d.kind !== 'consumer').map((d) => d.name || 'a worker'));
+	const recoveryAvailable = $derived(Boolean(networkStatus?.hub?.account_network?.recovery_available));
+	const enrollmentPending = $derived(!enrolled && (networkStatus?.enrollment?.status === 'pending' || networkStatus?.enrollment?.status === 'syncing'));
 
-	function startNetworkPoll() {
-		stopNetworkPoll();
-		networkPoll = setInterval(refreshNetwork, 3000);
-	}
+	function stopNetworkPoll() { if (networkPoll) clearInterval(networkPoll); networkPoll = null; }
+	function startNetworkPoll() { stopNetworkPoll(); networkPoll = setInterval(refreshNetwork, 3000); }
 
 	async function refreshNetwork() {
-		try {
-			const status = await getNetworkStatus();
-			networkStatus = status;
-			if (status.enrolled && status.network?.bootstrap_state !== 'syncing' && !joinedNetworkName && networkChoice !== null) {
-				joinedNetworkName = status.network?.name ?? 'your network';
-				stopNetworkPoll();
-			} else if (!status.enrolled && status.enrollment && status.enrollment.status !== 'pending' && status.enrollment.status !== 'complete') {
-				networkError = `The join ${status.enrollment.status}${status.enrollment.error ? `: ${status.enrollment.error}` : ''}.`;
-				joinStarted = null;
-			}
-		} catch { /* keep polling; the next poll retries */ }
-		if (networkChoice === 'account' && !joinedNetworkName) {
-			try { hubConnection = await api.get<HubConnection>('/mobile/hub/connection'); } catch { /* non-critical */ }
-		}
+		try { networkStatus = await getNetworkStatus(); }
+		catch { /* the next poll retries */ }
 	}
 
-	function chooseNetwork(choice: NetworkChoice) {
-		networkChoice = choice;
-		networkError = '';
+	function choose(next: StartChoice) {
+		choice = next; networkError = '';
 		void refreshNetwork();
 		startNetworkPoll();
 	}
 
-	function backToChoices() {
-		networkChoice = null;
-		networkError = '';
-		stopNetworkPoll();
-	}
+	function backToChoices() { choice = null; networkError = ''; stopNetworkPoll(); }
 
-	async function startFresh() {
-		networkBusy = true;
-		networkError = '';
-		stopNetworkPoll();
+	async function cleanInstall() {
+		networkBusy = true; networkError = ''; stopNetworkPoll();
 		try {
-			// Re-read before changing direction: an approval may have arrived.
 			const status = await getNetworkStatus();
-			if (!status.enrolled) {
-				if (status.enrollment) await cancelEnrollment();
-				await createNetwork();
-			}
+			if (!status.enrolled) await createNetwork();
 			networkStatus = await getNetworkStatus();
-			if (networkStatus.network?.bootstrap_state === 'syncing') {
-				chooseNetwork('join');
-				return;
-			}
-			finishNetworkStep();
+			finishStartStep();
 		} catch (e: unknown) {
-			networkError = getErrorMessage(e, 'Could not prepare local settings. Please try again.');
-		} finally {
-			networkBusy = false;
-		}
-	}
-
-	async function startJoin() {
-		networkBusy = true;
-		networkError = '';
-		try {
-			joinStarted = joinParsed
-				? await startEnrollment({ link: joinInput })
-				: await startEnrollment({ endpoint_url: joinEndpoint, code: joinCode, inviter_fingerprint: joinFingerprint });
-			await refreshNetwork();
-			startNetworkPoll();
-		} catch (e: unknown) {
-			networkError = getErrorMessage(e, 'Failed to start joining');
-		} finally {
-			networkBusy = false;
-		}
-	}
-
-	async function cancelJoin() {
-		networkBusy = true;
-		networkError = '';
-		try {
-			await cancelEnrollment();
-			joinStarted = null;
-			joinCompared = false;
-			await refreshNetwork();
-		} catch (e: unknown) {
-			networkError = getErrorMessage(e, 'Failed to cancel the join');
-		} finally {
-			networkBusy = false;
-		}
-	}
-
-	async function connectAccount() {
-		networkBusy = true;
-		networkError = '';
-		hubCodeCopied = false;
-		try {
-			hubConnection = await api.post<HubConnection>('/mobile/hub/connection', { name: hubWorkerName.trim() });
-		} catch (e: unknown) {
-			networkError = getErrorMessage(e, 'Failed to start the account sign-in');
-		} finally {
-			networkBusy = false;
-		}
-	}
-
-	async function copyHubCode() {
-		try {
-			await navigator.clipboard.writeText(hubConnection?.code ?? '');
-			hubCodeCopied = true;
-			setTimeout(() => (hubCodeCopied = false), 2000);
-		} catch { /* the code is selectable */ }
+			networkError = getErrorMessage(e, 'Could not prepare this worker. Please try again.');
+		} finally { networkBusy = false; }
 	}
 
 	async function unlockWithRecovery() {
-		networkBusy = true;
-		networkError = '';
+		networkBusy = true; networkError = '';
 		try {
-			const result = await unlockWithRecoveryKey(recoveryKeyInput, hubWorkerName.trim() || undefined);
-			recoveryKeyInput = '';
-			joinedNetworkName = result.network?.name ?? 'your network';
-			stopNetworkPoll();
+			await unlockWithRecoveryKey(recoveryKeyInput, workerName.trim() || undefined);
+			recoveryKeyInput = ''; showRecovery = false;
 			await refreshNetwork();
 		} catch (e: unknown) {
 			networkError = getErrorMessage(e, 'The recovery key was not accepted');
-		} finally {
-			networkBusy = false;
-		}
+		} finally { networkBusy = false; }
 	}
 
-	function finishNetworkStep() {
+	function finishStartStep() {
 		stopNetworkPoll();
-		completedSteps.add('network');
+		completedSteps.add('start');
 		advanceStep();
 	}
 
-	// ── Workspace state ──────────────────────────────────────────────────
+	// ── Workspace ────────────────────────────────────────────────────────────
 	let workspacePath = $state('');
 	let workspaceError = $state('');
 	let savingWorkspace = $state(false);
 
-	// ── Claude auth state ────────────────────────────────────────────────
-	let claudeIsAuthenticated = $state(false);
-	let claudeLoading = $state(false);
-	let claudeOAuthUrl = $state('');
-	let claudeOAuthState = $state('');
-	let claudeAuthCode = $state('');
-	let claudeCompletingLogin = $state(false);
-	let claudeError = $state('');
-	let claudePollInterval = $state<ReturnType<typeof setInterval> | null>(null);
+	function handleDirectorySelect(path: string) { workspacePath = path; workspaceError = ''; }
 
-	let hasModelCredential = $derived(claudeIsAuthenticated || $anyCredential);
+	async function saveWorkspaceAndContinue() {
+		if (!workspacePath.trim()) { workspaceError = 'Please select or enter a workspace path'; return; }
+		savingWorkspace = true; workspaceError = '';
+		try {
+			await setWorkspaceConfig(workspacePath);
+			if (auth.current.status?.setup_required) await setupInstallation();
+			await auth.checkAuth();
+			completedSteps.add('workspace');
+			advanceStep();
+		} catch (e: unknown) {
+			workspaceError = getErrorMessage(e, 'Failed to save workspace configuration');
+		} finally { savingWorkspace = false; }
+	}
 
-	// ── GitHub auth state ────────────────────────────────────────────────
+	// ── Providers & GitHub ──────────────────────────────────────────────────
+	let addProviderOpen = $state(false);
 	let githubIsAuthenticated = $state(false);
 	let githubUser = $state<string | null>(null);
 	let githubAuthMethod = $state<'device' | 'pat'>('device');
@@ -276,75 +144,15 @@
 	let githubPollInterval = $state<ReturnType<typeof setInterval> | null>(null);
 	let codeCopied = $state(false);
 
-	// ── Lifecycle ────────────────────────────────────────────────────────
-	onMount(async () => {
-		try {
-			workspaceConfig = await getWorkspaceConfig();
-			workspacePath = workspaceConfig.workspace_path || workspaceConfig.default_path;
-		} catch (e) {
-			console.error('Failed to load workspace config:', e);
-		}
-		// A local identity exists before setup. Choose its initial settings only
-		// when it has not been initialized or enrolled yet.
-		try {
-			networkStatus = await getNetworkStatus();
-			networkStepNeeded = !networkStatus.enrolled || networkStatus.network?.bootstrap_state === 'syncing';
-			if (networkStepNeeded) {
-				currentStep = 'network';
-				if (networkStatus.enrollment?.status === 'pending' || networkStatus.network?.bootstrap_state === 'syncing') chooseNetwork('join');
-			}
-		} catch {
-			networkStepNeeded = false;
-		}
-		loadingConfig = false;
-	});
-
-	onDestroy(() => {
-		stopNetworkPoll();
-		if (claudePollInterval) clearInterval(claudePollInterval);
-		if (githubPollInterval) clearInterval(githubPollInterval);
-	});
-
-	// ── Workspace step ───────────────────────────────────────────────────
-	function handleDirectorySelect(path: string) {
-		workspacePath = path;
-		workspaceError = '';
+	function closeAddProvider() {
+		addProviderOpen = false;
+		auth.checkAuth().catch(() => {});
+		providers.refreshProviders().catch(() => {});
 	}
 
-	async function saveWorkspaceAndContinue() {
-		if (!workspacePath.trim()) {
-			workspaceError = 'Please select or enter a workspace path';
-			return;
-		}
-
-		savingWorkspace = true;
-		workspaceError = '';
-
-		try {
-			await setWorkspaceConfig(workspacePath);
-			if (auth.current.status?.setup_required) await setupInstallation();
-			await auth.checkAuth();
-			completedSteps.add('workspace');
-			advanceStep();
-		} catch (e: any) {
-			workspaceError = e.detail || 'Failed to save workspace configuration';
-		} finally {
-			savingWorkspace = false;
-		}
-	}
-
-	// ── Claude auth ──────────────────────────────────────────────────────
-	async function loadCliAuthStatus() {
-		try {
-			const claudeStatus = await getClaudeAuthStatus();
-			claudeIsAuthenticated = claudeStatus.authenticated;
-		} catch { /* non-critical */ }
-
-		// Reflect credentials already configured before this run of the wizard.
-		try {
-			await auth.checkAuth();
-		} catch { /* non-critical */ }
-
+	async function loadProvidersStep() {
+		providers.ensureLoaded();
+		try { await auth.checkAuth(); } catch { /* non-critical */ }
 		try {
 			const githubStatus = await getGithubAuthStatus();
 			githubIsAuthenticated = githubStatus.authenticated;
@@ -352,86 +160,15 @@
 		} catch { /* non-critical */ }
 	}
 
-	async function startClaudeAuth() {
-		claudeLoading = true;
-		claudeError = '';
-
-		try {
-			const result = await startClaudeLogin();
-			if (result.already_authenticated) {
-				claudeIsAuthenticated = true;
-				return;
-			}
-			if (result.success && result.oauth_url && result.state) {
-				claudeOAuthUrl = result.oauth_url;
-				claudeOAuthState = result.state;
-				// Start polling for auto-detection
-				startClaudePoll();
-			} else {
-				claudeError = result.error || 'Failed to start Claude authentication';
-			}
-		} catch (e: any) {
-			claudeError = e.detail || 'Failed to start Claude authentication';
-		} finally {
-			claudeLoading = false;
-		}
-	}
-
-	function startClaudePoll() {
-		if (claudePollInterval) clearInterval(claudePollInterval);
-		claudePollInterval = setInterval(async () => {
-			try {
-				const result = await pollClaudeLogin();
-				if (result.authenticated) {
-					claudeIsAuthenticated = true;
-					claudeOAuthUrl = '';
-					claudeAuthCode = '';
-					if (claudePollInterval) clearInterval(claudePollInterval);
-				}
-			} catch { /* ignore polling errors */ }
-		}, 3000);
-	}
-
-	async function submitClaudeCode() {
-		if (!claudeAuthCode.trim() || !claudeOAuthState) return;
-		claudeCompletingLogin = true;
-		claudeError = '';
-
-		try {
-			const result = await completeClaudeLogin(claudeAuthCode.trim(), claudeOAuthState);
-			if (result.success) {
-				claudeIsAuthenticated = true;
-				claudeOAuthUrl = '';
-				claudeAuthCode = '';
-				if (claudePollInterval) clearInterval(claudePollInterval);
-			} else {
-				claudeError = result.error || 'Failed to complete authentication';
-			}
-		} catch (e: any) {
-			claudeError = e.detail || 'Failed to complete authentication';
-		} finally {
-			claudeCompletingLogin = false;
-		}
-	}
-
-	// ── GitHub auth ──────────────────────────────────────────────────────
 	async function startGithubDeviceFlow() {
-		githubDeviceLoading = true;
-		githubError = '';
-
+		githubDeviceLoading = true; githubError = '';
 		try {
 			const result = await startGithubWebLogin();
-			if (result.success && result.user_code) {
-				githubDeviceCode = result.user_code;
-				startGithubPoll();
-			} else {
-				githubError = result.error || 'Failed to start device flow';
-			}
-		} catch (e: any) {
-			githubError = e.detail || 'Failed to start device flow';
-		} finally {
-			githubDeviceLoading = false;
-		}
+			if (result.success && result.user_code) { githubDeviceCode = result.user_code; startGithubPoll(); }
+			else githubError = result.error || 'Failed to start the GitHub login';
+		} catch (e: unknown) {
+			githubError = getErrorMessage(e, 'Failed to start the GitHub login');
+		} finally { githubDeviceLoading = false; }
 	}
 
 	function startGithubPoll() {
@@ -440,9 +177,7 @@
 			try {
 				const status = await getGithubAuthStatus();
 				if (status.authenticated) {
-					githubIsAuthenticated = true;
-					githubUser = status.user;
-					githubDeviceCode = '';
+					githubIsAuthenticated = true; githubUser = status.user; githubDeviceCode = '';
 					if (githubPollInterval) clearInterval(githubPollInterval);
 				}
 			} catch { /* ignore polling errors */ }
@@ -451,57 +186,35 @@
 
 	async function connectGithubPAT() {
 		if (!githubPAT.trim()) return;
-		githubPATLoading = true;
-		githubError = '';
-
+		githubPATLoading = true; githubError = '';
 		try {
 			const result = await loginGithubWithToken(githubPAT.trim());
 			if (result.success) {
-				githubIsAuthenticated = true;
-				githubPAT = '';
-				// Fetch username
-				try {
-					const status = await getGithubAuthStatus();
-					githubUser = status.user;
-				} catch { /* non-critical */ }
-			} else {
-				githubError = result.error || 'Failed to authenticate with token';
-			}
-		} catch (e: any) {
-			githubError = e.detail || 'Failed to authenticate with token';
-		} finally {
-			githubPATLoading = false;
-		}
+				githubIsAuthenticated = true; githubPAT = '';
+				try { githubUser = (await getGithubAuthStatus()).user; } catch { /* non-critical */ }
+			} else githubError = result.error || 'Failed to authenticate with the token';
+		} catch (e: unknown) {
+			githubError = getErrorMessage(e, 'Failed to authenticate with the token');
+		} finally { githubPATLoading = false; }
 	}
 
 	async function copyDeviceCode() {
-		try {
-			await navigator.clipboard.writeText(githubDeviceCode);
-			codeCopied = true;
-			setTimeout(() => codeCopied = false, 2000);
-		} catch { /* clipboard API may not be available */ }
+		try { await navigator.clipboard.writeText(githubDeviceCode); codeCopied = true; setTimeout(() => (codeCopied = false), 2000); }
+		catch { /* clipboard may be unavailable */ }
 	}
 
-	// ── Step navigation ──────────────────────────────────────────────────
+	// ── Navigation ───────────────────────────────────────────────────────────
 	function advanceStep() {
-		const idx = steps.findIndex(s => s.id === currentStep);
+		const idx = steps.findIndex((s) => s.id === currentStep);
 		if (idx < steps.length - 1) {
-			const nextStep = steps[idx + 1].id;
-			currentStep = nextStep;
-			if (nextStep === 'cli-auth') {
-				loadCliAuthStatus();
-			}
-			if (nextStep === 'providers') {
-				providers.ensureLoaded();
-			}
+			currentStep = steps[idx + 1].id;
+			if (currentStep === 'providers') void loadProvidersStep();
 		}
 	}
 
 	function goBack() {
-		const idx = steps.findIndex(s => s.id === currentStep);
-		if (idx > 0) {
-			currentStep = steps[idx - 1].id;
-		}
+		const idx = steps.findIndex((s) => s.id === currentStep);
+		if (idx > 0) currentStep = steps[idx - 1].id;
 	}
 
 	async function finishSetup() {
@@ -513,6 +226,35 @@
 			setupError = 'Setup could not be saved. Please try again.';
 		}
 	}
+
+	// ── Lifecycle ────────────────────────────────────────────────────────────
+	onMount(async () => {
+		try {
+			workspaceConfig = await getWorkspaceConfig();
+			workspacePath = workspaceConfig.workspace_path || workspaceConfig.default_path;
+		} catch (e) {
+			console.error('Failed to load workspace config:', e);
+		}
+		// A worker that already belongs to a network (an upgraded install, or a
+		// wizard reopened after choosing) skips the Start step.
+		try {
+			networkStatus = await getNetworkStatus();
+			startStepNeeded = !networkStatus.enrolled || networkStatus.network?.bootstrap_state === 'syncing';
+			if (startStepNeeded) {
+				currentStep = 'start';
+				if (networkStatus.enrollment) choose('invite');
+				else if (networkStatus.hub?.linked || networkStatus.network?.bootstrap_state === 'syncing') choose('account');
+			}
+		} catch {
+			startStepNeeded = false;
+		}
+		loadingConfig = false;
+	});
+
+	onDestroy(() => {
+		stopNetworkPoll();
+		if (githubPollInterval) clearInterval(githubPollInterval);
+	});
 </script>
 
 <svelte:head>
@@ -521,7 +263,7 @@
 </svelte:head>
 
 <div class="min-h-screen flex items-center justify-center p-4">
-	<div class="card p-6 sm:p-8 w-full transition-all duration-300 {currentStep === 'workspace' || currentStep === 'network' ? 'max-w-xl' : currentStep === 'cli-auth' || currentStep === 'providers' ? 'max-w-lg' : 'max-w-md'}">
+	<div class="card p-6 sm:p-8 w-full transition-all duration-300 {currentStep === 'workspace' || currentStep === 'start' ? 'max-w-xl' : 'max-w-lg'}">
 		{#if loadingConfig}
 			<div class="text-center py-8">
 				<Loader2 size={32} strokeWidth={1.5} class="mx-auto mb-4 animate-spin text-muted-foreground" />
@@ -529,215 +271,129 @@
 			</div>
 		{:else}
 			{#if setupError}<p role="alert" class="text-destructive mb-4">{setupError}</p>{/if}
-			<!-- Header -->
 			<div class="text-center mb-6 sm:mb-8">
 				<h1 class="text-xl sm:text-2xl font-bold text-foreground mb-2">Welcome to AI Shuffle</h1>
 				<p class="text-muted-foreground text-sm sm:text-base">
-					{#if currentStep === 'network'}
-						Your local worker is running. Start fresh or sync settings from an existing worker.
+					{#if currentStep === 'start'}
+						Your worker is running. Start clean, or bring in the settings you already use.
 					{:else if currentStep === 'workspace'}
 						Choose where project checkouts will be created on this machine
-					{:else if currentStep === 'cli-auth'}
-						Optional — connect your development tools on this machine
 					{:else}
-						Optional — connect OpenAI, OpenRouter, or more Claude accounts. You can always do this later in Settings → Providers.
+						Optional — add model providers and connect GitHub. Everything here is also in Settings.
 					{/if}
 				</p>
 			</div>
 
 			<SetupProgress {steps} current={currentStep} completed={completedSteps} />
 
-			{#if currentStep === 'network'}
+			<!-- ═══ Step 1: Start ═══ -->
+			{#if currentStep === 'start'}
 				<div class="space-y-4">
-					{#if settingsSyncing}
-						<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Settings sync is approved and continues in the background when your other worker is available.</div>
-						<p class="text-sm text-muted-foreground">You can set up this machine's workspace and tool logins now. Imported settings will become available when sync finishes.</p>
-						<button type="button" onclick={refreshNetwork} class="btn btn-secondary w-full py-3">Check sync status</button>
-						<button type="button" onclick={finishNetworkStep} class="btn btn-primary w-full py-3">Continue local setup</button>
-					{:else if joinedNetworkName}
-						<!-- Enrolled through join / account / recovery: say what still needs local setup. -->
+					{#if ready}
 						<div class="bg-success/10 border border-success/30 text-success px-3 py-2.5 rounded-lg text-sm flex items-center gap-2">
 							<Check size={16} strokeWidth={2} />
-							<span>This local worker now syncs settings, profiles and provider keys with <strong>{joinedNetworkName}</strong>.</span>
+							<span>{choice === 'clean' || !choice ? 'This worker is ready.' : `This worker now syncs settings with ${networkStatus?.network?.name || 'your other workers'}.`}</span>
 						</div>
-						<div class="bg-muted/30 border border-border rounded-lg p-4 space-y-2">
-							<p class="text-sm font-medium text-foreground">The remaining steps set up this machine only:</p>
-							<ul class="text-sm text-muted-foreground list-disc pl-5 space-y-1">
-								{#each REMAINING_LOCAL_STEPS as step}<li>{step}</li>{/each}
-							</ul>
-						</div>
-						<button type="button" onclick={finishNetworkStep} class="btn btn-primary w-full py-3">Continue</button>
-					{:else if networkStatus?.enrolled}
-						<p class="text-sm text-muted-foreground">Local settings are ready. You can link an account and add remote workers later in Settings.</p>
-						<button type="button" onclick={finishNetworkStep} class="btn btn-primary w-full py-3">Continue</button>
-					{:else if networkChoice === null}
+						<p class="text-sm text-muted-foreground">The remaining steps set up this machine only: its workspace folder, model providers and GitHub login.</p>
+						<button type="button" onclick={finishStartStep} class="btn btn-primary w-full py-3">Continue</button>
+					{:else if syncing}
+						<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Copying settings from your other worker. This continues in the background when it is available.</div>
+						<button type="button" onclick={refreshNetwork} class="btn btn-secondary w-full py-3">Check sync status</button>
+						<button type="button" onclick={finishStartStep} class="btn btn-primary w-full py-3">Continue setup</button>
+					{:else if choice === null}
 						<div class="grid gap-3">
-							<button type="button" onclick={startFresh} disabled={networkBusy} class="text-left bg-muted/30 hover:bg-primary/10 border border-border hover:border-primary/40 rounded-lg p-4 transition-colors">
+							<button type="button" onclick={cleanInstall} disabled={networkBusy} class="text-left bg-muted/30 hover:bg-primary/10 border border-border hover:border-primary/40 rounded-lg p-4 transition-colors">
 								<div class="flex items-start gap-3">
-									<Network size={20} strokeWidth={1.5} class="text-primary mt-0.5 shrink-0" />
+									<Sparkles size={20} strokeWidth={1.5} class="text-primary mt-0.5 shrink-0" />
 									<div>
-										<h3 class="text-foreground font-medium mb-1">Start fresh</h3>
-										<p class="text-muted-foreground text-sm">Use fresh settings on this machine. No account or other worker is required.</p>
+										<h3 class="text-foreground font-medium mb-1">Clean install</h3>
+										<p class="text-muted-foreground text-sm">Fresh settings on this computer. You can sign in or connect other devices any time later.</p>
 									</div>
 								</div>
 							</button>
-							<button type="button" onclick={() => chooseNetwork('join')} disabled={networkBusy} class="text-left bg-muted/30 hover:bg-primary/10 border border-border hover:border-primary/40 rounded-lg p-4 transition-colors">
+							<button type="button" onclick={() => choose('account')} disabled={networkBusy} class="text-left bg-muted/30 hover:bg-primary/10 border border-border hover:border-primary/40 rounded-lg p-4 transition-colors">
 								<div class="flex items-start gap-3">
-									<Users size={20} strokeWidth={1.5} class="text-primary mt-0.5 shrink-0" />
+									<UserRound size={20} strokeWidth={1.5} class="text-primary mt-0.5 shrink-0" />
 									<div>
-										<h3 class="text-foreground font-medium mb-1">Sync settings from an existing worker</h3>
-										<p class="text-muted-foreground text-sm">Bring your settings, profiles and provider keys here. This machine keeps its own worker, workspace and tool logins.</p>
+										<h3 class="text-foreground font-medium mb-1">Sign in to your Shuffle account</h3>
+										<p class="text-muted-foreground text-sm">Sync settings, profiles and provider keys from your other workers, and control this one from your phone. New accounts start clean.</p>
+									</div>
+								</div>
+							</button>
+							<button type="button" onclick={() => choose('invite')} disabled={networkBusy} class="text-left bg-muted/30 hover:bg-primary/10 border border-border hover:border-primary/40 rounded-lg p-4 transition-colors">
+								<div class="flex items-start gap-3">
+									<Link2 size={20} strokeWidth={1.5} class="text-primary mt-0.5 shrink-0" />
+									<div>
+										<h3 class="text-foreground font-medium mb-1">Join with an invite</h3>
+										<p class="text-muted-foreground text-sm">Another worker on your network shows a QR code and link under Add device. Paste it here; no account needed.</p>
 									</div>
 								</div>
 							</button>
 						</div>
-						<p class="text-xs text-muted-foreground">Shuffle account sign-in is optional. You can link it after local setup to access this worker remotely and connect other devices.</p>
-					{:else if networkChoice === 'join'}
-						{#if enrollmentPending}
-							<div class="space-y-3 bg-muted/30 border border-border rounded-lg p-4">
-								<div class="flex items-center gap-2 text-sm text-foreground font-medium">
-									<Loader2 size={14} strokeWidth={2} class="animate-spin" />
-									Waiting for approval on {joinStarted?.inviter.name || networkStatus?.enrollment?.endpoint_url || 'the inviting worker'}
-								</div>
-								<p class="text-sm text-muted-foreground">On that worker, open Settings → Devices → Pending approvals and compare this fingerprint before approving:</p>
-								<code class="block text-sm font-mono font-bold tracking-wider text-foreground bg-muted/60 border border-border rounded-lg px-3 py-2 select-all break-all">{networkStatus?.enrollment?.fingerprint || joinStarted?.your_fingerprint || networkStatus?.device.fingerprint}</code>
-								{#if joinStarted?.inviter.network_name}<p class="text-xs text-muted-foreground">Network: {joinStarted.inviter.network_name}</p>{/if}
-							</div>
-							<div class="flex gap-3">
-								<button type="button" onclick={cancelJoin} class="btn btn-secondary flex-1 py-3" disabled={networkBusy}>Cancel join</button>
-							</div>
-						{:else}
-							<button type="button" onclick={() => chooseNetwork('account')} class="btn btn-secondary w-full py-2.5 text-sm flex items-center justify-center gap-2"><Smartphone size={16} /> Find it through my Shuffle account</button>
-							<div class="space-y-3">
-								<p class="text-sm text-muted-foreground">On the other worker, open Settings → Devices → Invite another worker. Paste its link, or type the code and address. You must also read the inviter's fingerprint from that screen.</p>
-								<div>
-									<label for="joinLink" class="block text-xs text-muted-foreground mb-1">Join link</label>
-									<input type="text" id="joinLink" bind:value={joinInput} class="input text-sm font-mono" placeholder="shuffle://network/join?endpoint=…&code=…&fp=…" autocomplete="off" spellcheck="false" />
-								</div>
-								{#if joinParsed}
-									<div class="bg-muted/30 border border-border rounded-lg p-3 text-sm space-y-1">
-										<div class="flex gap-2"><span class="text-muted-foreground w-32 shrink-0">Address</span><code class="text-xs break-all">{joinParsed.endpoint || '—'}</code></div>
-										<div class="flex gap-2"><span class="text-muted-foreground w-32 shrink-0">Code</span><code class="text-xs">{joinParsed.code || '—'}</code></div>
-										<div class="flex gap-2"><span class="text-muted-foreground w-32 shrink-0">Inviter fingerprint</span><code class="text-xs break-all">{joinParsed.fingerprint || '—'}</code></div>
-									</div>
-								{:else}
-									<div class="grid sm:grid-cols-2 gap-3">
-										<div>
-											<label for="joinEndpoint" class="block text-xs text-muted-foreground mb-1">Worker address</label>
-											<input type="text" id="joinEndpoint" bind:value={joinEndpoint} class="input text-sm" placeholder="https://10.0.0.5:8000" autocomplete="off" spellcheck="false" />
-										</div>
-										<div>
-											<label for="joinCode" class="block text-xs text-muted-foreground mb-1">Join code</label>
-											<input type="text" id="joinCode" bind:value={joinCode} class="input text-sm font-mono" placeholder="ABCD-EFGH-JKLM" autocomplete="off" spellcheck="false" />
-										</div>
-										<div class="sm:col-span-2">
-											<label for="joinFingerprint" class="block text-xs text-muted-foreground mb-1">Inviter fingerprint (read it on the other screen)</label>
-											<input type="text" id="joinFingerprint" bind:value={joinFingerprint} class="input text-sm font-mono" placeholder="xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx" autocomplete="off" spellcheck="false" />
-										</div>
-									</div>
-								{/if}
-								<label class="flex items-start gap-2 text-sm text-foreground cursor-pointer">
-									<input type="checkbox" bind:checked={joinCompared} class="mt-0.5" />
-									<span>I compared the inviter's fingerprint with the one shown on the other worker.</span>
-								</label>
-							</div>
-							<div class="flex gap-3">
-								<button type="button" onclick={backToChoices} class="btn btn-secondary flex-1 py-3" disabled={networkBusy}>Back</button>
-								<button type="button" onclick={startJoin} class="btn btn-primary flex-1 py-3" disabled={networkBusy || !joinReady}>
-									{#if networkBusy}<Loader2 size={16} strokeWidth={2} class="inline-block animate-spin mr-2" />{/if}
-									Sync settings
-								</button>
-							</div>
-						{/if}
-					{:else if networkChoice === 'account'}
+					{:else if choice === 'account'}
 						<div class="space-y-3">
-							<p class="text-sm text-muted-foreground">Sign in to sync settings from a worker you already own. If this is your first worker, use fresh settings below; you can link your account afterward.</p>
-							{#if hubLinked}
-								<div class="bg-success/10 border border-success/30 text-success px-3 py-2.5 rounded-lg text-sm flex items-center gap-2">
-									<Check size={16} strokeWidth={2} />
-									<span>Linked to your account</span>
+							{#if !linked}
+								<div>
+									<label for="workerName" class="block text-xs text-muted-foreground mb-1">Name for this worker</label>
+									<input type="text" id="workerName" bind:value={workerName} maxlength="80" class="input text-sm" placeholder="My worker" />
 								</div>
-								<div class="space-y-3 bg-muted/30 border border-border rounded-lg p-4">
+							{/if}
+							<div class="bg-muted/30 border border-border rounded-lg p-4">
+								<AccountPanel {workerName} variant="setup" />
+							</div>
+							{#if waitingOnAccount}
+								<div class="space-y-3 bg-muted/30 border border-border rounded-lg p-4" role="status">
 									<div class="flex items-center gap-2 text-sm text-foreground font-medium">
 										<Loader2 size={14} strokeWidth={2} class="animate-spin" />
-										Approve settings sync on an existing worker
+										Joining your account's network
 									</div>
-									<p class="text-sm text-muted-foreground">On an online worker, open Settings → Devices → Pending approvals and compare this fingerprint:</p>
-									<code class="block text-sm font-mono font-bold tracking-wider text-foreground bg-muted/60 border border-border rounded-lg px-3 py-2 select-all break-all">{networkStatus?.device.fingerprint ?? '…'}</code>
-								</div>
-								{#if showRecoveryUnlock}
-									<div class="space-y-2 bg-muted/30 border border-border rounded-lg p-4">
-										<p class="text-sm text-foreground font-medium">Enter your recovery key</p>
-										<p class="text-xs text-muted-foreground">Restores the account's network onto this worker without another worker approving it.</p>
-										<div class="flex gap-2">
-											<input type="text" bind:value={recoveryKeyInput} class="input flex-1 text-sm font-mono" placeholder="A1-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX-X" autocomplete="off" spellcheck="false" />
-											<button type="button" onclick={unlockWithRecovery} class="btn btn-primary px-4" disabled={networkBusy || recoveryKeyInput.trim().length < 20}>
-												{#if networkBusy}<Loader2 size={14} strokeWidth={2} class="animate-spin" />{:else}Restore{/if}
+									<p class="text-sm text-muted-foreground">
+										{#if accountWorkers.length}Your account already syncs settings between {accountWorkers.join(', ')}. This worker joins as soon as one of them is online; you can keep going with setup meanwhile.{:else}This worker joins as soon as another worker on your account is online; you can keep going with setup meanwhile.{/if}
+									</p>
+									{#if recoveryAvailable}
+										{#if showRecovery}
+											<div class="flex gap-2">
+												<input type="text" bind:value={recoveryKeyInput} class="input flex-1 text-sm font-mono" placeholder="A1-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX-X" autocomplete="off" spellcheck="false" aria-label="Recovery key" />
+												<button type="button" onclick={unlockWithRecovery} class="btn btn-primary px-4" disabled={networkBusy || recoveryKeyInput.trim().length < 20}>
+													{#if networkBusy}<Loader2 size={14} strokeWidth={2} class="animate-spin" />{:else}Restore{/if}
+												</button>
+											</div>
+										{:else}
+											<button type="button" onclick={() => (showRecovery = true)} class="btn btn-secondary w-full py-2.5 text-sm flex items-center justify-center gap-2">
+												<KeyRound size={16} strokeWidth={1.5} /> No other worker available? Use your recovery key
 											</button>
-										</div>
-									</div>
-								{:else}
-									<button type="button" onclick={() => (showRecoveryUnlock = true)} class="btn btn-secondary w-full py-2.5 text-sm flex items-center justify-center gap-2">
-										<KeyRound size={16} strokeWidth={1.5} />
-										No worker online to approve? Enter recovery key
-									</button>
-								{/if}
-							{:else if hubConnection?.code}
-								<div class="space-y-3 bg-muted/30 border border-border rounded-lg p-4">
-									{#if hubConnection.authorization_url}
-										<a href={hubConnection.authorization_url} target="_blank" rel="noopener noreferrer" class="btn btn-primary w-full py-2 text-sm flex items-center justify-center gap-2">
-											<ExternalLink size={14} strokeWidth={1.5} />
-											Sign in and link this worker
-										</a>
-										<p class="text-xs text-muted-foreground text-center">Return here after linking this worker — or scan the code with the Shuffle app.</p>
-									{:else}
-										<p class="text-sm text-muted-foreground">In the Shuffle app, sign in, choose <strong>Add worker</strong>, then scan this code.</p>
+										{/if}
 									{/if}
-									{#if hubConnection.qr_svg}<div class="w-44 max-w-full p-3 bg-white rounded-xl mx-auto [&_svg]:block [&_svg]:w-full [&_svg]:h-auto" aria-label="Worker connection QR code">{@html hubConnection.qr_svg}</div>{/if}
-									<div class="flex items-center justify-center gap-3">
-										<code class="text-xl font-mono font-bold tracking-widest text-foreground select-all">{hubConnection.code.match(/.{1,4}/g)?.join(' ')}</code>
-										<button type="button" onclick={copyHubCode} class="btn btn-secondary px-2 py-1.5 text-xs flex items-center gap-1">
-											{#if hubCodeCopied}<Check size={12} strokeWidth={2} /> Copied{:else}<Copy size={12} strokeWidth={1.5} /> Copy{/if}
-										</button>
-									</div>
-									<div class="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-										<Loader2 size={12} strokeWidth={2} class="animate-spin" />
-										Waiting for the account link… the code expires after ten minutes.
-									</div>
 								</div>
-							{:else if hubConnection?.status === 'locked' || hubConnection?.status === 'unavailable'}
-								<div class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">Account linking is unavailable. You can still set up this local worker with fresh settings.</div>
-							{:else}
-								<div>
-									<label for="hubWorkerName" class="block text-xs text-muted-foreground mb-1">Worker name</label>
-									<input type="text" id="hubWorkerName" bind:value={hubWorkerName} maxlength="80" class="input text-sm" placeholder="My worker" />
-								</div>
-								<button type="button" onclick={connectAccount} class="btn btn-primary w-full py-2.5 text-sm" disabled={networkBusy || !hubWorkerName.trim()}>
-									{#if networkBusy}<Loader2 size={14} strokeWidth={2} class="inline-block animate-spin mr-2" />{/if}
-									Sign in or create a Shuffle account
-								</button>
-							{/if}
-							{#if hubConnection?.error}
-								<div class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">{hubConnection.error}</div>
+							{:else if linked}
+								<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Connecting this worker to your account…</div>
 							{/if}
 						</div>
 						<div class="flex gap-3">
-							<button type="button" onclick={() => chooseNetwork('join')} class="btn btn-secondary flex-1 py-3" disabled={networkBusy}>Back</button>
-							<button type="button" onclick={startFresh} class="btn btn-primary flex-1 py-3" disabled={networkBusy}>Use fresh settings instead</button>
+							<button type="button" onclick={backToChoices} class="btn btn-secondary flex-1 py-3" disabled={networkBusy}><ChevronLeft size={16} class="inline-block" /> Back</button>
+							{#if waitingOnAccount}
+								<button type="button" onclick={finishStartStep} class="btn btn-primary flex-1 py-3">Continue setup</button>
+							{/if}
 						</div>
+					{:else if choice === 'invite'}
+						<div class="bg-muted/30 border border-border rounded-lg p-4">
+							<JoinNetworkPanel status={networkStatus} deviceName={workerName} onChanged={refreshNetwork} />
+						</div>
+						{#if !enrollmentPending}
+							<div class="flex gap-3">
+								<button type="button" onclick={backToChoices} class="btn btn-secondary flex-1 py-3" disabled={networkBusy}><ChevronLeft size={16} class="inline-block" /> Back</button>
+							</div>
+						{/if}
 					{/if}
-
 					{#if networkError}
 						<div role="alert" class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm flex items-start gap-2">
 							<AlertTriangle size={14} strokeWidth={2} class="mt-0.5 shrink-0" />
 							<span>{networkError}</span>
 						</div>
 					{/if}
-					{#if networkChoice !== null && !joinedNetworkName && !networkStatus?.enrolled}
-						<p class="text-xs text-muted-foreground text-center flex items-center justify-center gap-1"><ShieldCheck size={12} strokeWidth={1.5} /> Approve only devices you own. Fingerprints must match exactly.</p>
-					{/if}
 				</div>
 
+			<!-- ═══ Step 2: Workspace ═══ -->
 			{:else if currentStep === 'workspace'}
 				<div class="space-y-4">
 					<div class="bg-primary/10 border border-primary/30 rounded-lg p-4">
@@ -745,307 +401,44 @@
 							<FolderOpen size={20} strokeWidth={1.5} class="text-primary mt-0.5 shrink-0" />
 							<div>
 								<h3 class="text-foreground font-medium mb-1">Select Workspace Folder</h3>
-								<p class="text-muted-foreground text-sm">
-									This is where project checkouts will be created on this machine.
-								</p>
+								<p class="text-muted-foreground text-sm">This is where project checkouts will be created on this machine.</p>
 							</div>
 						</div>
 					</div>
-
-					<!-- Directory browser -->
-					<DirectoryBrowser
-						onSelect={handleDirectorySelect}
-						selectedPath={workspacePath}
-					/>
-
-					<!-- Selected path display -->
+					<DirectoryBrowser onSelect={handleDirectorySelect} selectedPath={workspacePath} />
 					{#if workspacePath}
 						<div class="text-sm text-foreground font-mono bg-muted/50 px-3 py-2 rounded-lg border border-border flex items-center gap-2">
 							<FolderOpen size={14} strokeWidth={1.5} class="text-primary shrink-0" />
 							<span class="truncate">{workspacePath}</span>
 						</div>
 					{/if}
-
-					<!-- Manual input fallback -->
 					<div>
-						<label for="workspaceManual" class="block text-xs text-muted-foreground mb-1">
-							Or type a path manually
-						</label>
-						<input
-							type="text"
-							id="workspaceManual"
-							bind:value={workspacePath}
-							class="input font-mono text-sm"
-							placeholder="Enter workspace path"
-						/>
+						<label for="workspaceManual" class="block text-xs text-muted-foreground mb-1">Or type a path manually</label>
+						<input type="text" id="workspaceManual" bind:value={workspacePath} class="input font-mono text-sm" placeholder="Enter workspace path" />
 					</div>
-
 					{#if workspaceError}
-						<div class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">
-							{workspaceError}
-						</div>
+						<div class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">{workspaceError}</div>
 					{/if}
-
 					<div class="flex gap-3">
-						<button type="button" onclick={goBack} class="btn btn-secondary flex-1 py-3">
-							Back
-						</button>
-						<button
-							type="button"
-							onclick={saveWorkspaceAndContinue}
-							class="btn btn-primary flex-1 py-3"
-							disabled={!workspacePath.trim() || savingWorkspace}
-						>
-							{#if savingWorkspace}
-								<Loader2 size={16} strokeWidth={2} class="inline-block animate-spin mr-2" />
-							{/if}
+						{#if startStepNeeded}<button type="button" onclick={goBack} class="btn btn-secondary flex-1 py-3">Back</button>{/if}
+						<button type="button" onclick={saveWorkspaceAndContinue} class="btn btn-primary flex-1 py-3" disabled={!workspacePath.trim() || savingWorkspace}>
+							{#if savingWorkspace}<Loader2 size={16} strokeWidth={2} class="inline-block animate-spin mr-2" />{/if}
 							Continue
 						</button>
 					</div>
 				</div>
 
-			<!-- ═══════════════════════════════════════════════════════════ -->
-			<!-- Step 3: CLI Authentication -->
-			<!-- ═══════════════════════════════════════════════════════════ -->
-			{:else if currentStep === 'cli-auth'}
-				<div class="space-y-6">
-
-					<!-- ── Claude Code Section ──────────────────────────── -->
-					<div class="space-y-3">
-						<div class="flex items-center gap-2">
-							<Terminal size={16} strokeWidth={1.5} class="text-foreground" />
-							<span class="text-sm font-semibold text-foreground">Claude Code</span>
-							<span class="text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/30 font-medium">Recommended</span>
-						</div>
-
-						{#if claudeIsAuthenticated}
-							<div class="bg-success/10 border border-success/30 text-success px-3 py-2.5 rounded-lg text-sm flex items-center gap-2">
-								<Check size={16} strokeWidth={2} />
-								<span>Claude Code is connected</span>
-							</div>
-						{:else if claudeOAuthUrl}
-							<div class="space-y-3 bg-muted/30 border border-border rounded-lg p-4">
-								<p class="text-sm text-muted-foreground">
-									1. Open the link below and authenticate with your Anthropic account:
-								</p>
-								<a href={claudeOAuthUrl} target="_blank" rel="noopener noreferrer"
-									class="btn btn-secondary w-full py-2 text-sm flex items-center justify-center gap-2">
-									<ExternalLink size={14} strokeWidth={1.5} />
-									Open Claude Authentication
-								</a>
-								<p class="text-sm text-muted-foreground">
-									2. After authenticating, paste the authorization code below:
-								</p>
-								<div class="flex gap-2">
-									<input
-										type="text"
-										bind:value={claudeAuthCode}
-										class="input flex-1 font-mono text-sm"
-										placeholder="Paste authorization code"
-									/>
-									<button
-										type="button"
-										onclick={submitClaudeCode}
-										class="btn btn-primary px-4"
-										disabled={!claudeAuthCode.trim() || claudeCompletingLogin}
-									>
-										{#if claudeCompletingLogin}
-											<Loader2 size={14} strokeWidth={2} class="animate-spin" />
-										{:else}
-											Submit
-										{/if}
-									</button>
-								</div>
-								<p class="text-xs text-muted-foreground text-center">
-									Or wait — authentication will be detected automatically.
-								</p>
-							</div>
-						{:else}
-							<button
-								type="button"
-								onclick={startClaudeAuth}
-								class="btn btn-primary w-full py-2.5 text-sm"
-								disabled={claudeLoading}
-							>
-								{#if claudeLoading}
-									<Loader2 size={14} strokeWidth={2} class="inline-block animate-spin mr-2" />
-								{/if}
-								Connect Claude Code
-							</button>
-						{/if}
-
-						{#if claudeError}
-							<div class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">
-								{claudeError}
-							</div>
-						{/if}
-					</div>
-
-					<div class="border-t border-border"></div>
-
-					<!-- ── GitHub Section ───────────────────────────────── -->
-					<div class="space-y-3">
-						<div class="flex items-center gap-2">
-							<Github size={16} strokeWidth={1.5} class="text-foreground" />
-							<span class="text-sm font-semibold text-foreground">GitHub</span>
-							<span class="text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/30 font-medium">Recommended</span>
-						</div>
-						<p class="text-xs text-muted-foreground">
-							Connect GitHub for pull request management, code reviews, and repository features. You can also configure this later in Settings.
-						</p>
-
-						{#if githubIsAuthenticated}
-							<div class="bg-success/10 border border-success/30 text-success px-3 py-2.5 rounded-lg text-sm flex items-center gap-2">
-								<Check size={16} strokeWidth={2} />
-								<span>GitHub is connected{githubUser ? ` as @${githubUser}` : ''}</span>
-							</div>
-						{:else}
-							<!-- Auth method toggle -->
-							<div class="flex rounded-lg border border-border overflow-hidden text-sm">
-								<button
-									type="button"
-									class="flex-1 px-3 py-1.5 transition-colors {githubAuthMethod === 'device' ? 'bg-primary/10 text-primary font-medium' : 'text-muted-foreground hover:text-foreground'}"
-									onclick={() => githubAuthMethod = 'device'}
-								>
-									Browser Login
-								</button>
-								<button
-									type="button"
-									class="flex-1 px-3 py-1.5 transition-colors border-l border-border {githubAuthMethod === 'pat' ? 'bg-primary/10 text-primary font-medium' : 'text-muted-foreground hover:text-foreground'}"
-									onclick={() => githubAuthMethod = 'pat'}
-								>
-									Access Token
-								</button>
-							</div>
-
-							{#if githubAuthMethod === 'device'}
-								{#if githubDeviceCode}
-									<div class="space-y-3 bg-muted/30 border border-border rounded-lg p-4">
-										<p class="text-sm text-muted-foreground text-center">
-											Enter this code at GitHub:
-										</p>
-										<div class="flex items-center justify-center gap-3">
-											<code class="text-2xl font-mono font-bold tracking-widest text-foreground select-all">
-												{githubDeviceCode}
-											</code>
-											<button
-												type="button"
-												onclick={copyDeviceCode}
-												class="btn btn-secondary px-2 py-1.5 text-xs flex items-center gap-1"
-											>
-												{#if codeCopied}
-													<Check size={12} strokeWidth={2} />
-													Copied
-												{:else}
-													<Copy size={12} strokeWidth={1.5} />
-													Copy
-												{/if}
-											</button>
-										</div>
-										<a
-											href="https://github.com/login/device"
-											target="_blank"
-											rel="noopener noreferrer"
-											class="btn btn-secondary w-full py-2 text-sm flex items-center justify-center gap-2"
-										>
-											<ExternalLink size={14} strokeWidth={1.5} />
-											Open github.com/login/device
-										</a>
-										<div class="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-											<Loader2 size={12} strokeWidth={2} class="animate-spin" />
-											Waiting for authentication...
-										</div>
-									</div>
-								{:else}
-									<button
-										type="button"
-										onclick={startGithubDeviceFlow}
-										class="btn btn-secondary w-full py-2.5 text-sm"
-										disabled={githubDeviceLoading}
-									>
-										{#if githubDeviceLoading}
-											<Loader2 size={14} strokeWidth={2} class="inline-block animate-spin mr-2" />
-										{/if}
-										Login with Browser
-									</button>
-								{/if}
-							{:else}
-								<div class="space-y-2">
-									<div class="flex gap-2">
-										<input
-											type="password"
-											bind:value={githubPAT}
-											class="input flex-1 text-sm font-mono"
-											placeholder="ghp_..."
-										/>
-										<button
-											type="button"
-											onclick={connectGithubPAT}
-											class="btn btn-secondary px-4"
-											disabled={!githubPAT.trim() || githubPATLoading}
-										>
-											{#if githubPATLoading}
-												<Loader2 size={14} strokeWidth={2} class="animate-spin" />
-											{:else}
-												Connect
-											{/if}
-										</button>
-									</div>
-									<p class="text-xs text-muted-foreground">
-										Create a token at <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">github.com/settings/tokens</a> with <code class="text-xs">repo</code> scope.
-									</p>
-								</div>
-							{/if}
-						{/if}
-
-						{#if githubError}
-							<div class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">
-								{githubError}
-							</div>
-						{/if}
-					</div>
-
-					<!-- ── Navigation ──────────────────────────────────── -->
-					<div class="border-t border-border pt-4">
-						<div class="flex gap-3">
-							<button type="button" onclick={goBack} class="btn btn-secondary flex-1 py-3">
-								Back
-							</button>
-							<button
-								type="button"
-								onclick={() => { completedSteps.add('cli-auth'); advanceStep(); }}
-								class="btn btn-primary flex-1 py-3"
-							>
-								{hasModelCredential ? 'Continue' : 'Skip for now'}
-							</button>
-						</div>
-						{#if !hasModelCredential}
-							<p class="text-xs text-muted-foreground text-center mt-2">
-								You can skip these tool connections and choose a model provider in the next step, or later in Settings.
-							</p>
-						{/if}
-					</div>
-				</div>
-
-			<!-- ═══════════════════════════════════════════════════════════ -->
-			<!-- Step 4: Providers (optional) -->
-			<!-- ═══════════════════════════════════════════════════════════ -->
+			<!-- ═══ Step 3: Providers & GitHub ═══ -->
 			{:else if currentStep === 'providers'}
 				<div class="space-y-6">
-
-					<!-- ── Add providers Section ────────────────────────── -->
 					<div class="space-y-3">
 						<div class="flex items-center gap-2">
 							<Plus size={16} strokeWidth={1.5} class="text-foreground" />
-							<span class="text-sm font-semibold text-foreground">Add AI providers</span>
+							<span class="text-sm font-semibold text-foreground">Model providers</span>
 							<span class="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border font-medium">Optional</span>
 						</div>
-
-						<!-- Configured-providers summary -->
 						{#if providers.current.providers.length === 0}
-							<p class="text-sm text-muted-foreground">
-								You can add more model providers now or later in Settings.
-							</p>
+							<p class="text-sm text-muted-foreground">Connect a Claude, OpenAI, Grok or OpenRouter account or API key to start chatting. {#if enrolled && networkStatus?.network && networkStatus.network.member_count > 1}Providers synced from your other workers appear here once sync finishes.{/if}</p>
 						{:else}
 							<div class="space-y-2">
 								{#each providers.current.providers as provider (provider.id)}
@@ -1056,37 +449,78 @@
 								{/each}
 							</div>
 						{/if}
-
-						<button
-							type="button"
-							onclick={() => (addProviderOpen = true)}
-							class="btn btn-secondary w-full py-2.5 text-sm flex items-center justify-center gap-2"
-						>
-							<Plus size={16} strokeWidth={1.5} />
-							Add provider
+						<button type="button" onclick={() => (addProviderOpen = true)} class="btn btn-secondary w-full py-2.5 text-sm flex items-center justify-center gap-2">
+							<Plus size={16} strokeWidth={1.5} /> Add provider
 						</button>
 					</div>
 
-					<section class="space-y-3" aria-label="Optional Shuffle account">
-						<p class="text-sm text-muted-foreground">Link a Shuffle account to access this local worker remotely and connect other devices. You can also do this later in Settings.</p>
-						{#if showAccount}
-							<AccountConnection />
-							<button type="button" onclick={() => (showAccount = false)} class="btn btn-secondary w-full py-2.5 text-sm">Skip account for now</button>
-						{:else}
-							<button type="button" onclick={() => (showAccount = true)} class="btn btn-secondary w-full py-2.5 text-sm">Sign in or create a Shuffle account (optional)</button>
-						{/if}
-					</section>
+					<div class="border-t border-border"></div>
 
-					<!-- ── Navigation ──────────────────────────────────── -->
+					<div class="space-y-3">
+						<div class="flex items-center gap-2">
+							<Github size={16} strokeWidth={1.5} class="text-foreground" />
+							<span class="text-sm font-semibold text-foreground">GitHub</span>
+							<span class="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border font-medium">Optional</span>
+						</div>
+						<p class="text-xs text-muted-foreground">Sign in to GitHub on this machine for pull requests, reviews and repository features.</p>
+						{#if githubIsAuthenticated}
+							<div class="bg-success/10 border border-success/30 text-success px-3 py-2.5 rounded-lg text-sm flex items-center gap-2">
+								<Check size={16} strokeWidth={2} />
+								<span>GitHub is connected{githubUser ? ` as @${githubUser}` : ''}</span>
+							</div>
+						{:else}
+							<div class="flex rounded-lg border border-border overflow-hidden text-sm">
+								<button type="button" class="flex-1 px-3 py-1.5 transition-colors {githubAuthMethod === 'device' ? 'bg-primary/10 text-primary font-medium' : 'text-muted-foreground hover:text-foreground'}" onclick={() => (githubAuthMethod = 'device')}>Browser Login</button>
+								<button type="button" class="flex-1 px-3 py-1.5 transition-colors border-l border-border {githubAuthMethod === 'pat' ? 'bg-primary/10 text-primary font-medium' : 'text-muted-foreground hover:text-foreground'}" onclick={() => (githubAuthMethod = 'pat')}>Access Token</button>
+							</div>
+							{#if githubAuthMethod === 'device'}
+								{#if githubDeviceCode}
+									<div class="space-y-3 bg-muted/30 border border-border rounded-lg p-4">
+										<p class="text-sm text-muted-foreground text-center">Enter this code at GitHub:</p>
+										<div class="flex items-center justify-center gap-3">
+											<code class="text-2xl font-mono font-bold tracking-widest text-foreground select-all">{githubDeviceCode}</code>
+											<button type="button" onclick={copyDeviceCode} class="btn btn-secondary px-2 py-1.5 text-xs flex items-center gap-1">
+												{#if codeCopied}<Check size={12} strokeWidth={2} /> Copied{:else}<Copy size={12} strokeWidth={1.5} /> Copy{/if}
+											</button>
+										</div>
+										<a href="https://github.com/login/device" target="_blank" rel="noopener noreferrer" class="btn btn-secondary w-full py-2 text-sm flex items-center justify-center gap-2">
+											<ExternalLink size={14} strokeWidth={1.5} /> Open github.com/login/device
+										</a>
+										<div class="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+											<Loader2 size={12} strokeWidth={2} class="animate-spin" /> Waiting for authentication...
+										</div>
+									</div>
+								{:else}
+									<button type="button" onclick={startGithubDeviceFlow} class="btn btn-secondary w-full py-2.5 text-sm" disabled={githubDeviceLoading}>
+										{#if githubDeviceLoading}<Loader2 size={14} strokeWidth={2} class="inline-block animate-spin mr-2" />{/if}
+										Login with Browser
+									</button>
+								{/if}
+							{:else}
+								<div class="space-y-2">
+									<div class="flex gap-2">
+										<input type="password" bind:value={githubPAT} class="input flex-1 text-sm font-mono" placeholder="ghp_..." aria-label="GitHub access token" />
+										<button type="button" onclick={connectGithubPAT} class="btn btn-secondary px-4" disabled={!githubPAT.trim() || githubPATLoading}>
+											{#if githubPATLoading}<Loader2 size={14} strokeWidth={2} class="animate-spin" />{:else}Connect{/if}
+										</button>
+									</div>
+									<p class="text-xs text-muted-foreground">Create a token at <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">github.com/settings/tokens</a> with <code class="text-xs">repo</code> scope.</p>
+								</div>
+							{/if}
+						{/if}
+						{#if githubError}
+							<div class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">{githubError}</div>
+						{/if}
+					</div>
+
 					<div class="border-t border-border pt-4">
 						<div class="flex gap-3">
-							<button type="button" onclick={goBack} class="btn btn-secondary flex-1 py-3">
-								Back
-							</button>
-							<button type="button" onclick={finishSetup} class="btn btn-primary flex-1 py-3">
-								Finish Setup
-							</button>
+							<button type="button" onclick={goBack} class="btn btn-secondary flex-1 py-3">Back</button>
+							<button type="button" onclick={finishSetup} class="btn btn-primary flex-1 py-3">{$anyCredential ? 'Finish Setup' : 'Finish without a provider'}</button>
 						</div>
+						{#if !$anyCredential}
+							<p class="text-xs text-muted-foreground text-center mt-2">You can add a model provider later in Settings → Providers.</p>
+						{/if}
 					</div>
 				</div>
 			{/if}

@@ -66,12 +66,19 @@ class FakeHub:
             if body.get("recovery"):
                 self.recovery = body["recovery"]
             return {"status": "active", "network_hub_id": "nh_1", "quota": self._quota()}
+        if body.get("network_id") and self.network["network_id"] is None:
+            # A pending worker founded the account's network locally and now names it.
+            self.network.update({"network_id": body["network_id"], "founder_device_id": body["founder_device_id"],
+                                 "generation": int(body.get("generation") or 0)})
         if body.get("network_id") and body["network_id"] == self.network["network_id"]:
             self.devices[device_id] = {**device, "server_id": server, "status": "active"}
             self.network["generation"] = max(self.network["generation"], int(body.get("generation") or 0))
             if body.get("recovery"):
                 self.recovery = body["recovery"]
             return {"status": "active", "network_hub_id": "nh_1", "quota": self._quota()}
+        if body.get("network_id"):
+            # A worker with its own network cannot enter another account's network unasked.
+            return {"status": "conflict", "network_id": self.network["network_id"], "network_hub_id": "nh_1"}
         existing = self.devices.get(device_id)
         if existing and existing["status"] == "active" and not body.get("network_id"):
             # Enrolled before but lost its state: needs approval again.

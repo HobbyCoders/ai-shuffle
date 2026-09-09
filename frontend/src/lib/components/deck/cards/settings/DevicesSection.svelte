@@ -1,388 +1,586 @@
 <script lang="ts">
-	// Network membership and recovery remain separate from the unified
-	// account/device list: independent workers do not share a database.
+	/**
+	 * DevicesSection — Settings → Devices.
+	 *
+	 * One place for everything that connects to this worker: the Shuffle
+	 * account it belongs to, the other workers in its network, the phones and
+	 * browsers paired with it, and how to add more. Invites and pairing codes
+	 * admit a device on their own; a device that signs in to the same account
+	 * is admitted by whichever worker is online. Nothing waits for approval.
+	 */
 	import { onMount } from 'svelte';
-	import { MonitorSmartphone, Server, Smartphone, Globe, Plus, Pencil, Trash2, Check, X, ShieldCheck, ShieldOff } from 'lucide-svelte';
+	import { AlertTriangle, Check, Globe, KeyRound, Loader2, MonitorSmartphone, Pencil, Plus, Server, ShieldAlert, ShieldCheck, ShieldOff, Smartphone, Trash2, X } from 'lucide-svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { getErrorMessage } from '$lib/api/client';
+	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { listPairedClients, revokePairedClient, type PairedClient } from '$lib/api/pairing';
+	import { listInstalls, renameInstall, deleteInstall, setInstallApproval, type Install } from '$lib/api/installs';
 	import {
-		listInstalls, renameInstall, deleteInstall, setInstallApproval,
-		getAdvertiseStatus, setAdvertiseUrl, testAdvertiseReachability,
-		type Install, type AdvertiseStatus, type AdvertiseReachability
-	} from '$lib/api/installs';
-	import PairingPanel from './PairingPanel.svelte';
-	import NetworkPanel from './NetworkPanel.svelte';
-	import AccountConnection from './AccountConnection.svelte';
+		adoptAccountNetwork, createNetwork, getNetworkStatus, renameNetworkMember, revokeNetworkMember, unlockWithRecoveryKey,
+		type NetworkMember, type NetworkStatus
+	} from '$lib/api/network';
+	import { NETWORK_STATE_HINTS, NETWORK_STATE_LABELS, deriveNetworkState, relativeTime } from '$lib/api/network-status';
+	import AccountPanel from './AccountPanel.svelte';
+	import AddDevicePanel from './AddDevicePanel.svelte';
+	import JoinNetworkPanel from './JoinNetworkPanel.svelte';
+	import NetworkAdvanced from './NetworkAdvanced.svelte';
 
+	const STATUS_MS = 5000;
+	const JOINING_MS = 3000;
+	const CLIENTS_MS = 10_000;
+
+	// ── Data ────────────────────────────────────────────────────────────────
+	let status = $state<NetworkStatus | null>(null);
+	let stale = $state(false);
+	let statusError = $state('');
 	let installs = $state<Install[]>([]);
-	let clients = $state<PairedClient[]>([]);
-	let selfId = $state('');
-	let workerName = $state('My worker');
-	// Fail closed until the directory identifies the worker's enrollment mode.
-	let networkEnrolled = $state(true);
+	let selfInstallId = $state('');
 	let workersLoaded = $state(false);
-	let clientsLoaded = $state(false);
 	let workersError = $state('');
+	let clients = $state<PairedClient[]>([]);
+	let clientsLoaded = $state(false);
 	let clientsError = $state('');
-	let advertiseError = $state('');
 	let error = $state('');
 	let success = $state('');
-	let showPairing = $state(false);
-	let pairingMounted = $state(false);
-	let editingId = $state<string | null>(null);
+	let now = $state(Date.now());
+
+	// ── UI ──────────────────────────────────────────────────────────────────
+	let showAdd = $state(false);
+	let addMounted = $state(false);
+	let editing = $state<string | null>(null);
 	let editName = $state('');
-	let removedDraft = $state<Install | null>(null);
-	let draftNotice = $state('');
-	let savingKey = $state<string | null>(null);
+	let saving = $state<string | null>(null);
 	let confirmation = $state<{ key: string; action: 'revoke' | 'remove' } | null>(null);
-	let advertise = $state<AdvertiseStatus | null>(null);
-	let advertiseInput = $state('');
-	let savingAdvertise = $state(false);
-	let testingAdvertise = $state(false);
-	let reachability = $state<AdvertiseReachability | null>(null);
+	let revokedNotice = $state<string | null>(null);
+	let conflictDismissed = $state(false);
+	let adopting = $state(false);
+	let startingFresh = $state(false);
+	let recoveryInput = $state('');
+	let unlocking = $state(false);
 	let stopped = false;
-	let workersVersion = 0;
-	let clientsVersion = 0;
-	let advertiseVersion = 0;
-	let pendingWorkers = 0;
+	let statusTimer: ReturnType<typeof setTimeout> | null = null;
+	let clientsTimer: ReturnType<typeof setInterval> | null = null;
 	let pendingClients = 0;
+	let pendingWorkers = 0;
 	let flashTimer: ReturnType<typeof setTimeout> | undefined;
 
-	// Only API identity determines row identity: names and IDs can overlap across sources.
-	type DeviceRow = { key: string; kind: 'worker'; device: Install; draft?: boolean }
-		| { key: string; kind: 'client'; device: PairedClient };
-	const devices = $derived<DeviceRow[]>([
-		...installs.map((device) => ({ key: `worker:${device.id}`, kind: 'worker' as const, device })),
-		...clients.map((device) => ({ key: `client:${device.id}`, kind: 'client' as const, device })),
-		...(removedDraft ? [{ key: `worker:${removedDraft.id}`, kind: 'worker' as const, device: removedDraft, draft: true }] : [])
+	// ── Derived ─────────────────────────────────────────────────────────────
+	const uiState = $derived(deriveNetworkState(status, stale));
+	const enrolled = $derived(Boolean(status?.enrolled));
+	const self = $derived(status?.members?.find((m) => m.is_self) ?? null);
+	const members = $derived((status?.members ?? []).filter((m) => m.status === 'active' && !m.is_self));
+	const legacyInstalls = $derived(installs.filter((install) => !install.device_id && install.id !== selfInstallId && !install.is_self));
+	const joining = $derived([
+		...(status?.pending_joins ?? []).map((join) => ({ key: `join:${join.id}`, name: join.name, platform: join.platform, via: 'invite' as const })),
+		...(status?.hub?.pending_devices ?? []).map((device) => ({ key: `hub:${device.device_id}`, name: device.name || device.device_id, platform: device.platform, via: 'account' as const }))
 	]);
-	const total = $derived(installs.length + clients.length);
-	const complete = $derived(workersLoaded && clientsLoaded && !workersError && !clientsError);
-	// Network-backed rows belong to NetworkPanel, never to legacy registry actions.
+	const workerName = $derived(self?.name ?? installs.find((install) => install.is_self || install.id === selfInstallId)?.device_name ?? 'My worker');
+	const workerCount = $derived((enrolled ? 1 + members.length : installs.length ? 1 : 0) + legacyInstalls.length);
+	const total = $derived(workerCount + clients.length);
+	const complete = $derived(workersLoaded && clientsLoaded && !workersError && !clientsError && status !== null);
+	const enrollmentPending = $derived(!enrolled && (status?.enrollment?.status === 'pending' || status?.enrollment?.status === 'syncing'));
+	const waitingOnAccount = $derived(!enrolled && !status?.enrollment && Boolean(status?.hub?.linked) && status?.hub?.status === 'pending');
+	const accountConflict = $derived(enrolled && Boolean(status?.hub?.linked) && status?.hub?.status === 'conflict' && !conflictDismissed);
+	const accountWorkers = $derived((status?.hub?.account_network?.devices ?? []).filter((d) => d.status === 'active' && d.kind !== 'consumer'));
+	const recoveryAvailable = $derived(Boolean(status?.hub?.account_network?.recovery_available));
 
+	// ── Loading ─────────────────────────────────────────────────────────────
 	onMount(() => {
-		void load();
-		// Pairing completion has no dedicated resource event. Refresh both sources while
-		// this view is mounted, including when the enrollment panel has been collapsed.
-		const poll = setInterval(() => {
-			// Do not repeatedly supersede a slow response with another poll.
-			if (!pendingWorkers) void loadWorkers();
+		void loadAll();
+		scheduleStatus();
+		clientsTimer = setInterval(() => {
 			if (!pendingClients) void loadClients();
-		}, 10_000);
+			if (!pendingWorkers) void loadWorkers();
+			now = Date.now();
+		}, CLIENTS_MS);
 		return () => {
-			stopped = true; workersVersion++; clientsVersion++; advertiseVersion++;
-			clearInterval(poll); clearTimeout(flashTimer);
+			stopped = true;
+			if (statusTimer) clearTimeout(statusTimer);
+			if (clientsTimer) clearInterval(clientsTimer);
+			clearTimeout(flashTimer);
 		};
 	});
-	watchResources(['settings', 'network'], load);
+	watchResources(['settings', 'network'], loadAll);
 
-	async function load() {
-		await Promise.all([loadWorkers(), loadClients(), loadAdvertise()]);
+	function scheduleStatus() {
+		if (stopped) return;
+		if (statusTimer) clearTimeout(statusTimer);
+		statusTimer = setTimeout(async () => {
+			if (typeof document === 'undefined' || document.visibilityState === 'visible') await loadStatus();
+			scheduleStatus();
+		}, enrollmentPending || waitingOnAccount || joining.length ? JOINING_MS : STATUS_MS);
+	}
+
+	async function loadAll() {
+		await Promise.all([loadStatus(), loadWorkers(), loadClients()]);
+	}
+
+	async function loadStatus() {
+		try {
+			const next = await getNetworkStatus();
+			if (stopped) return;
+			const wasJoining = status !== null && !status.enrolled && Boolean(status.enrollment);
+			status = next; stale = false; statusError = '';
+			if (wasJoining && next.enrolled) flash(`Joined ${next.network?.name || 'the network'}`);
+			if (editing === 'self' && !editName) editName = next.members?.find((m) => m.is_self)?.name ?? '';
+		} catch (e) {
+			if (stopped) return;
+			stale = true;
+			if (status === null) statusError = getErrorMessage(e, 'Could not load the worker network');
+		}
 	}
 
 	async function loadWorkers() {
-		if (savingKey?.startsWith('worker:')) return;
-		const version = ++workersVersion;
+		if (saving?.startsWith('legacy:')) return;
 		pendingWorkers++;
-		const selected = installs.find((install) => `worker:${install.id}` === editingId) || removedDraft;
-		const nameBefore = editName;
 		try {
 			const response = await listInstalls();
-			if (stopped || version !== workersVersion) return;
-			selfId = response.self_instance_id;
-			workerName = response.installs.find(isSelf)?.device_name || 'My worker';
-			networkEnrolled = response.installs.some((install) => !!install.device_id);
-			installs = response.installs.filter((install) => !install.device_id);
+			if (stopped) return;
+			selfInstallId = response.self_instance_id;
+			installs = response.installs;
 			workersLoaded = true; workersError = '';
-			if (selected && editingId === `worker:${selected.id}`) {
-				const fresh = installs.find((install) => install.id === selected.id);
-				const clean = editName === nameBefore && editName === selected.device_name;
-				if (clean) {
-					if (fresh) editName = fresh.device_name;
-					else cancelEdit();
-				} else if (!fresh) {
-					removedDraft = selected;
-					draftNotice = 'This device was removed elsewhere. Copy your unsaved name before closing it.';
-				} else if (fresh.device_name !== selected.device_name) {
-					draftNotice = 'This device changed elsewhere. Your unsaved name is kept here.';
-				}
-				if (fresh) removedDraft = null;
-			}
 		} catch (e) {
-			if (!stopped && version === workersVersion) workersError = getErrorMessage(e, 'Could not load workers');
+			if (!stopped) workersError = getErrorMessage(e, 'Could not load workers');
 		} finally { pendingWorkers--; }
 	}
 
 	async function loadClients() {
-		if (savingKey?.startsWith('client:')) return;
-		const version = ++clientsVersion;
+		if (saving?.startsWith('client:')) return;
 		pendingClients++;
 		try {
 			const response = await listPairedClients();
-			if (stopped || version !== clientsVersion) return;
+			if (stopped) return;
 			clients = response; clientsLoaded = true; clientsError = '';
 		} catch (e) {
-			if (!stopped && version === clientsVersion) clientsError = getErrorMessage(e, 'Could not load phones and browsers');
+			if (!stopped) clientsError = getErrorMessage(e, 'Could not load phones and browsers');
 		} finally { pendingClients--; }
 	}
 
-	async function loadAdvertise() {
-		if (savingAdvertise) return;
-		const version = ++advertiseVersion;
-		const before = advertiseInput;
-		const clean = advertiseInput === (advertise?.override || '');
-		try {
-			const next = await getAdvertiseStatus();
-			if (stopped || version !== advertiseVersion) return;
-			advertise = next; advertiseError = '';
-			if (clean && advertiseInput === before) advertiseInput = next.override || '';
-		} catch (e) {
-			if (!stopped && version === advertiseVersion) advertiseError = getErrorMessage(e, 'Could not load connection settings');
-		}
-	}
-
-	function isSelf(install: Install) { return install.id === selfId || install.is_self === true; }
-	function clientKind(client: PairedClient) {
-		// Older browser registrations used the default mobile client_type.
-		if (/browser/i.test(client.platform) || ['browser', 'pwa'].includes(client.client_type)) return 'Browser';
-		return client.client_type === 'mobile' ? 'Phone' : 'Device';
-	}
 	function flash(message: string) {
 		clearTimeout(flashTimer); success = message;
 		flashTimer = setTimeout(() => { success = ''; }, 4000);
 	}
-	function startEdit(install: Install) {
-		editingId = `worker:${install.id}`; editName = install.device_name;
-		confirmation = null; removedDraft = null; draftNotice = '';
-	}
-	function cancelEdit() { editingId = null; editName = ''; removedDraft = null; draftNotice = ''; }
 
-	async function saveEdit(id: string) {
+	function clientKind(client: PairedClient): 'Browser' | 'Phone' | 'Device' {
+		if (/browser/i.test(client.platform) || ['browser', 'pwa'].includes(client.client_type)) return 'Browser';
+		return client.client_type === 'mobile' ? 'Phone' : 'Device';
+	}
+
+	function seen(input: string | null | undefined): string {
+		if (!input) return 'Not seen yet';
+		return `Seen ${relativeTime(input, now)}`;
+	}
+
+	// ── Actions ─────────────────────────────────────────────────────────────
+	function startEdit(key: string, name: string) { editing = key; editName = name; confirmation = null; }
+	function cancelEdit() { editing = null; editName = ''; }
+
+	async function saveEdit() {
 		const name = editName.trim();
-		if (!name || savingKey || removedDraft) return;
-		savingKey = `worker:${id}`; workersVersion++; error = '';
+		if (!name || saving || !editing) return;
+		const key = editing;
+		saving = key; error = '';
 		try {
-			const updated = await renameInstall(id, name);
-			installs = installs.map((install) => install.id === id ? { ...install, ...updated } : install);
+			if (key === 'self' && self) {
+				await renameNetworkMember(self.device_id, name);
+			} else if (key.startsWith('legacy:')) {
+				const id = key.slice('legacy:'.length);
+				const updated = await renameInstall(id, name);
+				installs = installs.map((install) => install.id === id ? { ...install, ...updated } : install);
+			} else if (key.startsWith('member:')) {
+				await renameNetworkMember(key.slice('member:'.length), name);
+			}
 			cancelEdit(); flash('Device renamed');
-		} catch (e) { error = getErrorMessage(e, 'Could not rename device'); }
-		finally { savingKey = null; }
+			await loadStatus();
+		} catch (e) { error = getErrorMessage(e, 'Could not rename the device'); }
+		finally { saving = null; }
 	}
 
-	async function remove(install: Install) {
-		if (savingKey || isSelf(install)) return;
-		savingKey = `worker:${install.id}`; workersVersion++; error = '';
+	async function removeMember(member: NetworkMember) {
+		if (saving) return;
+		saving = `member:${member.device_id}`; error = '';
+		try {
+			const result = await revokeNetworkMember(member.device_id);
+			confirmation = null;
+			revokedNotice = result.rotate_provider_keys_recommended ? member.name : null;
+			flash(`${member.name} removed`);
+			await loadStatus();
+		} catch (e) { error = getErrorMessage(e, 'Could not remove the worker'); }
+		finally { saving = null; }
+	}
+
+	async function removeLegacy(install: Install) {
+		if (saving) return;
+		saving = `legacy:${install.id}`; error = '';
 		try {
 			await deleteInstall(install.id);
 			installs = installs.filter((item) => item.id !== install.id);
 			appData.dropDeviceSessions(install.id);
 			confirmation = null; flash('Device removed');
-		} catch (e) { error = getErrorMessage(e, 'Could not remove device'); }
-		finally { savingKey = null; }
+		} catch (e) { error = getErrorMessage(e, 'Could not remove the device'); }
+		finally { saving = null; }
 	}
 
-	async function changeApproval(install: Install, approved: boolean) {
-		if (savingKey || (!approved && isSelf(install))) return;
-		savingKey = `worker:${install.id}`; workersVersion++; error = '';
+	async function approveLegacy(install: Install, approved: boolean) {
+		if (saving) return;
+		saving = `legacy:${install.id}`; error = '';
 		try {
 			const updated = await setInstallApproval(install.id, approved);
 			installs = installs.map((item) => item.id === install.id ? { ...item, ...updated } : item);
 			confirmation = null;
-			flash(approved ? (updated.restart_required ? 'Worker approved. Restart it to begin execution.' : 'Worker approved') : 'Worker access revoked');
-		} catch (e) { error = getErrorMessage(e, approved ? 'Could not approve worker' : 'Could not revoke worker'); }
-		finally { savingKey = null; }
+			flash(approved ? 'Worker approved' : 'Worker access revoked');
+		} catch (e) { error = getErrorMessage(e, approved ? 'Could not approve the worker' : 'Could not revoke the worker'); }
+		finally { saving = null; }
 	}
 
 	async function revokeClient(client: PairedClient) {
-		if (savingKey) return;
-		savingKey = `client:${client.id}`; clientsVersion++; error = '';
+		if (saving) return;
+		saving = `client:${client.id}`; error = '';
 		try {
 			await revokePairedClient(client.id);
 			clients = clients.filter((item) => item.id !== client.id);
 			confirmation = null; flash('Device access revoked');
-		} catch (e) { error = getErrorMessage(e, 'Could not revoke device'); }
-		finally { savingKey = null; }
+		} catch (e) { error = getErrorMessage(e, 'Could not revoke the device'); }
+		finally { saving = null; }
 	}
 
-	async function saveAdvertise() {
-		if (!advertise || savingAdvertise || advertise.env_pinned) return;
-		const url = advertiseInput.trim();
-		if (url && !/^https?:\/\//.test(url)) { error = 'URL must start with http:// or https://'; return; }
-		savingAdvertise = true; advertiseVersion++; error = '';
+	async function startFresh() {
+		startingFresh = true; error = '';
+		try { await createNetwork(); flash('This worker now keeps its own settings'); await loadStatus(); }
+		catch (e) { error = getErrorMessage(e, 'Could not set up this worker'); }
+		finally { startingFresh = false; }
+	}
+
+	async function adopt() {
+		adopting = true; error = '';
 		try {
-			advertise = await setAdvertiseUrl(url);
-			advertiseInput = advertise.override || '';
-			reachability = null;
-			flash(url ? 'Address saved' : 'Using the auto-detected address');
-		} catch (e) { error = getErrorMessage(e, 'Could not save address'); }
-		finally { savingAdvertise = false; }
+			await adoptAccountNetwork();
+			conflictDismissed = false;
+			flash('Switching to your account\'s settings');
+			await loadStatus(); scheduleStatus();
+		} catch (e) { error = getErrorMessage(e, 'Could not switch to the account\'s settings'); }
+		finally { adopting = false; }
 	}
-	async function testAdvertise() {
-		testingAdvertise = true; error = '';
-		try { reachability = await testAdvertiseReachability(); }
-		catch (e) { error = getErrorMessage(e, 'Could not test address'); }
-		finally { testingAdvertise = false; }
+
+	async function unlock() {
+		unlocking = true; error = '';
+		try {
+			const result = await unlockWithRecoveryKey(recoveryInput);
+			recoveryInput = '';
+			flash(`Restored ${result.network?.name || 'your settings'}`);
+			await loadStatus();
+		} catch (e) { error = getErrorMessage(e, 'The recovery key was not accepted'); }
+		finally { unlocking = false; }
 	}
-	function seen(input: string | null): string {
-		if (!input) return 'Not seen yet';
-		const timestamp = new Date(input).getTime();
-		if (!Number.isFinite(timestamp)) return 'Last seen unknown';
-		const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60_000));
-		if (minutes < 1) return 'Seen just now';
-		if (minutes < 60) return `Seen ${minutes}m ago`;
-		if (minutes < 1440) return `Seen ${Math.floor(minutes / 60)}h ago`;
-		return `Seen ${Math.floor(minutes / 1440)}d ago`;
+
+	function openProviders() {
+		document.getElementById('providers-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 	}
 </script>
 
-<NetworkPanel />
-
-<section class="devices-section" aria-labelledby="devices-heading">
-	<header class="devices-header">
-		<div class="heading"><h3 id="devices-heading"><MonitorSmartphone size={18} /> Devices</h3>
-			<span class="device-count">{#if complete}{total} {total === 1 ? 'device' : 'devices'}{:else if workersLoaded || clientsLoaded || workersError || clientsError}{total} loaded{:else}Loading…{/if}</span>
+<section class="devices" aria-labelledby="devices-heading">
+	<header class="head">
+		<div class="heading">
+			<h3 id="devices-heading"><MonitorSmartphone size={18} /> Devices</h3>
+			<span class="count">{#if complete}{total} {total === 1 ? 'device' : 'devices'}{:else if workersLoaded || clientsLoaded || workersError || clientsError}{total} loaded{:else}Loading…{/if}</span>
+			<span class="pill s-{uiState}" title={NETWORK_STATE_HINTS[uiState]}>{NETWORK_STATE_LABELS[uiState]}</span>
 		</div>
-		<button type="button" class="device-button add-button" aria-expanded={showPairing} aria-controls="device-enrollment" onclick={() => { pairingMounted = true; showPairing = !showPairing; }}>
-			{#if showPairing}<X size={15} /> Close{:else}<Plus size={15} /> Add device{/if}
-		</button>
+		{#if $isAdmin}
+			<button type="button" class="btn add" aria-expanded={showAdd} aria-controls="device-enrollment" onclick={() => { addMounted = true; showAdd = !showAdd; }}>
+				{#if showAdd}<X size={15} /> Close{:else}<Plus size={15} /> Add device{/if}
+			</button>
+		{/if}
 	</header>
-	<AccountConnection {workerName} />
-	<div id="device-enrollment" hidden={!showPairing}>{#if pairingMounted}<PairingPanel allowWorkerEnrollment={workersLoaded && !networkEnrolled} />{/if}</div>
 
-	{#if workersError}<div class="load-error"><p role="alert">Workers: {workersError}</p><button type="button" class="device-button" onclick={loadWorkers}>Retry workers</button></div>{/if}
-	{#if clientsError}<div class="load-error"><p role="alert">Phones and browsers: {clientsError}</p><button type="button" class="device-button" onclick={loadClients}>Retry phones and browsers</button></div>{/if}
-	{#if !workersLoaded && !workersError}<p class="list-message" role="status">Loading workers…</p>{/if}
-	{#if !clientsLoaded && !clientsError}<p class="list-message" role="status">Loading phones and browsers…</p>{/if}
+	<AccountPanel {workerName} />
 
-	{#if devices.length}
-		<ul class="device-list" aria-label="Devices">
-			{#each devices as item (item.key)}
-				<li class="device-row" data-device-key={item.key}>
-					<span class="device-icon" aria-hidden="true">{#if item.kind === 'worker'}<Server size={18} />{:else if clientKind(item.device) === 'Phone'}<Smartphone size={18} />{:else}<Globe size={18} />{/if}</span>
-					<div class="device-main">
-						{#if item.kind === 'worker' && editingId === item.key}
-							<div class="name-editor">
-								<input class="device-input" aria-label="Device name" bind:value={editName} maxlength="60" disabled={savingKey !== null} onkeydown={(event) => { if (event.key === 'Enter') void saveEdit(item.device.id); if (event.key === 'Escape' && !savingKey) cancelEdit(); }} />
-								<button type="button" class="device-button icon-button" aria-label="Save name" title="Save name" disabled={savingKey !== null || !editName.trim() || !!removedDraft} onclick={() => saveEdit(item.device.id)}><Check size={15} /></button>
-								<button type="button" class="device-button icon-button" aria-label="Cancel rename" title="Cancel rename" disabled={savingKey !== null} onclick={cancelEdit}><X size={15} /></button>
-							</div>
-						{:else}
-							<div class="name-line"><span class="device-name">{item.device.device_name}</span>{#if item.kind === 'worker' && isSelf(item.device)}<span class="self-label">This device</span>{/if}</div>
-						{/if}
-						<div class="device-meta">
-							<span>{item.kind === 'worker' ? 'Worker' : clientKind(item.device)}</span>
-							{#if item.device.platform && !/^(browser|pwa|mobile)$/i.test(item.device.platform)}<span>{item.device.platform.replace(/-browser$/i, '')}</span>{/if}
-							{#if item.kind === 'worker'}
-								{#if item.draft}<span>Removed elsewhere</span>{:else if item.device.approved === false}<span class="approval-needed">Approval needed</span>{:else}<span>{item.device.online ? 'Online' : seen(item.device.last_seen)}</span>{/if}
-							{:else}<span>{seen(item.device.last_seen)}</span>{/if}
+	<div id="device-enrollment" hidden={!showAdd}>{#if addMounted}<AddDevicePanel {enrolled} allowLegacyRunner={workersLoaded && !enrolled && installs.length > 0} />{/if}</div>
+
+	<!-- Situations that need a word: joining, waiting for the account, account conflict, a fresh worker. -->
+	{#if statusError}
+		<div class="notice error-notice"><p role="alert">{statusError}</p><button type="button" class="btn sm" onclick={loadStatus}>Retry</button></div>
+	{:else if status && !enrolled}
+		{#if enrollmentPending}
+			<div class="notice"><JoinNetworkPanel {status} onChanged={loadStatus} /></div>
+		{:else if waitingOnAccount}
+			<div class="notice" role="status">
+				<h4><Loader2 size={14} class="spin" /> Joining your account's network</h4>
+				{#if accountWorkers.length}
+					<p>Your account already syncs settings between {accountWorkers.map((d) => d.name || 'a worker').join(', ')}. This worker is admitted as soon as one of them is online.</p>
+				{:else}
+					<p>This worker is admitted as soon as another worker on your account is online.</p>
+				{/if}
+				{#if recoveryAvailable && $isAdmin}
+					<details>
+						<summary><KeyRound size={13} /> No other worker available? Use your recovery key</summary>
+						<div class="row">
+							<input class="inp mono" bind:value={recoveryInput} placeholder="A1-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX-X" autocomplete="off" spellcheck="false" aria-label="Recovery key" />
+							<button type="button" class="btn sm primary" onclick={unlock} disabled={unlocking || recoveryInput.trim().length < 20}>{unlocking ? 'Restoring…' : 'Restore'}</button>
+						</div>
+					</details>
+				{/if}
+			</div>
+		{:else}
+			<div class="notice">
+				<h4>Set up this worker</h4>
+				<p>Join another worker's network with its invite, or keep this worker's own settings.</p>
+				{#if $isAdmin}
+					<JoinNetworkPanel {status} onChanged={loadStatus} />
+					<div class="row"><button type="button" class="btn sm" onclick={startFresh} disabled={startingFresh}>{startingFresh ? 'Setting up…' : 'Keep separate settings'}</button></div>
+				{/if}
+			</div>
+		{/if}
+	{:else if accountConflict}
+		<div class="notice warn" role="alert">
+			<h4><AlertTriangle size={14} /> Your account already syncs settings elsewhere</h4>
+			<p>This worker keeps its own settings while your account syncs settings between {accountWorkers.length ? accountWorkers.map((d) => d.name || 'a worker').join(', ') : 'your other workers'}. Switch this worker to the account's settings? Settings the account already has replace this worker's copies; anything only this worker has is added to the account.</p>
+			<div class="row">
+				{#if $isAdmin}<button type="button" class="btn sm primary" onclick={adopt} disabled={adopting}>{adopting ? 'Switching…' : 'Use my account\'s settings'}</button>{/if}
+				<button type="button" class="btn sm" onclick={() => (conflictDismissed = true)}>Keep this worker separate</button>
+			</div>
+		</div>
+	{/if}
+	{#if stale && status}<p class="stale" role="status"><AlertTriangle size={13} /> The worker did not answer the last status check; showing saved data.</p>{/if}
+	{#if revokedNotice}
+		<div class="notice warn" role="alert">
+			<p><strong>{revokedNotice}</strong> was removed. Its copies of your provider API keys are assumed compromised; rotate those keys with each provider.</p>
+			<div class="row"><button type="button" class="btn sm" onclick={openProviders}>Open providers</button><button type="button" class="btn sm" onclick={() => (revokedNotice = null)}>Dismiss</button></div>
+		</div>
+	{/if}
+
+	{#if workersError}<div class="load-error"><p role="alert">Workers: {workersError}</p><button type="button" class="btn sm" onclick={loadWorkers}>Retry workers</button></div>{/if}
+	{#if clientsError}<div class="load-error"><p role="alert">Phones and browsers: {clientsError}</p><button type="button" class="btn sm" onclick={loadClients}>Retry phones and browsers</button></div>{/if}
+
+	<!-- Workers -->
+	<h4 class="group"><Server size={14} /> Workers</h4>
+	<ul class="list" aria-label="Workers">
+		{#if status}
+			<li class="row-item" data-device-key="self">
+				<span class="icon" aria-hidden="true"><Server size={18} /></span>
+				<div class="main">
+					{#if editing === 'self'}
+						<div class="editor">
+							<input class="inp" aria-label="Device name" bind:value={editName} maxlength="100" disabled={saving !== null} onkeydown={(event) => { if (event.key === 'Enter') void saveEdit(); if (event.key === 'Escape' && !saving) cancelEdit(); }} />
+							<button type="button" class="btn icon" aria-label="Save name" title="Save name" disabled={saving !== null || !editName.trim()} onclick={saveEdit}><Check size={15} /></button>
+							<button type="button" class="btn icon" aria-label="Cancel rename" title="Cancel rename" disabled={saving !== null} onclick={cancelEdit}><X size={15} /></button>
+						</div>
+					{:else}
+						<div class="name-line"><span class="name">{workerName}</span><span class="self">This worker</span></div>
+					{/if}
+					<div class="meta">
+						{#if status.platform}<span>{status.platform}</span>{/if}
+						{#if status.version}<span>v{status.version}</span>{/if}
+						{#if enrolled && status.network}<span>{status.network.name || 'Your network'} · {status.network.member_count} {status.network.member_count === 1 ? 'worker' : 'workers'}</span>{:else}<span>Not in a network</span>{/if}
+					</div>
+				</div>
+				{#if editing !== 'self' && $isAdmin && enrolled && self}
+					<div class="actions"><button type="button" class="btn icon" aria-label="Rename {workerName}" title="Rename this worker" disabled={saving !== null} onclick={() => startEdit('self', self!.name)}><Pencil size={15} /></button></div>
+				{/if}
+			</li>
+		{/if}
+		{#each members as member (member.device_id)}
+			{@const key = `member:${member.device_id}`}
+			<li class="row-item" data-device-key={key}>
+				<span class="icon" aria-hidden="true"><Server size={18} /></span>
+				<div class="main">
+					{#if editing === key}
+						<div class="editor">
+							<input class="inp" aria-label="Device name" bind:value={editName} maxlength="100" disabled={saving !== null} onkeydown={(event) => { if (event.key === 'Enter') void saveEdit(); if (event.key === 'Escape' && !saving) cancelEdit(); }} />
+							<button type="button" class="btn icon" aria-label="Save name" title="Save name" disabled={saving !== null || !editName.trim()} onclick={saveEdit}><Check size={15} /></button>
+							<button type="button" class="btn icon" aria-label="Cancel rename" title="Cancel rename" disabled={saving !== null} onclick={cancelEdit}><X size={15} /></button>
+						</div>
+					{:else}
+						<div class="name-line"><span class="dot" class:online={member.online} title={member.online ? 'Online' : 'Offline'}></span><span class="name">{member.name}</span></div>
+					{/if}
+					<div class="meta">
+						{#if member.platform}<span>{member.platform}</span>{/if}
+						{#if member.version}<span>v{member.version}</span>{/if}
+						<span>{member.online ? 'Online' : seen(member.last_seen)}</span>
+					</div>
+				</div>
+				{#if editing !== key && confirmation?.key !== key && $isAdmin}
+					<div class="actions">
+						<button type="button" class="btn icon" aria-label="Rename {member.name}" title="Rename worker" disabled={saving !== null} onclick={() => startEdit(key, member.name)}><Pencil size={15} /></button>
+						<button type="button" class="btn icon" aria-label="Remove {member.name}" title="Remove from network" disabled={saving !== null} onclick={() => { confirmation = { key, action: 'remove' }; }}><Trash2 size={15} /></button>
+					</div>
+				{/if}
+				{#if confirmation?.key === key}
+					<div class="confirm">
+						<p>Remove <strong>{member.name}</strong> from the network? It stops receiving your settings and sessions. Its copies of provider keys should be rotated afterwards.</p>
+						<div class="row">
+							<button type="button" class="btn sm danger" disabled={saving !== null} onclick={() => removeMember(member)}>Confirm remove</button>
+							<button type="button" class="btn sm" disabled={saving !== null} onclick={() => { confirmation = null; }}>Cancel</button>
 						</div>
 					</div>
-					{#if editingId !== item.key && confirmation?.key !== item.key}
-						<div class="device-actions">
-							{#if item.kind === 'worker'}
-								{@const install = item.device}
-								{#if install.approved === false}
-									<button type="button" class="device-button" aria-label={`Approve ${install.device_name}`} disabled={savingKey !== null} onclick={() => changeApproval(install, true)}><ShieldCheck size={15} /> Approve</button>
-								{:else}
-									<button type="button" class="device-button icon-button" aria-label={`Rename ${install.device_name}`} title="Rename device" disabled={savingKey !== null} onclick={() => startEdit(install)}><Pencil size={15} /></button>
-								{/if}
-								{#if !isSelf(install)}
-									{#if install.approved !== false}<button type="button" class="device-button icon-button" aria-label={`Revoke ${install.device_name}`} title="Revoke worker access" disabled={savingKey !== null} onclick={() => { confirmation = { key: item.key, action: 'revoke' }; }}><ShieldOff size={15} /></button>{/if}
-									<button type="button" class="device-button icon-button" aria-label={`Remove ${install.device_name}`} title="Remove device" disabled={savingKey !== null} onclick={() => { confirmation = { key: item.key, action: 'remove' }; }}><Trash2 size={15} /></button>
-								{/if}
-							{:else}
-								<button type="button" class="device-button icon-button" aria-label={`Revoke ${item.device.device_name}`} title="Revoke device access" disabled={savingKey !== null} onclick={() => { confirmation = { key: item.key, action: 'revoke' }; }}><ShieldOff size={15} /></button>
-							{/if}
+				{/if}
+			</li>
+		{/each}
+		{#each joining as device (device.key)}
+			<li class="row-item joining" data-device-key={device.key}>
+				<span class="icon" aria-hidden="true"><Loader2 size={18} class="spin" /></span>
+				<div class="main">
+					<div class="name-line"><span class="name">{device.name}</span></div>
+					<div class="meta">{#if device.platform}<span>{device.platform}</span>{/if}<span>Joining {device.via === 'account' ? 'through your account' : 'with an invite'}…</span></div>
+				</div>
+			</li>
+		{/each}
+		{#each legacyInstalls as install (install.id)}
+			{@const key = `legacy:${install.id}`}
+			<li class="row-item" data-device-key={key}>
+				<span class="icon" aria-hidden="true"><Server size={18} /></span>
+				<div class="main">
+					{#if editing === key}
+						<div class="editor">
+							<input class="inp" aria-label="Device name" bind:value={editName} maxlength="60" disabled={saving !== null} onkeydown={(event) => { if (event.key === 'Enter') void saveEdit(); if (event.key === 'Escape' && !saving) cancelEdit(); }} />
+							<button type="button" class="btn icon" aria-label="Save name" title="Save name" disabled={saving !== null || !editName.trim()} onclick={saveEdit}><Check size={15} /></button>
+							<button type="button" class="btn icon" aria-label="Cancel rename" title="Cancel rename" disabled={saving !== null} onclick={cancelEdit}><X size={15} /></button>
 						</div>
+					{:else}
+						<div class="name-line"><span class="dot" class:online={install.online}></span><span class="name">{install.device_name}</span><span class="tag">Shared database</span></div>
 					{/if}
-					{#if confirmation?.key === item.key}
-						<div class="confirmation">
-							<p>{confirmation.action === 'remove' ? 'Remove this device from the list? It may reappear if it reconnects.' : item.kind === 'worker' ? 'Revoke access? This worker will no longer receive new tasks.' : 'Revoke access? This device will need to pair again.'}</p>
-							<div class="confirmation-actions">
-								<button type="button" class="device-button danger" disabled={savingKey !== null} onclick={() => { if (item.kind === 'client') void revokeClient(item.device); else if (confirmation?.action === 'remove') void remove(item.device); else void changeApproval(item.device, false); }}>{confirmation.action === 'remove' ? 'Confirm remove' : 'Confirm revoke'}</button>
-								<button type="button" class="device-button" disabled={savingKey !== null} onclick={() => { confirmation = null; }}>Cancel</button>
-							</div>
+					<div class="meta">
+						{#if install.platform}<span>{install.platform}</span>{/if}
+						{#if install.approved === false}<span class="warn-text">Not yet allowed to run tasks</span>{:else}<span>{install.online ? 'Online' : seen(install.last_seen)}</span>{/if}
+					</div>
+				</div>
+				{#if editing !== key && confirmation?.key !== key && $isAdmin}
+					<div class="actions">
+						{#if install.approved === false}
+							<button type="button" class="btn sm" aria-label="Allow {install.device_name}" disabled={saving !== null} onclick={() => approveLegacy(install, true)}><ShieldCheck size={15} /> Allow</button>
+						{:else}
+							<button type="button" class="btn icon" aria-label="Rename {install.device_name}" title="Rename device" disabled={saving !== null} onclick={() => startEdit(key, install.device_name)}><Pencil size={15} /></button>
+							<button type="button" class="btn icon" aria-label="Revoke {install.device_name}" title="Revoke worker access" disabled={saving !== null} onclick={() => { confirmation = { key, action: 'revoke' }; }}><ShieldOff size={15} /></button>
+						{/if}
+						<button type="button" class="btn icon" aria-label="Remove {install.device_name}" title="Remove device" disabled={saving !== null} onclick={() => { confirmation = { key, action: 'remove' }; }}><Trash2 size={15} /></button>
+					</div>
+				{/if}
+				{#if confirmation?.key === key}
+					<div class="confirm">
+						<p>{confirmation.action === 'remove' ? 'Remove this device from the list? It may reappear if it reconnects.' : 'Revoke access? This worker will no longer receive new tasks.'}</p>
+						<div class="row">
+							<button type="button" class="btn sm danger" disabled={saving !== null} onclick={() => confirmation?.action === 'remove' ? removeLegacy(install) : approveLegacy(install, false)}>{confirmation.action === 'remove' ? 'Confirm remove' : 'Confirm revoke'}</button>
+							<button type="button" class="btn sm" disabled={saving !== null} onclick={() => { confirmation = null; }}>Cancel</button>
 						</div>
-					{/if}
-				</li>
-			{/each}
-		</ul>
-	{:else if complete}<p class="list-message">No devices yet. Add a device to get started.</p>{/if}
-	{#if draftNotice}<p class="list-message" role="status">{draftNotice}</p>{/if}
+					</div>
+				{/if}
+			</li>
+		{/each}
+		{#if status && enrolled && members.length === 0 && joining.length === 0 && legacyInstalls.length === 0}
+			<li class="empty">No other workers yet. Add device → Worker invites one, or sign in to your Shuffle account on it.</li>
+		{/if}
+	</ul>
+
+	<!-- Phones and browsers -->
+	<h4 class="group"><Smartphone size={14} /> Phones and browsers</h4>
+	{#if !clientsLoaded && !clientsError}<p class="empty" role="status">Loading phones and browsers…</p>{/if}
+	<ul class="list" aria-label="Phones and browsers">
+		{#each clients as client (client.id)}
+			{@const key = `client:${client.id}`}
+			<li class="row-item" data-device-key={key}>
+				<span class="icon" aria-hidden="true">{#if clientKind(client) === 'Phone'}<Smartphone size={18} />{:else}<Globe size={18} />{/if}</span>
+				<div class="main">
+					<div class="name-line"><span class="name">{client.device_name}</span></div>
+					<div class="meta">
+						<span>{clientKind(client)}</span>
+						{#if client.platform && !/^(browser|pwa|mobile)$/i.test(client.platform)}<span>{client.platform.replace(/-browser$/i, '')}</span>{/if}
+						<span>{seen(client.last_seen)}</span>
+					</div>
+				</div>
+				{#if confirmation?.key !== key && $isAdmin}
+					<div class="actions"><button type="button" class="btn icon" aria-label="Revoke {client.device_name}" title="Revoke device access" disabled={saving !== null} onclick={() => { confirmation = { key, action: 'revoke' }; }}><ShieldOff size={15} /></button></div>
+				{/if}
+				{#if confirmation?.key === key}
+					<div class="confirm">
+						<p>Revoke access? This device will need to pair or sign in again.</p>
+						<div class="row">
+							<button type="button" class="btn sm danger" disabled={saving !== null} onclick={() => revokeClient(client)}>Confirm revoke</button>
+							<button type="button" class="btn sm" disabled={saving !== null} onclick={() => { confirmation = null; }}>Cancel</button>
+						</div>
+					</div>
+				{/if}
+			</li>
+		{/each}
+		{#if clientsLoaded && clients.length === 0}
+			<li class="empty">No phones or browsers yet. Add device → Phone or browser, or sign in to your Shuffle account in the app.</li>
+		{/if}
+	</ul>
+
 	{#if error}<p class="feedback error" role="alert">{error}</p>{/if}
 	{#if success}<p class="feedback" role="status">{success}</p>{/if}
-	{#if advertiseError}<div class="load-error"><p role="alert">Connection settings: {advertiseError}</p><button type="button" class="device-button" onclick={loadAdvertise}>Retry connection settings</button></div>{/if}
 
-	<details class="connection-settings">
-		<summary>Connection settings</summary>
-		<div class="address-settings">
-			<label for="device-address">This worker's address</label>
-			<p id="device-address-help">Used to open this worker's files from other devices. {#if advertise?.env_pinned}Set by CLUSTER_ADVERTISE_URL.{:else}Leave blank to detect automatically.{/if}</p>
-			<div class="address-controls">
-				<input id="device-address" class="device-input" type="url" bind:value={advertiseInput} placeholder={advertise?.url || 'https://worker.example.com'} aria-describedby="device-address-help" disabled={!advertise || advertise.env_pinned || savingAdvertise} autocomplete="off" />
-				<button type="button" class="device-button" disabled={testingAdvertise || savingAdvertise || !advertise?.url} onclick={testAdvertise}>{testingAdvertise ? 'Testing…' : 'Test address'}</button>
-				<button type="button" class="device-button" disabled={!advertise || advertise.env_pinned || savingAdvertise || advertiseInput.trim() === (advertise.override || '')} onclick={saveAdvertise}>{savingAdvertise ? 'Saving…' : 'Save address'}</button>
-			</div>
-			{#if reachability}<p class:error={!reachability.ok} role="status">{reachability.detail}</p>{/if}
-		</div>
-	</details>
+	<NetworkAdvanced {status} onChanged={loadStatus} />
 </section>
 
 <style>
-	.devices-section { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); color: var(--foreground); min-width: 0; }
-	.devices-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+	.devices { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); color: var(--foreground); min-width: 0; }
+	.head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--border); }
 	.heading { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; min-width: 0; }
 	h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-family: var(--font-display); font-size: 18px; font-weight: 600; letter-spacing: -.02em; }
-	.device-count { color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-	.device-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--foreground); font: inherit; font-size: 12px; line-height: 1.4; cursor: pointer; }
-	.device-button:hover:not(:disabled) { background: var(--hover-overlay); }
-	.device-button:disabled { opacity: .5; cursor: default; }
-	.device-button:focus-visible, .device-input:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.add-button { flex-shrink: 0; color: var(--primary); }
-	.icon-button { width: 40px; padding: 0; border-color: transparent; color: var(--muted-foreground); flex-shrink: 0; }
-	.device-button.danger, .error { color: var(--destructive); }
-	.device-list { list-style: none; margin: 0; padding: 0 18px; }
-	.device-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 8px 10px; padding: 14px 0; }
-	.device-row + .device-row { border-top: 1px solid var(--border); }
-	.device-icon { display: flex; color: var(--muted-foreground); }
-	.device-main { min-width: 0; }
-	.name-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
-	.device-name { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
-	.self-label { font-size: 11px; color: var(--primary); white-space: nowrap; }
-	.device-meta { display: flex; flex-wrap: wrap; gap: 2px 8px; margin-top: 3px; font-size: 11px; line-height: 1.5; color: var(--muted-foreground); }
-	.device-meta span { overflow-wrap: anywhere; }
-	.device-meta span + span::before { content: '·'; margin-right: 8px; }
-	.approval-needed { color: var(--warning-foreground, var(--warning)); }
-	.device-actions, .confirmation-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
-	.device-input { box-sizing: border-box; min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--foreground); font: inherit; font-size: 13px; }
-	.device-input:disabled { opacity: .55; }
-	.name-editor { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
-	.name-editor .device-input { flex: 1 1 120px; width: 100%; }
-	.confirmation { grid-column: 2 / -1; }
-	.confirmation p, .load-error p, .address-settings p { margin: 0 0 8px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
-	.list-message, .feedback { margin: 0; padding: 12px 18px; font-size: 12px; line-height: 1.5; color: var(--muted-foreground); }
-	.feedback { color: var(--primary); }
+	.count { color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+	.pill { padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 500; background: var(--muted); color: var(--muted-foreground); }
+	.pill.s-ready { background: color-mix(in oklch, var(--success) 15%, transparent); color: var(--success); }
+	.pill.s-syncing, .pill.s-waiting { background: color-mix(in oklch, var(--primary) 15%, transparent); color: var(--primary); }
+	.pill.s-conflict, .pill.s-needs-setup { background: color-mix(in oklch, var(--warning, orange) 18%, transparent); color: var(--warning-foreground, var(--foreground)); }
+	.pill.s-offline { background: color-mix(in oklch, var(--destructive) 12%, transparent); color: var(--destructive); }
+	.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--foreground); font: inherit; font-size: 12px; line-height: 1.4; cursor: pointer; }
+	.btn:hover:not(:disabled) { background: var(--hover-overlay); }
+	.btn:disabled { opacity: .5; cursor: default; }
+	.btn:focus-visible, .inp:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.btn.add { flex-shrink: 0; color: var(--primary); }
+	.btn.sm { min-height: 34px; padding: 6px 10px; }
+	.btn.primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+	.btn.icon { width: 40px; padding: 0; border-color: transparent; color: var(--muted-foreground); flex-shrink: 0; }
+	.btn.danger, .error, .warn-text { color: var(--destructive); }
+	.warn-text { color: var(--warning-foreground, var(--warning, var(--destructive))); }
+	.notice { display: flex; flex-direction: column; gap: 8px; margin: 12px 18px 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--primary) 4%, var(--card)); }
+	.notice.warn { border-color: color-mix(in oklch, var(--warning, orange) 50%, var(--border)); background: color-mix(in oklch, var(--warning, orange) 6%, var(--card)); }
+	.notice.error-notice { border-color: color-mix(in oklch, var(--destructive) 40%, var(--border)); }
+	.notice h4 { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 13px; font-weight: 600; }
+	.notice p, .confirm p, .load-error p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted-foreground); overflow-wrap: anywhere; }
+	.notice details summary { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted-foreground); cursor: pointer; min-height: 32px; }
+	.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+	.inp { box-sizing: border-box; min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--foreground); font: inherit; font-size: 13px; }
+	.inp.mono { flex: 1 1 220px; font-family: var(--font-mono); font-size: 12px; }
+	.inp:disabled { opacity: .55; }
+	.stale { display: flex; align-items: center; gap: 6px; margin: 8px 18px 0; font-size: 12px; color: var(--muted-foreground); }
+	.group { display: flex; align-items: center; gap: 6px; margin: 14px 18px 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted-foreground); }
+	.list { list-style: none; margin: 0; padding: 0 18px; }
+	.row-item { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 8px 10px; padding: 12px 0; }
+	.row-item + .row-item { border-top: 1px solid var(--border); }
+	.row-item.joining .icon { color: var(--primary); }
+	.icon { display: flex; color: var(--muted-foreground); }
+	.main { min-width: 0; }
+	.name-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+	.name { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+	.self, .tag { font-size: 11px; color: var(--primary); white-space: nowrap; }
+	.tag { color: var(--muted-foreground); }
+	.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted-foreground); opacity: .5; flex-shrink: 0; }
+	.dot.online { background: var(--success); opacity: 1; }
+	.meta { display: flex; flex-wrap: wrap; gap: 2px 8px; margin-top: 3px; font-size: 11px; line-height: 1.5; color: var(--muted-foreground); }
+	.meta span { overflow-wrap: anywhere; }
+	.meta span + span::before { content: '·'; margin-right: 8px; }
+	.actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+	.editor { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+	.editor .inp { flex: 1 1 120px; width: 100%; }
+	.confirm { grid-column: 2 / -1; display: flex; flex-direction: column; gap: 8px; }
+	.empty { padding: 12px 0; font-size: 12px; line-height: 1.5; color: var(--muted-foreground); list-style: none; }
+	p.empty { margin: 0; padding: 12px 18px; }
+	.feedback { margin: 0; padding: 12px 18px; font-size: 12px; line-height: 1.5; color: var(--primary); }
 	.feedback.error { color: var(--destructive); }
-	.load-error { padding: 12px 18px; color: var(--destructive); }
-	.connection-settings { padding: 0 18px; border-top: 1px solid var(--border); }
-	summary { padding: 14px 0; font-size: 12px; color: var(--muted-foreground); cursor: pointer; min-height: 44px; box-sizing: border-box; }
-	.address-settings { padding: 0 0 16px; }
-	.address-settings label { font-size: 13px; font-weight: 600; }
-	.address-settings p { margin-top: 6px; color: var(--muted-foreground); }
-	.address-settings p.error { color: var(--destructive); }
-	.address-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-	.address-controls .device-input { flex: 1 1 220px; width: 100%; }
+	.load-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 18px; color: var(--destructive); }
+	.load-error p { color: var(--destructive); }
+	:global(.devices .spin) { animation: devices-spin 1s linear infinite; }
+	@keyframes devices-spin { to { transform: rotate(360deg); } }
 	@media (max-width: 560px) {
-		.devices-header { padding: 12px; }
+		.head { padding: 12px; }
 		.heading { flex-direction: column; align-items: flex-start; }
-		.device-list { padding: 0 12px; }
-		.device-row { grid-template-columns: 20px minmax(0, 1fr); gap: 6px 8px; }
-		.device-actions { grid-column: 2; justify-content: flex-end; }
-		.device-button, .device-input { min-height: 44px; }
-		.icon-button { width: 44px; }
-		.connection-settings { padding: 0 12px; }
-		.load-error, .list-message, .feedback { padding: 12px; }
+		.notice, .stale { margin-left: 12px; margin-right: 12px; }
+		.group, .list, .feedback, .load-error { padding-left: 12px; padding-right: 12px; margin-left: 0; margin-right: 0; }
+		.group { margin: 14px 12px 0; padding: 0; }
+		.row-item { grid-template-columns: 20px minmax(0, 1fr); gap: 6px 8px; }
+		.actions { grid-column: 2; justify-content: flex-end; }
+		.btn, .inp { min-height: 44px; }
+		.btn.icon { width: 44px; }
 	}
 </style>

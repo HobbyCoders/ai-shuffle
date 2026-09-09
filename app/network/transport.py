@@ -392,6 +392,11 @@ async def stop() -> None:
     engine.set_kick(None)
 
 
-def reset_for_tests() -> None:
+def forget_peers() -> None:
+    """Drop every peer link and contact record (the worker left its network)."""
     _links.clear()
     _last_contact.clear()
+
+
+def reset_for_tests() -> None:
+    forget_peers()

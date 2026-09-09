@@ -186,13 +186,12 @@ async def test_enrollment_over_http_then_sync(workers, monkeypatch):
         started = await enrollment.start_enrollment(endpoint_url="http://a.local:8000", code=code,
                                                     inviter_fingerprint=fingerprint, device_name="B")
         assert started["status"] == "pending" and started["inviter"]["device_id"] == a.device_id
-        assert enrollment.enrollment_status()["status"] == "pending"
+        assert enrollment.enrollment_status()["status"] in ("pending", "syncing", "complete")
         poller = enrollment._task
-    # The administrator on A approves after comparing fingerprints.
+    # The one-time code admitted B on contact: nothing waits for an administrator on A.
     with a.active():
-        pending = enrollment.pending_joins()
-        assert pending and pending[0]["fingerprint"] == b.identity.fingerprint
-        enrollment.approve_join(pending[0]["id"], fingerprint_confirmed=True)
+        assert enrollment.pending_joins() == []
+        assert engine.context().member(b.device_id).status == "active"
 
     with b.active():
         await asyncio.wait_for(poller, timeout=10)
@@ -213,3 +212,48 @@ async def test_enrollment_over_http_then_sync(workers, monkeypatch):
             results = await transport.sync_pass(client)
             assert results[a.device_id]["sent"] >= 1
     assert _pref(a, "from_b") == 42
+
+
+async def test_enrolled_worker_switches_networks_with_an_invite(workers, monkeypatch):
+    """A clean-install worker later joins another worker: it leaves its own network
+    only once the inviter accepted the code; the inviter's records win, local-only rows merge."""
+    a, c = workers("a"), workers("c")
+    served = ServedBy(a, "http://a.local:8000")
+    monkeypatch.setattr(enrollment, "POLL_INTERVAL_SECONDS", 0.01)
+    real_async, real_sync = httpx.AsyncClient, httpx.Client
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: real_async(**{**kwargs, "transport": served.transport()}))
+    monkeypatch.setattr(httpx, "Client", lambda *args, **kwargs: real_sync(**{**kwargs, "transport": served.transport()}))
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        database.set_system_setting("tts_model", "voice-a")
+        engine.scan_all()
+        grant = pairing_core.create_grant(endpoint_url="http://a.local:8000", purpose="network:join")
+    with c.active():
+        engine.create_network("Solo", device_name="C")
+        database.set_system_setting("tts_model", "voice-c")
+        database.set_system_setting("only_on_c", "yes")
+        engine.scan_all()
+        solo = engine.context().network_id
+        with pytest.raises(enrollment.EnrollmentError, match="already belongs"):
+            await enrollment.start_enrollment(endpoint_url="http://a.local:8000", code=grant["code"], device_name="C")
+        # A wrong code never costs the current membership.
+        with pytest.raises(enrollment.EnrollmentError):
+            await enrollment.start_enrollment(endpoint_url="http://a.local:8000", code="AAAA-AAAA-AAAA", device_name="C",
+                                              leave_current=True)
+        assert engine.context() is not None and engine.context().network_id == solo
+        await enrollment.start_enrollment(endpoint_url="http://a.local:8000", code=grant["code"], device_name="C",
+                                          leave_current=True)
+        await asyncio.wait_for(enrollment._task, timeout=10)
+        ctx = engine.context()
+        assert ctx is not None and ctx.network_id != solo and ctx.bootstrap_state == "ready"
+        assert ctx.member(a.device_id).name == "A"
+        assert database.get_system_setting("tts_model") == "voice-a"
+        assert database.get_system_setting("only_on_c") == "yes"
+        engine.scan_all()
+    async with real_async(transport=served.transport()) as client:
+        with c.active():
+            results = await transport.sync_pass(client)
+            assert results[a.device_id]["sent"] >= 1
+    with a.active():
+        assert database.get_system_setting("only_on_c") == "yes"
+        assert database.get_system_setting("tts_model") == "voice-a"

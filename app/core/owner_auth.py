@@ -276,10 +276,13 @@ def browser_origin():
     return value
 
 
-def claim_url(code):
+def claim_url(code, screen=None):
+    """The hub page that signs in (or, with ``screen='signup'``, creates) the owner account and links this worker."""
     if not isinstance(code, str) or not re.fullmatch(r'[A-Z2-7]{12}', code):
         return None
-    return browser_origin() + '/browser/claim?code=' + code
+    if screen not in (None, 'signin', 'signup'):
+        raise ValueError('Unknown sign-in screen')
+    return browser_origin() + '/browser/claim?code=' + code + ('&screen=' + screen if screen else '')
 
 
 def poll_browser(proof, completion_secret=None):

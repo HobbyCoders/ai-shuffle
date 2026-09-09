@@ -12,7 +12,7 @@ export interface PairingEndpoint {
 
 export interface PairingGrant {
 	id: string;
-	purpose: 'controller' | 'runner';
+	purpose: 'controller' | 'runner' | 'network:join';
 	scopes: string[];
 	target_install_id: string | null;
 	endpoint_url: string | null;
@@ -64,6 +64,22 @@ export async function createPairingGrant(
 		device_label: deviceLabel?.trim() || null,
 		purpose
 	});
+}
+
+export type DeviceGrantPurpose = 'controller' | 'network:join' | 'runner';
+
+export interface DeviceGrant extends CreatedPairingGrant {
+	/** Present for `network:join` grants: the invite the other worker scans or pastes. */
+	join?: { url: string; endpoint: string; code: string; fingerprint: string; device_name: string | null } | null;
+}
+
+/**
+ * One code for one device. `controller` pairs a phone or browser, `network:join`
+ * invites another worker into this worker's network. Presenting the code is
+ * the authorization: no approval follows on this side.
+ */
+export async function createDeviceGrant(purpose: DeviceGrantPurpose, endpointUrl: string | null): Promise<DeviceGrant> {
+	return api.post<DeviceGrant>('/pairing/grants', { purpose, endpoint_url: endpointUrl, device_label: null });
 }
 
 export async function revokePairingGrant(grantId: string): Promise<void> {
