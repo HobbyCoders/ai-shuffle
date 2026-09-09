@@ -423,7 +423,7 @@ class ChatActivity : NativeScreen() {
         if (switchJob?.isActive == true) return
         val store = ServerStore.get(this)
         val account = AccountStore(this).session()
-        val others = store.orderedByRecentUse(store.getAll().filter { it.id != server.id &&
+        val others = store.orderedByRecentUse(store.getAll().filter { it.id != server.id && !it.needsAccountAuthorization &&
             (it.accountId == null || (it.accountId == account?.accountId && it.hubUrl == account?.hub)) })
         if (others.isEmpty()) return
         switchJob = lifecycleScope.launch {

@@ -31,6 +31,7 @@ extraResources:
     to: postgres
 
 asar: true
+afterPack: scripts/verify-packaged-runtime.cjs
 compression: normal
 
 publish:

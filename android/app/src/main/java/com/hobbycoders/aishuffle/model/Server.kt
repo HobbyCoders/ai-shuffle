@@ -41,6 +41,10 @@ data class Server(
     val hasCfAccess: Boolean
         get() = !cfAccessClientId.isNullOrBlank() && !cfAccessClientSecret.isNullOrBlank()
 
+    /** An account registry entry is not itself a credential for this phone. */
+    val needsAccountAuthorization: Boolean
+        get() = accountId != null && apiKey.isBlank()
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("accountId", accountId ?: JSONObject.NULL)
         put("hubUrl", hubUrl ?: JSONObject.NULL)

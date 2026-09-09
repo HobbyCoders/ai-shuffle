@@ -11,6 +11,7 @@
  *       app/               backend source, with the built frontend in app/static
  *       tools/             built @ai-shuffle/tools with production node_modules
  *       browser-mcp/       built browser MCP server with production node_modules
+ *       downloads/         pinned, verified cloudflared for remote access
  *
  * PostgreSQL ships next to it, under resources/postgres (assembled here into
  * desktop/postgres/ from a theseus-rs/postgresql-binaries release):
@@ -334,8 +335,35 @@ async function copyServer() {
 	}
 }
 
+async function installCloudflared() {
+	// Use the backend's pins and extraction rules, but never let a client on
+	// the build machine's PATH satisfy a dependency of the shipped runtime.
+	const server = path.join(outDir, 'server');
+	log('bundling checksum-verified cloudflared');
+	const result = spawnSync(pythonExe(path.join(outDir, 'python')), ['-B', '-m', 'app.core.cloudflared', '--bundle'], {
+		cwd: server,
+		env: { ...process.env, PYTHONNOUSERSITE: '1' },
+		encoding: 'utf8',
+		windowsHide: true
+	});
+	if (result.error || result.status !== 0) {
+		throw new Error(`cloudflared bundle failed: ${result.error?.message ?? result.stderr?.trim() ?? result.status}`);
+	}
+	const { executable, ...entry } = JSON.parse(result.stdout);
+	const relative = path.relative(server, executable).split(path.sep).join('/');
+	const expected = `downloads/cloudflared/${entry.version}/cloudflared${platform === 'win32' ? '.exe' : ''}`;
+	if (relative !== expected || !existsSync(executable)) {
+		throw new Error('cloudflared was not installed in the packaged worker');
+	}
+	log(`bundled cloudflared ${entry.version}`);
+	return { ...entry, path: `server/${relative}` };
+}
+
 async function main() {
 	const pkg = JSON.parse(await readFile(path.join(desktopDir, 'package.json'), 'utf8'));
+	if (!args.stub && (platform !== process.platform || arch !== process.arch)) {
+		throw new Error('Build the worker runtime on its target platform and architecture');
+	}
 	// Each step replaces its own directory; --keep-python skips the slow
 	// dependency install when iterating locally. CI always starts clean.
 	if (!args['keep-python']) await rm(outDir, { recursive: true, force: true });
@@ -354,6 +382,7 @@ async function main() {
 	if (args['skip-postgres']) log('skipping PostgreSQL (--skip-postgres)');
 	else postgres = await installPostgres();
 	await copyServer();
+	const cloudflared = await installCloudflared();
 	await buildNodePackage('tools');
 	await buildNodePackage('browser-mcp');
 	const manifest = {
@@ -364,6 +393,7 @@ async function main() {
 		python,
 		node,
 		postgres,
+		cloudflared,
 		builtAt: new Date().toISOString(),
 		host: os.hostname()
 	};

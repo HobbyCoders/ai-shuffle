@@ -1,6 +1,6 @@
 {
   "name": "ai-shuffle-mobile",
-  "version": "0.8.6",
+  "version": "0.8.8",
   "private": true,
   "type": "module",
   "description": "The AI Shuffle mobile UI: a SvelteKit static app bundled into the Android app. Shares $lib with ../frontend; talks to workers only through their HTTP/WebSocket APIs.",

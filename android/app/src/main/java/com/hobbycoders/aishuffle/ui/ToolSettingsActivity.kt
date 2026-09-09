@@ -40,7 +40,7 @@ class ToolSettingsActivity : NativeScreen() {
         heading("Phone tools", "Choose a server before enabling tools. Each screen action needs a new local approval. Voice starts separately and stops when you leave the voice screen.")
         text(selected?.let { "Selected server · ${it.name}\n${it.host}" } ?: "No server selected", 20f)
         button("Choose tools server") {
-            val servers = store.getAll()
+            val servers = store.getAll().filterNot { it.needsAccountAuthorization }
             if (servers.isEmpty()) { status.text = "Pair a server or sync your account servers first."; return@button }
             MaterialAlertDialogBuilder(this).setTitle("Choose tools server")
                 .setItems(servers.map { "${it.name} · ${it.host}" }.toTypedArray()) { _, which ->

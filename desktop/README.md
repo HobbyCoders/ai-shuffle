@@ -51,6 +51,7 @@ ships under `resources/worker`:
 | `node/` | Node.js 22 for the AI tools and the browser MCP server |
 | `server/app/` | the backend, with the built frontend in `app/static` |
 | `server/tools/`, `server/browser-mcp/` | the two Node packages, built, with production dependencies |
+| `server/downloads/cloudflared/<version>/` | pinned cloudflared for optional remote access, downloaded and checksum-verified during assembly |
 | `manifest.json` | versions and build time |
 
 The same script assembles `desktop/postgres/`, shipped under
@@ -119,8 +120,14 @@ which is handy for a throwaway data directory while testing.
 Tests: `npm test` (settings store, runtime resolution, worker environment,
 the PostgreSQL supervisor against a fake runtime, the download helpers).
 `npm run build:worker` assembles the runtime for this machine (downloads
-Python, Node and PostgreSQL, installs the Python dependencies; takes a few
+Python, Node, PostgreSQL and cloudflared, installs the Python dependencies; takes a few
 minutes). `--skip-postgres` leaves PostgreSQL out of a build.
+Cloudflared assembly always verifies a fresh package-local download using the
+pins in `app/core/cloudflared.py`, runs that binary's version check, and records
+its path and hashes in the runtime manifest. A system client cannot substitute
+for the bundled file; missing or invalid downloads fail the build.
+Both installer configurations also verify the copied cloudflared binary in
+their final resources directory before producing an installer.
 `npm run pack` builds an unpacked app in `release/`; `npm run dist` builds the
 installers. Pull-request CI packages a stub runtime on every platform and
 assembles a real one on Linux.

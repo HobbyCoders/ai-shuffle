@@ -25,6 +25,7 @@ internal object WorkerEnrollment {
     }
 
     fun retryable(error: Exception): Boolean {
+        if (error is AccountWorkerSyncFailure) return error.retryable
         val status = when (error) {
             is WorkerEnrollmentFailure -> error.status
             is HubFailure -> error.status

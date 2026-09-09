@@ -30,39 +30,33 @@ class AccountRepository(private val context: Context) {
         clearLocal()
         store.save(session)
     }
-    suspend fun sync() {
+    suspend fun sync(onlyServerId: String? = null) {
         val session = store.session() ?: throw IllegalStateException("Sign in to sync your servers.")
         val list = HubClient.call(session.hub, "/v1/servers", token = session.token).getJSONArray("servers")
         check(store.matches(session)) { "Account changed. Sign in again." }
         val saved = servers.getAll()
-        val activeIds = (0 until list.length()).map { list.getJSONObject(it).getString("id") }.toSet()
-        servers.replaceAccountServers(saved.filter { it.accountId == session.accountId && it.hubUrl == session.hub && it.hubServerId in activeIds })
-        val next = mutableListOf<Server>()
-        for (i in 0 until list.length()) {
+        val listed = (0 until list.length()).map { i ->
             val item = list.getJSONObject(i)
             val id = HubClient.segment(item.getString("id"))
             val url = PairingInput.origin(item.getString("url"))
-            val cached = AccountWorkerCache.updated(saved, session, id, item.getString("name"), url)
-            if (cached != null) {
-                check(store.matches(session)) { "Account changed. Sign in again." }
-                servers.update(cached)
-                next += cached
-                continue
-            }
+            AccountWorkerCache.listed(saved, session, id, item.getString("name"), url)
+        }
+        check(store.matches(session)) { "Account changed. Sign in again." }
+        // The authenticated registry proves membership, independently of whether
+        // an offline/reconnecting worker can issue this phone a new key right now.
+        servers.replaceAccountServers(listed)
+        val candidates = listed.filter { onlyServerId == null || it.hubServerId == onlyServerId }
+        AccountWorkerSync.authorizePending(candidates, { store.matches(session) }, { servers.update(it) }) { pending ->
+            val id = requireNotNull(pending.hubServerId)
             val ticket = HubClient.call(session.hub, "/v1/servers/$id/tickets", "POST", token = session.token).getString("ticket")
             // This request has NO account Authorization header. Only a one-use ticket crosses origins.
-            val enrolled = WorkerEnrollment.request(item.getString("name")) {
-                HubClient.call(url, "/api/v1/mobile/hub/enroll", "POST", JSONObject().put("ticket", ticket).put("device_info", HubClient.device(session.deviceId).put("capabilities", JSONObject().put("supports_push", false))))
+            val enrolled = WorkerEnrollment.request(pending.name) {
+                HubClient.call(pending.baseUrl, "/api/v1/mobile/hub/enroll", "POST", JSONObject().put("ticket", ticket).put("device_info", HubClient.device(session.deviceId).put("capabilities", JSONObject().put("supports_push", false))))
             }
             require(enrolled.getString("device_id") == session.deviceId) { "Server returned the wrong device identity. Contact its administrator." }
             require(enrolled.getString("api_key").startsWith("aim_")) { "Server returned an unsupported device key." }
-            check(store.matches(session)) { "Account changed. Sign in again." }
-            val server = Server("account:$id", item.getString("name"), url, enrolled.getString("api_key"), session.deviceId, accountId = session.accountId, hubUrl = session.hub, hubServerId = id)
-            servers.add(server)
-            next += server
+            pending.copy(apiKey = enrolled.getString("api_key"))
         }
-        check(store.matches(session)) { "Account changed. Sign in again." }
-        servers.replaceAccountServers(next)
     }
     suspend fun link(server: Server) {
         val session = store.session() ?: throw IllegalStateException("Sign in before sharing a server.")

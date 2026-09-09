@@ -26,9 +26,10 @@ class ServerListActivity : NativeScreen() {
     private fun updatePresence(server: Server, observed: WorkerPresence) {
         val row = statusRows[server.id]?.takeIf { it.server == server } ?: return
         val affiliation = if (server.accountId == null) "This phone" else "Your account"
-        val description = "$affiliation. ${observed.description(server.name)}"
+        val authorization = if (server.needsAccountAuthorization) " Authorization needed. Tap to retry." else ""
+        val description = "$affiliation. ${observed.description(server.name)}$authorization"
         if (row.label.contentDescription == description) return
-        row.label.text = "$affiliation · ${observed.state.label}"
+        row.label.text = "$affiliation · ${if (server.needsAccountAuthorization) "Authorization needed" else observed.state.label}"
         row.label.contentDescription = description
         row.dot.background = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
@@ -53,6 +54,16 @@ class ServerListActivity : NativeScreen() {
         ServerStore.get(this).selectedToolsServer()?.let { com.hobbycoders.aishuffle.tools.DeviceToolsRuntime.attach(this, it) }
     }
     private fun openAccount(mode: String) { startActivity(Intent(this, AccountActivity::class.java).putExtra("mode", mode)) }
+    private fun openWorker(server: Server) {
+        if (server.needsAccountAuthorization) {
+            runWork {
+                try { AccountRepository(this@ServerListActivity).sync(server.hubServerId) }
+                finally { render() }
+                val updated = ServerStore.get(this@ServerListActivity).getAll().firstOrNull { it.id == server.id }
+                if (updated != null && !updated.needsAccountAuthorization) openWorker(updated)
+            }
+        } else startActivity(Intent(this, ChatActivity::class.java).putExtra("server_id", server.id))
+    }
     private fun addWorker() { startActivity(Intent(this, AddServerActivity::class.java)) }
     private fun render() {
         presence.stop()
@@ -94,7 +105,10 @@ class ServerListActivity : NativeScreen() {
         navigationAction(R.drawable.ic_settings, "Settings") { startActivity(Intent(this, SettingsActivity::class.java)) }
         navigationAction(R.drawable.ic_refresh, "Refresh workers") {
             refreshPresence()
-            if (account != null) runWork { repo.sync(); render(); status.text = "Workers are up to date." }
+            if (account != null) runWork {
+                try { repo.sync() } finally { render() }
+                status.text = "Workers are up to date."
+            }
         }
         navigationAction(R.drawable.ic_add, "Add worker") { addWorker() }
         content.removeAllViews(); status.text = ""
@@ -112,7 +126,7 @@ class ServerListActivity : NativeScreen() {
         }
         for (server in servers) {
             val workerRow = row(server.name, server.host, R.drawable.ic_worker) {
-                startActivity(Intent(this, ChatActivity::class.java).putExtra("server_id", server.id))
+                openWorker(server)
             }
             val labels = workerRow.getChildAt(1) as LinearLayout
             // Keep the existing row and its options; status has text as well as a color indicator.
@@ -130,11 +144,15 @@ class ServerListActivity : NativeScreen() {
             workerRow.addView(more)
             more.setOnClickListener {
                 if (!busy) PopupMenu(this, more).apply {
-                    menu.add("Start voice chat").setOnMenuItemClickListener {
-                        startActivity(Intent(this@ServerListActivity, VoiceCallActivity::class.java).putExtra("server_id", server.id)); true
-                    }
-                    menu.add("Phone tools").setOnMenuItemClickListener {
-                        startActivity(Intent(this@ServerListActivity, ToolSettingsActivity::class.java).putExtra("server_id", server.id)); true
+                    if (server.needsAccountAuthorization) {
+                        menu.add("Retry authorization").setOnMenuItemClickListener { openWorker(server); true }
+                    } else {
+                        menu.add("Start voice chat").setOnMenuItemClickListener {
+                            startActivity(Intent(this@ServerListActivity, VoiceCallActivity::class.java).putExtra("server_id", server.id)); true
+                        }
+                        menu.add("Phone tools").setOnMenuItemClickListener {
+                            startActivity(Intent(this@ServerListActivity, ToolSettingsActivity::class.java).putExtra("server_id", server.id)); true
+                        }
                     }
                     if (account != null && server.accountId == null) menu.add("Share with account").setOnMenuItemClickListener {
                         confirm("Share ${server.name}?", "Devices signed in as ${account.username} will be able to connect to ${server.host}.") {

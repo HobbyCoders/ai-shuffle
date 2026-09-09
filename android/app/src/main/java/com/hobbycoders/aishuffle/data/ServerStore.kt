@@ -43,7 +43,7 @@ class ServerStore private constructor(private val prefs: SharedPreferences) {
     var selectedToolsServerId: String?
         get() = prefs.getString("selected_tools_server", null)
         set(value) { prefs.edit().putString("selected_tools_server", value).commit() }
-    fun selectedToolsServer(): Server? = selectedToolsServerId?.let(::getById)
+    fun selectedToolsServer(): Server? = selectedToolsServerId?.let(::getById)?.takeUnless { it.needsAccountAuthorization }
 
     /** Adds a server (or replaces one with the same id). */
     fun add(server: Server) {

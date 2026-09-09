@@ -1,9 +1,11 @@
 """Find or install the native tunnel client without changing the system PATH."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import platform
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -18,8 +20,8 @@ _DIGESTS = {
     'cloudflared-linux-amd64': 'f29324fe934d1e100617484c78deef803c4dc2cd351d645bbde42e96b4fccc5e',
     'cloudflared-linux-arm64': '4bcfd35521a7cbc545ebfd5d57334a71ee180e2a64874981f374c81472118391',
     'cloudflared-linux-386': '691e3a2b8926f90ec4fcec4f4bc8e38b1de14f6232d93a24f6cb7b2c23ab5e92',
-    'cloudflared-darwin-amd64.tgz': '61e1316266a00fd70ce40da011d612badc805367fb65293dd1925f938f704c99',
-    'cloudflared-darwin-arm64.tgz': '40c9144d86df8937c5b43293a1f7d2d2107029aa74725023dd46b1b27154352f',
+    'cloudflared-darwin-amd64.tgz': '936aa4ed783b0e191fac48e7140c34605b25d8d5c0495c3599c90e350ae6e4c4',
+    'cloudflared-darwin-arm64.tgz': '50a04624531e7a98ddb65f1223905e32f84e7488ed3ee8dadcd3260aa8932603',
 }
 
 
@@ -48,9 +50,13 @@ def find_executable():
     return str(local) if local.is_file() and os.access(local, os.X_OK) else None
 
 
-def install():
-    """Reuse installed clients; publish only a complete, checksum-verified binary."""
-    existing = find_executable()
+def install(*, force_local=False):
+    """Install a verified client; packaging always refreshes the local copy.
+
+    Normal setup may reuse PATH or an offline installation. A desktop build
+    must carry its own pinned binary, even if the builder already has one.
+    """
+    existing = None if force_local else find_executable()
     if existing:
         return existing
     asset = _asset()
@@ -87,5 +93,28 @@ def install():
     return str(target)
 
 
+def bundle():
+    """Build-time entry point: verify the download and execute the bundled file."""
+    executable = install(force_local=True)
+    result = subprocess.run(
+        [executable, '--version'], check=True, capture_output=True, text=True,
+        timeout=15, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+    )
+    if not result.stdout.strip().startswith(f'cloudflared version {VERSION} '):
+        raise RuntimeError('Bundled cloudflared did not report the pinned version')
+    asset = _asset()
+    return {
+        'version': VERSION,
+        'asset': asset,
+        'archiveSha256': _DIGESTS[asset],
+        'sha256': hashlib.sha256(Path(executable).read_bytes()).hexdigest(),
+        'executable': executable,
+    }
+
+
 if __name__ == '__main__':
-    print(install())
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--bundle', action='store_true', help='Install and verify a package-local binary, returning its manifest entry')
+    args = parser.parse_args()
+    print(json.dumps(bundle()) if args.bundle else install())

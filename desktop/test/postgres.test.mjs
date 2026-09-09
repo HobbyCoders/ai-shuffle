@@ -385,20 +385,21 @@ test('pickPort prefers a free stored port and never hands out a bound one', asyn
 });
 
 test('resolvePostgresBinaries finds the bundle, the development override, and explains what is missing', () => {
-	const present = new Set(['/res/postgres/bin/initdb', '/res/postgres/bin/pg_ctl', '/res/postgres/bin/postgres']);
+	const root = path.join('/res', 'postgres');
+	const present = new Set(['initdb', 'pg_ctl', 'postgres'].map(name => path.join(root, 'bin', name)));
 	const existsSync = (file) => present.has(file);
 	const bundled = resolvePostgresBinaries({ packaged: true, resourcesPath: '/res', platform: 'linux', env: {}, existsSync });
-	assert.equal(bundled.root, '/res/postgres');
-	assert.equal(bundled.initdb, '/res/postgres/bin/initdb');
-	assert.equal(bundled.pgCtl, '/res/postgres/bin/pg_ctl');
-	assert.equal(bundled.createdb, '/res/postgres/bin/createdb');
+	assert.equal(bundled.root, root);
+	assert.equal(bundled.initdb, path.join(root, 'bin', 'initdb'));
+	assert.equal(bundled.pgCtl, path.join(root, 'bin', 'pg_ctl'));
+	assert.equal(bundled.createdb, path.join(root, 'bin', 'createdb'));
 
 	assert.match(resolvePostgresBinaries({ packaged: false, resourcesPath: '/res', platform: 'linux', env: {}, existsSync }).error, /SHUFFLE_DESKTOP_POSTGRES_DIR/);
-	assert.match(resolvePostgresBinaries({ packaged: false, resourcesPath: '/res', platform: 'linux', env: { SHUFFLE_DESKTOP_POSTGRES_DIR: '/dev/pg' }, existsSync }).error, /No PostgreSQL initdb at \/dev\/pg\/bin\/initdb/);
+	assert.match(resolvePostgresBinaries({ packaged: false, resourcesPath: '/res', platform: 'linux', env: { SHUFFLE_DESKTOP_POSTGRES_DIR: '/dev/pg' }, existsSync }).error, /No PostgreSQL initdb at [\\/]dev[\\/]pg[\\/]bin[\\/]initdb/);
 	const dev = resolvePostgresBinaries({ packaged: false, resourcesPath: '/res', platform: 'linux', env: { SHUFFLE_DESKTOP_POSTGRES_DIR: '/res/postgres' }, existsSync });
 	assert.equal(dev.root, '/res/postgres');
 
-	present.delete('/res/postgres/bin/postgres');
+	present.delete(path.join(root, 'bin', 'postgres'));
 	assert.match(resolvePostgresBinaries({ packaged: true, resourcesPath: '/res', platform: 'linux', env: {}, existsSync }).error, /bundled PostgreSQL is missing.*postgres\)/);
 
 	const win = new Set(['initdb.exe', 'pg_ctl.exe', 'postgres.exe'].map((name) => path.join('C:\\res', 'postgres', 'bin', name)));

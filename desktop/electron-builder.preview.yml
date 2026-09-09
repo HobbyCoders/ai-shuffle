@@ -23,6 +23,7 @@ extraMetadata:
   productName: AI Shuffle Preview
   shuffleDesktopChannel: preview
 asar: true
+afterPack: scripts/verify-packaged-runtime.cjs
 compression: normal
 publish: null
 protocols:

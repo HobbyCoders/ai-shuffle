@@ -4,6 +4,12 @@ import com.hobbycoders.aishuffle.model.Server
 
 /** Called only with the current account's authenticated hub registry response. */
 internal object AccountWorkerCache {
+    /** Registry membership remains visible while this phone obtains its own worker key. */
+    fun listed(saved: List<Server>, session: AccountSession, serverId: String, name: String, rawUrl: String): Server =
+        updated(saved, session, serverId, name, rawUrl) ?: Server(
+            "account:${HubClient.segment(serverId)}", name, PairingInput.origin(rawUrl), "", session.deviceId,
+            accountId = session.accountId, hubUrl = session.hub, hubServerId = serverId)
+
     fun updated(saved: List<Server>, session: AccountSession, serverId: String, name: String, rawUrl: String): Server? {
         val url = PairingInput.origin(rawUrl)
         val id = HubClient.segment(serverId)

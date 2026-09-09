@@ -46,6 +46,7 @@ _wake: Optional[asyncio.Event] = None
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _state: Dict[str, Any] = {"linked": False}
 _recovery_upload_due = False
+_bootstrap_lock: Optional[asyncio.Lock] = None
 
 
 class HubError(RuntimeError):
@@ -239,13 +240,63 @@ async def restore_with_recovery(recovery_key_text: str, *, device_name: Optional
     response = recovery_mod.response_from_wrap(
         recovery_key_text, wrap, name=info.get("name"), founder_device_id=info["founder_device_id"],
         generation=int(info.get("generation") or 0), membership_records=[], device_name=device_name)
-    await asyncio.to_thread(engine.enroll_from_response, response, device_name=device_name or engine._default_device_name())
-    await asyncio.to_thread(_replay_feed_from_start)
-    await asyncio.to_thread(engine.finish_bootstrap)
-    await asyncio.to_thread(register)
-    await asyncio.to_thread(engine.publish_presence, version=settings.version)
+    await _bootstrap_from_hub(response, device_name=device_name)
     kick()
     return {"restored": True, "network": engine.require_context().summary()}
+
+
+def _bootstrap_id() -> str:
+    return "hub-bootstrap:" + identity_mod.load().device_id
+
+
+async def _bootstrap_from_hub(response: Optional[dict] = None, *, device_name: Optional[str] = None) -> bool:
+    """Persist hub provenance before enrollment, then safely retry the initial feed.
+
+    Direct-invite snapshots have their own joiner records and must never be
+    completed from a possibly partial hub feed. This separate local record also
+    closes the crash window between installing network state and starting replay.
+    Its admission response contains device-wrapped keys, never the recovery key.
+    """
+    global _bootstrap_lock
+    if _bootstrap_lock is None:
+        _bootstrap_lock = asyncio.Lock()
+    async with _bootstrap_lock:
+        binding = _binding()
+        if binding is None:
+            raise HubError("Sign in to the same Shuffle account to resume settings sync")
+        binding_identity = {key: binding.get(key) for key in ("hub_url", "server_id")}
+        marker = await asyncio.to_thread(store.get_join, _bootstrap_id())
+        if marker is None:
+            if response is None:
+                return False
+            if engine.context() is not None:
+                raise HubError("This worker already belongs to a network")
+            marker = await asyncio.to_thread(store.create_join, {
+                "id": _bootstrap_id(), "role": "hub_bootstrap", "status": "syncing",
+                "device_id": identity_mod.load().device_id,
+                "name": device_name or engine._default_device_name(),
+                "response": {"admission": response, "binding": binding_identity},
+            })
+        saved = marker.get("response") or {}
+        if (marker.get("role") != "hub_bootstrap" or marker.get("device_id") != identity_mod.load().device_id
+                or saved.get("binding") != binding_identity):
+            raise HubError("Settings sync belongs to a different worker or account connection")
+        admission = saved.get("admission") or {}
+        ctx = engine.context()
+        if ctx is None:
+            ctx = await asyncio.to_thread(engine.enroll_from_response, admission, device_name=marker["name"])
+        if ctx.network_id != admission.get("network_id") or ctx.device_id != marker["device_id"]:
+            raise HubError("Settings sync does not match this worker's network")
+        if ctx.bootstrap_state == engine.BOOTSTRAP_SYNCING:
+            await asyncio.to_thread(_replay_feed_from_start)
+            await asyncio.to_thread(engine.finish_bootstrap)
+        elif ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+            raise HubError("Settings sync is not ready to resume")
+        await asyncio.to_thread(register)
+        await asyncio.to_thread(engine.publish_presence, version=settings.version)
+        await asyncio.to_thread(store.delete_join, marker["id"])
+        engine.kick()
+        return True
 
 
 def _replay_feed_from_start() -> None:
@@ -312,28 +363,22 @@ async def _loop_body() -> bool:
     ctx = engine.context()
     hub_state = _hub_state() if ctx else {}
     try:
+        if await asyncio.to_thread(store.get_join, _bootstrap_id()):
+            resumed = await _bootstrap_from_hub()
+            _state["last_error"] = None
+            return resumed
         if ctx is None:
             # Signed in but not enrolled: register and wait for an approval.
             result = await asyncio.to_thread(register)
             if result.get("status") == "approved" or result.get("response"):
                 response = result.get("response") or await asyncio.to_thread(_await_approval_sync)
                 if response:
-                    await asyncio.to_thread(engine.enroll_from_response, response,
-                                            device_name=engine._default_device_name())
-                    await asyncio.to_thread(_replay_feed_from_start)
-                    await asyncio.to_thread(engine.finish_bootstrap)
-                    await asyncio.to_thread(engine.publish_presence, version=settings.version)
-                    engine.kick()
+                    await _bootstrap_from_hub(response)
                     return True
             elif result.get("status") == "pending":
                 response = await asyncio.to_thread(_await_approval_sync)
                 if response:
-                    await asyncio.to_thread(engine.enroll_from_response, response,
-                                            device_name=engine._default_device_name())
-                    await asyncio.to_thread(_replay_feed_from_start)
-                    await asyncio.to_thread(engine.finish_bootstrap)
-                    await asyncio.to_thread(engine.publish_presence, version=settings.version)
-                    engine.kick()
+                    await _bootstrap_from_hub(response)
                     return True
             _state["last_error"] = None
             return False
@@ -407,7 +452,8 @@ async def stop() -> None:
 
 
 def reset_for_tests() -> None:
-    global _recovery_upload_due
+    global _recovery_upload_due, _bootstrap_lock
     _state.clear()
     _state["linked"] = False
     _recovery_upload_due = False
+    _bootstrap_lock = None

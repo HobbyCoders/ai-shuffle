@@ -128,6 +128,10 @@ jobs:
             const fs = require("fs");
             const m = JSON.parse(fs.readFileSync("worker/manifest.json", "utf8"));
             if (m.stub) throw new Error("stub manifest");
+            if (!m.cloudflared?.path || !m.cloudflared?.sha256) throw new Error("cloudflared manifest missing");
+            const client = "worker/" + m.cloudflared.path;
+            const digest = require("crypto").createHash("sha256").update(fs.readFileSync(client)).digest("hex");
+            if (digest !== m.cloudflared.sha256) throw new Error("cloudflared checksum mismatch");
             for (const f of ["worker/python/bin/python3", "worker/node/bin/node", "worker/server/app/main.py", "worker/server/app/static/index.html", "worker/server/tools/dist/index.js", "worker/server/browser-mcp/dist/index.js"]) {
               if (!fs.existsSync(f)) throw new Error("missing " + f);
             }
@@ -135,6 +139,7 @@ jobs:
           '
           cd worker/server && ../python/bin/python3 -c "import app.core.config; print('server imports ok')"
           ../node/bin/node --version
+          ./downloads/cloudflared/$(../python/bin/python3 -c "from app.core.cloudflared import VERSION; print(VERSION)")/cloudflared --version
 
 
   windows-preview:

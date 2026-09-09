@@ -132,8 +132,8 @@ class AddServerActivity : NativeScreen() {
                 try {
                     if (repo.workerAvailable(id)) {
                         status.text = "Connecting your phone to the worker…"
-                        repo.sync()
-                        if (ServerStore.get(this@AddServerActivity).getAll().any { it.hubServerId == id }) {
+                        repo.sync(id)
+                        if (ServerStore.get(this@AddServerActivity).getAll().any { it.hubServerId == id && !it.needsAccountAuthorization }) {
                             return@withTimeoutOrNull true
                         }
                     }

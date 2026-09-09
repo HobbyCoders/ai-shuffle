@@ -2,6 +2,7 @@
 // CI profiles contain generated credentials: only this script's masked PNGs and
 // public report may be uploaded, never the profile, raw logs or descriptors.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -145,6 +146,13 @@ try {
   const worker = path.join(installDir, 'resources', 'worker');
   const manifest = JSON.parse(await fs.readFile(path.join(worker, 'manifest.json'), 'utf8'));
   assert(!manifest.stub && manifest.postgres, 'Installer must contain real PostgreSQL and worker');
+  assert(manifest.cloudflared?.version && manifest.cloudflared?.sha256, 'Installer must include cloudflared metadata');
+  assert.equal(manifest.cloudflared.path, `server/downloads/cloudflared/${manifest.cloudflared.version}/cloudflared.exe`);
+  const cloudflared = path.join(worker, manifest.cloudflared.path);
+  assert.equal(createHash('sha256').update(await fs.readFile(cloudflared)).digest('hex'), manifest.cloudflared.sha256,
+    'Installed cloudflared must match the verified build');
+  const clientVersion = await exec(cloudflared, ['--version'], { timeout: 15000, windowsHide: true });
+  assert(clientVersion.stdout.startsWith(`cloudflared version ${manifest.cloudflared.version} `), 'Installed cloudflared version mismatch');
   const build = JSON.parse(await fs.readFile(path.join(worker, 'preview-build.json'), 'utf8'));
   assert.equal(build.sourceCommit, report.sourceCommit, 'Installer revision differs from checked-out candidate');
   for (const required of ['python/python.exe', 'node/node.exe', 'server/app/main.py',
@@ -175,7 +183,11 @@ try {
     sentinels.push(server);
   }
   await launch();
-  await until(async () => (await publicState()).phase === 'failed', 'Occupied stable ports were not refused', 120000);
+  await until(async () => {
+    const state = await publicState();
+    assert.notEqual(state.postgres?.phase, 'failed', 'Bundled PostgreSQL failed before occupied-port refusal could be tested');
+    return state.phase === 'failed';
+  }, 'Occupied stable ports were not refused', 120000);
   const refusal = await publicState();
   assert(refusal.external !== true, 'Preview attached to the existing worker');
   await screenshot('occupied-port-refusal.png');
@@ -210,12 +222,7 @@ try {
     'import json,sys,psycopg2; d=json.load(open(sys.argv[1])); c=psycopg2.connect(host=d["host"],port=d["port"],user=d["user"],password=d["password"],dbname=d["database"],connect_timeout=5); q=c.cursor(); q.execute("select count(*) from information_schema.tables where table_schema=\'public\'"); print(q.fetchone()[0]); c.close()', descriptorPath], { timeout: 30000 });
   assert(Number(probe.stdout.trim()) > 0, 'App did not create schema in its managed PostgreSQL');
   passed('Bundled PostgreSQL authenticates and contains the actual application schema; inherited DB env ignored');
-  await page.getByRole('button', { name: /Start a new worker/ }).click();
-  await page.getByLabel('Network name (optional)').fill('Windows preview acceptance');
-  await page.getByRole('button', { name: 'Create network', exact: true }).click();
-  await page.getByText('Save your recovery key', { exact: true }).waitFor();
-  await page.getByLabel('I saved this key somewhere safe.').check();
-  await page.getByRole('button', { name: 'Continue', exact: true }).click();
+  await page.getByRole('button', { name: /^Start fresh/ }).click();
   await page.getByRole('heading', { name: 'Select Workspace Folder', exact: true }).waitFor();
   await page.getByLabel('Or type a path manually').fill(workspace);
   const saved = page.waitForResponse(response => response.url().endsWith('/workspace/config') && response.request().method() === 'POST');
@@ -223,12 +230,12 @@ try {
   const response = await saved;
   assert.equal(response.status(), 200, 'Real workspace producer rejected onboarding');
   const workspaceURL = response.url();
-  await page.getByText('Connect your development tools', { exact: true }).waitFor();
+  await page.getByText('Optional — connect your development tools on this machine', { exact: true }).waitFor();
   const originalNetwork = await networkStatus();
   assert(originalNetwork.networkId && originalNetwork.instanceId, 'Network producer did not persist identity');
   browserWasRunning = await canConnect(19221);
   await screenshot('real-onboarding.png');
-  passed('Packaged UI creates a new network and writes workspace through real APIs (no imported state)');
+  passed('Packaged UI prepares local settings and workspace without an account, recovery key, or remote worker');
 
   await closeApplication();
   await until(async () => !(await canConnect(8000)) && !(await canConnect(8001)) && !(await canConnect(databasePort)), 'Owned app/PostgreSQL listeners survived quit', 45000);
@@ -251,6 +258,19 @@ try {
   databasePort = nextDescriptor.port;
   await screenshot('restart-persistence.png');
   passed('Full relaunch preserves workspace, network, instance and PostgreSQL credentials');
+  // Resume the unfinished setup through its real UI, then finish without
+  // introducing provider credentials or an account link into this CI profile.
+  await page.goto('http://127.0.0.1:8000/setup', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('heading', { name: 'Select Workspace Folder', exact: true }).waitFor();
+  assert.equal(await page.getByLabel('Or type a path manually').inputValue(), workspace);
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
+  await page.getByRole('button', { name: 'Skip for now', exact: true }).click();
+  await page.getByText('Add AI providers', { exact: true }).waitFor();
+  const completed = page.waitForResponse(response => response.url().endsWith('/auth/onboarding/complete') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Finish Setup', exact: true }).click();
+  assert.equal((await completed).status(), 200, 'Standalone onboarding completion was rejected');
+  await page.waitForURL(url => url.origin === 'http://127.0.0.1:8000' && url.pathname !== '/setup');
+  passed('Interrupted local setup resumes and completes without account sign-in or provider credentials');
   // Navigate through the real native menu. Awaiting renderer IPC here would
   // destroy its own execution context while loadFile replaces the web app.
   await application.evaluate(({ Menu }) => {
@@ -260,6 +280,7 @@ try {
     status.click();
   });
   await page.waitForURL('file:///**', { timeout: 30000 });
+  await page.getByText('Startup diagnostics', { exact: true }).click();
   await page.locator('#status-postgres').waitFor();
   assert.equal(await page.locator('input, select, form').count(), 0, 'Database configuration controls remain in status UI');
   await screenshot('embedded-only-status.png');
@@ -272,7 +293,7 @@ try {
   assert.deepEqual(pageErrors, [], 'Installed UI raised JavaScript errors');
   passed('Stable sentinels unchanged after every lifecycle; no renderer errors');
   report.success = true;
-  report.gaps = ['No live provider credentials/account login, remote enrollment, physical handset, or user PC exercised. Connect-tools step deliberately left for the user; no onboarding flags were seeded.'];
+  report.gaps = ['No live provider credentials/account login, remote enrollment, physical handset, or user PC exercised. Local onboarding completed through the UI; no onboarding flags were seeded.'];
 } catch (error) {
   // Do not serialize page DOM, runtime descriptors, or full process output.
   report.failure = String(error.message).slice(0, 2400);

@@ -19,15 +19,15 @@
 	import {
 		cancelEnrollment,
 		createNetwork,
-		createRecoveryKey,
 		getNetworkStatus,
 		startEnrollment,
 		unlockWithRecoveryKey,
-		type CreatedRecoveryKey,
 		type EnrollStarted,
 		type NetworkStatus
 	} from '$lib/api/network';
 	import { isCompleteFingerprint, parseJoinLink } from '$lib/api/network-status';
+	import SetupProgress from '$lib/components/SetupProgress.svelte';
+	import AccountConnection from '$lib/components/deck/cards/settings/AccountConnection.svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
 	import AddProviderModal from '$lib/components/deck/cards/settings/providers/AddProviderModal.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
@@ -48,21 +48,17 @@
 	let steps = $derived.by(() => {
 		const s: { id: SetupStep; label: string }[] = [];
 		// Existing installs are already enrolled — the network step is skipped for them.
-		if (networkStepNeeded) s.push({ id: 'network', label: 'Network' });
+		if (networkStepNeeded) s.push({ id: 'network', label: 'Settings' });
 		s.push({ id: 'workspace', label: 'Workspace' });
 		s.push({ id: 'cli-auth', label: 'Connect' });
 		s.push({ id: 'providers', label: 'Providers' });
 		return s;
 	});
-
-	let currentStepIndex = $derived(steps.findIndex(s => s.id === currentStep));
-
 	// ── Providers step state ─────────────────────────────────────────────
 	let addProviderOpen = $state(false);
+	let showAccount = $state(false);
 
-	// PA10: closing the add-provider modal may have added the install's first
-	// credential — refresh the auth status so $anyCredential (and the Connect
-	// step's continue gate) updates immediately.
+	// Refresh any credentials added during setup.
 	function closeAddProvider() {
 		addProviderOpen = false;
 		auth.checkAuth().catch(() => {});
@@ -70,10 +66,9 @@
 	}
 
 	// ── Network step state ───────────────────────────────────────────────
-	// First-run choice: found a new worker network here, join one from another
-	// worker, or sign in to the Shuffle account (which enrolls this worker once
-	// another worker approves it — or immediately with the recovery key).
-	type NetworkChoice = 'create' | 'join' | 'account';
+	// Both choices configure this worker. Account linking is optional; only
+	// importing existing settings requires approval or a recovery key.
+	type NetworkChoice = 'join' | 'account';
 	type HubConnection = { authorization_url?: string | null; signed_in: boolean; status: string; code: string | null; qr_svg: string | null; error: string | null };
 	const REMAINING_LOCAL_STEPS = [
 		'Workspace folder — where checkouts live on this machine',
@@ -90,12 +85,6 @@
 	/** Set once this worker is enrolled through the join/account path — shows the "what remains" panel. */
 	let joinedNetworkName = $state<string | null>(null);
 
-	// create
-	let newNetworkName = $state('');
-	let createdRecoveryKey = $state<CreatedRecoveryKey | null>(null);
-	let recoveryKeySaved = $state(false);
-	let recoveryKeyCopied = $state(false);
-
 	// join
 	let joinInput = $state('');
 	let joinEndpoint = $state('');
@@ -110,6 +99,7 @@
 			: Boolean(joinEndpoint.trim() && joinCode.trim()) && isCompleteFingerprint(joinFingerprint) && joinCompared
 	);
 	let enrollmentPending = $derived(networkStatus !== null && !networkStatus.enrolled && networkStatus.enrollment?.status === 'pending');
+	let settingsSyncing = $derived(networkStatus?.network?.bootstrap_state === 'syncing');
 
 	// account
 	let hubConnection = $state<HubConnection | null>(null);
@@ -133,7 +123,7 @@
 		try {
 			const status = await getNetworkStatus();
 			networkStatus = status;
-			if (status.enrolled && !joinedNetworkName && networkChoice !== 'create') {
+			if (status.enrolled && status.network?.bootstrap_state !== 'syncing' && !joinedNetworkName && networkChoice !== null) {
 				joinedNetworkName = status.network?.name ?? 'your network';
 				stopNetworkPoll();
 			} else if (!status.enrolled && status.enrollment && status.enrollment.status !== 'pending' && status.enrollment.status !== 'complete') {
@@ -149,12 +139,8 @@
 	function chooseNetwork(choice: NetworkChoice) {
 		networkChoice = choice;
 		networkError = '';
-		if (choice === 'join' || choice === 'account') {
-			void refreshNetwork();
-			startNetworkPoll();
-		} else {
-			stopNetworkPoll();
-		}
+		void refreshNetwork();
+		startNetworkPoll();
 	}
 
 	function backToChoices() {
@@ -163,28 +149,28 @@
 		stopNetworkPoll();
 	}
 
-	async function createNetworkAndKey() {
+	async function startFresh() {
 		networkBusy = true;
 		networkError = '';
+		stopNetworkPoll();
 		try {
-			await createNetwork({ name: newNetworkName });
-			// The recovery key is shown ONCE, right after creation — never stored.
-			createdRecoveryKey = await createRecoveryKey();
-			recoveryKeySaved = false;
-			await refreshNetwork();
+			// Re-read before changing direction: an approval may have arrived.
+			const status = await getNetworkStatus();
+			if (!status.enrolled) {
+				if (status.enrollment) await cancelEnrollment();
+				await createNetwork();
+			}
+			networkStatus = await getNetworkStatus();
+			if (networkStatus.network?.bootstrap_state === 'syncing') {
+				chooseNetwork('join');
+				return;
+			}
+			finishNetworkStep();
 		} catch (e: unknown) {
-			networkError = getErrorMessage(e, 'Failed to create the network');
+			networkError = getErrorMessage(e, 'Could not prepare local settings. Please try again.');
 		} finally {
 			networkBusy = false;
 		}
-	}
-
-	async function copyRecoveryKey() {
-		try {
-			await navigator.clipboard.writeText(createdRecoveryKey?.recovery_key ?? '');
-			recoveryKeyCopied = true;
-			setTimeout(() => (recoveryKeyCopied = false), 2000);
-		} catch { /* clipboard may be unavailable — the key is selectable */ }
 	}
 
 	async function startJoin() {
@@ -276,11 +262,7 @@
 	let claudeError = $state('');
 	let claudePollInterval = $state<ReturnType<typeof setInterval> | null>(null);
 
-	// PA10: the Connect step no longer HARD-requires the Claude login. Continuing
-	// is allowed as soon as the install has any usable credential — the Claude
-	// subscription just connected here, or an already-configured model provider
-	// (reported by the auth status as has_any_credential).
-	let canLeaveCliAuth = $derived(claudeIsAuthenticated || $anyCredential);
+	let hasModelCredential = $derived(claudeIsAuthenticated || $anyCredential);
 
 	// ── GitHub auth state ────────────────────────────────────────────────
 	let githubIsAuthenticated = $state(false);
@@ -302,14 +284,14 @@
 		} catch (e) {
 			console.error('Failed to load workspace config:', e);
 		}
-		// Network first: a fresh worker chooses how it joins; an enrolled install
-		// (or a backend without the network API) goes straight to the workspace.
+		// A local identity exists before setup. Choose its initial settings only
+		// when it has not been initialized or enrolled yet.
 		try {
 			networkStatus = await getNetworkStatus();
-			networkStepNeeded = !networkStatus.enrolled;
+			networkStepNeeded = !networkStatus.enrolled || networkStatus.network?.bootstrap_state === 'syncing';
 			if (networkStepNeeded) {
 				currentStep = 'network';
-				if (networkStatus.enrollment?.status === 'pending') chooseNetwork('join');
+				if (networkStatus.enrollment?.status === 'pending' || networkStatus.network?.bootstrap_state === 'syncing') chooseNetwork('join');
 			}
 		} catch {
 			networkStepNeeded = false;
@@ -358,8 +340,7 @@
 			claudeIsAuthenticated = claudeStatus.authenticated;
 		} catch { /* non-critical */ }
 
-		// Refresh the auth status so has_any_credential reflects providers that
-		// were configured before this run of the wizard (PA10 gate below).
+		// Reflect credentials already configured before this run of the wizard.
 		try {
 			await auth.checkAuth();
 		} catch { /* non-critical */ }
@@ -509,7 +490,6 @@
 			currentStep = nextStep;
 			if (nextStep === 'cli-auth') {
 				loadCliAuthStatus();
-				providers.ensureLoaded();
 			}
 			if (nextStep === 'providers') {
 				providers.ensureLoaded();
@@ -554,74 +534,31 @@
 				<h1 class="text-xl sm:text-2xl font-bold text-foreground mb-2">Welcome to AI Shuffle</h1>
 				<p class="text-muted-foreground text-sm sm:text-base">
 					{#if currentStep === 'network'}
-						Choose how this worker joins your setup — settings, profiles and keys sync across your workers
+						Your local worker is running. Start fresh or sync settings from an existing worker.
 					{:else if currentStep === 'workspace'}
 						Choose where project checkouts will be created on this machine
 					{:else if currentStep === 'cli-auth'}
-						Connect your development tools
+						Optional — connect your development tools on this machine
 					{:else}
 						Optional — connect OpenAI, OpenRouter, or more Claude accounts. You can always do this later in Settings → Providers.
 					{/if}
 				</p>
 			</div>
 
-			<!-- Step indicator -->
-			<div class="flex items-center justify-center gap-1 mb-6">
-				{#each steps as step, i}
-					<div class="flex items-center gap-1">
-						<div class="flex items-center gap-1.5">
-							<div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold transition-colors
-								{completedSteps.has(step.id) ? 'bg-success text-success-foreground' :
-								 currentStep === step.id ? 'bg-primary text-primary-foreground' :
-								 'bg-muted text-muted-foreground'}">
-								{#if completedSteps.has(step.id)}
-									<Check size={14} strokeWidth={2.5} />
-								{:else}
-									{i + 1}
-								{/if}
-							</div>
-							<span class="text-xs font-medium hidden sm:inline
-								{currentStep === step.id ? 'text-foreground' : 'text-muted-foreground'}">
-								{step.label}
-							</span>
-						</div>
-						{#if i < steps.length - 1}
-							<div class="w-6 sm:w-10 h-px mx-1
-								{completedSteps.has(step.id) ? 'bg-success' : 'bg-border'}"></div>
-						{/if}
-					</div>
-				{/each}
-			</div>
+			<SetupProgress {steps} current={currentStep} completed={completedSteps} />
 
 			{#if currentStep === 'network'}
 				<div class="space-y-4">
-					{#if createdRecoveryKey}
-						<!-- Shown ONCE right after creating the network. -->
-						<div class="bg-warning/10 border border-warning/40 rounded-lg p-4 space-y-3">
-							<div class="flex items-start gap-3">
-								<KeyRound size={20} strokeWidth={1.5} class="text-warning mt-0.5 shrink-0" />
-								<div>
-									<h3 class="text-foreground font-medium mb-1">Save your recovery key</h3>
-									<p class="text-muted-foreground text-sm">It restores the network onto a fresh worker when no other worker of yours is online. It will <strong>not</strong> be shown again.</p>
-								</div>
-							</div>
-							<div class="flex items-center gap-2">
-								<code class="flex-1 text-sm font-mono font-bold tracking-wider text-foreground bg-muted/60 border border-border rounded-lg px-3 py-2 select-all break-all">{createdRecoveryKey.recovery_key}</code>
-								<button type="button" onclick={copyRecoveryKey} class="btn btn-secondary px-3 py-2 text-xs flex items-center gap-1 shrink-0">
-									{#if recoveryKeyCopied}<Check size={12} strokeWidth={2} /> Copied{:else}<Copy size={12} strokeWidth={1.5} /> Copy{/if}
-								</button>
-							</div>
-							<label class="flex items-start gap-2 text-sm text-foreground cursor-pointer">
-								<input type="checkbox" bind:checked={recoveryKeySaved} class="mt-0.5" />
-								<span>I saved this key somewhere safe.</span>
-							</label>
-						</div>
-						<button type="button" onclick={finishNetworkStep} class="btn btn-primary w-full py-3" disabled={!recoveryKeySaved}>Continue</button>
+					{#if settingsSyncing}
+						<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Settings sync is approved and continues in the background when your other worker is available.</div>
+						<p class="text-sm text-muted-foreground">You can set up this machine's workspace and tool logins now. Imported settings will become available when sync finishes.</p>
+						<button type="button" onclick={refreshNetwork} class="btn btn-secondary w-full py-3">Check sync status</button>
+						<button type="button" onclick={finishNetworkStep} class="btn btn-primary w-full py-3">Continue local setup</button>
 					{:else if joinedNetworkName}
 						<!-- Enrolled through join / account / recovery: say what still needs local setup. -->
 						<div class="bg-success/10 border border-success/30 text-success px-3 py-2.5 rounded-lg text-sm flex items-center gap-2">
 							<Check size={16} strokeWidth={2} />
-							<span>Joined <strong>{joinedNetworkName}</strong>. Your settings, profiles and provider keys sync from the network.</span>
+							<span>This local worker now syncs settings, profiles and provider keys with <strong>{joinedNetworkName}</strong>.</span>
 						</div>
 						<div class="bg-muted/30 border border-border rounded-lg p-4 space-y-2">
 							<p class="text-sm font-medium text-foreground">The remaining steps set up this machine only:</p>
@@ -630,49 +567,31 @@
 							</ul>
 						</div>
 						<button type="button" onclick={finishNetworkStep} class="btn btn-primary w-full py-3">Continue</button>
+					{:else if networkStatus?.enrolled}
+						<p class="text-sm text-muted-foreground">Local settings are ready. You can link an account and add remote workers later in Settings.</p>
+						<button type="button" onclick={finishNetworkStep} class="btn btn-primary w-full py-3">Continue</button>
 					{:else if networkChoice === null}
 						<div class="grid gap-3">
-							<button type="button" onclick={() => chooseNetwork('create')} class="text-left bg-muted/30 hover:bg-primary/10 border border-border hover:border-primary/40 rounded-lg p-4 transition-colors">
+							<button type="button" onclick={startFresh} disabled={networkBusy} class="text-left bg-muted/30 hover:bg-primary/10 border border-border hover:border-primary/40 rounded-lg p-4 transition-colors">
 								<div class="flex items-start gap-3">
 									<Network size={20} strokeWidth={1.5} class="text-primary mt-0.5 shrink-0" />
 									<div>
-										<h3 class="text-foreground font-medium mb-1">Start a new worker</h3>
-										<p class="text-muted-foreground text-sm">This is your first worker. It founds a new network; you can invite other workers later.</p>
+										<h3 class="text-foreground font-medium mb-1">Start fresh</h3>
+										<p class="text-muted-foreground text-sm">Use fresh settings on this machine. No account or other worker is required.</p>
 									</div>
 								</div>
 							</button>
-							<button type="button" onclick={() => chooseNetwork('join')} class="text-left bg-muted/30 hover:bg-primary/10 border border-border hover:border-primary/40 rounded-lg p-4 transition-colors">
+							<button type="button" onclick={() => chooseNetwork('join')} disabled={networkBusy} class="text-left bg-muted/30 hover:bg-primary/10 border border-border hover:border-primary/40 rounded-lg p-4 transition-colors">
 								<div class="flex items-start gap-3">
 									<Users size={20} strokeWidth={1.5} class="text-primary mt-0.5 shrink-0" />
 									<div>
-										<h3 class="text-foreground font-medium mb-1">Join from another worker</h3>
-										<p class="text-muted-foreground text-sm">Another worker of yours is on the same network — use its invite link or code and compare fingerprints.</p>
-									</div>
-								</div>
-							</button>
-							<button type="button" onclick={() => chooseNetwork('account')} class="text-left bg-muted/30 hover:bg-primary/10 border border-border hover:border-primary/40 rounded-lg p-4 transition-colors">
-								<div class="flex items-start gap-3">
-									<Smartphone size={20} strokeWidth={1.5} class="text-primary mt-0.5 shrink-0" />
-									<div>
-										<h3 class="text-foreground font-medium mb-1">Sign in to Shuffle</h3>
-										<p class="text-muted-foreground text-sm">Link this worker to your account. One of your online workers approves it, or your recovery key restores the network here.</p>
+										<h3 class="text-foreground font-medium mb-1">Sync settings from an existing worker</h3>
+										<p class="text-muted-foreground text-sm">Bring your settings, profiles and provider keys here. This machine keeps its own worker, workspace and tool logins.</p>
 									</div>
 								</div>
 							</button>
 						</div>
-					{:else if networkChoice === 'create'}
-						<div class="space-y-3">
-							<label for="networkName" class="block text-xs text-muted-foreground">Network name (optional)</label>
-							<input type="text" id="networkName" bind:value={newNetworkName} maxlength="100" class="input text-sm" placeholder="Home" />
-							<p class="text-xs text-muted-foreground">A recovery key is created right after the network and shown once.</p>
-						</div>
-						<div class="flex gap-3">
-							<button type="button" onclick={backToChoices} class="btn btn-secondary flex-1 py-3" disabled={networkBusy}>Back</button>
-							<button type="button" onclick={createNetworkAndKey} class="btn btn-primary flex-1 py-3" disabled={networkBusy}>
-								{#if networkBusy}<Loader2 size={16} strokeWidth={2} class="inline-block animate-spin mr-2" />{/if}
-								Create network
-							</button>
-						</div>
+						<p class="text-xs text-muted-foreground">Shuffle account sign-in is optional. You can link it after local setup to access this worker remotely and connect other devices.</p>
 					{:else if networkChoice === 'join'}
 						{#if enrollmentPending}
 							<div class="space-y-3 bg-muted/30 border border-border rounded-lg p-4">
@@ -688,6 +607,7 @@
 								<button type="button" onclick={cancelJoin} class="btn btn-secondary flex-1 py-3" disabled={networkBusy}>Cancel join</button>
 							</div>
 						{:else}
+							<button type="button" onclick={() => chooseNetwork('account')} class="btn btn-secondary w-full py-2.5 text-sm flex items-center justify-center gap-2"><Smartphone size={16} /> Find it through my Shuffle account</button>
 							<div class="space-y-3">
 								<p class="text-sm text-muted-foreground">On the other worker, open Settings → Devices → Invite another worker. Paste its link, or type the code and address. You must also read the inviter's fingerprint from that screen.</p>
 								<div>
@@ -725,12 +645,13 @@
 								<button type="button" onclick={backToChoices} class="btn btn-secondary flex-1 py-3" disabled={networkBusy}>Back</button>
 								<button type="button" onclick={startJoin} class="btn btn-primary flex-1 py-3" disabled={networkBusy || !joinReady}>
 									{#if networkBusy}<Loader2 size={16} strokeWidth={2} class="inline-block animate-spin mr-2" />{/if}
-									Join network
+									Sync settings
 								</button>
 							</div>
 						{/if}
 					{:else if networkChoice === 'account'}
 						<div class="space-y-3">
+							<p class="text-sm text-muted-foreground">Sign in to sync settings from a worker you already own. If this is your first worker, use fresh settings below; you can link your account afterward.</p>
 							{#if hubLinked}
 								<div class="bg-success/10 border border-success/30 text-success px-3 py-2.5 rounded-lg text-sm flex items-center gap-2">
 									<Check size={16} strokeWidth={2} />
@@ -739,7 +660,7 @@
 								<div class="space-y-3 bg-muted/30 border border-border rounded-lg p-4">
 									<div class="flex items-center gap-2 text-sm text-foreground font-medium">
 										<Loader2 size={14} strokeWidth={2} class="animate-spin" />
-										Waiting for one of your workers to approve this device
+										Approve settings sync on an existing worker
 									</div>
 									<p class="text-sm text-muted-foreground">On an online worker, open Settings → Devices → Pending approvals and compare this fingerprint:</p>
 									<code class="block text-sm font-mono font-bold tracking-wider text-foreground bg-muted/60 border border-border rounded-lg px-3 py-2 select-all break-all">{networkStatus?.device.fingerprint ?? '…'}</code>
@@ -768,7 +689,7 @@
 											<ExternalLink size={14} strokeWidth={1.5} />
 											Sign in and link this worker
 										</a>
-										<p class="text-xs text-muted-foreground text-center">Return here after approving this worker — or scan the code with the Shuffle app.</p>
+										<p class="text-xs text-muted-foreground text-center">Return here after linking this worker — or scan the code with the Shuffle app.</p>
 									{:else}
 										<p class="text-sm text-muted-foreground">In the Shuffle app, sign in, choose <strong>Add worker</strong>, then scan this code.</p>
 									{/if}
@@ -785,7 +706,7 @@
 									</div>
 								</div>
 							{:else if hubConnection?.status === 'locked' || hubConnection?.status === 'unavailable'}
-								<div class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">Remote access is unavailable until the issue below is resolved.</div>
+								<div class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">Account linking is unavailable. You can still set up this local worker with fresh settings.</div>
 							{:else}
 								<div>
 									<label for="hubWorkerName" class="block text-xs text-muted-foreground mb-1">Worker name</label>
@@ -793,7 +714,7 @@
 								</div>
 								<button type="button" onclick={connectAccount} class="btn btn-primary w-full py-2.5 text-sm" disabled={networkBusy || !hubWorkerName.trim()}>
 									{#if networkBusy}<Loader2 size={14} strokeWidth={2} class="inline-block animate-spin mr-2" />{/if}
-									Sign in to Shuffle
+									Sign in or create a Shuffle account
 								</button>
 							{/if}
 							{#if hubConnection?.error}
@@ -801,17 +722,18 @@
 							{/if}
 						</div>
 						<div class="flex gap-3">
-							<button type="button" onclick={backToChoices} class="btn btn-secondary flex-1 py-3" disabled={networkBusy}>Back</button>
+							<button type="button" onclick={() => chooseNetwork('join')} class="btn btn-secondary flex-1 py-3" disabled={networkBusy}>Back</button>
+							<button type="button" onclick={startFresh} class="btn btn-primary flex-1 py-3" disabled={networkBusy}>Use fresh settings instead</button>
 						</div>
 					{/if}
 
 					{#if networkError}
-						<div class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm flex items-start gap-2">
+						<div role="alert" class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm flex items-start gap-2">
 							<AlertTriangle size={14} strokeWidth={2} class="mt-0.5 shrink-0" />
 							<span>{networkError}</span>
 						</div>
 					{/if}
-					{#if networkChoice !== null && !joinedNetworkName && !createdRecoveryKey}
+					{#if networkChoice !== null && !joinedNetworkName && !networkStatus?.enrolled}
 						<p class="text-xs text-muted-foreground text-center flex items-center justify-center gap-1"><ShieldCheck size={12} strokeWidth={1.5} /> Approve only devices you own. Fingerprints must match exactly.</p>
 					{/if}
 				</div>
@@ -893,8 +815,6 @@
 						<div class="flex items-center gap-2">
 							<Terminal size={16} strokeWidth={1.5} class="text-foreground" />
 							<span class="text-sm font-semibold text-foreground">Claude Code</span>
-							<!-- PA10: the step-level requirement is "any usable credential" (see the
-							     Continue gate below) — claude connect itself is recommended, not required. -->
 							<span class="text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/30 font-medium">Recommended</span>
 						</div>
 
@@ -959,41 +879,6 @@
 								{claudeError}
 							</div>
 						{/if}
-					</div>
-
-					<div class="border-t border-border"></div>
-
-					<!-- ── Model providers Section (PA10) ───────────────── -->
-					<!-- On a fresh install the Providers step is unreachable until this
-					     step's gate passes, so provider-only users need an entry point HERE. -->
-					<div class="space-y-3">
-						<div class="flex items-center gap-2">
-							<Plus size={16} strokeWidth={1.5} class="text-foreground" />
-							<span class="text-sm font-semibold text-foreground">Model providers</span>
-						</div>
-						<p class="text-xs text-muted-foreground">
-							Prefer OpenAI, OpenRouter, or an API key? Add a model provider — you can finish setup without a Claude login.
-						</p>
-
-						{#if providers.current.providers.length > 0}
-							<div class="space-y-2">
-								{#each providers.current.providers as provider (provider.id)}
-									<div class="flex items-center justify-between gap-2 bg-muted/30 border border-border rounded-lg px-3 py-2">
-										<span class="text-sm text-foreground truncate">{provider.name}</span>
-										<span class="text-xs text-muted-foreground shrink-0">{provider.provider_type}</span>
-									</div>
-								{/each}
-							</div>
-						{/if}
-
-						<button
-							type="button"
-							onclick={() => (addProviderOpen = true)}
-							class="btn btn-secondary w-full py-2.5 text-sm flex items-center justify-center gap-2"
-						>
-							<Plus size={16} strokeWidth={1.5} />
-							Add a model provider
-						</button>
 					</div>
 
 					<div class="border-t border-border"></div>
@@ -1130,14 +1015,13 @@
 								type="button"
 								onclick={() => { completedSteps.add('cli-auth'); advanceStep(); }}
 								class="btn btn-primary flex-1 py-3"
-								disabled={!canLeaveCliAuth}
 							>
-								{canLeaveCliAuth ? 'Continue' : 'Connect a Model Provider to Continue'}
+								{hasModelCredential ? 'Continue' : 'Skip for now'}
 							</button>
 						</div>
-						{#if !canLeaveCliAuth}
+						{#if !hasModelCredential}
 							<p class="text-xs text-muted-foreground text-center mt-2">
-								Connect Claude Code or configure a model provider to continue.
+								You can skip these tool connections and choose a model provider in the next step, or later in Settings.
 							</p>
 						{/if}
 					</div>
@@ -1182,6 +1066,16 @@
 							Add provider
 						</button>
 					</div>
+
+					<section class="space-y-3" aria-label="Optional Shuffle account">
+						<p class="text-sm text-muted-foreground">Link a Shuffle account to access this local worker remotely and connect other devices. You can also do this later in Settings.</p>
+						{#if showAccount}
+							<AccountConnection />
+							<button type="button" onclick={() => (showAccount = false)} class="btn btn-secondary w-full py-2.5 text-sm">Skip account for now</button>
+						{:else}
+							<button type="button" onclick={() => (showAccount = true)} class="btn btn-secondary w-full py-2.5 text-sm">Sign in or create a Shuffle account (optional)</button>
+						{/if}
+					</section>
 
 					<!-- ── Navigation ──────────────────────────────────── -->
 					<div class="border-t border-border pt-4">
