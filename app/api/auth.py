@@ -291,6 +291,18 @@ async def get_auth_status(request: Request, response: Response = None):
             is_admin_authenticated = True
             username = auth_service.get_admin_username()
 
+    # The app-bundled UI sends its paired session as a Bearer and omits
+    # cookies. Match require_auth's cookie-first, Bearer-fallback order so a
+    # working mobile session is not reported as expired. Only paired sessions
+    # qualify here, not mobile enrollment keys or integration API keys.
+    api_key = get_api_key(request)
+    if api_key and not (is_admin_authenticated or is_paired_authenticated):
+        paired_client = await run_sync(get_paired_client_from_token, api_key)
+        if paired_client:
+            is_paired_authenticated = True
+            is_admin_authenticated = paired_client.get('account_owner_admin') is True
+            username = paired_client.get("device_name") or "Paired device"
+
     local = owner_auth.local_access(request) and not is_paired_authenticated
     if local:
         is_admin_authenticated = True

@@ -48,8 +48,10 @@ class TestSettingsDefaults:
                 from app.core.config import Settings
                 settings = Settings()
 
+                from app import __version__
+
                 assert settings.service_name == "ai-shuffle"
-                assert settings.version == "0.8.6"
+                assert settings.version == __version__
 
     def test_default_session_settings(self):
         """Default session settings should be set correctly."""

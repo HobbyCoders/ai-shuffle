@@ -115,9 +115,14 @@ def test_manual_link_or_other_install_never_promotes(owner_app, monkeypatch, lin
     'local_device_revoked', 'local_device_expired', 'paired_revoked', 'session_expired',
     'inactive_binding', 'wrong_server', 'wrong_client_device', 'wrong_authorization_device', 'wrong_mobile_client',
 ])
-def test_copied_owner_session_loses_admin_on_any_failed_ownership_proof(owner_app, monkeypatch, test_db, failure):
+@pytest.mark.parametrize('transport', ['cookie', 'bearer'])
+def test_copied_owner_session_loses_admin_on_any_failed_ownership_proof(owner_app, monkeypatch, test_db, failure, transport):
     call = bind_and_enroll(monkeypatch)
-    client, _ = web_session(owner_app)
+    client, token = web_session(owner_app)
+    if transport == 'bearer':
+        client.cookies.clear()
+        client.headers['Authorization'] = 'Bearer ' + token
+    assert client.get('/api/v1/auth/status').json()['authenticated'] is True
     assert change_voice(client).status_code == 200
     if failure == 'hub_revoked':
         call.return_value = {'active': False}

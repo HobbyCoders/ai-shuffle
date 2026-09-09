@@ -97,6 +97,7 @@ async def _auth_status(claude_authenticated: bool = False, session_token: str | 
 
     request = MagicMock()
     request.cookies = {"session": session_token} if session_token else {}
+    request.headers = {}
 
     oauth = MagicMock()
     oauth.ensure_fresh_credentials = AsyncMock(return_value=None)
@@ -278,6 +279,7 @@ class TestGithubAuthStatusCaching:
 
             request = MagicMock()
             request.cookies = {}
+            request.headers = {}
             oauth = MagicMock()
             oauth.ensure_fresh_credentials = AsyncMock(return_value=None)
 
@@ -320,6 +322,7 @@ class TestGithubAuthStatusCaching:
 
         request = MagicMock()
         request.cookies = {}
+        request.headers = {}
         oauth = MagicMock()
         oauth.ensure_fresh_credentials = AsyncMock(return_value=None)
 
