@@ -211,7 +211,7 @@ try {
   assert(descriptor.user !== 'never' && descriptor.database !== 'never' && descriptor.password !== 'never', 'Inherited DB config was adopted');
   databasePort = descriptor.port;
   const acl = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    "$ErrorActionPreference='Stop'; $rules=@((Get-Acl -LiteralPath $env:PREVIEW_DESCRIPTOR_PATH).Access | Where-Object { $_.AccessControlType -eq 'Allow' } | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }); @{owner=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;allow=$rules} | ConvertTo-Json -Compress"],
+    "$ErrorActionPreference='Stop'; $rules=@([System.IO.File]::GetAccessControl($env:PREVIEW_DESCRIPTOR_PATH).Access | Where-Object { $_.AccessControlType -eq 'Allow' } | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }); @{owner=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;allow=$rules} | ConvertTo-Json -Compress"],
     { env: { ...process.env, PREVIEW_DESCRIPTOR_PATH: descriptorPath }, timeout: 30000 });
   const access = JSON.parse(acl.stdout);
   assert(access.allow.includes(access.owner), 'Descriptor ACL does not grant its owner access');
