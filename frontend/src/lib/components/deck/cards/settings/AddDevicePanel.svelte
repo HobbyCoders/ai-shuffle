@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	/**
 	 * AddDevicePanel — one code for one device.
 	 *
@@ -97,11 +98,11 @@
 
 	async function copy(value: string, what: 'code' | 'link') {
 		try {
-			await navigator.clipboard.writeText(value);
+			await copyText(value);
 			copied = what;
 			clearTimeout(copyTimer);
 			copyTimer = setTimeout(() => { copied = null; }, 1800);
-		} catch { error = 'Clipboard access is unavailable. Select and copy the value manually.'; }
+		} catch { copied = null; error = COPY_ERROR_MESSAGE; }
 	}
 </script>
 

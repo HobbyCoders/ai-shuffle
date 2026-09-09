@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	/**
 	 * NetworkAdvanced — the parts of the worker network most people never
 	 * touch: the recovery key, this worker's reachable address, sync health,
@@ -111,8 +112,8 @@
 
 	async function copyKey() {
 		if (!createdKey) return;
-		try { await navigator.clipboard.writeText(createdKey.recovery_key); copied = true; setTimeout(() => (copied = false), 1800); }
-		catch { error = 'Clipboard access is unavailable. Select and copy the key manually.'; }
+		try { await copyText(createdKey.recovery_key); copied = true; setTimeout(() => (copied = false), 1800); }
+		catch { copied = false; error = COPY_ERROR_MESSAGE; }
 	}
 
 	async function dismissConflict(id: number) {

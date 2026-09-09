@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	/**
 	 * ChatGptDeviceFlow — Codex/ChatGPT-subscription device-code enrollment.
 	 *
@@ -91,6 +92,7 @@
 	let verificationUri = $state('');
 	let errorMessage = $state('');
 	let copied = $state(false);
+	let copyError = $state('');
 
 	// Non-reactive latches (never rendered directly).
 	let providerId: string | null = null;
@@ -280,16 +282,17 @@
 
 	async function copyCode() {
 		if (!userCode) return;
+		copied = false;
+		copyError = '';
 		try {
-			await navigator.clipboard.writeText(userCode);
+			await copyText(userCode);
 			copied = true;
 			if (copyTimer !== null) clearTimeout(copyTimer);
 			copyTimer = setTimeout(() => {
 				copied = false;
 			}, 2000);
 		} catch {
-			// Clipboard blocked (permissions/insecure context) — the code is
-			// select-all-able, so this is a silent no-op.
+			copyError = COPY_ERROR_MESSAGE;
 		}
 	}
 
@@ -350,6 +353,7 @@
 					{/if}
 				</button>
 			</div>
+			{#if copyError}<p role="alert" class="text-center text-sm text-destructive">{copyError}</p>{/if}
 			<a
 				href={verificationUri}
 				target="_blank"

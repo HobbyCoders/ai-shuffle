@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	/**
 	 * AssistantMessage - Assistant message with markdown rendering and hover-only action buttons
 	 */
@@ -302,9 +303,10 @@
 	// no component instance to bind to, and an inline onclick would have to
 	// survive DOMPurify. Reading the code back out of the rendered <pre> also
 	// means the button always copies exactly what is on screen.
+	let copyError = $state('');
 	const _copyTimers = new Set<ReturnType<typeof setTimeout>>();
 
-	function handleProseClick(e: MouseEvent) {
+	async function handleProseClick(e: MouseEvent) {
 		const target = e.target as HTMLElement | null;
 		const btn = target?.closest?.('.code-copy-btn') as HTMLElement | null;
 		if (!btn) return;
@@ -312,7 +314,16 @@
 		e.stopPropagation();
 		const code = btn.closest('.codeblock')?.querySelector('pre code')?.textContent ?? '';
 		if (!code) return;
-		void navigator.clipboard?.writeText(code).catch(() => {});
+		copyError = '';
+		try {
+			await copyText(code);
+		} catch {
+			btn.classList.remove('is-copied');
+			btn.title = COPY_ERROR_MESSAGE;
+			copyError = COPY_ERROR_MESSAGE;
+			return;
+		}
+		btn.removeAttribute('title');
 		btn.classList.add('is-copied');
 		const timer = setTimeout(() => {
 			btn.classList.remove('is-copied');
@@ -451,6 +462,8 @@
 		_tw.destroy();
 	});
 </script>
+
+{#if copyError}<p role="alert" class="text-sm text-destructive">{copyError}</p>{/if}
 
 <div
 	class="w-full overflow-hidden message-container"
