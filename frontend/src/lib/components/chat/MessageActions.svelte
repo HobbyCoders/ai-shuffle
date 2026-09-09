@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	/**
 	 * MessageActions - Hover-only action buttons for chat messages
 	 *
@@ -40,6 +41,7 @@
 	}: Props = $props();
 
 	let copied = $state(false);
+	let copyError = $state('');
 	let showRewindDialog = $state(false);
 	let isRewinding = $state(false);
 	let rewindError = $state<string | null>(null);
@@ -93,18 +95,20 @@
 	}
 
 	async function handleCopy() {
+		copied = false;
+		copyError = '';
 		const textToCopy = prepareTextForCopy(messageContent);
 		if (onCopy) {
 			onCopy(textToCopy);
 		} else {
 			try {
-				await navigator.clipboard.writeText(textToCopy);
+				await copyText(textToCopy);
 				copied = true;
 				setTimeout(() => {
 					copied = false;
 				}, 2000);
 			} catch (e) {
-				console.error('Failed to copy to clipboard:', e);
+				copyError = COPY_ERROR_MESSAGE;
 			}
 		}
 	}
@@ -183,6 +187,7 @@
 <!-- Action buttons - visibility controlled by prop, component stays mounted for dialog -->
 {#if visible}
 <div class="message-actions flex items-center gap-1">
+	{#if copyError}<span role="alert" class="text-xs text-destructive">{copyError}</span>{/if}
 	<!-- Copy button -->
 	<button
 		class="action-btn"

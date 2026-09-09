@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	import { onMount, onDestroy } from 'svelte';
 	import { Github, ExternalLink, Copy, Loader2 } from 'lucide-svelte';
 	import { getGithubAuthStatus, startGithubWebLogin, loginGithubWithToken, cancelGithubWebLogin, logoutGithub } from '$lib/api/auth';
@@ -139,8 +140,8 @@
 	}
 
 	async function copyCode() {
-		try { await navigator.clipboard.writeText(code); copied = true; }
-		catch { error = 'Could not copy the code. Select and copy it manually.'; }
+		try { await copyText(code); copied = true; }
+		catch { copied = false; error = COPY_ERROR_MESSAGE; }
 	}
 </script>
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	/**
 	 * AccountPanel — the Shuffle account this worker belongs to.
 	 *
@@ -122,8 +123,8 @@
 
 	async function copyCode() {
 		if (!connection?.code) return;
-		try { await navigator.clipboard.writeText(connection.code); copied = true; }
-		catch { actionError = 'Select the code to copy it.'; }
+		try { await copyText(connection.code); copied = true; }
+		catch { copied = false; actionError = COPY_ERROR_MESSAGE; }
 	}
 
 	async function signOut() {

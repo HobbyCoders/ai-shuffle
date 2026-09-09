@@ -195,3 +195,29 @@ describe('ChatGptDeviceFlow — model seeding on completion', () => {
 		} finally { vi.useRealTimers(); }
 	});
 });
+
+
+describe('ChatGptDeviceFlow clipboard', () => {
+ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+ it.each(['missing', 'blocked'])('copies the sign-in code when clipboard API is %s', async (mode) => {
+  vi.stubGlobal('navigator', mode === 'missing' ? {} : { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('blocked')) } });
+  const exec = vi.fn(() => {
+   expect((document.activeElement as HTMLTextAreaElement).value).toBe(DEVICE.user_code);
+   return true;
+  });
+  Object.defineProperty(document, 'execCommand', { value: exec, configurable: true });
+  const { findByRole } = render(ChatGptDeviceFlow, { props: { existingProviderId: 'prov-9', onDone: vi.fn(), onCancel: vi.fn() } });
+  await fireEvent.click(await findByRole('button', { name: 'Copy' }));
+  expect(exec).toHaveBeenCalledWith('copy');
+  expect(await findByRole('button', { name: 'Copied' })).toBeTruthy();
+ });
+ it('shows copy failure while keeping sign-in available', async () => {
+  vi.stubGlobal('navigator', {});
+  Object.defineProperty(document, 'execCommand', { value: vi.fn(() => false), configurable: true });
+  const { findByRole, queryByRole } = render(ChatGptDeviceFlow, { props: { existingProviderId: 'prov-9', onDone: vi.fn(), onCancel: vi.fn() } });
+  await fireEvent.click(await findByRole('button', { name: 'Copy' }));
+  expect((await findByRole('alert')).textContent).toContain('Could not copy');
+  expect(queryByRole('button', { name: 'Copied' })).toBeNull();
+  expect(await findByRole('link', { name: 'Open sign-in page' })).toBeTruthy();
+ });
+});
