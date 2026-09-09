@@ -45,18 +45,6 @@ def load_settings():
     return Settings(_env_file=_resolve_env_file())
 
 
-def select_mode(settings):
-    mode = settings.database_mode.strip().lower()
-    if mode not in {"auto", "external", "embedded"}:
-        raise RuntimeFailure("DATABASE_MODE must be auto, embedded, or external")
-    explicit = bool((settings.database_url or "").strip()) or bool(
-        settings.model_fields_set & {"postgres_host", "postgres_port", "postgres_user", "postgres_password", "postgres_db"}
-    )
-    if mode == "embedded" and explicit:
-        raise RuntimeFailure("embedded mode conflicts with explicit external database configuration")
-    return "external" if explicit or mode == "external" else "embedded"
-
-
 def safe_path(path):
     """Refuse symlinks in every existing path component; do not resolve them."""
     path = Path(os.path.abspath(path))
@@ -169,8 +157,8 @@ def client_env(url):
     if url:
         from urllib.parse import urlsplit, unquote, parse_qsl
         parts = urlsplit(url)
-        if parts.scheme not in {"postgres", "postgresql"} or not parts.hostname:
-            raise RuntimeFailure("external database URL must identify a PostgreSQL host")
+        if parts.scheme not in {"postgres", "postgresql"} or parts.hostname != "127.0.0.1":
+            raise RuntimeFailure("managed database URL must identify the loopback host")
         env.update(PGHOST=parts.hostname, PGPORT=str(parts.port or 5432),
             PGUSER=unquote(parts.username or ""), PGPASSWORD=unquote(parts.password or ""),
             PGDATABASE=unquote(parts.path.lstrip("/")))
@@ -183,7 +171,7 @@ def client_env(url):
 class Database:
     def __init__(self, settings, *, port=5432):
         self.settings = settings
-        self.mode = select_mode(settings)
+        self.mode = "embedded"
         self.root = Path(settings.effective_data_dir).absolute()
         self.pg = self.root / "postgres"
         self.data = self.pg / "data"
@@ -237,26 +225,12 @@ class Database:
 
     def open(self, purpose="run"):
         safe_path(self.root)
-        # Guard this exact path even in external mode: app startup would rename
-        # this source and can continue with an empty database after an import failure.
+        # Never rename/import a legacy source or replace it with an empty DB.
         if (self.root / "db.sqlite").exists() or (self.root / "db.sqlite").is_symlink():
             raise RuntimeFailure("legacy SQLite detected; explicit offline migration is required")
-        if self.mode == "external":
-            if purpose == "restore":
-                raise RuntimeFailure("external restore is forbidden")
-            if purpose == "run":
-                # Fence even a failed external launch: removing unavailable
-                # configuration must not look like a fresh embedded install.
-                self.record_mode()
-            try:
-                self.url = self.settings.get_database_url()
-            except Exception:
-                raise RuntimeFailure("external database configuration is incomplete or invalid") from None
-            self.query()  # authenticated SQL, no embedded fallback
-            return
         if self.mode_file.exists():
             if read_record(self.mode_file).get("mode") != "embedded":
-                raise RuntimeFailure("previous external configuration is missing; refusing a new database")
+                raise RuntimeFailure("previous external database state detected; refusing a new database; explicit offline migration is required")
         safe_path(self.pg)
         if not self.pg.exists():
             if purpose == "dump":
@@ -344,6 +318,14 @@ class Database:
 
     def set_url(self):
         self.url = f"postgresql://{APP_USER}:{self.password}@127.0.0.1:{self.port}/{APP_DB}"
+
+    def publish_descriptor(self):
+        path = self.root / "managed-postgres.json"
+        if path.exists() or path.is_symlink():
+            check_owned(path)
+        write_private(path, json.dumps({"version": 1, "host": "127.0.0.1",
+            "port": self.port, "user": APP_USER, "password": self.password,
+            "database": APP_DB}), replace=True)
 
     def initialize(self):
         if not re.search(r"\b16\.", self.command(["initdb", "--version"])):
@@ -441,9 +423,9 @@ class Database:
                 self.process.wait(timeout=5)
                 if forced:
                     raise RuntimeFailure("PostgreSQL fast shutdown deadline exceeded; operator inspection required")
-                endpoint = self.pg / "runtime.json"
-                if endpoint.exists():
-                    endpoint.unlink()
+                for endpoint in (self.pg / "runtime.json", self.root / "managed-postgres.json"):
+                    if endpoint.exists():
+                        endpoint.unlink()
         finally:
             if self.pg_log is not None:
                 self.pg_log.close()
@@ -512,8 +494,6 @@ def run(settings, action, filename=None):
     app = chrome = chrome_log = source = None
     try:
         if action == "restore":
-            if db.mode == "external":
-                raise RuntimeFailure("external restore is forbidden")
             # pg_restore inherits the OS descriptor, not Python's buffered
             # position. Header validation must not leave native reads at the
             # buffer's read-ahead offset after seek(0).
@@ -530,10 +510,12 @@ def run(settings, action, filename=None):
         if action == "restore":
             db.restore(source)
             return 0
-        env = os.environ.copy()
-        # Export the effective URL even in external mode, so child cwd changes
-        # cannot switch databases. Never place a credential in argv.
-        env["DATABASE_URL"] = db.url
+        # The descriptor is published only after authenticated readiness and
+        # before any child starts. Inherited retired DB settings cannot select
+        # a different server, even in worktrees or child processes.
+        db.publish_descriptor()
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("DATABASE_", "POSTGRES_", "PG"))}
         env["DATA_DIR"] = str(settings.effective_data_dir)
         if os.environ.get("START_CHROME", "1") == "1":
             logdir = Path.home() / ".config"

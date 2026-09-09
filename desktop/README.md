@@ -9,21 +9,20 @@ worker the app starts, so the two never drift apart.
 
 - Starts its bundled PostgreSQL, then the worker (`python -m app.main` in
   local mode, listening on 127.0.0.1:8000), and opens the worker's UI once it
-  answers. If a worker is already running on that port, the app attaches to
-  it instead of starting a second one. Quitting the app stops the worker and
-  the database it started.
+  answers. Stable builds may attach to an already running local worker; preview
+  builds refuse occupied ports and never attach. Exit the old app before opening
+  Preview. Quitting stops the worker and database that this app started.
 - Needs no database setup. The first run creates a cluster in
   `<userData>/postgres/data` (`initdb`, user `ai_shuffle`, a generated
   password, `scram-sha-256`); every start picks a free loopback port and
   hands the connection to the worker. The password is stored with the OS
-  keyring (DPAPI, Keychain, or libsecret); the worker gets it through its
-  environment and a `.env` file only your account can read. If the stored
-  password is ever lost, the next start sets a new one through PostgreSQL's
-  single-user mode, so the data stays reachable.
-- Advanced: Worker → Advanced → Use external PostgreSQL… points the worker at
-  a server you run instead (tests the connection, can create the database
-  when the user exists but the database does not) and leaves the bundled
-  server stopped. The same page has a button back to the bundled one.
+  keyring (DPAPI, Keychain, or libsecret). Before startup the supervisor writes
+  the private `data/managed-postgres.json` descriptor; no database credentials
+  are handed to the app through environment variables or `.env`. The transient
+  descriptor is removed on shutdown; retain the private profile for persistence.
+- PostgreSQL is managed-only. There is no connection form, external-server mode,
+  or database environment configuration. Worker → Worker Status… shows lifecycle
+  and failure details; Show PostgreSQL Log opens the database log.
 - Restart and log actions in the Worker menu and the tray.
 - Frameless window with the OS window controls overlaid. The web UI's top
   strip is the drag handle and keeps clear of the buttons through the Window
@@ -81,9 +80,9 @@ browser automation.
 
 The preload exposes `window.shuffleDesktop` to the worker page: window and
 theme control, native notifications, menu commands, update state, and the
-worker's state with restart/log/database actions. The bundled setup and
+worker's state with restart/log/status actions. The bundled
 status page additionally gets `window.shuffleDesktopWorker` for the database
-form and the raw worker log; the worker page never sees the credentials.
+lifecycle and worker log; neither page exposes credentials or connection forms.
 
 ## Develop
 
@@ -99,7 +98,8 @@ run uses the repository as the worker runtime: its `venv/` and a built
 It has no bundled PostgreSQL of its own: point `SHUFFLE_DESKTOP_POSTGRES_DIR`
 at any PostgreSQL 16 installation (a directory with `bin/initdb`, `bin/pg_ctl`
 and `bin/postgres`, such as an assembled `desktop/postgres/` or a Homebrew or
-EnterpriseDB install), or choose an external server under Worker → Advanced.
+EnterpriseDB install). This development-only binary override is ignored by
+packaged apps; it never selects an external database server.
 
 | Variable | Purpose |
 | --- | --- |

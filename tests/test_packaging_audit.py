@@ -161,17 +161,34 @@ def backup_fixture(tmp_path):
     (workspace / "project with spaces/generated-images/image.png").write_text("fixture")
     (workspace / "nested/project/generated-models/model.glb").write_text("fixture")
     (settings / "settings.toml").write_text("fixture")
-    stub = bindir / "pg_dump"
-    stub.write_text(
-        '#!/usr/bin/env bash\nfor arg in "$@"; do case "$arg" in --file=*) printf fixture > "${arg#--file=}" ;; esac; done\n'
-    )
-    stub.chmod(0o755)
-    env = os.environ.copy()
-
     def shell_path(path):
         value = path.as_posix()
         return "/" + value[0].lower() + value[2:] if sys.platform == "win32" else value
 
+    # Exercise the real archive/retention shell logic with a synthetic managed
+    # runtime. No database process, descriptor or inherited credential is used.
+    runtime = tmp_path / "container_runtime.py"
+    runtime.write_text("# isolated managed-runtime fixture")
+    script = tmp_path / "backup.sh"
+    script.write_text(
+        (ROOT / "scripts/backup.sh").read_text().replace(
+            "/app/docker/container_runtime.py", shell_path(runtime)
+        )
+    )
+    stub = bindir / "python"
+    stub.write_text(
+        '#!/usr/bin/env bash\n'
+        '[ "$2" = dump ] && [ "$3" = --file ] || exit 90\n'
+        'printf fixture > "$4"\n'
+    )
+    stub.chmod(0o755)
+    # Prevent root-only setpriv dispatch in this isolated shell fixture.
+    identity = bindir / "id"
+    identity.write_text('#!/usr/bin/env bash\nprintf "12345\\n"\n')
+    identity.chmod(0o755)
+    (data / "postgres/data").mkdir(parents=True)
+    (data / "postgres/data/physical-cluster").write_text("never archive a live cluster")
+    env = os.environ.copy()
     env.update(
         DATA_DIR=shell_path(data),
         WORKSPACE_DIR=shell_path(workspace),
@@ -179,13 +196,13 @@ def backup_fixture(tmp_path):
         BACKUP_DIR=shell_path(data / "backups"),
         PATH=str(bindir) + os.pathsep + env["PATH"],
     )
-    return data, env
+    return data, env, script
 
 
 def test_backup_covers_project_media_memory_and_excludes_backup_recursion(tmp_path):
-    data, env = backup_fixture(tmp_path)
+    data, env, script = backup_fixture(tmp_path)
     result = subprocess.run(
-        [bash_path(), str(ROOT / "scripts/backup.sh")],
+        [bash_path(), str(script)],
         env=env,
         capture_output=True,
         text=True,
@@ -206,10 +223,11 @@ def test_backup_covers_project_media_memory_and_excludes_backup_recursion(tmp_pa
         assert "./fluid/skills/memories.json" in names
         assert "./.instance_id" in names
         assert not any(name.startswith("./backups") for name in names)
+        assert not any(name.startswith("./postgres/data") for name in names)
 
 
-def test_backup_dry_run_via_entrypoint_writes_nothing(tmp_path):
-    data, env = backup_fixture(tmp_path)
+def test_retired_backup_sidecar_refuses_without_writes(tmp_path):
+    data, env, _script = backup_fixture(tmp_path)
     result = subprocess.run(
         [
             bash_path(),
@@ -224,18 +242,18 @@ def test_backup_dry_run_via_entrypoint_writes_nothing(tmp_path):
         timeout=20,
         check=False,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "dry-run" in result.stdout
+    assert result.returncode != 0
+    assert "retired" in result.stderr.lower()
     assert not (data / "backups").exists()
 
 
 def test_custom_backup_destination_inside_project_media_is_excluded(tmp_path):
-    _data, env = backup_fixture(tmp_path)
+    _data, env, script = backup_fixture(tmp_path)
     env["BACKUP_DIR"] = (
         env["WORKSPACE_DIR"] + "/project with spaces/generated-images/backups"
     )
     result = subprocess.run(
-        [bash_path(), str(ROOT / "scripts/backup.sh")],
+        [bash_path(), str(script)],
         env=env,
         capture_output=True,
         text=True,
@@ -249,7 +267,7 @@ def test_custom_backup_destination_inside_project_media_is_excluded(tmp_path):
         assert not any("/backups" in name for name in archive.getnames())
 
 
-def test_failed_sql_restore_does_not_report_success(tmp_path):
+def test_legacy_sql_restore_refuses_before_running_docker(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     docker = bindir / "docker"
@@ -271,5 +289,61 @@ def test_failed_sql_restore_does_not_report_success(tmp_path):
         check=False,
     )
     assert result.returncode != 0
-    assert b"fixture SQL error" in result.stderr
+    assert b"Refusing in-place SQL restore" in result.stderr
+    assert b"fixture SQL error" not in result.stderr
     assert b"Done." not in result.stdout
+    assert backup.read_text() == "invalid SQL for the fake client"
+
+
+def test_backup_dry_run_ignores_removed_database_environment(tmp_path):
+    data, env, script = backup_fixture(tmp_path)
+    env.update(
+        DATABASE_MODE="external",
+        DATABASE_URL="postgresql://fixture:fixture@192.0.2.1/fixture",
+        POSTGRES_HOST="192.0.2.1",
+        POSTGRES_PASSWORD="fixture-only-password",
+        PGHOST="192.0.2.1",
+        PGPASSWORD="fixture-only-password",
+    )
+    result = subprocess.run(
+        [bash_path(), str(script), "--dry-run"], env=env,
+        capture_output=True, text=True, timeout=20, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "container_runtime.py dump --file" in result.stdout
+    assert "192.0.2.1" not in result.stdout + result.stderr
+    assert "fixture-only-password" not in result.stdout + result.stderr
+    assert "pg_dump" not in result.stdout
+    assert not (data / "backups").exists()
+
+
+def test_backup_requires_managed_runtime_without_libpq_fallback(tmp_path):
+    data, env, script = backup_fixture(tmp_path)
+    (tmp_path / "container_runtime.py").unlink()
+    forbidden = tmp_path / "bin/pg_dump"
+    forbidden.write_text('#!/usr/bin/env bash\nprintf "forbidden external dump\\n" >&2\nexit 90\n')
+    forbidden.chmod(0o755)
+    env.update(PGHOST="192.0.2.1", PGPASSWORD="fixture-only-password")
+    result = subprocess.run(
+        [bash_path(), str(script)], env=env,
+        capture_output=True, text=True, timeout=20, check=False,
+    )
+    assert result.returncode == 2
+    assert "managed app" in result.stderr
+    assert "forbidden external dump" not in result.stderr
+    assert not (data / "backups").exists()
+
+
+def test_operator_examples_have_no_database_environment_options():
+    import re
+
+    retired = re.compile(r"DATABASE_(?:MODE|URL)|POSTGRES_[A-Z_]+|DB_POOL_(?:MIN|MAX)")
+    for name in (
+        ".env.example", "docker-compose.yml", "README.md", "LOCAL_SETUP.md",
+        "docs/RESTORE.md", "docs/content/getting-started/installation.md",
+        "scripts/backup.sh", "scripts/deploy.sh", "tools/backup-db.sh",
+        "tools/restore-db.sh",
+    ):
+        assert not retired.search((ROOT / name).read_text()), name
+    assert not (ROOT / "docker-compose.external.yml").exists()
+    assert not (ROOT / "docker-compose.backup.yml").exists()

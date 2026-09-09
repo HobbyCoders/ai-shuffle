@@ -5,7 +5,7 @@
  * Packaged builds carry a PostgreSQL 16 distribution under resources/postgres
  * (see scripts/build-worker.mjs). Development runs point
  * `SHUFFLE_DESKTOP_POSTGRES_DIR` at any directory with bin/initdb, bin/pg_ctl
- * and bin/postgres, or choose an external server on the setup page.
+ * and bin/postgres.
  *
  * The cluster lives in `<userData>/postgres/data`. The first start runs
  * initdb with a generated password for the `ai_shuffle` superuser; every
@@ -24,6 +24,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import type { PostgresConfig } from './settings';
+import { privateDirectory } from './private-file';
 import { isPortFree } from './worker';
 
 export const POSTGRES_HOST = '127.0.0.1';
@@ -60,7 +61,7 @@ export function resolvePostgresBinaries(opts: ResolvePostgresOptions): PostgresB
 	const root = opts.packaged ? path.join(opts.resourcesPath, 'postgres') : env.SHUFFLE_DESKTOP_POSTGRES_DIR || null;
 	if (!root) {
 		return {
-			error: 'Development run: set SHUFFLE_DESKTOP_POSTGRES_DIR to a PostgreSQL 16 installation (a directory with bin/initdb), or choose an external server under Worker → Advanced.'
+			error: 'Development run: set SHUFFLE_DESKTOP_POSTGRES_DIR to a PostgreSQL 16 installation (a directory with bin/initdb).'
 		};
 	}
 	const exe = platform === 'win32' ? '.exe' : '';
@@ -69,7 +70,7 @@ export function resolvePostgresBinaries(opts: ResolvePostgresOptions): PostgresB
 		if (!exists(bin(name))) {
 			return {
 				error: opts.packaged
-					? `The bundled PostgreSQL is missing (${bin(name)}). Reinstall the app, or choose an external server under Worker → Advanced.`
+					? `The bundled PostgreSQL is missing (${bin(name)}). Reinstall the app.`
 					: `No PostgreSQL ${name} at ${bin(name)} (SHUFFLE_DESKTOP_POSTGRES_DIR).`
 			};
 		}
@@ -262,9 +263,7 @@ export const nodeRuntime: PostgresRuntime = {
 	existsSync,
 	readFile: (file) => fs.readFile(file, 'utf8'),
 	writeFile: (file, text, mode) => fs.writeFile(file, text, { encoding: 'utf8', mode }),
-	mkdir: async (dir) => {
-		await fs.mkdir(dir, { recursive: true });
-	},
+	mkdir: privateDirectory,
 	remove: (target) => fs.rm(target, { recursive: true, force: true }),
 	exec: execCapture,
 	pidAlive: isPidAlive,
@@ -404,11 +403,10 @@ export class PostgresSupervisor extends EventEmitter {
 		return (await this.exec(this.opts.binaries.pgCtl, pgCtlStatusArgs(this.dataDir), { timeoutMs: 15_000 })).code === 0;
 	}
 
-	/** A fresh cluster with a generated superuser password; a half-made data directory from an aborted initdb is discarded. */
+	/** A fresh cluster with a generated password; existing data is never auto-cleaned. */
 	private async initCluster(): Promise<string> {
 		if (this.rt.existsSync(this.dataDir)) {
-			this.log(`removing an incomplete data directory at ${this.dataDir}`);
-			await this.rt.remove(this.dataDir);
+			throw new Error(`The existing database directory at ${this.dataDir} has no PG_VERSION. It was preserved; inspect or back it up before retrying.`);
 		}
 		this.log(`creating the database cluster in ${this.dataDir}`);
 		const password = this.rt.randomPassword();
@@ -425,8 +423,8 @@ export class PostgresSupervisor extends EventEmitter {
 
 	/**
 	 * The cluster exists but its password is unknown: the settings file was
-	 * lost, the keyring changed, or the person switched to an external server
-	 * and back. Single-user mode needs no password and takes a new one.
+	 * lost or the keyring changed. Single-user mode sets a new password
+	 * without deleting or importing data.
 	 */
 	private async resetPassword(): Promise<string> {
 		this.log('no stored password for the bundled server; setting a new one');
@@ -512,7 +510,7 @@ export class PostgresSupervisor extends EventEmitter {
 	private async exec(file: string, args: string[], opts: ExecOptions = {}): Promise<ExecResult> {
 		const env: NodeJS.ProcessEnv = {};
 		for (const [key, value] of Object.entries(this.rt.env)) {
-			if (!/^PG/i.test(key)) env[key] = value;
+			if (!/^(PG|DATABASE_|POSTGRES_)/i.test(key)) env[key] = value;
 		}
 		const result = await this.rt.exec(file, args, { ...opts, env: { ...env, ...opts.env } });
 		for (const text of [result.stdout, result.stderr]) {

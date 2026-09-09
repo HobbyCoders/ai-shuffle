@@ -1,32 +1,25 @@
 <#
 .SYNOPSIS
-    Native Windows deploy: build the SvelteKit frontend, deploy it into
-    app/static, restart the backend, and poll /health/ready until green.
+    Build and deploy source frontend assets; managed desktop owns runtime restarts.
 
 .DESCRIPTION
-    The unified deploy for the NATIVE Windows install (Phase 4.5). Equivalent to
-    the manual cycle:
-      1. cd frontend; npm run build   (stamps sw.js CACHE_VERSION via prebuild)
-      2. refresh app/static (clear hashed _app, copy build/* over)
-      3. kill the running app.main process tree (parent + worker, no orphans)
-      4. relaunch detached, logging to run.log / run.err.log
-      5. poll http://localhost:<Port>/health/ready until 200 (DB + pool ready)
-
-    If the build fails, the script aborts BEFORE touching the running backend,
-    so a broken build never leaves the app down. The Docker-host equivalent is
-    scripts/deploy.sh.
+    Use -SkipRestart to build frontend and copy it into app/static. This script
+    cannot start a standalone worker or stop the managed PostgreSQL supervisor.
+    Start/restart the desktop app itself for runtime changes. Without -SkipRestart
+    it refuses before building, copying files or touching a running process.
+    The Docker-host equivalent is scripts/deploy.sh.
 
 .PARAMETER SkipBuild
-    Restart the backend only (no frontend rebuild/deploy).
+    Skip the frontend build/copy step.
 
 .PARAMETER SkipRestart
-    Rebuild + deploy frontend only (leave the backend running).
+    Required. Leave the managed backend and database running unchanged.
 
 .PARAMETER Port
-    Port the backend listens on (default 8000). Used for the readiness poll.
+    Retained for command-line compatibility; no standalone readiness poll is run.
 
 .PARAMETER ReadyTimeoutSec
-    How long to wait for /health/ready to go green (default 60).
+    Retained for command-line compatibility; no standalone readiness poll is run.
 #>
 [CmdletBinding()]
 param(
@@ -39,12 +32,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if (-not $SkipRestart) {
+    throw 'Standalone backend restart is unsupported. Start or restart AI Shuffle through the desktop app, which supervises its private database. Use -SkipRestart for a frontend-only build.'
+}
+
 # scripts/ is one level below the repo root.
 $root   = Split-Path -Parent $PSScriptRoot
 $src    = Join-Path $root 'frontend\build'
 $dst    = Join-Path $root 'app\static'
-$python = Join-Path $root 'venv\Scripts\python.exe'
-if (-not (Test-Path $python)) { $python = 'python' }  # fall back to PATH python
 
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 
@@ -70,47 +65,4 @@ if (-not $SkipBuild) {
     Write-Host '    deployed frontend -> app/static' -ForegroundColor Green
 }
 
-if ($SkipRestart) {
-    Write-Step 'Skipping backend restart (-SkipRestart). Done.'
-    return
-}
-
-Write-Step 'Stopping running backend (app.main tree)...'
-# @(...) so an empty match doesn't throw under StrictMode when nothing is running.
-$procs = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-    Where-Object { $_.CommandLine -like '*app.main*' })
-foreach ($proc in $procs) { taskkill /F /T /PID $proc.ProcessId 2>&1 | Out-Null }
-Start-Sleep -Milliseconds 1000
-
-Write-Step 'Launching backend...'
-$p = Start-Process -FilePath $python -ArgumentList '-m','app.main' `
-        -WorkingDirectory $root `
-        -RedirectStandardOutput (Join-Path $root 'run.log') `
-        -RedirectStandardError  (Join-Path $root 'run.err.log') `
-        -WindowStyle Hidden -PassThru
-Write-Host "    launched parent PID $($p.Id)" -ForegroundColor Green
-
-Write-Step "Waiting for /health/ready on port $Port (timeout ${ReadyTimeoutSec}s)..."
-$deadline = (Get-Date).AddSeconds($ReadyTimeoutSec)
-$ready = $false
-while ((Get-Date) -lt $deadline) {
-    try {
-        $resp = Invoke-WebRequest -Uri "http://localhost:$Port/health/ready" `
-                    -UseBasicParsing -TimeoutSec 3
-        if ($resp.StatusCode -eq 200) { $ready = $true; break }
-    } catch {
-        # Not up yet (connection refused) or 503 (not ready) — keep polling.
-    }
-    Start-Sleep -Seconds 2
-}
-
-if ($ready) {
-    Write-Host "==> Backend READY on http://localhost:$Port/health/ready" -ForegroundColor Green
-} else {
-    Write-Warning "Backend not ready after ${ReadyTimeoutSec}s - check run.err.log"
-    Write-Host '--- run.err.log (tail) ---' -ForegroundColor DarkGray
-    if (Test-Path (Join-Path $root 'run.err.log')) {
-        Get-Content (Join-Path $root 'run.err.log') -Tail 8
-    }
-    exit 1
-}
+Write-Step 'Frontend-only operation complete; managed services left unchanged.'

@@ -1,8 +1,15 @@
 # Migrating existing installs to the worker network
 
-## Single install
+The current runtime supports only private managed PostgreSQL. If the source
+installation uses an external/shared database, keep its previous release,
+configuration and backups intact while a separate migration is rehearsed. The
+historical export phase below runs under that source release; this build cannot
+connect to an external database. Follow [backup and recovery](../RESTORE.md) for
+isolated managed recovery. Do not import production data into a clean test install.
 
-Nothing to do. On the first start after upgrading, an install whose database
+## Single managed install
+
+No network-specific migration is needed. On the first start after upgrading, an install whose database
 already served a user (onboarding complete, or any session on file) becomes a
 network of one: a device identity is created under `.credential-keys`, the
 `network_state` row is written, every session, automation, connector and
@@ -37,12 +44,15 @@ another worker's device identity.
    Retain the bundles with the backups. They include transcripts, queued prompts,
    connector session routes, upload bytes, SDK/fluid executing state, checkouts and
    artifact metadata; they are sensitive data, not encrypted network envelopes.
-4. **Choose the source**, normally the worker with the most local files. Upgrade
-   it alone, keeping its identity and data directory. Its database must now be
-   private. Explicitly choose **Create network** in onboarding/Settings; a shared
+4. **Choose the source**, normally the worker with the most local files. Rehearse
+   recovery into a separate managed database with its matching identity and app
+   data, retaining the original deployment for rollback. Its database must now be
+   private and supervised by the desktop/Docker runtime. Explicitly choose **Create network** in onboarding/Settings; a shared
    legacy registry is never converted automatically. Keep jobs paused.
-5. **Move each other worker to a fresh PostgreSQL database.** Preserve its data
-   directory and existing `INSTANCE_ID`, upgrade it, and join the source's network.
+5. **Start each other worker with its own fresh managed database.** Preserve its
+   matching app data and existing `INSTANCE_ID` through the rehearsed migration,
+   then join the source's network. Do not copy another worker's database descriptor
+   or cluster lifecycle files.
    Wait for snapshot hydration to complete. The join carries its legacy ID so
    session and resource ownership can be mapped to its new device identity.
 6. **Restore executing state on each new owner**:

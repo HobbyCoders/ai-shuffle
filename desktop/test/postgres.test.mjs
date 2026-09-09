@@ -44,7 +44,7 @@ function fakeRuntime({ files = {}, dirs = [], alive = [], results = {}, platform
 	const calls = [];
 	const rt = {
 		platform,
-		env: { PATH: '/usr/bin', PGHOST: 'leak', HOME: '/home/u' },
+		env: { PATH: '/usr/bin', PGHOST: 'leak', DATABASE_URL: 'leak', POSTGRES_PASSWORD: 'leak', HOME: '/home/u' },
 		tmpDir: '/tmp',
 		existsSync: (file) => fs.has(file) || dirSet.has(file),
 		readFile: async (file) => {
@@ -131,7 +131,7 @@ test('a fresh data directory gets initdb with a generated password, then a start
 	assert.equal(written.mode, 0o600);
 	assert.ok(calls.some((c) => c.op === 'remove' && c.target === pwfile), 'the password file is removed after initdb');
 	assert.equal(fs.has(pwfile), false);
-	assert.equal(initdb.env.PGHOST, undefined, 'inherited PG* variables must not reach the tools');
+	assert.equal(Object.keys(initdb.env).some((key) => /^(PG|DATABASE_|POSTGRES_)/i.test(key)), false, 'inherited DB variables must not reach the tools');
 	assert.equal(initdb.env.HOME, '/home/u');
 
 	const starts = execs('pg_ctl').filter((c) => c.args.at(-1) === 'start');
@@ -211,14 +211,17 @@ test('an existing cluster without a known password gets a new one in single-user
 	assert.equal(store.saved[0].managed, true);
 });
 
-test('a leftover data directory without PG_VERSION is discarded before initdb', async () => {
-	const { rt, calls, execs } = fakeRuntime({ files: { [path.join(DATA, 'junk')]: '' }, dirs: [DATA] });
-	const state = await supervisor(rt, credentialsStore().credentials).start();
-	assert.equal(state.phase, 'ready', state.error);
-	const removal = calls.findIndex((c) => c.op === 'remove' && c.target === DATA);
-	const initdb = calls.findIndex((c) => c.op === 'exec' && path.basename(c.file) === 'initdb');
-	assert.ok(removal >= 0 && removal < initdb, 'the directory goes before initdb runs');
-	assert.equal(execs('initdb').length, 1);
+test('an incomplete existing data directory is preserved, never auto-cleaned on restart', async () => {
+	const marker = path.join(DATA, 'preserved-data');
+	const { rt, calls, execs, fs } = fakeRuntime({ files: { [marker]: 'keep' }, dirs: [DATA] });
+	const pg = supervisor(rt, credentialsStore().credentials);
+	for (let run = 0; run < 2; run++) {
+		const state = await pg.start();
+		assert.equal(state.phase, 'failed'); assert.match(state.error, /preserved/);
+	}
+	assert.equal(fs.get(marker), 'keep');
+	assert.equal(calls.some((c) => c.op === 'remove' && c.target === DATA), false);
+	assert.equal(execs('initdb').length, 0);
 });
 
 test('a stale postmaster.pid whose process is gone is removed before starting', async () => {
@@ -402,4 +405,57 @@ test('resolvePostgresBinaries finds the bundle, the development override, and ex
 	const onWindows = resolvePostgresBinaries({ packaged: true, resourcesPath: 'C:\\res', platform: 'win32', env: {}, existsSync: (f) => win.has(f) });
 	assert.equal(onWindows.initdb, path.join('C:\\res', 'postgres', 'bin', 'initdb.exe'), onWindows.error);
 	assert.equal(onWindows.pgIsReady, path.join('C:\\res', 'postgres', 'bin', 'pg_isready.exe'));
+});
+
+test('generated supervisor connection is handed off atomically BEFORE worker spawn, never via env or config', async () => {
+	const { mkdtemp, readFile, rm, writeFile } = await import('node:fs/promises');
+	const { readFileSync } = await import('node:fs');
+	const { tmpdir } = await import('node:os');
+	const { EventEmitter } = await import('node:events');
+	const vm = await import('node:vm');
+	const { fs, rt, execs } = fakeRuntime();
+	rt.exec = ((original) => async (file, args, opts) => {
+		if (path.basename(file) === 'pg_ctl') pgCtlWritingPid(fs)(args);
+		return original(file, args, opts);
+	})(rt.exec);
+	const store = credentialsStore(); const pg = supervisor(rt, store.credentials);
+	assert.equal((await pg.start()).phase, 'ready');
+	assert.equal(execs('initdb').length, 1, 'generated through real supervisor startup decisions');
+	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-handoff-'));
+	const envFile = path.join(dir, 'worker.env'); const descriptor = path.join(dir, 'managed-postgres.json');
+	const codeFile = new URL('../dist/main/worker.js', import.meta.url); const localRequire = createRequire(codeFile);
+	const module = { exports: {} }; let spawns = 0;
+	const child = new EventEmitter(); child.pid = 424242; child.exitCode = null; child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+	const replacements = {
+		'node:child_process': { spawn: (_file, _args, options) => {
+			spawns++;
+			const actual = JSON.parse(readFileSync(descriptor, 'utf8'));
+			const { managed, ...generated } = pg.connection();
+			assert.deepEqual(actual, { version: 1, ...generated });
+			assert.equal(Object.keys(options.env).some((key) => /^(DATABASE_|POSTGRES_|PG)/i.test(key)), false);
+			assert.equal(readFileSync(envFile, 'utf8'), 'MODEL=kept\n');
+			return child;
+		} },
+		'node:net': { createServer: () => ({ once() {}, listen(_options, callback) { callback(); }, close(callback) { callback(); } }) },
+		'node:http': { get: (_options, callback) => {
+			const request = new EventEmitter(); request.destroy = () => {};
+			queueMicrotask(() => {
+				const response = new EventEmitter(); response.statusCode = 200; response.setEncoding = () => {};
+				callback(response); response.emit('data', JSON.stringify({ service: 'ai-shuffle' })); response.emit('end');
+			});
+			return request;
+		} }
+	};
+	vm.runInNewContext(readFileSync(codeFile, 'utf8'), { module, exports: module.exports, Buffer, process, setTimeout, clearTimeout, console, require: (id) => id in replacements ? replacements[id] : localRequire(id) });
+	try {
+		await writeFile(envFile, 'MODEL=kept\nPOSTGRES_PASSWORD=old-test\nDATABASE_URL=old-test\n'.replaceAll('\\n', '\n'));
+		const worker = new module.exports.WorkerSupervisor({ runtime: { mode: 'bundled', root: dir, python: '/fake/python', serverDir: dir, nodeBinDir: null, toolsDir: dir, browserMcpEntry: 'unused' }, logDir: dir, envFile, dataDir: dir, postgres: () => pg.connection(), allowAttach: false });
+		assert.equal((await worker.start()).phase, 'ready'); assert.equal(spawns, 1);
+		// Simulate an actual child exit before cleanup; no process tree is killed in this test.
+		child.exitCode = 0; await worker.stop(); child.emit('exit', 0); await Promise.resolve();
+		await pg.stop(); await worker.clearConnectionFile();
+		await assert.rejects(readFile(descriptor), { code: 'ENOENT' });
+		assert.equal(store.current.password, 'generated-secret', 'restart custody remains');
+		assert.equal(fs.has(path.join(DATA, 'PG_VERSION')), false, 'fake runtime does not pretend to be a real database');
+	} finally { await pg.stop(); await rm(dir, { recursive: true, force: true }); }
 });

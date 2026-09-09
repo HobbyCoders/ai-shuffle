@@ -46,8 +46,10 @@ Safety properties
 
 Usage
 -----
-From the repo root, with the POSTGRES_* settings pointing at the target
-Postgres (POSTGRES_HOST/PORT/USER/PASSWORD/DB — see .env.example)::
+Advanced maintenance only, not a fresh-install step. The managed PostgreSQL
+supervisor and its private DATA_DIR/managed-postgres.json descriptor must remain
+available while application writers are stopped. External database environment
+settings are not supported. From that managed maintenance environment::
 
     # Preview only, touch nothing:
     python -m scripts.rekey --old-password OLD --new-password NEW --dry-run

@@ -7,7 +7,7 @@
  * (`navigator.windowControlsOverlay`, `env(titlebar-area-*)`), and the page
  * marks the strip draggable with `-webkit-app-region: drag`.
  *
- * Only two kinds of document ever load here: the bundled setup/status page
+ * Only two kinds of document ever load here: the bundled status page
  * (file://) and the local worker's web UI at http://127.0.0.1:<port>.
  * Loading the worker's origin directly keeps every request same-origin, so
  * the server's CSRF and WebSocket origin checks behave exactly as they do
@@ -29,7 +29,7 @@ export interface TitleBarTheme {
 const DARK_TITLE_BAR: TitleBarTheme = { background: '#000000', symbol: '#e9e9ec' };
 const LIGHT_TITLE_BAR: TitleBarTheme = { background: '#ffffff', symbol: '#1d1d1f' };
 
-export type PageMode = 'setup' | 'status';
+export type PageMode = 'status';
 
 export class MainWindow {
 	private win: BrowserWindow | null = null;

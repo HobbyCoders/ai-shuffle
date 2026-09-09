@@ -164,16 +164,12 @@ class EventGateway:
             self._thread.start()
 
     def _listen_loop(self) -> None:
-        from app.db.base import parse_database_url
-
         backoff = 1.0
         consecutive_failures = 0
         while not self._stop:
             conn = None
             try:
-                # Decompose the DSN like the pool does — a raw URL with a
-                # literal '@' in the password makes libpq mis-parse the host.
-                conn = psycopg2.connect(**parse_database_url(settings.get_database_url()))
+                conn = psycopg2.connect(**settings.get_database_connection())
                 # LISTEN must run outside a transaction.
                 conn.autocommit = True
                 cursor = conn.cursor()

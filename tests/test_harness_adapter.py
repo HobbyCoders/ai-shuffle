@@ -2661,52 +2661,19 @@ async def test_add_dirs_reach_delegated_loop(monkeypatch, tmp_path):
 
 
 @pytest.fixture()
-def _db_less_settings(monkeypatch):
-    """The suite's DB shim isolates connections, not the loaded configuration.
-
-    Clear both database sources: a legacy URL can already have populated the
-    POSTGRES_* fields at settings load, and clearing only the URL leaves a DB.
-    Keep this opt-in so unrelated tests retain their configured-store coverage.
-    """
+def _db_less_settings(monkeypatch, tmp_path):
+    """No inherited/live descriptor may enable the production store in tests."""
     from app.core.config import settings
-
-    for name, value in {
-        "database_url": None,
-        "postgres_host": None,
-        "postgres_port": 5432,
-        "postgres_user": "ai_shuffle",
-        "postgres_password": None,
-        "postgres_db": "ai_shuffle",
-    }.items():
-        monkeypatch.setattr(settings, name, value)
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
     return settings
 
 
-@pytest.fixture(params=["legacy_url", "postgres_fields", "imported_legacy_url"])
-def _configured_db_settings(monkeypatch, _db_less_settings, request):
-    """Exercise each DB source without borrowing the runner's credentials."""
+@pytest.fixture
+def _configured_db_settings(monkeypatch, _db_less_settings):
+    """Explicit test-only connection injection, never runtime environment knobs."""
     settings = _db_less_settings
-    url = "postgresql://REDACTED@postgres.test.invalid:5433/harness_test"
-    if request.param == "postgres_fields":
-        for name, value in {
-            "postgres_host": "postgres.test.invalid",
-            "postgres_port": 5433,
-            "postgres_user": "harness",
-            "postgres_password": "harness-test",
-            "postgres_db": "harness_test",
-        }.items():
-            monkeypatch.setattr(settings, name, value)
-    else:
-        monkeypatch.setattr(settings, "database_url", url)
-        if request.param == "imported_legacy_url":
-            import app.core.config as config
-
-            monkeypatch.setattr(config, "legacy_database_url_imported", False)
-            # Run the real settings-load importer, not a pre-seeded password.
-            settings._import_legacy_database_url()
-            assert config.legacy_database_url_imported is True
-            monkeypatch.setattr(settings, "database_url", None)
-    assert settings.get_database_url() == url
+    connection = dict(host="127.0.0.1", port=5433, user="harness", password="synthetic", dbname="harness_test")
+    monkeypatch.setattr(type(settings), "get_database_connection", lambda self: dict(connection))
     return settings
 
 
@@ -2724,17 +2691,17 @@ def test_store_derived_from_database_presence(monkeypatch, _configured_db_settin
     assert isinstance(store, PgFluidStore)
     assert ha._recall_backend_available() is True
 
-    monkeypatch.setattr(settings, "database_url", None)
-    store = HarnessAdapter._build_store(SessionOptions(model="m"))
-    expected_store = PgFluidStore if settings.postgres_password else MemoryStore
-    assert isinstance(store, expected_store)
-    assert ha._recall_backend_available() is bool(settings.postgres_password)
-
-    monkeypatch.setattr(settings, "postgres_password", None)
+    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
     monkeypatch.setenv("AIH_OMNI_STORE", "pg")  # retired flag — ignored
     store = HarnessAdapter._build_store(SessionOptions(model="m"))
     assert isinstance(store, MemoryStore)
     assert ha._recall_backend_available() is False
+
+
+def test_unsupervised_harness_refuses_memory_store(monkeypatch, _db_less_settings):
+    monkeypatch.setattr(HarnessAdapter, "_test_memory_store_factory", None)
+    with pytest.raises(RuntimeError, match="Refusing an in-memory"):
+        HarnessAdapter._build_store(SessionOptions(model="m"))
 
 
 def test_requires_reconnect():

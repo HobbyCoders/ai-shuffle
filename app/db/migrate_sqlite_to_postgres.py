@@ -8,12 +8,10 @@ together; any failure aborts the import. Dry runs inspect SQLite only.
 Usage:
     python -m app.db.migrate_sqlite_to_postgres
     python -m app.db.migrate_sqlite_to_postgres --dry-run
-    python -m app.db.migrate_sqlite_to_postgres --sqlite-path /data/app.db --postgres-url postgresql://...
+    python -m app.db.migrate_sqlite_to_postgres --sqlite-path /path/to/offline-copy.db
 
-Environment:
-    The PostgreSQL connection is built from the POSTGRES_* settings
-    (POSTGRES_HOST/PORT/USER/PASSWORD/DB). The SQLite database path is
-    auto-detected from settings.
+The target is exclusively the managed PostgreSQL descriptor in DATA_DIR.
+This explicit offline tool never imports automatically during application startup.
 """
 
 import argparse
@@ -280,7 +278,7 @@ def _build_tsvectors(pg_conn) -> None:
 
 def migrate(
     sqlite_path: str,
-    postgres_url: str,
+    postgres_url: str | None = None,
     dry_run: bool = False,
 ) -> dict:
     """Run the full migration.
@@ -294,7 +292,7 @@ def migrate(
     print("SQLite -> PostgreSQL Migration")
     print("=" * 60)
     print(f"  SQLite:   {sqlite_path}")
-    print(f"  Postgres: {postgres_url.split('@')[-1] if '@' in postgres_url else postgres_url}")
+    print("  Postgres: managed local database")
     if dry_run:
         print("  MODE:     DRY RUN (no data will be written)")
     print()
@@ -312,9 +310,15 @@ def migrate(
     pg_conn = None
     if not dry_run:
         try:
-            pg_conn = psycopg2.connect(**parse_database_url(postgres_url))
-        except Exception as exc:
-            print(f"ERROR: Cannot connect to PostgreSQL: {exc}")
+            from app.core.config import settings
+            connection = settings.get_database_connection()
+            if postgres_url is not None:
+                # Do not let an old caller redirect this maintenance operation.
+                if parse_database_url(postgres_url) != parse_database_url(settings.get_database_url()):
+                    raise RuntimeError("SQLite migration target must be the managed database")
+            pg_conn = psycopg2.connect(**connection)
+        except Exception:
+            print("ERROR: Cannot connect to managed PostgreSQL; start its supervisor first.")
             sys.exit(1)
 
         # Verify Postgres schema exists
@@ -398,46 +402,15 @@ def main() -> None:
              "Defaults to the path from application settings.",
     )
     parser.add_argument(
-        "--postgres-url",
-        default=None,
-        help="PostgreSQL connection URL. "
-             "Defaults to the URL built from the POSTGRES_* settings.",
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Report what would be migrated without writing any data.",
     )
     args = parser.parse_args()
 
-    # Resolve defaults from settings if not provided via CLI
-    sqlite_path = args.sqlite_path
-    postgres_url = args.postgres_url
-
-    if sqlite_path is None or postgres_url is None:
-        try:
-            from app.core.config import settings
-        except Exception:
-            pass
-        else:
-            if sqlite_path is None:
-                sqlite_path = str(settings.db_path)
-            if postgres_url is None:
-                try:
-                    postgres_url = settings.get_database_url()
-                except ValueError:
-                    pass
-
-    if sqlite_path is None:
-        print("ERROR: SQLite path not provided and could not be "
-              "auto-detected. Use --sqlite-path.")
-        sys.exit(1)
-    if postgres_url is None and not args.dry_run:
-        print("ERROR: PostgreSQL URL not provided and the POSTGRES_* "
-              "settings are incomplete. Use --postgres-url.")
-        sys.exit(1)
-
-    migrate(sqlite_path, postgres_url or "", dry_run=args.dry_run)
+    from app.core.config import settings
+    sqlite_path = args.sqlite_path or str(settings.db_path)
+    migrate(sqlite_path, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

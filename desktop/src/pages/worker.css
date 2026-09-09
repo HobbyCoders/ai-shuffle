@@ -1,4 +1,4 @@
-/* Setup and status pages. Mirrors the web UI's Studio Noir tokens (frontend/src/app.css). */
+/* Worker status page. Mirrors the web UI's Studio Noir tokens (frontend/src/app.css). */
 :root {
 	color-scheme: dark;
 	--background: oklch(0.145 0.004 240);
@@ -88,20 +88,6 @@ body {
 	gap: 18px;
 }
 
-.brand {
-	display: flex;
-	gap: 16px;
-	align-items: flex-start;
-}
-
-.brand-mark {
-	width: 48px;
-	height: 48px;
-	flex: none;
-	border-radius: 12px;
-	box-shadow: 0 0 0 1px var(--border-strong);
-}
-
 h1 {
 	margin: 0 0 4px;
 	font-size: 20px;
@@ -113,70 +99,6 @@ h1 {
 	margin: 0;
 	color: var(--muted-foreground);
 	font-size: 13.5px;
-}
-
-.banner {
-	padding: 10px 12px;
-	border-radius: var(--radius);
-	font-size: 13px;
-	border: 1px solid transparent;
-}
-
-.banner-error {
-	background: oklch(0.7 0.175 20 / 0.12);
-	border-color: oklch(0.7 0.175 20 / 0.35);
-	color: oklch(0.88 0.09 20);
-}
-
-.empty {
-	margin: 0;
-	color: var(--subtle-foreground);
-	font-size: 13px;
-}
-
-.add {
-	display: grid;
-	grid-template-columns: 1fr 160px auto;
-	gap: 10px;
-	align-items: end;
-}
-
-.field {
-	display: flex;
-	flex-direction: column;
-	gap: 6px;
-	min-width: 0;
-}
-
-.label {
-	font-size: 12px;
-	color: var(--muted-foreground);
-}
-
-.optional {
-	color: var(--subtle-foreground);
-}
-
-input {
-	font: inherit;
-	color: var(--foreground);
-	background: var(--input);
-	border: 1px solid var(--border);
-	border-radius: 8px;
-	padding: 8px 10px;
-	height: 36px;
-	outline: none;
-	min-width: 0;
-	transition: border-color 0.12s ease, box-shadow 0.12s ease;
-}
-
-input::placeholder {
-	color: var(--subtle-foreground);
-}
-
-input:focus-visible {
-	border-color: var(--ring);
-	box-shadow: 0 0 0 3px oklch(0.72 0.14 180 / 0.2);
 }
 
 .btn {
@@ -213,50 +135,10 @@ input:focus-visible {
 	filter: brightness(1.08);
 }
 
-.btn-secondary {
-	background: var(--muted);
-	color: var(--foreground);
-	border-color: var(--border);
-	height: 32px;
-	padding: 0 12px;
-}
-
-.btn-secondary:hover {
-	background: var(--accent);
-}
-
-.btn-ghost {
-	background: transparent;
-	color: var(--muted-foreground);
-	width: 30px;
-	height: 30px;
-	padding: 0;
-}
-
-.btn-ghost:hover {
-	background: var(--accent);
-	color: var(--foreground);
-}
-
-.btn-ghost svg {
-	width: 15px;
-	height: 15px;
-	fill: none;
-	stroke: currentColor;
-	stroke-width: 1.9;
-	stroke-linecap: round;
-	stroke-linejoin: round;
-}
-
 .hint {
 	margin: 0;
 	font-size: 12.5px;
 	color: var(--subtle-foreground);
-}
-
-.hint strong {
-	color: var(--muted-foreground);
-	font-weight: 500;
 }
 
 .foot {
@@ -268,35 +150,15 @@ input:focus-visible {
 	color: var(--subtle-foreground);
 }
 
-@media (max-width: 640px) {
-	.add {
-		grid-template-columns: 1fr;
-	}
-}
-
 @media (prefers-reduced-motion: reduce) {
+	.btn {
+		transition: none;
+	}
 	.dot-checking {
 		animation: none;
 	}
 }
 
-/* ---- Setup form -------------------------------------------------------- */
-.form {
-	display: flex;
-	flex-direction: column;
-	gap: 12px;
-}
-.row {
-	display: flex;
-	gap: 10px;
-}
-.grow {
-	flex: 1;
-}
-.field-port {
-	width: 110px;
-	flex: none;
-}
 .actions {
 	display: flex;
 	align-items: center;
@@ -316,53 +178,6 @@ input:focus-visible {
 	color: var(--foreground);
 	background: var(--accent);
 }
-.banner-ok {
-	background: oklch(0.76 0.15 155 / 0.1);
-	border-color: oklch(0.76 0.15 155 / 0.35);
-	color: oklch(0.88 0.1 155);
-}
-.bundled {
-	display: flex;
-	flex-direction: column;
-	gap: 8px;
-}
-.bundled .btn {
-	margin-left: 6px;
-	vertical-align: middle;
-}
-.help {
-	border-top: 1px solid var(--border);
-	padding-top: 12px;
-	font-size: 13px;
-	color: var(--muted-foreground);
-}
-.help summary {
-	cursor: pointer;
-	color: var(--foreground);
-	font-weight: 500;
-}
-.help p {
-	margin: 10px 0 6px;
-}
-.help a {
-	color: var(--primary);
-	text-decoration: none;
-}
-.help pre {
-	margin: 6px 0;
-	padding: 10px 12px;
-	background: var(--sidebar);
-	border: 1px solid var(--border);
-	border-radius: 8px;
-	font: 12px/1.5 var(--font-mono);
-	color: var(--foreground);
-	overflow-x: auto;
-}
-code {
-	font-family: var(--font-mono);
-	font-size: 12.5px;
-}
-
 /* ---- Status ------------------------------------------------------------ */
 .panel-status {
 	width: min(100%, 720px);

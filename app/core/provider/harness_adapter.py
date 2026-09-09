@@ -2713,6 +2713,9 @@ class HarnessAdapter(ProviderAdapter):
             return system if system is not None else append_system
         return compiled.text
 
+    # Injected only by tests/conftest.py; never configured from app settings/env.
+    _test_memory_store_factory = None
+
     @staticmethod
     def _build_store(options: SessionOptions) -> Any:
         # Derived, not configured (2026-08-13 ruling: no permanent flags — the
@@ -2722,14 +2725,18 @@ class HarnessAdapter(ProviderAdapter):
         # Postgres, exactly like the SDK path's PgSessionStore: cross-restart
         # resume, fork, and event replay from any app instance sharing the DB.
         # The only DB-less environments are unit tests, which get MemoryStore.
-        # "Has a database" means either the POSTGRES_* pieces (postgres_password
-        # is the one with no default) or a legacy pre-split DATABASE_URL.
+        # Only a validated supervisor descriptor enables the managed store.
         from app.core.config import settings
 
-        if settings.database_url or settings.postgres_password:
+        if settings.managed_database_available():
             from app.core.provider.fluid_pg_store import PgFluidStore
             return PgFluidStore()
-        return MemoryStore()
+        if HarnessAdapter._test_memory_store_factory is not None:
+            return HarnessAdapter._test_memory_store_factory()
+        raise RuntimeError(
+            "Managed PostgreSQL descriptor is unavailable; start the desktop "
+            "launcher or container supervisor. Refusing an in-memory session store."
+        )
 
     async def _build_registry(
         self, options: SessionOptions, *, native: bool
@@ -3564,7 +3571,7 @@ def _recall_backend_available() -> bool:
     """
     from app.core.config import settings
 
-    return bool(settings.database_url or settings.postgres_password)
+    return settings.managed_database_available()
 
 
 def _fluid_skills_root() -> Path:

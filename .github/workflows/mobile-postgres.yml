@@ -54,6 +54,7 @@ jobs:
           TESTING: '1'
           ALLOW_REAL_PG: '1'
           MOBILE_POSTGRES_TEST: '1'
+          TEST_POSTGRES_DSN: postgresql://REDACTED@127.0.0.1:5432/shuffle_mobile_test
           MOBILE_PG_HOST: '127.0.0.1'
           MOBILE_PG_PORT: '5432'
           MOBILE_PG_DATABASE: shuffle_mobile_test
@@ -77,6 +78,7 @@ jobs:
           TESTING: '1'
           ALLOW_REAL_PG: '1'
           NETWORK_POSTGRES_TEST: '1'
+          TEST_POSTGRES_DSN: postgresql://REDACTED@127.0.0.1:5432/shuffle_network_test
           NETWORK_PG_PORT: '5432'
           AI_SHUFFLE_ENV_FILE: /dev/null
           PYTHONPATH: .

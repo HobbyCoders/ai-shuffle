@@ -20,28 +20,25 @@ def settings_factory(monkeypatch, tmp_path):
 
 
 def test_fresh_defaults_to_embedded(settings_factory):
-    assert runtime.select_mode(settings_factory()) == "embedded"
+    assert runtime.Database(settings_factory()).mode == "embedded"
 
 
-@pytest.mark.parametrize("field,value", [("postgres_password", "synthetic"), ("postgres_port", 5432), ("postgres_host", ""), ("postgres_user", "ai_shuffle")])
-def test_explicit_components_select_external(settings_factory, field, value):
-    assert runtime.select_mode(settings_factory(**{field: value})) == "external"
+@pytest.mark.parametrize("name,value", [("POSTGRES_PASSWORD", "synthetic"), ("POSTGRES_PORT", "garbage"), ("POSTGRES_HOST", "external.invalid"), ("DATABASE_MODE", "external"), ("DATABASE_URL", "postgresql://never:never@external.invalid/prod")])
+def test_retired_environment_cannot_select_external(settings_factory, monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    cfg = settings_factory()
+    assert runtime.Database(cfg).mode == "embedded"
+    assert not any(k.startswith(("postgres_", "database_")) for k in cfg.model_fields)
 
 
-def test_embedded_conflict_and_invalid_mode(settings_factory):
-    with pytest.raises(runtime.RuntimeFailure, match="conflict"):
-        runtime.select_mode(settings_factory(database_mode="embedded", postgres_password="synthetic"))
-    with pytest.raises(runtime.RuntimeFailure, match="DATABASE_MODE"):
-        runtime.select_mode(settings_factory(database_mode="typo"))
-
-
-def test_env_file_settings_and_url_precedence(settings_factory, tmp_path, monkeypatch):
+def test_env_file_database_settings_are_ignored(settings_factory, tmp_path, monkeypatch):
     envfile = tmp_path / "synthetic-config"
-    envfile.write_text("POSTGRES_PASSWORD=from-file\nDATABASE_URL=postgres://REDACTED@db:5544/name\nDATABASE_MODE=auto\n")
+    envfile.write_text("POSTGRES_PASSWORD=from-file\nDATABASE_URL=postgres://u:never@external.invalid/name\nDATABASE_MODE=external\n")
     monkeypatch.setenv("AI_SHUFFLE_ENV_FILE", str(envfile))
     cfg = runtime.load_settings()
-    assert runtime.select_mode(cfg) == "external"
-    assert cfg.get_database_url() == "postgres://REDACTED@db:5544/name"
+    assert runtime.Database(cfg).mode == "embedded"
+    with pytest.raises(RuntimeError, match="supervisor"):
+        cfg.get_database_url()
 
 
 def test_legacy_and_missing_external_config_fail_closed(settings_factory, tmp_path):
@@ -72,7 +69,8 @@ def test_direct_runtime_cli_loads_app_without_pythonpath(settings_factory, tmp_p
     project = Path(__file__).resolve().parents[2]
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
-    env.update(AI_SHUFFLE_ENV_FILE="/dev/null", DATABASE_MODE="invalid-probe")
+    (tmp_path / "db.sqlite").write_text("legacy-sentinel")
+    env.update(AI_SHUFFLE_ENV_FILE="/dev/null", DATA_DIR=str(tmp_path), DATABASE_MODE="invalid-probe")
     result = subprocess.run(
         [sys.executable, "-I", str(project / "docker/container_runtime.py"), "run"],
         cwd=project if working_directory == "project" else tmp_path,
@@ -81,7 +79,7 @@ def test_direct_runtime_cli_loads_app_without_pythonpath(settings_factory, tmp_p
     # Reach configuration validation without opening a database or starting the
     # app. The image invokes this absolute script, not an imported test module.
     assert result.returncode == 1
-    assert "DATABASE_MODE must be auto, embedded, or external" in result.stderr
+    assert "legacy SQLite detected" in result.stderr
     assert "ModuleNotFoundError" not in result.stderr
     assert not (tmp_path / "postgres").exists()
 
@@ -98,23 +96,19 @@ def test_main_diagnostics_keep_type_and_call_site_but_not_secret_values(monkeypa
     assert "postgresql://" not in output
 
 
-def test_external_never_inspects_managed_storage(settings_factory, tmp_path, monkeypatch):
+def test_retired_external_settings_do_not_bypass_storage_safety(settings_factory, tmp_path, monkeypatch):
     forbidden = tmp_path / "postgres"
     forbidden.symlink_to("/definitely/not/a/cluster")
-    db = runtime.Database(settings_factory(postgres_password="synthetic"))
-    monkeypatch.setattr(db, "query", Mock(return_value="1"))
-    db.open()
-    db.close()
+    monkeypatch.setenv("DATABASE_MODE", "external")
+    with pytest.raises(runtime.RuntimeFailure, match="symlink"):
+        runtime.Database(settings_factory()).open()
     assert forbidden.is_symlink()
-    assert json.loads((tmp_path / "database-mode.json").read_text())["mode"] == "external"
 
 
-def test_dump_never_initializes_and_restore_external_is_forbidden(settings_factory, tmp_path):
+def test_dump_never_initializes(settings_factory, tmp_path):
     with pytest.raises(runtime.RuntimeFailure, match="retained"):
         runtime.Database(settings_factory()).open(purpose="dump")
     assert not (tmp_path / "postgres").exists()
-    with pytest.raises(runtime.RuntimeFailure, match="external restore"):
-        runtime.Database(settings_factory(postgres_password="synthetic")).open(purpose="restore")
 
 
 def test_symlink_and_partial_state_are_not_repaired(settings_factory, tmp_path):
@@ -192,6 +186,43 @@ def test_unexpected_clean_app_exit_still_fails_container():
     assert runtime.watch(app, db, None) == 1
 
 
+def test_backend_refuses_legacy_sqlite_before_creating_directories_or_connecting(tmp_path, monkeypatch):
+    from app.core import startup
+    legacy = tmp_path / "db.sqlite"
+    legacy.write_bytes(b"legacy sentinel")
+    monkeypatch.setattr(startup.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(startup, "ensure_directories", lambda: pytest.fail("must fail before any startup writes"))
+    with pytest.raises(RuntimeError, match="Legacy SQLite"):
+        startup.init_core()
+    assert legacy.read_bytes() == b"legacy sentinel"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["db.sqlite"]
+
+
+def test_run_publishes_private_descriptor_before_spawning_worker(settings_factory, tmp_path, monkeypatch):
+    cfg = settings_factory()
+    db = runtime.Database(cfg)
+    db.password = "synthetic-password"
+    monkeypatch.setattr(db, "open", Mock())
+    monkeypatch.setattr(db, "close", Mock())
+    monkeypatch.setattr(runtime, "Database", lambda settings: db)
+    monkeypatch.setenv("START_CHROME", "0")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://bad:synthetic@external.invalid/prod")
+    monkeypatch.setenv("POSTGRES_HOST", "external.invalid")
+    monkeypatch.setenv("PGHOSTADDR", "203.0.113.2")
+    monkeypatch.setenv("UNRELATED_APP_SETTING", "preserved")
+    def spawn(args, *, env, **kwargs):
+        assert cfg.get_database_connection()["password"] == "synthetic-password"
+        assert not any(k.startswith(("DATABASE_", "POSTGRES_", "PG")) for k in env)
+        assert env["UNRELATED_APP_SETTING"] == "preserved"
+        assert env["DATA_DIR"] == str(tmp_path)
+        return Mock()
+    monkeypatch.setattr(runtime.subprocess, "Popen", spawn)
+    monkeypatch.setattr(runtime, "watch", lambda *args: 0)
+    monkeypatch.setattr(runtime, "shutdown", Mock())
+    runtime.STOP.clear()
+    assert runtime.run(cfg, "run") == 0
+
+
 def test_shutdown_order(monkeypatch):
     calls = []
     app, chrome = Mock(), Mock()
@@ -255,15 +286,19 @@ def test_empty_custom_uid_mount_only_is_chowned(settings_factory, tmp_path, monk
     assert (workspace / "sentinel").read_text() == "preserve"
 
 
-def test_failed_external_launch_is_recorded_without_pg_storage(settings_factory, tmp_path, monkeypatch):
-    db = runtime.Database(settings_factory(postgres_password="synthetic"))
-    monkeypatch.setattr(db, "query", Mock(side_effect=runtime.RuntimeFailure("authentication refused")))
-    with pytest.raises(runtime.RuntimeFailure, match="authentication refused"):
-        db.open()
-    assert json.loads((tmp_path / "database-mode.json").read_text())["mode"] == "external"
-    assert not (tmp_path / "postgres").exists()
-    with pytest.raises(runtime.RuntimeFailure, match="external"):
-        runtime.Database(settings_factory()).open()
+def test_descriptor_written_atomically_and_consumed_by_backend(settings_factory, tmp_path):
+    cfg = settings_factory()
+    db = runtime.Database(cfg, port=6543)
+    db.password = "synthetic-test-password"
+    db.publish_descriptor()
+    path = tmp_path / "managed-postgres.json"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert set(json.loads(path.read_text())) == {"version", "host", "port", "user", "password", "database"}
+    assert cfg.get_database_connection()["port"] == 6543
+    db.password = "replacement-synthetic"
+    db.publish_descriptor()
+    assert cfg.get_database_connection()["password"] == "replacement-synthetic"
+    assert not list(tmp_path.glob("*.new-*"))
 
 
 def test_client_environment_uses_normalized_credentials_not_inherited_pg(monkeypatch):
@@ -278,7 +313,7 @@ def test_client_environment_uses_normalized_credentials_not_inherited_pg(monkeyp
 
 def test_dump_stdout_is_binary_and_diagnostics_stay_on_stderr(settings_factory, monkeypatch, capsys):
     db = runtime.Database(settings_factory())
-    db.url = "postgresql://REDACTED@localhost/test"
+    db.url = "postgresql://u:synthetic@127.0.0.1/test"
     command = Mock()
     monkeypatch.setattr(db, "command", command)
     db.dump("-")
@@ -314,6 +349,12 @@ def test_real_pg_retains_identity_authenticates_and_dumps_online_offline(setting
     db = runtime.Database(cfg, port=pg_enabled)
     try:
         db.open()
+        db.publish_descriptor()
+        import psycopg2
+        with psycopg2.connect(**cfg.get_database_connection()) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT current_user, inet_server_addr()")
+                assert cursor.fetchone() == ("ai_shuffle", "127.0.0.1")
         assert db.query("SHOW server_version_num").startswith("16")
         assert db.query("SELECT rolsuper FROM pg_roles WHERE rolname=current_user") == "f"
         assert db.query("SHOW listen_addresses") == "127.0.0.1"

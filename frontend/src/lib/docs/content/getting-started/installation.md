@@ -6,11 +6,15 @@ order: 2
 
 # Installation
 
+For an ordinary desktop installation, use the packaged desktop app. It includes
+its database and starts with a clean local store; no database credentials or
+import are needed. The requirements below are for building from source.
+
 ## Prerequisites
 
 - **Python 3.12+** — Backend runtime
 - **Node.js 22.12+** — Frontend build tooling
-- **PostgreSQL** — Application database (required). The provided `docker-compose.yml` runs one for you; for a manual install you'll need a reachable PostgreSQL instance.
+- **Managed runtime** — The desktop app and Docker image bundle and supervise their own private PostgreSQL. Do not install or configure an external database.
 - **GitHub CLI** — [Download](https://cli.github.com/) — Used for PR reviews, issue management, etc.
 - **Git** — For project management and worktree features
 
@@ -54,13 +58,18 @@ rm -rf app/static && cp -r frontend/build app/static
 > **Tip:** `python run_local.py --setup` performs the dependency install, build,
 > and copy steps for you in one command.
 
-### 5. Start the Server
+### 5. Start Through the Managed Runtime
+
+Use the desktop app, or build and start the managed Docker runtime:
 
 ```bash
-python -m app.main
+docker compose up -d --build
 ```
 
-The application starts on `http://localhost:8000` by default.
+Docker starts the application on `http://localhost:8000` by default. Source
+workers require a managed supervisor and its private `DATA_DIR/managed-postgres.json`
+descriptor; standalone `app.main` startup is not a database setup path. Never
+construct, edit or publish that descriptor yourself.
 
 ## First Launch
 
@@ -74,6 +83,10 @@ Local setup and trusted local-network use require no username, password, or Shuf
 
 ## Configuration
 
+The managed runtime generates and retains database credentials privately. There
+are no database connection or tuning environment options. Preserve the complete
+data directory and protected backups when updating.
+
 ### Environment Variables
 
 | Variable | Default | Description |
@@ -82,9 +95,6 @@ Local setup and trusted local-network use require no username, password, or Shuf
 | `PORT` | `8000` | Server port |
 | `SHUFFLE_LOCAL_ACCESS` | `true` | Allow owner access from direct trusted local/LAN requests on the local listener. Use `false` during an existing deployment's protected-ingress upgrade. |
 | `CORS_ORIGINS` | `http://localhost:8000,http://127.0.0.1:8000` | Comma-separated allowed CORS origins (use `*` for development only) |
-| `POSTGRES_PASSWORD` | _(required)_ | PostgreSQL password. No default — the server refuses to start without it. Collected by `python run_local.py --setup` on local installs. |
-| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_DB` | `localhost`¹ / `5432` / `ai_shuffle` / `ai_shuffle` | Remaining PostgreSQL connection pieces — the app assembles the connection URL itself. ¹`postgres` (the compose service) in Docker. |
-| `DATABASE_URL` | _(legacy)_ | Full connection string from installs that predate the `POSTGRES_*` split — auto-imported into the `POSTGRES_*` values at startup, so a URL-only `.env` keeps working without re-running setup; takes precedence when explicit pieces are also set. |
 
 ### Running in Production
 
@@ -92,17 +102,20 @@ For production deployments, consider:
 
 - Using Shuffle's managed remote connection, or directing a custom HTTPS reverse proxy to the protected loopback listener on port 8001 in the same network namespace. Never expose the local owner listener through a public proxy or tunnel.
 - Setting specific CORS origins instead of `*`
-- Using a process manager (systemd, PM2) for auto-restart
+- Using the desktop or Docker supervisor for ordered worker/database restarts
 - Reviewing security settings (rate limiting, audit logging)
 
 ## Updating
 
+Keep a non-managed installation on its existing release and preserve its data,
+configuration and backup until a separately tested migration is approved. This
+release does not automatically attach to or import an existing external database.
+For packaged desktop installs, update the package and restart through the desktop
+app. For a managed source/Docker install, rebuild through its supervisor:
+
 ```bash
 git pull
-pip install -r requirements.txt ./fluid
-cd frontend && npm install && npm run build && cd ..
-rm -rf app/static && cp -r frontend/build app/static
-python -m app.main
+docker compose up -d --build
 ```
 
 Database schema migrations run automatically on startup. Before upgrading a password-encrypted installation, stop all writers and back up both PostgreSQL and the persistent data directory. Adopt its existing encryption key using the legacy startup password or the private `python -m scripts.credential_keys adopt` prompt, then verify `python -m scripts.credential_keys status` reports ready. Browser sign-in is not an encryption-unlock step.
@@ -115,50 +128,23 @@ For an existing managed tunnel, start the new build with `SHUFFLE_LOCAL_ACCESS=f
 > the new backend no longer exposes. Symptoms of a skipped rebuild include
 > repeated `404`s in the browser network tab and a stale service worker (`sw.js`)
 > that keeps requesting cached assets such as `/offline.html`. The `git pull`
-> block above already rebuilds and re-copies `app/static`; do not omit those
-> steps.
+> Docker rebuild above includes the frontend build and deploy; do not skip it
+> when updating source. A source-only `--update` also rebuilds its assets.
 
-## Multi-install rollout (shared database)
+## Multiple Workers
 
-AI Shuffle supports running more than one install (for example a desktop
-**primary** plus an always-on **worker**) against a **single shared PostgreSQL
-database**. The installs coordinate entirely through that database — durable
-session state, turn leases, and pending interactions all live in shared tables.
-
-**Upgrade every install that shares a database together.** Mixed-version
-clusters are **not supported**. The V2 re-architecture replaced the old
-peer-to-peer HTTP relay with shared-table coordination and **deleted** the
-legacy relay endpoints (the cross-install `message` / `live` / `intake` routes
-and the `/sessions/cloud/*` offload routes) in one phase. An install still
-running pre-upgrade code alongside an upgraded peer will:
-
-- get `404`s when it polls relay endpoints the upgraded peer has removed, and
-  classify that peer as **offline** (a "device offline" toast, with sends to it
-  blocked); and
-- serve a stale frontend if its `app/static` was not rebuilt — for example a
-  worker still shipping a pre-upgrade SPA produced repeated `404`s on the deleted
-  `/sessions/cloud/*` endpoints plus a stale service worker requesting
-  `/offline.html`.
-
-Recommended rollout for a shared-database cluster:
-
-1. Stop **all** installs sharing the database.
-2. On **each** install: `git pull`, reinstall backend deps, **rebuild the
-   frontend and re-copy `app/static`** (see [Updating](#updating) above).
-3. Bring the installs back up. Database migrations run automatically on the
-   first process to start; the schema is forward-only, so bringing every install
-   to the same commit avoids one install writing state a peer cannot read.
-
-Do not upgrade one install and leave a peer on an older commit "for now" — the
-two will not interoperate across a V2 phase boundary. For the engineering
-rationale and phase history, see the internal
-[V2 Core Re-architecture](architecture.md) spec.
+Each worker has its own private managed PostgreSQL database. Join workers through
+**Settings → Devices**; never point multiple workers at a shared database.
+Historical shared-database installations need a coordinated, separately rehearsed
+migration. Preserve the original deployment and backup until recovery is verified;
+see the [network migration guide](https://github.com/HobbyCoders/ai-shuffle/blob/main/docs/network/migration.md).
 
 ### Refreshing a native checkout
 
 After `git pull`, run `python run_local.py --update` (or the platform launcher with
 `--update`). This installs the checked-in Fluid harness and locked Node packages,
 then rebuilds the frontend, browser MCP and AI tools. It does not reconfigure the
-database or restart an already running server. Restart the backend after it succeeds.
+database or restart an already running server. Restart through the managed desktop
+runtime after it succeeds; do not launch the worker directly.
 Native release archives already contain the frontend; replace the archive to update
 that frontend, then run `--update` to install/build its runtime tools.

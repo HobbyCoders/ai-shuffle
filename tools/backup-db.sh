@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Back up the selected database through the running app container's lifecycle CLI.
-# Default: embedded PostgreSQL; existing external configuration stays authoritative.
+# Back up the managed database through the running app container's lifecycle CLI.
+# Connection credentials stay inside the private runtime descriptor.
 # Usage: ./tools/backup-db.sh [output-file.dump]
-# For the legacy topology, set COMPOSE_FILE=docker-compose.yml:docker-compose.external.yml.
-# Produces a custom-format logical dump, NOT SQL for tools/restore-db.sh.
+# Requires the managed ai-shuffle container; no separate database service.
+# Produces a custom-format logical dump for the offline maintenance restore CLI.
 # See docs/RESTORE.md for an offline restore into an empty embedded database.
 set -euo pipefail
 umask 077

@@ -61,7 +61,7 @@ auth              → authentication state, admin status
 
 ### Technology Stack
 - **FastAPI** — Async Python web framework
-- **PostgreSQL** — Relational database via psycopg2
+- **PostgreSQL** — Private relational database bundled and supervised by the desktop/Docker runtime, accessed via psycopg2; no external connection setup
 - **Claude Agent SDK** — Anthropic's Python SDK for AI agents
 - **APScheduler** — Cron and interval scheduling for automations
 - **WebSocket** — Real-time bidirectional communication

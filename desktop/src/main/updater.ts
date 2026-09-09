@@ -29,12 +29,14 @@ export class Updater {
 	private timer: NodeJS.Timeout | null = null;
 	private readonly enabled: boolean;
 
-	constructor() {
+	constructor(updatesAllowed = true) {
 		// Development runs have no update feed; unsigned macOS builds cannot
 		// replace themselves either, so treat that as unsupported rather than
 		// as a repeating error.
-		this.enabled = app.isPackaged && !process.env.SHUFFLE_DESKTOP_NO_UPDATES;
+		this.enabled = updatesAllowed && app.isPackaged && !process.env.SHUFFLE_DESKTOP_NO_UPDATES;
 		if (!this.enabled) {
+			autoUpdater.autoDownload = false;
+			autoUpdater.autoInstallOnAppQuit = false;
 			this.state = { ...this.state, phase: 'unsupported' };
 			return;
 		}

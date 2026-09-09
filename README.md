@@ -16,7 +16,7 @@ AI Shuffle puts AI agents in a browser. Instead of a terminal, you get a full GU
 
 **Three ways to open it:** any browser, the [Android app](android/README.md), or
 the [desktop app](desktop/README.md) for Windows, macOS and Linux. The desktop
-app runs the worker on your computer (bring your own PostgreSQL) and shows the
+app runs the worker and its private bundled PostgreSQL on your computer and shows the
 same web UI in a native window; the Android app connects to your workers.
 
 ---
@@ -103,39 +103,25 @@ or desktop app. See [Android installation and builds](android/README.md).
 
 ### Local (Desktop)
 
-```bash
-# Clone or download a release package
-git clone https://github.com/HobbyCoders/ai-shuffle.git
-cd ai-shuffle
+Install the [desktop app](desktop/README.md) for your operating system. It bundles
+PostgreSQL and supervises the worker; no database setup, credentials or import is
+needed for a fresh installation. Choose your workspace and connect your development
+tools or model providers on first launch. No local username, password, or Shuffle
+account is required.
 
-# First-time setup (creates venv, installs deps, builds frontend)
-python run_local.py --setup
-
-# Start the server
-python run_local.py
-# Windows: run_local.bat
-# macOS/Linux: ./run_local.sh
-```
-
-Open `http://localhost:8000`. Choose your workspace and connect your development tools or model providers on first launch. No local username, password, or Shuffle account is required.
-
-**Options:** `--port 3000` · `--no-browser` · `--check` (verify prerequisites)
+For source development, `python run_local.py --setup` installs dependencies and
+builds assets; it does not create a standalone database. Worker startup requires
+the managed supervisor and its private runtime descriptor. Use the desktop
+runtime or the Docker source build below rather than launching `app.main` directly.
 
 ### Docker
 
-**Upgrading an existing two-container Compose install?** Before upgrading, select
-both files below and keep the **same Compose project name** (including any old
-`-p` / `COMPOSE_PROJECT_NAME` setting):
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.external.yml up -d --build
-```
-
-That compatibility overlay retains the `postgres` service, `ai-shuffle-postgres`
-container and `postgres-data` volume. Continue selecting it for future operations.
-Do **not** use `down -v`, `--remove-orphans`, rename volumes, or remove database
-configuration as a shortcut to embedded mode. Moving databases requires an
-explicit, tested logical restore; the old volume is not automatically imported.
+**Existing non-managed database installation?** Keep it on its current release
+with its original data, configuration and protected backup. This release supports
+only embedded PostgreSQL; it does not connect to or automatically import an old
+database. Do not run it over production as a migration shortcut. Never remove
+volumes, use `down -v` or `--remove-orphans`, or replace the retained production
+configuration. See [backup and recovery](docs/RESTORE.md) for isolation and recovery.
 
 For a **fresh installation**, Docker Compose 2.24 or newer needs no `.env` or
 database password:
@@ -147,7 +133,7 @@ docker compose up -d --build
 This starts **one container**, including managed PostgreSQL **16**. Open
 `http://localhost:8000` and choose your workspace and model providers. No local
 username, password, or Shuffle account is required. An optional `.env` can set
-other options; `.env.example` does not activate placeholder database credentials.
+other options; `.env.example` contains no database connection settings.
 
 Keep the existing `ai-shuffle-data:/data` mount: it contains the database at
 `/data/postgres/data`, private lifecycle files in `/data/postgres`, app credential
@@ -157,25 +143,18 @@ Compose allows **90 seconds** for ordered shutdown; use `docker stop --time 90
 ai-shuffle` (or longer) with plain Docker, and set the equivalent stop timeout in
 Unraid. A ten-second default stop can interrupt database shutdown.
 
-`DATABASE_MODE=auto` uses embedded PostgreSQL only for a fresh or recognized
-embedded data directory with no external database configuration. An existing
-`DATABASE_URL` or explicit `POSTGRES_*` settings selects external mode; invalid or
-unreachable external configuration fails instead of creating an empty local DB.
-Put component settings in the optional `.env` for Compose, or pass them with
-`docker run -e` for a separately managed server. The legacy URL keeps precedence.
-Explicit embedded mode rejects conflicting external settings. Ambiguous retained
-state, missing lifecycle credentials or another PostgreSQL major version fails
-closed; image replacement is **not** a PostgreSQL major upgrade or downgrade.
-See [backup and recovery](docs/RESTORE.md) before changing storage or DB mode.
+The runtime manages database credentials and writes the private
+`DATA_DIR/managed-postgres.json` descriptor before starting the worker. Database
+connection and tuning environment settings are not supported. Do not edit or
+publish the descriptor. Ambiguous retained state, missing lifecycle credentials
+or another PostgreSQL major version fails closed; image replacement is **not**
+a PostgreSQL major upgrade or downgrade. See [backup and recovery](docs/RESTORE.md)
+before changing storage.
 
 **Key environment variables:**
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATABASE_MODE` | `auto` | Docker: `auto`, `embedded`, or `external`; native/local installs still need their own PostgreSQL |
-| `POSTGRES_PASSWORD` | unset | External DB only; required for the legacy Compose `postgres` service, never required for fresh embedded installs |
-| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_DB` | `postgres` / `5432` / `ai_shuffle` / `ai_shuffle` (external) | External connection pieces; leave **all** unset for embedded mode |
-| `DATABASE_URL` | unset | Existing full connection string remains authoritative over components; supplied from `.env` or the Compose shell environment |
 | `ADMIN_PASSWORD` | — | Upgrade only: unlock legacy ciphertext for its first verified key adoption, then remove. Never needed on a fresh installation |
 | `SHUFFLE_LOCAL_ACCESS` | `true` | Allow owner access on the local/LAN listener. Set `false` during a staged upgrade until managed tunnel ingress is verified |
 | `PUID` / `PGID` | `99` / `100` (Compose) | Non-root runtime user/group for persistent volume permissions; retain existing custom mappings |

@@ -8,17 +8,16 @@
 # Usage:
 #   scripts/deploy.sh                 # pull latest image + up -d + wait for ready
 #   scripts/deploy.sh --build         # build locally instead of pulling
-#   scripts/deploy.sh --with-backup   # also start the opt-in backup sidecar
 #   scripts/deploy.sh --port 8000     # port to poll for readiness (default 8000)
 #   scripts/deploy.sh --timeout 120   # readiness timeout seconds (default 90)
 #   scripts/deploy.sh --dry-run       # print the commands, run nothing
 #
-# Requires POSTGRES_PASSWORD in .env (compose fails fast otherwise).
+# The managed container owns its database; no database environment setup.
+# Schedule backups through docker compose exec; see docs/RESTORE.md.
 #
 set -euo pipefail
 
 MODE="pull"          # pull | build
-WITH_BACKUP=0
 PORT=8000
 TIMEOUT=90
 DRY_RUN=0
@@ -27,7 +26,6 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --build)        MODE="build" ;;
     --pull)         MODE="pull" ;;
-    --with-backup)  WITH_BACKUP=1 ;;
     --port)         PORT="$2"; shift ;;
     --timeout)      TIMEOUT="$2"; shift ;;
     --dry-run)      DRY_RUN=1 ;;
@@ -47,11 +45,8 @@ else
   exit 3
 fi
 
-# Assemble the -f file list. The backup sidecar lives in a separate file.
+# Managed-only topology. Backups run inside this same container.
 FILES=(-f docker-compose.yml)
-if [ "$WITH_BACKUP" -eq 1 ]; then
-  FILES+=(-f docker-compose.backup.yml)
-fi
 
 run() {
   if [ "$DRY_RUN" -eq 1 ]; then

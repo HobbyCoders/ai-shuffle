@@ -1,6 +1,6 @@
 # Backup and recovery
 
-## One-container backups (default)
+## Managed one-container backups
 
 The app image manages PostgreSQL 16 privately inside the container. Do not expose
 its port or copy a running `/data/postgres/data` directory as a database backup.
@@ -15,8 +15,9 @@ The helper runs `docker compose exec -T ai-shuffle python
 streamed to stdout; diagnostics use stderr. It keeps the host output private
 (mode 0600), preserves a failed command's status, and replaces the requested file
 only after a successful nonempty dump. It neither prints nor retrieves a database
-URL/password into the host shell. The selected external DB also works through
-this command; it is never silently substituted with an embedded DB.
+URL/password into the host shell. The runtime reads its validated private
+`DATA_DIR/managed-postgres.json` descriptor; database connection environment
+settings are not supported.
 
 For the DB **and** app files, run the existing backup script inside the app:
 
@@ -48,38 +49,36 @@ starts only the retained database long enough to dump it, not the app, Chromium,
 connectors or schedulers. It cannot dump a fresh/uninitialized database. Keep the
 matching app files and private keys as well, and resume the app only when ready.
 
-## Legacy external PostgreSQL and optional sidecar
+## Schedule managed backups on the host
 
-**Before upgrading an existing two-container Compose install**, keep the original
-Compose project name (including `-p` / `COMPOSE_PROJECT_NAME`) and select both files:
+There is no separate database or backup-sidecar Compose service. Schedule the
+same managed in-container script with your host scheduler instead. For example,
+run at 03:30 daily from the deployment directory (substitute its absolute path):
 
-```sh
-docker compose -f docker-compose.yml -f docker-compose.external.yml up -d --build
+```cron
+30 3 * * * cd /path/to/ai-shuffle && docker compose exec -T ai-shuffle bash /app/scripts/backup.sh
 ```
 
-Continue using both files for later operations, or set
-`COMPOSE_FILE=docker-compose.yml:docker-compose.external.yml` on Linux. The overlay
-preserves the `postgres` service, `ai-shuffle-postgres` container and `postgres-data`
-volume. Its existing `POSTGRES_PASSWORD` is still required. Keep a configured
-`DATABASE_URL` unchanged: it remains authoritative over the components. Never use
-`down -v`, `--remove-orphans`, a new project name or renamed volumes to migrate.
-There is no automatic import from `postgres-data` into the embedded directory.
-A separately hosted PostgreSQL server can use the default app-only Compose file
-with external settings in `.env`; it does not need this legacy-service overlay.
+Set `BACKUP_DIR`, `BACKUP_RETENTION_DAYS`, `WORKSPACE_DIR`, `DATA_DIR` and
+`FLUID_HOME` as needed for the app's existing paths. For a scheduled override,
+pass only these non-database options with `docker compose exec -e NAME=value`.
+Move copies to protected storage outside the app's volume and alert on failed
+jobs. A backup scheduler must not parse, print or copy database credentials.
 
-The **external-only** sidecar targets the legacy `postgres` service:
+## Preserve an existing non-managed installation
 
-```sh
-docker compose -f docker-compose.yml -f docker-compose.external.yml -f docker-compose.backup.yml up -d --build
-```
+This release does not support connecting to a separately hosted database or
+starting the old two-container database service. Do not upgrade an existing
+non-managed deployment in place. Keep its previous release, original Compose
+configuration/project name, database volumes, private keys and protected backups
+unchanged while a separate migration is planned and rehearsed.
 
-For one backup, replace `up -d --build` with `run --rm backup bash /scripts/backup.sh`.
-Add `--dry-run` after the script to inspect its work without writing files or
-starting the scheduler. Explicit commands bypass the cron entrypoint. Do **not**
-attach this sidecar to the default embedded deployment: it cannot reach its private
-socket. If the app's URL/components select a different external server/database,
-use the in-app backup above or configure a separate job with matching `PG*` values;
-the unmodified sidecar would back up the legacy service, not that other database.
+Never use `down -v`, `--remove-orphans`, renamed volumes, edited lifecycle markers
+or deleted credentials to make the new runtime start. Nothing automatically
+imports an old database into the managed directory. Take any final source backup
+using the old release's own maintenance procedure before retirement; this release
+cannot connect to that database to back it up. For a clean test installation, use
+a separate new data directory and **do not import production data or settings**.
 
 ## What must be retained
 
@@ -94,8 +93,10 @@ Directories that do not exist are skipped. Symlinks are not followed. Archives
 are private (umask 077); lifecycle files retain their original modes. Keep the
 whole live `ai-shuffle-data:/data` volume for ordinary container recreation. The
 logical backup plus app-data tar is a recovery set, **not** a physical PostgreSQL
-backup. Lifecycle records/passwords in `postgres/` and `database-mode.json` are
-sensitive retained state, not a way to re-create a missing physical cluster.
+backup. Lifecycle records/passwords in `postgres/`, `managed-postgres.json` and
+any retained `database-mode.json` are sensitive runtime state, not a way to
+re-create a missing physical cluster. Never publish the descriptor or archive it
+as a standalone configuration file.
 
 This does not archive project source repositories, custom stores outside these
 roots, legacy Claude credentials, GitHub/browser login volumes, or `.env`. Back up
@@ -122,7 +123,7 @@ its original encryption password once. Protect all archives as sensitive data.
    ```sh
    docker volume create ai-shuffle-recovery-data
    docker run --rm --network none --stop-timeout 90 \
-     -e DATABASE_MODE=embedded -e PUID=99 -e PGID=100 \
+     -e PUID=99 -e PGID=100 \
      -v ai-shuffle-recovery-data:/data -v "$RECOVERY_FILES:/restore:ro" \
      "$IMAGE" restore --file /restore/ai-shuffle-db-TIMESTAMP.dump
    ```
@@ -130,8 +131,7 @@ its original encryption password once. Protect all archives as sensitive data.
 2. The maintenance CLI verifies an **empty embedded destination**, performs
    `pg_restore --exit-on-error --single-transaction --no-owner --no-privileges`, and
    shuts PostgreSQL down without starting application services. It rejects a live
-   supervisor, external mode, conflicting DB settings, nonempty targets and unsafe
-   retained state. A failed restore leaves an incomplete-state fence: do not delete
+   supervisor, nonempty targets and unsafe retained state. A failed restore leaves an incomplete-state fence: do not delete
    it to force startup. Inspect the error and retry recovery on a separate fresh
    disposable volume, keeping failed/source data intact.
 3. Restore the **logical DB first**, before app-data files make the target look
@@ -146,7 +146,8 @@ its original encryption password once. Protect all archives as sensitive data.
      -v ai-shuffle-recovery-data:/data -v "$RECOVERY_FILES:/restore:ro" \
      "$IMAGE" -xzf /restore/ai-shuffle-data-TIMESTAMP.tar.gz -C /data \
      --numeric-owner --exclude=./postgres --exclude=postgres \
-     --exclude=./database-mode.json --exclude=database-mode.json
+     --exclude=./database-mode.json --exclude=database-mode.json \
+     --exclude=./managed-postgres.json --exclude=managed-postgres.json
    ```
 
    Extract media into the recovery workspace and settings into its active Fluid
@@ -155,7 +156,8 @@ its original encryption password once. Protect all archives as sensitive data.
    also bypasses UID mapping: resolving the archived `appuser` name would use the
    image's UID 1000 instead of the backup's UID (99 by default). Start the recovered
    app with the original `PUID`/`PGID`. Restore matching app keys/identity before any normal app
-   startup; do not overwrite the new `postgres/` or `database-mode.json` afterward.
+   startup; do not overwrite the new `postgres/`, `managed-postgres.json` or
+   `database-mode.json` afterward.
 4. Attach only these recovery volumes to an **isolated** disposable app. Review
    connector/automation/network configuration before letting it start; normal boot
    runs migrations and application services, unlike maintenance restore. Do not
@@ -164,20 +166,18 @@ its original encryption password once. Protect all archives as sensitive data.
    without calling models. Switch the real installation only after validating
    recovery and planning identity/network handling; see [network migration](network/migration.md).
 
-## External recovery and version compatibility
+## Historical backups and version compatibility
 
-For an external destination, provision and verify a separate empty DB yourself;
-the embedded maintenance restore intentionally refuses external targets. With
-matching PostgreSQL 16 clients, use
-`pg_restore --exit-on-error --single-transaction --no-owner --no-privileges --dbname=YOUR_EMPTY_DB ai-shuffle-db-TIMESTAMP.dump`.
-Supply connection details via protected standard `PG*` environment variables, not
-command-line passwords, then restore matching app keys/files as above. Do not
-copy a source embedded lifecycle record into an external installation.
+`tools/backup-db.sh` emits **custom format**, just like the full backup script.
+Use the managed offline maintenance restore above on an empty disposable target,
+never an in-place restore into a running installation. `tools/restore-db.sh` now
+refuses its former destructive SQL operation without changing data.
 
-`tools/backup-db.sh` now emits **custom format**, just like the full backup script.
-Never feed these dumps to the legacy `tools/restore-db.sh`, which accepts only
-historical plain SQL and has destructive external-DB restore semantics. Keep old
-SQL backups unchanged and follow their explicit external restore procedure.
+Keep historical plain SQL backups and their original recovery tooling unchanged.
+They need a separately planned and tested conversion to a compatible logical
+archive; do not feed SQL to the managed custom-format restore command. A restored
+backup also needs its matching private app keys and identity files. An external
+database is not a supported runtime destination for this release.
 
 The runtime requires PostgreSQL **16** in its fixed `postgres/data` path. A missing,
 malformed or different `PG_VERSION`, missing credentials or partial cluster is an

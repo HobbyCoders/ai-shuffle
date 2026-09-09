@@ -531,7 +531,7 @@ def _get_session_store():
     except Exception:
         logger.warning(
             "PgSessionStore construction failed — proceeding without session_store. "
-            "Check the POSTGRES_* settings and Postgres connectivity.",
+            "Check the managed PostgreSQL supervisor and its private descriptor.",
             exc_info=True,
         )
         _session_store_singleton = None

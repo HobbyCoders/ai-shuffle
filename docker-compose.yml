@@ -1,6 +1,6 @@
-# Fresh installs: one container, including managed PostgreSQL 16.
-# Existing two-container installs: also select docker-compose.external.yml
-# BEFORE upgrading; keep the same Compose project name and all existing volumes.
+# One container, including private managed PostgreSQL 16.
+# Existing non-managed deployments must stay on their previous release until
+# a separately tested migration is approved. Preserve all existing volumes.
 # Requires Docker Compose >= 2.24 for the optional env_file.
 services:
   ai-shuffle:
@@ -21,14 +21,7 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=8000
-      # Auto uses embedded PostgreSQL only when no external DB is configured.
-      # A legacy DATABASE_URL remains authoritative, never an embedded fallback.
-      # Optional POSTGRES_* components are loaded from .env below; do not inject
-      # default components here, because explicit fields select external mode.
-      # Pass through only if set; empty defaults would shadow a worker-specific
-      # AI_SHUFFLE_ENV_FILE and could hide its existing connection settings.
-      - DATABASE_MODE
-      - DATABASE_URL
+      # The supervisor supplies the private managed database; no DB env settings.
       - SERVICE_NAME=${SERVICE_NAME:-ai-shuffle}
       # Every worker owns its own database and joins other workers as a
       # network device (Settings > Devices). INSTANCE_ID is only the legacy

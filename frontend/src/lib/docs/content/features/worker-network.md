@@ -31,8 +31,9 @@ On first run a worker offers three choices:
   workers. An online worker shows the new device with its fingerprint and
   approves it. If none is online, enter the recovery key.
 
-Existing installs join a network of one automatically on upgrade; nothing
-changes until you invite another worker.
+Existing managed embedded installations join a network of one on upgrade;
+external/shared-database installations are not automatically converted. Preserve
+those deployments and backups until an explicit migration is approved.
 
 ## What syncs
 
@@ -74,8 +75,9 @@ remaining members and the removed device's later writes are rejected. Any
 secret it had already received should be treated as compromised; rotate
 provider keys from Settings > Providers.
 
-## Migrating a shared database
+## Existing shared-database installations
 
-Installs that shared one PostgreSQL become separate workers in one network.
-See `docs/network/migration.md` in the repository for the steps and the
-`network_migrate` tool that moves an install's sessions into its own database.
+Each worker uses its own private managed PostgreSQL database. New installations
+do not attach to or import an existing shared database. Keep the existing
+deployment and its backups intact until a separately tested migration is
+approved. See `docs/network/migration.md` for preservation requirements.

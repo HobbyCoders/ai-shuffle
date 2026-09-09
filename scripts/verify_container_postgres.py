@@ -315,39 +315,35 @@ class Check:
         self.exited(blocked, success=False)
         self.passed("legacy data is protected; invalid archives leave no cluster; failed restore transactions fence normal startup")
 
-    def external_compatibility(self):
-        network = self.prefix + "-network"
-        self.docker("network", "create", "--internal", network)
-        self.networks.append(network)
-        external = self.prefix + "-external"
-        self.containers.append(external)
-        password = uuid.uuid4().hex
-        self.docker("run", "-d", "--name", external, "--network", network,
-                    "--network-alias", "legacy-postgres", "-e", "POSTGRES_USER=legacy_worker",
-                    "-e", "POSTGRES_DB=legacy_worker", "-e", "POSTGRES_PASSWORD=" + password,
-                    "postgres:16-alpine")
-        deadline = time.monotonic() + 60
-        while self.docker("exec", external, "pg_isready", "-U", "legacy_worker", check=False).returncode:
-            assert self.state(external)["Running"], "External fixture exited"
-            if time.monotonic() >= deadline:
-                raise TimeoutError("External PostgreSQL fixture did not become ready")
-            time.sleep(1)
+    def removed_environment_regression(self):
         volume = self.volume()
-        # Exercise the same env-file selection as an existing install, not only -e.
-        env_text = "DATABASE_URL=postgresql://legacy_worker:" + password + "@legacy-postgres:5432/legacy_worker\n"
-        self.inspect_volume(volume, "from pathlib import Path; import os,sys; p=Path('/data/external.env'); p.write_bytes(sys.stdin.buffer.read()); p.chmod(0o600); os.chown(p,99,100); os.chown('/data',99,100)", input=env_text.encode())
-        app = self.launch(volume, network=network, env={"AI_SHUFFLE_ENV_FILE": "/data/external.env"})
+        app = self.launch(volume, env={
+            "DATABASE_URL": "postgresql://unused:synthetic@external.invalid/production",
+            "DATABASE_MODE": "external", "POSTGRES_HOST": "external.invalid",
+            "POSTGRES_PORT": "invalid", "POSTGRES_PASSWORD": "synthetic-ignored",
+            "PGHOSTADDR": "203.0.113.1", "PGSERVICE": "must-not-be-used",
+        })
         self.ready(app)
-        assert self.sql(app, "SELECT current_user;") == "legacy_worker"
-        self.inspect_volume(volume, "from pathlib import Path; assert not Path('/data/postgres').exists()")
+        assert self.sql(app, "SELECT current_user;") == "ai_shuffle"
+        assert self.sql(app, "SELECT inet_server_addr();") == "127.0.0.1"
+        probe = (
+            "from app.core.config import settings; "
+            "c=settings.get_database_connection(); "
+            "assert c['host']==c['hostaddr']=='127.0.0.1'; "
+            "assert c['user']=='ai_shuffle'; "
+            "assert not any(k.startswith(('database_','postgres_')) for k in type(settings).model_fields)"
+        )
+        self.docker("exec", app, "python", "-c", probe)
         self.stop(app)
-        assert self.state(external)["Running"], "App stopped an externally managed database"
-        missing_config = self.launch(volume)
-        self.exited(missing_config, success=False)
-        self.inspect_volume(volume, "from pathlib import Path; assert not Path('/data/postgres').exists()")
-        broken = self.launch(self.volume(), env={"DATABASE_URL": "postgresql://REDACTED@127.0.0.1:1/absent"})
-        self.exited(broken, success=False, timeout=180)
-        self.passed("external env-file database survives app shutdown; missing/unreachable external configuration never falls back")
+        self.inspect_volume(volume, "from pathlib import Path; assert not Path('/data/managed-postgres.json').exists()")
+        retained = self.volume()
+        self.inspect_volume(retained, "from pathlib import Path; import os; "
+            "p=Path('/data/database-mode.json'); p.write_text('{\"version\":1,\"mode\":\"external\"}'); "
+            "p.chmod(0o600); os.chown(p,99,100); os.chown('/data',99,100)")
+        blocked = self.launch(retained)
+        self.exited(blocked, success=False)
+        self.inspect_volume(retained, "from pathlib import Path; assert not Path('/data/postgres').exists()")
+        self.passed("inherited database environment is ignored; descriptor selects embedded DB; legacy external state is preserved and refused")
 
     def cleanup(self):
         for name in reversed(self.containers):
@@ -357,15 +353,14 @@ class Check:
             (self.artifacts / (name + ".log")).write_bytes(logs)
             state = self.docker("inspect", "--format", "{{json .State}}", name, check=False)
             (self.artifacts / (name + ".state.json")).write_bytes(state.stdout)
-            if name != self.prefix + "-external":
-                metadata = self.docker("run", "--rm", "--network", "none", "--volumes-from", name,
-                    "--entrypoint", "python", self.image, "-c",
-                    "from pathlib import Path; import json; "
-                    "paths=[Path('/data'),Path('/workspace')]+list(Path('/data').glob('*'))[:12]; "
-                    "print(json.dumps([{'path':str(p),'uid':p.lstat().st_uid,'gid':p.lstat().st_gid,"
-                    "'mode':oct(p.lstat().st_mode & 0o777),'bytes':p.lstat().st_size} "
-                    "for p in paths if p.exists()]))", check=False)
-                (self.artifacts / (name + ".storage.json")).write_bytes(metadata.stdout)
+            metadata = self.docker("run", "--rm", "--network", "none", "--volumes-from", name,
+                "--entrypoint", "python", self.image, "-c",
+                "from pathlib import Path; import json; "
+                "paths=[Path('/data'),Path('/workspace')]+list(Path('/data').glob('*'))[:12]; "
+                "print(json.dumps([{'path':str(p),'uid':p.lstat().st_uid,'gid':p.lstat().st_gid,"
+                "'mode':oct(p.lstat().st_mode & 0o777),'bytes':p.lstat().st_size} "
+                "for p in paths if p.exists()]))", check=False)
+            (self.artifacts / (name + ".storage.json")).write_bytes(metadata.stdout)
             self.docker("rm", "--force", "--volumes", name, check=False)
         for name in self.volumes:
             self.docker("volume", "rm", name, check=False)
@@ -382,12 +377,9 @@ def main():
     check = Check(args.image, args.artifacts)
     try:
         check.docker("image", "inspect", args.image)
-        # Resolve the isolated external fixture before putting containers on an
-        # internal network; never grant the app outbound access to real services.
-        check.docker("pull", "postgres:16-alpine", timeout=180)
         check.fresh_persistence_and_restore()
         check.identity_and_failure_safety()
-        check.external_compatibility()
+        check.removed_environment_regression()
     finally:
         check.cleanup()
 

@@ -1,0 +1,46 @@
+# Standalone: electron-builder concatenates inherited protocol arrays.
+# Never extend the stable config or register its aishuffle protocol.
+extends: null
+appId: com.hobbycoders.aishuffle.preview
+productName: AI Shuffle Preview
+copyright: Copyright © 2026 HobbyCoders
+artifactName: AI-Shuffle-Preview-${version}-${os}-${arch}.${ext}
+directories:
+  output: release-preview
+  buildResources: build
+files:
+  - dist/**/*
+  - src/pages/**/*
+  - package.json
+  - build/icon.png
+extraResources:
+  - from: worker
+    to: worker
+  - from: postgres
+    to: postgres
+extraMetadata:
+  name: ai-shuffle-preview
+  productName: AI Shuffle Preview
+  shuffleDesktopChannel: preview
+asar: true
+compression: normal
+publish: null
+protocols:
+  - name: AI Shuffle Preview
+    schemes:
+      - aishuffle-preview
+win:
+  executableName: AI Shuffle Preview
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch: [x64]
+nsis:
+  buildUniversalInstaller: false
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  runAfterFinish: false
+  shortcutName: AI Shuffle Preview
+  uninstallDisplayName: AI Shuffle Preview
+  deleteAppDataOnUninstall: false

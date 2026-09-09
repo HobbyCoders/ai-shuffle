@@ -35,7 +35,7 @@ listener. Public reverse proxies must use the authenticated remote listener.
 
 The application identifies ingress using the actual server socket, with proxy
 header rewriting disabled. Headers cannot grant local authority. Use the normal
-launcher (`python -m app.main` underneath) so this boundary is installed;
+desktop or Docker managed launcher so this boundary is installed;
 launching the bare ASGI app with a custom server does not grant local access.
 
 ## Upgrading an existing installation

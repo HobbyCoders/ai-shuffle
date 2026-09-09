@@ -4,8 +4,8 @@
  *
  * The preload runs for every document in the main window. The worker's web
  * UI gets the window, theme, notification, update and worker-status surface.
- * The database setup and the raw worker log are exposed only to the bundled
- * setup/status page (file://) as `window.shuffleDesktopWorker`.
+ * The raw worker log is exposed only to the bundled status page (file://)
+ * as `window.shuffleDesktopWorker`. No database configuration is exposed.
  */
 import { contextBridge, ipcRenderer } from 'electron';
 
@@ -61,7 +61,7 @@ const bridge = {
 		onState: (listener: Listener<unknown>) => subscribe('desktop:worker-state', listener),
 		restart: () => ipcRenderer.invoke('desktop:worker-restart'),
 		openLogs: () => void ipcRenderer.invoke('desktop:worker-open-logs'),
-		openDatabaseSettings: () => void ipcRenderer.invoke('desktop:worker-open-setup')
+		openStatus: () => void ipcRenderer.invoke('desktop:worker-open-status')
 	},
 
 	updates: {
@@ -76,12 +76,6 @@ contextBridge.exposeInMainWorld('shuffleDesktop', bridge);
 
 if (window.location.protocol === 'file:') {
 	contextBridge.exposeInMainWorld('shuffleDesktopWorker', {
-		getSettings: () => ipcRenderer.invoke('desktop:settings-get'),
-		checkDatabase: (config: unknown, action: 'test' | 'create') => ipcRenderer.invoke('desktop:db-check', config, action),
-		saveAndStart: (config: unknown) => ipcRenderer.invoke('desktop:setup-save', config),
-		useBundled: () => ipcRenderer.invoke('desktop:setup-use-bundled'),
-		cancelSetup: () => void ipcRenderer.invoke('desktop:setup-cancel'),
-		openSetup: () => void ipcRenderer.invoke('desktop:worker-open-setup'),
 		getState: () => ipcRenderer.invoke('desktop:worker-state'),
 		onState: (listener: Listener<unknown>) => subscribe('desktop:worker-state', listener),
 		onLog: (listener: Listener<string>) => subscribe('desktop:worker-log', listener),

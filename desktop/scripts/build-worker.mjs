@@ -29,11 +29,11 @@
  * --stub writes only a manifest so electron-builder can package a shell without
  * a runtime (used by pull-request CI on platforms that do not build one).
  * --skip-postgres leaves PostgreSQL out (a development build that uses
- * SHUFFLE_DESKTOP_POSTGRES_DIR or an external server); the manifest says so.
+ * SHUFFLE_DESKTOP_POSTGRES_DIR); the manifest says so.
  */
 import { createHash } from 'node:crypto';
 import { createWriteStream, existsSync } from 'node:fs';
-import { cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
@@ -290,19 +290,26 @@ async function installPostgres() {
 const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 async function buildNodePackage(name) {
-	const src = path.join(repoDir, name);
+	const scratch = await mkdtemp(path.join(os.tmpdir(), 'shuffle-package-'));
+	const src = path.join(scratch, name);
 	const dest = path.join(outDir, 'server', name);
 	const env = { ...process.env, PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1', PUPPETEER_SKIP_DOWNLOAD: '1' };
-	run(npmCmd, ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: src, env, shell: process.platform === 'win32' });
-	run(npmCmd, ['run', 'build'], { cwd: src, env, shell: process.platform === 'win32' });
-	run(npmCmd, ['prune', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: src, env, shell: process.platform === 'win32' });
-	await rm(dest, { recursive: true, force: true });
-	await mkdir(dest, { recursive: true });
-	for (const item of ['dist', 'node_modules', 'package.json']) {
-		await cp(path.join(src, item), path.join(dest, item), { recursive: true });
+	try {
+		await cp(path.join(repoDir, name), src, {
+			recursive: true,
+			filter: (file) => !path.relative(path.join(repoDir, name), file).split(path.sep).some((part) => ['node_modules', 'dist', '.git', '.env'].includes(part))
+		});
+		run(npmCmd, ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: src, env, shell: process.platform === 'win32' });
+		run(npmCmd, ['run', 'build'], { cwd: src, env, shell: process.platform === 'win32' });
+		run(npmCmd, ['prune', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: src, env, shell: process.platform === 'win32' });
+		await rm(dest, { recursive: true, force: true });
+		await mkdir(dest, { recursive: true });
+		for (const item of ['dist', 'node_modules', 'package.json']) {
+			await cp(path.join(src, item), path.join(dest, item), { recursive: true });
+		}
+	} finally {
+		await rm(scratch, { recursive: true, force: true });
 	}
-	// The dev dependencies are needed again for local work; restore them quietly.
-	spawnSync(npmCmd, ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: src, env, stdio: 'ignore', shell: process.platform === 'win32' });
 }
 
 async function copyServer() {
@@ -319,9 +326,7 @@ async function copyServer() {
 		}
 	});
 	if (!existsSync(path.join(frontendBuild, 'index.html'))) {
-		log('frontend build missing; building it');
-		run(npmCmd, ['ci', '--no-audit', '--no-fund'], { cwd: path.join(repoDir, 'frontend'), shell: process.platform === 'win32' });
-		run(npmCmd, ['run', 'build'], { cwd: path.join(repoDir, 'frontend'), shell: process.platform === 'win32' });
+		throw new Error('Frontend build missing. Build the frontend separately and pass --frontend-build; runtime assembly never installs into the source checkout.');
 	}
 	await cp(frontendBuild, path.join(dest, 'app', 'static'), { recursive: true });
 	for (const file of ['requirements.txt', 'requirements-native.txt', 'LICENSE']) {

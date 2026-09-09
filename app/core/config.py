@@ -14,7 +14,7 @@ import tempfile
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar, Optional
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 
@@ -60,10 +60,9 @@ def _get_default_workspace_dir() -> Path:
 def _parse_legacy_database_url(db_url: str) -> dict:
     """Decompose a PostgreSQL URL into its connection pieces.
 
-    Canonical implementation lives here because Settings must parse a legacy
-    DATABASE_URL at load time — app.db.base imports this module for
-    ``settings``, so config cannot import back (circular import). app.db.
-    base.parse_database_url delegates here.
+    Pure compatibility helper for explicit maintenance/test URLs. It never
+    reads the environment and is not a runtime connection selector.
+    app.db.base.parse_database_url delegates here.
 
     urlparse splits userinfo at the LAST ``@`` and credentials are unquoted,
     so both percent-encoded passwords and literal-``@`` passwords work.
@@ -89,20 +88,16 @@ def normalize_database_url(db_url: str) -> str:
     A password containing a reserved character — ``@`` above all — makes the
     same connection string mean two different things depending on who reads it.
     Python's ``urlsplit`` splits userinfo at the LAST ``@``, which is what
-    :func:`_parse_legacy_database_url` (and therefore every psycopg2 connection
-    the app opens from kwargs) relies on. **libpq splits at the FIRST ``@``**,
-    so anything that hands the raw string to a client — a subprocess reading
-    ``DATABASE_URL`` from the environment, a psql invocation, a tool that
-    connects by DSN — resolves the wrong host. The observed failure was a
+    :func:`_parse_legacy_database_url` relies on. A client that splits at the
+    FIRST ``@`` can resolve the wrong host when given an unescaped DSN. The observed failure was a
     worker container reporting ``could not translate host name "Pwd@10.0.0.200"``:
     libpq had taken the tail of the password as part of the hostname, and the
     fragment went into the event log with the error.
 
-    Normalizing at load makes the two readings agree: the credentials are
-    decoded with the app's own parser and re-encoded with nothing left bare, so
-    both splitters land on the same ``@``. Idempotent — an already-encoded URL
-    round-trips to itself — and never raises: an unparseable string is returned
-    untouched rather than blocking boot.
+    Explicit normalization makes the two readings agree. This pure helper is
+    not used to load application database settings; managed descriptors carry
+    separate credentials instead. Idempotent and never raises: an unparseable
+    string is returned untouched.
     """
     from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
@@ -136,11 +131,6 @@ def normalize_database_url(db_url: str) -> str:
 
 _cached_persisted_instance_id: Optional[str] = None
 _persisted_instance_id_lock = threading.Lock()
-
-# Set by Settings._import_legacy_database_url when it filled POSTGRES_* fields
-# from a legacy DATABASE_URL — lets startup logging distinguish an explicitly
-# configured POSTGRES_* setup from an auto-imported one without re-parsing.
-legacy_database_url_imported = False
 
 
 @contextmanager
@@ -281,37 +271,9 @@ class Settings(BaseSettings):
     fluid_projects_dir: Optional[str] = None
     tools_dir: Optional[Path] = None  # Path to AI tools directory (defaults to /workspace/ai-shuffle/tools in Docker)
 
-    # Database (PostgreSQL). Set the individual connection pieces — the app
-    # assembles the connection URL itself, so nobody has to hand-build a
-    # postgresql:// DSN (or get percent-encoding of a password right).
-    #   POSTGRES_HOST     — hostname or IP. Defaults to "postgres" (the compose
-    #                       service) in Docker and "localhost" in local mode.
-    #   POSTGRES_PORT     — default 5432.
-    #   POSTGRES_USER     — default "ai_shuffle".
-    #   POSTGRES_PASSWORD — REQUIRED, no default. Collected during setup
-    #                       (run_local.py --setup writes it to .env; Docker
-    #                       compose fails fast if unset).
-    #   POSTGRES_DB       — default "ai_shuffle".
-    #   DATABASE_URL      — LEGACY full connection string from versions before
-    #                       the split. Auto-imported into the POSTGRES_* fields
-    #                       at load (see _import_legacy_database_url), so a
-    #                       URL-only install counts as fully configured and
-    #                       every "is the database set up?" check passes without
-    #                       re-running setup. Takes precedence when explicit
-    #                       POSTGRES_* values are also present (it captures the
-    #                       user's complete previous config). New installs use
-    #                       the pieces above; setup comments the legacy URL out
-    #                       when it writes new values.
-    # Interpreted only by the Docker lifecycle supervisor, not app startup.
-    database_mode: str = "auto"  # auto | embedded | external
-    postgres_host: Optional[str] = None
-    postgres_port: int = 5432
-    postgres_user: str = "ai_shuffle"
-    postgres_password: Optional[str] = None
-    postgres_db: str = "ai_shuffle"
-    database_url: Optional[str] = None
-    db_pool_min: int = 2  # Connections opened at startup
-    db_pool_max: int = 32  # Pool limit; healthy burst connections stay open for reuse
+    # Database endpoints come only from the private managed supervisor descriptor.
+    db_pool_min: ClassVar[int] = 2  # Internal managed defaults, not environment knobs
+    db_pool_max: ClassVar[int] = 32  # Healthy burst connections stay open for reuse
     # Several thread pools share this pool: the asyncio default executor,
     # AnyIO sync dependencies, and Git workers. Agents borrow connections for
     # short operations rather than holding one for their entire turn.
@@ -991,86 +953,6 @@ class Settings(BaseSettings):
         if self.workspace_dir is None:
             object.__setattr__(self, 'workspace_dir', _get_default_workspace_dir())
 
-        # Percent-encode the connection string's credentials BEFORE anything
-        # reads them, so every consumer — this process, a subprocess handed
-        # DATABASE_URL, libpq itself — splits the userinfo at the same ``@``.
-        self._normalize_database_url()
-
-        # A pre-split install carries only a legacy DATABASE_URL. Decompose it
-        # into the POSTGRES_* fields so the rest of the app (setup checks, the
-        # Docker compose gate, harness_adapter's has-database probe) sees a
-        # fully configured database without re-running setup.
-        self._import_legacy_database_url()
-
-    def _normalize_database_url(self) -> None:
-        """Rewrite ``database_url`` in place with its credentials encoded.
-
-        See :func:`normalize_database_url`. The rewrite is logged at DEBUG and
-        the value is NEVER logged — the whole reason this exists is that a
-        password fragment leaked into an error message.
-        """
-        raw = (self.database_url or "").strip()
-        if not raw:
-            return
-        normalized = normalize_database_url(raw)
-        if normalized == raw:
-            return
-        object.__setattr__(self, "database_url", normalized)
-        logger.debug(
-            "DATABASE_URL normalized: userinfo percent-encoded so libpq and "
-            "urlsplit agree on the credential/host boundary (value not logged)"
-        )
-
-    def _import_legacy_database_url(self) -> None:
-        """Fill empty POSTGRES_* fields from a legacy DATABASE_URL.
-
-        Pre-split installs carry only the full connection string; without this
-        import their POSTGRES_PASSWORD stays unset and every "is the database
-        configured?" check (run_local.py's start gate, harness_adapter's probe,
-        the get_database_url() error path) treats the install as unconfigured
-        even though get_database_url() itself would have worked. Only EMPTY
-        fields are filled — an explicit POSTGRES_* value always wins so a user
-        overriding one piece isn't clobbered.
-        """
-        if not self.database_url or not self.database_url.strip():
-            return
-
-        try:
-            parts = _parse_legacy_database_url(self.database_url.strip())
-        except Exception:  # noqa: BLE001 — malformed URL must never block boot
-            return
-
-        if not parts.get("dbname"):
-            return  # Not a usable connection string — leave fields untouched.
-
-        # Only EMPTY/default fields are filled — an explicit POSTGRES_* value
-        # always wins so a user overriding one piece isn't clobbered.
-        # object.__setattr__ is required: pydantic models are frozen here.
-        filled = False
-
-        def _fill(attr, value):
-            nonlocal filled
-            if value:
-                object.__setattr__(self, attr, value)
-                filled = True
-
-        if not self.postgres_host and parts.get("host"):
-            _fill("postgres_host", parts["host"])
-        if not self.postgres_password:
-            _fill("postgres_password", parts.get("password"))
-        if self.postgres_user == "ai_shuffle" and parts.get("user"):
-            _fill("postgres_user", parts["user"])
-        if self.postgres_db == "ai_shuffle" and parts.get("dbname"):
-            _fill("postgres_db", parts["dbname"])
-        if self.postgres_port == 5432 and parts.get("port", 5432) != 5432:
-            # int() coercion is required: object.__setattr__ bypasses
-            # pydantic's validation on this typed field.
-            _fill("postgres_port", int(parts["port"]))
-
-        if filled:
-            global legacy_database_url_imported
-            legacy_database_url_imported = True
-
     @property
     def effective_instance_id(self) -> str:
         """Get the instance ID for multi-instance isolation.
@@ -1135,45 +1017,77 @@ class Settings(BaseSettings):
         # In local mode, tools would be relative to install location
         return Path(__file__).parent.parent.parent / "tools"
 
-    @property
-    def effective_postgres_host(self) -> str:
-        """Postgres host: explicit POSTGRES_HOST, else a per-mode default."""
-        if self.postgres_host and self.postgres_host.strip():
-            return self.postgres_host.strip()
-        # Docker compose ships a "postgres" service; local installs talk to a
-        # database the user runs themselves.
-        return "localhost" if self.is_local_mode() else "postgres"
+    def get_database_connection(self) -> dict:
+        """Read the supervisor-owned endpoint; never consult database environment variables.
+
+        Reading is lazy so source utilities can import settings without starting
+        PostgreSQL. A worker must fail before connecting if it was not supervised.
+        """
+        import json
+        import re
+        import stat
+
+        path = self.effective_data_dir / "managed-postgres.json"
+        message = (
+            "Managed PostgreSQL is not ready: a valid private managed-postgres.json "
+            "is required in DATA_DIR. Start AI Shuffle with the desktop launcher "
+            "or container supervisor; direct unsupervised backend startup is unsupported."
+        )
+        try:
+            for component in (path, *path.absolute().parents):
+                if component.is_symlink():
+                    raise ValueError()
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 16384:
+                    raise ValueError()
+                if os.name != "nt" and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
+                    raise ValueError()
+                def unique_object(pairs):
+                    result = {}
+                    for key, value in pairs:
+                        if key in result:
+                            raise ValueError()
+                        result[key] = value
+                    return result
+                record = json.loads(stream.read(16385), object_pairs_hook=unique_object)
+            if not isinstance(record, dict) or set(record) != {"version", "host", "port", "user", "password", "database"}:
+                raise ValueError()
+            if type(record["version"]) is not int or record["version"] != 1 or record["host"] != "127.0.0.1":
+                raise ValueError()
+            if type(record["port"]) is not int or not 1 <= record["port"] <= 65535:
+                raise ValueError()
+            for key in ("user", "database"):
+                if not isinstance(record[key], str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", record[key]):
+                    raise ValueError()
+            password = record["password"]
+            if not isinstance(password, str) or not password or len(password) > 4096 or any(ord(c) < 32 for c in password):
+                raise ValueError()
+            # hostaddr defeats inherited PGHOSTADDR; explicit options prevent
+            # PGOPTIONS from changing the managed connection's search path.
+            return {"host": "127.0.0.1", "hostaddr": "127.0.0.1", "port": record["port"],
+                    "user": record["user"], "password": password, "dbname": record["database"],
+                    "connect_timeout": 5, "options": "", "sslmode": "disable"}
+        except (OSError, ValueError, TypeError, UnicodeError):
+            raise RuntimeError(message) from None
+
+    def managed_database_available(self) -> bool:
+        """Availability probe for tools that can operate without a database."""
+        try:
+            self.get_database_connection()
+            return True
+        except RuntimeError:
+            return False
 
     def get_database_url(self) -> str:
-        """Assemble the PostgreSQL URL from the POSTGRES_* connection pieces.
-
-        A legacy DATABASE_URL (pre-split installs) takes precedence when set —
-        it captures the user's complete previous configuration verbatim, so an
-        upgraded install keeps connecting exactly where it always did.
-
-        Credentials are percent-encoded so passwords containing '@', '/', or
-        '%' survive the round-trip through app.db.base.parse_database_url.
-        """
-        # Already normalized at load (``_normalize_database_url``); re-running
-        # the idempotent encode here covers a value assigned after init (tests,
-        # a runtime override).
-        if self.database_url and self.database_url.strip():
-            return normalize_database_url(self.database_url.strip())
-        if not self.postgres_password:
-            raise ValueError(
-                "Database connection is not configured. Set POSTGRES_HOST, "
-                "POSTGRES_USER, and POSTGRES_PASSWORD in .env (see "
-                ".env.example), or re-run setup: python run_local.py --setup. "
-                "(A legacy DATABASE_URL connection string is also still "
-                "honored.)"
-            )
+        """Descriptor-derived URL for maintenance consumers; never log this value."""
         from urllib.parse import quote
-        user = quote(self.postgres_user, safe="")
-        password = quote(self.postgres_password, safe="")
-        return (
-            f"postgresql://{user}:{password}@{self.effective_postgres_host}:"
-            f"{self.postgres_port}/{self.postgres_db}"
-        )
+        connection = self.get_database_connection()
+        user = quote(connection["user"], safe="")
+        password = quote(connection["password"], safe="")
+        database = quote(connection["dbname"], safe="")
+        return f"postgresql://{user}:{password}@127.0.0.1:{connection['port']}/{database}"
 
     def is_local_mode(self) -> bool:
         """Check if running in local mode"""

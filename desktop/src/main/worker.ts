@@ -20,7 +20,8 @@ import { promises as fs } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
-import type { PostgresConfig } from './settings';
+import { isManagedConnection, type PostgresConfig } from './settings';
+import { writePrivateFile } from './private-file';
 
 export const DEFAULT_PORT = 8000;
 /** Fixed by app/serve.py; the worker refuses to start without it. */
@@ -115,14 +116,18 @@ export function resolveRuntime(opts: ResolveOptions): WorkerRuntime | { error: s
 
 export interface EnvOptions {
 	runtime: WorkerRuntime;
-	postgres: PostgresConfig;
 	port: number;
+	protectedPort?: number;
 	envFile: string;
+	dataDir: string;
+	workspaceDir?: string;
+	/** Only set for a packaged preview; isolates inherited CLI credential/config paths. */
+	profileDir?: string;
 	baseEnv?: NodeJS.ProcessEnv;
 	platform?: NodeJS.Platform;
 }
 
-/** The environment the worker process starts with. Pure, for tests. */
+/** The worker gets a private descriptor, never database environment variables. */
 export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 	const platform = opts.platform ?? process.platform;
 	const base = { ...(opts.baseEnv ?? process.env) };
@@ -131,101 +136,54 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 	const pathParts = [path.dirname(opts.runtime.python)];
 	if (opts.runtime.nodeBinDir) pathParts.push(opts.runtime.nodeBinDir);
 	if (base[pathKey]) pathParts.push(base[pathKey] as string);
-	// Anything a parent shell set must not leak into the worker's database choice.
 	for (const key of Object.keys(base)) {
-		if (/^(POSTGRES_|DATABASE_URL$|PYTHONHOME$|PYTHONPATH$|VIRTUAL_ENV$)/.test(key)) delete base[key];
+		if (/^(POSTGRES_|DATABASE_|PG|PYTHONHOME$|PYTHONPATH$|VIRTUAL_ENV$)/i.test(key)) delete base[key];
+	}
+	let profile: NodeJS.ProcessEnv = {};
+	if (opts.profileDir) {
+		// Case-insensitive removal matters on Windows: do not leave HOME/home
+		// aliases or inherited config overrides that point at the stable profile.
+		for (const key of Object.keys(base)) {
+			if (/^(HOME|USERPROFILE|APPDATA|LOCALAPPDATA|XDG_.*|CLAUDE_CONFIG_DIR|CLAUDE_PROJECTS_DIR|FLUID_PROJECTS_DIR|FLUID_SKILLS_DIR|CODEX_HOME|GH_CONFIG_DIR|INSTANCE_ID|CLUSTER_SECRET|AI_SHUFFLE_ENV_FILE|DATA_DIR|WORKSPACE_DIR|SHUFFLE_.*DIR|.*(?:API_KEY|AUTH_TOKEN|ACCESS_TOKEN)|ADMIN_PASSWORD|SECRET_KEY)$/i.test(key)) delete base[key];
+		}
+		profile = {
+			HOME: opts.profileDir, USERPROFILE: opts.profileDir, CHROME_CDP_PORT: '19221',
+			APPDATA: path.join(opts.profileDir, 'AppData', 'Roaming'),
+			LOCALAPPDATA: path.join(opts.profileDir, 'AppData', 'Local'),
+			XDG_CONFIG_HOME: path.join(opts.profileDir, '.config'),
+			XDG_DATA_HOME: path.join(opts.profileDir, '.local', 'share'),
+			XDG_CACHE_HOME: path.join(opts.profileDir, '.cache'),
+			CLAUDE_CONFIG_DIR: path.join(opts.profileDir, '.claude'),
+			CODEX_HOME: path.join(opts.profileDir, '.codex'),
+			GH_CONFIG_DIR: path.join(opts.profileDir, '.config', 'gh')
+		};
 	}
 	return {
-		...base,
+		...base, ...profile,
 		[pathKey]: pathParts.join(sep),
-		LOCAL_MODE: 'true',
-		HOST: '127.0.0.1',
-		PORT: String(opts.port),
-		POSTGRES_HOST: opts.postgres.host,
-		POSTGRES_PORT: String(opts.postgres.port),
-		POSTGRES_USER: opts.postgres.user,
-		POSTGRES_PASSWORD: opts.postgres.password,
-		POSTGRES_DB: opts.postgres.database,
+		LOCAL_MODE: 'true', HOST: '127.0.0.1', PORT: String(opts.port),
+		DATA_DIR: opts.dataDir,
+		...(opts.workspaceDir ? { WORKSPACE_DIR: opts.workspaceDir } : {}),
 		AI_SHUFFLE_ENV_FILE: opts.envFile,
-		TOOLS_DIR: opts.runtime.toolsDir,
-		BROWSER_MCP_ENTRY: opts.runtime.browserMcpEntry,
-		PYTHONNOUSERSITE: '1',
-		PYTHONUNBUFFERED: '1',
-		PYTHONIOENCODING: 'utf-8',
-		SHUFFLE_DESKTOP: '1'
+		TOOLS_DIR: opts.runtime.toolsDir, BROWSER_MCP_ENTRY: opts.runtime.browserMcpEntry,
+		PYTHONNOUSERSITE: '1', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8', SHUFFLE_DESKTOP: '1'
 	};
 }
 
-/** Python that answers whether the configured database can be reached, and can create it. */
-const PG_CHECK_SCRIPT = `
-import json, sys
-cfg = json.load(sys.stdin)
-try:
-    import psycopg2
-except Exception as e:
-    print(json.dumps({"ok": False, "code": "runtime", "error": "psycopg2 is missing from the worker runtime: %s" % e})); sys.exit(0)
-
-def connect(db):
-    return psycopg2.connect(host=cfg["host"], port=cfg["port"], user=cfg["user"], password=cfg["password"], dbname=db, connect_timeout=8)
-
-def classify(msg):
-    low = msg.lower()
-    if "does not exist" in low and "database" in low: return "no-database"
-    if "password authentication failed" in low or "authentication failed" in low or "no password supplied" in low: return "auth"
-    if "role" in low and "does not exist" in low: return "no-role"
-    if "could not connect" in low or "connection refused" in low or "timeout" in low or "could not translate" in low or "no route" in low or "network is unreachable" in low: return "unreachable"
-    if "no pg_hba.conf entry" in low: return "hba"
-    return "unknown"
-
-action = cfg.get("action", "test")
-try:
-    if action == "create":
-        conn = connect("postgres")
-        conn.autocommit = True
-        cur = conn.cursor()
-        cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (cfg["database"],))
-        if cur.fetchone() is None:
-            cur.execute('CREATE DATABASE "%s"' % cfg["database"].replace('"', '""'))
-        conn.close()
-    conn = connect(cfg["database"])
-    cur = conn.cursor()
-    cur.execute("SELECT version(), current_user")
-    version, user = cur.fetchone()
-    cur.execute("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'")
-    tables = cur.fetchone()[0]
-    conn.close()
-    print(json.dumps({"ok": True, "version": version.split(",")[0], "user": user, "tables": tables}))
-except psycopg2.Error as e:
-    msg = (str(e) or e.__class__.__name__).strip()
-    print(json.dumps({"ok": False, "code": classify(msg), "error": msg}))
-except Exception as e:
-    print(json.dumps({"ok": False, "code": "unknown", "error": str(e)}))
-`;
-
-export interface PgCheckResult {
-	ok: boolean;
-	code?: 'no-database' | 'auth' | 'no-role' | 'unreachable' | 'hba' | 'runtime' | 'unknown';
-	error?: string;
-	version?: string;
-	user?: string;
-	tables?: number;
+/** Private, atomic handoff to the backend; called before spawning it. */
+export async function writeManagedPostgres(dataDir: string, config: PostgresConfig): Promise<void> {
+	if (!isManagedConnection(config)) throw new Error('The embedded PostgreSQL endpoint is invalid.');
+	const { host, port, user, password, database } = config;
+	await writePrivateFile(path.join(dataDir, 'managed-postgres.json'), JSON.stringify({ version: 1, host, port, user, password, database }));
 }
 
-export function checkPostgres(runtime: WorkerRuntime, config: PostgresConfig, action: 'test' | 'create' = 'test'): PgCheckResult {
-	const result = spawnSync(runtime.python, ['-I', '-c', PG_CHECK_SCRIPT], {
-		input: JSON.stringify({ ...config, action }),
-		encoding: 'utf8',
-		timeout: 20_000,
-		env: { ...process.env, PYTHONNOUSERSITE: '1', PYTHONIOENCODING: 'utf-8' },
-		windowsHide: true
-	});
-	if (result.error) return { ok: false, code: 'runtime', error: `Could not run the worker's Python: ${result.error.message}` };
-	const line = (result.stdout || '').trim().split('\n').pop() ?? '';
-	try {
-		return JSON.parse(line) as PgCheckResult;
-	} catch {
-		return { ok: false, code: 'runtime', error: (result.stderr || result.stdout || 'The database check produced no result.').trim().slice(-600) };
-	}
+/** Retain non-database application settings; remove obsolete database entries. */
+export async function prepareWorkerConfig(file: string): Promise<void> {
+	let content = '';
+	try { content = await fs.readFile(file, 'utf8'); }
+	catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+	const clean = content.split(/\r?\n/).filter((line) => !/^\s*(?:export\s+)?(?:DATABASE_|POSTGRES_)[A-Z0-9_]*\s*=/i.test(line)).join('\n');
+	await writePrivateFile(file, clean);
 }
 
 export function isPortFree(port: number, host = '127.0.0.1'): Promise<boolean> {
@@ -275,12 +233,19 @@ export interface SupervisorOptions {
 	runtime: WorkerRuntime;
 	logDir: string;
 	envFile: string;
+	dataDir: string;
+	workspaceDir?: string;
+	profileDir?: string;
+	port?: number;
+	protectedPort?: number;
+	allowAttach?: boolean;
 	postgres: () => PostgresConfig | null;
 	readyTimeoutMs?: number;
 }
 
 export class WorkerSupervisor extends EventEmitter {
 	private child: ChildProcess | null = null;
+	private starting: Promise<WorkerState> | null = null;
 	private logStream: WriteStream | null = null;
 	private _state: WorkerState;
 	private stopping = false;
@@ -291,8 +256,8 @@ export class WorkerSupervisor extends EventEmitter {
 		super();
 		this._state = {
 			phase: 'idle',
-			port: DEFAULT_PORT,
-			url: `http://127.0.0.1:${DEFAULT_PORT}`,
+			port: opts.port ?? DEFAULT_PORT,
+			url: `http://127.0.0.1:${opts.port ?? DEFAULT_PORT}`,
 			pid: null,
 			external: false,
 			error: null,
@@ -320,33 +285,56 @@ export class WorkerSupervisor extends EventEmitter {
 		this.emit('state', this.state);
 	}
 
-	async start(): Promise<WorkerState> {
+	start(): Promise<WorkerState> {
+		if (this.starting) return this.starting;
+		this.starting = this.doStart().finally(() => { this.starting = null; });
+		return this.starting;
+	}
+
+	private async doStart(): Promise<WorkerState> {
 		if (this._state.phase === 'starting' || this._state.phase === 'ready') return this.state;
 		this.stopping = false;
 		this.set({ phase: 'starting', error: null, exitCode: null, pid: null, external: false });
 
-		// A worker already answering on the default port: attach rather than fight over 8001.
-		const health = await fetchHealth(DEFAULT_PORT);
-		if (health.ok && health.service === 'ai-shuffle') {
-			this.set({ phase: 'ready', external: true, port: DEFAULT_PORT, url: `http://127.0.0.1:${DEFAULT_PORT}`, startedAt: new Date().toISOString() });
-			return this.state;
-		}
-		for (const port of [DEFAULT_PORT, PROTECTED_PORT]) {
-			if (!(await isPortFree(port))) {
-				this.set({ phase: 'failed', error: `Port ${port} is in use by another program. Free it and restart the worker.` });
+		const port = this.opts.port ?? DEFAULT_PORT;
+		const protectedPort = this.opts.protectedPort ?? PROTECTED_PORT;
+		// Preview NEVER attaches to an existing worker, even on its own port.
+		if (this.opts.allowAttach !== false) {
+			const health = await fetchHealth(port);
+			if (this.stopping) return this.state;
+			if (health.ok && health.service === 'ai-shuffle') {
+				this.set({ phase: 'ready', external: true, port, url: `http://127.0.0.1:${port}`, startedAt: new Date().toISOString() });
 				return this.state;
 			}
 		}
+		for (const candidate of [port, protectedPort]) {
+			if (!(await isPortFree(candidate))) {
+				this.set({ phase: 'failed', error: `Port ${candidate} is in use by another program. Free it and restart the worker.` });
+				return this.state;
+			}
+		}
+		if (this.stopping) return this.state;
 		const postgres = this.opts.postgres();
 		if (!postgres) {
-			this.set({ phase: 'failed', error: 'The database connection is not set up.' });
+			this.set({ phase: 'failed', error: 'The embedded PostgreSQL server is not ready.' });
 			return this.state;
 		}
 
 		await fs.mkdir(this.opts.logDir, { recursive: true });
-		await this.writeEnvFile(postgres);
+		try {
+			await writeManagedPostgres(this.opts.dataDir, postgres);
+			await prepareWorkerConfig(this.opts.envFile);
+			for (const dir of [this.opts.workspaceDir, this.opts.profileDir]) if (dir) await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+		} catch {
+			this.set({ phase: 'failed', error: 'Could not prepare the private embedded database connection.' });
+			return this.state;
+		}
 		await this.rotateLog();
-		const env = buildWorkerEnv({ runtime: this.opts.runtime, postgres, port: DEFAULT_PORT, envFile: this.opts.envFile });
+		if (this.stopping) {
+			this.closeLog('--- worker start cancelled by app shutdown ---');
+			return this.state;
+		}
+		const env = buildWorkerEnv({ ...this.opts, port });
 		const child = spawn(this.opts.runtime.python, ['-m', 'app.main'], {
 			cwd: this.opts.runtime.serverDir,
 			env,
@@ -367,12 +355,12 @@ export class WorkerSupervisor extends EventEmitter {
 			});
 		});
 		void exited.then((code) => this.onExit(code));
-		this.set({ pid: child.pid ?? null, port: DEFAULT_PORT, url: `http://127.0.0.1:${DEFAULT_PORT}`, startedAt: new Date().toISOString() });
+		this.set({ pid: child.pid ?? null, port, url: `http://127.0.0.1:${port}`, startedAt: new Date().toISOString() });
 
 		const deadline = Date.now() + (this.opts.readyTimeoutMs ?? 180_000);
 		while (Date.now() < deadline) {
 			if (this.child !== child || this.state.phase !== 'starting') return this.state;
-			const ready = await fetchHealth(DEFAULT_PORT, '/health/ready', 2000);
+			const ready = await fetchHealth(port, '/health/ready', 2000);
 			if (ready.ok) {
 				this.set({ phase: 'ready' });
 				return this.state;
@@ -417,8 +405,10 @@ export class WorkerSupervisor extends EventEmitter {
 	}
 
 	async stop(): Promise<void> {
+		this.stopping = true;
 		const child = this.child;
 		if (!child || child.exitCode !== null) {
+			if (this.starting) await this.starting;
 			if (this._state.phase !== 'idle') this.set({ phase: 'stopped', pid: null });
 			return;
 		}
@@ -446,28 +436,15 @@ export class WorkerSupervisor extends EventEmitter {
 		}
 	}
 
+	/** Called only after the worker and database have stopped on app exit. */
+	async clearConnectionFile(): Promise<void> {
+		await fs.rm(path.join(this.opts.dataDir, 'managed-postgres.json'), { force: true });
+	}
+
 	async restart(): Promise<WorkerState> {
 		await this.stop();
 		this.set({ phase: 'idle' });
 		return this.start();
-	}
-
-	private async writeEnvFile(postgres: PostgresConfig): Promise<void> {
-		// The server also reads .env for anything the settings UI persists there;
-		// keep a copy of the connection so command-line tools run against the
-		// same database. Written with owner-only permissions.
-		const lines = [
-			'# Written by AI Shuffle Desktop. Edit the connection from the app, not here.',
-			'LOCAL_MODE=true',
-			`POSTGRES_HOST=${postgres.host}`,
-			`POSTGRES_PORT=${postgres.port}`,
-			`POSTGRES_USER=${postgres.user}`,
-			`POSTGRES_PASSWORD=${postgres.password}`,
-			`POSTGRES_DB=${postgres.database}`,
-			''
-		];
-		await fs.mkdir(path.dirname(this.opts.envFile), { recursive: true });
-		await fs.writeFile(this.opts.envFile, lines.join('\n'), { encoding: 'utf8', mode: 0o600 });
 	}
 
 	private async rotateLog(): Promise<void> {

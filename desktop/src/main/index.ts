@@ -4,8 +4,7 @@
  * One instance, one window, one local worker with its own database. On
  * launch the app starts the bundled PostgreSQL, then the worker (or attaches
  * to one already running on this computer), and opens its web UI. A first
- * run needs no setup: the cluster is created on the spot. People who would
- * rather use their own PostgreSQL choose it under Worker → Advanced.
+ * run needs no setup: the embedded cluster is created on the spot.
  */
 import { app, nativeTheme, safeStorage, session, shell } from 'electron';
 import { existsSync } from 'node:fs';
@@ -14,15 +13,20 @@ import { registerIpc, type DesktopState, type PostgresStatus, type WorkerControl
 import { installMenu } from './menu';
 import { installPermissionPolicy } from './navigation';
 import { PostgresSupervisor, resolvePostgresBinaries } from './postgres';
-import { plainCipher, SettingsStore, type Cipher, type PostgresConfig } from './settings';
+import { plainCipher, SettingsStore, type Cipher } from './settings';
+import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
 import { Updater } from './updater';
 import { MainWindow, PARTITION } from './window';
 import { resolveRuntime, WorkerSupervisor, type WorkerState } from './worker';
 
-const PROTOCOL = 'aishuffle';
-
-app.setAppUserModelId('com.hobbycoders.aishuffle.desktop');
+// Only the application's packaged metadata can select the isolated preview.
+const identity = desktopIdentity(app.isPackaged, require(path.join(app.getAppPath(), 'package.json')));
+app.setAppUserModelId(identity.appId);
+if (identity.preview) {
+	app.setName(identity.name);
+	app.setPath('userData', path.join(app.getPath('appData'), identity.name));
+}
 
 // Development helpers: an isolated profile and a headless screenshot, so the
 // shell can be exercised from a script or CI without a person at the screen.
@@ -39,13 +43,13 @@ if (!app.requestSingleInstanceLock()) {
 async function main(): Promise<void> {
 	const userData = app.getPath('userData');
 	const window = new MainWindow(userData);
-	const updater = new Updater();
+	const updater = new Updater(identity.updates);
 
 	app.on('second-instance', () => window.focus());
 	app.on('window-all-closed', () => {
 		if (process.platform !== 'darwin') app.quit();
 	});
-	if (app.isPackaged) app.setAsDefaultProtocolClient(PROTOCOL);
+	if (app.isPackaged) app.setAsDefaultProtocolClient(identity.protocol);
 
 	await app.whenReady();
 
@@ -54,8 +58,7 @@ async function main(): Promise<void> {
 	await settings.load();
 
 	// The bundled PostgreSQL: under resources/postgres in a packaged app,
-	// SHUFFLE_DESKTOP_POSTGRES_DIR in development. Started only while the
-	// settings ask for the managed server; an external one leaves it alone.
+	// SHUFFLE_DESKTOP_POSTGRES_DIR in development. Always app-managed.
 	const logDir = path.join(userData, 'logs');
 	const pgResolved = resolvePostgresBinaries({ packaged: app.isPackaged, resourcesPath: process.resourcesPath });
 	const postgresError = 'error' in pgResolved ? pgResolved.error : null;
@@ -67,7 +70,7 @@ async function main(): Promise<void> {
 					root: path.join(userData, 'postgres'),
 					logDir,
 					credentials: {
-						load: () => (settings.managed ? settings.postgres() : null),
+						load: () => settings.postgres(),
 						save: (config) => settings.savePostgres({ ...config, managed: true })
 					}
 				});
@@ -83,9 +86,12 @@ async function main(): Promise<void> {
 					runtime: resolved,
 					logDir,
 					envFile: path.join(userData, 'worker', '.env'),
-					// The managed connection comes from the running server, not the
-					// file: it is authoritative even when the keyring cannot be read.
-					postgres: () => (settings.managed ? postgres?.connection() ?? null : settings.postgres())
+					dataDir: identity.preview ? path.join(userData, 'data') : stableDataDir(process.platform, process.env, app.getPath('home')),
+					...(identity.preview ? { workspaceDir: path.join(userData, 'workspace'), profileDir: path.join(userData, 'profile') } : {}),
+					port: identity.port,
+					protectedPort: identity.protectedPort,
+					allowAttach: identity.allowAttach,
+					postgres: () => postgres?.connection() ?? null
 				});
 	// Development: point the window at a frontend dev server instead of the worker UI.
 	const devUrl = !app.isPackaged ? process.env.SHUFFLE_DESKTOP_DEV_URL ?? null : null;
@@ -96,8 +102,8 @@ async function main(): Promise<void> {
 
 	const failedState = (error: string): WorkerState => ({
 		phase: 'failed',
-		port: 8000,
-		url: 'http://127.0.0.1:8000',
+		port: identity.port,
+		url: `http://127.0.0.1:${identity.port}`,
 		pid: null,
 		external: false,
 		error,
@@ -107,10 +113,6 @@ async function main(): Promise<void> {
 	});
 
 	const postgresStatus = (): PostgresStatus => {
-		if (!settings.managed) {
-			const external = settings.postgresPublic();
-			return { managed: false, phase: 'external', host: external.host, port: external.port, error: null, logPath: null };
-		}
 		if (!postgres) return { managed: true, phase: 'failed', host: null, port: null, error: postgresError, logPath: null };
 		const state = postgres.state;
 		return { managed: true, phase: state.phase, host: '127.0.0.1', port: state.port, error: state.error, logPath: state.logPath };
@@ -123,15 +125,13 @@ async function main(): Promise<void> {
 
 	/** Bundled PostgreSQL first when it is wanted, then the worker. */
 	const startStack = async (): Promise<void> => {
-		if (!supervisor) return;
-		if (settings.managed) {
-			if (!postgres) {
-				window.send('desktop:worker-state', desktopState());
-				return;
-			}
-			const state = await postgres.start();
-			if (state.phase !== 'ready') return;
+		if (quitting || !supervisor) return;
+		if (!postgres) {
+			window.send('desktop:worker-state', desktopState());
+			return;
 		}
+		const state = await postgres.start();
+		if (quitting || state.phase !== 'ready') return;
 		await supervisor.start();
 	};
 
@@ -141,28 +141,7 @@ async function main(): Promise<void> {
 		bundledPostgresError: postgresError,
 		state: desktopState,
 		tail: () => [...(postgres?.tail().map((line) => `[postgres] ${line}`) ?? []), ...(supervisor?.tail() ?? [])],
-		openSetup: () => window.showPage('setup'),
-		cancelSetup: async () => {
-			const state = worker.state();
-			if (state.phase === 'ready') await window.loadWorker(state.url);
-			else await window.showPage('status');
-		},
-		saveAndStart: async (config: PostgresConfig) => {
-			await settings.savePostgres({ ...config, managed: false });
-			await window.showPage('status');
-			if (!supervisor) return;
-			await supervisor.stop();
-			// The bundled server is no longer wanted; leave its data in place.
-			await postgres?.stop();
-			await startStack();
-		},
-		useBundled: async () => {
-			await settings.useBundled();
-			await window.showPage('status');
-			if (!supervisor) return;
-			await supervisor.stop();
-			await startStack();
-		},
+		openStatus: () => window.showPage('status'),
 		restart: async () => {
 			if (!supervisor) return;
 			if (window.currentPage !== 'status') await window.showPage('status');
@@ -171,7 +150,7 @@ async function main(): Promise<void> {
 		}
 	};
 
-	registerIpc({ window, settings, updater, worker, keyringAvailable: cipher.available() });
+	registerIpc({ window, updater, worker });
 	updater.subscribe((state) => window.send('desktop:update-state', state));
 	nativeTheme.on('updated', () => window.send('desktop:native-theme', { dark: nativeTheme.shouldUseDarkColors }));
 
@@ -214,7 +193,8 @@ async function main(): Promise<void> {
 	const actions = {
 		command: (name: string) => window.send('desktop:command', name),
 		restartWorker: () => void worker.restart(),
-		openDatabaseSettings: () => void worker.openSetup(),
+		openWorkerStatus: () => void worker.openStatus(),
+		updatesEnabled: identity.updates,
 		showLogs: () => void shell.showItemInFolder(worker.state().logPath),
 		showPostgresLogs: () => {
 			const logPath = postgres?.state.logPath ?? path.join(logDir, 'postgres.log');
@@ -247,8 +227,12 @@ async function main(): Promise<void> {
 		event.preventDefault();
 		quitting = true;
 		void (async () => {
-			if (stopWorker) await supervisor.stop();
-			if (stopPostgres) await postgres.stop();
+			try {
+				if (stopWorker) await supervisor.stop();
+			} finally {
+				if (stopPostgres) await postgres.stop();
+				if (stopWorker) await supervisor.clearConnectionFile();
+			}
 		})().finally(() => app.quit());
 	});
 	app.on('activate', () => void open());

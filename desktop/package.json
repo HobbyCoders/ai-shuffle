@@ -20,7 +20,8 @@
     "start": "npm run build && electron .",
     "test": "npm run build && node --test \"test/**/*.test.mjs\"",
     "pack": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder --publish never"
+    "dist": "npm run build && electron-builder --publish never",
+    "dist:preview:win": "npm run build && electron-builder --config electron-builder.preview.yml --win nsis --x64 --publish never"
   },
   "dependencies": {
     "electron-updater": "^6.8.9"

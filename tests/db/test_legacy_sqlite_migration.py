@@ -80,6 +80,9 @@ def source(tmp_path):
 @pytest.fixture
 def destination(monkeypatch):
     dest = Destination()
+    from app.core.config import Settings
+    monkeypatch.setattr(Settings, "get_database_connection", lambda self: dict(
+        host="127.0.0.1", port=5432, user="fixture", password="fixture", dbname="fixture"))
     monkeypatch.setattr(migration.psycopg2, "connect", lambda **kwargs: dest)
     monkeypatch.setattr(migration.psycopg2.extras, "execute_values", dest.insert)
     monkeypatch.setattr(migration, "_reset_sequences", lambda conn: None)
@@ -88,7 +91,7 @@ def destination(monkeypatch):
 
 
 def test_migration_orders_foreign_keys_converts_bools_and_keeps_version(source, destination):
-    result = migration.migrate(str(source), "postgresql://REDACTED@localhost/fixture")
+    result = migration.migrate(str(source))
     assert result["sessions"] == 1
     assert destination.rows["sessions"][0]["is_active"] is True
     assert destination.rows["schema_version"] == [{"version": 85}]
@@ -107,7 +110,7 @@ def test_failed_table_aborts_entire_import(source, destination, monkeypatch):
 
     monkeypatch.setattr(migration.psycopg2.extras, "execute_values", fail_sessions)
     with pytest.raises(RuntimeError, match="Migration failed for table 'sessions'"):
-        migration.migrate(str(source), "postgresql://REDACTED@localhost/fixture")
+        migration.migrate(str(source))
     assert destination.commits == 0
     assert destination.rollbacks == 1
     assert "sessions" not in destination.rows
@@ -118,7 +121,7 @@ def test_unknown_legacy_columns_fail_instead_of_disappearing(source, destination
     with sqlite3.connect(source) as conn:
         conn.execute("ALTER TABLE sessions ADD COLUMN unknown_setting TEXT")
     with pytest.raises(RuntimeError, match="Unsupported legacy columns"):
-        migration.migrate(str(source), "postgresql://REDACTED@localhost/fixture")
+        migration.migrate(str(source))
     assert destination.commits == 0
     assert destination.rollbacks == 1
 

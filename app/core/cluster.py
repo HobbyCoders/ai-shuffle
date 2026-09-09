@@ -325,7 +325,7 @@ def _warn_if_stray_instance() -> None:
     registry — best-effort, never raises, never blocks registration.
 
     The classic footgun: an ad-hoc dev/debug instance started with a fresh
-    instance_id but the PRODUCTION ``DATABASE_URL``. It is not just a viewer —
+    instance_id but the production managed database descriptor. It is not just a viewer —
     its background workers act on SHARED credentials (the Codex token-refresh
     worker rotates the refresh token on a provider row every install sees), so
     the operator should know before it does anything.
@@ -340,7 +340,7 @@ def _warn_if_stray_instance() -> None:
         logger.warning(
             "instance_id %s is not yet registered in a shared database that "
             "already has %d install(s) — if this is an ad-hoc dev/debug instance "
-            "pointed at a production DATABASE_URL, its background workers (Codex "
+            "pointed at production managed data, its background workers (Codex "
             "token refresh, etc.) will act on shared credentials.",
             settings.effective_instance_id,
             len(peers),

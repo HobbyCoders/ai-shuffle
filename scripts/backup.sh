@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 #
 # AI Shuffle backup — pg_dump (custom format) + tar of generated media, with
-# timestamped output and retention pruning. Targets the Docker deployment
-# (embedded or external Postgres + /workspace + /data volumes) but runs anywhere
-# the env is set correctly. In the app image the lifecycle CLI selects the DB;
-# the external-only sidecar uses PG* environment variables.
+# timestamped output and retention pruning. Run inside the managed app container
+# through docker compose exec. The lifecycle CLI reads its private descriptor;
+# this script never accepts database credentials or connects to another server.
 #
 # What it produces (in $BACKUP_DIR):
 #   ai-shuffle-db-<timestamp>.dump      pg_dump -Fc (custom format, restore with pg_restore)
@@ -17,12 +16,11 @@
 # backup name patterns are pruned after a successful run.
 #
 # Configuration (env vars):
-#   PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE   standard libpq vars
 #   BACKUP_DIR             where backups are written (default: /data/backups)
 #   BACKUP_RETENTION_DAYS  days to keep (default: 7)
 #   WORKSPACE_DIR          generated media root (default: /workspace)
 #   DATA_DIR              app data root, archived separately (default: /data)
-#   FLUID_HOME            active settings (app: /home/appuser/.fluid; sidecar: /fluid)
+#   FLUID_HOME            active settings (default: /home/appuser/.fluid)
 #
 # Flags:
 #   --dry-run   print the commands that WOULD run; touch nothing.
@@ -54,15 +52,18 @@ for arg in "$@"; do
   esac
 done
 
+# No standalone libpq fallback: only the managed runtime may choose the DB.
+# Keep --dry-run useful outside the image, but never touch data there.
+if [ ! -f /app/docker/container_runtime.py ] && [ "$DRY_RUN" -ne 1 ]; then
+  echo "Run this backup inside the managed app: docker compose exec -T ai-shuffle bash /app/scripts/backup.sh" >&2
+  exit 2
+fi
+
 BACKUP_DIR="${BACKUP_DIR:-/data/backups}"
 BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
 DATA_DIR="${DATA_DIR:-/data}"
-if [ -f /app/docker/container_runtime.py ]; then
-  FLUID_HOME="${FLUID_HOME:-/home/appuser/.fluid}"
-else
-  FLUID_HOME="${FLUID_HOME:-/fluid}"
-fi
+FLUID_HOME="${FLUID_HOME:-/home/appuser/.fluid}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
 DB_DUMP="${BACKUP_DIR}/ai-shuffle-db-${TIMESTAMP}.dump"
@@ -111,16 +112,10 @@ exclude_backup_destination() {
 # ---------------------------------------------------------------------------
 # 1) Database dump (pg_dump custom format)
 # ---------------------------------------------------------------------------
-# In the application image, let the supervisor resolve the same DB settings as
-# normal startup (including embedded credentials). Never log connection values.
-# The external-only backup sidecar has no runtime CLI and uses libpq PG* vars.
-if [ -f /app/docker/container_runtime.py ]; then
-  log "Dumping database via container lifecycle CLI"
-  run python /app/docker/container_runtime.py dump --file "$DB_DUMP"
-else
-  log "Dumping external database via PG* environment variables"
-  run pg_dump --format=custom --no-owner --no-privileges --file="$DB_DUMP"
-fi
+# Let the supervisor resolve the private descriptor used by normal startup.
+# Never retrieve connection values into this shell or log them.
+log "Dumping managed database via container lifecycle CLI"
+run python /app/docker/container_runtime.py dump --file "$DB_DUMP"
 log "DB dump -> ${DB_DUMP}"
 
 # ---------------------------------------------------------------------------
@@ -156,8 +151,7 @@ fi
 # ---------------------------------------------------------------------------
 # 3) Active Fluid settings
 # ---------------------------------------------------------------------------
-# Archive only the active destination. The legacy Claude auth/import volume is
-# intentionally not mounted into the backup sidecar and cannot be changed here.
+# Archive only the active destination, never the legacy Claude auth/import volume.
 if [ -d "$FLUID_HOME" ]; then
   log "Archiving active Fluid settings"
   exclude_backup_destination "$FLUID_HOME"
