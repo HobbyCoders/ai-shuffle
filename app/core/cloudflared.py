@@ -20,8 +20,10 @@ _DIGESTS = {
     'cloudflared-linux-amd64': 'f29324fe934d1e100617484c78deef803c4dc2cd351d645bbde42e96b4fccc5e',
     'cloudflared-linux-arm64': '4bcfd35521a7cbc545ebfd5d57334a71ee180e2a64874981f374c81472118391',
     'cloudflared-linux-386': '691e3a2b8926f90ec4fcec4f4bc8e38b1de14f6232d93a24f6cb7b2c23ab5e92',
-    'cloudflared-darwin-amd64.tgz': '936aa4ed783b0e191fac48e7140c34605b25d8d5c0495c3599c90e350ae6e4c4',
-    'cloudflared-darwin-arm64.tgz': '50a04624531e7a98ddb65f1223905e32f84e7488ed3ee8dadcd3260aa8932603',
+    # Darwin release-body checksums differ from the downloadable archives. Use
+    # GitHub's asset digests, independently checked against the downloaded bytes.
+    'cloudflared-darwin-amd64.tgz': '61e1316266a00fd70ce40da011d612badc805367fb65293dd1925f938f704c99',
+    'cloudflared-darwin-arm64.tgz': '40c9144d86df8937c5b43293a1f7d2d2107029aa74725023dd46b1b27154352f',
 }
 
 
