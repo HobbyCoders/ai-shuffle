@@ -10,6 +10,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { installPreview } from './install-preview.mjs';
 
 const exec = promisify(execFile);
 assert(process.platform === 'win32' && process.env.CI === 'true', 'Windows CI only');
@@ -103,7 +104,42 @@ async function networkStatus() {
   });
 }
 try {
-  await exec(installer, ['/S', `/D=${installDir}`], { timeout: 180000 });
+  const installStarted = Date.now();
+  report.installerBytes = (await fs.stat(installer)).size;
+  report.installation = [];
+  await installPreview(installer, installDir, async pid => {
+    // No app is running yet. Only process counters/dialog labels and existence
+    // flags are retained, never command lines, environment, or runtime logs.
+    const sample = { elapsedMs: Date.now() - installStarted };
+    for (const [name, relative] of Object.entries({ executable: 'AI Shuffle Preview.exe',
+      manifest: 'resources/worker/manifest.json', postgres: 'resources/postgres/bin/initdb.exe' })) {
+      sample[name] = await exists(path.join(installDir, relative));
+    }
+    if (Number.isInteger(pid) && pid > 0) {
+      const command = `
+        $ErrorActionPreference = 'Stop'
+        $rows = @(Get-CimInstance Win32_Process)
+        $ids = @(${pid})
+        for ($i = 0; $i -lt 4; $i++) {
+          $ids += @($rows | Where-Object { $_.ParentProcessId -in $ids } | ForEach-Object { $_.ProcessId })
+        }
+        @($rows | Where-Object { $_.ProcessId -in $ids } | ForEach-Object {
+          $p = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+          [pscustomobject]@{ name=$_.Name; pid=$_.ProcessId; parent=$_.ParentProcessId;
+            readBytes=$_.ReadTransferCount; writeBytes=$_.WriteTransferCount;
+            cpuUser=$_.UserModeTime; cpuKernel=$_.KernelModeTime; window=$p.MainWindowTitle }
+        }) | ConvertTo-Json -Compress
+      `;
+      try {
+        const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { timeout: 10000 });
+        sample.processes = JSON.parse(stdout.trim() || '[]');
+      } catch { sample.processDiagnostics = 'unavailable within 10s'; }
+    }
+    report.installation.push(sample);
+    console.log('NSIS progress:', JSON.stringify(sample));
+    await fs.writeFile(path.join(output, 'installation.json'), JSON.stringify(report.installation, null, 2));
+  });
+  report.installationDurationMs = Date.now() - installStarted;
   const executable = path.join(installDir, 'AI Shuffle Preview.exe');
   assert(await exists(executable), 'NSIS did not install the preview executable');
   const worker = path.join(installDir, 'resources', 'worker');
@@ -215,7 +251,14 @@ try {
   databasePort = nextDescriptor.port;
   await screenshot('restart-persistence.png');
   passed('Full relaunch preserves workspace, network, instance and PostgreSQL credentials');
-  await page.evaluate(() => window.shuffleDesktop.worker.openStatus());
+  // Navigate through the real native menu. Awaiting renderer IPC here would
+  // destroy its own execution context while loadFile replaces the web app.
+  await application.evaluate(({ Menu }) => {
+    const workerMenu = Menu.getApplicationMenu()?.items.find(item => item.label === 'Worker');
+    const status = workerMenu?.submenu?.items.find(item => item.label.startsWith('Worker Status'));
+    if (!status || !status.enabled) throw new Error('Worker Status menu is unavailable');
+    status.click();
+  });
   await page.waitForURL('file:///**', { timeout: 30000 });
   await page.locator('#status-postgres').waitFor();
   assert.equal(await page.locator('input, select, form').count(), 0, 'Database configuration controls remain in status UI');

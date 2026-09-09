@@ -243,14 +243,14 @@ def test_startup_runs_extension_initializers_in_order(monkeypatch):
     calls = []
     class EndOfSetup(Exception):
         pass
-    for name in ('ensure_directories', 'init_database', 'run_migrations'):
+    for name in ('_reject_legacy_sqlite', 'ensure_directories', 'init_database', 'run_migrations'):
         monkeypatch.setattr(startup, name, lambda n=name: calls.append(n))
     monkeypatch.setattr(base, 'init_pool', lambda **_: calls.append('pool'))
     monkeypatch.setattr(mobile_tools.queue, 'init_schema', lambda: calls.append('queue'))
     monkeypatch.setattr(store, 'init_schema', lambda: calls.append('identity'))
     def stop():
         raise EndOfSetup
-    monkeypatch.setattr(startup, '_auto_migrate_sqlite_to_postgres', stop)
+    monkeypatch.setattr(startup, '_adopt_orphaned_instance_data', stop)
     with pytest.raises(EndOfSetup):
         startup.init_core()
-    assert calls == ['ensure_directories', 'pool', 'init_database', 'run_migrations', 'queue', 'identity']
+    assert calls == ['_reject_legacy_sqlite', 'ensure_directories', 'pool', 'init_database', 'run_migrations', 'queue', 'identity']
