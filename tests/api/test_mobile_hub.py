@@ -136,7 +136,8 @@ def test_account_profile_proxies_only_owning_account_inventory_metadata(setup, m
     assert profile.json() == {'account': {'id': ACCOUNT, 'username': 'owner', 'profile_complete': False},
                               'servers': [{'id': SERVER, 'name': 'Desk', 'url': 'https://desk.example', 'current': True},
                                           {'id': DEVICE, 'name': 'Laptop', 'url': None, 'current': False}],
-                              'devices': [{'id': DEVICE, 'name': 'Phone', 'platform': 'android'}]}
+                              'devices': [{'id': DEVICE, 'name': 'Phone', 'platform': 'android',
+                                           'local_device_id': store.local_device_id(SERVER, DEVICE)}]}
     assert 'secret' not in profile.text and 'sessions' not in profile.text and 'never' not in profile.text
     assert setup.patch('/api/v1/mobile/hub/account', json={'username': '!bad'}).status_code == 400
     assert setup.patch('/api/v1/mobile/hub/account', json={'username': 'taken'}).status_code == 409
@@ -149,6 +150,19 @@ def test_account_profile_proxies_only_owning_account_inventory_metadata(setup, m
 def test_account_profile_preserves_unknown_devices_for_older_hubs():
     result = mobile_hub._profile({'account': {'id': ACCOUNT, 'username': 'owner'}, 'servers': []})
     assert 'devices' not in result
+
+
+def test_inactive_account_link_reports_pending_connection_not_signed_out(setup, monkeypatch):
+    store.bind(HUB, SERVER, encryption.encrypt_value(SECRET), 'controller')
+    call = Mock()
+    monkeypatch.setattr(account_hub, 'call', call)
+    client = admin_client()
+    for response in (client.get('/api/v1/mobile/hub/account'),
+                     client.patch('/api/v1/mobile/hub/account', json={'username': 'owner'})):
+        assert response.status_code == 503
+        assert 'Your account is linked' in response.json()['error']
+        assert 'Sign in' not in response.json()['error']
+    call.assert_not_called()
 
 
 def test_connection_offers_sign_in_and_sign_up_links_for_the_same_code(setup, monkeypatch):

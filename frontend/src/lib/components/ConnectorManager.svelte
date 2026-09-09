@@ -605,9 +605,6 @@
 			<div class="flex items-center justify-between">
 				<div>
 					<h3 class="text-sm font-medium text-foreground">Connectors</h3>
-					<p class="text-xs text-muted-foreground mt-0.5">
-						Connect external messaging platforms and webhooks
-					</p>
 				</div>
 				<button
 					onclick={startAdd}

@@ -55,16 +55,15 @@ function row(key: string): HTMLElement {
 	return el as HTMLElement;
 }
 
-it('lists this worker, network workers and paired devices in two groups with one count and no approval controls', async () => {
+it('lists workers, phones and browsers in one device list with no advanced settings', async () => {
 	render(DevicesSection);
 	expect(await screen.findByText('4 devices')).toBeTruthy();
 	expect(screen.getByText('Ready')).toBeTruthy();
-	const workers = screen.getByRole('list', { name: 'Workers' });
-	expect(within(workers).getAllByRole('listitem')).toHaveLength(2);
+	const devices = screen.getByRole('list', { name: 'Devices' });
+	expect(within(devices).getAllByRole('listitem')).toHaveLength(4);
+	expect(screen.getAllByRole('list')).toHaveLength(1);
 	expect(within(row('self')).getByText('This worker')).toBeTruthy();
 	expect(within(row('member:laptop')).getByText('Online')).toBeTruthy();
-	const phones = screen.getByRole('list', { name: 'Phones and browsers' });
-	expect(within(phones).getAllByRole('listitem')).toHaveLength(2);
 	expect(row('client:phone').textContent).toContain('Phone');
 	expect(row('client:browser').textContent).toContain('Browser');
 	expect(row('client:browser').querySelector('svg.lucide-globe')).not.toBeNull();
@@ -73,7 +72,8 @@ it('lists this worker, network workers and paired devices in two groups with one
 	expect(screen.queryByRole('button', { name: /rotate/i })).toBeNull();
 	expect(screen.queryByText(/key v1|generation/)).toBeNull();
 	expect(screen.queryByText(/fingerprint/i)).toBeNull();
-	expect(screen.getByText('Advanced').closest('details')?.open).toBe(false);
+	expect(screen.queryByText('Advanced')).toBeNull();
+	expect(screen.queryByRole('button', { name: 'Create account' })).toBeNull();
 	expect(api.get.mock.calls.some(([path]) => path.includes('/secret'))).toBe(false);
 });
 
@@ -227,20 +227,53 @@ it('refreshes on network events without losing a rename draft and stops polling 
 	expect(api.get).toHaveBeenCalledTimes(count);
 });
 
-it('creates the recovery key from Advanced and keeps the address controls there', async () => {
-	api.post.mockImplementation(async (path: string) => {
-		if (path !== '/network/recovery') throw new Error('Unexpected POST ' + path);
-		return { recovery_key: 'SYNTHETIC-RECOVERY-KEY', created_at: '2026-09-01T10:00:00Z', key_version: 1 };
-	});
-	api.put.mockResolvedValue({ ...advertise, override: 'https://new.example.com' });
+it('does not expose advanced network settings or load their data', async () => {
 	render(DevicesSection);
 	await screen.findByText('4 devices');
-	const details = screen.getByText('Advanced').closest('details')!;
-	details.open = true;
-	await fireEvent.click(screen.getByRole('button', { name: 'Create recovery key' }));
-	expect(await screen.findByText('SYNTHETIC-RECOVERY-KEY')).toBeTruthy();
-	expect(api.post).toHaveBeenCalledExactlyOnceWith('/network/recovery', {});
-	await fireEvent.input(screen.getByLabelText("This worker's address"), { target: { value: 'https://new.example.com' } });
-	await fireEvent.click(screen.getByRole('button', { name: 'Save address' }));
-	expect(api.put).toHaveBeenCalledWith('/cluster/advertise', { base_url: 'https://new.example.com' });
+	expect(screen.queryByText('Advanced')).toBeNull();
+	expect(screen.queryByLabelText("This worker's address")).toBeNull();
+	expect(screen.queryByRole('button', { name: 'Create recovery key' })).toBeNull();
+	expect(screen.queryByText("Join a different worker's network")).toBeNull();
+	expect(api.get.mock.calls.some(([path]) => ['/cluster/advertise', '/network/conflicts'].includes(path))).toBe(false);
+});
+
+it('includes offline account devices in the same list, merges known local identities, and refreshes registrations', async () => {
+	vi.useFakeTimers();
+	status.members![1].endpoints = ['https://laptop.example/'];
+	let profile = {
+		account: { id: 'account', username: 'owner', profile_complete: true },
+		servers: [
+			{ id: 'server-self', name: 'Desk account name', current: true, url: null },
+			{ id: 'server-laptop', name: 'Laptop account name', current: false, url: 'https://laptop.example' },
+			{ id: 'offline', name: 'Offline PC', current: false, url: null }
+		],
+		devices: [
+			{ id: 'account-phone', local_device_id: 'phone', name: 'Phone account name', platform: 'android' },
+			{ id: 'browser', name: 'Browser account name', platform: 'web' },
+			{ id: 'offline-phone', name: 'Offline phone', platform: 'ios' },
+			{ id: 'same-name', name: 'Laptop', platform: 'web' }
+		]
+	};
+	api.get.mockImplementation(async (path: string) => {
+		if (path === '/mobile/hub/connection') return { ...disconnected, signed_in: true, status: 'connected' };
+		if (path === '/mobile/hub/account') return profile;
+		return reads(path);
+	});
+	render(DevicesSection);
+	await tick(); await vi.advanceTimersByTimeAsync(0);
+	expect(screen.getByText('7 devices')).toBeTruthy();
+	expect(screen.getAllByRole('list')).toHaveLength(1);
+	expect(within(screen.getByRole('list', { name: 'Devices' })).getAllByRole('listitem')).toHaveLength(7);
+	expect(row('account-worker:offline').textContent).toContain('Offline PC');
+	expect(row('account-device:offline-phone').textContent).toContain('Phone');
+	expect(row('account-device:same-name').textContent).toContain('Browser');
+	expect(screen.queryByText('Desk account name')).toBeNull();
+	expect(screen.queryByText('Laptop account name')).toBeNull();
+	expect(screen.queryByText('Phone account name')).toBeNull();
+	expect(screen.queryByText('Browser account name')).toBeNull();
+	profile = { ...profile, devices: [] };
+	await vi.advanceTimersByTimeAsync(32_000);
+	expect(screen.queryByText('Offline phone')).toBeNull();
+	expect(screen.getByText('5 devices')).toBeTruthy();
+	expect(row('client:phone')).toBeTruthy();
 });

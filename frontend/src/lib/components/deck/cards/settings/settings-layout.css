@@ -1,0 +1,55 @@
+/* Settings density is scoped here; other Studio editors keep their own spacing. */
+.settings.card-system .tab-content {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.settings.card-system .tab-content .set-group {
+	margin-bottom: 0;
+}
+
+.settings.card-system .tab-content .set-grouphead {
+	padding: 10px 14px;
+}
+
+.settings.card-system .tab-content .set-grouphead h3 {
+	font-size: 15px;
+	line-height: 1.4;
+	gap: 8px;
+}
+
+.settings.card-system .tab-content .set-row {
+	padding: 10px 14px;
+	gap: 12px;
+}
+
+.settings.card-system .tab-content .set-row .lab h4 {
+	margin: 0;
+	font-size: 13px;
+}
+
+.settings.card-system .tab-content .set-row.stack .lab {
+	margin-bottom: 8px;
+}
+
+.settings.card-system .tab-content .section-header {
+	padding: 10px 14px;
+}
+
+.settings.card-system .tab-content .section-content {
+	padding: 0 14px;
+}
+
+.settings.card-system .tab-content .setting-row {
+	padding: 10px 0;
+}
+
+@media (max-width: 560px) {
+	.settings.card-system .tab-content .set-grouphead,
+	.settings.card-system .tab-content .set-row,
+	.settings.card-system .tab-content .section-header {
+		padding-left: 12px;
+		padding-right: 12px;
+	}
+}

@@ -45,7 +45,8 @@ def _pending():
 
 def status():
     binding = mobile_hub.get_binding()
-    common = {'signed_in': bool(binding), 'server_id': binding['server_id'] if binding else None}
+    common = {'signed_in': bool(binding), 'profile_ready': bool(binding and binding['active']),
+              'server_id': binding['server_id'] if binding else None}
     if not encryption.is_encryption_ready():
         return {**common, 'status': 'locked', 'error': encryption.credential_storage_error(),
                 'url': None, 'code': None, 'expires_at': None}
@@ -59,7 +60,7 @@ def status():
                 'url': None, 'code': None, 'expires_at': None}
     valid = pending and pending['expires'] > time.time()
     state = _state if binding or valid else 'disconnected'
-    if state == 'disconnected' and binding:
+    if binding and (state == 'disconnected' or not binding['active']):
         state = 'connecting'
     if valid and not binding:
         state = 'waiting'

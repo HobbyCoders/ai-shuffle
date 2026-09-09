@@ -13,6 +13,7 @@
 	import { onMount } from 'svelte';
 	import { providers } from '$lib/stores/providers.svelte';
 	import './card-design-system.css';
+	import './settings/settings-layout.css';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { api } from '$lib/api/client';
 	import type { WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
@@ -378,7 +379,6 @@
 
 <StudioEditorShell
 	title="Settings"
-	subtitle="Account, connections, AI models & system"
 	sections={settingsTabs}
 	active={activeTab}
 	onSelect={(id) => (activeTab = id as Tab)}
@@ -420,8 +420,7 @@
 		min-width: 0;
 	}
 
-	/* Block flow so each .set-group's own margin-bottom governs spacing —
-	   matches the 5 editors exactly (no extra flex gap stacking). */
+	/* Group spacing is shared by every settings tab. */
 	.tab-content {
 		min-width: 0;
 	}

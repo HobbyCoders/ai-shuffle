@@ -15,7 +15,6 @@
 <div class="set-group">
 	<div class="set-grouphead">
 		<h3><Gauge />Rate limits</h3>
-		<p>Throttle how often sessions can call the model.</p>
 	</div>
 	<div class="sg-body"><RateLimitManager /></div>
 </div>
@@ -24,13 +23,12 @@
 <div class="set-group">
 	<div class="set-grouphead">
 		<h3><Users />API users</h3>
-		<p>Create and revoke API keys for programmatic access.</p>
 	</div>
 	<div class="sg-body"><ApiUserManager /></div>
 </div>
 
 <style>
 	.sg-body {
-		padding: 14px 18px 16px;
+		padding: 10px 14px;
 	}
 </style>

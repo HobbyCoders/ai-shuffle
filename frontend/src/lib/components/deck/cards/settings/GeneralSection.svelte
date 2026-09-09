@@ -35,10 +35,9 @@
 <div class="set-group">
 	<div class="set-grouphead">
 		<h3><Palette />Appearance</h3>
-		<p>Theme and color palette applied across the whole workspace.</p>
 	</div>
 	<div class="set-row">
-		<div class="lab"><h4>Theme</h4><p>Light, dark, or follow the operating system.</p></div>
+		<div class="lab"><h4>Theme</h4></div>
 		<div class="ctl">
 			<div class="seg">
 				<button type="button" class:on={$themePreference === 'light'} onclick={() => theme.setTheme('light')}>Light</button>
@@ -48,7 +47,7 @@
 		</div>
 	</div>
 	<div class="set-row">
-		<div class="lab"><h4>Theme style</h4><p>Color palette for cards, accents and highlights.</p></div>
+		<div class="lab"><h4>Theme style</h4></div>
 		<div class="ctl">
 			<select
 				class="sel"
@@ -68,10 +67,9 @@
 <div class="set-group">
 	<div class="set-grouphead">
 		<h3><FolderOpen />Workspace</h3>
-		<p>Where this install reads and writes your projects.</p>
 	</div>
 	<div class="set-row stack">
-		<div class="lab"><h4>Workspace directory</h4><p>Base folder for all projects on this machine.</p></div>
+		<div class="lab"><h4>Workspace directory</h4></div>
 		<div class="ctl">
 			<div class="ws-row">
 				<input
@@ -104,7 +102,7 @@
 		</div>
 	</div>
 	<div class="set-row">
-		<div class="lab"><h4>Timezone</h4><p>Used for timestamps and schedule triggers.</p></div>
+		<div class="lab"><h4>Timezone</h4></div>
 		<div class="ctl">
 			<select
 				class="sel"

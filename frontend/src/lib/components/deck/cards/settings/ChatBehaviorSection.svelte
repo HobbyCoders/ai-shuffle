@@ -56,21 +56,11 @@
 <div class="set-group" data-testid="computer-use-section">
 	<div class="set-grouphead">
 		<h3><Monitor />Computer use</h3>
-		<p>The purple frame identifies the active screen. The Agent pointer stays visible between actions.</p>
 	</div>
 	<div class="set-row" class:disabled={!computerUse.available}>
 		<div class="lab">
 			<h4>Enable computer use <span class="hint">{statusText}</span></h4>
-			<p>
-				Let chats control this machine's screen — screenshots, mouse, and keyboard,
-				with a visible agent pointer. Press Esc on the host or Stop computer use to take control.
-				Mouse and keyboard input are shared. Use browser tools for web tasks without moving
-				your mouse; independent desktop input requires a separate desktop session or VM.
-				Native (non-Docker) hosts only.
-				{#if !computerUse.available}
-					<br /><strong>{unavailableText}</strong>
-				{/if}
-			</p>
+			{#if !computerUse.available}<p role="status">{unavailableText}</p>{/if}
 		</div>
 		<div class="ctl">
 			<button
@@ -92,7 +82,7 @@
 	<div class="set-group">
 		<div class="set-grouphead"><h3><MessageSquare />Reply suggestions</h3></div>
 		<div class="set-row">
-			<div class="lab"><h4>Suggest next reply</h4><p>In code chats, send the final assistant response to your configured generated-text model for a suggested reply. Uses an extra model call. Suggestions are never sent automatically.</p></div>
+			<div class="lab"><h4>Suggest next reply</h4></div>
 			<div class="ctl">
 				<button type="button" class="switch" class:on={chatPrefs.suggestNextResponse}
 					role="switch" aria-checked={chatPrefs.suggestNextResponse} aria-label="Suggest next reply"
@@ -104,10 +94,9 @@
 	<div class="set-group">
 		<div class="set-grouphead">
 			<h3><Brain />Reasoning &amp; tools</h3>
-			<p>How thinking blocks, tool results and todos appear in the transcript.</p>
 		</div>
 		<div class="set-row">
-			<div class="lab"><h4>Show thinking blocks</h4><p>Display Claude's reasoning process.</p></div>
+			<div class="lab"><h4>Show thinking blocks</h4></div>
 			<div class="ctl">
 				<button type="button" class="switch" class:on={chatPrefs.showThinkingBlocks}
 					role="switch" aria-checked={chatPrefs.showThinkingBlocks} aria-label="Show thinking blocks"
@@ -115,7 +104,7 @@
 			</div>
 		</div>
 		<div class="set-row">
-			<div class="lab"><h4>Expand thinking by default</h4><p>Thinking blocks start expanded.</p></div>
+			<div class="lab"><h4>Expand thinking by default</h4></div>
 			<div class="ctl">
 				<button type="button" class="switch" class:on={chatPrefs.thinkingStartExpanded}
 					disabled={!chatPrefs.showThinkingBlocks}
@@ -124,7 +113,7 @@
 			</div>
 		</div>
 		<div class="set-row">
-			<div class="lab"><h4>Show thinking summary</h4><p>Preview thinking content when collapsed.</p></div>
+			<div class="lab"><h4>Show thinking summary</h4></div>
 			<div class="ctl">
 				<button type="button" class="switch" class:on={chatPrefs.showThinkingSummary}
 					disabled={!chatPrefs.showThinkingBlocks}
@@ -133,7 +122,7 @@
 			</div>
 		</div>
 		<div class="set-row">
-			<div class="lab"><h4>Expand tools by default</h4><p>Tool results start expanded.</p></div>
+			<div class="lab"><h4>Expand tools by default</h4></div>
 			<div class="ctl">
 				<button type="button" class="switch" class:on={chatPrefs.toolsStartExpanded}
 					role="switch" aria-checked={chatPrefs.toolsStartExpanded} aria-label="Expand tools by default"
@@ -141,7 +130,7 @@
 			</div>
 		</div>
 		<div class="set-row">
-			<div class="lab"><h4>Group tool calls</h4><p>Collapse consecutive tool calls into one expandable card.</p></div>
+			<div class="lab"><h4>Group tool calls</h4></div>
 			<div class="ctl">
 				<button type="button" class="switch" class:on={chatPrefs.groupToolCalls}
 					role="switch" aria-checked={chatPrefs.groupToolCalls} aria-label="Group tool calls"
@@ -149,7 +138,7 @@
 			</div>
 		</div>
 		<div class="set-row">
-			<div class="lab"><h4>Expand todo list by default</h4><p>Task list starts expanded.</p></div>
+			<div class="lab"><h4>Expand todo list by default</h4></div>
 			<div class="ctl">
 				<button type="button" class="switch" class:on={chatPrefs.todosStartExpanded}
 					role="switch" aria-checked={chatPrefs.todosStartExpanded} aria-label="Expand todo list by default"
@@ -162,10 +151,9 @@
 	<div class="set-group">
 		<div class="set-grouphead">
 			<h3><MessageSquare />Messages</h3>
-			<p>Scrolling, timestamps and message density.</p>
 		</div>
 		<div class="set-row">
-			<div class="lab"><h4>Auto-scroll on new messages</h4><p>Automatically scroll to new content.</p></div>
+			<div class="lab"><h4>Auto-scroll on new messages</h4></div>
 			<div class="ctl">
 				<button type="button" class="switch" class:on={chatPrefs.autoScrollOnNewMessage}
 					role="switch" aria-checked={chatPrefs.autoScrollOnNewMessage} aria-label="Auto-scroll on new messages"
@@ -173,7 +161,7 @@
 			</div>
 		</div>
 		<div class="set-row">
-			<div class="lab"><h4>Show message timestamps</h4><p>Display the time on each message.</p></div>
+			<div class="lab"><h4>Show message timestamps</h4></div>
 			<div class="ctl">
 				<button type="button" class="switch" class:on={chatPrefs.showMessageTimestamps}
 					role="switch" aria-checked={chatPrefs.showMessageTimestamps} aria-label="Show message timestamps"
@@ -181,7 +169,7 @@
 			</div>
 		</div>
 		<div class="set-row">
-			<div class="lab"><h4>Compact message view</h4><p>Reduce spacing between messages.</p></div>
+			<div class="lab"><h4>Compact message view</h4></div>
 			<div class="ctl">
 				<button type="button" class="switch" class:on={chatPrefs.compactMessageView}
 					role="switch" aria-checked={chatPrefs.compactMessageView} aria-label="Compact message view"

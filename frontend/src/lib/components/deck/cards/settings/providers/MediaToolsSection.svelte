@@ -116,7 +116,6 @@
 <div class="set-group">
 	<div class="set-grouphead">
 		<h3><Image />Media &amp; tools</h3>
-		<p>Keys and models for the image, video, audio and 3D generation tools.</p>
 	</div>
 
 	<!-- fal.ai key -->
@@ -131,12 +130,8 @@
 		<div class="kc-body">
 			<h4>fal.ai API key
 				{#if falKeySet}<span class="sb ok">Set</span>{:else}<span class="sb off">Optional</span>{/if}
+				{#if falKeySet}<code class="kc-val">{falKeyMasked}</code>{/if}
 			</h4>
-			{#if falKeySet}
-				<p>One key powers every AI media tool. <code class="kc-val">{falKeyMasked}</code></p>
-			{:else}
-				<p>Image, video, audio &amp; 3D generation &amp; editing tools.</p>
-			{/if}
 		</div>
 		<div class="kc-acts">
 			{#if falKeySet}
@@ -144,6 +139,7 @@
 			{:else}
 				<input
 					type="password"
+					aria-label="fal.ai API key"
 					autocomplete="off"
 					value={falKeyInput}
 					oninput={(e) => (falKeyInput = e.currentTarget.value)}
@@ -160,7 +156,7 @@
 	{#if falError}<div class="kc-foot err" role="alert">{falError}</div>{/if}
 	{#if falSuccess}<div class="kc-foot ok">{falSuccess}</div>{/if}
 
-	<GitHubConnection />
+	<GitHubConnection embedded />
 
 	<!-- AI media models (opens the manage-media-models drawer) -->
 	<div class="keycard">
@@ -174,7 +170,6 @@
 		</div>
 		<div class="kc-body">
 			<h4>AI media models</h4>
-			<p>Image, video, audio and 3D generation models</p>
 		</div>
 		<div class="kc-acts">
 			<button type="button" class="ed-btn" onclick={() => (manageMediaOpen = true)}>Manage</button>
@@ -190,9 +185,9 @@
 <style>
 	.keycard {
 		display: flex;
-		gap: 14px;
-		align-items: flex-start;
-		padding: 14px 18px;
+		gap: 10px;
+		align-items: center;
+		padding: 10px 14px;
 		border-bottom: 1px solid var(--border);
 	}
 	.keycard:last-child {
@@ -200,13 +195,11 @@
 	}
 	.kc-ic {
 		flex-shrink: 0;
-		width: 38px;
-		height: 38px;
-		border-radius: 10px;
+		width: 20px;
+		height: 24px;
 		display: grid;
 		place-items: center;
-		background: var(--muted);
-		color: var(--foreground);
+		color: var(--muted-foreground);
 	}
 	.kc-ic :global(svg) {
 		width: 20px;
@@ -217,20 +210,14 @@
 		min-width: 0;
 	}
 	.kc-body h4 {
-		margin: 1px 0 3px;
-		font-size: 13.5px;
+		margin: 0;
+		font-size: 13px;
 		font-weight: 600;
 		color: var(--foreground);
 		display: flex;
 		align-items: center;
 		gap: 8px;
 		flex-wrap: wrap;
-	}
-	.kc-body p {
-		margin: 0;
-		font-size: 12px;
-		color: var(--muted-foreground);
-		line-height: 1.5;
 	}
 	.kc-val {
 		font-family: var(--font-mono, monospace);
@@ -242,8 +229,6 @@
 		display: flex;
 		gap: 8px;
 		align-items: center;
-		/* Vertically center the action column against the taller left body
-		   (the card itself stays flex-start so the icon aligns with the title). */
 		align-self: center;
 		flex-wrap: wrap;
 		justify-content: flex-end;
@@ -280,7 +265,7 @@
 		background: var(--muted);
 	}
 	.kc-foot {
-		padding: 8px 18px 12px;
+		padding: 6px 14px 10px;
 		font-size: 12.5px;
 	}
 	.kc-foot.ok {
@@ -296,8 +281,10 @@
 		   in the same row and crushes the body text to one word per line. */
 		.keycard {
 			flex-wrap: wrap;
+			padding-left: 12px;
+			padding-right: 12px;
 		}
-		.kc-acts {
+		.kc-acts:has(input) {
 			width: 100%;
 			justify-content: flex-start;
 		}

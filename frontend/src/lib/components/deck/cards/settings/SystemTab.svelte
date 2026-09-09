@@ -36,7 +36,6 @@
 <div class="set-group">
 	<div class="set-grouphead">
 		<h3><FileText />System prompt</h3>
-		<p>Prepended to every system prompt sent to Claude, across all agents.</p>
 	</div>
 	{#if loadingSecurityInstructions}
 		<div class="sg-body"><p class="muted">Loading…</p></div>
@@ -44,7 +43,6 @@
 		<div class="set-row stack">
 			<div class="lab">
 				<h4>Custom instructions</h4>
-				<p>Applies globally. Leave empty to use the built-in default.</p>
 			</div>
 			<div class="ctl">
 				<textarea
@@ -84,7 +82,7 @@
 
 <style>
 	.sg-body {
-		padding: 14px 18px 16px;
+		padding: 10px 14px;
 	}
 	.muted {
 		margin: 0;

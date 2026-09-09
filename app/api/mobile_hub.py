@@ -58,8 +58,10 @@ class UsernameUpdate(BaseModel):
 
 def _active_binding():
     binding = store.get_binding()
-    if not binding or not binding['active']:
+    if not binding:
         raise HTTPException(409, 'Sign in to a Shuffle account first')
+    if not binding['active']:
+        raise HTTPException(503, 'Your account is linked. Waiting for this worker to finish connecting to the account service.')
     return binding
 
 
@@ -71,7 +73,7 @@ def account_profile(_admin=Depends(require_admin)):
     their credentials or sessions. Local owner access is required.
     """
     binding = _active_binding()
-    return JSONResponse(_profile(account_hub.call(binding, 'GET', 'account')), headers={'Cache-Control': 'no-store'})
+    return JSONResponse(_profile(account_hub.call(binding, 'GET', 'account'), binding['server_id']), headers={'Cache-Control': 'no-store'})
 
 
 @router.patch('/account')
@@ -80,11 +82,11 @@ def update_account_username(body: UsernameUpdate, _admin=Depends(require_admin))
     if not account_hub.USERNAME_PATTERN.fullmatch(username):
         raise HTTPException(400, account_hub.USERNAME_HINT)
     binding = _active_binding()
-    return JSONResponse(_profile(account_hub.call(binding, 'PATCH', 'account', {'username': username})),
+    return JSONResponse(_profile(account_hub.call(binding, 'PATCH', 'account', {'username': username}), binding['server_id']),
                         headers={'Cache-Control': 'no-store'})
 
 
-def _profile(result):
+def _profile(result, server_id=None):
     account = result.get('account') if isinstance(result, dict) else None
     if not isinstance(account, dict) or not isinstance(account.get('username'), str):
         raise HTTPException(503, 'Account profile unavailable')
@@ -93,10 +95,10 @@ def _profile(result):
         if not isinstance(item, dict):
             continue
         try:
-            server_id = account_hub.identifier(item.get('id'))
+            worker_id = account_hub.identifier(item.get('id'))
         except ValueError:
             continue
-        servers.append({'id': server_id, 'name': str(item.get('name') or '')[:80], 'url': item.get('url') if isinstance(item.get('url'), str) else None,
+        servers.append({'id': worker_id, 'name': str(item.get('name') or '')[:80], 'url': item.get('url') if isinstance(item.get('url'), str) else None,
                         'current': bool(item.get('current'))})
     profile = {'account': {'id': account.get('id'), 'username': account['username'],
                            'profile_complete': bool(account.get('profile_complete'))},
@@ -113,6 +115,8 @@ def _profile(result):
                 continue
             devices.append({'id': device_id, 'name': str(item.get('name') or '')[:80],
                             'platform': str(item.get('platform') or '')[:32]})
+            if server_id:
+                devices[-1]['local_device_id'] = store.local_device_id(server_id, device_id)
         profile['devices'] = devices
     return profile
 

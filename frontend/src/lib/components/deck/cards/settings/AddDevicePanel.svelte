@@ -170,7 +170,7 @@
 				</select>
 			</label>
 			{#if kind === 'worker' && usableEndpoints.length === 0}
-				<p class="error" role="alert">No address other computers can reach was detected. Set one under Advanced → This worker's address.</p>
+				<p class="error" role="alert">No address other computers can reach was detected. Connect this worker to a reachable network, then retry.</p>
 			{/if}
 		{/if}
 		<div class="actions">

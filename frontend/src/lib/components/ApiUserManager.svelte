@@ -343,9 +343,6 @@
 		<div class="flex items-center justify-between">
 			<div>
 				<h3 class="text-sm font-medium text-foreground">API Users</h3>
-				<p class="text-xs text-muted-foreground mt-0.5">
-					Manage API users for connectors and external integrations
-				</p>
 			</div>
 			{#if !showCreateForm}
 				<button
