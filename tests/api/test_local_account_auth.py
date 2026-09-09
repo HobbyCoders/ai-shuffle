@@ -112,6 +112,43 @@ def test_fresh_lan_setup_needs_no_password_or_account(app):
     assert c.post('/owner').status_code == 200
 
 
+def test_unlinked_local_owner_can_start_account_connection_without_browser_signin(app, monkeypatch):
+    from app.api import mobile_hub as hub_api
+    from app.core import managed_connection
+
+    app.include_router(hub_api.router, prefix='/api/v1/mobile')
+    monkeypatch.setattr(settings, 'account_browser_origin', 'https://shuffle-connect.unraidhomeserver.com')
+    monkeypatch.setattr(managed_connection.cloudflared, 'find_executable', lambda: '/test/cloudflared')
+    monkeypatch.setattr(managed_connection, '_state', 'disconnected')
+    monkeypatch.setattr(managed_connection, '_error', None)
+    monkeypatch.setattr(managed_connection, '_url', None)
+    hub_call = Mock(return_value={'ok': True})
+    monkeypatch.setattr(account_hub, 'worker_link_call', hub_call)
+    local = client(app)
+    assert local.post('/api/v1/auth/setup', json={}).status_code == 200
+    status = local.get('/api/v1/auth/status').json()
+    assert status['authenticated'] and status['is_admin'] and status['local_access']
+    assert not status['owner_linked'] and not status['account_sign_in_available']
+    assert local.get('/api/v1/mobile/hub/connection').json()['status'] == 'disconnected'
+
+    remote = client(app, 'remote', '127.0.0.1', 'https://worker.example.com')
+    assert remote.post('/api/v1/mobile/hub/connection', json={'name': 'Unraid'}).status_code == 403
+    hub_call.assert_not_called()
+
+    response = local.post('/api/v1/mobile/hub/connection', json={'name': 'Unraid'})
+    assert response.status_code == 200
+    connection = response.json()
+    assert connection['status'] == 'waiting' and not connection['signed_in']
+    assert connection['authorization_url'] == (
+        'https://shuffle-connect.unraidhomeserver.com/browser/claim?code=' + connection['code'])
+    assert len(connection['code']) == 12 and connection['qr_svg']
+    assert hub_call.call_count == 1 and hub_call.call_args.args[0] == 'start'
+    assert hub_call.call_args.args[1]['name'] == 'Unraid'
+    assert mobile_hub.get_binding() is None
+    assert local.get('/owner').status_code == 200
+    assert not local.get('/api/v1/auth/status').json()['account_sign_in_available']
+
+
 def test_workspace_metadata_needs_local_access_or_authenticated_remote(app, tmp_path, monkeypatch):
     from app.api import system
     app.include_router(system.router)

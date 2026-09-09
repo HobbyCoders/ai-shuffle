@@ -10,25 +10,35 @@ import AccountConnection from './AccountConnection.svelte';
 
 const disconnected = { signed_in: false, status: 'disconnected', code: null, qr_svg: null, error: null };
 const waiting = { ...disconnected, status: 'waiting', code: 'TESTONLYCODE', authorization_url: 'https://account.example.com/claim' };
-beforeEach(() => { vi.resetAllMocks(); capability.account_sign_in_available = true; api.get.mockResolvedValue(disconnected); });
+beforeEach(() => { vi.resetAllMocks(); capability.account_sign_in_available = false; api.get.mockResolvedValue(disconnected); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
-it('disables unavailable account sign-in and explains how to enable it without a login request', async () => {
-    capability.account_sign_in_available = false;
+it('allows first account linking before owner browser sign-in is available', async () => {
+    api.post.mockResolvedValue(waiting);
+    render(AccountConnection);
+    const button = await screen.findByRole('button', { name: 'Log in' });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText(/Ask the operator to enable it/)).toBeNull();
+    await fireEvent.click(button);
+    expect(api.post).toHaveBeenCalledExactlyOnceWith('/mobile/hub/connection', { name: 'My worker' });
+    expect((await screen.findByRole('link', { name: 'Continue to account' })).getAttribute('href')).toBe(waiting.authorization_url);
+});
+
+it.each(['locked', 'unavailable'])('disables linking when the connection is %s and shows the actual cause', async (status) => {
+    api.get.mockResolvedValue({ ...disconnected, status, error: 'Connection prerequisite unavailable' });
     render(AccountConnection);
     const button = await screen.findByRole('button', { name: 'Log in' });
     expect((button as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText('Account sign-in is not configured on this worker. Ask the operator to enable it.')).toBeTruthy();
-    expect(button.getAttribute('aria-describedby')).toBe('account-sign-in-unavailable');
+    expect(screen.getByRole('alert').textContent).toBe('Connection prerequisite unavailable');
+    expect(button.getAttribute('aria-describedby')).toBe('account-connection-error');
     await fireEvent.click(button);
     expect(api.post).not.toHaveBeenCalled();
     expect(screen.queryByRole('link')).toBeNull();
 });
 
 it('keeps local logout available when account sign-in is unavailable', async () => {
-    capability.account_sign_in_available = false;
-    api.get.mockResolvedValue({ ...disconnected, signed_in: true });
-    api.delete.mockResolvedValue(disconnected);
+    api.get.mockResolvedValue({ ...disconnected, signed_in: true, status: 'locked' });
+    api.delete.mockResolvedValue({ ...disconnected, status: 'locked', error: 'Credential storage is locked' });
     render(AccountConnection);
     const button = await screen.findByRole('button', { name: 'Log out' });
     expect((button as HTMLButtonElement).disabled).toBe(false);

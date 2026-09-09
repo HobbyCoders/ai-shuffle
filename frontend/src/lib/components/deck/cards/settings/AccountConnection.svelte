@@ -1,14 +1,14 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
-	import { auth } from '$lib/stores/auth.svelte';
 	import { Check, Copy } from 'lucide-svelte';
 
 	type Connection = { authorization_url?: string | null; signed_in: boolean; status: string; code: string | null; qr_svg: string | null; error: string | null };
 	let { workerName = 'My worker' }: { workerName?: string } = $props();
 	let connection = $state<Connection | null>(null);
-	// Older workers omit the capability; an explicit false means no account issuer.
-	const loginAvailable = $derived($auth.status?.account_sign_in_available !== false);
+	// Linking a worker is available before it has an owner account. The auth
+	// sign-in flag instead describes browser access to an already-linked worker.
+	const loginAvailable = $derived(connection !== null && connection.status !== 'locked' && connection.status !== 'unavailable');
 	let checking = $state(true);
 	let busy = $state(false);
 	let statusError = $state('');
@@ -99,12 +99,9 @@
 		{#if connection?.signed_in}
 			<button type="button" class="account-button" disabled={busy} onclick={disconnect}>{busy ? 'Logging out…' : 'Log out'}</button>
 		{:else if connection && !(loginInitiated && connection.code)}
-			<button type="button" class="account-button" disabled={busy || !loginAvailable} aria-describedby={!loginAvailable ? 'account-sign-in-unavailable' : undefined} onclick={connect}>{busy ? 'Preparing…' : 'Log in'}</button>
+			<button type="button" class="account-button" disabled={busy || !loginAvailable} aria-describedby={!loginAvailable && connection.error ? 'account-connection-error' : undefined} onclick={connect}>{busy ? 'Preparing…' : 'Log in'}</button>
 		{/if}
 	</div>
-	{#if !loginAvailable && !connection?.signed_in}
-		<p id="account-sign-in-unavailable">Account sign-in is not configured on this worker. Ask the operator to enable it.</p>
-	{/if}
 	{#if loginAvailable && loginInitiated && connection?.code && !connection.signed_in}
 		<div class="login-flow">
 			{#if connection.authorization_url}
@@ -124,7 +121,7 @@
 	{#if statusError}
 		<div class="account-error"><p role="alert">{statusError}</p><button type="button" class="account-button" disabled={busy} onclick={refresh}>Retry account status</button></div>
 	{/if}
-	{#if actionError || connection?.error}<p class="account-error" role="alert">{actionError || connection?.error}</p>{/if}
+	{#if actionError || connection?.error}<p id="account-connection-error" class="account-error" role="alert">{actionError || connection?.error}</p>{/if}
 </section>
 
 <style>
