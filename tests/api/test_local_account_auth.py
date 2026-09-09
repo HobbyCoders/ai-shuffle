@@ -120,7 +120,6 @@ def test_unlinked_local_owner_can_start_account_connection(app, monkeypatch):
     from app.core import managed_connection
 
     app.include_router(hub_api.router, prefix='/api/v1/mobile')
-    monkeypatch.setattr(settings, 'account_browser_origin', 'https://shuffle-connect.unraidhomeserver.com')
     monkeypatch.setattr(managed_connection.cloudflared, 'find_executable', lambda: '/test/cloudflared')
     monkeypatch.setattr(managed_connection, '_state', 'disconnected')
     monkeypatch.setattr(managed_connection, '_error', None)
@@ -143,7 +142,7 @@ def test_unlinked_local_owner_can_start_account_connection(app, monkeypatch):
     connection = response.json()
     assert connection['status'] == 'waiting' and not connection['signed_in']
     assert connection['authorization_url'] == (
-        'https://shuffle-connect.unraidhomeserver.com/browser/claim?code=' + connection['code'])
+        'https://hobbycoders.com/browser/claim?code=' + connection['code'])
     assert len(connection['code']) == 12 and connection['qr_svg']
     assert hub_call.call_count == 1 and hub_call.call_args.args[0] == 'start'
     assert hub_call.call_args.args[1]['name'] == 'Unraid'

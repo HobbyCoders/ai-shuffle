@@ -343,8 +343,8 @@ class Settings(BaseSettings):
     # precedence: process environment overrides .env; neither is exported to os.environ.
     shuffle_local_access: bool = True
     shuffle_local_hostnames: str = ""
-    account_browser_origin: str = "https://shuffle-connect.unraidhomeserver.com"
-    mobile_account_hub_url: str = "https://shuffle-account-hub.example.workers.dev"
+    account_browser_origin: str = "https://hobbycoders.com"
+    mobile_account_hub_url: str = "https://hobbycoders.com"
     # A paired device's hub verdict is reused for this long before the hub is
     # asked again, and honored for the grace window when the hub is down or
     # rate limiting. Both bound hub traffic; the hub allows 120 requests a

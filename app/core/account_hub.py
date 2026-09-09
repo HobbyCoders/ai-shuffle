@@ -21,7 +21,7 @@ from app.db import mobile_hub as store
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_HUB = 'https://shuffle-account-hub.example.workers.dev'
+DEFAULT_HUB = 'https://hobbycoders.com'
 
 # Username rules mirror the hub's PATCH .../account validation.
 USERNAME_PATTERN = re.compile(r'^[a-z0-9][a-z0-9_.-]{2,63}$')

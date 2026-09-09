@@ -25,7 +25,7 @@ class AccountSession(val hub: String, val token: String, val expiresAt: String, 
 }
 
 class AccountStore internal constructor(private val prefs: android.content.SharedPreferences) {
-    companion object { const val DEFAULT_HUB = "https://shuffle-account-hub.example.workers.dev" }
+    companion object { const val DEFAULT_HUB = "https://hobbycoders.com" }
     constructor(context: Context) : this(EncryptedSharedPreferences.create(context.applicationContext, "account_secure", MasterKey.Builder(context.applicationContext).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(), EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV, EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM))
     fun beginSignIn(): String = UUID.randomUUID().toString().also { prefs.edit().putString("install_id", it).commit() }
     var pendingOAuth: String?
