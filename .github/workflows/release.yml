@@ -46,23 +46,21 @@ jobs:
           body: |
             ## AI Shuffle ${{ env.VERSION }}
 
-            ### Desktop downloads
+            ### Windows desktop download
 
-            Choose the installer for your operating system and processor.
+            The desktop release includes the Windows x64 installer.
 
             | Platform | Processor | Download |
             |----------|-----------|----------|
             | **Windows** | Intel / AMD (x64) | [Windows installer (.exe)](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Desktop-${{ env.DESKTOP_VERSION }}-win-x64.exe) |
-            | **macOS** | Apple silicon (arm64) | [Mac installer (.dmg)](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Desktop-${{ env.DESKTOP_VERSION }}-mac-arm64.dmg) |
-            | **Linux** | Intel / AMD (x64) | [AppImage](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Desktop-${{ env.DESKTOP_VERSION }}-linux-x86_64.AppImage) / [Debian package (.deb)](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Desktop-${{ env.DESKTOP_VERSION }}-linux-amd64.deb) |
 
             The app runs an AI Shuffle worker on your computer and opens its web UI.
             It bundles Python, Node and its own persistent PostgreSQL database.
             There is no database server setup or database environment configuration.
             Other workers are managed inside the app under Devices.
-            Docker users: `ghcr.io/hobbycoders/ai-shuffle:${{ env.VERSION }}`.
+            Linux Docker image: `ghcr.io/hobbycoders/ai-shuffle:latest`.
 
-            Installers become available as each desktop build finishes.
+            The Windows installer becomes available when its build finishes.
 
             ### Android APK
 
@@ -81,10 +79,8 @@ jobs:
       publish_download: ${{ vars.ANDROID_WORKERS_READY == 'true' }}
     secrets: inherit
 
-  # Package the desktop app for each supported target and upload to the
-  # release above. Each installer carries the worker runtime for its target
-  # (Python with the server's dependencies, Node, the server itself), assembled
-  # by desktop/scripts/build-worker.mjs on a runner of that architecture.
+  # Default releases package Windows only to bound desktop build costs.
+  # Platform source/runtime support remains available for manual builds.
   desktop:
     name: Desktop (${{ matrix.target }})
     timeout-minutes: 90
@@ -96,19 +92,12 @@ jobs:
           - target: win-x64
             os: blacksmith-4vcpu-windows-2025
             arch: x64
-          - target: mac-arm64
-            os: blacksmith-6vcpu-macos-latest
-            arch: arm64
-          - target: linux-x64
-            os: blacksmith-4vcpu-ubuntu-2404
-            arch: x64
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: desktop
     env:
-      # No signing certificates are configured; do not let electron-builder
-      # look for one and fail the macOS build.
+      # No signing certificates are configured.
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - name: Checkout repository
@@ -160,6 +149,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           shopt -s nullglob
-          files=(release/*.exe release/*.dmg release/*.zip release/*.AppImage release/*.deb release/*.blockmap release/latest*.yml)
+          files=(release/*.exe release/*.blockmap release/latest.yml)
           ls -la release/
           gh release upload "$VERSION" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"

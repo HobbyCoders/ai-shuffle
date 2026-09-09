@@ -3,9 +3,10 @@ name: Desktop CI
 # Desktop app (desktop/). Path-filtered like the other CI workflows. The
 # release build that publishes installers lives in release.yml.
 #
-# Shell checks cover every platform. Windows additionally installs a complete,
-# isolated preview and exercises its real worker/PostgreSQL before publishing
-# a downloadable CI artifact. This never publishes a stable release/update.
+# Default packaging is Windows-only. Cheap typechecks/unit tests run on Linux;
+# full Linux desktop-runtime assembly requires an explicit manual opt-in.
+# Windows installs an isolated preview and exercises its real worker/PostgreSQL
+# before publishing a CI artifact, never a stable release/update.
 on:
   push:
     branches: [ main ]
@@ -29,6 +30,12 @@ on:
       - 'requirements*.txt'
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
+    inputs:
+      build_linux_runtime:
+        description: 'Explicitly assemble the Linux desktop runtime (additional build cost)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -56,13 +63,9 @@ jobs:
       - run: npm test
 
   package:
-    name: Package shell (${{ matrix.os }})
+    name: Package Windows shell
     needs: check
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [blacksmith-2vcpu-ubuntu-2404, blacksmith-2vcpu-windows-2025, blacksmith-6vcpu-macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: blacksmith-2vcpu-windows-2025
     defaults:
       run:
         working-directory: desktop
@@ -80,30 +83,10 @@ jobs:
         run: npm run build:worker:stub
       - name: Build unpacked app
         run: npm run pack
-      - name: Smoke-run the shell headless
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb > /dev/null
-          mkdir -p "$RUNNER_TEMP/profile"
-          SHUFFLE_DESKTOP_USER_DATA="$RUNNER_TEMP/profile" \
-          SHUFFLE_DESKTOP_WORKER_DIR="$PWD/worker" \
-          SHUFFLE_DESKTOP_SHOT="$RUNNER_TEMP/status.png" \
-          SHUFFLE_DESKTOP_SHOT_DELAY=3000 \
-          xvfb-run --auto-servernum npx electron . --no-sandbox --disable-gpu
-          # A PNG proves the page painted; the .txt fallback proves it loaded
-          # when the headless compositor cannot capture.
-          test -s "$RUNNER_TEMP/status.png" || { test -s "$RUNNER_TEMP/status.png.txt" && cat "$RUNNER_TEMP/status.png.txt"; }
-      - uses: actions/upload-artifact@v4
-        if: runner.os == 'Linux'
-        with:
-          name: desktop-status-screenshot
-          path: |
-            ${{ runner.temp }}/status.png
-            ${{ runner.temp }}/status.png.txt
-          if-no-files-found: ignore
 
   runtime:
     name: Assemble worker runtime (linux-x64)
+    if: github.event_name == 'workflow_dispatch' && inputs.build_linux_runtime == true
     needs: check
     runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
