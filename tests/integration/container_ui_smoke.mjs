@@ -10,7 +10,8 @@ page.on('pageerror', error => pageErrors.push(error.message));
 try {
   await page.goto('http://127.0.0.1:8000/setup', { waitUntil: 'domcontentloaded' });
   await page.getByRole('heading', { name: 'Welcome to AI Shuffle', exact: true }).waitFor();
-  const create = page.getByRole('button', { name: /^Start fresh/ });
+  // Start step: a clean install needs no account, invite or approval.
+  const create = page.getByRole('button', { name: /^Clean install/ });
   if (await create.isVisible()) {
     await create.click();
   }
@@ -26,11 +27,12 @@ try {
     return current.json();
   }, response.url());
   assert.equal(config.workspace_path, '/workspace/container-onboarding-check');
-  await page.getByText('Optional — connect your development tools on this machine', { exact: true }).waitFor();
-  await page.getByRole('button', { name: 'Skip for now', exact: true }).click();
-  await page.getByText('Add AI providers', { exact: true }).waitFor();
+  // Providers & GitHub is the last step; no Claude Code login is offered.
+  await page.getByText('Model providers', { exact: true }).waitFor();
+  await page.getByText('GitHub', { exact: true }).waitFor();
+  assert.equal(await page.getByText(/Claude Code/).count(), 0, 'Setup must not ask for Claude Code');
   const completed = page.waitForResponse(response => response.url().endsWith('/auth/onboarding/complete') && response.request().method() === 'POST');
-  await page.getByRole('button', { name: 'Finish Setup', exact: true }).click();
+  await page.getByRole('button', { name: /^Finish/ }).click();
   assert.equal((await completed).status(), 200, 'Standalone onboarding completion was rejected');
   await page.waitForURL(url => url.origin === 'http://127.0.0.1:8000' && url.pathname !== '/setup');
   const auth = await (await context.request.get('http://127.0.0.1:8000/api/v1/auth/status')).json();
@@ -40,10 +42,12 @@ try {
   await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'More', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Settings', exact: true }).click();
   await page.getByRole('button', { name: 'Providers', exact: true }).click();
-  const account = page.getByRole('region', { name: 'Account connection', exact: true });
-  const login = account.getByRole('button', { name: 'Log in', exact: true });
+  const account = page.getByRole('region', { name: 'Shuffle account', exact: true });
+  const login = account.getByRole('button', { name: 'Sign in', exact: true });
   await login.waitFor();
-  assert.equal(await login.isEnabled(), true, 'Fresh local owner must be able to link an account before owner browser sign-in is available');
+  assert.equal(await login.isEnabled(), true, 'Fresh local owner must be able to sign in to an account before owner browser sign-in is available');
+  assert.equal(await account.getByRole('button', { name: 'Create account', exact: true }).isEnabled(), true, 'Fresh local owner must be able to create an account');
+  assert.equal(await page.getByText(/Pending approvals/).count(), 0, 'Devices must not show an approval queue');
   assert.equal(await account.getByText(/Ask the operator to enable it/).count(), 0);
   assert.deepEqual(pageErrors, [], 'Bundled UI raised JavaScript errors');
   console.log('Bundled UI completed local setup and enabled first account linking without account, remote worker, or provider credentials.');

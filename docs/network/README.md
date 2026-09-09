@@ -111,9 +111,11 @@ them when the worker is enrolled).
   (`hub.admit_pending_devices` runs in the sync loop; the hub only lists
   devices whose server secret is bound to the same account) or unlocks with
   the recovery key when every worker is off. A worker that already has its
-  own network is answered `conflict`; its owner may adopt the account's
-  network (`hub.adopt_account_network`: `engine.leave_network` then a fresh
-  registration; the account's records win, local-only rows are merged in).
+  own network is answered `conflict`; the account always wins, so the loop
+  adopts the account's network at once (`hub.adopt_account_network`:
+  `engine.leave_network` then a fresh registration; the account's records
+  win, local-only rows are merged in). A signed-in worker is always in its
+  account's network.
 - **Device tokens.** Peers prove key possession with a signed challenge and get
   a five-minute HMAC token; every authenticated request re-checks membership, so
   revocation takes effect within one token lifetime.

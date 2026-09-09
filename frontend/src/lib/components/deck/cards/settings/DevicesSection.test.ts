@@ -117,13 +117,20 @@ it('explains waiting on the account and offers the recovery key without any appr
 	expect(api.post).toHaveBeenCalledWith('/network/recovery/unlock', { recovery_key: 'A1-AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-A' });
 });
 
-it('offers to switch to the account settings when the account network differs', async () => {
-	status = { ...enrolled(), hub: { linked: true, registered: false, status: 'conflict', account_network: { network_id: 'other', name: null, founder_device_id: 'x', devices: [{ device_id: 'x', name: 'Office PC', platform: 'windows', kind: 'worker', status: 'active' }], recovery_available: false } } };
+it('shows the automatic switch to the account settings with no choice to keep separate ones', async () => {
+	const account_network = { network_id: 'other', name: null, founder_device_id: 'x', devices: [{ device_id: 'x', name: 'Office PC', platform: 'windows', kind: 'worker', status: 'active' }], recovery_available: false };
+	status = { ...enrolled(), hub: { linked: true, registered: false, status: 'conflict', account_network } };
 	api.post.mockResolvedValue({ adopted: true, status: 'pending' });
 	render(DevicesSection);
-	expect((await screen.findByRole('alert')).textContent).toContain('Office PC');
-	expect(screen.getByText('Account differs')).toBeTruthy();
-	await fireEvent.click(screen.getByRole('button', { name: "Use my account's settings" }));
+	expect((await screen.findByText(/Your account already syncs settings between/)).textContent).toContain('Office PC');
+	expect(screen.getByText('Joining')).toBeTruthy();
+	expect(screen.queryByRole('button', { name: /Keep this worker separate/ })).toBeNull();
+	expect(screen.queryByRole('button', { name: /Use my account/ })).toBeNull();
+	expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+	// Only a failed switch surfaces a retry, which calls the adopt endpoint.
+	status = { ...status, hub: { ...status.hub!, last_error: 'Wait for the current settings sync to finish before switching networks' } };
+	resourceSync.invalidate(['network']);
+	await fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
 	expect(api.post).toHaveBeenCalledWith('/network/hub/adopt', {});
 });
 

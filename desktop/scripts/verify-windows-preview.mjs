@@ -222,7 +222,8 @@ try {
     'import json,sys,psycopg2; d=json.load(open(sys.argv[1])); c=psycopg2.connect(host=d["host"],port=d["port"],user=d["user"],password=d["password"],dbname=d["database"],connect_timeout=5); q=c.cursor(); q.execute("select count(*) from information_schema.tables where table_schema=\'public\'"); print(q.fetchone()[0]); c.close()', descriptorPath], { timeout: 30000 });
   assert(Number(probe.stdout.trim()) > 0, 'App did not create schema in its managed PostgreSQL');
   passed('Bundled PostgreSQL authenticates and contains the actual application schema; inherited DB env ignored');
-  await page.getByRole('button', { name: /^Start fresh/ }).click();
+  // Start step: a clean install needs no account, invite or approval.
+  await page.getByRole('button', { name: /^Clean install/ }).click();
   await page.getByRole('heading', { name: 'Select Workspace Folder', exact: true }).waitFor();
   await page.getByLabel('Or type a path manually').fill(workspace);
   const saved = page.waitForResponse(response => response.url().endsWith('/workspace/config') && response.request().method() === 'POST');
@@ -230,7 +231,9 @@ try {
   const response = await saved;
   assert.equal(response.status(), 200, 'Real workspace producer rejected onboarding');
   const workspaceURL = response.url();
-  await page.getByText('Optional — connect your development tools on this machine', { exact: true }).waitFor();
+  // Providers & GitHub is the last step; Claude Code is not asked for.
+  await page.getByText('Model providers', { exact: true }).waitFor();
+  assert.equal(await page.getByText(/Claude Code/).count(), 0, 'Setup must not ask for Claude Code');
   const originalNetwork = await networkStatus();
   assert(originalNetwork.networkId && originalNetwork.instanceId, 'Network producer did not persist identity');
   browserWasRunning = await canConnect(19221);
@@ -264,10 +267,9 @@ try {
   await page.getByRole('heading', { name: 'Select Workspace Folder', exact: true }).waitFor();
   assert.equal(await page.getByLabel('Or type a path manually').inputValue(), workspace);
   await page.getByRole('button', { name: 'Continue', exact: true }).click();
-  await page.getByRole('button', { name: 'Skip for now', exact: true }).click();
-  await page.getByText('Add AI providers', { exact: true }).waitFor();
+  await page.getByText('Model providers', { exact: true }).waitFor();
   const completed = page.waitForResponse(response => response.url().endsWith('/auth/onboarding/complete') && response.request().method() === 'POST');
-  await page.getByRole('button', { name: 'Finish Setup', exact: true }).click();
+  await page.getByRole('button', { name: /^Finish/ }).click();
   assert.equal((await completed).status(), 200, 'Standalone onboarding completion was rejected');
   await page.waitForURL(url => url.origin === 'http://127.0.0.1:8000' && url.pathname !== '/setup');
   passed('Interrupted local setup resumes and completes without account sign-in or provider credentials');

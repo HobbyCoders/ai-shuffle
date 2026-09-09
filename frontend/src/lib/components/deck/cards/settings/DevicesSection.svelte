@@ -6,7 +6,9 @@
 	 * account it belongs to, the other workers in its network, the phones and
 	 * browsers paired with it, and how to add more. Invites and pairing codes
 	 * admit a device on their own; a device that signs in to the same account
-	 * is admitted by whichever worker is online. Nothing waits for approval.
+	 * is admitted by whichever worker is online. Nothing waits for approval,
+	 * and the account always wins: a worker that signs in after a clean
+	 * install switches to the account's settings by itself.
 	 */
 	import { onMount } from 'svelte';
 	import { AlertTriangle, Check, Globe, KeyRound, Loader2, MonitorSmartphone, Pencil, Plus, Server, ShieldAlert, ShieldCheck, ShieldOff, Smartphone, Trash2, X } from 'lucide-svelte';
@@ -53,7 +55,6 @@
 	let saving = $state<string | null>(null);
 	let confirmation = $state<{ key: string; action: 'revoke' | 'remove' } | null>(null);
 	let revokedNotice = $state<string | null>(null);
-	let conflictDismissed = $state(false);
 	let adopting = $state(false);
 	let startingFresh = $state(false);
 	let recoveryInput = $state('');
@@ -81,7 +82,7 @@
 	const complete = $derived(workersLoaded && clientsLoaded && !workersError && !clientsError && status !== null);
 	const enrollmentPending = $derived(!enrolled && (status?.enrollment?.status === 'pending' || status?.enrollment?.status === 'syncing'));
 	const waitingOnAccount = $derived(!enrolled && !status?.enrollment && Boolean(status?.hub?.linked) && status?.hub?.status === 'pending');
-	const accountConflict = $derived(enrolled && Boolean(status?.hub?.linked) && status?.hub?.status === 'conflict' && !conflictDismissed);
+	const switchingToAccount = $derived(enrolled && Boolean(status?.hub?.linked) && status?.hub?.status === 'conflict');
 	const accountWorkers = $derived((status?.hub?.account_network?.devices ?? []).filter((d) => d.status === 'active' && d.kind !== 'consumer'));
 	const recoveryAvailable = $derived(Boolean(status?.hub?.account_network?.recovery_available));
 
@@ -109,7 +110,7 @@
 		statusTimer = setTimeout(async () => {
 			if (typeof document === 'undefined' || document.visibilityState === 'visible') await loadStatus();
 			scheduleStatus();
-		}, enrollmentPending || waitingOnAccount || joining.length ? JOINING_MS : STATUS_MS);
+		}, enrollmentPending || waitingOnAccount || switchingToAccount || joining.length ? JOINING_MS : STATUS_MS);
 	}
 
 	async function loadAll() {
@@ -256,7 +257,6 @@
 		adopting = true; error = '';
 		try {
 			await adoptAccountNetwork();
-			conflictDismissed = false;
 			flash('Switching to your account\'s settings');
 			await loadStatus(); scheduleStatus();
 		} catch (e) { error = getErrorMessage(e, 'Could not switch to the account\'s settings'); }
@@ -297,7 +297,7 @@
 
 	<div id="device-enrollment" hidden={!showAdd}>{#if addMounted}<AddDevicePanel {enrolled} allowLegacyRunner={workersLoaded && !enrolled && installs.length > 0} />{/if}</div>
 
-	<!-- Situations that need a word: joining, waiting for the account, account conflict, a fresh worker. -->
+	<!-- Situations that need a word: joining, waiting for the account, switching to the account, a fresh worker. -->
 	{#if statusError}
 		<div class="notice error-notice"><p role="alert">{statusError}</p><button type="button" class="btn sm" onclick={loadStatus}>Retry</button></div>
 	{:else if status && !enrolled}
@@ -331,14 +331,14 @@
 				{/if}
 			</div>
 		{/if}
-	{:else if accountConflict}
-		<div class="notice warn" role="alert">
-			<h4><AlertTriangle size={14} /> Your account already syncs settings elsewhere</h4>
-			<p>This worker keeps its own settings while your account syncs settings between {accountWorkers.length ? accountWorkers.map((d) => d.name || 'a worker').join(', ') : 'your other workers'}. Switch this worker to the account's settings? Settings the account already has replace this worker's copies; anything only this worker has is added to the account.</p>
-			<div class="row">
-				{#if $isAdmin}<button type="button" class="btn sm primary" onclick={adopt} disabled={adopting}>{adopting ? 'Switching…' : 'Use my account\'s settings'}</button>{/if}
-				<button type="button" class="btn sm" onclick={() => (conflictDismissed = true)}>Keep this worker separate</button>
-			</div>
+	{:else if switchingToAccount}
+		<div class="notice" role="status">
+			<h4><Loader2 size={14} class="spin" /> Switching to your account's settings</h4>
+			<p>Your account already syncs settings between {accountWorkers.length ? accountWorkers.map((d) => d.name || 'a worker').join(', ') : 'your other workers'}. This worker takes the account's settings; anything only this worker has is added to the account.</p>
+			{#if status?.hub?.last_error}
+				<p class="error">{status.hub.last_error}</p>
+				{#if $isAdmin}<div class="row"><button type="button" class="btn sm" onclick={adopt} disabled={adopting}>{adopting ? 'Retrying…' : 'Retry'}</button></div>{/if}
+			{/if}
 		</div>
 	{/if}
 	{#if stale && status}<p class="stale" role="status"><AlertTriangle size={13} /> The worker did not answer the last status check; showing saved data.</p>{/if}
@@ -521,7 +521,7 @@
 	.pill { padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 500; background: var(--muted); color: var(--muted-foreground); }
 	.pill.s-ready { background: color-mix(in oklch, var(--success) 15%, transparent); color: var(--success); }
 	.pill.s-syncing, .pill.s-waiting { background: color-mix(in oklch, var(--primary) 15%, transparent); color: var(--primary); }
-	.pill.s-conflict, .pill.s-needs-setup { background: color-mix(in oklch, var(--warning, orange) 18%, transparent); color: var(--warning-foreground, var(--foreground)); }
+	.pill.s-needs-setup { background: color-mix(in oklch, var(--warning, orange) 18%, transparent); color: var(--warning-foreground, var(--foreground)); }
 	.pill.s-offline { background: color-mix(in oklch, var(--destructive) 12%, transparent); color: var(--destructive); }
 	.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--foreground); font: inherit; font-size: 12px; line-height: 1.4; cursor: pointer; }
 	.btn:hover:not(:disabled) { background: var(--hover-overlay); }

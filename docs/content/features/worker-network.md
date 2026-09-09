@@ -81,14 +81,15 @@ remaining workers switch to a fresh network key on their own. Any secret the
 worker had already received should be treated as compromised; rotate provider
 keys from Settings > Providers.
 
-## Switching a worker to your account
+## The account always wins
 
 A worker set up with a clean install that later signs in to an account which
-already syncs other workers is shown as *Account differs*. Choose *Use my
-account's settings* to move it into the account's network: settings the
-account already has replace the worker's copies, and anything only that worker
-has is added to the account. The same applies to *Join a different worker's
-network* under Settings > Devices > Advanced.
+already syncs other workers switches to the account's network on its own:
+settings the account already has replace the worker's copies, and anything
+only that worker has is added to the account. A worker signed in to an account
+is always in that account's network; there is no separate state to keep.
+*Join a different worker's network* under Settings > Devices > Advanced moves a
+worker between networks with an invite in the same way.
 
 ## Existing shared-database installations
 

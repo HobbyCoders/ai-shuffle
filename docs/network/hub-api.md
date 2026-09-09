@@ -80,8 +80,8 @@ Rules:
   `{"status": "pending"}` (or `approved` once an approval waits for pickup).
 - Body names a network that is not the account's: nothing is stored; reply
   `{"status": "conflict", "network_id": "<the account's network>"}`. The
-  worker's owner chooses to adopt the account's network (the worker leaves
-  its own and registers again without one) or to keep it apart.
+  account always wins: the worker leaves its own network and registers again
+  without one (becoming `pending` until a member admits it).
 
 ### `GET .../network` — network summary
 

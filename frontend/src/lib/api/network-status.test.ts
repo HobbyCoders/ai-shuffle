@@ -83,8 +83,8 @@ describe('deriveNetworkState', () => {
 		expect(deriveNetworkState(status({ enrolled: false, network: undefined, enrollment: failed }))).toBe('needs-setup');
 	});
 
-	it('is Account differs when the account already has a network founded elsewhere', () => {
-		expect(deriveNetworkState(status({ hub: { linked: true, registered: false, status: 'conflict' } }))).toBe('conflict');
+	it('is Joining while a worker switches to the account network that was founded elsewhere', () => {
+		expect(deriveNetworkState(status({ hub: { linked: true, registered: false, status: 'conflict' } }))).toBe('waiting');
 		expect(deriveNetworkState(status({ hub: { linked: true, registered: true, status: 'active' } }))).toBe('ready');
 	});
 });

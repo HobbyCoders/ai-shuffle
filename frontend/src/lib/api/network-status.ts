@@ -11,13 +11,12 @@ import type { NetworkStatus } from './network';
 
 // ─── State pill ──────────────────────────────────────────────────────────────
 
-export type NetworkUiState = 'ready' | 'syncing' | 'waiting' | 'conflict' | 'needs-setup' | 'offline';
+export type NetworkUiState = 'ready' | 'syncing' | 'waiting' | 'needs-setup' | 'offline';
 
 export const NETWORK_STATE_LABELS: Record<NetworkUiState, string> = {
 	ready: 'Ready',
 	syncing: 'Syncing',
 	waiting: 'Joining',
-	conflict: 'Account differs',
 	'needs-setup': 'Needs local setup',
 	offline: 'Offline'
 };
@@ -26,7 +25,6 @@ export const NETWORK_STATE_HINTS: Record<NetworkUiState, string> = {
 	ready: 'This worker is enrolled and in sync with its network.',
 	syncing: 'This worker is still catching up on the network history.',
 	waiting: 'Joining: another worker on the network admits this one as soon as it is online.',
-	conflict: 'This worker has its own settings while the account already syncs settings between other workers.',
 	'needs-setup': 'This worker does not belong to a network yet.',
 	offline: 'The worker did not answer — showing the last saved data.'
 };
@@ -45,7 +43,9 @@ export function deriveNetworkState(status: NetworkStatus | null | undefined, sta
 		if (status.hub?.linked && status.hub.status === 'pending') return 'waiting';
 		return 'needs-setup';
 	}
-	if (status.hub?.linked && status.hub.status === 'conflict') return 'conflict';
+	// The account always wins: a worker whose own network clashes with the
+	// account's is switching to the account's network right now.
+	if (status.hub?.linked && status.hub.status === 'conflict') return 'waiting';
 	if (status.network && status.network.bootstrap_state !== 'ready') return 'syncing';
 	if ((status.sync?.holes?.length ?? 0) > 0) return 'syncing';
 	return 'ready';

@@ -135,7 +135,9 @@ async def test_first_worker_to_sign_in_founds_the_account_network(workers, fake)
         assert hub.status()["backlog"] == 0 and len(fake.feed) >= 2
 
 
-async def test_worker_with_its_own_network_is_reported_as_conflict_and_can_adopt(workers, fake):
+async def test_worker_with_its_own_network_switches_to_the_account_network_on_sign_in(workers, fake):
+    """The account always wins: a clean-install worker that signs in later drops its
+    own network and joins the account's, with nothing to decide."""
     a, b = workers("a"), workers("b")
     with a.active():
         engine.create_network("Home", device_name="A")
@@ -151,17 +153,17 @@ async def test_worker_with_its_own_network_is_reported_as_conflict_and_can_adopt
         engine.scan_all()
         own_network = engine.context().network_id
         _signed_in(fake, b)
-        assert await hub._loop_body() is False
+        # One pass: the hub answers conflict, B leaves its network and registers again as pending.
+        assert await hub._loop_body() is True
         status = hub.status()
-        assert status["status"] == "conflict" and not status["registered"]
+        assert status["status"] == "pending"
         assert status["account_network"]["network_id"] == fake.network["network_id"]
-        assert b.device_id not in fake.devices
-        # Nothing of B's reached the account while the owner had not decided.
-        assert all(env["origin_device_id"] == a.device_id for env in fake.feed)
-        result = await hub.adopt_account_network()
-        assert result["adopted"] and result["status"] == "pending"
         assert engine.context() is None and fake.devices[b.device_id]["status"] == "pending"
         assert b.sql("SELECT COUNT(*) AS n FROM sync_ops")[0]["n"] == 0
+        # Nothing of B's old network reached the account.
+        assert all(env["origin_device_id"] == a.device_id for env in fake.feed)
+        # The manual retry is a no-op once the switch happened.
+        assert (await hub.adopt_account_network())["adopted"] is False
     with a.active():
         _signed_in(fake, a)
         await hub._loop_body()

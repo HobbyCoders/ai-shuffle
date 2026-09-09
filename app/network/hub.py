@@ -17,9 +17,12 @@ worker signed into the account:
   in to the account is the authorization; no one compares fingerprints.
 
 A worker that already has its own network and signs in to an account whose
-network was founded elsewhere is reported as ``conflict``; the owner may
-adopt the account's network (``adopt_account_network``), which replaces the
-local network bookkeeping and merges local-only rows into the account's.
+network was founded elsewhere is answered ``conflict`` by the hub; the
+account always wins, so the loop adopts the account's network at once
+(``adopt_account_network``): the local network bookkeeping is replaced and
+local-only rows are merged into the account's. A worker signed in to an
+account is therefore always in that account's network; there is no second
+state to manage.
 
 Quota errors stop cloud durability, never LAN sync: the backlog is shown
 in the status and retried.
@@ -173,7 +176,7 @@ def register() -> dict:
     _state["status"] = result.get("status")
     if result.get("status") == "conflict":
         # The account's network was founded elsewhere; remember whose so the
-        # owner can decide, and keep the feed idle until they do.
+        # UI can say which workers will admit this one once it switched.
         _state["account_network"] = _account_network(_summary_or_none())
     if ctx is not None:
         _save_hub_state(registered=result.get("status") != "conflict", status=result.get("status"),
@@ -313,8 +316,10 @@ def found_account_network(*, device_name: Optional[str] = None) -> dict:
 async def adopt_account_network(*, device_name: Optional[str] = None) -> dict:
     """Leave this worker's own network and join the account's instead.
 
-    Records already in the account's network win over local copies with the
-    same id; rows only this worker holds are published once it is admitted.
+    The account always takes precedence: records already in the account's
+    network win over local copies with the same id; rows only this worker
+    holds are published once it is admitted. The sync loop calls this on its
+    own when the hub reports a conflict; the API exposes it for a retry.
     """
     if _binding() is None:
         raise HubError("This worker is not signed in to a Shuffle account")
@@ -322,13 +327,13 @@ async def adopt_account_network(*, device_name: Optional[str] = None) -> dict:
     if not info.get("network_id"):
         raise HubError("The account has no network to adopt")
     ctx = engine.context()
-    if ctx is not None:
-        if ctx.network_id == info["network_id"]:
-            return {"adopted": False, "status": _state.get("status")}
-        try:
-            await asyncio.to_thread(engine.leave_network)
-        except RuntimeError as exc:
-            raise HubError(str(exc)) from exc
+    if ctx is None or ctx.network_id == info["network_id"]:
+        # Already switched (waiting to be admitted) or already in the account's network.
+        return {"adopted": False, "status": _state.get("status")}
+    try:
+        await asyncio.to_thread(engine.leave_network)
+    except RuntimeError as exc:
+        raise HubError(str(exc)) from exc
     result = await asyncio.to_thread(register)
     _state["account_network"] = _account_network(info)
     kick()
@@ -498,10 +503,14 @@ async def _loop_body() -> bool:
         if not hub_state.get("registered"):
             result = await asyncio.to_thread(register)
             if result.get("status") == "conflict":
+                # The account already syncs other workers: the account wins.
+                await adopt_account_network()
                 _state["last_error"] = None
-                return False
+                return True
         elif hub_state.get("status") == "conflict":
-            return False
+            await adopt_account_network()
+            _state["last_error"] = None
+            return True
         recovery_wrap = (store.get_state() or {}).get("recovery") or {}
         if _recovery_upload_due or (recovery_wrap.get("stale") and not recovery_wrap.get("hub_tombstoned")):
             await asyncio.to_thread(_upload_recovery)

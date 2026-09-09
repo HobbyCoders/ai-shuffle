@@ -185,7 +185,7 @@
 	</div>
 
 	{#if !signedIn}
-		<p class="hint">Sign in on every worker you want to see from your phone or another worker. Workers on one account share settings, profiles and provider keys. Local use needs no account.</p>
+		<p class="hint">Sign in on every worker you want to see from your phone or another worker. Workers on one account share settings, profiles and provider keys; the account's settings replace this worker's own. Local use needs no account.</p>
 	{/if}
 
 	{#if canStart && intent && connection?.code && !connection.signed_in}
