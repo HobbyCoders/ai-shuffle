@@ -206,7 +206,16 @@ def is_install_approved(install_id: str) -> bool:
 
 
 def get_install(install_id: str) -> Optional[InstallRow]:
-    """Get one install row by id (= instance_id), with derived ``online``."""
+    """Get one install row by id (= instance_id), with derived ``online``.
+
+    In a network the id may be a device id or a member's legacy instance id.
+    """
+    directory = _network_directory()
+    if directory is not None:
+        for row in directory:
+            if row["id"] == install_id or row.get("legacy_instance_id") == install_id:
+                return row
+        return None
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -216,8 +225,29 @@ def get_install(install_id: str) -> Optional[InstallRow]:
         return _row_to_install(cursor.fetchone())
 
 
+def _network_directory() -> Optional[List[InstallRow]]:
+    """Runner rows from the worker network, or None when this worker has no network.
+
+    Once a worker belongs to a network its runners come from the members it
+    trusts and the presence they published, not from a shared ``installs``
+    table. The rows keep the ``installs`` shape so placement, the session
+    enrichment and the composer's runner picker need no changes.
+    """
+    try:
+        from app.network import engine, runners
+        if engine.context() is None:
+            return None
+        return runners.directory()["runners"]  # type: ignore[return-value]
+    except Exception:  # noqa: BLE001 — registry trouble must never break callers
+        logger.debug("Network runner directory unavailable", exc_info=True)
+        return None
+
+
 def get_installs() -> List[InstallRow]:
     """List all registered installs, most recently seen first."""
+    directory = _network_directory()
+    if directory is not None:
+        return directory
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -233,8 +263,17 @@ def get_installs() -> List[InstallRow]:
 
 
 def get_installs_map() -> Dict[str, InstallRow]:
-    """Return {install_id: row} for batch session enrichment."""
-    return {row["id"]: row for row in get_installs()}
+    """Return {install_id: row} for batch session enrichment.
+
+    In a network the map is keyed by device id AND by each member's legacy
+    instance id, so rows written before migration still resolve.
+    """
+    out = {row["id"]: row for row in get_installs()}
+    for row in list(out.values()):
+        legacy = row.get("legacy_instance_id")
+        if legacy and legacy not in out:
+            out[legacy] = row
+    return out
 
 
 def delete_install(install_id: str) -> bool:

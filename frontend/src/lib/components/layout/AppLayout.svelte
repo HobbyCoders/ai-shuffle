@@ -1,28 +1,25 @@
 <script lang="ts">
 	/**
-	 * AppLayout - app shell (Studio Noir)
+	 * AppLayout - the desktop app shell (Studio Noir)
 	 *
-	 * Two shells, chosen by PLATFORM (see `$lib/stores/platform.svelte`), never
-	 * by window width:
+	 * The worker-served web UI renders this shell in every browser, at any
+	 * window width: a 256px sidebar on the black `--sidebar` plane holds the
+	 * session navigator and the page rail; the main panel carries its own top
+	 * bar (StudioTopBar, rendered by MainPanel so it can host the existing git
+	 * actions). The sidebar collapses from that top bar and its collapsed state
+	 * persists via the layout store. In a narrow window (≤1080px) the same
+	 * shell stays, but the sidebar becomes an overlay that starts collapsed, so
+	 * the main panel keeps the full width.
 	 *
-	 * Desktop (every web browser): a 256px sidebar on the black `--sidebar`
-	 * plane holds the session navigator and the page rail; the main panel
-	 * carries its own top bar (StudioTopBar, rendered by MainPanel so it can
-	 * host the existing git actions). The sidebar collapses from that top bar
-	 * and its collapsed state persists via the layout store. In a narrow window
-	 * (≤1080px) the same shell stays, but the sidebar becomes an overlay that
-	 * starts collapsed, so the main panel keeps the full width.
-	 *
-	 * Mobile (the Android app's WebView, or `?ui=mobile`): AppTopBar's compact
-	 * bar plus the slide-in drawer, which hosts the very same Sidebar component.
+	 * The mobile shell (compact app bar + slide-in drawer) is not part of this
+	 * build: it is the mobile app's own layout in `mobile/src/shell`, which
+	 * wraps the same MainPanel. See docs/mobile-desktop-ui-split.md.
 	 */
 	import { onMount, onDestroy } from 'svelte';
 	import { layout, sidebarCollapsed } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
-	import { platform } from '$lib/stores/platform.svelte';
 	import { isNarrowViewportWidth } from '$lib/utils/viewport';
 	import MainPanel from './MainPanel.svelte';
-	import AppTopBar from './AppTopBar.svelte';
 	import Sidebar from './Sidebar.svelte';
 	import CredentialStorageBanner from '../CredentialStorageBanner.svelte';
 
@@ -48,8 +45,7 @@
 		onOpenSpotlight
 	}: Props = $props();
 
-	const isMobile = $derived(platform.isMobile);
-	/** Desktop shell only: window is too narrow for a docked sidebar. */
+	/** Window is too narrow for a docked sidebar. */
 	let narrow = $state(false);
 
 	// --- resizable sidebar ---------------------------------------------------
@@ -85,16 +81,14 @@
 		persistWidth();
 	}
 
-	// The sidebar is an overlay (collapsed by default, not persisted) on the
-	// mobile shell always, and on the desktop shell only while the window is
-	// narrow. To try the mobile shell in a desktop browser, load `?ui=mobile`.
+	// The sidebar is an overlay (collapsed by default, not persisted) only
+	// while the window is narrow.
 	let overlayApplied: boolean | null = null;
 	function syncOverlay() {
 		narrow = isNarrowViewportWidth(window.innerWidth);
-		const overlay = isMobile || narrow;
-		if (overlay === overlayApplied) return;
-		overlayApplied = overlay;
-		layout.setSidebarOverlay(overlay);
+		if (narrow === overlayApplied) return;
+		overlayApplied = narrow;
+		layout.setSidebarOverlay(narrow);
 	}
 
 	onMount(() => {
@@ -108,14 +102,14 @@
 		}
 	});
 
-	const showSidebar = $derived(!isMobile && !$sidebarCollapsed);
-	/** Desktop shell, narrow window: the open sidebar floats over the main panel. */
+	const showSidebar = $derived(!$sidebarCollapsed);
+	/** Narrow window: the open sidebar floats over the main panel. */
 	const sidebarFloating = $derived(showSidebar && narrow);
 
 	function closeFloatingSidebar() {
 		if (sidebarFloating) layout.setSidebarCollapsed(true);
 	}
-	// Navigating from a floating sidebar dismisses it, like the mobile drawer.
+	// Navigating from a floating sidebar dismisses it.
 	const sidebarNav = $derived({
 		onNewSession: () => { onNewSession(); closeFloatingSidebar(); },
 		onSettledOpenSession: () => { onSettledOpenSession(); closeFloatingSidebar(); },
@@ -125,18 +119,8 @@
 	});
 </script>
 
-<div class="app-shell" class:mobile={isMobile} class:narrow={!isMobile && narrow}>
+<div class="app-shell" class:narrow>
 	<CredentialStorageBanner />
-	{#if isMobile}
-		<AppTopBar
-			{isAdmin}
-			{onNewSession}
-			{onSettledOpenSession}
-			{onOpenSession}
-			{onOpenFeature}
-			{onOpenSpotlight}
-		/>
-	{/if}
 
 	<div class="app-body">
 		{#if sidebarFloating}
@@ -174,7 +158,6 @@
 			{onOpenPlugins}
 			{onNewSession}
 			{onNewSessionForProject}
-			{isMobile}
 			sidebarCollapsed={$sidebarCollapsed}
 			onToggleSidebar={() => layout.toggleSidebar()}
 		/>
@@ -210,8 +193,8 @@
 		border-right: 1px solid var(--sidebar-border);
 	}
 
-	/* Desktop shell in a narrow window: the sidebar floats over the main panel
-	   instead of squeezing it, and never grows past the viewport. */
+	/* Narrow window: the sidebar floats over the main panel instead of
+	   squeezing it, and never grows past the viewport. */
 	.sidebar-slot.floating {
 		position: absolute;
 		inset: 0 auto 0 0;

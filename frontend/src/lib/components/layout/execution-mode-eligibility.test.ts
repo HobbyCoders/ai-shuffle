@@ -111,7 +111,7 @@ describe('runnerTitle', () => {
 
 describe('emptyRunnersCopy', () => {
 	it('is shown only when there are no peers, and says runner not device', () => {
-		expect(emptyRunnersCopy).toBe('No other runners in this cluster');
+		expect(emptyRunnersCopy).toBe('No other workers in this network');
 		expect(emptyRunnersCopy.toLowerCase()).not.toContain('device');
 		expect(peerRunners([self, offlinePeer]).length).toBeGreaterThan(0);
 	});

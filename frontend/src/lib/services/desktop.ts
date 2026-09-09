@@ -89,7 +89,7 @@ export interface ShuffleDesktopBridge {
 		onState(listener: (state: DesktopWorkerState) => void): () => void;
 		restart(): Promise<void>;
 		openLogs(): void;
-		openDatabaseSettings(): void;
+		openStatus(): void;
 	};
 	updates: {
 		getState(): Promise<DesktopUpdateState>;

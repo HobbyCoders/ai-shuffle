@@ -112,7 +112,7 @@ def quantiles(values):
 def worker_environment(target, directory, index):
     validate_target(target)
     env = clean_env(os.environ)
-    env.update(TESTING="1", ALLOW_REAL_PG="1", DATABASE_URL=target["url"],
+    env.update(TESTING="1", ALLOW_REAL_PG="1", TEST_POSTGRES_DSN=target["url"],
                AI_SHUFFLE_ENV_FILE=str(Path(directory) / "empty.env"),
                DATA_DIR=str(Path(directory) / f"data-{index}"),
                WORKSPACE_DIR=str(Path(directory) / f"workspace-{index}"),
@@ -126,16 +126,17 @@ def child(payload):
     target = payload["target"]
     validate_target(target)
     if (os.environ.get("ALLOW_REAL_PG") != "1" or os.environ.get("TESTING") != "1"
-            or os.environ.get("DATABASE_URL") != target["url"]):
+            or os.environ.get("TEST_POSTGRES_DSN") != target["url"]):
         raise ValueError("child safety gate rejected")
     attest(target, clean_env(os.environ))
     # First application import occurs only after override validation and proof
     # that this is the launcher's owned, loopback-only disposable container.
     logging.disable(logging.CRITICAL)
     from app.core.config import settings
-    if settings.get_database_url() != target["url"]:
-        raise ValueError("configuration did not select disposable target")
     from app.db import base
+    connection = base.parse_database_url(target["url"])
+    connection.update(hostaddr="127.0.0.1", options="-c statement_timeout=5000", connect_timeout=5, sslmode="disable")
+    object.__setattr__(settings, "get_database_connection", lambda: dict(connection))
     base.init_pool(min_conn=1, max_conn=payload["pool_cap"])
     try:
         if payload.get("bootstrap"):

@@ -1,4 +1,6 @@
 <script lang="ts">
+	// Network membership and recovery remain separate from the unified
+	// account/device list: independent workers do not share a database.
 	import { onMount } from 'svelte';
 	import { MonitorSmartphone, Server, Smartphone, Globe, Plus, Pencil, Trash2, Check, X, ShieldCheck, ShieldOff } from 'lucide-svelte';
 	import { watchResources } from '$lib/services/watch-resources';
@@ -11,11 +13,15 @@
 		type Install, type AdvertiseStatus, type AdvertiseReachability
 	} from '$lib/api/installs';
 	import PairingPanel from './PairingPanel.svelte';
+	import NetworkPanel from './NetworkPanel.svelte';
 	import AccountConnection from './AccountConnection.svelte';
 
 	let installs = $state<Install[]>([]);
 	let clients = $state<PairedClient[]>([]);
 	let selfId = $state('');
+	let workerName = $state('My worker');
+	// Fail closed until the directory identifies the worker's enrollment mode.
+	let networkEnrolled = $state(true);
 	let workersLoaded = $state(false);
 	let clientsLoaded = $state(false);
 	let workersError = $state('');
@@ -54,7 +60,7 @@
 	]);
 	const total = $derived(installs.length + clients.length);
 	const complete = $derived(workersLoaded && clientsLoaded && !workersError && !clientsError);
-	const workerName = $derived(installs.find(isSelf)?.device_name || 'My worker');
+	// Network-backed rows belong to NetworkPanel, never to legacy registry actions.
 
 	onMount(() => {
 		void load();
@@ -70,7 +76,7 @@
 			clearInterval(poll); clearTimeout(flashTimer);
 		};
 	});
-	watchResources(['settings'], load);
+	watchResources(['settings', 'network'], load);
 
 	async function load() {
 		await Promise.all([loadWorkers(), loadClients(), loadAdvertise()]);
@@ -85,8 +91,10 @@
 		try {
 			const response = await listInstalls();
 			if (stopped || version !== workersVersion) return;
-			installs = response.installs;
 			selfId = response.self_instance_id;
+			workerName = response.installs.find(isSelf)?.device_name || 'My worker';
+			networkEnrolled = response.installs.some((install) => !!install.device_id);
+			installs = response.installs.filter((install) => !install.device_id);
 			workersLoaded = true; workersError = '';
 			if (selected && editingId === `worker:${selected.id}`) {
 				const fresh = installs.find((install) => install.id === selected.id);
@@ -229,6 +237,8 @@
 	}
 </script>
 
+<NetworkPanel />
+
 <section class="devices-section" aria-labelledby="devices-heading">
 	<header class="devices-header">
 		<div class="heading"><h3 id="devices-heading"><MonitorSmartphone size={18} /> Devices</h3>
@@ -239,7 +249,7 @@
 		</button>
 	</header>
 	<AccountConnection {workerName} />
-	<div id="device-enrollment" hidden={!showPairing}>{#if pairingMounted}<PairingPanel />{/if}</div>
+	<div id="device-enrollment" hidden={!showPairing}>{#if pairingMounted}<PairingPanel allowWorkerEnrollment={workersLoaded && !networkEnrolled} />{/if}</div>
 
 	{#if workersError}<div class="load-error"><p role="alert">Workers: {workersError}</p><button type="button" class="device-button" onclick={loadWorkers}>Retry workers</button></div>{/if}
 	{#if clientsError}<div class="load-error"><p role="alert">Phones and browsers: {clientsError}</p><button type="button" class="device-button" onclick={loadClients}>Retry phones and browsers</button></div>{/if}

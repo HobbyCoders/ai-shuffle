@@ -10,7 +10,18 @@
  * `.media-*` class names). Visibility/hover styling lives in app.css.
  */
 
+import { apiUrl } from '$lib/api/runtime';
+
 export type MediaKind = 'image' | 'video' | 'audio';
+
+/**
+ * Backend-relative media paths (`/api/generated-*`, `/api/files/by-path`) are
+ * same-origin on the web UI but must point at the worker when the page is the
+ * app-bundled mobile UI. Everything else (data:, blob:, absolute) is untouched.
+ */
+export function resolveMediaUrl(url: string): string {
+	return url.startsWith('/api/') ? apiUrl(url) : url;
+}
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'avif']);
 const VIDEO_EXTS = new Set(['mp4', 'webm', 'mov', 'm4v']);
@@ -100,7 +111,8 @@ function overlayButtons(url: string, filename: string): string {
  * Build the inline player HTML for a single media item. `label` is used as alt
  * text / aria label; `filename` (optional) names the download.
  */
-export function mediaHtml(kind: MediaKind, url: string, label = '', filename?: string): string {
+export function mediaHtml(kind: MediaKind, rawUrl: string, label = '', filename?: string): string {
+	const url = resolveMediaUrl(rawUrl);
 	const u = escAttr(url);
 	const alt = escAttr(label || `Generated ${kind}`);
 	const name = filename || filenameFor(url, kind);

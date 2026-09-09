@@ -15,7 +15,7 @@ import type { Install } from '$lib/api/installs';
 /** Per-install checkout eligibility. `null` = unknown (fail-open). */
 export type EligibilityMap = Record<string, boolean> | null;
 
-/** Other cluster installs, including offline. "This device" is Local, not a Cloud row. */
+/** Other network workers, including offline. "This device" is Local, not a Cloud row. */
 export function peerRunners(installs: Install[]): Install[] {
 	return installs.filter(i => !i.is_self && i.approved !== false);
 }
@@ -58,4 +58,4 @@ export function runnerTitle(
 }
 
 /** Empty state: shown only when there are no peer runners at all. */
-export const emptyRunnersCopy = 'No other runners in this cluster';
+export const emptyRunnersCopy = 'No other workers in this network';

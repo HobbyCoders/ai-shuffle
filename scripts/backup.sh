@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
 #
 # AI Shuffle backup — pg_dump (custom format) + tar of generated media, with
-# timestamped output and retention pruning. Targets the Docker deployment
-# (shared Postgres + /workspace + /data volumes) but runs anywhere the env is
-# set correctly.
+# timestamped output and retention pruning. Run inside the managed app container
+# through docker compose exec. The lifecycle CLI reads its private descriptor;
+# this script never accepts database credentials or connects to another server.
 #
 # What it produces (in $BACKUP_DIR):
 #   ai-shuffle-db-<timestamp>.dump      pg_dump -Fc (custom format, restore with pg_restore)
 #   ai-shuffle-media-<timestamp>.tar.gz    tar of generated media dirs (see MEDIA_DIRS)
 #   ai-shuffle-settings-<timestamp>.tar.gz tar of active Fluid settings (never legacy Claude data)
+#   ai-shuffle-data-<timestamp>.tar.gz  private app state + lifecycle credentials,
+#                                      NEVER the live postgres/data cluster
 #
 # Retention: files older than BACKUP_RETENTION_DAYS (default 7) matching the
 # backup name patterns are pruned after a successful run.
 #
 # Configuration (env vars):
-#   PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE   standard libpq vars
 #   BACKUP_DIR             where backups are written (default: /data/backups)
 #   BACKUP_RETENTION_DAYS  days to keep (default: 7)
 #   WORKSPACE_DIR          generated media root (default: /workspace)
 #   DATA_DIR              app data root, archived separately (default: /data)
-#   FLUID_HOME            active Fluid settings root (default: /fluid)
+#   FLUID_HOME            active settings (default: /home/appuser/.fluid)
 #
 # Flags:
 #   --dry-run   print the commands that WOULD run; touch nothing.
@@ -28,6 +29,13 @@
 #
 set -euo pipefail
 umask 077
+
+# docker exec defaults to root, but the lifecycle CLI runs as appuser. Run the
+# entire backup as that same mapped identity so its 0700 destination is writable
+# by the dump process and the private files retain a consistent owner.
+if [ -f /app/docker/container_runtime.py ] && [ "$(id -u)" -eq 0 ]; then
+  exec setpriv --reuid=appuser --regid="$(id -g appuser)" --init-groups bash "$0" "$@"
+fi
 
 DRY_RUN=0
 for arg in "$@"; do
@@ -44,11 +52,18 @@ for arg in "$@"; do
   esac
 done
 
+# No standalone libpq fallback: only the managed runtime may choose the DB.
+# Keep --dry-run useful outside the image, but never touch data there.
+if [ ! -f /app/docker/container_runtime.py ] && [ "$DRY_RUN" -ne 1 ]; then
+  echo "Run this backup inside the managed app: docker compose exec -T ai-shuffle bash /app/scripts/backup.sh" >&2
+  exit 2
+fi
+
 BACKUP_DIR="${BACKUP_DIR:-/data/backups}"
 BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
 DATA_DIR="${DATA_DIR:-/data}"
-FLUID_HOME="${FLUID_HOME:-/fluid}"
+FLUID_HOME="${FLUID_HOME:-/home/appuser/.fluid}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
 DB_DUMP="${BACKUP_DIR}/ai-shuffle-db-${TIMESTAMP}.dump"
@@ -97,9 +112,10 @@ exclude_backup_destination() {
 # ---------------------------------------------------------------------------
 # 1) Database dump (pg_dump custom format)
 # ---------------------------------------------------------------------------
-# pg_dump reads the standard libpq PG* vars from the environment.
-log "Dumping database via PG* environment variables"
-run pg_dump --format=custom --no-owner --no-privileges --file="$DB_DUMP" 
+# Let the supervisor resolve the private descriptor used by normal startup.
+# Never retrieve connection values into this shell or log them.
+log "Dumping managed database via container lifecycle CLI"
+run python /app/docker/container_runtime.py dump --file "$DB_DUMP"
 log "DB dump -> ${DB_DUMP}"
 
 # ---------------------------------------------------------------------------
@@ -122,18 +138,20 @@ else
   log "No generated-media dirs found under ${WORKSPACE_DIR}; skipping media tar"
 fi
 
-# DATA_DIR contains the continual memory store, instance identity and other app
-# state. Exclude the backup destination itself to avoid recursive archives.
+# DATA_DIR contains app keys, memory, identity and private PostgreSQL lifecycle
+# files. Keep the lifecycle parent (postgres/) but NEVER tar the live physical
+# cluster (postgres/data): only the logical dump above is a database backup.
+# umask 077 makes the archive private; tar preserves the lifecycle file modes.
+# Exclude the backup destination itself to avoid recursive archives.
 if [ -d "$DATA_DIR" ]; then
   exclude_backup_destination "$DATA_DIR"
-  run tar -czf "$DATA_TAR" -C "$DATA_DIR" --exclude=./logs "${BACKUP_EXCLUDES[@]}" .
+  run tar -czf "$DATA_TAR" -C "$DATA_DIR" --exclude=./logs --exclude=./postgres/data "${BACKUP_EXCLUDES[@]}" .
 fi
 
 # ---------------------------------------------------------------------------
 # 3) Active Fluid settings
 # ---------------------------------------------------------------------------
-# Archive only the active destination. The legacy Claude auth/import volume is
-# intentionally not mounted into the backup sidecar and cannot be changed here.
+# Archive only the active destination, never the legacy Claude auth/import volume.
 if [ -d "$FLUID_HOME" ]; then
   log "Archiving active Fluid settings"
   exclude_backup_destination "$FLUID_HOME"
@@ -150,7 +168,7 @@ fi
 # our own name patterns so nothing else in BACKUP_DIR is ever touched.
 log "Pruning backups older than ${BACKUP_RETENTION_DAYS} day(s)"
 if [ "$DRY_RUN" -eq 1 ]; then
-  printf '[dry-run] find %s -maxdepth 1 -type f \\( -name "ai-shuffle-db-*.dump" -o -name "ai-shuffle-media-*.tar.gz" -o -name "ai-shuffle-settings-*.tar.gz" \\) -mtime +%s -print\n' \
+  printf '[dry-run] find %s -maxdepth 1 -type f \\( -name "ai-shuffle-db-*.dump" -o -name "ai-shuffle-media-*.tar.gz" -o -name "ai-shuffle-settings-*.tar.gz" -o -name "ai-shuffle-data-*.tar.gz" \\) -mtime +%s -print\n' \
     "$BACKUP_DIR" "$BACKUP_RETENTION_DAYS"
 else
   find "$BACKUP_DIR" -maxdepth 1 -type f \

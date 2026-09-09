@@ -15,8 +15,8 @@ import type {
 	UsageSnapshot,
 	ProviderUsageEntry,
 } from '$lib/stores/rate-limit';
+import { apiBase, isBundledMobile, withAuth } from './runtime';
 
-const API_BASE = '/api/v1';
 
 export interface ApiError {
 	detail: string;
@@ -63,6 +63,9 @@ export function redirectToLoginOn401(): Promise<void> {
 				&& auth.current.status?.authenticated === false
 				&& !auth.current.loading && !auth.current.error && !isLoginFlow();
 			if (!stillUnauthenticated()) return;
+			// The bundled mobile UI has no login route: the app owns the session
+			// and shows its own reconnect UI once the auth store reports it.
+			if (isBundledMobile()) return;
 			try {
 				const { goto } = await import('$app/navigation');
 				if (stillUnauthenticated()) await goto('/login');
@@ -159,17 +162,16 @@ export class ApiClient {
 		body?: unknown,
 		options?: RequestOptions
 	): Promise<T> {
-		const response = await fetch(`${API_BASE}${path}`, {
+		const response = await fetch(`${apiBase()}${path}`, withAuth({
 			method,
 			headers: {
 				'Content-Type': 'application/json'
 			},
-			credentials: 'include',
 			body: body ? JSON.stringify(body) : undefined,
 			signal: options?.signal,
 			keepalive: options?.keepalive,
 			cache: options?.cache
-		});
+		}));
 
 		if (!response.ok) {
 			const detail = await extractErrorDetail(response);
@@ -242,11 +244,10 @@ export class ApiClient {
 			formData.append('path', destDir);
 		}
 
-		const response = await fetch(`${API_BASE}${endpoint}`, {
+		const response = await fetch(`${apiBase()}${endpoint}`, withAuth({
 			method: 'POST',
-			credentials: 'include',
 			body: formData
-		});
+		}));
 
 		if (!response.ok) {
 			const detail = await extractErrorDetail(response);
@@ -267,10 +268,8 @@ export const api = new ApiClient();
  * Centralizes the common pattern of: fetch → check ok → extract filename → blob → download link.
  */
 export async function fetchAndDownload(path: string, fallbackFilename: string): Promise<void> {
-	const response = await fetch(`${API_BASE}${path}`, {
-		method: 'GET',
-		credentials: 'include'
-	});
+	const response = await fetch(`${apiBase()}${path}`, withAuth({
+		method: 'GET' }));
 
 	if (!response.ok) {
 		const error = await response.json().catch(() => ({ detail: 'Export failed' }));
@@ -710,7 +709,7 @@ export interface Team {
  * List all agent teams (and their teammates) for a parent session.
  */
 export async function listTeams(sessionId: string): Promise<Team[]> {
-	const r = await fetch(`${API_BASE}/teams/${sessionId}`, { credentials: 'include' });
+	const r = await fetch(`${apiBase()}/teams/${sessionId}`, withAuth({ }));
 	if (!r.ok) throw new Error(`listTeams: ${r.status}`);
 	return r.json();
 }
@@ -724,8 +723,8 @@ export async function killTeammate(
 	teammateName: string
 ): Promise<{ success: boolean; pid?: number }> {
 	const r = await fetch(
-		`${API_BASE}/teams/${sessionId}/${encodeURIComponent(teamName)}/members/${encodeURIComponent(teammateName)}/kill`,
-		{ method: 'POST', credentials: 'include' }
+		`${apiBase()}/teams/${sessionId}/${encodeURIComponent(teamName)}/members/${encodeURIComponent(teammateName)}/kill`,
+		withAuth({ method: 'POST' })
 	);
 	if (!r.ok) throw new Error(`killTeammate: ${r.status}`);
 	return r.json();

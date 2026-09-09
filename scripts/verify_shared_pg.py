@@ -32,27 +32,10 @@ class VerificationError(RuntimeError):
 
 
 def configure(source_env, runtime, database):
-    os.environ['AI_SHUFFLE_ENV_FILE'] = str(source_env)
-    os.environ['START_CHROME'] = '0'
-    os.environ['DATA_DIR'] = str(runtime / 'data')
-    from app.core.config import settings
-    from app.db.base import parse_database_url
-    connection = parse_database_url(settings.get_database_url())
-    addresses = {ipaddress.ip_address(row[4][0]) for row in socket.getaddrinfo(connection['host'], None)}
-    if not addresses or not all(address.is_private and not (address.is_link_local or address.is_multicast or address.is_unspecified) for address in addresses):
-        raise VerificationError('Only loopback or private LAN PostgreSQL is permitted')
-    if connection['dbname'] == database:
-        raise VerificationError('Source and audit databases must differ')
-    settings.database_url = None
-    settings.postgres_host = connection['host']
-    settings.postgres_port = connection.get('port', 5432)
-    settings.postgres_user = connection['user']
-    settings.postgres_password = connection['password']
-    settings.postgres_db = database
-    settings.data_dir = runtime / 'data'
-    settings.workspace_dir = runtime / 'workspace'
-    # No app lifespan, credential setup, migration seeding or provider services.
-    return dict(connection, dbname=database, connect_timeout=10)
+    raise VerificationError(
+        'Shared-database verification is retired: each installation now owns its '
+        'embedded database. No source data or database configuration was changed.'
+    )
 
 
 class Socket:

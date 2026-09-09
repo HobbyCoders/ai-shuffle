@@ -9,6 +9,7 @@
 	import { platform } from '$lib/stores/platform.svelte';
 	import { createConnectionBannerGrace } from '$lib/stores/session/connection-banner-grace';
 	import Banner from '$lib/components/Banner.svelte';
+	import { forkOfferedSessionHere } from '$lib/components/chat/fork-here';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
 	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
@@ -224,7 +225,8 @@
 		<div class="empty-hero" class:hero-only={!showComposer}>
 			{#if $activeSession.error}
 				<div class="empty-error-overlay">
-					<Banner severity="error" message={$activeSession.error} dismissible onDismiss={() => activeSession.clearError()} />
+					<Banner severity="error" message={$activeSession.error} dismissible onDismiss={() => activeSession.clearError()}
+						action={$activeSession.forkOfferSessionId ? { label: 'Fork here', onClick: () => forkOfferedSessionHere($activeSession.forkOfferSessionId!) } : undefined} />
 				</div>
 			{/if}
 
@@ -475,29 +477,6 @@
 		width: 100%;
 		max-width: 768px;
 	}
-
-	/* The invitation stays at its natural size and a fixed top inset. The
-	   whole empty surface scrolls; the workspace popup uses the top layer. */
-	:global(html[data-platform='mobile']) .chat-view.is-empty { overflow-y: auto; }
-	:global(html[data-platform='mobile']) .is-empty .empty-hero {
-		flex: 0 0 auto;
-		justify-content: flex-start;
-		padding-top: 1rem;
-	}
-	:global(html[data-platform='mobile']) .is-empty .empty-hero-content { flex-shrink: 0; }
-	:global(html[data-platform='mobile']) .is-empty .empty-bottom-spacer { display: none; }
-	:global(html[data-platform='mobile']) .chat-view.is-empty .input-slot.empty-input-layout {
-		position: sticky;
-		bottom: 0;
-		z-index: 10;
-		background: var(--background);
-		margin-top: 0;
-	}
-	/* An oversized dock must scroll normally, not pin its editor offscreen.
-	   Do not clip the slot: its anchored popovers extend outside the dock. */
-	:global(html[data-platform='mobile']) .chat-view.is-empty .input-slot.empty-input-layout.composer-overflow { position: static; }
-	/* Short expanded panels must not permanently cover the invitation. */
-	:global(html[data-platform='mobile']) .chat-view.is-empty .input-slot.empty-input-layout:global([data-panel-flow]) { position: static; }
 
 	/* A composer-free surface can center its hero on desktop. */
 	.empty-hero.hero-only {

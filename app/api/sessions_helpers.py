@@ -675,9 +675,18 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
         claimable_ids = set()
 
     my_install = installs_map.get(me)
+    try:
+        from app.network import runners as _runners
+        my_device = _runners.self_device_id()
+    except Exception:  # noqa: BLE001
+        my_device = None
     for session in sessions:
         inst = session.get("instance_id")
-        is_remote = bool(inst) and inst != me
+        owner_device = session.get("owner_device_id")
+        if owner_device and owner_device != my_device and (not inst or inst == me):
+            # A mirrored session from another network device.
+            inst = owner_device
+        is_remote = bool(inst) and inst != me and inst != my_device
         session["is_remote"] = is_remote
         session["is_pinned"] = is_pinned(session)
 

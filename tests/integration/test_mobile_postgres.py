@@ -29,7 +29,7 @@ def _auto_db_shim():
 
 
 @pytest.fixture
-def pg(monkeypatch):
+def pg(monkeypatch, tmp_path):
     expected = {
         "TESTING": "1", "ALLOW_REAL_PG": "1",
         "MOBILE_PG_HOST": "127.0.0.1", "MOBILE_PG_PORT": "5432",
@@ -48,6 +48,13 @@ def pg(monkeypatch):
     # Even if invoked outside the dedicated workflow, do not read any .env.
     monkeypatch.setattr(DotEnvSettingsSource, "_read_env_files", lambda self: {})
     from app.db import mobile_hub as hub, mobile_tools as queue, pairing
+    from app.core import config
+
+    # Isolate the filesystem as well as SQL, but do NOT pin/warm the identity:
+    # concurrent bind must exercise real first-use identity publication.
+    monkeypatch.setattr(config.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(config.settings, "instance_id", None)
+    monkeypatch.setattr(config, "_cached_persisted_instance_id", None)
 
     schema = "mobile_test_" + uuid.uuid4().hex
 
@@ -148,7 +155,8 @@ def pg(monkeypatch):
 
     # Leave only our UUID schema behind; the disposable service owns cleanup.
     return SimpleNamespace(hub=hub, queue=queue, pairing=pairing, transaction=transaction,
-                           rows=rows, race=race, integrity_error=psycopg2.IntegrityError)
+                           rows=rows, race=race, integrity_error=psycopg2.IntegrityError,
+                           config=config, id_file=tmp_path / ".instance_id")
 
 
 def enroll(pg, device="device-one", account="account-one", key="test-key-hash"):
@@ -247,12 +255,16 @@ def test_authorization_conflict_rolls_back_both_preceding_inserts(pg):
 
 
 def test_concurrent_immutable_bind_preserves_winners_secret(pg):
+    assert pg.config._cached_persisted_instance_id is None
+    assert not pg.id_file.exists()
     candidates = [
         ("https://first.invalid", "server-first", "enc:fake-first", "account-first"),
         ("https://second.invalid", "server-second", "enc:fake-second", "account-second"),
     ]
     first, second = pg.race(*(lambda args=args: pg.hub.bind(*args) for args in candidates))
     assert first == second == pg.hub.get_binding()
+    assert first["instance_id"] == pg.id_file.read_text().strip()
+    assert pg.rows("system_settings")[0]["key"] == "mobile_account_hub_secret:" + first["instance_id"]
     winner = next(args for args in candidates if args[1] == first["server_id"])
     assert (first["hub_url"], first["server_id"], first["encrypted_secret"], first["linked_by"]) == winner
     assert len(pg.rows("mobile_worker_bindings")) == len(pg.rows("system_settings")) == 1

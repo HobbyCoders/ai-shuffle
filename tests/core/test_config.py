@@ -19,10 +19,11 @@ import tempfile
 
 
 @pytest.fixture(autouse=True)
-def isolate_data_directory_default(monkeypatch):
+def isolate_directory_defaults(monkeypatch):
     # Tests of Settings defaults must not inherit the test runner's explicit
-    # disposable DATA_DIR. The already-created app singleton stays isolated.
+    # disposable paths. The already-created app singleton stays isolated.
     monkeypatch.delenv("DATA_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_DIR", raising=False)
 
 
 class TestSettingsDefaults:
@@ -111,8 +112,8 @@ class TestSettingsDefaults:
                     assert settings.workspace_dir == Path("/mock/workspace")
                     assert settings.claude_projects_dir is None
                     assert settings.tools_dir is None
-                    assert settings.postgres_host is None
-                    assert settings.postgres_password is None
+                    assert "postgres_host" not in Settings.model_fields
+                    assert "postgres_password" not in Settings.model_fields
 
 
 class TestSettingsFromEnvironment:
@@ -307,192 +308,87 @@ class TestDatabasePaths:
 
                 assert settings.db_path == Path("/mock/data/db.sqlite")
 
-    def test_get_database_url_requires_configuration(self):
-        """get_database_url raises when neither the POSTGRES_* pieces nor a
-        legacy DATABASE_URL are set — the app is Postgres-only and there is no
-        insecure default."""
-        # Clear the deployment-leaked values so the unconfigured path runs.
-        # _env_file=None also blocks pydantic-settings from re-reading a
-        # repo-root .env — popping the env vars alone is not hermetic.
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("POSTGRES_PASSWORD", None)
-            os.environ.pop("DATABASE_URL", None)
-            os.environ.pop("POSTGRES_HOST", None)
-            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
-                    from app.core.config import Settings
-                    settings = Settings(_env_file=None)
+    def test_unsupervised_start_fails_despite_inherited_database_env(self, tmp_path, monkeypatch):
+        from app.core.config import Settings
+        monkeypatch.setenv("DATABASE_URL", "postgresql://never:synthetic@external.invalid/production")
+        monkeypatch.setenv("DATABASE_MODE", "external")
+        monkeypatch.setenv("DB_POOL_MIN", "999")
+        monkeypatch.setenv("DB_POOL_MAX", "not-a-number")
+        monkeypatch.setenv("POSTGRES_HOST", "external.invalid")
+        monkeypatch.setenv("POSTGRES_PASSWORD", "never-use-this")
+        settings = Settings(_env_file=None, data_dir=tmp_path)
+        assert not settings.managed_database_available()
+        assert settings.db_pool_min == 2 and settings.db_pool_max == 32
+        assert "db_pool_min" not in Settings.model_fields and "db_pool_max" not in Settings.model_fields
+        assert not any(k.startswith(("postgres_", "database_")) for k in Settings.model_fields)
+        with pytest.raises(RuntimeError, match="desktop launcher"):
+            settings.get_database_url()
 
-                    assert settings.postgres_password is None
-                    assert settings.database_url is None
-                    with pytest.raises(ValueError, match="POSTGRES_HOST"):
-                        settings.get_database_url()
+    def test_supervisor_descriptor_wins_over_inherited_env_and_env_file(self, tmp_path, monkeypatch):
+        from app.core.config import Settings
+        import json
+        envfile = tmp_path / "synthetic.env"
+        envfile.write_text("DATABASE_URL=postgresql://bad:bad@external.invalid/prod\nPOSTGRES_PORT=garbage\nPOSTGRES_HOST=external.invalid\n")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://bad:bad@external.invalid/prod")
+        monkeypatch.setenv("POSTGRES_PASSWORD", "external-password")
+        monkeypatch.setenv("PGHOSTADDR", "203.0.113.8")
+        settings = Settings(_env_file=envfile, data_dir=tmp_path)
+        password = "synthetic@pass/word%"
+        descriptor = tmp_path / "managed-postgres.json"
+        descriptor.write_text(json.dumps(dict(version=1, host="127.0.0.1", port=6543,
+            user="ai_shuffle", password=password, database="ai_shuffle")))
+        descriptor.chmod(0o600)
+        connection = settings.get_database_connection()
+        assert connection["host"] == connection["hostaddr"] == "127.0.0.1"
+        assert connection["port"] == 6543
+        assert connection["password"] == password
+        assert settings.managed_database_available()
+        from app.db.base import parse_database_url
+        assert parse_database_url(settings.get_database_url())["password"] == password
 
-    def test_get_database_url_legacy_database_url_fallback(self):
-        """A legacy DATABASE_URL from a pre-split install keeps working
-        verbatim — upgraded installs have no way to re-run setup."""
-        with patch.dict(os.environ, {
-            "DATABASE_URL": "postgresql://REDACTED@10.0.0.9:5433/olddb",
-        }, clear=False):
-            os.environ.pop("POSTGRES_PASSWORD", None)
-            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
-                    from app.core.config import Settings
-                    settings = Settings(_env_file=None)
+    @pytest.mark.parametrize("change", [
+        {"version": True}, {"version": 2}, {"host": "localhost"}, {"host": "203.0.113.1"},
+        {"host": "/tmp"}, {"port": True}, {"port": "5432"}, {"port": 0}, {"port": 65536},
+        {"password": ""}, {"password": "bad\x00password"}, {"user": ""},
+        {"database": "host=external.invalid"}, {"extra": "no"},
+    ])
+    def test_malformed_descriptor_is_rejected_without_credentials(self, tmp_path, change):
+        import json
+        from app.core.config import Settings
+        record = dict(version=1, host="127.0.0.1", port=5432, user="test_user", password="private-synthetic-value", database="test_db")
+        record.update(change)
+        descriptor = tmp_path / "managed-postgres.json"
+        descriptor.write_text(json.dumps(record))
+        descriptor.chmod(0o600)
+        with pytest.raises(RuntimeError, match="private managed-postgres.json") as exc:
+            Settings(_env_file=None, data_dir=tmp_path).get_database_connection()
+        assert "private-synthetic-value" not in str(exc.value)
 
-                    assert settings.get_database_url() == (
-                        "postgresql://REDACTED@10.0.0.9:5433/olddb"
-                    )
-
-    def test_get_database_url_legacy_url_wins_over_components(self):
-        """When BOTH are configured the legacy DATABASE_URL wins: it captures
-        the user's complete previous config (custom user/db/host) that the
-        POSTGRES_* defaults would get wrong. A boot warning flags the
-        shadowing (see app/core/startup.py)."""
-        with patch.dict(os.environ, {
-            "DATABASE_URL": "postgresql://REDACTED@external-db:5432/legacydb",
-            "POSTGRES_PASSWORD": "component-pw",
-            "POSTGRES_HOST": "postgres",
-        }, clear=False):
-            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
-                    from app.core.config import Settings
-                    settings = Settings(_env_file=None)
-
-                    assert settings.get_database_url() == (
-                        "postgresql://REDACTED@external-db:5432/legacydb"
-                    )
-
-    def test_get_database_url_built_from_components(self):
-        """get_database_url assembles the URL from the POSTGRES_* pieces."""
-        with patch.dict(os.environ, {
-            "POSTGRES_HOST": "10.0.0.5",
-            "POSTGRES_PORT": "5433",
-            "POSTGRES_USER": "alice",
-            "POSTGRES_PASSWORD": "secret",
-            "POSTGRES_DB": "mydb",
-        }, clear=False):
-            os.environ.pop("DATABASE_URL", None)
-            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
-                    from app.core.config import Settings
-                    settings = Settings(_env_file=None)
-
-                    assert settings.get_database_url() == (
-                        "postgresql://REDACTED@10.0.0.5:5433/mydb"
-                    )
-
-    def test_get_database_url_percent_encodes_password(self):
-        """Passwords with URL-special characters survive the round-trip through
-        parse_database_url."""
-        with patch.dict(os.environ, {
-            "POSTGRES_HOST": "localhost",
-            "POSTGRES_PASSWORD": "p@ss/w%rd",
-        }, clear=False):
-            os.environ.pop("DATABASE_URL", None)
-            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
-                    from app.core.config import Settings
-                    from app.db.base import parse_database_url
-                    settings = Settings(_env_file=None)
-
-                    parsed = parse_database_url(settings.get_database_url())
-                    assert parsed["password"] == "p@ss/w%rd"
-                    assert parsed["host"] == "localhost"
-
-    def test_get_database_url_default_hosts(self):
-        """Host defaults to localhost in local mode and postgres in Docker."""
-        with patch.dict(os.environ, {"POSTGRES_PASSWORD": "pw"}, clear=False):
-            os.environ.pop("POSTGRES_HOST", None)
-            # A deployment-leaked DATABASE_URL would be auto-imported into
-            # POSTGRES_HOST at load, defeating the default-host assertion.
-            os.environ.pop("DATABASE_URL", None)
-            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
-                    from app.core.config import Settings
-                    local = Settings(_env_file=None, local_mode=True)
-                    docker = Settings(_env_file=None, local_mode=False)
-
-                    assert local.effective_postgres_host == "localhost"
-                    assert docker.effective_postgres_host == "postgres"
-
-
-class TestLegacyDatabaseUrlAutoImport:
-    """A legacy DATABASE_URL is auto-imported into the POSTGRES_* fields at
-    settings load, so a URL-only install (pre-split .env or Docker env) counts
-    as fully configured without re-running setup."""
-
-    def _make_settings(self, **env):
-        import app.core.config as config_mod
-
-        with patch.dict(os.environ, env, clear=False):
-            for key in ("POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER",
-                        "POSTGRES_PASSWORD", "POSTGRES_DB", "DATABASE_URL"):
-                if key not in env:
-                    os.environ.pop(key, None)
-            # Reset the module-global import flag so assertions on it don't
-            # see a True left over from an earlier test's URL-bearing env.
-            old_flag = config_mod.legacy_database_url_imported
-            config_mod.legacy_database_url_imported = False
-            try:
-                with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
-                    with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
-                        from app.core.config import Settings
-                        result = Settings(_env_file=None)
-            finally:
-                imported_now = config_mod.legacy_database_url_imported
-                config_mod.legacy_database_url_imported = old_flag
-        return result, imported_now
-
-    def test_url_only_install_becomes_fully_configured(self):
-        """The pre-split .env case: only DATABASE_URL set — every POSTGRES_*
-        piece is derived from it and get_database_url() works unchanged."""
-        settings, imported = self._make_settings(
-            DATABASE_URL="postgresql://REDACTED@10.0.0.9:5433/olddb",
-        )
-        assert imported is True
-        assert settings.postgres_host == "10.0.0.9"
-        assert settings.postgres_port == 5433
-        assert settings.postgres_user == "olduser"
-        assert settings.postgres_password == "oldpass"
-        assert settings.postgres_db == "olddb"
-        # The URL still wins at connect time, byte-for-byte.
-        assert settings.get_database_url() == (
-            "postgresql://REDACTED@10.0.0.9:5433/olddb"
-        )
-
-    def test_percent_encoded_and_literal_at_passwords_round_trip(self):
-        """The raw-DSN trap: passwords with % or @ survive the import."""
-        settings, _ = self._make_settings(
-            DATABASE_URL="postgresql://REDACTED@10.0.0.200:5432/appdb",
-        )
-        assert settings.postgres_password == "p@ss"
-
-        settings, _ = self._make_settings(
-            DATABASE_URL="postgresql://REDACTED@10.0.0.200:5432/appdb",
-        )
-        assert settings.postgres_password == "p@ssPwd"
-
-    def test_explicit_pieces_are_never_clobbered(self):
-        """An explicit POSTGRES_* value beats the URL's counterpart — a user
-        overriding one piece isn't silently reverted by the import."""
-        settings, _ = self._make_settings(
-            DATABASE_URL="postgresql://REDACTED@10.0.0.9:5433/olddb",
-            POSTGRES_PASSWORD="explicit-pw",
-        )
-        assert settings.postgres_password == "explicit-pw"
-        # Untouched pieces still come from the URL.
-        assert settings.postgres_host == "10.0.0.9"
-        assert settings.postgres_db == "olddb"
-
-    def test_no_url_leaves_defaults(self):
-        """No DATABASE_URL — nothing changes and the flag stays False."""
-        settings, imported = self._make_settings(POSTGRES_PASSWORD="pw")
-        assert imported is False
-        assert settings.postgres_host is None
-        assert settings.postgres_db == "ai_shuffle"
-
-
+    @pytest.mark.parametrize("kind", ["symlink", "public", "hardlink", "invalid-json", "duplicate-key"])
+    def test_unsafe_descriptor_is_rejected(self, tmp_path, kind):
+        from app.core.config import Settings
+        import json
+        settings = Settings(_env_file=None, data_dir=tmp_path)
+        path = tmp_path / "managed-postgres.json"
+        path.write_text(json.dumps(dict(version=1, host="127.0.0.1", port=5432,
+            user="test_user", password="synthetic", database="test_db")))
+        path.chmod(0o600)
+        if kind == "symlink":
+            target = tmp_path / "target"
+            path.rename(target)
+            path.symlink_to(target)
+        elif kind == "public":
+            if os.name == "nt":
+                pytest.skip("Windows privacy is enforced by supervisor ACLs")
+            path.chmod(0o644)
+        elif kind == "hardlink":
+            os.link(path, tmp_path / "other-link")
+        elif kind == "invalid-json":
+            path.write_text("not-json synthetic-secret")
+        else:
+            path.write_text(path.read_text().replace('"version": 1', '"version": 1, "version": 1'))
+        with pytest.raises(RuntimeError):
+            settings.get_database_connection()
 
     def test_get_claude_projects_dir_default(self):
         """get_claude_projects_dir should return default path."""
@@ -924,44 +820,6 @@ class TestDatabaseUrlNormalization:
         assert normalize_database_url("   ") == ""
         # No scheme, no credentials: returned as given rather than mangled.
         assert normalize_database_url("not a url at all") == "not a url at all"
-
-    def test_settings_normalizes_at_load(self):
-        """The rewrite happens once, at load, so every consumer of
-        ``get_database_url()`` sees the encoded form."""
-        with patch.dict(os.environ, {
-            "DATABASE_URL": "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle",
-        }, clear=False):
-            os.environ.pop("POSTGRES_PASSWORD", None)
-            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
-                    from app.core.config import Settings
-                    settings = Settings(_env_file=None)
-
-                    assert settings.database_url == (
-                        "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle"
-                    )
-                    assert settings.get_database_url() == settings.database_url
-
-    def test_normalized_url_parses_back_to_the_real_password(self):
-        """The point of the exercise: the credentials still decode correctly,
-        and the host is the host."""
-        with patch.dict(os.environ, {
-            "DATABASE_URL": "postgresql://REDACTED@10.0.0.200:5432/ai_shuffle",
-        }, clear=False):
-            os.environ.pop("POSTGRES_PASSWORD", None)
-            with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
-                with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
-                    from app.core.config import Settings
-                    from app.db.base import parse_database_url
-                    settings = Settings(_env_file=None)
-
-                    parsed = parse_database_url(settings.get_database_url())
-                    assert parsed["host"] == "10.0.0.200"
-                    assert parsed["password"] == "Pwd@word"
-                    assert parsed["user"] == "ai_shuffle"
-                    # And the POSTGRES_* import took the same decoded values.
-                    assert settings.postgres_host == "10.0.0.200"
-                    assert settings.postgres_password == "Pwd@word"
 
     def test_libpq_first_at_split_now_finds_the_host(self):
         """Simulates libpq's split (FIRST ``@``) on the normalized string: with

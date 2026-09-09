@@ -2660,22 +2660,48 @@ async def test_add_dirs_reach_delegated_loop(monkeypatch, tmp_path):
     assert _CapturingLoop.captured["add_dirs"] == ["/notes", "/extra"]
 
 
-def test_store_derived_from_database_presence(monkeypatch):
-    """No store flags (2026-08-13 ruling): DATABASE_URL set -> PgFluidStore;
-    DB-less (unit tests) -> MemoryStore. The retired AIH_OMNI_STORE env var
-    must be ignored."""
+@pytest.fixture()
+def _db_less_settings(monkeypatch, tmp_path):
+    """No inherited/live descriptor may enable the production store in tests."""
     from app.core.config import settings
-    from app.core.provider.fluid_pg_store import PgFluidStore
-    from fluid.store.base import MemoryStore as FluidMemoryStore
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    return settings
 
-    monkeypatch.setattr(settings, "database_url", "postgresql://REDACTED@h:5432/db")
+
+@pytest.fixture
+def _configured_db_settings(monkeypatch, _db_less_settings):
+    """Explicit test-only connection injection, never runtime environment knobs."""
+    settings = _db_less_settings
+    connection = dict(host="127.0.0.1", port=5433, user="harness", password="synthetic", dbname="harness_test")
+    monkeypatch.setattr(type(settings), "get_database_connection", lambda self: dict(connection))
+    return settings
+
+
+def test_store_derived_from_database_presence(monkeypatch, _configured_db_settings):
+    """Either configured DB source requires durability; only neither is DB-less.
+
+    The retired AIH_OMNI_STORE env var must not override either choice.
+    """
+    import app.core.provider.harness_adapter as ha
+    from app.core.provider.fluid_pg_store import PgFluidStore
+
+    settings = _configured_db_settings
+    monkeypatch.setenv("AIH_OMNI_STORE", "memory")  # retired flag — ignored
     store = HarnessAdapter._build_store(SessionOptions(model="m"))
     assert isinstance(store, PgFluidStore)
+    assert ha._recall_backend_available() is True
 
-    monkeypatch.setattr(settings, "database_url", None)
+    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
     monkeypatch.setenv("AIH_OMNI_STORE", "pg")  # retired flag — ignored
     store = HarnessAdapter._build_store(SessionOptions(model="m"))
-    assert isinstance(store, FluidMemoryStore)
+    assert isinstance(store, MemoryStore)
+    assert ha._recall_backend_available() is False
+
+
+def test_unsupervised_harness_refuses_memory_store(monkeypatch, _db_less_settings):
+    monkeypatch.setattr(HarnessAdapter, "_test_memory_store_factory", None)
+    with pytest.raises(RuntimeError, match="Refusing an in-memory"):
+        HarnessAdapter._build_store(SessionOptions(model="m"))
 
 
 def test_requires_reconnect():
@@ -5791,13 +5817,13 @@ async def test_github_section_is_dropped_when_bash_is_not_permitted(
 
 @pytest.mark.asyncio
 async def test_native_prompt_carries_the_recall_block_with_a_db(
-    monkeypatch, agent_workspace
+    monkeypatch, agent_workspace, _configured_db_settings
 ):
     import app.core.provider.harness_adapter as ha
-    from app.core.config import settings
+    from app.core.provider.fluid_pg_store import PgFluidStore
 
-    monkeypatch.setattr(settings, "database_url", "postgresql://stub/db")
     captured = await _connect_with_github(monkeypatch, agent_workspace, False)
+    assert isinstance(captured["store"], PgFluidStore)
     system = captured["system"]
     assert ha.RECALL_BLOCK in system
     # Code mode stays LAST — the recall tools are reached from run_python.
@@ -5806,25 +5832,26 @@ async def test_native_prompt_carries_the_recall_block_with_a_db(
 
 @pytest.mark.asyncio
 async def test_recall_block_is_absent_without_a_db_backend(
-    monkeypatch, agent_workspace
+    monkeypatch, agent_workspace, _db_less_settings
 ):
-    """Unit-test deployments run MemoryStore, which offers no recall — the
-    tools are gated off, so nothing may describe them (ruling T9)."""
+    """Genuinely DB-less deployments run MemoryStore, which offers no recall —
+    the tools are gated off, so nothing may describe them (ruling T9)."""
     captured = await _connect_with_github(monkeypatch, agent_workspace, False)
+    assert isinstance(captured["store"], MemoryStore)
     assert "# Past sessions are your memory" not in captured["system"]
 
 
 @pytest.mark.asyncio
 async def test_recall_block_is_dropped_when_the_tools_are_not_permitted(
-    monkeypatch, agent_workspace
+    monkeypatch, agent_workspace, _configured_db_settings
 ):
-    from app.core.config import settings
+    from app.core.provider.fluid_pg_store import PgFluidStore
 
-    monkeypatch.setattr(settings, "database_url", "postgresql://stub/db")
     captured = await _connect_with_github(
         monkeypatch, agent_workspace, False,
         disallowed_tools=["SessionSearch", "SessionView"],
     )
+    assert isinstance(captured["store"], PgFluidStore)
     assert "# Past sessions are your memory" not in captured["system"]
 
 

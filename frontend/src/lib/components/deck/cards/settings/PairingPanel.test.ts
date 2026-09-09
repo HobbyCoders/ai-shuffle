@@ -17,9 +17,12 @@ it('loads only enrollment endpoints, not a second list of clients', async () => 
     render(PairingPanel);
     await screen.findByRole('button', { name: 'Pair phone or browser' });
     expect(api.get).toHaveBeenCalledExactlyOnceWith('/pairing/endpoints');
+    expect(screen.queryByRole('button', { name: 'Enroll worker' })).toBeNull();
     expect(screen.queryByRole('list')).toBeNull();
     expect(screen.queryByText(/paired devices|No controller devices|Pair a controller/i)).toBeNull();
     expect(screen.getByText('Pairing address').closest('details')?.open).toBe(false);
+    expect(screen.getByText(/For a worker with its own database, use Invite another worker/)).toBeTruthy();
+    expect(screen.getByText(/network keys, and future device pairing remain admin-only/)).toBeTruthy();
 });
 
 it('creates phone/browser grants using the selected eligible endpoint', async () => {
@@ -30,8 +33,8 @@ it('creates phone/browser grants using the selected eligible endpoint', async ()
     expect(screen.getByRole('button', { name: 'Cancel code' })).toBeTruthy();
 });
 
-it('keeps worker enrollment code-only and provides the real join command', async () => {
-    render(PairingPanel);
+it('keeps worker enrollment code-only and provides the real join command when explicitly allowed', async () => {
+    render(PairingPanel, { props: { allowWorkerEnrollment: true } });
     await fireEvent.click(await screen.findByRole('button', { name: 'Enroll worker' }));
     expect(api.post).toHaveBeenCalledWith('/pairing/grants', { endpoint_url: null, device_label: null, purpose: 'runner' });
     expect(await screen.findByText('Worker enrollment code')).toBeTruthy();

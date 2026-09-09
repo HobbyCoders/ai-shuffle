@@ -1,0 +1,70 @@
+name: Instance identity contracts
+
+on:
+  pull_request:
+    paths:
+      - 'app/core/config.py'
+      - 'tests/core/test_instance_identity.py'
+      - 'requirements.txt'
+      - 'requirements-dev.txt'
+      - '.github/workflows/ci-instance-identity.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: instance-identity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  identity:
+    name: Instance identity (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux is covered by CI Backend; exercise the native desktop paths too.
+        os: [blacksmith-2vcpu-windows-2025, blacksmith-6vcpu-macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    env:
+      TESTING: '1'
+      ALLOW_REAL_PG: '0'
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install isolated identity test dependencies
+        # Requirement files contain extras and cannot be used as pip constraints.
+        # Select the existing pins rather than duplicating them in this workflow.
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+
+          wanted = {"pydantic", "pydantic-settings", "pytest", "pytest-timeout"}
+          selected = {}
+          for filename in ("requirements.txt", "requirements-dev.txt"):
+              for line in Path(filename).read_text(encoding="utf-8").splitlines():
+                  line = line.split("#", 1)[0].strip()
+                  name = re.split(r"[<>=!~\[]", line, maxsplit=1)[0].strip()
+                  if name in wanted:
+                      selected[name] = line
+          if set(selected) != wanted:
+              raise RuntimeError(f"Missing identity test requirements: {wanted - set(selected)}")
+          subprocess.run([sys.executable, "-m", "pip", "install", *selected.values()], check=True)
+      - name: Exercise native thread and process identity publication
+        # Runner paths exist only in step-level expression context.
+        env:
+          AI_SHUFFLE_ENV_FILE: '${{ runner.temp }}/nonexistent-identity-test.env'
+          DATA_DIR: '${{ runner.temp }}/shuffle-identity-data'
+          WORKSPACE_DIR: '${{ runner.temp }}/shuffle-identity-workspace'
+        # Do not load the unrelated backend/database fixtures or plugins.
+        run: >-
+          python -m pytest tests/core/test_instance_identity.py
+          --confcutdir=tests/core -o addopts="" -p no:cacheprovider --timeout=60 -q

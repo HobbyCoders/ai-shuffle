@@ -16,7 +16,7 @@ AI Shuffle puts AI agents in a browser. Instead of a terminal, you get a full GU
 
 **Three ways to open it:** any browser, the [Android app](android/README.md), or
 the [desktop app](desktop/README.md) for Windows, macOS and Linux. The desktop
-app runs the worker on your computer (bring your own PostgreSQL) and shows the
+app runs the worker and its private bundled PostgreSQL on your computer and shows the
 same web UI in a native window; the Android app connects to your workers.
 
 ---
@@ -71,10 +71,13 @@ Global markdown notes with tags, pinning, and search. Each note backed by a phys
 ### Built-in Documentation
 Full documentation rendered in-app covering getting started, all features, connectors, and API reference.
 
-### Mobile & PWA
-The web UI is the desktop layout at every window size; narrow windows collapse the sidebar into an overlay and tighten spacing. The Android app renders a separate mobile shell with a compact app bar, slide-in drawer, collapsing composer and 44px touch targets. PWA install support, offline detection, and push notifications work in both. See [docs/mobile-desktop-ui-split.md](docs/mobile-desktop-ui-split.md).
+### Worker network
+Every worker runs by itself with its own PostgreSQL (the desktop app and Docker image both bundle one). Workers connect into one network by pairing on the local network or by signing every worker into the same Shuffle account, and then converge on the same settings, provider keys, profiles, preferences, UI state, notes, plugins, memory and session catalog. A session executes on exactly one worker; any worker's UI can see every session and drive any runner, and forks the transcript when an owner is offline. Everything synced is end-to-end encrypted with one network key; the account keeps an encrypted copy so a new device restores from a recovery key when every worker is off. See [docs/network/README.md](docs/network/README.md).
 
-Pair another browser, phone, tablet, or cluster runner with a short-lived,
+### Mobile & PWA
+The web UI served by workers is the desktop layout at every window size; narrow windows collapse the sidebar into an overlay and tighten spacing. The Android app bundles its own mobile UI (`mobile/`) and talks to workers only through their APIs, so a worker's version never changes what the phone shows. PWA install support and offline detection work in the web UI. See [docs/mobile-desktop-ui-split.md](docs/mobile-desktop-ui-split.md).
+
+Pair another browser, phone, tablet, or worker with a short-lived,
 one-time code or locally rendered QR. Local/LAN use requires no Shuffle account; optionally link a worker to an account for managed remote access.
 
 ### Security
@@ -100,49 +103,61 @@ or desktop app. See [Android installation and builds](android/README.md).
 
 ### Local (Desktop)
 
-```bash
-# Clone or download a release package
-git clone https://github.com/HobbyCoders/ai-shuffle.git
-cd ai-shuffle
+Install the [desktop app](desktop/README.md) for your operating system. It bundles
+PostgreSQL and supervises the worker; no database setup, credentials or import is
+needed for a fresh installation. Choose your workspace and connect your development
+tools or model providers on first launch. No local username, password, or Shuffle
+account is required.
 
-# First-time setup (creates venv, installs deps, builds frontend)
-python run_local.py --setup
-
-# Start the server
-python run_local.py
-# Windows: run_local.bat
-# macOS/Linux: ./run_local.sh
-```
-
-Open `http://localhost:8000`. Choose your workspace and connect your development tools or model providers on first launch. No local username, password, or Shuffle account is required.
-
-**Options:** `--port 3000` · `--no-browser` · `--check` (verify prerequisites)
+For source development, `python run_local.py --setup` installs dependencies and
+builds assets; it does not create a standalone database. Worker startup requires
+the managed supervisor and its private runtime descriptor. Use the desktop
+runtime or the Docker source build below rather than launching `app.main` directly.
 
 ### Docker
 
-```bash
-# Configure secrets first — compose fails fast if POSTGRES_PASSWORD is unset
-cp .env.example .env
-# edit .env: set POSTGRES_PASSWORD
+**Existing non-managed database installation?** Keep it on its current release
+with its original data, configuration and protected backup. This release supports
+only embedded PostgreSQL; it does not connect to or automatically import an old
+database. Do not run it over production as a migration shortcut. Never remove
+volumes, use `down -v` or `--remove-orphans`, or replace the retained production
+configuration. See [backup and recovery](docs/RESTORE.md) for isolation and recovery.
 
-# Bring up the app together with its bundled PostgreSQL
-docker compose up -d
+For a **fresh installation**, Docker Compose 2.24 or newer needs no `.env` or
+database password:
+
+```bash
+docker compose up -d --build
 ```
 
-The compose stack provisions PostgreSQL for you (`postgres:16-alpine`); the app
-waits for the database to be healthy before starting. Open `http://localhost:8000`
-and choose your workspace and model providers. No local username, password, or Shuffle account is required.
+This starts **one container**, including managed PostgreSQL **16**. Open
+`http://localhost:8000` and choose your workspace and model providers. No local
+username, password, or Shuffle account is required. An optional `.env` can set
+other options; `.env.example` contains no database connection settings.
+
+Keep the existing `ai-shuffle-data:/data` mount: it contains the database at
+`/data/postgres/data`, private lifecycle files in `/data/postgres`, app credential
+keys, memory and identity. PostgreSQL is private to the container; publish only
+the app port. Keep the workspace and existing auth/settings/browser mounts too.
+Compose allows **90 seconds** for ordered shutdown; use `docker stop --time 90
+ai-shuffle` (or longer) with plain Docker, and set the equivalent stop timeout in
+Unraid. A ten-second default stop can interrupt database shutdown.
+
+The runtime manages database credentials and writes the private
+`DATA_DIR/managed-postgres.json` descriptor before starting the worker. Database
+connection and tuning environment settings are not supported. Do not edit or
+publish the descriptor. Ambiguous retained state, missing lifecycle credentials
+or another PostgreSQL major version fails closed; image replacement is **not**
+a PostgreSQL major upgrade or downgrade. See [backup and recovery](docs/RESTORE.md)
+before changing storage.
 
 **Key environment variables:**
 
 | Variable | Default | Description |
 |---|---|---|
-| `POSTGRES_PASSWORD` | — | **Required.** Database password — compose fails fast if unset. The app builds its own connection URL from the `POSTGRES_*` pieces |
-| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_DB` | `postgres` / `5432` / `ai_shuffle` / `ai_shuffle` | Remaining connection pieces — only set them if your database lives outside the bundled compose service |
-| `DATABASE_URL` | — | *Legacy.* Full connection string from pre-split installs — auto-imported into the `POSTGRES_*` values at startup, so a `.env` with only this set is fully configured (no re-setup needed); still wins at connect time when explicit pieces are also present |
 | `ADMIN_PASSWORD` | — | Upgrade only: unlock legacy ciphertext for its first verified key adoption, then remove. Never needed on a fresh installation |
 | `SHUFFLE_LOCAL_ACCESS` | `true` | Allow owner access on the local/LAN listener. Set `false` during a staged upgrade until managed tunnel ingress is verified |
-| `PUID` / `PGID` | `1000` | Runtime user/group for file permissions (Unraid: `99` / `100`) |
+| `PUID` / `PGID` | `99` / `100` (Compose) | Non-root runtime user/group for persistent volume permissions; retain existing custom mappings |
 | `AUTO_UPDATE` | `true` | Auto-update the GitHub CLI on startup (the Claude engine ships with `claude-agent-sdk`) |
 | `LOCAL_MODE` | `false` | Use local filesystem paths |
 | `COMMAND_TIMEOUT` | `300` | Subprocess timeout (seconds) |
@@ -204,7 +219,7 @@ would allow it.
 
 - **Python 3.12+**
 - **Node.js 22.12+** — For building the frontend and the bundled `browser-mcp` server
-- **PostgreSQL** — The database backend (provisioned automatically by Docker Compose)
+- **PostgreSQL 16** — Included and managed by the Docker image. Source deployments need a configured PostgreSQL server.
 - **GitHub CLI** — [Download](https://cli.github.com/) (used for PR reviews, issue management, etc.)
 
 ---

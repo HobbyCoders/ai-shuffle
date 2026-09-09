@@ -7,6 +7,8 @@
 		type CreatedPairingGrant, type PairingEndpoint
 	} from '$lib/api/pairing';
 
+	let { allowWorkerEnrollment = false }: { allowWorkerEnrollment?: boolean } = $props();
+
 	let endpoints = $state<PairingEndpoint[]>([]);
 	let selectedEndpoint = $state('');
 	let activeGrant = $state<CreatedPairingGrant | null>(null);
@@ -46,7 +48,7 @@
 	}
 
 	async function create(purpose: 'controller' | 'runner') {
-		if (creating || cancelling) return;
+		if (creating || cancelling || (purpose === 'runner' && !allowWorkerEnrollment)) return;
 		creating = true; error = ''; expired = false; copied = null;
 		try {
 			const endpoint = endpoints.find((item) => item.url === selectedEndpoint);
@@ -105,10 +107,10 @@
 			{#if activeGrant.qr_svg}<div class="qr" aria-label="Pairing QR code">{@html activeGrant.qr_svg}</div>{/if}
 		</div>
 	{:else}
-		<p class="pair-hint">Pair a phone or browser, or enroll a worker on this database.</p>
+		<p class="pair-hint">Pair a phone or browser.{#if allowWorkerEnrollment} You can also enroll a worker sharing this database.{/if} For a worker with its own database, use Invite another worker in Worker network.</p>
 		<div class="create-actions">
 			<button type="button" class="pair-button primary" disabled={creating} onclick={() => create('controller')}><QrCode size={15} /> Pair phone or browser</button>
-			<button type="button" class="pair-button" disabled={creating} onclick={() => create('runner')}><Plus size={15} /> Enroll worker</button>
+			{#if allowWorkerEnrollment}<button type="button" class="pair-button" disabled={creating} onclick={() => create('runner')}><Plus size={15} /> Enroll worker</button>{/if}
 		</div>
 		{#if creating}<p class="pair-hint" role="status">Creating code…</p>{/if}
 		<details class="pair-connection">
@@ -120,6 +122,7 @@
 			</select>
 		</details>
 	{/if}
+	<p class="pair-hint">Pairing gives phones and browsers controller access. Admin credentials, connectors, network keys, and future device pairing remain admin-only.</p>
 	{#if endpointError}<p class="pair-error" role="alert">{endpointError}. You can still create a code without an address.</p><button type="button" class="pair-button" disabled={loading} onclick={load}>Retry pairing addresses</button>{/if}
 	{#if error}<p class="pair-error" role="alert">{error}</p>{/if}
 	{#if expired}<p class="pair-hint" role="status">Pairing code expired. Create a new code.</p>{/if}

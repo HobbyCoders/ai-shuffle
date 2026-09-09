@@ -46,8 +46,9 @@ Nothing runs this automatically. It is an operator tool, invoked by hand.
 
 Usage
 -----
-From the repo root, with POSTGRES_* pointing at the target database
-(see .env.example)::
+From the managed worker environment, whose DATA_DIR contains the supervisor's
+private managed-postgres.json descriptor. No database environment settings are
+needed or supported::
 
     # Preview every change, touch nothing:
     python -m scripts.backfill_usage_from_events --dry-run

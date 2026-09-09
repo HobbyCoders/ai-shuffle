@@ -22,61 +22,14 @@ from app.core import encryption
 logger = logging.getLogger(__name__)
 
 
-def _auto_migrate_sqlite_to_postgres() -> None:
-    """Automatically migrate data from SQLite if it exists and Postgres is empty.
-
-    Runs once on first startup after switching from SQLite to PostgreSQL.
-    The SQLite file is renamed to db.sqlite.migrated after success.
-    """
-    sqlite_path = settings.db_path  # data_dir / "db.sqlite"
-
-    if not sqlite_path.exists():
-        return  # No SQLite database to migrate from
-
-    # Check if Postgres already has data (admin table has rows)
-    from app.db.base import get_db
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) as cnt FROM admin")
-        row = cursor.fetchone()
-        count = row["cnt"] if isinstance(row, dict) else row[0]
-        if count > 0:
-            logger.info("PostgreSQL already has data, skipping SQLite migration")
-            # Rename the old file so we don't check every startup
-            migrated_path = sqlite_path.with_suffix(".sqlite.migrated")
-            try:
-                sqlite_path.rename(migrated_path)
-                logger.info(f"Renamed old SQLite database to {migrated_path}")
-            except Exception:
-                pass
-            return
-
-    # Postgres is empty and SQLite exists — run migration
-    logger.info("=" * 60)
-    logger.info("Detected existing SQLite database — auto-migrating to PostgreSQL")
-    logger.info("=" * 60)
-
-    try:
-        from app.db.migrate_sqlite_to_postgres import migrate
-        results = migrate(
-            sqlite_path=str(sqlite_path),
-            postgres_url=settings.get_database_url(),
-            dry_run=False,
+def _reject_legacy_sqlite() -> None:
+    """Never import, rename, or ignore an old database during managed startup."""
+    sqlite_path = settings.db_path
+    if sqlite_path.exists() or sqlite_path.is_symlink():
+        raise RuntimeError(
+            "Legacy SQLite data detected. Startup is stopped without modifying it; "
+            "explicit offline migration is required."
         )
-        total = sum(results.values())
-        logger.info(f"Migration complete: {total} total rows migrated")
-
-        # Rename SQLite file to prevent re-migration
-        migrated_path = sqlite_path.parent / "db.sqlite.migrated"
-        sqlite_path.rename(migrated_path)
-        logger.info(f"Renamed SQLite database to {migrated_path}")
-    except BaseException as e:
-        # Catch BaseException because migrate() may call sys.exit() which
-        # raises SystemExit (a subclass of BaseException, not Exception)
-        logger.error(f"Auto-migration failed: {e}")
-        logger.error("The application will continue with an empty database.")
-        logger.error(f"You can retry manually: python -m app.db.migrate_sqlite_to_postgres --sqlite-path {sqlite_path}")
-
 
 def _backfill_attachment_data() -> None:
     """Copy local attachment files into the shared database (idempotent).
@@ -188,6 +141,7 @@ def _adopt_orphaned_instance_data() -> None:
 
 def init_core() -> None:
     """Phase 1: Initialize core infrastructure (directories, database, encryption)."""
+    _reject_legacy_sqlite()
     ensure_directories()
 
     # Initialize PostgreSQL connection pool
@@ -203,9 +157,6 @@ def init_core() -> None:
     from app.db import mobile_tools, mobile_tool_identity
     mobile_tools.init_schema()
     mobile_tool_identity.init_schema()
-
-    # Auto-migrate from SQLite if it exists and Postgres is empty
-    _auto_migrate_sqlite_to_postgres()
 
     # Adopt orphaned projects/sessions from previous Docker containers.
     # Before this fix, instance_id fell back to socket.gethostname() which
@@ -300,52 +251,7 @@ def check_prerequisites() -> None:
 
 
 def _warn_removed_env_vars() -> None:
-    """Log (once, at boot) about legacy / removed env vars that are still set.
-
-    DATABASE_URL was replaced by the POSTGRES_HOST/PORT/USER/PASSWORD/DB
-    pieces. A URL-only install is auto-imported into those fields at settings
-    load (config._import_legacy_database_url), so it is fully configured — the
-    note just says so. When explicit POSTGRES_* values are ALSO present the
-    import left them untouched and the URL still wins at connect time
-    (get_database_url prefers it verbatim); warn that the pieces are shadowed.
-    SESSION_STORE_MODE and PRESERVE_BACKGROUND_ON_INTERRUPT were removed
-    outright (their enabled behavior is now always-on / their feature retired),
-    so setting them would be silently ignored — say so.
-    """
-    if settings.database_url and settings.database_url.strip():
-        from app.core.config import legacy_database_url_imported
-
-        if legacy_database_url_imported:
-            logger.info(
-                "Legacy DATABASE_URL imported into the POSTGRES_* settings "
-                "(host=%s port=%s db=%s user=%s) — the install is fully "
-                "configured; consider dropping DATABASE_URL from .env.",
-                settings.postgres_host, settings.postgres_port,
-                settings.postgres_db, settings.postgres_user,
-            )
-        elif settings.postgres_password == settings.database_url.strip():
-            # Docker compose passes the URL itself as the POSTGRES_PASSWORD
-            # value purely to open the fail-fast gate on legacy .env files
-            # (see docker-compose.yml) — not a genuine dual configuration.
-            logger.info(
-                "Legacy DATABASE_URL connection string in use — the install "
-                "is fully configured."
-            )
-        elif settings.postgres_password:
-            logger.warning(
-                "Both the legacy DATABASE_URL and the POSTGRES_* settings are "
-                "configured — DATABASE_URL takes precedence and the POSTGRES_* "
-                "values are IGNORED. Remove DATABASE_URL from .env to switch "
-                "to the POSTGRES_* pieces."
-            )
-        else:
-            logger.info(
-                "Using the legacy DATABASE_URL connection string (it could not "
-                "be parsed into POSTGRES_* pieces). Consider migrating to the "
-                "POSTGRES_HOST/POSTGRES_PORT/POSTGRES_USER/POSTGRES_PASSWORD/"
-                "POSTGRES_DB settings in .env (see .env.example)."
-            )
-
+    """Log names (never values) of removed application environment flags."""
     import os
 
     for removed in ("SESSION_STORE_MODE", "PRESERVE_BACKGROUND_ON_INTERRUPT"):

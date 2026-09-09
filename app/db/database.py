@@ -249,7 +249,12 @@ def _safe_json(value):
 #     can show PR Opened / PR Merged without a live GitHub poll. Additive
 #     nullable pr_number / pr_url / pr_state; NULL on every pre-existing row.
 # 86: per-chat additional workspace projects, stored as project IDs.
-SCHEMA_VERSION = 86
+# 87 (2026-09-08): worker network. Local network tables (network_state,
+#     network_members, sync_ops, sync_records, sync_watermarks, sync_pending,
+#     sync_conflicts, sync_peers, network_joins, ...) and nullable
+#     ``owner_device_id`` on sessions / automations / connectors / artifacts,
+#     ``blob_hash`` on note_attachments. All additive.
+SCHEMA_VERSION = 87
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -2220,6 +2225,23 @@ def _run_column_migrations(cursor):
             )
 
     _migrate_provider_revisions(cursor)
+
+    # Worker network (v87): private-database peers replace the shared-database
+    # cluster. Additive, nullable columns naming the owning device on the
+    # tables whose rows execute somewhere, plus the local network tables.
+    # The startup backfill (app.network.migration) stamps this worker's device
+    # id onto rows that still only carry instance_id.
+    from app.db.network import create_schema as _create_network_schema
+    _create_network_schema(cursor)
+    for _table in ("sessions", "automations", "connectors", "artifacts"):
+        if table_exists(cursor, _table) and not column_exists(cursor, _table, "owner_device_id"):
+            cursor.execute(f"ALTER TABLE {_table} ADD COLUMN owner_device_id TEXT")
+            migrations_applied.append(f"{_table}.owner_device_id")
+    if table_exists(cursor, "sessions") and column_exists(cursor, "sessions", "owner_device_id"):
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_device ON sessions(owner_device_id)")
+    if table_exists(cursor, "note_attachments") and not column_exists(cursor, "note_attachments", "blob_hash"):
+        cursor.execute("ALTER TABLE note_attachments ADD COLUMN blob_hash TEXT")
+        migrations_applied.append("note_attachments.blob_hash")
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")

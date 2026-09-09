@@ -1,33 +1,8 @@
-version: '3.8'
-
+# One container, including private managed PostgreSQL 16.
+# Existing non-managed deployments must stay on their previous release until
+# a separately tested migration is approved. Preserve all existing volumes.
+# Requires Docker Compose >= 2.24 for the optional env_file.
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: ai-shuffle-postgres
-    restart: unless-stopped
-    environment:
-      - POSTGRES_DB=ai_shuffle
-      - POSTGRES_USER=ai_shuffle
-      # Fail fast if unset — no insecure default. Set POSTGRES_PASSWORD in .env.
-      # (This service genuinely needs the plain password to create its user — a
-      # legacy DATABASE_URL pointing elsewhere cannot substitute here.)
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (set it in .env)}
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "ai_shuffle"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    networks:
-      - claude-network
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
   ai-shuffle:
     # Use pre-built image from GitHub Container Registry
     # Replace <your-username> with your GitHub username
@@ -46,24 +21,20 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=8000
-      # The app builds its own connection URL from these pieces (host defaults
-      # to the "postgres" service; user/db default to ai_shuffle). A legacy
-      # .env carrying only DATABASE_URL also works: the URL substitutes here
-      # purely to pass the gate, and the app re-imports the URL into its
-      # POSTGRES_* settings at boot (get_database_url always prefers the URL,
-      # so the placeholder pieces are never actually connected with).
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-${DATABASE_URL:?set POSTGRES_PASSWORD or DATABASE_URL in .env}}
+      # The supervisor supplies the private managed database; no DB env settings.
       - SERVICE_NAME=${SERVICE_NAME:-ai-shuffle}
-      # Instance ID isolates projects/sessions when multiple devices share one DB.
-      # Defaults to SERVICE_NAME. Set a unique value per device if needed.
+      # Every worker owns its own database and joins other workers as a
+      # network device (Settings > Devices). INSTANCE_ID is only the legacy
+      # install id kept for migrating a shared-database cluster; leave it unset
+      # on a new install. See docs/network/migration.md.
       - INSTANCE_ID=${INSTANCE_ID:-}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-300}
       - PUID=${PUID:-99}
       - PGID=${PGID:-100}
-      # Auto-update the GitHub CLI package on container start (default: true).
-      # Delegated provider CLIs are image-managed and are not updated here.
-      - AUTO_UPDATE=${AUTO_UPDATE:-true}
+      # Pull a new image for updates; startup needs no package downloads.
+      # The legacy GitHub CLI updater is bounded and explicit opt-in.
+      - AUTO_UPDATE=${AUTO_UPDATE:-false}
       # Delegated Claude CLI stream-close timeout in ms.
       - CLAUDE_CODE_STREAM_CLOSE_TIMEOUT=${CLAUDE_CODE_STREAM_CLOSE_TIMEOUT:-120000}
       # Git identity used for commits made inside the container. Seeded into
@@ -77,13 +48,13 @@ services:
       - SETTINGS_IMPORT_SOURCE_HOME=${SETTINGS_IMPORT_SOURCE_HOME:-/home/appuser}
       - SETTINGS_IMPORT_ALLOWED_HOMES=${SETTINGS_IMPORT_ALLOWED_HOMES:-/imports/provider-settings}
 
-    depends_on:
-      postgres:
-        condition: service_healthy
+    # Allow ordered application drain, then PostgreSQL shutdown and checkpoint.
+    stop_grace_period: 90s
 
-    # Load environment from .env file (optional)
+    # Fresh installs need no .env; existing connection/provider settings survive.
     env_file:
-      - .env
+      - path: .env
+        required: false
 
     # Volume mounts for persistent data
     volumes:
@@ -105,7 +76,8 @@ services:
       # disables the DevTools debug port on the default ~/.config/google-chrome
       # profile (see docker/start-chrome.sh).
       - browser-profile:/home/appuser/chrome-profile
-      # Persist database and session data
+      # Persist app identity/keys and PostgreSQL (/data/postgres/data, with
+      # private lifecycle credentials alongside it in /data/postgres).
       - ai-shuffle-data:/data
       # Mount workspace directory for projects
       - ${WORKSPACE_DIR:-./workspace}:/workspace
@@ -198,9 +170,6 @@ volumes:
     driver: local
   # Named volume for AI Shuffle data (database, sessions)
   ai-shuffle-data:
-    driver: local
-  # Named volume for PostgreSQL data
-  postgres-data:
     driver: local
 
 networks:

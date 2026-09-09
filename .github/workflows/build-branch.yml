@@ -72,17 +72,39 @@ jobs:
             type=ref,event=branch,prefix=branch-
             type=sha,prefix=sha-
 
-      - name: Build and push
+      - name: Build candidate image
         uses: useblacksmith/build-push-action@v2
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
           labels: ${{ steps.meta.outputs.labels }}
-          tags: ${{ steps.meta.outputs.tags }}
-          push: true
+          tags: ai-shuffle:postgres-candidate
+          load: true
+          push: false
           no-cache: ${{ inputs.no_cache == true }}
           build-args: GIT_SHA=${{ github.sha }}
+
+      - name: Verify actual container lifecycle and UI
+        run: python scripts/verify_container_postgres.py --image ai-shuffle:postgres-candidate --artifacts "$RUNNER_TEMP/container-postgres"
+
+      - name: Upload container evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-postgres-${{ github.sha }}
+          path: ${{ runner.temp }}/container-postgres
+          if-no-files-found: ignore
+
+      - name: Push verified candidate without rebuilding
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker tag ai-shuffle:postgres-candidate "$tag"
+            docker push "$tag"
+          done <<< "$IMAGE_TAGS"
 
       - name: Inspect image
         run: |

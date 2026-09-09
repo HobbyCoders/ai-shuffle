@@ -3,11 +3,16 @@ import { cleanup, fireEvent, render, screen, within, waitFor } from '@testing-li
 import { tick } from 'svelte';
 import type { Install } from '$lib/api/installs';
 import type { PairedClient } from '$lib/api/pairing';
+import type { NetworkStatus } from '$lib/api/network';
 
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() }));
 const appData = vi.hoisted(() => ({ dropDeviceSessions: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api, getErrorMessage: (e: Error) => e.message }));
 vi.mock('$lib/stores/app-data.svelte', () => ({ appData }));
+vi.mock('$lib/stores/auth.svelte', async () => {
+    const { writable } = await import('svelte/store');
+    return { isAdmin: writable(true), auth: writable({ status: { account_sign_in_available: true } }) };
+});
 import DevicesSection from './DevicesSection.svelte';
 import { resourceSync } from '$lib/services/resource-sync';
 
@@ -15,9 +20,11 @@ const worker = (id: string, extra: Partial<Install> = {}): Install => ({ id, dev
 const client = (id: string, extra: Partial<PairedClient> = {}): PairedClient => ({ id, device_id: id, device_name: 'My phone', platform: 'android', client_type: 'mobile', scopes: ['controller'], session_expires_at: null, paired_at: '2026-09-01T10:00:00Z', last_seen: null, revoked_at: null, created_at: '', updated_at: '', ...extra });
 let workers: Install[];
 let clients: PairedClient[];
+let networkStatus: NetworkStatus;
 const advertise = { url: null, source: 'none', env_pinned: false, override: null, instance_id: 'self' };
 const disconnected = { signed_in: false, status: 'disconnected', code: null, qr_svg: null, error: null };
 function reads(path: string): unknown {
+    if (path === '/network/status') return networkStatus;
     if (path === '/cluster/installs') return { installs: [...workers], self_instance_id: 'self' };
     if (path === '/pairing/clients') return { clients: [...clients] };
     if (path === '/cluster/advertise') return advertise;
@@ -28,6 +35,7 @@ function reads(path: string): unknown {
 }
 beforeEach(() => {
     vi.resetAllMocks();
+    networkStatus = { device: { device_id: 'network-self', fingerprint: 'abcd-'.repeat(7) + 'abcd' }, enrolled: false, platform: 'linux', version: '1.0', instance_id: 'self' };
     workers = [worker('self', { device_name: 'This computer' }), worker('shared')];
     clients = [client('shared'), client('browser', { device_name: 'Work browser', client_type: 'browser', platform: 'linux-browser' })];
     api.get.mockImplementation(async (path: string) => reads(path));
@@ -190,7 +198,8 @@ it('keeps the enrollment panel mounted when closed and shows a later pairing in 
     await fireEvent.click(screen.getByRole('button', { name: 'Add device' }));
     expect(screen.getByRole('button', { name: 'Cancel code' })).toBeTruthy();
     expect(api.post).toHaveBeenCalledTimes(1);
-    expect(api.get.mock.calls.filter(([path]) => path === '/pairing/endpoints')).toHaveLength(1);
+    // The network invite and controller pairing each load their own address options.
+    expect(api.get.mock.calls.filter(([path]) => path === '/pairing/endpoints')).toHaveLength(2);
 });
 
 it('retains previous devices on a refresh failure and marks the count as partial', async () => {
@@ -261,6 +270,82 @@ it('lets slow list requests finish rather than superseding them on every poll', 
     expect(screen.getByText('4 devices')).toBeTruthy();
 });
 
+
+it('keeps independent-worker membership, enrollment and recovery alongside the unified devices list', async () => {
+    workers = [worker('network-self', { device_id: 'network-self', is_self: true, device_name: 'Independent self' })];
+    networkStatus = {
+        ...networkStatus, enrolled: true,
+        network: { network_id: 'network', name: 'Studio network', device_id: 'network-self', fingerprint: networkStatus.device.fingerprint, founder_device_id: 'network-self', generation: 1, key_version: 1, bootstrap_state: 'ready', member_count: 1 },
+        recovery: { configured: false, created_at: null, key_version: null },
+    };
+    render(DevicesSection);
+    await screen.findByText('2 devices');
+    const network = screen.getByRole('region', { name: 'Worker network' });
+    expect(within(network).getByText('Studio network')).toBeTruthy();
+    expect(within(network).getByText('Invite another worker')).toBeTruthy();
+    expect(within(network).getByRole('button', { name: 'Create join code' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Log in' })).toBeTruthy();
+    expect(screen.getByRole('list', { name: 'Devices' }).children).toHaveLength(2);
+    api.post.mockImplementation(async (path: string) => {
+        if (path !== '/network/recovery') throw new Error('Unexpected POST ' + path);
+        networkStatus = { ...networkStatus, recovery: { configured: true, created_at: '2026-09-01T10:00:00Z', key_version: 1 } };
+        return { recovery_key: 'SYNTHETIC-RECOVERY-KEY', created_at: '2026-09-01T10:00:00Z', key_version: 1 };
+    });
+    await fireEvent.click(within(network).getByRole('button', { name: 'Create recovery key' }));
+    expect(await within(network).findByText('SYNTHETIC-RECOVERY-KEY')).toBeTruthy();
+    expect(api.post).toHaveBeenCalledExactlyOnceWith('/network/recovery', {});
+    await fireEvent.click(screen.getByRole('button', { name: 'Add device' }));
+    expect(await screen.findByRole('button', { name: 'Pair phone or browser' })).toBeTruthy();
+    expect(screen.getByText(/For a worker with its own database/)).toBeTruthy();
+    expect(screen.queryByText(/Cluster secret/)).toBeNull();
+});
+
+it('refreshes both network and device state on network events without losing a rename draft', async () => {
+    vi.useFakeTimers();
+    render(DevicesSection);
+    await tick(); await vi.advanceTimersByTimeAsync(0);
+    await fireEvent.click(within(row('worker:shared')).getByRole('button', { name: 'Rename Desk worker' }));
+    await fireEvent.input(screen.getByRole('textbox', { name: 'Device name' }), { target: { value: 'Unsaved worker name' } });
+    workers.push(worker('independent', { device_name: 'Independent worker' }));
+    api.get.mockClear();
+    resourceSync.invalidate(['network']);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(screen.getByText('5 devices')).toBeTruthy();
+    expect(screen.getByText('Independent worker')).toBeTruthy();
+    expect((screen.getByRole('textbox', { name: 'Device name' }) as HTMLInputElement).value).toBe('Unsaved worker name');
+    expect(api.get.mock.calls.some(([path]) => path === '/network/status')).toBe(true);
+    expect(api.get.mock.calls.some(([path]) => path === '/cluster/installs')).toBe(true);
+});
+
+it('keeps network directory rows out of legacy actions and directs enrollment to Worker network', async () => {
+    networkStatus = { ...networkStatus, enrolled: true };
+    workers = [worker('network-self', { device_id: 'network-self', is_self: true, legacy_instance_id: 'self', device_name: 'Independent self' }), worker('network-peer', { device_id: 'network-peer', legacy_instance_id: 'legacy-peer', device_name: 'Independent peer' })];
+    render(DevicesSection);
+    await screen.findByText('2 devices');
+    expect(screen.queryByText('Independent peer')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Rename Independent|Revoke Independent|Remove Independent/ })).toBeNull();
+    expect(screen.getByRole('list', { name: 'Devices' }).children).toHaveLength(2);
+    await fireEvent.click(screen.getByRole('button', { name: 'Add device' }));
+    expect(await screen.findByRole('button', { name: 'Pair phone or browser' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Enroll worker' })).toBeNull();
+    expect(screen.getByText(/For a worker with its own database/)).toBeTruthy();
+    expect(api.patch).not.toHaveBeenCalled();
+    expect(api.put).not.toHaveBeenCalled();
+    expect(api.delete).not.toHaveBeenCalled();
+});
+
+it('does not offer legacy worker enrollment when the directory could not be loaded', async () => {
+    api.get.mockImplementation(async (path: string) => {
+        if (path === '/cluster/installs') throw new Error('Worker directory unavailable');
+        return reads(path);
+    });
+    render(DevicesSection);
+    await screen.findByText('Workers: Worker directory unavailable');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add device' }));
+    expect(await screen.findByRole('button', { name: 'Pair phone or browser' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Enroll worker' })).toBeNull();
+});
+
 it('stops polling both device sources and account status when unmounted', async () => {
     vi.useFakeTimers();
     const view = render(DevicesSection);
@@ -270,4 +355,3 @@ it('stops polling both device sources and account status when unmounted', async 
     await vi.advanceTimersByTimeAsync(20_000);
     expect(api.get).toHaveBeenCalledTimes(count);
 });
-

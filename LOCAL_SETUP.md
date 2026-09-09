@@ -4,39 +4,27 @@ Run AI Shuffle directly on your PC without Docker! Perfect for game development,
 
 ## Quick Start
 
-### Windows
-```batch
-# First time setup
-python run_local.py --setup
+Install and open the [desktop app](desktop/README.md). It bundles PostgreSQL and
+supervises the worker, including startup and shutdown. A fresh installation starts
+with a clean database: no host, port, password or database import is required.
 
-# Start the server
-python run_local.py
-```
+For a test installer, use its separate test data directory and close the running
+stable app first. Do not attach to an existing worker, import production data, or
+copy production settings/credentials into the test installation. Keep the existing
+installation and protected backups unchanged.
 
-Or double-click `run_local.bat`
+## Source-build Prerequisites
 
-### macOS / Linux
-```bash
-# First time setup
-./run_local.sh --setup
-
-# Start the server
-./run_local.sh
-```
-
-## Prerequisites
-
-### Required
 - **Python 3.12+** — [Download](https://www.python.org/downloads/)
 - **Node.js 22.12+** — [Download](https://nodejs.org/) (for building frontend)
-- **PostgreSQL 14+** — [Download](https://www.postgresql.org/download/) (or any reachable Postgres server on your network)
 - **GitHub CLI** — [Download](https://cli.github.com/) (used for PR reviews, issue management, etc.)
+- **Managed runtime** — Desktop or Docker supplies the database; an external
+  PostgreSQL server is not supported.
 
-During `--setup` you'll be asked for the database connection: the host/IP of
-your Postgres server, the username, and the password (port and database name
-have sensible defaults). The answers are saved to `.env` — the app assembles
-the connection URL itself, so you never have to hand-build a `postgresql://`
-string.
+`python run_local.py --setup` (or `run_local.bat --setup` / `./run_local.sh --setup`)
+installs dependencies and builds source assets only. It does not prompt for a
+database connection or create a standalone database. Source worker startup needs
+the managed supervisor's private runtime descriptor.
 
 ## Manual Setup
 
@@ -66,13 +54,12 @@ pip install -r requirements.txt ./fluid
 pip install -r requirements-native.txt
 ```
 
-### 4. Configure the Database
-```bash
-# Prompts for host/IP, username, and password; saves them to .env
-python -c "import run_local; run_local.configure_database()"
-```
-Or add them to `.env` by hand (see `.env.example`): `POSTGRES_HOST`,
-`POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`.
+### 4. Use the Managed Database
+
+The desktop/Docker supervisor creates and retains the database privately. It
+writes `DATA_DIR/managed-postgres.json` before starting the worker. Do not edit,
+print or copy this descriptor into `.env`; it is sensitive runtime state, not a
+user-facing configuration file. There is no database connection setup step.
 
 ### 5. Build Frontend
 ```bash
@@ -89,16 +76,15 @@ rm -rf app/static/_app && cp -r frontend/build/_app app/static/_app && cp fronte
 rm -rf app/static/_app && cp -r frontend/build/* app/static/
 ```
 
-### 6. Start the Server
-```bash
-# Set local mode
-export LOCAL_MODE=true  # or set LOCAL_MODE=true on Windows
+### 6. Start Through the Managed Supervisor
 
-# Start
-python -m app.main
-```
+Open the desktop app, or use `docker compose up -d --build` for a source-built
+managed container. Do not start `app.main` or Uvicorn directly: source workers
+require the supervisor's validated database descriptor. Standalone startup with
+no managed database refuses instead of connecting to another server.
 
-Visit http://127.0.0.1:8000 in your browser. On first launch, you'll be guided through account setup and Claude authentication.
+On first launch, choose your workspace and connect development tools or model
+providers. A local username, password or Shuffle account is not required.
 
 ## Configuration
 
@@ -110,17 +96,17 @@ is reused. No service or tunnel is started until you link the worker in Devices.
 If the download fails, local access still works. Retry the install with
 `python -m app.core.cloudflared` from the Shuffle folder.
 
-Each worker signs in to and out of its own Shuffle account connection, including
-workers sharing a database. Sign in with the same account on your phone to see
+Each worker signs in to and out of its own Shuffle account connection and has its
+own private managed database. Sign in with the same account on your phone to see
 all of those workers. LAN device authorization is separate from account sign-in.
 Signing out of a worker stops its tunnel and removes its account registration;
 other workers and local network connections remain available.
 
 ### Credential storage locked after an upgrade
 
-If another install (for example Unraid) has already initialized the shared
-database's credential key, this machine also needs that key. Export a portable
-recovery package from the working install, stop this local app, then import it
+If you are recovering an existing database into a separate managed installation,
+its encrypted records need the matching credential key. Export a portable
+recovery package from the working source install, stop the recovery app, then import it
 with `venv\Scripts\python.exe -m scripts.credential_keys import <recovery-file>`.
 The commands prompt privately for the recovery passphrase. Restart Shuffle
 after `venv\Scripts\python.exe -m scripts.credential_keys status` reports ready.
@@ -143,12 +129,7 @@ PORT=8000
 # Disable secure cookies for HTTP
 COOKIE_SECURE=false
 
-# Database connection (written by the setup prompts; edit here to change)
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_USER=ai_shuffle
-POSTGRES_PASSWORD=your-strong-password
-POSTGRES_DB=ai_shuffle
+# Database credentials are private runtime state, not environment options.
 ```
 
 ### Data Locations
@@ -222,8 +203,8 @@ already owns the port), or `Chrome crash-looped …` (check the app logs).
 | Feature | Docker | Local |
 |---------|--------|-------|
 | File access | Container only | Full PC access |
-| Installation | Single command | Manual setup |
-| Updates | Rebuild image | Git pull + rebuild |
+| Installation | Single command | Packaged desktop app |
+| Updates | Rebuild image | Update package; rebuild source assets for development |
 | Port binding | Configurable | Default 8000 |
 | Data isolation | Volume mounts | User directories |
 
@@ -244,44 +225,27 @@ chmod +x run_local.sh
 ```
 
 ### "Port already in use"
-```bash
-# Use a different port
-python run_local.py --port 3000
 
-# Or kill the process using port 8000
-# Windows:
-netstat -ano | findstr :8000
-taskkill /PID <pid> /F
-
-# macOS/Linux:
-lsof -i :8000
-kill -9 <pid>
-```
+Close the other AI Shuffle app normally before starting the managed desktop
+runtime or a test installer. Do not force-kill a database process or attach the
+test app to a production worker. The supervisor needs time to stop PostgreSQL
+cleanly; preserve existing data and backups.
 
 ### Database Issues
-Data lives in the PostgreSQL database configured during setup (the
-`POSTGRES_*` values in `.env`). If the server refuses to start with a
-database error, check that Postgres is running and reachable, then re-run the
-connection setup:
-```bash
-python -c "import run_local; run_local.configure_database()"
-```
-To reset the app completely, drop and recreate the database:
-```sql
-DROP DATABASE ai_shuffle;
-CREATE DATABASE ai_shuffle;
-```
+
+The managed database lives in the runtime's data directory, not a customer-supplied
+connection. Restart through the desktop app or Docker supervisor and inspect its
+startup diagnostics. Do not create a replacement database, reset a password,
+rewrite the descriptor or delete lifecycle files to bypass a startup failure.
+Preserve the original data and follow [backup and recovery](docs/RESTORE.md).
+A clean test install must use a separate empty data directory, never production.
 
 ## Development Mode
 
-For development with auto-reload:
-```bash
-# Activate venv first
-source venv/bin/activate  # or venv\Scripts\activate on Windows
-
-# Run with reload
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
+Use the desktop or Docker supervisor for backend startup/restarts. A direct
+Uvicorn process does not manage the database lifecycle or the application's
+listener boundary. Build source dependencies with `run_local.py --setup` and
+refresh them with `--update`; neither command creates a standalone database.
 
 For frontend development:
 ```bash
@@ -306,6 +270,17 @@ cd ..
 rm -rf app/static/_app && cp -r frontend/build/* app/static/
 ```
 
+## Worker Network
+
+A native install is one worker in a worker network. On first run it offers to
+start a new network, join another worker with a code and fingerprint check, or
+sign in to a Shuffle account. Workers in one network share settings, provider
+keys, profiles, preferences, notes and the session catalog, all end-to-end
+encrypted; each session runs on the worker that owns it. Settings > Devices
+manages members, invites, the recovery key and sync conflicts. Every desktop or
+Docker worker owns its own bundled managed PostgreSQL; shared database setup is
+not supported. See [worker networks](docs/network/README.md).
+
 ## Security Notes
 
 - Local mode binds to `127.0.0.1` by default (localhost only)
@@ -324,6 +299,7 @@ rm -rf app/static/_app && cp -r frontend/build/* app/static/
 After `git pull`, run `python run_local.py --update` (or the platform launcher with
 `--update`). This installs the checked-in Fluid harness and locked Node packages,
 then rebuilds the frontend, browser MCP and AI tools. It does not reconfigure the
-database or restart an already running server. Restart the backend after it succeeds.
+database or restart an already running server. Restart through the managed desktop
+runtime after it succeeds.
 Native release archives already contain the frontend; replace the archive to update
 that frontend, then run `--update` to install/build its runtime tools.

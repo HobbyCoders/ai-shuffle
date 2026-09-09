@@ -1,0 +1,281 @@
+"""Driving a session that executes on another device.
+
+The UI on worker A works against A's own database, where a session owned by
+B is a read-only mirror. Anything that must run on B is a control request:
+
+    submit a turn            -> B enqueues it exactly as a local send
+    create a session on B    -> B creates the row (it is the owner) and
+                                enqueues the first turn
+    interrupt                -> B flips the live turn like its own stop button
+    answer a prompt          -> B resolves the pending interaction
+    hydrate a transcript     -> B publishes an old session's events
+
+A calls B's ``/api/v1/network/peer/control/...`` with a device token; the
+outcome shows up in A's mirror through the event feed. When B is
+unreachable the caller gets ``RunnerUnreachable`` and the UI offers to fork
+the mirrored transcript into a new session on an online runner.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, List, Optional
+
+import httpx
+
+from app.db import network as store
+from app.network import engine, runners, transport
+
+logger = logging.getLogger(__name__)
+
+REQUEST_TIMEOUT = 20.0
+
+
+class RunnerUnreachable(RuntimeError):
+    pass
+
+
+class ControlRefused(RuntimeError):
+    """The owner answered with an error (4xx)."""
+
+
+# ---------------------------------------------------------------------------
+# Client side (the device whose UI is driving)
+# ---------------------------------------------------------------------------
+
+def owner_of(session_row: Dict[str, Any]) -> Optional[str]:
+    """The device id that executes this session, or None when it is ours."""
+    ctx = engine.context()
+    if ctx is None:
+        return None
+    owner = session_row.get("owner_device_id")
+    if not owner:
+        instance = (session_row.get("instance_id") or "").strip()
+        owner = runners.device_for_instance(instance) if instance else None
+    if owner in (None, ctx.device_id):
+        return None
+    return owner
+
+
+async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """POST a control action to the owner with a device token."""
+    ctx = engine.require_context()
+    link = transport._links.get(device_id)
+    if link is None:
+        member = store.get_member(device_id)
+        if member is None:
+            raise RunnerUnreachable("Unknown device")
+        presence = engine.presence_of(device_id) or {}
+        endpoints = list(presence.get("endpoints") or member.get("endpoints") or [])
+        link = transport.PeerLink(device_id, endpoints)
+        transport._links[device_id] = link
+    if not link.endpoints:
+        raise RunnerUnreachable("The owning worker has no reachable address")
+    async with httpx.AsyncClient(follow_redirects=False) as client:
+        try:
+            await link.authenticate(client, ctx)
+            result = await link._request(client, "POST", f"/api/v1/network/peer/control/{action}", json_body=body or {})
+        except transport.PeerError as exc:
+            message = str(exc)
+            if message.startswith("HTTP 4"):
+                raise ControlRefused(message.split(" ", 2)[-1] if " " in message else message) from exc
+            raise RunnerUnreachable(message) from exc
+        except httpx.HTTPError as exc:
+            raise RunnerUnreachable(f"{type(exc).__name__}") from exc
+    transport.note_contact(device_id)
+    return result
+
+
+async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: str = "user",
+                      profile_id: Optional[str] = None, project_id: Optional[str] = None,
+                      overrides: Optional[Dict[str, Any]] = None, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return await call(device_id, "turns", {
+        "session_id": session_id, "source": source, "prompt": prompt, "profile_id": profile_id,
+        "project_id": project_id, "overrides": overrides, "payload": payload,
+    })
+
+
+async def create_session(device_id: str, session: Dict[str, Any], turn: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    return await call(device_id, "sessions", {"session": session, "turn": turn})
+
+
+async def interrupt(device_id: str, session_id: str, mode: str, *, stop_background: bool = False,
+                    turn_id: Optional[str] = None) -> Dict[str, Any]:
+    return await call(device_id, "interrupt", {"session_id": session_id, "mode": mode,
+                                               "stop_background": stop_background, "turn_id": turn_id})
+
+
+async def answer_permission(device_id: str, *, request_id: str, session_id: str, decision: str,
+                            remember: Optional[str], pattern: Optional[str], answered_by_device: Optional[str]) -> Dict[str, Any]:
+    return await call(device_id, "permission", {
+        "request_id": request_id, "session_id": session_id, "decision": decision, "remember": remember,
+        "pattern": pattern, "answered_by_device": answered_by_device})
+
+
+async def answer_question(device_id: str, *, request_id: str, session_id: str, answers: Dict[str, Any],
+                          answered_by_device: Optional[str], dismissed: bool, skipped: Optional[List[str]]) -> Dict[str, Any]:
+    return await call(device_id, "question", {
+        "request_id": request_id, "session_id": session_id, "answers": answers,
+        "answered_by_device": answered_by_device, "dismissed": dismissed, "skipped": skipped})
+
+
+async def hydrate(device_id: str, session_id: str) -> Dict[str, Any]:
+    return await call(device_id, "hydrate", {"session_id": session_id})
+
+
+# ---------------------------------------------------------------------------
+# Owner side (handlers behind /peer/control/{action})
+# ---------------------------------------------------------------------------
+
+async def handle(action: str, body: Dict[str, Any], *, from_device: str) -> Dict[str, Any]:
+    if action in {"git-state", "git-op"}:
+        from app.network import git
+        handler = git.handle_state if action == "git-state" else git.handle_op
+        return await handler(body, from_device)
+    handler = _HANDLERS.get(action)
+    if handler is None:
+        raise KeyError(action)
+    return await handler(body, from_device)
+
+
+def _require_owned(session_id: str) -> Dict[str, Any]:
+    from app.db import database
+    row = database.get_session(session_id)
+    if row is None:
+        raise LookupError("Unknown session")
+    if owner_of(row) is not None:
+        raise PermissionError("This worker does not own the session")
+    return row
+
+
+async def _turns(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    from app.core import turn_manager
+    session_id = str(body.get("session_id") or "")
+    _require_owned(session_id)
+    payload = dict(body.get("payload") or {})
+    payload.setdefault("forwarded_by_device", from_device)
+    turn_id = await turn_manager.submit_async(
+        session_id, str(body.get("source") or "user"), prompt=body.get("prompt"),
+        profile_id=body.get("profile_id"), project_id=body.get("project_id"),
+        overrides=body.get("overrides") or None, payload=payload or None)
+    return {"turn_id": turn_id, "session_id": session_id}
+
+
+async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    from app.db import database
+    from app.db.async_database import run_sync
+    session = dict(body.get("session") or {})
+    session_id = str(session.get("id") or "")
+    if not session_id:
+        raise ValueError("session.id is required")
+    allowed = {"profile_id", "project_v2_id", "title", "api_user_id", "model", "effort", "permission_mode",
+               "context_window", "fast", "mode", "hidden"}
+    fields = {k: v for k, v in session.items() if k in allowed}
+    profile_id = fields.pop("profile_id", None) or "default"
+
+    def _create():
+        existing = database.get_session(session_id)
+        if existing is not None:
+            return existing
+        return database.create_session(session_id=session_id, profile_id=profile_id, project_id=None,
+                                       is_active=True, **fields)
+
+    row = await run_sync(_create)
+    _require_owned(session_id)
+    if session.get("branch"):
+        await run_sync(database.set_session_branch, session_id, str(session["branch"]), session.get("project_v2_id"))
+    if body.get("uploads"):
+        from app.network import git
+        await run_sync(git.import_uploads, session_id, body["uploads"])
+    result = {"session_id": row["id"], "owner_device_id": row.get("owner_device_id")}
+    turn = body.get("turn")
+    if turn:
+        result["turn"] = await _turns({**turn, "session_id": session_id}, from_device)
+    from app.network import catalog
+    await run_sync(catalog.publish_owned)
+    return result
+
+
+async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    from app.core import turn_manager
+    session_id = str(body.get("session_id") or "")
+    _require_owned(session_id)
+    row = await turn_manager.interrupt_async(session_id, str(body.get("mode") or "stop"),
+                                             stop_background=bool(body.get("stop_background")),
+                                             turn_id=body.get("turn_id") or None)
+    if row is not None and body.get("stop_background"):
+        from app.core.query_session_lifecycle import stop_all_background_tasks
+        await stop_all_background_tasks(session_id, user_stop=True)
+    return {"interrupted": row is not None, "turn_id": (row or {}).get("id")}
+
+
+async def _permission(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    from app.core.permission_handler import permission_handler
+    session_id = str(body.get("session_id") or "")
+    _require_owned(session_id)
+    result = await permission_handler.respond(
+        request_id=str(body.get("request_id") or ""), session_id=session_id, decision=body.get("decision"),
+        remember=body.get("remember"), pattern=body.get("pattern"),
+        answered_by_device=body.get("answered_by_device") or from_device)
+    return {"result": result}
+
+
+async def _question(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    from app.core.user_question_handler import user_question_handler
+    session_id = str(body.get("session_id") or "")
+    _require_owned(session_id)
+    result = await user_question_handler.respond(
+        request_id=str(body.get("request_id") or ""), session_id=session_id, answers=body.get("answers") or {},
+        answered_by_device=body.get("answered_by_device") or from_device, dismissed=bool(body.get("dismissed")),
+        skipped=body.get("skipped"))
+    return {"success": bool(result)}
+
+
+async def _hydrate(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    from app.db.async_database import run_sync
+    from app.network import catalog
+    session_id = str(body.get("session_id") or "")
+    _require_owned(session_id)
+    published = await run_sync(catalog.hydrate, session_id)
+    return {"published": published}
+
+
+_HANDLERS = {
+    "turns": _turns,
+    "sessions": _sessions,
+    "interrupt": _interrupt,
+    "permission": _permission,
+    "question": _question,
+    "hydrate": _hydrate,
+}
+
+
+# ---------------------------------------------------------------------------
+# Fork on offline
+# ---------------------------------------------------------------------------
+
+def fork_here(session_id: str, *, title: Optional[str] = None, api_user_id: Optional[str] = None) -> Dict[str, Any]:
+    """New local session seeded with the mirrored transcript; the original is untouched."""
+    import uuid
+    from app.db import database
+    from app.db.base import transaction
+    from app.network import catalog
+    original = database.get_session(session_id)
+    if original is None:
+        raise LookupError("Unknown session")
+    context_text = catalog.transcript_text(session_id)
+    new_id = str(uuid.uuid4())
+    with transaction() as txn:
+        database.create_session(
+            session_id=new_id, profile_id=original.get("profile_id") or "default", project_id=None,
+            project_v2_id=original.get("project_v2_id"),
+            title=title or f"{original.get('title') or 'Session'} (forked)", api_user_id=api_user_id,
+            parent_session_id=session_id, is_active=True, model=original.get("model"),
+            effort=original.get("effort"), permission_mode=original.get("permission_mode"),
+            context_window=original.get("context_window"), fast=original.get("fast"), mode=original.get("mode"),
+            _conn=txn)
+        if context_text:
+            database.add_session_message(
+                session_id=new_id, role="user", content=(
+                    "Context from the original session, which ran on another device:\n\n" + context_text),
+                metadata={"forked_from": session_id, "forked_context": True}, _conn=txn)
+    return {"session_id": new_id, "parent_session_id": session_id, "context_chars": len(context_text)}

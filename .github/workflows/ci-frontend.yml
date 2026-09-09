@@ -83,6 +83,7 @@ jobs:
               - '.github/workflows/ci-frontend.yml'
             tools:
               - 'tools/**'
+              - 'tests/core/network/vectors.json'
               - '.github/workflows/ci-frontend.yml'
             browser:
               - 'browser-mcp/**'
@@ -122,6 +123,14 @@ jobs:
         if: github.event_name != 'pull_request' || steps.changes.outputs.tools == 'true'
         working-directory: tools
         run: npm ci --ignore-scripts && npm run build && npm audit --audit-level=high
+
+      # The worker network's crypto vectors must verify with WebCrypto, the API
+      # the account hub and the mobile app use (tests/core/network/vectors.json
+      # is also checked by the Python suite).
+      - name: Verify worker-network crypto vectors with WebCrypto
+        if: github.event_name != 'pull_request' || steps.changes.outputs.tools == 'true' || steps.changes.outputs.frontend == 'true'
+        working-directory: .
+        run: node tools/scripts/verify-network-vectors.mjs
 
       - name: Browser MCP build and tests
         if: github.event_name != 'pull_request' || steps.changes.outputs.browser == 'true'

@@ -679,6 +679,13 @@ def clear_paired_client_session(client_id: str, token_hash: Optional[str] = None
         return native_changed or web_changed
 
 
+def consume_grant_for_network_join(*, token_hash: str) -> Optional[PairingGrantRow]:
+    """Consume a ``network:join`` grant issued by this worker."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        return _consume_grant(cursor, token_hash, "network:join")
+
+
 def consume_grant_for_runner(
     *, token_hash: str, install_id: str
 ) -> Optional[PairingGrantRow]:

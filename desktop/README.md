@@ -7,15 +7,23 @@ worker the app starts, so the two never drift apart.
 
 ## What the app does
 
-- Starts the worker on launch (`python -m app.main` in local mode, listening
-  on 127.0.0.1:8000) and opens its UI once the worker answers. If a worker is
-  already running on that port, the app attaches to it instead of starting a
-  second one. Quitting the app stops the worker it started.
-- Asks for the PostgreSQL connection on first run, tests it, and can create
-  the database when the user exists but the database does not. The password
-  is stored with the OS keyring (DPAPI, Keychain, or libsecret); the worker
-  gets it through its environment and a `.env` file only your account can read.
-- Restart, log and database-connection actions in the Worker menu and the tray.
+- Starts its bundled PostgreSQL, then the worker (`python -m app.main` in
+  local mode, listening on 127.0.0.1:8000), and opens the worker's UI once it
+  answers. Stable builds may attach to an already running local worker; preview
+  builds refuse occupied ports and never attach. Exit the old app before opening
+  Preview. Quitting stops the worker and database that this app started.
+- Needs no database setup. The first run creates a cluster in
+  `<userData>/postgres/data` (`initdb`, user `ai_shuffle`, a generated
+  password, `scram-sha-256`); every start picks a free loopback port and
+  hands the connection to the worker. The password is stored with the OS
+  keyring (DPAPI, Keychain, or libsecret). Before startup the supervisor writes
+  the private `data/managed-postgres.json` descriptor; no database credentials
+  are handed to the app through environment variables or `.env`. The transient
+  descriptor is removed on shutdown; retain the private profile for persistence.
+- PostgreSQL is managed-only. There is no connection form, external-server mode,
+  or database environment configuration. Worker → Worker Status… shows lifecycle
+  and failure details; Show PostgreSQL Log opens the database log.
+- Restart and log actions in the Worker menu and the tray.
 - Frameless window with the OS window controls overlaid. The web UI's top
   strip is the drag handle and keeps clear of the buttons through the Window
   Controls Overlay API; see the `html.desktop` rules in `frontend/src/app.css`
@@ -45,9 +53,24 @@ ships under `resources/worker`:
 | `server/tools/`, `server/browser-mcp/` | the two Node packages, built, with production dependencies |
 | `manifest.json` | versions and build time |
 
-PostgreSQL is not bundled. The runtime is built on a runner of the target
+The same script assembles `desktop/postgres/`, shipped under
+`resources/postgres`: PostgreSQL 16 (`bin/` with initdb, pg_ctl, postgres and
+the client tools, plus `lib/` and `share/`) from a
+[theseus-rs/postgresql-binaries](https://github.com/theseus-rs/postgresql-binaries)
+release, pinned in `scripts/postgres-binaries.mjs` and verified against the
+release's `.sha256` sidecar. The worker manifest records it under
+`postgres: {version, target}`. The runtime is built on a runner of the target
 architecture: Windows x64, macOS arm64, Linux x64. Installers are large
 (several hundred MB); updates download only the changed blocks.
+
+The database lives in `<userData>/postgres/data` (for example
+`%APPDATA%\AI Shuffle\postgres\data` on Windows,
+`~/Library/Application Support/AI Shuffle/postgres/data` on macOS,
+`~/.config/AI Shuffle/postgres/data` on Linux) and the server log next to the
+worker's under `<userData>/logs/postgres.log`. To back up AI Shuffle, back up
+that data directory with the app closed (or use `pg_dump` from
+`resources/postgres/bin` against the connection in `<userData>/worker/.env`).
+Uninstalling the app leaves the data directory in place.
 
 Optional tools the worker looks for on PATH, as on any native install: the
 GitHub CLI for pull-request features, and a Chrome, Chromium or Edge for
@@ -57,9 +80,9 @@ browser automation.
 
 The preload exposes `window.shuffleDesktop` to the worker page: window and
 theme control, native notifications, menu commands, update state, and the
-worker's state with restart/log/database actions. The bundled setup and
+worker's state with restart/log/status actions. The bundled
 status page additionally gets `window.shuffleDesktopWorker` for the database
-form and the raw worker log; the worker page never sees the credentials.
+lifecycle and worker log; neither page exposes credentials or connection forms.
 
 ## Develop
 
@@ -72,12 +95,18 @@ npm start
 `npm start` compiles `src/` to `dist/` and launches Electron. A development
 run uses the repository as the worker runtime: its `venv/` and a built
 `app/static` (run `python run_local.py --setup` once), with Node from PATH.
+It has no bundled PostgreSQL of its own: point `SHUFFLE_DESKTOP_POSTGRES_DIR`
+at any PostgreSQL 16 installation (a directory with `bin/initdb`, `bin/pg_ctl`
+and `bin/postgres`, such as an assembled `desktop/postgres/` or a Homebrew or
+EnterpriseDB install). This development-only binary override is ignored by
+packaged apps; it never selects an external database server.
 
 | Variable | Purpose |
 | --- | --- |
 | `SHUFFLE_DESKTOP_USER_DATA` | Use an isolated profile directory instead of the real one. |
 | `SHUFFLE_DESKTOP_REPO_DIR` | Borrow another checkout's venv and frontend build (worktrees). |
 | `SHUFFLE_DESKTOP_WORKER_DIR` | Use an assembled runtime (`npm run build:worker`) instead of the repository. |
+| `SHUFFLE_DESKTOP_POSTGRES_DIR` | PostgreSQL binaries for the bundled server in a development run (a directory with `bin/initdb`). |
 | `SHUFFLE_DESKTOP_DEV_URL` | Show a frontend dev server instead of starting the worker. |
 | `SHUFFLE_DESKTOP_SHOT` | Write a PNG of the window after load and quit (used by CI). |
 | `SHUFFLE_DESKTOP_SHOT_DELAY` | Milliseconds to wait before the screenshot (default 4000). |
@@ -87,9 +116,11 @@ run uses the repository as the worker runtime: its `venv/` and a built
 `DATA_DIR` and `WORKSPACE_DIR` in the environment pass through to the worker,
 which is handy for a throwaway data directory while testing.
 
-Tests: `npm test` (settings store, runtime resolution, worker environment).
+Tests: `npm test` (settings store, runtime resolution, worker environment,
+the PostgreSQL supervisor against a fake runtime, the download helpers).
 `npm run build:worker` assembles the runtime for this machine (downloads
-Python and Node, installs the Python dependencies; takes a few minutes).
+Python, Node and PostgreSQL, installs the Python dependencies; takes a few
+minutes). `--skip-postgres` leaves PostgreSQL out of a build.
 `npm run pack` builds an unpacked app in `release/`; `npm run dist` builds the
 installers. Pull-request CI packages a stub runtime on every platform and
 assembles a real one on Linux.

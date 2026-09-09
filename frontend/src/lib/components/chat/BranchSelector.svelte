@@ -479,22 +479,6 @@
 		}
 	}
 
-	/* Mobile shell: keep the dropdown within the viewport. */
-	:global(html[data-platform='mobile']) .branch-name {
-		max-width: min(120px, 30vw);
-	}
-
-	:global(html[data-platform='mobile']) .branch-selector {
-		position: static;
-	}
-
-	:global(html[data-platform='mobile']) .branch-dropdown {
-		left: 12px;
-		right: 12px;
-		min-width: 0;
-		max-width: none;
-	}
-
 	@media (prefers-reduced-motion: reduce) {
 		.branch-dropdown,
 		:global(.spin) {

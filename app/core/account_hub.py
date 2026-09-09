@@ -114,14 +114,19 @@ class _PinnedHTTPS(http.client.HTTPSConnection):
             raise
 
 
-def call(binding, method, suffix, body=None, *, credential=None):
-    """Bounded, nonredirecting request; never include hub bodies or secrets in errors."""
+def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384, timeout=None):
+    """Bounded, nonredirecting request; never include hub bodies or secrets in errors.
+
+    ``max_bytes`` caps the response (16 KiB by default; the network feed
+    passes more). ``timeout`` overrides the per-route default.
+    """
     conn = None
     detail = 'Account hub authorization unavailable'
     try:
         origin = trusted_origin(binding['hub_url'])
         server = identifier(binding['server_id'])
-        timeout = 65 if suffix in ('activate', 'connector') else 4
+        if timeout is None:
+            timeout = 65 if suffix in ('activate', 'connector') else 4
         conn = _PinnedHTTPS(urlsplit(origin).hostname, timeout=timeout, context=ssl.create_default_context())
         conn.request(method, f'/v1/servers/{server}/{suffix}',
                      body=json.dumps(body) if body is not None else None,
@@ -134,8 +139,8 @@ def call(binding, method, suffix, body=None, *, credential=None):
             if response.status == 429:
                 detail = 'Account hub is rate limiting this worker'
             raise ValueError(f'hub answered HTTP {response.status}')
-        raw = response.read(16385)
-        if len(raw) > 16384:
+        raw = response.read(max_bytes + 1)
+        if len(raw) > max_bytes:
             raise ValueError('Oversize hub response')
         result = json.loads(raw)
         if not isinstance(result, dict):

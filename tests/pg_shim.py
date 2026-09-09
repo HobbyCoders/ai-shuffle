@@ -338,6 +338,9 @@ def _should_skip(sql: str) -> bool:
         "CREATE OR REPLACE FUNCTION",
         "CREATE FUNCTION",
         "CREATE TRIGGER",
+        # This locked single-connection shim has no PostgreSQL MVCC. Actual
+        # repeatable-read semantics are exercised by the opt-in PG tests.
+        "SET TRANSACTION ISOLATION LEVEL",
     ))
 
 

@@ -9,11 +9,44 @@ a real server, per the task's "don't spawn real servers in CI" constraint.
 """
 
 import sys
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import run_local  # noqa: E402  (path insert above must run first)
+
+
+
+def test_source_preflight_uses_worker_settings_without_connecting(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    monkeypatch.setattr(run_local, "get_venv_python", lambda: Path(sys.executable))
+    calls = []
+    def probe(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(run_local.subprocess, "run", probe)
+    assert run_local.require_managed_database({"AI_SHUFFLE_ENV_FILE": str(tmp_path / "custom.env")})
+    args, kwargs = calls[0]
+    assert args[-1] == "from app.core.config import settings; settings.get_database_connection()"
+    assert kwargs["env"]["LOCAL_MODE"] == "true"
+    assert kwargs["env"]["AI_SHUFFLE_ENV_FILE"] == str(tmp_path / "custom.env")
+    assert kwargs["capture_output"] is True
+
+
+def test_source_start_refuses_inherited_external_db_before_setup(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://never:synthetic@external.invalid/production")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "ignored-synthetic-password")
+    monkeypatch.setattr(sys, "argv", ["run_local.py"])
+    monkeypatch.setattr(run_local, "print_banner", lambda: None)
+    monkeypatch.setattr(run_local, "check_python_version", lambda: None)
+    monkeypatch.setattr(run_local, "run_setup", lambda: pytest.fail("must not install anything"))
+    with pytest.raises(SystemExit) as exc:
+        run_local.main()
+    assert exc.value.code == 1
+    assert "packaged desktop launcher" in capsys.readouterr().out
+    assert not list(tmp_path.iterdir())
 
 
 class TestFirstRunSetup:
@@ -29,13 +62,14 @@ class TestFirstRunSetup:
         monkeypatch.setattr(run_local, "run_setup", lambda **kw: calls.append(("setup", kw)) or True)
         monkeypatch.setattr(run_local, "start_server", lambda *a: calls.append(("start", a)))
         monkeypatch.setattr(run_local, "needs_first_run_setup", lambda: not (venv_exists and static_exists))
+        monkeypatch.setattr(run_local, "require_managed_database", lambda env: True)
         run_local.main()
         return calls
 
     def test_missing_venv_runs_setup_then_starts(self, monkeypatch, tmp_path):
         calls = self._main(monkeypatch, tmp_path, venv_exists=False, static_exists=True)
         assert [name for name, _ in calls] == ["setup", "start"]
-        assert calls[0][1] == {"configure_db": True}
+        assert calls[0][1] == {}
 
     def test_missing_frontend_build_runs_setup_then_starts(self, monkeypatch, tmp_path):
         calls = self._main(monkeypatch, tmp_path, venv_exists=True, static_exists=False)

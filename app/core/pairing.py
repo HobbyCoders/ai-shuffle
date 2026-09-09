@@ -23,6 +23,8 @@ PAIRING_MAX_ATTEMPTS = 10
 PAIRED_SESSION_PREFIX = "shc_"
 DEFAULT_CONTROLLER_SCOPES = ["controller"]
 RUNNER_ENROLL_SCOPES = ["runner:enroll"]
+NETWORK_JOIN_SCOPES = ["network:join"]
+PAIRING_PURPOSES = {"controller", "runner", "network:join"}
 DEFAULT_MOBILE_SCOPES = [
     "controller",
     "mobile:notifications",
@@ -51,6 +53,21 @@ def format_pairing_code(value: str) -> str:
     return "-".join(normalized[index:index + 4] for index in range(0, 12, 4))
 
 
+PAIRING_KEY_SETTING = "network_pairing_key"
+
+
+def pairing_key() -> str:
+    """The local key pairing codes are hashed under.
+
+    Generated once per database (``network_pairing_key`` in system_settings,
+    a local-only key the sync policy never shares). It replaces the
+    shared-database cluster secret, so rotating or retiring that secret no
+    longer invalidates outstanding pairing codes.
+    """
+    from app.db import database
+    return database.get_or_create_system_setting(PAIRING_KEY_SETTING, lambda: secrets.token_urlsafe(32))
+
+
 def hash_pairing_code(value: str) -> str:
     normalized = normalize_pairing_code(value)
     if not normalized:
@@ -58,7 +75,7 @@ def hash_pairing_code(value: str) -> str:
         # risking an accidental match against a real grant.
         normalized = "INVALID-PAIRING-CODE"
     return hmac.new(
-        cluster.get_cluster_secret().encode("utf-8"),
+        pairing_key().encode("utf-8"),
         f"shuffle-pairing-v1:{normalized}".encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
@@ -201,9 +218,9 @@ def create_grant(
     scopes: Optional[List[str]] = None,
     purpose: str = "controller",
 ) -> Dict[str, Any]:
-    if purpose not in {"controller", "runner"}:
+    if purpose not in PAIRING_PURPOSES:
         raise ValueError("Unsupported pairing purpose")
-    endpoint = sanitize_endpoint_url(endpoint_url) if purpose == "controller" else None
+    endpoint = sanitize_endpoint_url(endpoint_url) if purpose in ("controller", "network:join") else None
     code = generate_pairing_code()
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=PAIRING_TTL_MINUTES)
     grant = pairing_db.create_pairing_grant(
@@ -212,6 +229,8 @@ def create_grant(
         scopes=scopes or (
             RUNNER_ENROLL_SCOPES
             if purpose == "runner"
+            else NETWORK_JOIN_SCOPES
+            if purpose == "network:join"
             else DEFAULT_CONTROLLER_SCOPES + DEFAULT_MOBILE_SCOPES[1:]
         ),
         target_install_id=settings.effective_instance_id,
@@ -222,10 +241,16 @@ def create_grant(
         max_attempts=PAIRING_MAX_ATTEMPTS,
     )
     url = build_pairing_url(endpoint, code) if purpose == "controller" else None
+    join_link = None
+    if purpose == "network:join":
+        from app.network.enrollment import build_join_link
+        join_link = build_join_link(endpoint, code)
+        url = join_link["url"] if join_link else None
     return {
         "grant": grant,
         "code": code,
         "display_code": format_pairing_code(code),
         "pairing_url": url,
-        "qr_svg": render_qr_svg(url) if url and not classify_endpoint(endpoint or "")["loopback"] else None,
+        "join": join_link,
+        "qr_svg": render_qr_svg(url) if url and (purpose == "network:join" or not classify_endpoint(endpoint or "")["loopback"]) else None,
     }

@@ -273,7 +273,7 @@ def init_pool(min_conn: int = 2, max_conn: int = 10) -> None:
     _pg_pool = _RetainingThreadedConnectionPool(
         min_conn,
         max_conn,
-        **parse_database_url(settings.get_database_url()),
+        **settings.get_database_connection(),
     )
     logger.info(
         f"PostgreSQL connection pool initialized (min={min_conn}, max={max_conn})"

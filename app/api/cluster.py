@@ -34,6 +34,20 @@ router = APIRouter(prefix="/api/v1/cluster", tags=["Cluster"])
 # Admin endpoints (normal auth) — power the Devices UI
 # ============================================================================
 
+def _require_legacy_install_target(install_id: str) -> None:
+    """A network directory id is not authority to mutate the old registry."""
+    from app.network import engine, runners
+
+    ctx = engine.context()
+    if ctx is not None:
+        device_id = runners.resolve_runner_id(install_id)
+        if ctx.member(device_id) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Use network membership controls to manage enrolled workers.",
+            )
+
+
 class InstallRenameRequest(BaseModel):
     device_name: str
 
@@ -46,13 +60,32 @@ class InstallApprovalRequest(BaseModel):
     approved: bool
 
 
+def _self_install_id() -> str:
+    """The id of this worker's own row in the install listing.
+
+    Enrolled in a network, the listing is the runner directory and its rows
+    are keyed by device id; outside one, the legacy registry keys rows by
+    instance id. ``is_self`` and ``self_instance_id`` must use whichever id
+    the rows actually carry, or the composer's runner picker offers this
+    worker as "another worker" and Settings > Devices loses its badge.
+    """
+    from app.core.config import settings
+
+    try:
+        from app.network import runners
+
+        device_id = runners.self_device_id()
+    except Exception:  # noqa: BLE001 — the network layer must never break a listing
+        device_id = None
+    return device_id or settings.effective_instance_id
+
+
 @router.get("/installs")
 async def list_installs(token: str = Depends(require_auth)) -> Dict[str, Any]:
     """List every registered install, annotating which row is this one."""
-    from app.core.config import settings
 
     installs = await run_sync(database.get_installs)
-    me = settings.effective_instance_id
+    me = _self_install_id()
     for row in installs:
         row["is_self"] = row.get("id") == me
     return {"installs": installs, "self_instance_id": me}
@@ -179,7 +212,6 @@ async def list_cluster_projects(
     A scoped user whose assigned project is gone gets an empty list,
     not every origin.
     """
-    from app.core.config import settings
     from app.db import checkouts as checkouts_db
     from app.db import projects_v2 as projects_v2_db
 
@@ -192,7 +224,7 @@ async def list_cluster_projects(
     pv2s = await run_sync(projects_v2_db.list_projects_v2)
     installs = await run_sync(database.get_installs)
     local_projects = await run_sync(database.get_all_projects)
-    me = settings.effective_instance_id
+    me = _self_install_id()
 
     catalog = _build_cluster_catalog(
         bases=bases,
@@ -228,7 +260,6 @@ async def git_state(
     A legacy project with no ``projects_v2`` row (a non-git project) is not an
     error: it answers 200 with ``project_v2_id: null`` and every device ineligible.
     """
-    from app.core.config import settings
     from app.db import checkouts as checkouts_db
     from app.db import git_ops as git_ops_db
 
@@ -242,7 +273,24 @@ async def git_state(
     pv2_id = pv2["id"] if pv2 else None
 
     installs = await run_sync(database.get_installs)
-    me = settings.effective_instance_id
+    me = _self_install_id()
+
+    from app.network import engine, git as network_git
+    if engine.context() is not None:
+        out, recent = [], []
+        for install in installs:
+            entry = {**install, "is_self": install.get("id") == me,
+                     "eligible": False, "checkouts": []}
+            if pv2_id and (entry["is_self"] or install.get("online")):
+                try:
+                    owned = await network_git.state(install["id"], pv2_id)
+                    entry.update(eligible=owned["eligible"], checkouts=owned["checkouts"])
+                    recent.extend(owned.get("recent_ops", []))
+                except Exception:
+                    logger.warning("Cannot read Git state from worker %s", install["id"], exc_info=True)
+                    entry["availability_error"] = "Worker Git state is unavailable"
+            out.append(entry)
+        return {"project_v2_id": pv2_id, "installs": out, "recent_ops": recent}
 
     if pv2_id:
         rows = await run_sync(checkouts_db.list_checkouts, pv2_id)
@@ -335,6 +383,14 @@ async def refresh_git_state(
             detail="not a git project",
         )
 
+    from app.network import engine, git as network_git
+    if engine.context() is not None:
+        try:
+            op = await network_git.enqueue(runner_id, "refresh_status", project_v2_id=pv2["id"])
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail="Selected worker is unavailable or has no base checkout") from exc
+        return {"ops": [op]}
+
     op = await run_sync(
         git_ops_db.insert_op,
         runner_id,
@@ -362,6 +418,7 @@ async def update_install(
     """Rename a device (the user-friendly name shown on its sessions)."""
     if not rename or not (rename.device_name or "").strip():
         raise HTTPException(status_code=400, detail="device_name is required")
+    _require_legacy_install_target(install_id)
     updated = await run_sync(database.set_install_name, install_id, rename.device_name.strip())
     if not updated:
         raise HTTPException(status_code=404, detail="Install not found")
@@ -387,6 +444,7 @@ async def update_install_approval(
             status_code=400,
             detail="You cannot revoke the install serving this admin session",
         )
+    _require_legacy_install_target(install_id)
     updated = await run_sync(database.set_install_approval, install_id, body.approved)
     if updated is None:
         raise HTTPException(status_code=404, detail="Install not found")
@@ -401,6 +459,7 @@ async def delete_install(install_id: str, token: str = Depends(require_admin)) -
     Deleting this install's own row is allowed but pointless — it re-registers
     on its next heartbeat. Mainly for pruning devices that are gone for good.
     """
+    _require_legacy_install_target(install_id)
     ok = await run_sync(database.delete_install, install_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Install not found")

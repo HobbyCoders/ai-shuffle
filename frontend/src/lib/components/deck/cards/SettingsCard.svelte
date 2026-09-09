@@ -377,7 +377,7 @@
 							onDisconnectGithub={disconnectGithub}
 						/>
 
-						<!-- Device management is admin-only: account linking, pairing, and runner access. -->
+						<!-- Admin-only: worker network membership/recovery, account linking, pairing, and runner access. -->
 						{#if $isAdmin}
 							<DevicesSection />
 						{/if}

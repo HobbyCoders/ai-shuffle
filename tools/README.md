@@ -48,3 +48,12 @@ this tool surface. Voice input/read-aloud are separate app features.
 external imports. They are not dispatched by the app's media worker. Their separate
 credentials and APIs are not configured by the fal.ai media setup. Prefer the app's
 current provider/agent mechanisms for new integrations.
+
+## Scripts
+
+`scripts/verify-network-vectors.mjs` checks the worker network's crypto test
+vectors (`tests/core/network/vectors.json`) with Node's WebCrypto, the API the
+account hub and the mobile app use, so the Python primitives in
+`app/network/crypto.py` stay verifiable outside Python. Run it from the
+repository root with `node tools/scripts/verify-network-vectors.mjs`; CI runs it
+in the JavaScript job.

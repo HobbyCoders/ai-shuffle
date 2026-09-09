@@ -57,9 +57,10 @@ jobs:
             | **Linux** | Intel / AMD (x64) | [AppImage](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Desktop-${{ env.DESKTOP_VERSION }}-linux-x86_64.AppImage) / [Debian package (.deb)](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Desktop-${{ env.DESKTOP_VERSION }}-linux-amd64.deb) |
 
             The app runs an AI Shuffle worker on your computer and opens its web UI.
-            It bundles Python and Node; you need a PostgreSQL server, which the app
-            asks for on first run. Other workers are managed inside the app under
-            Devices. Docker users: `ghcr.io/hobbycoders/ai-shuffle:${{ env.VERSION }}`.
+            It bundles Python, Node and its own persistent PostgreSQL database.
+            There is no database server setup or database environment configuration.
+            Other workers are managed inside the app under Devices.
+            Docker users: `ghcr.io/hobbycoders/ai-shuffle:${{ env.VERSION }}`.
 
             Installers become available as each desktop build finishes.
 
@@ -68,7 +69,8 @@ jobs:
             [Download Android APK](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Android.apk) · [Latest verified Android build](https://github.com/${{ github.repository }}/releases/tag/android-latest)
 
             Requires Android 8.0 or newer. Install over the existing app to keep
-            your accounts and workers. The APK appears after Android verification passes.
+            your accounts and workers. The APK appears after Android verification passes
+            and the compatible-worker rollout is approved (`ANDROID_WORKERS_READY=true`).
 
   android:
     name: Android APK
@@ -76,6 +78,7 @@ jobs:
     uses: ./.github/workflows/android.yml
     with:
       release_tag: ${{ github.event.inputs.version || github.ref_name }}
+      publish_download: ${{ vars.ANDROID_WORKERS_READY == 'true' }}
     secrets: inherit
 
   # Package the desktop app for each supported target and upload to the
@@ -91,13 +94,13 @@ jobs:
       matrix:
         include:
           - target: win-x64
-            os: windows-latest
+            os: blacksmith-4vcpu-windows-2025
             arch: x64
           - target: mac-arm64
-            os: macos-latest
+            os: blacksmith-6vcpu-macos-latest
             arch: arm64
           - target: linux-x64
-            os: ubuntu-latest
+            os: blacksmith-4vcpu-ubuntu-2404
             arch: x64
     runs-on: ${{ matrix.os }}
     defaults:

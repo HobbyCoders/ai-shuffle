@@ -3,18 +3,30 @@ name: Desktop CI
 # Desktop app (desktop/). Path-filtered like the other CI workflows. The
 # release build that publishes installers lives in release.yml.
 #
-# Pull requests package a shell without the worker runtime on every platform
-# (the stub manifest) and assemble the full runtime once, on Linux, to catch
-# packaging regressions without three long dependency installs per run.
+# Shell checks cover every platform. Windows additionally installs a complete,
+# isolated preview and exercises its real worker/PostgreSQL before publishing
+# a downloadable CI artifact. This never publishes a stable release/update.
 on:
   push:
     branches: [ main ]
     paths:
       - 'desktop/**'
+      - 'app/**'
+      - 'frontend/**'
+      - 'fluid/**'
+      - 'tools/**'
+      - 'browser-mcp/**'
+      - 'requirements*.txt'
       - '.github/workflows/desktop.yml'
   pull_request:
     paths:
       - 'desktop/**'
+      - 'app/**'
+      - 'frontend/**'
+      - 'fluid/**'
+      - 'tools/**'
+      - 'browser-mcp/**'
+      - 'requirements*.txt'
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
 
@@ -28,7 +40,7 @@ concurrency:
 jobs:
   check:
     name: Typecheck and unit tests
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
       run:
         working-directory: desktop
@@ -49,7 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [blacksmith-2vcpu-ubuntu-2404, blacksmith-2vcpu-windows-2025, blacksmith-6vcpu-macos-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -93,7 +105,7 @@ jobs:
   runtime:
     name: Assemble worker runtime (linux-x64)
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
       run:
         working-directory: desktop
@@ -123,3 +135,83 @@ jobs:
           '
           cd worker/server && ../python/bin/python3 -c "import app.core.config; print('server imports ok')"
           ../node/bin/node --version
+
+
+  windows-preview:
+    name: Windows preview installer and fresh database
+    needs: check
+    runs-on: blacksmith-2vcpu-windows-2025
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: desktop
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      PREVIEW_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            desktop/package-lock.json
+            frontend/package-lock.json
+      - name: Build real frontend
+        working-directory: frontend
+        run: npm ci && npm run build
+      - name: Install desktop build tools
+        run: npm ci
+      - name: Assemble full Windows worker and PostgreSQL
+        run: npm run build:worker -- --frontend-build ../frontend/build
+      - name: Record exact candidate in packaged resources
+        run: |
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($head -ne $env:PREVIEW_SOURCE_COMMIT) { throw 'Unexpected source revision' }
+          @{
+            sourceCommit = $head
+            channel = 'preview'
+            platform = 'win32-x64'
+            workflowRun = $env:GITHUB_RUN_ID
+          } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM worker/preview-build.json
+      - name: Build isolated NSIS installer (never publish)
+        run: |
+          $base = (Get-Content package.json | ConvertFrom-Json).version
+          $version = "$base-preview.$env:GITHUB_RUN_NUMBER"
+          npm run dist:preview:win -- "--config.extraMetadata.version=$version"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install and exercise actual Windows app
+        run: |
+          $installers = @(Get-ChildItem release-preview -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one Windows preview installer' }
+          $evidence = Join-Path $env:RUNNER_TEMP 'windows-preview-evidence'
+          node scripts/verify-windows-preview.mjs $installers[0].FullName $evidence
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $delivery = Join-Path $env:RUNNER_TEMP 'windows-preview-delivery'
+          New-Item -ItemType Directory -Path $delivery -Force | Out-Null
+          Copy-Item $installers[0].FullName $delivery
+          Copy-Item worker/preview-build.json $delivery
+          Copy-Item (Join-Path $evidence 'acceptance.json') $delivery
+          $hash = (Get-FileHash $installers[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $($installers[0].Name)" | Set-Content -Encoding ascii (Join-Path $delivery 'SHA256SUMS')
+          $signature = Get-AuthenticodeSignature $installers[0].FullName
+          @{ status = [string]$signature.Status } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM (Join-Path $delivery 'signature.json')
+      - name: Upload verified installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-preview-installer
+          path: ${{ runner.temp }}/windows-preview-delivery/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Upload sanitized native acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-preview-acceptance
+          path: ${{ runner.temp }}/windows-preview-evidence/
+          if-no-files-found: ignore
+          retention-days: 14

@@ -327,7 +327,9 @@ class TestRouterRegistration:
         """Auth router should be registered."""
         from app.main import app
         assert str(app.url_path_for("get_auth_status")) == "/api/v1/auth/status"
-        assert str(app.url_path_for("login")) == "/api/v1/auth/login"
+        # Password login is a retired 410 endpoint, not the account entry point.
+        assert str(app.url_path_for("start_account_login")) == "/api/v1/auth/account/start"
+        assert str(app.url_path_for("poll_account_login")) == "/api/v1/auth/account/poll"
 
     def test_agents_router_registered(self):
         """Agents router should be registered."""

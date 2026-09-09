@@ -888,13 +888,6 @@
 		height: 64px;
 	}
 
-	/* Mobile shell (Android WebView): the panel is always fullscreen. Backstops
-	   the JS-driven .panel-mobile class before hydration. */
-	:global(html[data-platform='mobile']) .panel {
-		width: 100% !important;
-		border-left: none;
-	}
-
 	/* ── Header ──────────────────────────────────────────────────────── */
 	.panel-header {
 		display: flex;
@@ -1409,8 +1402,6 @@
 	@media (hover: none) {
 		.file-actions { display: flex; }
 	}
-
-	:global(html[data-platform='mobile']) .file-actions { display: flex; }
 
 	.action-btn {
 		width: 28px;

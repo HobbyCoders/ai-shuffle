@@ -1,11 +1,14 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
+	import { auth } from '$lib/stores/auth.svelte';
 	import { Check, Copy } from 'lucide-svelte';
 
 	type Connection = { authorization_url?: string | null; signed_in: boolean; status: string; code: string | null; qr_svg: string | null; error: string | null };
 	let { workerName = 'My worker' }: { workerName?: string } = $props();
 	let connection = $state<Connection | null>(null);
+	// Older workers omit the capability; an explicit false means no account issuer.
+	const loginAvailable = $derived($auth.status?.account_sign_in_available !== false);
 	let checking = $state(true);
 	let busy = $state(false);
 	let statusError = $state('');
@@ -44,7 +47,7 @@
 	});
 
 	async function connect() {
-		if (busy || !connection || connection.signed_in) return;
+		if (busy || !loginAvailable || !connection || connection.signed_in) return;
 		loginInitiated = true;
 		actionError = ''; copied = false; showPairingCode = false;
 		// Reopen an existing offer without creating a second one.
@@ -96,10 +99,13 @@
 		{#if connection?.signed_in}
 			<button type="button" class="account-button" disabled={busy} onclick={disconnect}>{busy ? 'Logging out…' : 'Log out'}</button>
 		{:else if connection && !(loginInitiated && connection.code)}
-			<button type="button" class="account-button" disabled={busy} onclick={connect}>{busy ? 'Preparing…' : 'Log in'}</button>
+			<button type="button" class="account-button" disabled={busy || !loginAvailable} aria-describedby={!loginAvailable ? 'account-sign-in-unavailable' : undefined} onclick={connect}>{busy ? 'Preparing…' : 'Log in'}</button>
 		{/if}
 	</div>
-	{#if loginInitiated && connection?.code && !connection.signed_in}
+	{#if !loginAvailable && !connection?.signed_in}
+		<p id="account-sign-in-unavailable">Account sign-in is not configured on this worker. Ask the operator to enable it.</p>
+	{/if}
+	{#if loginAvailable && loginInitiated && connection?.code && !connection.signed_in}
 		<div class="login-flow">
 			{#if connection.authorization_url}
 				<a class="account-button primary" href={connection.authorization_url} target="_blank" rel="noopener noreferrer">Continue to account</a>

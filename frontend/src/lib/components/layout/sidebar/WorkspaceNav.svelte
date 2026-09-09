@@ -261,9 +261,6 @@
 		.mi { height: 40px; }
 	}
 
-	:global(html[data-platform='mobile']) .ghostrow { height: 40px; }
-	:global(html[data-platform='mobile']) .mi { height: 40px; }
-
 	@media (prefers-reduced-motion: reduce) {
 		.ghostrow, .mi { transition: none; }
 		.pop { animation: none; }

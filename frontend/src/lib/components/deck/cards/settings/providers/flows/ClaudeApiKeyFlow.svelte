@@ -12,6 +12,7 @@
 	 * Tailwind utility classes only (landmine L3).
 	 */
 	import { Loader2 } from 'lucide-svelte';
+	import { apiBase, withAuth } from '$lib/api/runtime';
 
 	interface Props {
 		onDone: () => void;
@@ -36,14 +37,13 @@
 		submitting = true;
 		error = '';
 		try {
-			const res = await fetch('/api/v1/settings/integrations/anthropic', {
+			const res = await fetch(`${apiBase()}/settings/integrations/anthropic`, withAuth({
 				method: 'POST',
-				credentials: 'include',
 				headers: { 'content-type': 'application/json' },
 				body: JSON.stringify({ api_key: apiKey })
-			});
+			}));
 			if (!res.ok) {
-				const body = await res.json().catch(() => ({}));
+				const body = await res.json().catch(() => ({ }));
 				error = body.detail ?? `Save failed (${res.status})`;
 				return;
 			}

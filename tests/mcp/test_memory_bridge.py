@@ -41,8 +41,7 @@ def test_journal_pair_registered_by_default(monkeypatch):
     session pair stays off while Remember/Recall ride every server."""
     from app.core.config import settings
 
-    monkeypatch.setattr(settings, "database_url", None)
-    monkeypatch.setattr(settings, "postgres_password", None)
+    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
     tools = _bridge_tools()
     assert "Remember" in tools
     assert "Recall" in tools
@@ -53,7 +52,7 @@ def test_journal_pair_registered_by_default(monkeypatch):
 def test_session_pair_needs_a_database(monkeypatch):
     from app.core.config import settings
 
-    monkeypatch.setattr(settings, "database_url", "postgresql://x/y")
+    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
     tools = _bridge_tools()
     assert "SessionSearch" in tools
     assert "SessionView" in tools

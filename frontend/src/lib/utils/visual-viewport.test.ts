@@ -71,7 +71,9 @@ describe('keyboard viewport contract', () => {
 	});
 
 	it('keeps the layout viewport meta aligned with app.html', () => {
-		const layout = readFileSync(resolve(process.cwd(), 'src/routes/+layout.svelte'), 'utf8');
+		// The head meta and the viewport binding live in the shared RootLayout
+		// (rendered by both the web +layout and the mobile app's).
+		const layout = readFileSync(resolve(process.cwd(), 'src/lib/components/layout/RootLayout.svelte'), 'utf8');
 		expect(layout).toContain('interactive-widget=resizes-content');
 		expect(layout).toContain('viewport-fit=cover');
 		expect(layout).toContain('bindVisualViewport');

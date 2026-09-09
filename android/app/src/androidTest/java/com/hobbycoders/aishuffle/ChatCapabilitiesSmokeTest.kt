@@ -21,7 +21,9 @@ import com.hobbycoders.aishuffle.net.ApiClient
 import com.hobbycoders.aishuffle.tools.DeviceToolsRuntime
 import com.hobbycoders.aishuffle.tools.ToolsPreferences
 import com.hobbycoders.aishuffle.ui.ChatActivity
-import com.hobbycoders.aishuffle.ui.ContainedDocument
+import com.hobbycoders.aishuffle.ui.MobileUi
+import com.hobbycoders.aishuffle.ui.WorkerAssetLoader
+import com.hobbycoders.aishuffle.ui.WorkerDownloadClient
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
@@ -32,7 +34,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.concurrent.CopyOnWriteArrayList
 
-/** Real WebView + native activity callbacks, local intercepted HTTP and a test-only SAF destination. */
+/** Real WebView loading the bundled UI + native activity callbacks, local intercepted HTTP for the worker API and a test-only SAF destination. */
 @RunWith(AndroidJUnit4::class)
 class ChatCapabilitiesSmokeTest {
     private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
@@ -60,8 +62,6 @@ class ChatCapabilitiesSmokeTest {
         context.contentResolver.delete(destination, null, null)
         val apiField = ApiClient::class.java.getDeclaredField("client\$delegate").apply { isAccessible = true }
         val oldApi = apiField.get(null)
-        val docField = ContainedDocument::class.java.getDeclaredField("http").apply { isAccessible = true }
-        val oldDoc = docField.get(null)
         fun response(request: okhttp3.Request, text: String, mime: String) = Response.Builder().request(request)
             .protocol(Protocol.HTTP_1_1).code(200).message("Fixture").body(text.toResponseBody(mime.toMediaType())).build()
         val sessions = java.util.concurrent.atomic.AtomicInteger()
@@ -73,27 +73,30 @@ class ChatCapabilitiesSmokeTest {
             beforeSession(sessions.incrementAndGet())
             response(chain.request(), "{\"session_token\":\"fixture-cookie\"}", "application/json")
         }.build()
-        val doc = OkHttpClient.Builder().addInterceptor { chain ->
-            check(chain.request().url.host == "chat-fixture.example")
-            response(chain.request(), "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body>Benign file and permission fixture</body></html>", "text/html")
-        }.build()
         val monitor = object : Instrumentation.ActivityMonitor() {
             override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? =
                 if (intent.action == Intent.ACTION_CREATE_DOCUMENT || intent.action == Intent.ACTION_GET_CONTENT) picker(intent, server) else null
         }
-        apiField.set(null, lazyOf(api)); docField.set(null, doc); instrumentation.addMonitor(monitor)
+        apiField.set(null, lazyOf(api)); instrumentation.addMonitor(monitor)
         try {
             ActivityScenario.launch<ChatActivity>(Intent(context, ChatActivity::class.java).putExtra(ChatActivity.EXTRA_SERVER_ID, server.id)).use { scenario ->
                 beforeReady(scenario)
-                waitFor("Fixture document never loaded") {
-                    var ready = false
-                    scenario.onActivity { ready = it.hasWindowFocus() && web(it).url == server.baseUrl + "/" && it.findViewById<TextView>(R.id.screenStatus).text.isEmpty() }
-                    ready
+                // The document is the app's own bundle; the worker only answered the session mint.
+                var runtimeReady = false
+                waitFor("Bundled UI JavaScript never initialized") {
+                    scenario.onActivity {
+                        if (it.hasWindowFocus() && web(it).url == MobileUi.INDEX_URL && it.findViewById<TextView>(R.id.screenStatus).text.isEmpty()) {
+                            web(it).evaluateJavascript("document.readyState === 'complete' && typeof window.shuffleMobileSetToken === 'function'") { raw ->
+                                runtimeReady = raw == "true"
+                            }
+                        }
+                    }
+                    runtimeReady
                 }
                 block(scenario, server)
             }
         } finally {
-            instrumentation.removeMonitor(monitor); apiField.set(null, oldApi); docField.set(null, oldDoc)
+            instrumentation.removeMonitor(monitor); apiField.set(null, oldApi)
             instrumentation.runOnMainSync { DeviceToolsRuntime.stop(); ServerStore.get(context).remove(server.id) }
             context.contentResolver.delete(destination, null, null)
         }
@@ -130,6 +133,105 @@ class ChatCapabilitiesSmokeTest {
             assertEquals(listOf("fixture.txt", "image.png"), chosen.toList())
         }
     }
+    @Test fun workerMediaElementsAndOrdinaryAttachmentLinksUseAuthenticatedNativeTransport() {
+        val seen = CopyOnWriteArrayList<okhttp3.Request>()
+        val png = java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        // A valid, silent PCM WAV: lets the real WebView decode audio metadata, not just fetch bytes.
+        val wav = java.nio.ByteBuffer.allocate(8044).order(java.nio.ByteOrder.LITTLE_ENDIAN).apply {
+            put("RIFF".toByteArray()); putInt(8036); put("WAVEfmt ".toByteArray()); putInt(16)
+            putShort(1); putShort(1); putInt(8000); putInt(8000); putShort(1); putShort(8)
+            put("data".toByteArray()); putInt(8000); repeat(8000) { put(128.toByte()) }
+        }.array()
+        // Synthetic 64x64 red H.264 baseline, 5 frames/1s; generated with FFmpeg
+        // color=c=red:s=64x64:r=5 -t 1 -c:v libx264 -pix_fmt yuv420p -profile:v baseline -movflags +faststart -an.
+        val videoBytes = InstrumentationRegistry.getInstrumentation().context.assets.open("native-media.mp4").use { it.readBytes() }
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request(); seen.add(request)
+            val path = request.url.encodedPath
+            val ranged = request.header("Range") == "bytes=2-4"
+            val (bytes, mime) = when {
+                ranged -> "abc".toByteArray() to "video/mp4"
+                path.contains("generated-audio") -> wav to "audio/wav"
+                path.contains("generated-videos") -> videoBytes to "video/mp4"
+                path.contains("generated-images") || path.contains("files/by-path") && request.url.queryParameter("path")!!.endsWith(".png") -> png to "image/png"
+                else -> "benign attachment".toByteArray() to "application/pdf"
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(if (ranged) 206 else 200).message("Fixture")
+                .header("Content-Type", mime).header("Content-Length", bytes.size.toString()).header("Accept-Ranges", "bytes")
+                .apply { if (ranged) header("Content-Range", "bytes 2-4/12") }.body(bytes.toResponseBody(mime.toMediaType())).build()
+        }.build()
+        fixture({ _, _ -> Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(destination)) }) { scenario, server ->
+            scenario.onActivity { activity ->
+                val transport = WorkerDownloadClient(http)
+                ChatActivity::class.java.getDeclaredField("workerAssets").apply { isAccessible = true }
+                    .set(activity, WorkerAssetLoader(transport))
+                val downloads = ChatActivity::class.java.getDeclaredField("downloads").apply { isAccessible = true }.get(activity)
+                downloads.javaClass.getDeclaredField("client").apply { isAccessible = true }.set(downloads, transport)
+                web(activity).evaluateJavascript("""
+                    (() => {
+                      window.assetSmoke = {images:0, audio:false, video:false, range:false, errors:[]};
+                      for (const src of [
+                        '${server.baseUrl}/api/generated-images/by-path?path=/work/image.png',
+                        '${server.baseUrl}/api/files/by-path?path=/work/chip.png',
+                        '/api/files/by-path?path=/work/legacy.png']) {
+                        const image = new Image(); image.onload = () => { if (image.naturalWidth === 1) assetSmoke.images++; };
+                        image.onerror = () => assetSmoke.errors.push('image:' + src);
+                        image.src = src; document.body.append(image);
+                      }
+                      const audio = document.createElement('audio'); audio.preload = 'auto';
+                      audio.onloadedmetadata = () => { assetSmoke.audioDuration = audio.duration; assetSmoke.audio = audio.duration === 1; };
+                      audio.onerror = () => assetSmoke.errors.push('audio:' + audio.error?.code);
+                      audio.src = '${server.baseUrl}/api/generated-audio/by-path?path=/work/audio.wav'; document.body.append(audio); audio.load();
+                      const video = document.createElement('video'); video.preload = 'auto';
+                      video.onloadeddata = () => { assetSmoke.video = video.videoWidth === 64 && video.videoHeight === 64 && video.duration === 1; };
+                      video.onerror = () => assetSmoke.errors.push('video:' + video.error?.code);
+                      video.src = '${server.baseUrl}/api/generated-videos/by-path?path=/work/video.mp4'; document.body.append(video); video.load();
+                      fetch('${server.baseUrl}/api/generated-videos/by-path?path=/work/range.mp4', {headers:{Range:'bytes=2-4'}})
+                        .then(async r => {
+                          assetSmoke.rangeResponse = {status:r.status, contentRange:r.headers.get('Content-Range'), length:r.headers.get('Content-Length')};
+                          const body = await r.text(); assetSmoke.rangeResponse.body = body;
+                          assetSmoke.range = r.status === 206 && r.headers.get('Content-Range') === 'bytes 2-4/12' && r.headers.get('Content-Length') === '3' && body === 'abc';
+                        })
+                        .catch(error => assetSmoke.errors.push('range:' + error.message));
+                    })()
+                """.trimIndent(), null)
+            }
+            var ready = false
+            var lastState = "No JavaScript callback"
+            try {
+                waitFor("WebView did not decode images/audio and preserve the ranged response") {
+                    scenario.onActivity { web(it).evaluateJavascript("JSON.stringify(assetSmoke)") { raw ->
+                        lastState = org.json.JSONTokener(raw).nextValue().toString()
+                        val state = org.json.JSONObject(lastState)
+                        ready = state.optInt("images") == 3 && state.optBoolean("audio") && state.optBoolean("video") && state.optBoolean("range")
+                    } }
+                    ready
+                }
+            } catch (error: AssertionError) {
+                throw AssertionError("${error.message}; state=$lastState; requested=${seen.map { it.url.encodedPath + "?" + it.url.encodedQuery + " Range=" + it.header("Range") }}", error)
+            }
+            waitFor("Video element did not request its source") { seen.any { it.url.queryParameter("path") == "/work/video.mp4" } }
+            for (url in listOf("${server.baseUrl}/api/v1/notes/n/attachments/a/download", "/api/files/by-path?path=/work/report.pdf")) {
+                val before = seen.size
+                val expected = if (url.startsWith("/")) server.baseUrl + url else url
+                scenario.onActivity { web(it).evaluateJavascript("""
+                    (() => { const a=document.createElement('a'); a.href=${org.json.JSONObject.quote(url)};
+                    a.target='_blank'; a.textContent='report.pdf'; document.body.append(a);
+                    a.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true})); })()
+                """.trimIndent(), null) }
+                waitFor("Native attachment download was not requested") { seen.drop(before).any { it.url.toString() == expected } }
+                status(scenario, "File saved.")
+                assertEquals("benign attachment", context.contentResolver.openInputStream(destination)!!.bufferedReader().use { it.readText() })
+                scenario.onActivity { assertEquals(MobileUi.INDEX_URL, web(it).url) }
+            }
+            assertTrue(seen.any { it.url.encodedPath.contains("notes/") })
+            seen.forEach {
+                assertEquals("chat-fixture.example", it.url.host)
+                assertEquals("Bearer fixture-cookie", it.header("Authorization"))
+                assertFalse(it.url.toString().contains("fixture-cookie"))
+            }
+        }
+    }
     @Test fun cancellationAndRemovedWorkerNeverPersistDownloadedBytes() {
         fixture({ _, _ -> Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null) }) { scenario, _ ->
             saveBlob(scenario); status(scenario, "Download cancelled.")
@@ -152,11 +254,14 @@ class ChatCapabilitiesSmokeTest {
         fixture({ _, server -> ServerStore.get(context).remove(server.id); Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(destination)) }) { scenario, server ->
             scenario.onActivity { activity ->
                 val view = web(activity); val chrome = requireNotNull(view.webChromeClient)
-                val audio = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+                val audio = Permission(Uri.parse(MobileUi.ORIGIN), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
                 chrome.onPermissionRequest(audio); assertArrayEquals(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE), audio.granted)
                 val outside = Permission(Uri.parse("https://outside.example"), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
                 chrome.onPermissionRequest(outside); assertTrue(outside.denied)
-                val mixed = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE, PermissionRequest.RESOURCE_VIDEO_CAPTURE))
+                // The worker is an API origin, never the document: it cannot hold the microphone either.
+                val worker = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+                chrome.onPermissionRequest(worker); assertTrue(worker.denied)
+                val mixed = Permission(Uri.parse(MobileUi.ORIGIN), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE, PermissionRequest.RESOURCE_VIDEO_CAPTURE))
                 chrome.onPermissionRequest(mixed); assertTrue(mixed.denied)
             }
             var delivered = false; var selected: Array<Uri>? = null
@@ -188,12 +293,12 @@ class ChatCapabilitiesSmokeTest {
                 complete.invoke(activity)
             }
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
-            val audio = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+            val audio = Permission(Uri.parse(MobileUi.ORIGIN), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
             scenario.onActivity { pending(it, audio); assertNull(audio.granted); assertFalse(audio.denied) }
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
             waitFor("Pending audio permission was not completed on resume") { audio.granted != null }
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
-            val stale = Permission(Uri.parse(server.baseUrl), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+            val stale = Permission(Uri.parse(MobileUi.ORIGIN), arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
             scenario.onActivity {
                 pending(it, stale); assertNull(stale.granted)
                 ServerStore.get(context).remove(server.id)
@@ -257,7 +362,8 @@ class ChatCapabilitiesSmokeTest {
                 val view = web(activity)
                 val bridgeField = ChatActivity::class.java.getDeclaredField("nativeVoice").apply { isAccessible = true }
                 (bridgeField.get(activity) as com.hobbycoders.aishuffle.ui.NativeVoiceBridge).close()
-                val fixtureBridge = com.hobbycoders.aishuffle.ui.NativeVoiceBridge(activity, view, server.baseUrl, { true }) {
+                // The page is the bundle, so the replacement bridge must be scoped to the bundle's origin as the real one is.
+                val fixtureBridge = com.hobbycoders.aishuffle.ui.NativeVoiceBridge(activity, view, MobileUi.ORIGIN, { true }) {
                     throw IllegalStateException("Fixture activity launch refused")
                 }
                 bridgeField.set(activity, fixtureBridge)

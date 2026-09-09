@@ -15,6 +15,7 @@
 	 */
 	import { tick, untrack, onMount, onDestroy } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import { forkOfferedSessionHere } from './fork-here';
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import type { ChatMessage, TodoItem } from '$lib/stores/types';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
@@ -1743,7 +1744,12 @@
 				<div class="max-w-5xl mx-auto w-full px-4 sm:px-8 pt-4">
 					<div class="bg-destructive/10 border border-destructive/30 text-destructive px-4 py-3 rounded-lg flex items-center justify-between shadow-s">
 						<span class="text-sm">{$activeSession.error}</span>
-						<button onclick={() => activeSession.clearError()} class="text-destructive hover:opacity-80">&times;</button>
+						<span class="flex items-center gap-3 shrink-0">
+							{#if $activeSession.forkOfferSessionId}
+								<button type="button" onclick={() => forkOfferedSessionHere($activeSession.forkOfferSessionId!)} class="text-sm font-medium underline underline-offset-2 hover:opacity-80">Fork here</button>
+							{/if}
+							<button onclick={() => activeSession.clearError()} class="text-destructive hover:opacity-80">&times;</button>
+						</span>
 					</div>
 				</div>
 			{/if}
@@ -1835,7 +1841,12 @@
 			{#if $activeSession.error}
 				<div class="bg-destructive/10 border border-destructive/30 text-destructive px-4 py-3 rounded-lg flex items-center justify-between shadow-s">
 					<span class="text-sm">{$activeSession.error}</span>
-					<button onclick={() => activeSession.clearError()} class="text-destructive hover:opacity-80">&times;</button>
+					<span class="flex items-center gap-3 shrink-0">
+						{#if $activeSession.forkOfferSessionId}
+							<button type="button" onclick={() => forkOfferedSessionHere($activeSession.forkOfferSessionId!)} class="text-sm font-medium underline underline-offset-2 hover:opacity-80">Fork here</button>
+						{/if}
+						<button onclick={() => activeSession.clearError()} class="text-destructive hover:opacity-80">&times;</button>
+					</span>
 				</div>
 			{/if}
 

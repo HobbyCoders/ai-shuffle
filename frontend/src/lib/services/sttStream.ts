@@ -16,6 +16,7 @@
  * caller decide what to render.
  */
 
+import { apiBase, withAuth, wsUrl } from '$lib/api/runtime';
 import { browser } from '$app/environment';
 import { SttTranscript } from './sttTranscript';
 
@@ -152,9 +153,7 @@ export async function fetchSttCapability(force = false): Promise<SttCapability> 
 		return capabilityCache.value;
 	}
 
-	const response = await fetch('/api/v1/settings/transcribe/stream/capability', {
-		credentials: 'include'
-	});
+	const response = await fetch(`${apiBase()}/settings/transcribe/stream/capability`, withAuth({ }));
 	if (!response.ok) {
 		throw new Error(`Capability check failed (${response.status})`);
 	}
@@ -213,9 +212,7 @@ function describeMicError(error: unknown): Error {
 }
 
 function websocketUrl(language?: string): string {
-	const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-	const query = language ? `?language=${encodeURIComponent(language)}` : '';
-	return `${protocol}//${window.location.host}/api/v1/settings/transcribe/stream${query}`;
+	return wsUrl('/api/v1/settings/transcribe/stream', { language });
 }
 
 // ============================================================================

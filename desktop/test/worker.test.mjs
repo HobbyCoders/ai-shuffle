@@ -66,26 +66,28 @@ test('resolveRuntime uses the repository venv in development', async () => {
 	}
 });
 
-test('buildWorkerEnv sets local mode, the database and the bundled PATH, and drops inherited database settings', async () => {
+test('buildWorkerEnv preserves non-DB settings and drops ALL inherited DB settings case-insensitively', async () => {
 	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-worker-'));
 	try {
 		await fakeBundle(path.join(dir, 'worker'), 'win32');
 		const runtime = resolveRuntime({ packaged: true, resourcesPath: dir, repoDir: '/nowhere', platform: 'win32' });
 		const env = buildWorkerEnv({
 			runtime,
-			postgres,
+			dataDir: 'C:\\data',
 			port: 8000,
 			envFile: 'C:\\data\\.env',
 			platform: 'win32',
-			baseEnv: { Path: 'C:\\Windows', POSTGRES_HOST: 'leak', DATABASE_URL: 'leak', PYTHONPATH: 'leak', HOME: 'h' }
+			baseEnv: { Path: 'C:\\Windows', POSTGRES_HOST: 'leak', DATABASE_URL: 'leak', database_password: 'leak', DATABASE_POOL_SIZE: 'leak', PGPASSWORD: 'leak', PGHOST: 'leak', Postgres_Port: 'leak', PYTHONPATH: 'leak', HOME: 'h', CORS_ORIGINS: 'retained', WORKSPACE_DIR: 'retained-workspace', SECRET_KEY: 'retained-test-key' }
 		});
 		assert.equal(env.LOCAL_MODE, 'true');
 		assert.equal(env.HOST, '127.0.0.1');
 		assert.equal(env.PORT, '8000');
-		assert.equal(env.POSTGRES_HOST, 'db');
-		assert.equal(env.POSTGRES_PASSWORD, 'pw');
-		assert.equal(env.POSTGRES_DB, 'd');
-		assert.equal(env.DATABASE_URL, undefined);
+		assert.equal(Object.keys(env).some((key) => /^(DATABASE_|POSTGRES_|PG)/i.test(key)), false);
+		assert.equal(env.DATA_DIR, 'C:\\data');
+		assert.equal(env.WORKSPACE_DIR, 'retained-workspace');
+		assert.equal(env.SECRET_KEY, 'retained-test-key');
+		assert.equal(env.CORS_ORIGINS, 'retained');
+		assert.equal(env.SHUFFLE_DESKTOP_PROTECTED_PORT, undefined);
 		assert.equal(env.PYTHONPATH, undefined);
 		assert.equal(env.HOME, 'h');
 		assert.equal(env.TOOLS_DIR, runtime.toolsDir);

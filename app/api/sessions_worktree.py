@@ -235,11 +235,11 @@ async def _preflight_remote_target(
             detail=f"{device} is offline. Bring it online or pick another device.",
         )
 
-    eligible = await run_sync(
-        checkouts_db.has_active_base_checkout,
-        pv2["id"],
-        target_instance_id,
-    )
+    from app.network import git as network_git
+    try:
+        eligible = await network_git.eligible(target_instance_id, pv2["id"])
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail="Selected worker Git state is unavailable") from exc
     if not eligible:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -329,13 +329,24 @@ async def _create_remote_branch_session(
         database.set_session_branch(session_id, branch_name, pv2["id"])
 
     await run_sync(_create)
+    from app.network import control, engine, git as network_git
+    ctx = engine.context()
+    remote_device = network_git.device_id(target_instance_id) if ctx else None
+    if ctx and remote_device != ctx.device_id:
+        row = await run_sync(database.get_session, session_id)
+        await control.call(remote_device, "sessions", {
+            "session": {**row, "branch": branch_name},
+            "uploads": await network_git.export_uploads(upload_blob_ids),
+        })
+    else:
+        remote_device = None
     _broadcast_session_created(session_id)
 
     # 4. Queue the checkout work for the target. This row carries
     #    ``create_new_branch`` — a brand-new branch exists on no disk anywhere,
     #    so the intent has to travel durably or the session can never spawn.
-    await run_sync(
-        git_ops_db.insert_op,
+    from app.network import git as network_git
+    await network_git.enqueue(
         target_instance_id,
         "ensure_worktree",
         project_v2_id=pv2["id"],
@@ -362,19 +373,20 @@ async def _create_remote_branch_session(
                 payload["api_user_id"] = api_user_id
             if upload_blob_ids:
                 payload["upload_blob_ids"] = upload_blob_ids
-            await turn_manager.submit_async(
-                session_id,
-                "worktree",
-                prompt=prompt,
-                # The 'claude-code' no-profile sentinel is install-local and must
-                # never ride a turn another install executes.
-                profile_id=None if profile_id == "claude-code" else profile_id,
-                project_id=body.project_id or None,
-                overrides=body.overrides,
-                payload=payload or None,
-                no_kick=True,
-            )
-            await run_sync(turn_claim.notify_turns_changed, session_id)
+            portable_profile = None if profile_id == "claude-code" else profile_id
+            if remote_device:
+                await control.submit_turn(
+                    remote_device, session_id=session_id, source="worktree", prompt=prompt,
+                    profile_id=portable_profile, project_id=None,
+                    overrides=body.overrides, payload=payload or None,
+                )
+            else:
+                await turn_manager.submit_async(
+                    session_id, "worktree", prompt=prompt, profile_id=portable_profile,
+                    project_id=body.project_id or None, overrides=body.overrides,
+                    payload=payload or None, no_kick=True,
+                )
+                await run_sync(turn_claim.notify_turns_changed, session_id)
             query_started = True
         except Exception as e:  # noqa: BLE001
             logger.exception(f"Failed to submit remote branch-session turn: {e}")

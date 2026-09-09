@@ -34,7 +34,7 @@ function makeBridge() {
 			onState: () => () => {},
 			restart: () => Promise.resolve(),
 			openLogs: () => {},
-			openDatabaseSettings: () => {}
+			openStatus: vi.fn()
 		},
 		updates: {
 			getState: () => Promise.resolve(idle()),
@@ -85,6 +85,17 @@ describe('desktop update announcement', () => {
 		expect(mod.desktop).toBeNull();
 		expect(mod.isDesktop).toBe(false);
 		expect(mod.initDesktop()).toBeTypeOf('function');
+	});
+
+	it('opens worker status through the current preload bridge', async () => {
+		const { bridge } = makeBridge();
+		window.shuffleDesktop = bridge;
+		const { desktop } = await import('./desktop');
+
+		desktop?.worker.openStatus();
+
+		expect(bridge.worker.openStatus).toHaveBeenCalledOnce();
+		expect(Object.keys(bridge.worker).sort()).toEqual(['getState', 'onState', 'openLogs', 'openStatus', 'restart']);
 	});
 
 	it('puts a downloaded update in the bell once, with a restart action', async () => {

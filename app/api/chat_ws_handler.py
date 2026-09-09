@@ -717,6 +717,12 @@ class ChatWebSocketHandler:
         try:
             from app.core import placement as placement_mod
 
+            # Worker network: a mirror of a session another device executes is
+            # never adopted on send; the owner keeps the conversation state and
+            # the turn is forwarded to it instead.
+            if await self._network_owner(session_id, session_row):
+                return False
+
             # Reuse the resolver's own normalizer: Postgres JSONB hands back a
             # dict, the SQLite test shim a JSON string.
             if placement_mod._normalize_placement(session_row.get("placement")):
@@ -762,6 +768,37 @@ class ChatWebSocketHandler:
         )
         return True
 
+    async def _network_owner(self, session_id: Optional[str], session_row: Optional[dict] = None) -> Optional[str]:
+        """Device id of the network worker that executes ``session_id``, or None for ours.
+
+        Worker network: a session owned by another device is a read-only
+        mirror here, so anything that must run there (send, stop, prompt
+        answers) is forwarded through ``app.network.control`` instead of being
+        queued locally for a shared-database claim loop that no longer exists.
+        """
+        if not session_id:
+            return None
+        try:
+            from app.network import control, engine as network_engine
+            if network_engine.context() is None:
+                return None
+            row = session_row or await run_sync(database.get_session, session_id)
+            if not row:
+                return None
+            return control.owner_of(row)
+        except Exception:  # noqa: BLE001 — never let the network layer break a send
+            logger.debug("Network owner lookup failed for %s", session_id, exc_info=True)
+            return None
+
+    async def _forward_unreachable(self, session_id: str, exc: Exception) -> None:
+        await self.send_json({
+            "type": "error",
+            "session_id": session_id,
+            "message": f"The worker that runs this session is offline ({exc}). "
+                       "You can fork the transcript into a new session on this device.",
+            "offer_fork": True,
+        })
+
     async def _validate_target_install(
         self, target_instance_id: str, project_v2_id: Optional[str]
     ) -> bool:
@@ -799,21 +836,18 @@ class ChatWebSocketHandler:
             from app.db import checkouts as checkouts_db
 
             try:
-                if not await run_sync(
-                    checkouts_db.has_active_base_checkout,
-                    project_v2_id,
-                    target_instance_id,
-                ):
+                from app.network import git as network_git
+                if not await network_git.eligible(target_instance_id, project_v2_id):
                     return await _refuse(
                         f"This project isn't checked out on {device} yet. Open "
                         "the project there once (or clone it), then try again."
                     )
-            except Exception:  # noqa: BLE001 — fail open on lookup trouble
+            except Exception:  # noqa: BLE001 — do not strand work on an unknown owner
                 logger.warning(
-                    "Device-pick preflight errored for project_v2 %s on %s; "
-                    "proceeding fail-open", project_v2_id, target_instance_id,
-                    exc_info=True,
+                    "Device-pick preflight failed for project_v2 %s on %s",
+                    project_v2_id, target_instance_id, exc_info=True,
                 )
+                return await _refuse("Couldn't reach the selected device. Bring it online and retry.")
         return True
 
     async def _lift_uploads(
@@ -1101,6 +1135,28 @@ class ChatWebSocketHandler:
 
             await run_sync(_create_session_atomic)
 
+            # Worker network: a session born on another device is created
+            # there as well (that device is its owner and publishes it).
+            if target_instance_id:
+                owner_device = await self._network_owner(session_id)
+                if owner_device:
+                    from app.network import control
+                    try:
+                        await control.create_session(owner_device, {
+                            "id": session_id, "profile_id": profile_id, "project_v2_id": resolved_pv2_id,
+                            "title": title, "api_user_id": self.api_user_id,
+                            "model": (overrides or {}).get("model"), "effort": (overrides or {}).get("effort"),
+                            "permission_mode": (overrides or {}).get("permission_mode"),
+                            "context_window": (overrides or {}).get("context_window"),
+                            "fast": (overrides or {}).get("fast"), "mode": session_mode,
+                        }, None)
+                    except control.RunnerUnreachable as exc:
+                        await self._forward_unreachable(session_id, exc)
+                        return
+                    except control.ControlRefused as exc:
+                        await self.send_json({"type": "error", "session_id": session_id, "message": str(exc)})
+                        return
+
             # V2 projects: bind the new session to its origin-keyed project_v2 so
             # the resolver is a DIRECT hit on the first send. create_session
             # already stamps project_v2_id when we resolved it above; this
@@ -1315,6 +1371,32 @@ class ChatWebSocketHandler:
             if blob_ids:
                 payload["upload_blob_ids"] = blob_ids
 
+        # Worker network: the owner enqueues the turn itself; our mirror shows
+        # it once the owner's events sync back.
+        owner_device = await self._network_owner(session_id) if placed_remote else None
+        if owner_device:
+            from app.network import control
+            if upload_paths or (payload or {}).get("upload_blob_ids"):
+                await self.send_json({
+                    "type": "error", "session_id": session_id,
+                    "message": "Attachments cannot be sent to a session that runs on another device yet. "
+                               "Send the message without attachments, or fork the session here.",
+                })
+                return
+            try:
+                await control.submit_turn(
+                    owner_device, session_id, prompt=prompt, profile_id=submit_profile_id,
+                    project_id=project_id, overrides=overrides or None, payload=payload or None,
+                )
+            except control.RunnerUnreachable as exc:
+                await self._forward_unreachable(session_id, exc)
+                return
+            except control.ControlRefused as exc:
+                await self.send_json({"type": "error", "session_id": session_id, "message": str(exc)})
+                return
+            await self.send_json({"type": "query_queued", "session_id": session_id})
+            return
+
         # W6: ``submit`` performs up to three DB writes (run binding, wakeup
         # supersede, enqueue). ``submit_async`` pays ONE thread hop for all
         # three and still fires the kick on this loop, so the send path never
@@ -1418,6 +1500,18 @@ class ChatWebSocketHandler:
             # after its target settled cannot interrupt the successor turn.
             # Absent turn_id keeps the legacy session-scoped stop.
             target_turn_id = data.get("turn_id") or None
+            owner_device = await self._network_owner(session_id)
+            if owner_device:
+                from app.network import control
+                try:
+                    await control.interrupt(owner_device, session_id, "stop", stop_background=True,
+                                            turn_id=target_turn_id)
+                except control.RunnerUnreachable as exc:
+                    await self._forward_unreachable(session_id, exc)
+                except control.ControlRefused as exc:
+                    await self.send_json({"type": "error", "session_id": session_id, "message": str(exc)})
+                await self._v2_broadcast_queue(session_id)
+                return
             flipped = await turn_manager.interrupt_async(
                 session_id,
                 "stop",
@@ -1476,6 +1570,13 @@ class ChatWebSocketHandler:
         # (F6), so it can never cross a mid-turn CLI. Confirm unconditionally so
         # the frontend's replacement query is unblocked.
         try:
+            owner_device = await self._network_owner(session_id)
+            if owner_device:
+                from app.network import control
+                try:
+                    await control.interrupt(owner_device, session_id, "send_now")
+                except (control.RunnerUnreachable, control.ControlRefused) as exc:
+                    logger.info("send_now forward to %s failed: %s", owner_device, exc)
             flipped = await turn_manager.interrupt_async(session_id, "send_now")
             if flipped is not None:
                 # Cross-runner wake (see handle_stop) — latency only.
@@ -1780,6 +1881,21 @@ class ChatWebSocketHandler:
             eff_remember = remember if decision != "defer" else None
             eff_pattern = pattern if decision != "defer" else None
 
+            owner_device = await self._network_owner(response_session_id)
+            if owner_device:
+                from app.network import control
+                try:
+                    forwarded = await control.answer_permission(
+                        owner_device, request_id=request_id, session_id=response_session_id, decision=decision,
+                        remember=eff_remember, pattern=eff_pattern, answered_by_device=self.device_id)
+                except (control.RunnerUnreachable, control.ControlRefused) as exc:
+                    await self.send_json({"type": "error", "session_id": response_session_id, "message": str(exc)})
+                    return
+                await self.send_json({
+                    "type": "permission_response_ack", "session_id": response_session_id,
+                    "request_id": request_id, "result": forwarded.get("result"),
+                })
+                return
             # The prompt is a shared ``pending_interactions`` row — ANY install
             # answers it directly against the table, no cloud_relay. The owning
             # runner's awaiting SDK callback wakes via NOTIFY (or in-process fast
@@ -1874,14 +1990,26 @@ class ChatWebSocketHandler:
             # directly against the table (no cloud_relay); the owning runner's
             # awaiting SDK callback wakes via NOTIFY. Stamp the answering device
             # (Q4-6).
-            result = await user_question_handler.respond(
-                request_id=request_id,
-                session_id=response_session_id,
-                answers=answers,
-                answered_by_device=self.device_id,
-                dismissed=dismissed,
-                skipped=skipped,
-            )
+            owner_device = await self._network_owner(response_session_id)
+            if owner_device:
+                from app.network import control
+                try:
+                    forwarded = await control.answer_question(
+                        owner_device, request_id=request_id, session_id=response_session_id, answers=answers,
+                        answered_by_device=self.device_id, dismissed=dismissed, skipped=skipped)
+                    result = bool(forwarded.get("success"))
+                except (control.RunnerUnreachable, control.ControlRefused) as exc:
+                    await self.send_json({"type": "error", "session_id": response_session_id, "message": str(exc)})
+                    return
+            else:
+                result = await user_question_handler.respond(
+                    request_id=request_id,
+                    session_id=response_session_id,
+                    answers=answers,
+                    answered_by_device=self.device_id,
+                    dismissed=dismissed,
+                    skipped=skipped,
+                )
             logger.debug(f"User question response processed (v2): {request_id} -> {result}")
             ack = {
                 "type": "user_question_response_ack",
@@ -2033,6 +2161,22 @@ class ChatWebSocketHandler:
             payload["api_user_id"] = self.api_user_id
         if getattr(self, "user_id", None):
             payload["user_id"] = self.user_id
+        owner_device = await self._network_owner(session_id) if placed_remote else None
+        if owner_device:
+            from app.network import control
+            try:
+                await control.submit_turn(
+                    owner_device, session_id, source="queue", prompt=content, profile_id=queue_profile_id,
+                    project_id=project_id, payload=payload or None,
+                )
+            except control.RunnerUnreachable as exc:
+                await self._forward_unreachable(session_id, exc)
+                return
+            except control.ControlRefused as exc:
+                await self.send_json({"type": "error", "session_id": session_id, "message": str(exc)})
+                return
+            await self._v2_broadcast_queue(session_id)
+            return
         await turn_manager.submit_async(
             session_id,
             "queue",

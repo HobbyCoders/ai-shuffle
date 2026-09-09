@@ -144,7 +144,7 @@
 </div>
 
 <!-- Group A: model providers -->
-<div class="set-group">
+<div class="set-group" id="providers-section">
 	<div class="set-grouphead">
 		<h3><Server />Providers</h3>
 		<p>Your Claude subscription and API key, plus any OpenRouter / OpenAI / custom gateways. Enabled providers and their curated models appear in the agent editor.</p>

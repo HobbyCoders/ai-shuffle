@@ -2,9 +2,10 @@
  * SSE feed client — fetch-streaming reader for the per-session event log.
  *
  * V2 Phase 1 (docs/V2_PHASE1_DESIGN.md §6). Reads
- * `GET /api/v1/sessions/{id}/events?from_seq=N` as an SSE body with
- * `credentials:'include'` (cookie auth — the endpoint's require_auth passes via
- * the cookie branch, so no EventSource / bearer token is needed).
+ * `GET /api/v1/sessions/{id}/events?from_seq=N` as an SSE body through
+ * `$lib/api/runtime` (cookie auth on the web UI; Bearer token on the bundled
+ * mobile UI — the endpoint's require_auth accepts either, so no EventSource is
+ * needed).
  *
  * Parses SSE frames incrementally (`id:` / `event:` / `data:`, multi-line data,
  * `:`-prefixed keepalive comments ignored), tracks `lastSeq` from each frame's
@@ -23,6 +24,8 @@
  *
  * No new npm deps: uses `fetch` + `ReadableStream` + `TextDecoder`.
  */
+
+import { apiBase, withAuth } from '$lib/api/runtime';
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -318,15 +321,14 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 		const ownsAttempt = () =>
 			running && connectionAttempt === attempt && controller === ac;
 		const from = nextFrom;
-		const url = `/api/v1/sessions/${encodeURIComponent(sessionId)}/events?from_seq=${from}`;
+		const url = `${apiBase()}/sessions/${encodeURIComponent(sessionId)}/events?from_seq=${from}`;
 
 		try {
-			const res = await fetch(url, {
+			const res = await fetch(url, withAuth({
 				method: 'GET',
-				credentials: 'include',
 				headers: { Accept: 'text/event-stream' },
 				signal: ac.signal,
-			});
+			}));
 
 			if (!ownsAttempt()) {
 				try {

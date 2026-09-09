@@ -21,8 +21,18 @@ from contextlib import contextmanager
 # Add the project root to the path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Set test environment variables before importing app modules
+# Set test environment variables before importing app modules.
 os.environ["TESTING"] = "1"
+# Never read a descriptor from the user's live DATA_DIR during collection or
+# fixture setup. Disposable PostgreSQL jobs opt in below with TEST_POSTGRES_DSN.
+_TEST_DATA = tempfile.TemporaryDirectory(prefix="shuffle-tests-")
+os.environ["DATA_DIR"] = _TEST_DATA.name
+
+
+@pytest.fixture(autouse=True)
+def _test_only_memory_store(monkeypatch):
+    from app.core.provider.harness_adapter import HarnessAdapter, MemoryStore
+    monkeypatch.setattr(HarnessAdapter, "_test_memory_store_factory", MemoryStore)
 
 
 @pytest.fixture(autouse=True)
@@ -49,8 +59,8 @@ os.environ["CORS_ORIGINS"] = "*"
 # =============================================================================
 # SAFETY: forbid opening a real Postgres pool during tests
 # =============================================================================
-# The application is Postgres-only and the configured POSTGRES_* settings
-# frequently point at a real/shared/production database. Multiple code paths will open a pool against
+# The application is Postgres-only and a live managed descriptor may point
+# at production data. Multiple code paths will open a pool against
 # it if allowed to:
 #   * app.db.base.init_pool() — invoked by the FastAPI lifespan (entered by the
 #     TestClient fixtures) AND directly by the PgSessionStore conformance
@@ -66,8 +76,20 @@ os.environ["CORS_ORIGINS"] = "*"
 # _pg_pool None so the in-memory SQLite shim is always used.
 #
 # Opt in to a real Postgres pool ONLY against a disposable test database by
-# exporting ALLOW_REAL_PG=1.
+# exporting ALLOW_REAL_PG=1 and TEST_POSTGRES_DSN for an explicit disposable DB.
 ALLOW_REAL_PG = os.environ.get("ALLOW_REAL_PG") == "1"
+if ALLOW_REAL_PG:
+    from app.core.config import settings as _test_settings
+    from app.db.base import parse_database_url as _parse_test_url
+    _test_dsn = os.environ.get("TEST_POSTGRES_DSN", "")
+    if not _test_dsn:
+        raise RuntimeError("ALLOW_REAL_PG requires an explicit disposable TEST_POSTGRES_DSN")
+    _test_connection = _parse_test_url(_test_dsn)
+    if _test_connection["host"] not in {"127.0.0.1", "localhost"}:
+        raise RuntimeError("TEST_POSTGRES_DSN must identify a disposable loopback database")
+    _test_connection.update(hostaddr="127.0.0.1", options="", connect_timeout=5, sslmode="disable")
+    # Instance-only injection is outside application runtime configuration.
+    object.__setattr__(_test_settings, "get_database_connection", lambda: dict(_test_connection))
 if not ALLOW_REAL_PG:
     from app.db import base as _db_base
 
@@ -76,8 +98,7 @@ if not ALLOW_REAL_PG:
             "init_pool() is disabled in the test suite to prevent connecting to "
             "the configured Postgres database (which may be production). Tests "
             "run on the in-memory SQLite shim. Set ALLOW_REAL_PG=1 to override, "
-            "and only point the POSTGRES_* settings at a disposable test "
-            "database when you do."
+            "with TEST_POSTGRES_DSN pointing at a disposable loopback test database."
         )
 
     _db_base._pg_pool = None

@@ -6,6 +6,8 @@
  * ping/pong keep-alive, visibility change handling, and connection health monitoring.
  */
 
+import { wsUrl } from '$lib/api/runtime';
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const CONNECTION_HEALTH_TIMEOUT_MS = 90_000;
@@ -69,11 +71,7 @@ export interface WsConnection {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function getWsBaseUrl(): string {
-	const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-	const host = window.location.host;
-	return `${protocol}//${host}/api/v1/ws/chat`;
-}
+const WS_CHAT_PATH = '/api/v1/ws/chat';
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
@@ -156,10 +154,10 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
 		const deviceId = config.getDeviceId();
-		let url = `${getWsBaseUrl()}?device_id=${encodeURIComponent(deviceId)}`;
-
-		const token = config.getAuthToken();
-		if (token) url = `${url}&token=${encodeURIComponent(token)}`;
+		// Web UI: same-origin socket, cookie auth (plus an explicit token when the
+		// caller has one). Bundled mobile UI: worker origin with `token=` added by
+		// the runtime helper.
+		const url = wsUrl(WS_CHAT_PATH, { device_id: deviceId, token: config.getAuthToken() });
 
 		const socket = new WebSocket(url);
 		ws = socket;

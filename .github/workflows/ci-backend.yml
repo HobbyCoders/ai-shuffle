@@ -14,6 +14,7 @@ on:
       - 'app/**'
       - 'tests/**'
       - 'fluid/**'
+      - 'scripts/network_migrate.py'
       - 'requirements.txt'
       - 'requirements-dev.txt'
       - 'requirements-native.txt'
@@ -128,18 +129,20 @@ jobs:
       - name: Start the runner's PostgreSQL
         # The Ubuntu runner image ships PostgreSQL preinstalled and stopped;
         # starting it costs seconds, where a service container costs a pull
-        # and a health-check wait on every run.
+        # and a health-check wait on every run. One database per contract
+        # suite so neither sees the other's tables.
         run: |
           sudo systemctl start postgresql.service
           sudo -u postgres psql -v ON_ERROR_STOP=1 \
             -c "CREATE USER shuffle_mobile_test WITH PASSWORD 'mobile-test-only'" \
-            -c "CREATE DATABASE shuffle_mobile_test OWNER shuffle_mobile_test"
+            -c "CREATE DATABASE shuffle_mobile_test OWNER shuffle_mobile_test" \n            -c "CREATE USER shuffle_network_test WITH PASSWORD 'network-test-only'" \n            -c "CREATE DATABASE shuffle_network_test OWNER shuffle_network_test"
           pg_isready -h 127.0.0.1 -p 5432
 
       - name: Mobile PostgreSQL contracts
         env:
           ALLOW_REAL_PG: '1'
           MOBILE_POSTGRES_TEST: '1'
+          TEST_POSTGRES_DSN: postgresql://REDACTED@127.0.0.1:5432/shuffle_mobile_test
           MOBILE_PG_HOST: '127.0.0.1'
           MOBILE_PG_PORT: '5432'
           MOBILE_PG_DATABASE: shuffle_mobile_test
@@ -151,6 +154,19 @@ jobs:
           python -m pytest tests/integration/test_mobile_postgres.py
           --confcutdir=tests/integration -o addopts="" -p no:cacheprovider
           --timeout=60 -v
+
+      - name: Verify network migration on real PostgreSQL
+        env:
+          ALLOW_REAL_PG: '1'
+          NETWORK_POSTGRES_TEST: '1'
+          TEST_POSTGRES_DSN: postgresql://REDACTED@127.0.0.1:5432/shuffle_network_test
+          NETWORK_PG_PORT: '5432'
+          AI_SHUFFLE_ENV_FILE: /dev/null
+          PYTHONPATH: .
+        run: >-
+          python -m pytest tests/integration/test_network_migration_postgres.py
+          --confcutdir=tests/integration -o addopts="" -p no:cacheprovider
+          --timeout=120 -v
 
       - name: Audit public Python dependencies
         run: |

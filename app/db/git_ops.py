@@ -138,20 +138,25 @@ def insert_op(
     *,
     project_v2_id: Optional[str] = None,
     params: Optional[Dict[str, Any]] = None,
+    op_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Enqueue a ``queued`` op targeted at ``runner_id``. Returns the new row."""
-    op_id = f"gitop-{uuid.uuid4().hex}"
+    """Enqueue an op; an optional stable ID makes peer retries idempotent."""
+    op_id = op_id or f"gitop-{uuid.uuid4().hex}"
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO git_ops (id, runner_id, project_v2_id, op, params, status) "
             "VALUES (%s, %s, %s, %s, %s, 'queued') "
-            "RETURNING *",
+            "ON CONFLICT (id) DO NOTHING RETURNING *",
             (op_id, runner_id, project_v2_id, op, json.dumps(params or {})),
         )
         row = _row(cursor.fetchone())
-    if row is None:  # INSERT ... RETURNING always yields the row
-        raise RuntimeError(f"insert_op: no row returned for {op!r} -> {runner_id!r}")
+    if row is None:
+        row = get_op(op_id)
+        if row is None or (row["runner_id"], row["op"], row.get("project_v2_id"), row.get("params")) != (
+            runner_id, op, project_v2_id, params or {},
+        ):
+            raise ValueError("Git operation request ID was reused with different parameters")
     return row
 
 

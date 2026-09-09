@@ -472,27 +472,6 @@
 		outline-offset: -2px;
 	}
 
-	/* Mobile shell: the header reflows and an absolutely-positioned panel anchored
-	   to this button would clip. Pin it as a fixed near-full-width panel below the
-	   header. */
-	:global(html[data-platform='mobile']) {
-		.notif-btn {
-			width: 36px;
-			height: 36px;
-		}
-
-		.notif-panel {
-			position: fixed;
-			top: 58px;
-			left: 8px;
-			right: 8px;
-			width: auto;
-			max-width: none;
-			max-height: calc(100vh - 120px);
-			z-index: 200;
-		}
-	}
-
 	@media (prefers-reduced-motion: reduce) {
 		.notif-btn {
 			transition: none;

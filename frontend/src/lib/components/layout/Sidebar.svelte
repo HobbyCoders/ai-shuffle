@@ -1224,14 +1224,6 @@
 		.sb-head { height: 56px; }
 	}
 
-	:global(html[data-platform='mobile']) .iconbtn { width: 40px; height: 40px; }
-	:global(html[data-platform='mobile']) .ghostrow { height: 44px; }
-	:global(html[data-platform='mobile']) .shortcut { display: none; }
-	/* The drawer is fullscreen, so the brand row sits under the status bar /
-	   notch unless it clears the inset itself. */
-	:global(html[data-platform='mobile']) .sb-top { padding-top: env(safe-area-inset-top, 0px); }
-	:global(html[data-platform='mobile']) .sb-head { height: 56px; }
-
 	@media (prefers-reduced-motion: reduce) {
 		.iconbtn, .ghostrow, .shelf, .fbtn, .scope-clear, .group-chev, .sb-top::after { transition: none; }
 		.menu { animation: none; }

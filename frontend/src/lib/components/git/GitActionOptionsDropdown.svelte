@@ -619,19 +619,6 @@
 		outline-offset: 1px;
 	}
 
-	/* Mobile shell: escape the header's horizontal scroll rail (mirrors .branch-dropdown). */
-	:global(html[data-platform='mobile']) .options-dropdown {
-		position: fixed;
-		top: 100px;
-		left: 8px;
-		right: 8px;
-		bottom: auto;
-		min-width: 0;
-		max-width: none;
-		max-height: 70vh;
-		z-index: 200;
-	}
-
 	@media (prefers-reduced-motion: reduce) {
 		.options-dropdown { animation: none; }
 		.opt-switch, .opt-switch::after, .opt-radio-dot { transition: none; }

@@ -1,5 +1,13 @@
 """Cross-install cluster primitives: shared secret, peer auth, advertise URL.
 
+TRANSITION WINDOW (worker network, 2026-09). Installs that have joined a
+network no longer share a database: the runner directory comes from
+``app.network.runners`` (``get_installs`` returns it when enrolled), pairing
+codes are hashed under a local pairing key, and peers authenticate with
+signed device tokens. What remains here serves installs that have not
+enrolled yet and the legacy artifact redirect. Retire once every deployment
+reports Ready in Settings > Devices. See docs/network/README.md.
+
 When multiple AI Shuffle installs share one database they form a cluster. They
 authenticate to each other with a single shared *cluster secret* (every install
 on the shared DB converges on the same value) rather than per-peer API keys.
@@ -317,7 +325,7 @@ def _warn_if_stray_instance() -> None:
     registry — best-effort, never raises, never blocks registration.
 
     The classic footgun: an ad-hoc dev/debug instance started with a fresh
-    instance_id but the PRODUCTION ``DATABASE_URL``. It is not just a viewer —
+    instance_id but the production managed database descriptor. It is not just a viewer —
     its background workers act on SHARED credentials (the Codex token-refresh
     worker rotates the refresh token on a provider row every install sees), so
     the operator should know before it does anything.
@@ -332,7 +340,7 @@ def _warn_if_stray_instance() -> None:
         logger.warning(
             "instance_id %s is not yet registered in a shared database that "
             "already has %d install(s) — if this is an ad-hoc dev/debug instance "
-            "pointed at a production DATABASE_URL, its background workers (Codex "
+            "pointed at production managed data, its background workers (Codex "
             "token refresh, etc.) will act on shared credentials.",
             settings.effective_instance_id,
             len(peers),

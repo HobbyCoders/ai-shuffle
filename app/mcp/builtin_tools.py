@@ -1087,7 +1087,7 @@ def _build_memory_bridge_tools(
     tools: list = []
     store_on = settings.fluid_code_mode or settings.fluid_continual
     continual_on = settings.fluid_continual
-    db_on = bool(settings.database_url or settings.postgres_password)
+    db_on = settings.managed_database_available()
 
     # The bridged surface itself, for fluid's describe() specialization —
     # cross-tool routing clauses collapse to the tools that actually exist

@@ -61,7 +61,8 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(harness.clean_env(source), {"PATH": "tools"})
         with patch.dict(os.environ, source, clear=True):
             env = harness.worker_environment(self.target(), "/disposable", 0)
-        self.assertEqual(env["DATABASE_URL"], self.target()["url"])
+        self.assertEqual(env["TEST_POSTGRES_DSN"], self.target()["url"])
+        self.assertNotIn("DATABASE_URL", env)
         self.assertEqual(env["TESTING"], "1")
         self.assertEqual(env["ALLOW_REAL_PG"], "1")
         self.assertNotIn("POSTGRES_HOST", env)

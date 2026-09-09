@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { watchResources } from '$lib/services/watch-resources';
+	import { apiBase, withAuth } from '$lib/api/runtime';
 	/**
 	 * MediaToolsSection — the "Media & tools" settings group (Chunk 8, plan §1.5).
 	 *
@@ -52,7 +53,7 @@
 	// The fal key comes from the /settings/integrations payload.
 	async function loadKeyStatus() {
 		try {
-			const res = await fetch('/api/v1/settings/integrations', { credentials: 'include' });
+			const res = await fetch(`${apiBase()}/settings/integrations`, withAuth({ }));
 			if (!res.ok) return;
 			const data = await res.json();
 			falKeySet = !!data.fal_api_key_set;
@@ -69,14 +70,13 @@
 		falError = '';
 		falSuccess = '';
 		try {
-			const res = await fetch('/api/v1/settings/integrations/fal-ai', {
+			const res = await fetch(`${apiBase()}/settings/integrations/fal-ai`, withAuth({
 				method: 'POST',
-				credentials: 'include',
 				headers: { 'content-type': 'application/json' },
 				body: JSON.stringify({ api_key: falKeyInput.trim() }),
-			});
+			}));
 			if (!res.ok) {
-				const body = await res.json().catch(() => ({}));
+				const body = await res.json().catch(() => ({ }));
 				falError = body.detail ?? `Save failed (${res.status})`;
 				return;
 			}
@@ -98,10 +98,9 @@
 		falError = '';
 		falSuccess = '';
 		try {
-			const res = await fetch('/api/v1/settings/integrations/fal-ai', {
+			const res = await fetch(`${apiBase()}/settings/integrations/fal-ai`, withAuth({
 				method: 'DELETE',
-				credentials: 'include',
-			});
+			}));
 			if (!res.ok) {
 				falError = `Remove failed (${res.status})`;
 				return;

@@ -17,10 +17,13 @@ export type DesktopCommand =
 	| 'find';
 
 export interface MenuActions {
+	/** Preview builds do not check for or install stable updates. */
+	updatesEnabled?: boolean;
 	command(name: DesktopCommand): void;
 	restartWorker(): void;
-	openDatabaseSettings(): void;
+	openWorkerStatus(): void;
 	showLogs(): void;
+	showPostgresLogs(): void;
 	openInBrowser(): void;
 	checkForUpdates(): void;
 	reload(): void;
@@ -36,7 +39,7 @@ export function installMenu(actions: MenuActions): void {
 					label: app.name,
 					submenu: [
 						{ role: 'about' },
-						{ label: 'Check for Updates…', click: () => actions.checkForUpdates() },
+						{ label: 'Check for Updates…', visible: actions.updatesEnabled !== false, click: () => actions.checkForUpdates() },
 						{ type: 'separator' },
 						{ label: 'Settings…', accelerator: 'Cmd+,', click: () => actions.command('open-settings') },
 						{ type: 'separator' },
@@ -106,10 +109,11 @@ export function installMenu(actions: MenuActions): void {
 		label: 'Worker',
 		submenu: [
 			{ label: 'Restart Worker', click: () => actions.restartWorker() },
+			{ label: 'Worker Status…', click: () => actions.openWorkerStatus() },
 			{ label: 'Open in Browser', click: () => actions.openInBrowser() },
 			{ type: 'separator' },
-			{ label: 'Database Connection…', click: () => actions.openDatabaseSettings() },
-			{ label: 'Show Worker Log', click: () => actions.showLogs() }
+			{ label: 'Show Worker Log', click: () => actions.showLogs() },
+			{ label: 'Show PostgreSQL Log', click: () => actions.showPostgresLogs() }
 		]
 	};
 
@@ -129,7 +133,7 @@ export function installMenu(actions: MenuActions): void {
 				? []
 				: ([
 						{ type: 'separator' },
-						{ label: 'Check for Updates…', click: () => actions.checkForUpdates() },
+						{ label: 'Check for Updates…', visible: actions.updatesEnabled !== false, click: () => actions.checkForUpdates() },
 						{ label: `AI Shuffle Desktop ${app.getVersion()}`, enabled: false }
 					] as MenuItemConstructorOptions[]))
 		]

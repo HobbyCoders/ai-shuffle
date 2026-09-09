@@ -101,11 +101,10 @@ def _drive_listen_loop(monkeypatch, gateway, connect_effects, max_sleeps=10):
             gateway._stop = True
 
     record = MagicMock()
-    # A real DATABASE_URL from the developer's .env would win over the
-    # postgres_* fields these tests patch, so neutralize it for every driven loop.
-    monkeypatch.setattr(eg.settings, "database_url", "")
-    if not getattr(eg.settings, "postgres_password", None):
-        monkeypatch.setattr(eg.settings, "postgres_password", "p")
+    monkeypatch.setattr(type(eg.settings), "get_database_connection", lambda self: {
+        "host": "127.0.0.1", "hostaddr": "127.0.0.1", "port": 6543,
+        "user": "aihub", "password": "p@ssPwd", "dbname": "aihub",
+    })
     monkeypatch.setattr(eg.psycopg2, "connect", fake_connect)
     monkeypatch.setattr(eg.select, "select", fake_select)
     monkeypatch.setattr(gateway, "_sleep", fake_sleep)
@@ -119,16 +118,12 @@ def test_listen_loop_connects_with_parsed_dsn_kwargs(monkeypatch, gw):
     a literal '@' in the password makes libpq mis-parse the host."""
     import app.core.event_gateway as eg
 
-    monkeypatch.setattr(eg.settings, "postgres_host", "10.0.0.200")
-    monkeypatch.setattr(eg.settings, "postgres_user", "aihub")
-    monkeypatch.setattr(eg.settings, "postgres_password", "p@ssPwd")
-    monkeypatch.setattr(eg.settings, "postgres_db", "aihub")
     calls, _ = _drive_listen_loop(monkeypatch, gw, ["fail"], max_sleeps=1)
 
     assert len(calls) == 1
     args, kwargs = calls[0]
     assert args == ()  # no raw-DSN positional argument
-    assert kwargs["host"] == "10.0.0.200"
+    assert kwargs["host"] == kwargs["hostaddr"] == "127.0.0.1"
     assert kwargs["password"] == "p@ssPwd"
     assert kwargs["dbname"] == "aihub"
 
@@ -166,7 +161,7 @@ def test_stop_joins_running_listener_thread_promptly(monkeypatch):
     import app.core.event_gateway as eg
 
     g = EventGateway()
-    monkeypatch.setattr(eg.settings, "postgres_password", "p")
+    monkeypatch.setattr(type(eg.settings), "get_database_connection", lambda self: {"host": "127.0.0.1", "password": "synthetic"})
 
     # Every connect fails immediately, so the loop parks in the (interruptible)
     # backoff sleep between attempts.

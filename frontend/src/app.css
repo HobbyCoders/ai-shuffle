@@ -1109,7 +1109,8 @@ select option {
    [data-layout] selectors) had no consumers anywhere in the app. The
    mobile/desktop shell is now chosen by platform, not width — see
    docs/mobile-desktop-ui-split.md. Gate shell-specific chrome on
-   html[data-platform='mobile'] / html[data-platform='desktop'] instead.
+   the html[data-platform] attribute instead (the web build is desktop-only;
+   the mobile rules live in mobile/src/mobile.css).
    ======================================== */
 
 /* ========================================

@@ -1,4 +1,5 @@
 import { auth } from '$lib/stores/auth.svelte';
+import { wsUrl } from '$lib/api/runtime';
 import '$lib/stores/theme.svelte';
 import '$lib/stores/timezonePreference.svelte';
 import '$lib/stores/chatPreferences.svelte';
@@ -52,8 +53,7 @@ export function startLiveSync() {
  function connect() {
   if (!owner) return;
   const epoch = generation;
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${protocol}//${location.host}/api/v1/ws/global?device_id=${encodeURIComponent(getOrCreateDeviceId())}`);
+  const ws = new WebSocket(wsUrl('/api/v1/ws/global', { device_id: getOrCreateDeviceId() }));
   socket = ws;
   let lastMessage = Date.now();
   ws.onmessage = event => {

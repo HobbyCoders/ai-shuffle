@@ -874,57 +874,6 @@
 		}
 	}
 
-	:global(html[data-platform='mobile']) .scard-frame {
-		overflow: hidden;
-		touch-action: pan-y;
-		background: color-mix(in oklch, var(--sidebar-accent-active) 84%, var(--sidebar));
-	}
-	:global(html[data-platform='mobile']) .scard {
-		background: var(--sidebar);
-		padding: 7px 8px 8px;
-		transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 130ms ease;
-		will-change: transform;
-	}
-	/* The swipe track sits behind the card, so the card surface has to be
-	   opaque or the revealed actions bleed through the accent tint. */
-	:global(html[data-platform='mobile']) .scard.active {
-		background:
-			linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
-			var(--sidebar);
-	}
-	:global(html[data-platform='mobile']) .scard-frame.actions-open .scard { transform: translateX(-44px); }
-	:global(html[data-platform='mobile']) .scard-frame.dragging .scard { transition: none; }
-	:global(html[data-platform='mobile']) .scard-frame:hover .scard { background: var(--sidebar); }
-	:global(html[data-platform='mobile']) .scard-frame:hover .scard.active {
-		background:
-			linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
-			var(--sidebar);
-	}
-
-	:global(html[data-platform='mobile']) .card-actions {
-		top: 0;
-		right: 0;
-		bottom: 0;
-		width: 44px;
-		justify-content: flex-end;
-		gap: 0;
-		padding-left: 0;
-		background: none;
-		opacity: 1;
-		z-index: 1;
-		pointer-events: none;
-	}
-	:global(html[data-platform='mobile']) .scard-frame.actions-open .card-actions { pointer-events: auto; }
-	:global(html[data-platform='mobile']) .card-actions > * {
-		width: 44px;
-		height: 100%;
-		min-height: 44px;
-		border-radius: 0;
-	}
-	:global(html[data-platform='mobile']) .card-actions > *:hover {
-		background: color-mix(in oklch, var(--sidebar-accent-active) 88%, transparent);
-	}
-
 	@media (prefers-reduced-motion: reduce) {
 		.pip,
 		.working-dots > span,

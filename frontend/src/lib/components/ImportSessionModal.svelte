@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { apiBase, withAuth } from '$lib/api/runtime';
 	// Props
 	let { show = $bindable(false), onclose, onimported }: { show: boolean; onclose?: () => void; onimported?: (data: { sessionId: string; title: string; messageCount: number }) => void } = $props();
 
@@ -114,11 +115,10 @@
 			const formData = new FormData();
 			formData.append('file', selectedFile);
 
-			const response = await fetch('/api/v1/sessions/import', {
+			const response = await fetch(`${apiBase()}/sessions/import`, withAuth({
 				method: 'POST',
-				credentials: 'include',
 				body: formData
-			});
+			}));
 
 			if (!response.ok) {
 				const error = await response.json().catch(() => ({ detail: 'Import failed' }));

@@ -13,3 +13,6 @@ local.properties
 *.jks
 *.jks.b64
 *.keystore
+
+# Generated: the mobile UI bundle copied from mobile/build by scripts/sync-mobile-ui.sh.
+/app/src/main/assets/mobile-ui/

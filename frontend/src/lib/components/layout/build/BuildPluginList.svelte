@@ -583,7 +583,6 @@
 	@media (hover: none) {
 		.bpl-actions--hover { opacity: 1; }
 	}
-	:global(html[data-platform='mobile']) .bpl-actions--hover { opacity: 1; }
 	.bpl-act { display: grid; place-items: center; width: 28px; height: 28px; background: transparent; border: 1px solid transparent; border-radius: 7px; color: var(--muted-foreground); cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
 	.bpl-act:hover { color: var(--foreground); background: var(--hover-overlay); }
 	.bpl-act:disabled { opacity: 0.5; cursor: not-allowed; }

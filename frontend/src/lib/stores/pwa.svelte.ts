@@ -6,6 +6,7 @@
  */
 
 import { browser } from '$app/environment';
+import { isBundledMobile } from '$lib/api/runtime';
 import { untrack } from 'svelte';
 import { createSubscribers } from './store-utils';
 import { installPromptPreference } from './install-prompt-preference.svelte';
@@ -121,6 +122,11 @@ async function registerServiceWorker() {
 	// shell, so the worker would only add a cache layer that Chromium's
 	// app partition does not always honour.
 	if (isDesktop) {
+		return null;
+	}
+	// The Android app ships the UI as bundled assets and updates it with the
+	// app itself; a service worker would only cache a copy it never serves.
+	if (isBundledMobile()) {
 		return null;
 	}
 

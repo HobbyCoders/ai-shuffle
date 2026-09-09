@@ -20,6 +20,7 @@
  * and account boundaries invalidate that cache; mounted editors refresh safely.
  */
 
+import { apiBase, withAuth } from './runtime';
 import { api, type ApiError } from './client';
 import { resourceSync } from '$lib/services/resource-sync';
 import { sessionOwnerBoundary, sessionOwnerEpoch } from '$lib/stores/session-owner';
@@ -256,12 +257,11 @@ export function getVoiceAgents(): Promise<VoiceAgent[]> {
  * goes through fetch directly (same cookie auth, same error shape).
  */
 export async function previewVoice(voice: string): Promise<Blob> {
-	const response = await fetch('/api/v1/voice/preview', {
+	const response = await fetch(`${apiBase()}/voice/preview`, withAuth({
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		credentials: 'include',
 		body: JSON.stringify({ voice }),
-	});
+	}));
 	if (!response.ok) {
 		let detail = `Voice preview failed (HTTP ${response.status})`;
 		try {

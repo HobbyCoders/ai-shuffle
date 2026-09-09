@@ -2,21 +2,36 @@ name: Android CI
 
 # Android app (android/) and the Cloudflare account hub (android/hub). Paths-
 # filtered like the other CI workflows: a PR that touches nothing under
-# android/ never starts it. The push-to-main leg keeps producing the signed
-# release APK artifact and publishes a permanent download after all checks pass.
+# android/, frontend/ or mobile/ never starts it (the APK bundles the mobile
+# UI built from mobile/ and the shared frontend/src/lib). The push-to-main leg keeps producing the signed
+# release APK artifact. Publishing additionally requires explicit rollout approval:
+# a merge must not ship a client before its workers support the bundled UI.
 on:
   push:
     branches: [ main ]
     paths:
       - 'android/**'
+      - 'frontend/**'
+      - 'mobile/**'
       - '.github/workflows/android.yml'
   pull_request:
     paths:
       - 'android/**'
+      - 'frontend/**'
+      - 'mobile/**'
       - '.github/workflows/android.yml'
   workflow_dispatch:
+    inputs:
+      publish_download:
+        description: Publish only after compatible workers and account hub are deployed and verified
+        type: boolean
+        default: false
   workflow_call:
     inputs:
+      publish_download:
+        description: Compatible workers and account hub have been deployed and verified
+        type: boolean
+        default: false
       release_tag:
         description: Existing versioned release to attach the verified APK to
         type: string
@@ -75,14 +90,32 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # The APK ships its own build of the mobile UI (mobile/ + shared
+      # frontend/src/lib). Gradle's checkMobileUi task refuses to assemble
+      # without it, so this runs before any gradlew invocation.
+      - name: Build and bundle the mobile UI
+        working-directory: frontend
+        run: |
+          npm ci
+          bash ../android/scripts/sync-mobile-ui.sh
+
       - name: Unit tests and Android lint
         run: |
           python3 ci/test-apk-download.py
           python3 ci/test-publish-apk.py
+          python3 ci/test-mobile-apk.py
           ./gradlew testDebugUnitTest lintDebug --stacktrace
 
       - name: Build instrumentation APKs
-        run: ./gradlew assembleDebug assembleDebugAndroidTest --max-workers=2 --stacktrace
+        run: |
+          ./gradlew assembleDebug assembleDebugAndroidTest --max-workers=2 --stacktrace
+          python3 ci/verify-mobile-apk.py app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload instrumentation APKs
         uses: actions/upload-artifact@v4
@@ -123,6 +156,7 @@ jobs:
             export ANDROID_VERSION_NAME="$version"
           fi
           ./gradlew assembleRelease --stacktrace
+          python3 ci/verify-mobile-apk.py app/build/outputs/apk/release/app-release.apk
 
       - name: Verify APK is signed with the release key
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -224,8 +258,8 @@ jobs:
   publish:
     name: Publish verified Android download
     needs: [account-hub, build, android-ui]
-    if: github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
-    runs-on: ubuntu-latest
+    if: inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     permissions:
       contents: write

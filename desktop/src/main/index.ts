@@ -1,24 +1,32 @@
 /**
  * AI Shuffle desktop: process entry.
  *
- * One instance, one window, one local worker. On launch the app starts the
- * worker (or attaches to one already running on this computer) and opens
- * its web UI; the first run asks for the PostgreSQL connection first.
+ * One instance, one window, one local worker with its own database. On
+ * launch the app starts the bundled PostgreSQL, then the worker (or attaches
+ * to one already running on this computer), and opens its web UI. A first
+ * run needs no setup: the embedded cluster is created on the spot.
  */
-import { app, nativeTheme, safeStorage, session } from 'electron';
+import { app, nativeTheme, safeStorage, session, shell } from 'electron';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { registerIpc, type WorkerControl } from './ipc';
+import { registerIpc, type DesktopState, type PostgresStatus, type WorkerControl } from './ipc';
 import { installMenu } from './menu';
 import { installPermissionPolicy } from './navigation';
-import { plainCipher, SettingsStore, type Cipher, type PostgresConfig } from './settings';
+import { PostgresSupervisor, resolvePostgresBinaries } from './postgres';
+import { plainCipher, SettingsStore, type Cipher } from './settings';
+import { desktopIdentity, stableDataDir } from './identity';
 import { installTray } from './tray';
 import { Updater } from './updater';
 import { MainWindow, PARTITION } from './window';
 import { resolveRuntime, WorkerSupervisor, type WorkerState } from './worker';
 
-const PROTOCOL = 'aishuffle';
-
-app.setAppUserModelId('com.hobbycoders.aishuffle.desktop');
+// Only the application's packaged metadata can select the isolated preview.
+const identity = desktopIdentity(app.isPackaged, require(path.join(app.getAppPath(), 'package.json')));
+app.setAppUserModelId(identity.appId);
+if (identity.preview) {
+	app.setName(identity.name);
+	app.setPath('userData', path.join(app.getPath('appData'), identity.name));
+}
 
 // Development helpers: an isolated profile and a headless screenshot, so the
 // shell can be exercised from a script or CI without a person at the screen.
@@ -35,19 +43,37 @@ if (!app.requestSingleInstanceLock()) {
 async function main(): Promise<void> {
 	const userData = app.getPath('userData');
 	const window = new MainWindow(userData);
-	const updater = new Updater();
+	const updater = new Updater(identity.updates);
 
 	app.on('second-instance', () => window.focus());
 	app.on('window-all-closed', () => {
 		if (process.platform !== 'darwin') app.quit();
 	});
-	if (app.isPackaged) app.setAsDefaultProtocolClient(PROTOCOL);
+	if (app.isPackaged) app.setAsDefaultProtocolClient(identity.protocol);
 
 	await app.whenReady();
 
 	const cipher = safeStorageCipher();
 	const settings = new SettingsStore(path.join(userData, 'worker-settings.json'), cipher);
 	await settings.load();
+
+	// The bundled PostgreSQL: under resources/postgres in a packaged app,
+	// SHUFFLE_DESKTOP_POSTGRES_DIR in development. Always app-managed.
+	const logDir = path.join(userData, 'logs');
+	const pgResolved = resolvePostgresBinaries({ packaged: app.isPackaged, resourcesPath: process.resourcesPath });
+	const postgresError = 'error' in pgResolved ? pgResolved.error : null;
+	const postgres =
+		'error' in pgResolved
+			? null
+			: new PostgresSupervisor({
+					binaries: pgResolved,
+					root: path.join(userData, 'postgres'),
+					logDir,
+					credentials: {
+						load: () => settings.postgres(),
+						save: (config) => settings.savePostgres({ ...config, managed: true })
+					}
+				});
 
 	// The worker runtime: bundled in a packaged app, the repository in development.
 	const repoDir = path.resolve(__dirname, '..', '..', '..');
@@ -58,9 +84,14 @@ async function main(): Promise<void> {
 			? null
 			: new WorkerSupervisor({
 					runtime: resolved,
-					logDir: path.join(userData, 'logs'),
+					logDir,
 					envFile: path.join(userData, 'worker', '.env'),
-					postgres: () => settings.postgres()
+					dataDir: identity.preview ? path.join(userData, 'data') : stableDataDir(process.platform, process.env, app.getPath('home')),
+					...(identity.preview ? { workspaceDir: path.join(userData, 'workspace'), profileDir: path.join(userData, 'profile') } : {}),
+					port: identity.port,
+					protectedPort: identity.protectedPort,
+					allowAttach: identity.allowAttach,
+					postgres: () => postgres?.connection() ?? null
 				});
 	// Development: point the window at a frontend dev server instead of the worker UI.
 	const devUrl = !app.isPackaged ? process.env.SHUFFLE_DESKTOP_DEV_URL ?? null : null;
@@ -71,41 +102,55 @@ async function main(): Promise<void> {
 
 	const failedState = (error: string): WorkerState => ({
 		phase: 'failed',
-		port: 8000,
-		url: 'http://127.0.0.1:8000',
+		port: identity.port,
+		url: `http://127.0.0.1:${identity.port}`,
 		pid: null,
 		external: false,
 		error,
 		exitCode: null,
 		startedAt: null,
-		logPath: path.join(userData, 'logs', 'worker.log')
+		logPath: path.join(logDir, 'worker.log')
 	});
+
+	const postgresStatus = (): PostgresStatus => {
+		if (!postgres) return { managed: true, phase: 'failed', host: null, port: null, error: postgresError, logPath: null };
+		const state = postgres.state;
+		return { managed: true, phase: state.phase, host: '127.0.0.1', port: state.port, error: state.error, logPath: state.logPath };
+	};
+
+	const desktopState = (): DesktopState => ({
+		...(supervisor?.state ?? failedState(runtimeError ?? 'The worker runtime is missing.')),
+		postgres: postgresStatus()
+	});
+
+	/** Bundled PostgreSQL first when it is wanted, then the worker. */
+	const startStack = async (): Promise<void> => {
+		if (quitting || !supervisor) return;
+		if (!postgres) {
+			window.send('desktop:worker-state', desktopState());
+			return;
+		}
+		const state = await postgres.start();
+		if (quitting || state.phase !== 'ready') return;
+		await supervisor.start();
+	};
 
 	const worker: WorkerControl = {
 		supervisor,
 		runtimeError,
-		state: () => supervisor?.state ?? failedState(runtimeError ?? 'The worker runtime is missing.'),
-		openSetup: () => window.showPage('setup'),
-		cancelSetup: async () => {
-			const state = worker.state();
-			if (state.phase === 'ready') await window.loadWorker(state.url);
-			else await window.showPage('status');
-		},
-		saveAndStart: async (config: PostgresConfig) => {
-			await settings.savePostgres(config);
-			await window.showPage('status');
-			if (!supervisor) return;
-			if (supervisor.state.phase === 'ready' || supervisor.state.phase === 'starting') await supervisor.restart();
-			else await supervisor.start();
-		},
+		bundledPostgresError: postgresError,
+		state: desktopState,
+		tail: () => [...(postgres?.tail().map((line) => `[postgres] ${line}`) ?? []), ...(supervisor?.tail() ?? [])],
+		openStatus: () => window.showPage('status'),
 		restart: async () => {
 			if (!supervisor) return;
 			if (window.currentPage !== 'status') await window.showPage('status');
-			await supervisor.restart();
+			await supervisor.stop();
+			await startStack();
 		}
 	};
 
-	registerIpc({ window, settings, updater, worker, keyringAvailable: cipher.available() });
+	registerIpc({ window, updater, worker });
 	updater.subscribe((state) => window.send('desktop:update-state', state));
 	nativeTheme.on('updated', () => window.send('desktop:native-theme', { dark: nativeTheme.shouldUseDarkColors }));
 
@@ -115,7 +160,7 @@ async function main(): Promise<void> {
 	let loadRetries = 0;
 	supervisor?.on('state', (state: WorkerState) => {
 		if (quitting) return;
-		window.send('desktop:worker-state', state);
+		window.send('desktop:worker-state', desktopState());
 		// The status page hands over to the worker UI as soon as it answers;
 		// a worker that dies while its UI is showing brings the status page back.
 		if (state.phase === 'ready' && window.currentPage === 'status') {
@@ -126,6 +171,13 @@ async function main(): Promise<void> {
 	});
 	supervisor?.on('log', (line: string) => {
 		if (window.currentPage === 'status') window.send('desktop:worker-log', line);
+	});
+	postgres?.on('state', () => {
+		if (quitting) return;
+		window.send('desktop:worker-state', desktopState());
+	});
+	postgres?.on('log', (line: string) => {
+		if (window.currentPage === 'status') window.send('desktop:worker-log', `[postgres] ${line}`);
 	});
 	window.onLoadFailed((message) => {
 		const state = worker.state();
@@ -141,10 +193,13 @@ async function main(): Promise<void> {
 	const actions = {
 		command: (name: string) => window.send('desktop:command', name),
 		restartWorker: () => void worker.restart(),
-		openDatabaseSettings: () => void worker.openSetup(),
-		showLogs: () => {
-			const { shell } = require('electron') as typeof import('electron');
-			void shell.showItemInFolder(worker.state().logPath);
+		openWorkerStatus: () => void worker.openStatus(),
+		updatesEnabled: identity.updates,
+		showLogs: () => void shell.showItemInFolder(worker.state().logPath),
+		showPostgresLogs: () => {
+			const logPath = postgres?.state.logPath ?? path.join(logDir, 'postgres.log');
+			if (existsSync(logPath)) void shell.showItemInFolder(logPath);
+			else void shell.openPath(logDir);
 		},
 		openInBrowser: () => {
 			const state = worker.state();
@@ -165,10 +220,20 @@ async function main(): Promise<void> {
 	installTray(actions);
 
 	app.on('before-quit', (event) => {
-		if (quitting || !supervisor || supervisor.state.external) return;
+		if (quitting) return;
+		const stopWorker = supervisor !== null && !supervisor.state.external;
+		const stopPostgres = postgres !== null && (postgres.state.phase === 'starting' || postgres.state.phase === 'ready' || postgres.state.phase === 'failed');
+		if (!stopWorker && !stopPostgres) return;
 		event.preventDefault();
 		quitting = true;
-		void supervisor.stop().finally(() => app.quit());
+		void (async () => {
+			try {
+				if (stopWorker) await supervisor.stop();
+			} finally {
+				if (stopPostgres) await postgres.stop();
+				if (stopWorker) await supervisor.clearConnectionFile();
+			}
+		})().finally(() => app.quit());
 	});
 	app.on('activate', () => void open());
 
@@ -185,16 +250,8 @@ async function main(): Promise<void> {
 			await window.loadWorker(devUrl);
 			return;
 		}
-		if (!supervisor) {
-			await window.showPage('status');
-			return;
-		}
-		if (!settings.configured) {
-			await window.showPage('setup');
-			return;
-		}
 		await window.showPage('status');
-		void supervisor.start();
+		void startStack();
 	}
 }
 

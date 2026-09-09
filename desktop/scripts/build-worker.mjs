@@ -12,26 +12,44 @@
  *       tools/             built @ai-shuffle/tools with production node_modules
  *       browser-mcp/       built browser MCP server with production node_modules
  *
- * PostgreSQL is deliberately not bundled: the app asks for a connection on
- * first run.
+ * PostgreSQL ships next to it, under resources/postgres (assembled here into
+ * desktop/postgres/ from a theseus-rs/postgresql-binaries release):
+ *
+ *   postgres/
+ *     bin/                 initdb, pg_ctl, postgres and the client tools
+ *     lib/, share/         what those binaries need at run time
+ *     manifest.json        version and target
  *
  * Usage:
  *   node scripts/build-worker.mjs [--out worker] [--platform win32|darwin|linux]
  *                                 [--arch x64|arm64] [--frontend-build <dir>]
- *                                 [--keep-python] [--stub]
+ *                                 [--keep-python] [--stub] [--skip-postgres]
+ *                                 [--postgres-out postgres]
  *
  * --stub writes only a manifest so electron-builder can package a shell without
  * a runtime (used by pull-request CI on platforms that do not build one).
+ * --skip-postgres leaves PostgreSQL out (a development build that uses
+ * SHUFFLE_DESKTOP_POSTGRES_DIR); the manifest says so.
  */
 import { createHash } from 'node:crypto';
 import { createWriteStream, existsSync } from 'node:fs';
-import { cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+	POSTGRES_VERSION,
+	initdbRelativePath,
+	parseSha256Sidecar,
+	postgresArchiveName,
+	postgresArchiveUrl,
+	postgresChecksumUrl,
+	postgresManifestEntry,
+	postgresTarget
+} from './postgres-binaries.mjs';
 
 const PYTHON_VERSION = '3.12.14';
 const PYTHON_BUILD = '20260901';
@@ -46,6 +64,7 @@ const args = parseArgs(process.argv.slice(2));
 const platform = args.platform ?? process.platform;
 const arch = args.arch ?? process.arch;
 const outDir = path.resolve(desktopDir, args.out ?? 'worker');
+const postgresDir = path.resolve(desktopDir, args['postgres-out'] ?? 'postgres');
 const frontendBuild = args['frontend-build'] ? path.resolve(args['frontend-build']) : path.join(repoDir, 'frontend', 'build');
 
 const PYTHON_TRIPLES = {
@@ -225,22 +244,72 @@ async function installNode() {
 	return { version: NODE_VERSION };
 }
 
+/**
+ * The directory inside an extracted archive that holds `marker`: the archive
+ * root itself, or a single wrapping directory (the release layout has varied).
+ */
+async function findRoot(dir, marker, depth = 2) {
+	if (existsSync(path.join(dir, marker))) return dir;
+	if (depth === 0) return null;
+	const { readdir } = await import('node:fs/promises');
+	for (const entry of await readdir(dir, { withFileTypes: true })) {
+		if (!entry.isDirectory()) continue;
+		const found = await findRoot(path.join(dir, entry.name), marker, depth - 1);
+		if (found) return found;
+	}
+	return null;
+}
+
+async function installPostgres() {
+	const target = postgresTarget(platform, arch);
+	const name = postgresArchiveName(POSTGRES_VERSION, target);
+	const url = postgresArchiveUrl(POSTGRES_VERSION, target);
+	const expected = parseSha256Sidecar(await fetchText(postgresChecksumUrl(POSTGRES_VERSION, target)), name);
+	const archive = path.join(cacheDir, name);
+	await download(url, archive, expected);
+	const staging = path.join(cacheDir, `postgresql-${POSTGRES_VERSION}-${target}`);
+	await extract(archive, staging, 0);
+	const marker = initdbRelativePath(platform);
+	const root = await findRoot(staging, marker);
+	if (!root) throw new Error(`${name} does not contain ${marker}`);
+	await rm(postgresDir, { recursive: true, force: true });
+	await mkdir(postgresDir, { recursive: true });
+	// include/ and the pkg-config files are for building against libpq; the app only runs the server.
+	for (const item of ['bin', 'lib', 'share']) {
+		if (existsSync(path.join(root, item))) await cp(path.join(root, item), path.join(postgresDir, item), { recursive: true });
+	}
+	await rm(staging, { recursive: true, force: true });
+	if (platform === process.platform) {
+		run(path.join(postgresDir, 'bin', platform === 'win32' ? 'pg_ctl.exe' : 'pg_ctl'), ['--version']);
+	}
+	const entry = postgresManifestEntry(POSTGRES_VERSION, target);
+	await writeFile(path.join(postgresDir, 'manifest.json'), JSON.stringify({ ...entry, builtAt: new Date().toISOString() }, null, 2));
+	return entry;
+}
+
 const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 async function buildNodePackage(name) {
-	const src = path.join(repoDir, name);
+	const scratch = await mkdtemp(path.join(os.tmpdir(), 'shuffle-package-'));
+	const src = path.join(scratch, name);
 	const dest = path.join(outDir, 'server', name);
 	const env = { ...process.env, PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1', PUPPETEER_SKIP_DOWNLOAD: '1' };
-	run(npmCmd, ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: src, env, shell: process.platform === 'win32' });
-	run(npmCmd, ['run', 'build'], { cwd: src, env, shell: process.platform === 'win32' });
-	run(npmCmd, ['prune', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: src, env, shell: process.platform === 'win32' });
-	await rm(dest, { recursive: true, force: true });
-	await mkdir(dest, { recursive: true });
-	for (const item of ['dist', 'node_modules', 'package.json']) {
-		await cp(path.join(src, item), path.join(dest, item), { recursive: true });
+	try {
+		await cp(path.join(repoDir, name), src, {
+			recursive: true,
+			filter: (file) => !path.relative(path.join(repoDir, name), file).split(path.sep).some((part) => ['node_modules', 'dist', '.git', '.env'].includes(part))
+		});
+		run(npmCmd, ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: src, env, shell: process.platform === 'win32' });
+		run(npmCmd, ['run', 'build'], { cwd: src, env, shell: process.platform === 'win32' });
+		run(npmCmd, ['prune', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: src, env, shell: process.platform === 'win32' });
+		await rm(dest, { recursive: true, force: true });
+		await mkdir(dest, { recursive: true });
+		for (const item of ['dist', 'node_modules', 'package.json']) {
+			await cp(path.join(src, item), path.join(dest, item), { recursive: true });
+		}
+	} finally {
+		await rm(scratch, { recursive: true, force: true });
 	}
-	// The dev dependencies are needed again for local work; restore them quietly.
-	spawnSync(npmCmd, ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: src, env, stdio: 'ignore', shell: process.platform === 'win32' });
 }
 
 async function copyServer() {
@@ -257,9 +326,7 @@ async function copyServer() {
 		}
 	});
 	if (!existsSync(path.join(frontendBuild, 'index.html'))) {
-		log('frontend build missing; building it');
-		run(npmCmd, ['ci', '--no-audit', '--no-fund'], { cwd: path.join(repoDir, 'frontend'), shell: process.platform === 'win32' });
-		run(npmCmd, ['run', 'build'], { cwd: path.join(repoDir, 'frontend'), shell: process.platform === 'win32' });
+		throw new Error('Frontend build missing. Build the frontend separately and pass --frontend-build; runtime assembly never installs into the source checkout.');
 	}
 	await cp(frontendBuild, path.join(dest, 'app', 'static'), { recursive: true });
 	for (const file of ['requirements.txt', 'requirements-native.txt', 'LICENSE']) {
@@ -283,6 +350,9 @@ async function main() {
 	await mkdir(cacheDir, { recursive: true });
 	const python = await installPython();
 	const node = await installNode();
+	let postgres = null;
+	if (args['skip-postgres']) log('skipping PostgreSQL (--skip-postgres)');
+	else postgres = await installPostgres();
 	await copyServer();
 	await buildNodePackage('tools');
 	await buildNodePackage('browser-mcp');
@@ -293,12 +363,14 @@ async function main() {
 		arch,
 		python,
 		node,
+		postgres,
 		builtAt: new Date().toISOString(),
 		host: os.hostname()
 	};
 	await writeFile(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
 	const size = await dirSize(outDir);
 	log(`done: ${(size / 1024 / 1024).toFixed(0)} MB in ${outDir}`);
+	if (postgres) log(`PostgreSQL ${postgres.version} (${postgres.target}): ${((await dirSize(postgresDir)) / 1024 / 1024).toFixed(0)} MB in ${postgresDir}`);
 }
 
 async function dirSize(dir) {

@@ -16,6 +16,7 @@
  */
 
 import type { ChatMessage, SubagentChildMessage, Task, TeammateStatus } from '../../types';
+import { apiBase } from '$lib/api/runtime';
 import type { SessionEvent } from '$lib/contract/events';
 import { isSwarmTool } from '$lib/utils/swarm';
 
@@ -478,7 +479,7 @@ function str(v: unknown): string {
 function artifactScreenshotUrl(v: unknown, sessionId?: string): string | undefined {
 	if (!Array.isArray(v)) return undefined;
 	const hash = v.find((h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h));
-	return hash ? `/api/v1/artifacts/${hash}${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}` : undefined;
+	return hash ? `${apiBase()}/artifacts/${hash}${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}` : undefined;
 }
 
 function scopedScreenshot(v: unknown, sessionId?: string): string | undefined {

@@ -47,6 +47,60 @@ class WorkerDownloadClientTest {
         assertThrows(CancellationException::class.java) { client.save(server, "${server.baseUrl}/file", "session=test", "test", ByteArrayOutputStream(), { false }, {}) }
         assertEquals(0, requests)
     }
+
+    @Test fun rangedAssetsPreserveBearerAccessHeadersAndResponseWithoutBuffering() {
+        val seen = mutableListOf<Request>()
+        val client = WorkerDownloadClient(OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request(); seen.add(request)
+            if (seen.size == 1) response(request, 307, "/final.mp4") else response(request, 206)
+                .newBuilder().header("Content-Range", "bytes 2-4/12").header("Accept-Ranges", "bytes").build()
+        }.build())
+        client.open(server, "${server.baseUrl}/clip.mp4", "session=stale-owner; CF_Authorization=fixture; other=untrusted", "agent", { true }, {},
+            "Bearer paired-token", headers = mapOf("Range" to "bytes=2-4", "If-Range" to "fixture-etag",
+                "Authorization" to "Bearer injected", "CF-Access-Client-Secret" to "injected", "Cookie" to "injected")).use {
+            assertEquals(206, it.code)
+            assertEquals("bytes 2-4/12", it.header("Content-Range"))
+            assertEquals("bytes", it.header("Accept-Ranges"))
+            assertEquals("small benign file", it.body!!.string())
+        }
+        assertEquals(2, seen.size)
+        seen.forEach {
+            assertEquals("Bearer paired-token", it.header("Authorization"))
+            assertEquals("bytes=2-4", it.header("Range"))
+            assertEquals("fixture-etag", it.header("If-Range"))
+            assertEquals("test-id", it.header("CF-Access-Client-Id"))
+            assertEquals("test-secret", it.header("CF-Access-Client-Secret"))
+            assertEquals("CF_Authorization=fixture", it.header("Cookie"))
+            assertFalse(it.url.toString().contains("paired-token"))
+        }
+    }
+    @Test fun bearerNeverFollowsCrossOriginRedirectsOrUnboundedLoops() {
+        for (target in listOf("https://outside.example/a", "http://worker.example/a", "//worker.example.evil/a", "https://worker.example:8443/a", "https://user@worker.example/a")) {
+            val seen = mutableListOf<Request>()
+            val client = WorkerDownloadClient(OkHttpClient.Builder().followRedirects(true).addInterceptor { chain ->
+                seen.add(chain.request()); response(chain.request(), 302, target)
+            }.build())
+            assertThrows(IllegalArgumentException::class.java) {
+                client.open(server, "${server.baseUrl}/asset", null, "agent", { true }, {}, "Bearer paired-token")
+            }
+            assertEquals(1, seen.size)
+            assertEquals("worker.example", seen.single().url.host)
+        }
+        var seen = 0
+        val loop = WorkerDownloadClient(OkHttpClient.Builder().addInterceptor { chain -> seen++; response(chain.request(), 302, "/loop") }.build())
+        assertThrows(IllegalArgumentException::class.java) { loop.open(server, "${server.baseUrl}/loop", null, "agent", { true }, {}, "Bearer paired-token") }
+        assertEquals(6, seen)
+    }
+    @Test fun headAndRangeFailureRetainTheirStatusAndHeaders() {
+        val client = WorkerDownloadClient(OkHttpClient.Builder().addInterceptor { chain ->
+            assertEquals("HEAD", chain.request().method)
+            response(chain.request(), 416).newBuilder().header("Content-Range", "bytes */12").build()
+        }.build())
+        client.open(server, "${server.baseUrl}/clip.mp4", null, "agent", { true }, {}, "Bearer paired-token", "HEAD").use {
+            assertEquals(416, it.code)
+            assertEquals("bytes */12", it.header("Content-Range"))
+        }
+    }
     @Test fun authorizationFailureIsNotSavedAsDownloadedFile() {
         val client = WorkerDownloadClient(OkHttpClient.Builder().addInterceptor { chain -> response(chain.request(), 401) }.build())
         val sink = ByteArrayOutputStream()

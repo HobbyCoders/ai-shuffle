@@ -2,38 +2,51 @@
  * IPC handlers behind the preload bridge.
  *
  * Every handler checks that the message comes from the main window. The
- * database setup and the worker's raw log are additionally limited to the
- * bundled pages (file://), so the worker's web UI can steer its own window
- * but never read the database credentials this app holds.
+ * worker's raw log is additionally limited to the bundled status page
+ * (file://). No renderer can read or change database credentials.
  */
 import { app, ipcMain, Notification, shell, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron';
-import { validatePostgres, type PostgresConfig, type SettingsStore } from './settings';
+import type { PostgresPhase } from './postgres';
 import type { Updater } from './updater';
 import { MainWindow, TITLE_BAR_HEIGHT, type TitleBarTheme } from './window';
-import { checkPostgres, type WorkerState, type WorkerSupervisor } from './worker';
+import { type WorkerState, type WorkerSupervisor } from './worker';
+
+/** The database behind the worker, as the status page shows it. */
+export interface PostgresStatus {
+	/** True when the app's own bundled PostgreSQL is in use. */
+	managed: boolean;
+	/** The embedded supervisor's phase. */
+	phase: PostgresPhase;
+	host: string | null;
+	port: number | null;
+	error: string | null;
+	logPath: string | null;
+}
+
+export type DesktopState = WorkerState & { postgres: PostgresStatus };
 
 export interface WorkerControl {
 	supervisor: WorkerSupervisor | null;
 	/** Why no supervisor exists (runtime missing), shown on the status page. */
 	runtimeError: string | null;
-	state(): WorkerState;
-	openSetup(): Promise<void>;
-	cancelSetup(): Promise<void>;
-	saveAndStart(config: PostgresConfig): Promise<void>;
+	/** Whether the bundled PostgreSQL can be used, and if not, why. */
+	bundledPostgresError: string | null;
+	state(): DesktopState;
+	/** The supervisor lines followed by the worker's, for the status page log. */
+	tail(): string[];
+	openStatus(): Promise<void>;
 	restart(): Promise<void>;
 }
 
 interface Deps {
 	window: MainWindow;
-	settings: SettingsStore;
 	updater: Updater;
 	worker: WorkerControl;
-	keyringAvailable: boolean;
 }
 
 type Handler = (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown;
 
-export function registerIpc({ window, settings, updater, worker, keyringAvailable }: Deps): void {
+export function registerIpc({ window, updater, worker }: Deps): void {
 	const fromMainWindow = (event: IpcMainInvokeEvent | IpcMainEvent) => window.isOwnSender(event.sender.id);
 	const fromBundledPage = (event: IpcMainInvokeEvent | IpcMainEvent) =>
 		fromMainWindow(event) && (event.senderFrame?.url ?? '').startsWith('file:');
@@ -116,33 +129,15 @@ export function registerIpc({ window, settings, updater, worker, keyringAvailabl
 	handle('desktop:worker-state', fromMainWindow, () => worker.state());
 	handle('desktop:worker-restart', fromMainWindow, () => worker.restart());
 	handle('desktop:worker-open-logs', fromMainWindow, () => void shell.showItemInFolder(worker.state().logPath));
-	handle('desktop:worker-open-setup', fromMainWindow, () => worker.openSetup());
+	handle('desktop:worker-open-status', fromMainWindow, () => worker.openStatus());
 
 	// Updates.
 	handle('desktop:update-state', fromMainWindow, () => updater.current);
 	handle('desktop:update-check', fromMainWindow, () => updater.check());
 	handle('desktop:update-install', fromMainWindow, () => updater.install());
 
-	// Bundled pages only: database setup and the raw log.
-	handle('desktop:settings-get', fromBundledPage, () => ({
-		postgres: settings.postgresPublic(),
-		configured: settings.configured,
-		keyringAvailable,
-		runtimeError: worker.runtimeError
-	}));
-	handle('desktop:db-check', fromBundledPage, (_e, input, action) => {
-		const validated = validatePostgres((input ?? {}) as Record<string, unknown>);
-		if (!validated.ok) return { ok: false, code: 'unknown', error: validated.error };
-		if (!worker.supervisor) return { ok: false, code: 'runtime', error: worker.runtimeError ?? 'The worker runtime is missing.' };
-		return checkPostgres(worker.supervisor.runtime, validated.config, action === 'create' ? 'create' : 'test');
-	});
-	handle('desktop:setup-save', fromBundledPage, async (_e, input) => {
-		const validated = validatePostgres((input ?? {}) as Record<string, unknown>);
-		if (!validated.ok) throw new Error(validated.error);
-		await worker.saveAndStart(validated.config);
-	});
-	handle('desktop:setup-cancel', fromBundledPage, () => worker.cancelSetup());
-	handle('desktop:worker-tail', fromBundledPage, () => worker.supervisor?.tail() ?? []);
+	// Bundled status page only: raw logs. No database configuration IPC exists.
+	handle('desktop:worker-tail', fromBundledPage, () => worker.tail());
 }
 
 function isTitleBarTheme(value: unknown): value is TitleBarTheme {

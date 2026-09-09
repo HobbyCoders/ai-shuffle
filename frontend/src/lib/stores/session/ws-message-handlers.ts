@@ -891,9 +891,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// Only the in-view session surfaces the banner and resets its
 				// streaming flag (so the user can send again).
 				if (isActiveError) {
+					// `offer_fork`: the worker that owns this session is unreachable —
+					// the chat renders a "Fork here" action for POST /network/sessions/{id}/fork-here.
+					const forkOffer = data.offer_fork === true && erroredSessionId ? erroredSessionId : null;
 					update(s => ({
 						...s,
 						error: errMessage,
+						forkOfferSessionId: forkOffer,
 						isStreaming: false,
 						optimisticStreaming: false,
 						streamStartTime: null,

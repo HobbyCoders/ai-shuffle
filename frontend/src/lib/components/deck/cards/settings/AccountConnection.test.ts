@@ -3,13 +3,39 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), delete: vi.fn() }));
+const capability = vi.hoisted(() => ({ account_sign_in_available: true as boolean | undefined }));
+vi.mock('$lib/stores/auth.svelte', () => ({ auth: { subscribe(run: (value: unknown) => void) { run({ status: capability }); return () => {}; } } }));
 vi.mock('$lib/api/client', () => ({ api, getErrorMessage: (e: Error) => e.message }));
 import AccountConnection from './AccountConnection.svelte';
 
 const disconnected = { signed_in: false, status: 'disconnected', code: null, qr_svg: null, error: null };
 const waiting = { ...disconnected, status: 'waiting', code: 'TESTONLYCODE', authorization_url: 'https://account.example.com/claim' };
-beforeEach(() => { vi.resetAllMocks(); api.get.mockResolvedValue(disconnected); });
+beforeEach(() => { vi.resetAllMocks(); capability.account_sign_in_available = true; api.get.mockResolvedValue(disconnected); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
+
+it('disables unavailable account sign-in and explains how to enable it without a login request', async () => {
+    capability.account_sign_in_available = false;
+    render(AccountConnection);
+    const button = await screen.findByRole('button', { name: 'Log in' });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText('Account sign-in is not configured on this worker. Ask the operator to enable it.')).toBeTruthy();
+    expect(button.getAttribute('aria-describedby')).toBe('account-sign-in-unavailable');
+    await fireEvent.click(button);
+    expect(api.post).not.toHaveBeenCalled();
+    expect(screen.queryByRole('link')).toBeNull();
+});
+
+it('keeps local logout available when account sign-in is unavailable', async () => {
+    capability.account_sign_in_available = false;
+    api.get.mockResolvedValue({ ...disconnected, signed_in: true });
+    api.delete.mockResolvedValue(disconnected);
+    render(AccountConnection);
+    const button = await screen.findByRole('button', { name: 'Log out' });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(button);
+    expect(api.delete).toHaveBeenCalledExactlyOnceWith('/mobile/hub/connection');
+    expect((await screen.findByRole('button', { name: 'Log in' }) as HTMLButtonElement).disabled).toBe(true);
+});
 
 it('shows a compact logged-out row and reveals authorization only after Log in', async () => {
     render(AccountConnection, { workerName: 'Desk worker' });
