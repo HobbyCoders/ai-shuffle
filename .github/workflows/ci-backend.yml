@@ -1,10 +1,11 @@
 name: CI Backend
 
 # Python half of the split CI: the app's fast test subset, the packaging
-# checks, the real-PostgreSQL mobile contracts and (when fluid/ changed) the
-# fluid harness unit suite, all on one runner. Paths-filtered: a PR that
-# touches no backend file runs this workflow not at all, so docs-only PRs run
-# no CI whatsoever — intended, that is the point of the split.
+# checks and the real-PostgreSQL mobile contracts on one runner. (fluid's own
+# unit suite stays in ci-fluid.yml: its dev extras need mcp>=2 while the app
+# pins 1.x.) Paths-filtered: a PR that touches no backend file runs this
+# workflow not at all, so docs-only PRs run no CI whatsoever — intended, that
+# is the point of the split.
 #
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
@@ -38,8 +39,7 @@ on:
 
 permissions:
   contents: read
-  # dorny/paths-filter reads the PR file list; the canary gate reads run history.
-  pull-requests: read
+  # The canary gate reads run history.
   actions: read
 
 # Cancel superseded runs (force-pushes / rapid successive commits) instead of
@@ -88,14 +88,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dorny/paths-filter@v3
-        id: changes
-        with:
-          filters: |
-            fluid:
-              - 'fluid/**'
-              - '.github/workflows/ci-backend.yml'
-
       # Upstream actions/setup-* on purpose: Blacksmith archived its
       # useblacksmith/setup-* forks and now routes the official cache actions
       # through its colocated cache transparently.
@@ -110,12 +102,13 @@ jobs:
       - name: Install dependencies
         # The fluid harness (fluid/) must be importable or tests/core's fluid
         # modules fail at COLLECTION, aborting the whole run before any test
-        # executes. Its dev extras are installed too so the fluid unit step
-        # below can run in the same environment.
+        # executes. fluid's own unit suite runs separately in ci-fluid.yml;
+        # never install its dev extras here, they upgrade mcp past the app's
+        # pin and break a dozen app tests.
         run: |
           python -m pip install --upgrade pip==26.2.1
           pip install -r requirements.txt -r requirements-dev.txt
-          pip install -e './fluid[dev]'
+          pip install -e ./fluid
 
       - name: Run fast test subset
         # The suite uses an in-memory SQLite shim — no Postgres service needed.
@@ -131,14 +124,6 @@ jobs:
 
       - name: Packaging and backup regression checks
         run: python -m pytest tests/test_packaging_audit.py tests/test_run_local_supervisor.py tests/test_chrome_supervisor.py -o addopts="" -q --timeout=120
-
-      - name: fluid unit tests
-        # fluid is developed on Windows; this Linux run is the one that catches
-        # POSIX-only failures (path separators, os.fork, unix sockets).
-        # fluid/pyproject.toml carries the pytest config (asyncio_mode=auto);
-        # pytest picks it up as rootdir because the test path sits under it.
-        if: github.event_name != 'pull_request' || steps.changes.outputs.fluid == 'true'
-        run: python -m pytest fluid/tests/unit -q -p no:cacheprovider --timeout=120
 
       - name: Start the runner's PostgreSQL
         # The Ubuntu runner image ships PostgreSQL preinstalled and stopped;
