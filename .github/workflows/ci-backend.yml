@@ -1,8 +1,10 @@
 name: CI Backend
 
-# Backend half of the split CI. Paths-filtered: a PR that touches no backend
-# file runs this workflow not at all, so docs-only PRs run no CI whatsoever —
-# intended, that is the point of the split.
+# Python half of the split CI: the app's fast test subset, the packaging
+# checks, the real-PostgreSQL mobile contracts and (when fluid/ changed) the
+# fluid harness unit suite, all on one runner. Paths-filtered: a PR that
+# touches no backend file runs this workflow not at all, so docs-only PRs run
+# no CI whatsoever — intended, that is the point of the split.
 #
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
@@ -27,11 +29,18 @@ on:
   # already ran it, and re-running on the merge commit doubled the bill for a
   # result that is green ~always. What that loses is semantic conflicts between
   # two branches that were each green alone; the canary catches those within
-  # ~6h instead of at the next PR.
+  # ~6h instead of at the next PR. The gate job below skips the paid runner
+  # when main has not moved since the last green canary.
   schedule:
     - cron: '7 */6 * * *'
   # Manual canary (`gh workflow run ci-backend.yml`).
   workflow_dispatch:
+
+permissions:
+  contents: read
+  # dorny/paths-filter reads the PR file list; the canary gate reads run history.
+  pull-requests: read
+  actions: read
 
 # Cancel superseded runs (force-pushes / rapid successive commits) instead of
 # letting stale runs finish and fail/email after a newer commit already ran.
@@ -40,8 +49,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  canary-gate:
+    name: Canary gate
+    # Use a standard GitHub-hosted runner for the revision lookup, so unchanged revisions do not allocate a paid
+    # canary job.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-backend.yml/runs?event=schedule&status=success&branch=main&per_page=1" --jq '.workflow_runs[0].head_sha // empty')"
+          if [ "$last" = "$GITHUB_SHA" ]; then
+            echo "main is still at $GITHUB_SHA, which the last canary already verified; skipping."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "main moved from ${last:-<none>} to $GITHUB_SHA; running the canary."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   backend:
     name: Backend tests
+    needs: canary-gate
+    # PRs and manual runs always run; the schedule runs only when main moved.
+    # !cancelled() keeps this job alive when the gate is skipped on a PR.
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.canary-gate.outputs.changed == 'true') }}
     # Keep a hard job timeout to bound silent backend wedges and surface a useful failure rather than waiting
     # for the platform default.
     timeout-minutes: 20
@@ -51,6 +87,14 @@ jobs:
       ALLOW_REAL_PG: "0"
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            fluid:
+              - 'fluid/**'
+              - '.github/workflows/ci-backend.yml'
 
       # Upstream actions/setup-* on purpose: Blacksmith archived its
       # useblacksmith/setup-* forks and now routes the official cache actions
@@ -66,11 +110,12 @@ jobs:
       - name: Install dependencies
         # The fluid harness (fluid/) must be importable or tests/core's fluid
         # modules fail at COLLECTION, aborting the whole run before any test
-        # executes. fluid's own unit suite runs separately in ci-fluid.yml.
+        # executes. Its dev extras are installed too so the fluid unit step
+        # below can run in the same environment.
         run: |
           python -m pip install --upgrade pip==26.2.1
           pip install -r requirements.txt -r requirements-dev.txt
-          pip install -e ./fluid
+          pip install -e './fluid[dev]'
 
       - name: Run fast test subset
         # The suite uses an in-memory SQLite shim — no Postgres service needed.
@@ -78,10 +123,49 @@ jobs:
         # --timeout=120 bounds the rare hard-wedge per test: a wedged run fails
         # in ~2 minutes with the hung test named, instead of billing the full
         # 20-minute job timeout with no diagnosis.
-        run: python -m pytest tests/api tests/core tests/db tests/middleware tests/contract tests/performance -o addopts="" -q -p no:cacheprovider --timeout=120
+        # -n 4 (pytest-xdist) oversubscribes the 2 vCPUs on purpose: the suite
+        # is dominated by app start/stop and short waits, not CPU, so four
+        # workers hide most of that wall-clock (4.3x faster than serial when
+        # measured locally).
+        run: python -m pytest tests/api tests/core tests/db tests/middleware tests/contract tests/performance -o addopts="" -q -p no:cacheprovider --timeout=120 -n 4
 
       - name: Packaging and backup regression checks
         run: python -m pytest tests/test_packaging_audit.py tests/test_run_local_supervisor.py tests/test_chrome_supervisor.py -o addopts="" -q --timeout=120
+
+      - name: fluid unit tests
+        # fluid is developed on Windows; this Linux run is the one that catches
+        # POSIX-only failures (path separators, os.fork, unix sockets).
+        # fluid/pyproject.toml carries the pytest config (asyncio_mode=auto);
+        # pytest picks it up as rootdir because the test path sits under it.
+        if: github.event_name != 'pull_request' || steps.changes.outputs.fluid == 'true'
+        run: python -m pytest fluid/tests/unit -q -p no:cacheprovider --timeout=120
+
+      - name: Start the runner's PostgreSQL
+        # The Ubuntu runner image ships PostgreSQL preinstalled and stopped;
+        # starting it costs seconds, where a service container costs a pull
+        # and a health-check wait on every run.
+        run: |
+          sudo systemctl start postgresql.service
+          sudo -u postgres psql -v ON_ERROR_STOP=1 \
+            -c "CREATE USER shuffle_mobile_test WITH PASSWORD 'mobile-test-only'" \
+            -c "CREATE DATABASE shuffle_mobile_test OWNER shuffle_mobile_test"
+          pg_isready -h 127.0.0.1 -p 5432
+
+      - name: Mobile PostgreSQL contracts
+        env:
+          ALLOW_REAL_PG: '1'
+          MOBILE_POSTGRES_TEST: '1'
+          MOBILE_PG_HOST: '127.0.0.1'
+          MOBILE_PG_PORT: '5432'
+          MOBILE_PG_DATABASE: shuffle_mobile_test
+          MOBILE_PG_USER: shuffle_mobile_test
+          MOBILE_PG_PASSWORD: mobile-test-only
+          AI_SHUFFLE_ENV_FILE: /dev/null
+          PYTHONPATH: .
+        run: >-
+          python -m pytest tests/integration/test_mobile_postgres.py
+          --confcutdir=tests/integration -o addopts="" -p no:cacheprovider
+          --timeout=60 -v
 
       - name: Audit public Python dependencies
         run: |

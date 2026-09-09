@@ -82,10 +82,17 @@ class TestPingProtocol:
         mock_ws = MagicMock()
         mock_ws.client_state = WebSocketState.CONNECTED
 
-        task = asyncio.create_task(ping_loop(mock_ws, "test-device", send_fn=failing_send))
-        await asyncio.sleep(16)
-        # Task should have exited after first failed send
-        assert task.done() or call_count <= 1
+        # Patch the loop's 30s interval so the first ping goes out at once
+        # instead of holding the suite for real wall-clock seconds.
+        async def no_sleep(_seconds):
+            return None
+
+        with patch("app.api.ws_utils.asyncio.sleep", no_sleep):
+            await asyncio.wait_for(
+                ping_loop(mock_ws, "test-device", send_fn=failing_send), timeout=2
+            )
+        # The loop exits after the first failed send
+        assert call_count == 1
 
 
 # =============================================================================

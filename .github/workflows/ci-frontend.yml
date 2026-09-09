@@ -16,7 +16,8 @@ on:
   # already ran it, and re-running on the merge commit doubled the bill for a
   # result that is green ~always. What that loses is semantic conflicts between
   # two branches that were each green alone; the canary catches those within
-  # ~6h instead of at the next PR.
+  # ~6h instead of at the next PR. The gate job below skips the paid runner
+  # when main has not moved since the last green canary.
   schedule:
     - cron: '7 */6 * * *'
   # Manual canary (`gh workflow run ci-frontend.yml`).
@@ -29,11 +30,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  canary-gate:
+    name: Canary gate
+    # Use a standard GitHub-hosted runner for the revision lookup, so unchanged revisions do not allocate a paid
+    # canary job.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: read
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-frontend.yml/runs?event=schedule&status=success&branch=main&per_page=1" --jq '.workflow_runs[0].head_sha // empty')"
+          if [ "$last" = "$GITHUB_SHA" ]; then
+            echo "main is still at $GITHUB_SHA, which the last canary already verified; skipping."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "main moved from ${last:-<none>} to $GITHUB_SHA; running the canary."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   frontend:
     name: JavaScript package checks
+    needs: canary-gate
+    # PRs and manual runs always run; the schedule runs only when main moved.
+    # !cancelled() keeps this job alive when the gate is skipped on a PR.
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.canary-gate.outputs.changed == 'true') }}
     # Choose a frontend runner suited to the suite parallelism and keep a bounded job timeout.
     timeout-minutes: 20
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Use the smaller frontend runner for mostly single-threaded build, type-check and test work.
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
       run:
         working-directory: frontend

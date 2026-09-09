@@ -284,7 +284,7 @@ python -m pytest fluid/tests/unit -q
 ```
 
 Run it on Linux as well as Windows before opening a PR that touches `fluid/`;
-CI (`ci-fluid.yml`) runs it on Linux.
+CI (the fluid step of `ci-backend.yml`) runs it on Linux.
 
 ### Android Tests
 
