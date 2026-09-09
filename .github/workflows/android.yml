@@ -259,7 +259,7 @@ jobs:
     name: Publish verified Android download
     needs: [account-hub, build, android-ui]
     if: inputs.publish_download && github.event_name != 'pull_request' && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     permissions:
       contents: write

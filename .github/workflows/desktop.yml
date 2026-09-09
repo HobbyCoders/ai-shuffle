@@ -40,7 +40,7 @@ concurrency:
 jobs:
   check:
     name: Typecheck and unit tests
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
       run:
         working-directory: desktop
@@ -61,7 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [blacksmith-2vcpu-ubuntu-2404, blacksmith-2vcpu-windows-2025, blacksmith-6vcpu-macos-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -105,7 +105,7 @@ jobs:
   runtime:
     name: Assemble worker runtime (linux-x64)
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
       run:
         working-directory: desktop
@@ -140,7 +140,7 @@ jobs:
   windows-preview:
     name: Windows preview installer and fresh database
     needs: check
-    runs-on: windows-latest
+    runs-on: blacksmith-2vcpu-windows-2025
     timeout-minutes: 35
     defaults:
       run:

@@ -94,13 +94,13 @@ jobs:
       matrix:
         include:
           - target: win-x64
-            os: windows-latest
+            os: blacksmith-4vcpu-windows-2025
             arch: x64
           - target: mac-arm64
-            os: macos-latest
+            os: blacksmith-6vcpu-macos-latest
             arch: arm64
           - target: linux-x64
-            os: ubuntu-latest
+            os: blacksmith-4vcpu-ubuntu-2404
             arch: x64
     runs-on: ${{ matrix.os }}
     defaults:
