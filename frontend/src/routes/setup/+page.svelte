@@ -17,17 +17,18 @@
 	import { auth, anyCredential } from '$lib/stores/auth.svelte';
 	import {
 		getWorkspaceConfig, setupInstallation, setWorkspaceConfig,
-		getGithubAuthStatus, startGithubWebLogin, loginGithubWithToken, completeOnboarding
+		completeOnboarding
 	} from '$lib/api/auth';
 	import { getErrorMessage, type WorkspaceConfig } from '$lib/api/client';
 	import { createNetwork, getNetworkStatus, unlockWithRecoveryKey, type NetworkStatus } from '$lib/api/network';
 	import SetupProgress from '$lib/components/SetupProgress.svelte';
+	import GitHubConnection from '$lib/components/GitHubConnection.svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
 	import AddProviderModal from '$lib/components/deck/cards/settings/providers/AddProviderModal.svelte';
 	import AccountPanel from '$lib/components/deck/cards/settings/AccountPanel.svelte';
 	import JoinNetworkPanel from '$lib/components/deck/cards/settings/JoinNetworkPanel.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
-	import { Check, Github, FolderOpen, Copy, ExternalLink, Loader2, Plus, Sparkles, UserRound, Link2, KeyRound, AlertTriangle, ChevronLeft } from 'lucide-svelte';
+	import { Check, FolderOpen, Loader2, Plus, Sparkles, UserRound, Link2, KeyRound, AlertTriangle, ChevronLeft } from 'lucide-svelte';
 
 	// ── Steps ────────────────────────────────────────────────────────────────
 	type SetupStep = 'start' | 'workspace' | 'providers';
@@ -133,16 +134,6 @@
 
 	// ── Providers & GitHub ──────────────────────────────────────────────────
 	let addProviderOpen = $state(false);
-	let githubIsAuthenticated = $state(false);
-	let githubUser = $state<string | null>(null);
-	let githubAuthMethod = $state<'device' | 'pat'>('device');
-	let githubDeviceCode = $state('');
-	let githubDeviceLoading = $state(false);
-	let githubPAT = $state('');
-	let githubPATLoading = $state(false);
-	let githubError = $state('');
-	let githubPollInterval = $state<ReturnType<typeof setInterval> | null>(null);
-	let codeCopied = $state(false);
 
 	function closeAddProvider() {
 		addProviderOpen = false;
@@ -153,54 +144,6 @@
 	async function loadProvidersStep() {
 		providers.ensureLoaded();
 		try { await auth.checkAuth(); } catch { /* non-critical */ }
-		try {
-			const githubStatus = await getGithubAuthStatus();
-			githubIsAuthenticated = githubStatus.authenticated;
-			githubUser = githubStatus.user;
-		} catch { /* non-critical */ }
-	}
-
-	async function startGithubDeviceFlow() {
-		githubDeviceLoading = true; githubError = '';
-		try {
-			const result = await startGithubWebLogin();
-			if (result.success && result.user_code) { githubDeviceCode = result.user_code; startGithubPoll(); }
-			else githubError = result.error || 'Failed to start the GitHub login';
-		} catch (e: unknown) {
-			githubError = getErrorMessage(e, 'Failed to start the GitHub login');
-		} finally { githubDeviceLoading = false; }
-	}
-
-	function startGithubPoll() {
-		if (githubPollInterval) clearInterval(githubPollInterval);
-		githubPollInterval = setInterval(async () => {
-			try {
-				const status = await getGithubAuthStatus();
-				if (status.authenticated) {
-					githubIsAuthenticated = true; githubUser = status.user; githubDeviceCode = '';
-					if (githubPollInterval) clearInterval(githubPollInterval);
-				}
-			} catch { /* ignore polling errors */ }
-		}, 3000);
-	}
-
-	async function connectGithubPAT() {
-		if (!githubPAT.trim()) return;
-		githubPATLoading = true; githubError = '';
-		try {
-			const result = await loginGithubWithToken(githubPAT.trim());
-			if (result.success) {
-				githubIsAuthenticated = true; githubPAT = '';
-				try { githubUser = (await getGithubAuthStatus()).user; } catch { /* non-critical */ }
-			} else githubError = result.error || 'Failed to authenticate with the token';
-		} catch (e: unknown) {
-			githubError = getErrorMessage(e, 'Failed to authenticate with the token');
-		} finally { githubPATLoading = false; }
-	}
-
-	async function copyDeviceCode() {
-		try { await navigator.clipboard.writeText(githubDeviceCode); codeCopied = true; setTimeout(() => (codeCopied = false), 2000); }
-		catch { /* clipboard may be unavailable */ }
 	}
 
 	// ── Navigation ───────────────────────────────────────────────────────────
@@ -253,7 +196,6 @@
 
 	onDestroy(() => {
 		stopNetworkPoll();
-		if (githubPollInterval) clearInterval(githubPollInterval);
 	});
 </script>
 
@@ -456,62 +398,7 @@
 
 					<div class="border-t border-border"></div>
 
-					<div class="space-y-3">
-						<div class="flex items-center gap-2">
-							<Github size={16} strokeWidth={1.5} class="text-foreground" />
-							<span class="text-sm font-semibold text-foreground">GitHub</span>
-							<span class="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border font-medium">Optional</span>
-						</div>
-						<p class="text-xs text-muted-foreground">Sign in to GitHub on this machine for pull requests, reviews and repository features.</p>
-						{#if githubIsAuthenticated}
-							<div class="bg-success/10 border border-success/30 text-success px-3 py-2.5 rounded-lg text-sm flex items-center gap-2">
-								<Check size={16} strokeWidth={2} />
-								<span>GitHub is connected{githubUser ? ` as @${githubUser}` : ''}</span>
-							</div>
-						{:else}
-							<div class="flex rounded-lg border border-border overflow-hidden text-sm">
-								<button type="button" class="flex-1 px-3 py-1.5 transition-colors {githubAuthMethod === 'device' ? 'bg-primary/10 text-primary font-medium' : 'text-muted-foreground hover:text-foreground'}" onclick={() => (githubAuthMethod = 'device')}>Browser Login</button>
-								<button type="button" class="flex-1 px-3 py-1.5 transition-colors border-l border-border {githubAuthMethod === 'pat' ? 'bg-primary/10 text-primary font-medium' : 'text-muted-foreground hover:text-foreground'}" onclick={() => (githubAuthMethod = 'pat')}>Access Token</button>
-							</div>
-							{#if githubAuthMethod === 'device'}
-								{#if githubDeviceCode}
-									<div class="space-y-3 bg-muted/30 border border-border rounded-lg p-4">
-										<p class="text-sm text-muted-foreground text-center">Enter this code at GitHub:</p>
-										<div class="flex items-center justify-center gap-3">
-											<code class="text-2xl font-mono font-bold tracking-widest text-foreground select-all">{githubDeviceCode}</code>
-											<button type="button" onclick={copyDeviceCode} class="btn btn-secondary px-2 py-1.5 text-xs flex items-center gap-1">
-												{#if codeCopied}<Check size={12} strokeWidth={2} /> Copied{:else}<Copy size={12} strokeWidth={1.5} /> Copy{/if}
-											</button>
-										</div>
-										<a href="https://github.com/login/device" target="_blank" rel="noopener noreferrer" class="btn btn-secondary w-full py-2 text-sm flex items-center justify-center gap-2">
-											<ExternalLink size={14} strokeWidth={1.5} /> Open github.com/login/device
-										</a>
-										<div class="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-											<Loader2 size={12} strokeWidth={2} class="animate-spin" /> Waiting for authentication...
-										</div>
-									</div>
-								{:else}
-									<button type="button" onclick={startGithubDeviceFlow} class="btn btn-secondary w-full py-2.5 text-sm" disabled={githubDeviceLoading}>
-										{#if githubDeviceLoading}<Loader2 size={14} strokeWidth={2} class="inline-block animate-spin mr-2" />{/if}
-										Login with Browser
-									</button>
-								{/if}
-							{:else}
-								<div class="space-y-2">
-									<div class="flex gap-2">
-										<input type="password" bind:value={githubPAT} class="input flex-1 text-sm font-mono" placeholder="ghp_..." aria-label="GitHub access token" />
-										<button type="button" onclick={connectGithubPAT} class="btn btn-secondary px-4" disabled={!githubPAT.trim() || githubPATLoading}>
-											{#if githubPATLoading}<Loader2 size={14} strokeWidth={2} class="animate-spin" />{:else}Connect{/if}
-										</button>
-									</div>
-									<p class="text-xs text-muted-foreground">Create a token at <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">github.com/settings/tokens</a> with <code class="text-xs">repo</code> scope.</p>
-								</div>
-							{/if}
-						{/if}
-						{#if githubError}
-							<div class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">{githubError}</div>
-						{/if}
-					</div>
+					<GitHubConnection />
 
 					<div class="border-t border-border pt-4">
 						<div class="flex gap-3">

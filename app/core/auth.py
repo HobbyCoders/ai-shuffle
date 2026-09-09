@@ -112,20 +112,19 @@ class AuthService:
             home = Path.home() if sys.platform == 'win32' else Path('/home/appuser')
         self.config_dir = home / '.claude'
 
-        # GitHub CLI config location varies by platform
-        # Windows: %APPDATA%\GitHub CLI\
-        # Linux/Mac: ~/.config/gh/
-        if sys.platform == 'win32':
-            appdata = os.environ.get('APPDATA')
-            if appdata:
-                self.gh_config_dir = Path(appdata) / 'GitHub CLI'
-            else:
-                self.gh_config_dir = home / 'AppData' / 'Roaming' / 'GitHub CLI'
+        # Match gh's config resolution, including custom/container locations.
+        if os.environ.get('GH_CONFIG_DIR'):
+            self.gh_config_dir = Path(os.environ['GH_CONFIG_DIR'])
+        elif os.environ.get('XDG_CONFIG_HOME'):
+            self.gh_config_dir = Path(os.environ['XDG_CONFIG_HOME']) / 'gh'
+        elif sys.platform == 'win32':
+            self.gh_config_dir = Path(os.environ.get('APPDATA', home / 'AppData' / 'Roaming')) / 'GitHub CLI'
         else:
             self.gh_config_dir = home / '.config' / 'gh'
 
         # Background process for GitHub web login device flow
         self._gh_web_login_process: Optional[subprocess.Popen] = None
+        self._gh_web_login_error: Optional[str] = None
 
         # Note: OAuth state is now managed by direct_oauth module (app/core/oauth.py)
 
@@ -485,13 +484,12 @@ class AuthService:
                 logger.debug("GitHub CLI not found")
                 return False
 
-            home_env = os.environ.get('HOME', str(Path.home()))
             result = subprocess.run(
-                [gh_cmd, 'auth', 'status'],
+                [gh_cmd, 'auth', 'status', '--hostname', 'github.com'],
                 capture_output=True,
                 text=True,
                 timeout=10,
-                env={**os.environ, 'HOME': home_env}
+                env=self._github_env()
             )
             if result.returncode == 0:
                 return True
@@ -503,16 +501,20 @@ class AuthService:
         except Exception as e:
             logger.warning(f"GitHub auth status check failed: {e}")
 
-        # Fallback: check if hosts file exists with content
-        hosts_file = self.gh_config_dir / 'hosts.yml'
-        if hosts_file.exists() and hosts_file.stat().st_size > 0:
-            logger.debug(f"hosts.yml exists at {hosts_file}, assuming authenticated")
-            return True
-
         return False
 
     def get_github_auth_info(self) -> Dict[str, Any]:
-        """Get GitHub CLI authentication info"""
+        """Get GitHub CLI authentication info and reconcile the device flow."""
+        proc = self._gh_web_login_process
+        if proc is not None and proc.poll() is not None:
+            self._gh_web_login_process = None
+            if proc.returncode == 0:
+                try:
+                    self._setup_github_git(find_gh_executable())
+                except Exception:
+                    self._gh_web_login_error = 'GitHub signed in, but Git credentials could not be configured. Retry connecting.'
+            else:
+                self._gh_web_login_error = 'GitHub web sign-in expired or was cancelled. Please try again.'
         authenticated = self.is_github_authenticated()
         user = None
 
@@ -520,13 +522,12 @@ class AuthService:
             try:
                 gh_cmd = find_gh_executable()
                 if gh_cmd:
-                    home_env = os.environ.get('HOME', str(Path.home()))
                     result = subprocess.run(
-                        [gh_cmd, 'api', 'user', '-q', '.login'],
+                        [gh_cmd, 'api', '--hostname', 'github.com', 'user', '-q', '.login'],
                         capture_output=True,
                         text=True,
                         timeout=10,
-                        env={**os.environ, 'HOME': home_env}
+                        env=self._github_env()
                     )
                     if result.returncode == 0:
                         user = result.stdout.strip()
@@ -536,76 +537,108 @@ class AuthService:
         return {
             "authenticated": authenticated,
             "user": user,
-            "config_dir": str(self.gh_config_dir)
+            "config_dir": str(self.gh_config_dir),
+            "web_login_pending": self._gh_web_login_process is not None,
+            "web_login_error": self._gh_web_login_error,
         }
 
+    def _github_env(self) -> Dict[str, str]:
+        return {**os.environ, 'GH_CONFIG_DIR': str(self.gh_config_dir),
+                'HOME': os.environ.get('HOME', str(Path.home()))}
+
+    def _setup_github_git(self, gh_cmd: str) -> None:
+        # Host-scoped helper; do not replace credential helpers for other hosts.
+        result = subprocess.run(
+            [gh_cmd, 'auth', 'setup-git', '--hostname', 'github.com'],
+            capture_output=True, text=True, timeout=10, env=self._github_env(),
+        )
+        if result.returncode:
+            raise RuntimeError('GitHub signed in, but Git credentials could not be configured. Retry connecting.')
+
+    def _save_limited_github_token(self, token: str, user: str) -> None:
+        """Save an API-validated, limited-scope PAT in gh's native file store.
+
+        `gh auth login --with-token` insists on classic repo/read:org scopes,
+        even for valid public-only PATs. Use its hosts format for that case,
+        preserving other accounts/hosts and atomically writing owner-only data.
+        """
+        import tempfile
+        import yaml
+
+        hosts_file = self.gh_config_dir / 'hosts.yml'
+        hosts = yaml.safe_load(hosts_file.read_text()) if hosts_file.exists() else {}
+        if hosts is None:
+            hosts = {}
+        if not isinstance(hosts, dict):
+            raise ValueError('GitHub CLI hosts configuration is invalid')
+        host = hosts.setdefault('github.com', {})
+        host.update(user=user, oauth_token=token, git_protocol='https')
+        host.setdefault('users', {}).setdefault(user, {})['oauth_token'] = token
+        fd, name = tempfile.mkstemp(prefix='.hosts-', dir=self.gh_config_dir)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                yaml.safe_dump(hosts, stream, sort_keys=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, hosts_file)
+        finally:
+            Path(name).unlink(missing_ok=True)
+
     def github_login_with_token(self, token: str) -> Dict[str, Any]:
-        """Login to GitHub CLI using a personal access token"""
+        """Validate the PAT itself before saving it; permissions are per operation."""
+        if not isinstance(token, str) or not token.strip():
+            return {'success': False, 'error': 'A personal access token is required.'}
+        token = token.strip()
+        if any(c.isspace() for c in token):
+            return {'success': False, 'error': 'The token must not contain whitespace.'}
         try:
             gh_cmd = find_gh_executable()
             if not gh_cmd:
-                return {
-                    "success": False,
-                    "message": "GitHub CLI not found",
-                    "error": "Could not find 'gh' command. Please install GitHub CLI."
-                }
-
-            home_env = os.environ.get('HOME', str(Path.home()))
-
-            # Ensure config directory exists
-            self.gh_config_dir.mkdir(parents=True, exist_ok=True)
-
-            # Login with the token
-            result = subprocess.run(
-                [gh_cmd, 'auth', 'login', '--with-token'],
-                input=token,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env={**os.environ, 'HOME': home_env}
+                return {'success': False, 'error': 'GitHub CLI (gh) is not installed. Install it from https://cli.github.com/'}
+            if os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN'):
+                return {'success': False, 'error': 'GitHub is managed by GH_TOKEN/GITHUB_TOKEN in the server environment. Remove that setting before signing in here.'}
+            self.cancel_github_web_login()
+            env = self._github_env()
+            # No token on the command line or in logs. This endpoint supports
+            # classic and fine-grained PATs without requiring unrelated scopes.
+            check = subprocess.run(
+                [gh_cmd, 'api', '--hostname', 'github.com', 'user', '--jq', '.login'],
+                capture_output=True, text=True, timeout=30,
+                env={**env, 'GH_TOKEN': token},
             )
-
-            if result.returncode == 0:
-                # Configure git credential helper
-                git_cmd = shutil.which('git')
-                if git_cmd:
-                    subprocess.run(
-                        [git_cmd, 'config', '--global', 'credential.helper', '!gh auth git-credential'],
-                        capture_output=True,
-                        timeout=10,
-                        env={**os.environ, 'HOME': home_env}
-                    )
-
-                logger.info("GitHub CLI login successful")
-                return {
-                    "success": True,
-                    "message": "Successfully logged in to GitHub"
-                }
-            else:
-                error_msg = result.stderr.strip() if result.stderr else "Login failed"
-                logger.warning(f"GitHub login failed: {error_msg}")
-                return {
-                    "success": False,
-                    "message": "GitHub login failed",
-                    "error": error_msg
-                }
-
+            if check.returncode or not check.stdout.strip():
+                return {'success': False, 'error': 'GitHub could not validate this token. Check that it is correct, unexpired, and that github.com is reachable.'}
+            user = check.stdout.strip()
+            self.gh_config_dir.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run(
+                [gh_cmd, 'auth', 'login', '--hostname', 'github.com',
+                 '--git-protocol', 'https', '--with-token'],
+                input=token, capture_output=True, text=True, timeout=30, env=env,
+            )
+            if result.returncode:
+                error = (result.stderr or 'GitHub login failed').strip().replace(token, '[redacted]')
+                if 'missing required scope' not in error:
+                    return {'success': False, 'error': error}
+                self._save_limited_github_token(token, user)
+            # Read the persisted credential, not the validation override: a write
+            # alone is not proof that future CLI and Git commands can use it.
+            saved = subprocess.run(
+                [gh_cmd, 'api', '--hostname', 'github.com', 'user', '--jq', '.login'],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            if saved.returncode or saved.stdout.strip() != user:
+                return {'success': False, 'error': 'GitHub credentials were not saved correctly. Please retry.'}
+            self._setup_github_git(gh_cmd)
+            return {'success': True, 'message': 'Successfully logged in to GitHub', 'user': user}
         except subprocess.TimeoutExpired:
-            return {
-                "success": False,
-                "message": "Login timed out",
-                "error": "GitHub CLI login process timed out"
-            }
-        except Exception as e:
-            logger.error(f"GitHub login error: {e}")
-            return {
-                "success": False,
-                "message": "Login failed",
-                "error": str(e)
-            }
+            return {'success': False, 'error': 'GitHub login timed out. Check your connection and retry.'}
+        except Exception as exc:
+            logger.warning('GitHub login failed (%s)', type(exc).__name__)
+            return {'success': False, 'error': 'GitHub sign-in could not be saved or Git credentials could not be configured. Check GitHub CLI configuration and retry.'}
 
     def github_logout(self) -> Dict[str, Any]:
         """Logout from GitHub CLI"""
+        self.cancel_github_web_login()
         try:
             gh_cmd = find_gh_executable()
             if not gh_cmd:
@@ -618,14 +651,13 @@ class AuthService:
                     "message": "Logged out from GitHub (config removed)"
                 }
 
-            home_env = os.environ.get('HOME', str(Path.home()))
             result = subprocess.run(
                 [gh_cmd, 'auth', 'logout', '--hostname', 'github.com'],
                 input='Y\n',  # Confirm logout
                 capture_output=True,
                 text=True,
                 timeout=30,
-                env={**os.environ, 'HOME': home_env}
+                env=self._github_env()
             )
 
             if result.returncode == 0:
@@ -656,6 +688,16 @@ class AuthService:
     # GitHub Device Flow (gh auth login --web)
     # =========================================================================
 
+    def cancel_github_web_login(self) -> Dict[str, Any]:
+        proc = self._gh_web_login_process
+        self._gh_web_login_process = None
+        self._gh_web_login_error = None
+        if proc is not None:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+        return {'success': True}
+
     async def github_login_web(self) -> Dict[str, Any]:
         """
         Start GitHub CLI device flow authentication (gh auth login --web).
@@ -666,13 +708,7 @@ class AuthService:
         import re
         import threading
 
-        # Clean up any existing process
-        if self._gh_web_login_process is not None:
-            try:
-                self._gh_web_login_process.kill()
-            except Exception:
-                pass
-            self._gh_web_login_process = None
+        await asyncio.to_thread(self.cancel_github_web_login)
 
         try:
             gh_cmd = find_gh_executable()
@@ -683,10 +719,11 @@ class AuthService:
                     "install_url": "https://cli.github.com/"
                 }
 
-            home_env = os.environ.get('HOME', str(Path.home()))
             self.gh_config_dir.mkdir(parents=True, exist_ok=True)
 
-            env = {**os.environ, 'HOME': home_env}
+            if os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN'):
+                return {'success': False, 'error': 'GitHub is managed by GH_TOKEN/GITHUB_TOKEN in the server environment. Remove that setting before signing in here.'}
+            env = self._github_env()
             # Prevent gh from trying to open a browser automatically
             env['BROWSER'] = ''
             env['GH_BROWSER'] = ' '
@@ -705,49 +742,35 @@ class AuthService:
                 cmd_str,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
                 env=env,
                 shell=use_shell,
             )
             self._gh_web_login_process = proc
 
-            # Read stderr in a thread to capture the device code
-            output_lines: list[str] = []
+            # Drain one merged stream for the entire process lifetime. Wake as
+            # soon as the code arrives, without blocking the asyncio event loop.
+            codes: list[str] = []
+            ready = threading.Event()
 
             def read_output():
                 try:
-                    for stream in [proc.stderr, proc.stdout]:
-                        if stream is None:
-                            continue
-                        for line in stream:
-                            output_lines.append(line)
-                except Exception:
-                    pass
+                    if proc.stdout is not None:
+                        for line in proc.stdout:
+                            match = re.search(r'\b([A-Z0-9]{4}-[A-Z0-9]{4})\b', line)
+                            if match and not codes:
+                                codes.append(match.group(1))
+                                ready.set()
+                finally:
+                    ready.set()
 
-            reader = threading.Thread(target=read_output, daemon=True)
-            reader.start()
-            reader.join(timeout=15)
-
-            # Parse the one-time code from output
-            all_output = ''.join(output_lines)
-            code_match = re.search(r'([A-Z0-9]{4}-[A-Z0-9]{4})', all_output)
-
-            if not code_match:
-                # Clean up the process
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                self._gh_web_login_process = None
-                logger.warning(f"Could not parse device code from gh output: {all_output[:200]}")
-                return {
-                    "success": False,
-                    "error": "Could not start GitHub device flow. Try using a personal access token instead."
-                }
-
-            user_code = code_match.group(1)
-            logger.info(f"GitHub device flow started, code: {user_code}")
+            threading.Thread(target=read_output, daemon=True).start()
+            await asyncio.to_thread(ready.wait, 15)
+            if not codes:
+                await asyncio.to_thread(self.cancel_github_web_login)
+                return {'success': False, 'error': 'Could not start GitHub web sign-in. Check your connection or use a personal access token.'}
+            user_code = codes[0]
 
             # Send Enter to stdin to proceed (gh waits for Enter before opening browser)
             try:

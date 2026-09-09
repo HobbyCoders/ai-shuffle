@@ -13,7 +13,7 @@
 	import { onMount } from 'svelte';
 	import { providers } from '$lib/stores/providers.svelte';
 	import './card-design-system.css';
-	import { auth, isAdmin } from '$lib/stores/auth.svelte';
+	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { api } from '$lib/api/client';
 	import type { WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import {
@@ -88,14 +88,6 @@
 	let workspaceError = $state('');
 	let workspaceSuccess = $state('');
 
-	// Auth state
-	// Claude native-auth (connect / saved accounts / API key) now lives in the
-	// providers store (Chunk 4) and is consumed directly by the providers/ UI —
-	// SettingsCard no longer holds or drills that state. GitHub stays here.
-	let githubToken = $state('');
-	let githubLoginLoading = $state(false);
-	let githubUser: string | null = $state(null);
-
 	// Chat Behavior Preferences
 	let chatPrefs = $state<ChatPreferences | null>(null);
 	let currentTimezone = $state('local');
@@ -138,19 +130,9 @@
 
 	async function loadAllData() {
 		await Promise.all([
-			loadAuthStatus(),
 			loadWorkspaceConfig(),
 			loadSecurityInstructions()
 		]);
-	}
-
-	async function loadAuthStatus() {
-		try {
-			const ghStatus = await api.get<{authenticated: boolean, user: string | null}>('/auth/github/status');
-			githubUser = ghStatus.user;
-		} catch (e) {
-			console.error('Failed to load GitHub status:', e);
-		}
 	}
 
 	async function loadWorkspaceConfig(quiet = false) {
@@ -279,35 +261,10 @@
 	// Claude native-auth handlers (connect / re-auth / saved accounts) moved to the
 	// providers store in Chunk 4; the providers/ UI calls the store directly.
 
-	async function connectGithub() {
-		if (!githubToken.trim()) return;
-		githubLoginLoading = true;
-		try {
-			await api.post('/auth/github/login', { token: githubToken });
-			await loadAuthStatus();
-			await auth.checkAuth();
-			githubToken = '';
-		} catch (e: any) {
-			error = e.detail || 'Failed to connect GitHub';
-		} finally {
-			githubLoginLoading = false;
-		}
-	}
-
-	async function disconnectGithub() {
-		try {
-			await api.post('/auth/github/logout');
-			githubUser = null;
-			await auth.checkAuth();
-		} catch (e: any) {
-			error = e.detail || 'Failed to disconnect';
-		}
-	}
-
 	let remoteChange = $state('');
 	watchResources(['settings'], async () => {
 		await Promise.all([
-			loadAuthStatus(), loadWorkspaceConfig(true),
+			loadWorkspaceConfig(true),
 			...($isAdmin ? [loadSecurityInstructions(true), providers.refreshAll(), providers.refreshProviders()] : [])
 		]);
 	});
@@ -368,14 +325,7 @@
 				<!-- PROVIDERS -->
 				{#if activeTab === 'providers'}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
-						<ProvidersSection
-							{githubUser}
-							{githubToken}
-							onGithubTokenChange={(v) => githubToken = v}
-							{githubLoginLoading}
-							onConnectGithub={connectGithub}
-							onDisconnectGithub={disconnectGithub}
-						/>
+						<ProvidersSection />
 
 						<!-- Admin-only: worker network membership/recovery, account linking, pairing, and runner access. -->
 						{#if $isAdmin}

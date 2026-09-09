@@ -16,7 +16,7 @@ vi.mock('$lib/api/client', () => ({ api: { get: mocks.get, post: mocks.post, pat
 	getErrorMessage: (e: { detail?: string; message?: string }, fallback: string) => e.detail || e.message || fallback }));
 vi.mock('$lib/api/auth', () => ({ getWorkspaceConfig: mocks.workspace, setWorkspaceConfig: mocks.saveWorkspace,
 	setupInstallation: mocks.setup, completeOnboarding: mocks.complete,
-	getGithubAuthStatus: mocks.githubStatus, startGithubWebLogin: mocks.githubWeb, loginGithubWithToken: mocks.githubToken }));
+	getGithubAuthStatus: mocks.githubStatus, startGithubWebLogin: mocks.githubWeb, loginGithubWithToken: mocks.githubToken, cancelGithubWebLogin: vi.fn(), logoutGithub: vi.fn() }));
 vi.mock('$lib/stores/auth.svelte', () => ({
 	auth: { checkAuth: mocks.checkAuth, current: { status: { setup_required: true, auth_mode: 'local' } }, logout: vi.fn(),
 		subscribe(run: (v: unknown) => void) { run({ status: { auth_mode: 'local' } }); return () => {}; } },
@@ -84,7 +84,7 @@ describe('first-run setup', () => {
 		expect(mocks.create).toHaveBeenCalledExactlyOnceWith();
 		await continueToProviders();
 		expect(screen.getByText('GitHub', { exact: true })).toBeTruthy();
-		expect(screen.getByRole('button', { name: 'Login with Browser' })).toBeTruthy();
+		expect(await screen.findByRole('button', { name: 'Sign in with GitHub' })).toBeTruthy();
 		expect(screen.queryByText(/Claude Code/)).toBeNull();
 		expect(screen.queryByText(/Connect Claude/)).toBeNull();
 		if (existingCredential) expect(screen.getByText('My OpenAI account')).toBeTruthy();
@@ -99,11 +99,11 @@ describe('first-run setup', () => {
 		mocks.githubToken.mockResolvedValue({ success: true });
 		mocks.githubStatus.mockResolvedValueOnce({ authenticated: false, user: null }).mockResolvedValue({ authenticated: true, user: 'octocat' });
 		await cleanInstall(); await continueToProviders();
-		await fireEvent.click(screen.getByRole('button', { name: 'Access Token' }));
-		await fireEvent.input(screen.getByLabelText('GitHub access token'), { target: { value: 'ghp_secret' } });
-		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Personal access token' }));
+		await fireEvent.input(screen.getByLabelText('GitHub personal access token'), { target: { value: 'ghp_secret' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect token' }));
 		expect(mocks.githubToken).toHaveBeenCalledWith('ghp_secret');
-		expect(await screen.findByText('GitHub is connected as @octocat')).toBeTruthy();
+		expect(await screen.findByText('GitHub is connected as @octocat.')).toBeTruthy();
 	});
 
 	it('resumes an initialized worker at the workspace step', async () => {

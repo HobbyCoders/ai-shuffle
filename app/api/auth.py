@@ -581,13 +581,13 @@ async def github_login(request: Request, token: str = Depends(require_admin)):
     """
     try:
         body = await request.json()
-        gh_token = body.get("token")
-        if not gh_token:
+        gh_token = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(gh_token, str) or not gh_token.strip():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="GitHub token is required"
             )
-        result = await run_sync(auth_service.github_login_with_token, gh_token)
+        result = await run_sync(auth_service.github_login_with_token, gh_token.strip())
         _invalidate_github_auth_caches(True if result.get("success") else None)
         return result
     except HTTPException:
@@ -619,6 +619,11 @@ async def github_login_web(request: Request, token: str = Depends(require_admin)
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to start GitHub web login"
         )
+
+
+@router.post("/github/login/web/cancel")
+async def github_cancel_web_login(token: str = Depends(require_admin)):
+    return await run_sync(auth_service.cancel_github_web_login)
 
 
 @router.post("/github/logout")

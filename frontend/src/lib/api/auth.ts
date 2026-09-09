@@ -168,10 +168,20 @@ export async function loginGithubWithToken(token: string): Promise<{
 	return api.post('/auth/github/login', { token });
 }
 
+export async function cancelGithubWebLogin(): Promise<{ success: boolean }> {
+	return api.post('/auth/github/login/web/cancel');
+}
+
+export async function logoutGithub(): Promise<{ success: boolean; error?: string }> {
+	return api.post('/auth/github/logout');
+}
+
 export async function getGithubAuthStatus(): Promise<{
 	authenticated: boolean;
 	user: string | null;
 	config_dir: string;
+	web_login_pending?: boolean;
+	web_login_error?: string | null;
 }> {
 	return api.get('/auth/github/status');
 }

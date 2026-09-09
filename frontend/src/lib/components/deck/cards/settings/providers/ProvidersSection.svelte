@@ -10,8 +10,7 @@
 	 * model_providers rows).
 	 *
 	 * The remaining credential groups (Media & tools / fal, Integrations / GitHub)
-	 * now live in the store-adjacent `MediaToolsSection`, rendered below with only
-	 * their own GitHub props (Chunk 8 lifted them out of ConnectionsSection, which
+	 * now live in the self-contained `MediaToolsSection` (lifted out of ConnectionsSection, which
 	 * is now removed, and folded the old AI-models tab into a "Manage media models"
 	 * drawer there).
 	 *
@@ -37,23 +36,7 @@
 	import { getDefaultModel } from '$lib/constants/models';
 	import { notify } from '$lib/stores/notifications';
 
-	interface Props {
-		// ----- GitHub (forwarded to MediaToolsSection) -----
-		githubUser: string | null;
-		githubToken: string;
-		onGithubTokenChange: (value: string) => void;
-		githubLoginLoading: boolean;
-		onConnectGithub: () => void;
-		onDisconnectGithub: () => void;
-	}
-	let {
-		githubUser,
-		githubToken,
-		onGithubTokenChange,
-		githubLoginLoading,
-		onConnectGithub,
-		onDisconnectGithub
-	}: Props = $props();
+
 
 	let importDialogOpen = $state(false);
 	let importOpener = $state<HTMLButtonElement | null>(null);
@@ -201,14 +184,7 @@
 </div>
 
 <!-- Media & tools (fal.ai, GitHub, AI media models) — served by MediaToolsSection. -->
-<MediaToolsSection
-	{githubUser}
-	{githubToken}
-	{onGithubTokenChange}
-	{githubLoginLoading}
-	{onConnectGithub}
-	{onDisconnectGithub}
-/>
+<MediaToolsSection />
 
 {#if importDialogOpen}
 	<SettingsImportDialog onClose={closeImportDialog} />

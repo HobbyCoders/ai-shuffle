@@ -429,3 +429,28 @@ class TestGithubAuthStatusCaching:
             is not False
         )
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('value', ['', '   ', None, 123, ['token']])
+async def test_github_login_rejects_missing_or_non_string_token(value):
+    from fastapi import HTTPException
+    from app.api import auth as auth_api
+    request = MagicMock()
+    request.json = AsyncMock(return_value={'token': value})
+    with patch.object(auth_api, 'auth_service') as service:
+        with pytest.raises(HTTPException) as error:
+            await auth_api.github_login(request, token='admin')
+        assert error.value.status_code == 400
+        service.github_login_with_token.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_github_login_trims_token_and_preserves_failure():
+    from app.api import auth as auth_api
+    request = MagicMock()
+    request.json = AsyncMock(return_value={'token': '  supplied-token\n'})
+    with patch.object(auth_api, 'auth_service') as service:
+        service.github_login_with_token.return_value = {'success': False, 'error': 'Token expired'}
+        response = await auth_api.github_login(request, token='admin')
+        service.github_login_with_token.assert_called_once_with('supplied-token')
+        assert response == {'success': False, 'error': 'Token expired'}
+
