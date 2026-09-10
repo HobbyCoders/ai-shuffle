@@ -191,6 +191,49 @@ async def test_supervisor_stops_on_revocation_and_keeps_token_out_of_arguments(m
     assert managed._process is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("readiness,expected_spawns", [([False, True], 1), ([False, False, True], 2)])
+async def test_supervisor_recovers_route_without_registering_another_worker(monkeypatch, readiness, expected_spawns):
+    pending, registration = offer(monkeypatch)
+    registration.return_value = {"status": "approved", "server_id": pending["id"]}
+    def server_response(binding, method, suffix, body=None):
+        if suffix == "status":
+            return {"active": True}
+        return {"tunnel_token": "private-token" * 8, "url": "https://worker.example.com", "remote_port": 8001}
+    server = Mock(side_effect=server_response)
+    monkeypatch.setattr(account_hub, "call", server)
+    managed._credentials()
+    original_binding = mobile_hub.get_binding()
+    registration.reset_mock()
+    server.reset_mock()
+    processes = []
+    async def spawn(*args, **kwargs):
+        process = SimpleNamespace(returncode=None, terminate=Mock(), wait=AsyncMock(), kill=Mock())
+        processes.append(process)
+        return process
+    monkeypatch.setattr(managed.asyncio, "create_subprocess_exec", spawn)
+    async def inline(fn, *args):
+        return fn(*args)
+    monkeypatch.setattr(managed, "run_sync", inline)
+    monkeypatch.setattr(managed, "_reachable", Mock(side_effect=readiness))
+    clock = [0]
+    monkeypatch.setattr(managed, "time", SimpleNamespace(monotonic=lambda: clock[0], time=managed.time.time))
+    async def tick(delay):
+        assert clock[0] < 180, (managed._state, managed._error, len(processes))
+        if managed._state == "connected":
+            assert len(processes) == expected_spawns
+            assert mobile_hub.get_binding() == original_binding
+            registration.assert_not_called()
+            assert all(call.args[0]["server_id"] == original_binding["server_id"] for call in server.call_args_list)
+            if expected_spawns == 2:
+                processes[0].terminate.assert_called_once()
+            raise asyncio.CancelledError()
+        clock[0] += 30
+    monkeypatch.setattr(managed.asyncio, "sleep", tick)
+    with pytest.raises(asyncio.CancelledError):
+        await managed.supervise()
+
+
 def test_tunnel_upgrade_requires_live_protected_socket_before_hub_mutation(monkeypatch):
     pending, calls = offer(monkeypatch)
     calls.return_value = {'status': 'approved', 'server_id': pending['id']}

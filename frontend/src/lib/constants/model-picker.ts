@@ -75,8 +75,10 @@ export function buildModelPickerCatalog(opts: BuildCatalogOptions = {}): PickerC
 	const options: PickerOption[] = [];
 	const { providerModelsOnly = false, providerScope, familyBlurbs = false } = opts;
 
-	if (!providerModelsOnly && (!providerScope || providerScope === NATIVE_PROVIDER_KEY)) {
-		const claudeAuth = getClaudeAuth();
+	// Bundled Claude metadata also labels historical sessions. It is not proof
+	// that this worker has an account or API key that can run those models.
+	const claudeAuth = getClaudeAuth();
+	if (claudeAuth.auth_kind && !providerModelsOnly && (!providerScope || providerScope === NATIVE_PROVIDER_KEY)) {
 		const claude = getClaudeDisplay({
 			planType: claudeAuth.plan_type,
 			authKind: claudeAuth.auth_kind

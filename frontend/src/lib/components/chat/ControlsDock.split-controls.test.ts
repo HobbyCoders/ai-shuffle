@@ -6,7 +6,8 @@ import { activeSession } from '$lib/stores/active-session';
 import { appMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
 import ControlsDock from './ControlsDock.svelte';
 import '../../test-stubs/composer-dom';
-import { getUsageLimits } from '$lib/api/client';
+import { api, getUsageLimits } from '$lib/api/client';
+import { getModels, hydrateModelRegistry } from '$lib/constants/models';
 
 vi.hoisted(() => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
@@ -36,7 +37,12 @@ function setLane(mode: SessionMode) {
 	activeSession.newChat();
 }
 
-beforeEach(() => setLane('code'));
+beforeEach(async () => {
+ setLane('code');
+ const registryGet = vi.spyOn(api, 'get').mockResolvedValue({ models: getModels(), providers: [], claude: { auth_kind: 'subscription', plan_type: null } });
+ await hydrateModelRegistry();
+ registryGet.mockRestore();
+});
 afterEach(() => {
 	cleanup();
 	setLane('code');
@@ -58,6 +64,19 @@ const voiceActions = createRawSnippet(() => ({
 }));
 
 describe('ControlsDock split controls', () => {
+ it('does not label a fresh provider-only composer with the bundled Sonnet default', async () => {
+  const registryGet = vi.spyOn(api, 'get').mockResolvedValue({ models: getModels(), providers: [], claude: { auth_kind: null, plan_type: null } });
+  await hydrateModelRegistry();
+  registryGet.mockRestore();
+  activeSession.setModelOverride(null);
+  renderDock();
+  expect(screen.getByRole('button', { name: 'Model: Select model' })).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'Model: Select model' }));
+  expect(screen.queryByRole('tab', { name: /Claude/ })).toBeNull();
+  expect(screen.queryByText('Sonnet')).toBeNull();
+  expect(screen.queryByText('Extended')).toBeNull();
+ });
+
 	it('hides the browser control without an eligible-session toggle', () => {
 		renderDock({ browserOpen: true });
 		expect(screen.queryByRole('button', { name: 'Toggle live browser view' })).toBeNull();
@@ -197,6 +216,9 @@ describe('ControlsDock split controls', () => {
 	});
 
 	it('keeps the model picker open after selecting a model so context stays reachable', async () => {
+		const registryGet = vi.spyOn(api, 'get').mockResolvedValue({ models: getModels(), providers: [], claude: { auth_kind: 'subscription', plan_type: null } });
+		await hydrateModelRegistry();
+		registryGet.mockRestore();
 		renderDock();
 
 		await fireEvent.click(screen.getByRole('button', { name: /^model:/i }));

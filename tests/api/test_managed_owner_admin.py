@@ -115,7 +115,11 @@ def test_managed_account_session_reads_account_wide_inventory(owner_app, monkeyp
         'active': True, 'account_id': ACCOUNT, 'device_id': DEVICE}
     response = client.get('/api/v1/mobile/hub/account')
     assert response.status_code == 200, response.text
-    assert response.json() == inventory
+    assert response.json() == {
+        **inventory,
+        'devices': [{**inventory['devices'][0],
+                     'local_device_id': hub_store.local_device_id(SERVER, DEVICE)}],
+    }
     # Revocation immediately removes the right to read the shared inventory too.
     hub.side_effect = None
     hub.return_value = {'active': False}

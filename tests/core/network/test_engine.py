@@ -167,6 +167,88 @@ def test_remote_catalog_updates_refresh_account_and_paired_views(workers, monkey
         assert database.get_profile("agent-sync")["name"] == "My agent"
 
 
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_enrolled_worker_missing_identity_requires_recovery_without_new_device(workers, corrupt):
+    from app.network import identity, startup
+    worker = workers("persisted-worker")
+    with worker.active():
+        ctx = engine.create_network("Home", legacy_instance_id="stable-install")
+        before = [row["device_id"] for row in store.list_members()]
+        path = worker.data_dir / ".credential-keys" / identity.IDENTITY_FILE
+        if corrupt:
+            path.write_text("not a key")
+        else:
+            path.unlink()
+        identity.reset_cache_for_tests()
+        engine.reset_for_tests()
+        with pytest.raises(startup.PrivateDatabaseRequiredError):
+            startup.initialize()
+        assert [row["device_id"] for row in store.list_members()] == before
+        assert store.get_state()["network_id"] == ctx.network_id
+        if not corrupt:
+            assert not path.exists()
+            with pytest.raises(identity.IdentityError):
+                engine.load_context()
+            assert not path.exists()
+
+
+def test_restart_after_worker_update_keeps_identity_and_membership(workers, monkeypatch):
+    from app.core.config import settings
+    from app.network import identity, startup
+    worker = workers("persistent-data")
+    with worker.active():
+        original = engine.create_network("Home", legacy_instance_id="stable-install")
+        fingerprint = original.identity.fingerprint
+        before = [row["device_id"] for row in store.list_members()]
+        identity.reset_cache_for_tests()
+        engine.reset_for_tests()
+        monkeypatch.setattr(settings, "service_name", "updated-container-name")
+        restored = startup.initialize()
+        assert restored.device_id == original.device_id
+        assert restored.identity.fingerprint == fingerprint
+        assert restored.network_id == original.network_id
+        assert [row["device_id"] for row in store.list_members()] == before
+        assert restored.legacy_instance_map["stable-install"] == original.device_id
+
+
+@pytest.mark.asyncio
+async def test_account_connection_starts_before_runner_approval_and_stops_cleanly(workers, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+    from app.core import cluster, managed_connection
+    from app.network import enrollment, hub, startup, transport
+    worker = workers("waiting-for-approval")
+    entered, stopped = asyncio.Event(), asyncio.Event()
+    async def connection():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+    supervisor = AsyncMock(side_effect=connection)
+    monkeypatch.setattr(managed_connection, "supervise", supervisor)
+    monkeypatch.setattr(transport, "start", Mock(return_value=[]))
+    monkeypatch.setattr(transport, "stop", AsyncMock())
+    monkeypatch.setattr(hub, "start", Mock(return_value=[]))
+    monkeypatch.setattr(hub, "stop", AsyncMock())
+    monkeypatch.setattr(enrollment, "resume_enrollment", Mock())
+    monkeypatch.setattr(startup, "_tasks", [])
+    with worker.active():
+        database.register_install(install_id="existing-worker", device_name="Existing",
+                                  base_url=None, platform="test", version="before-update", approve_new=True)
+        assert cluster.register_self() is False
+        tasks = await startup.start()
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            supervisor.assert_awaited_once()
+            assert not tasks[0].done()
+        finally:
+            await startup.stop()
+        assert stopped.is_set()
+        assert all(task.done() for task in tasks)
+        assert engine.context() is None
+
+
 def test_network_of_one_records_and_scans(workers):
     a = workers("a")
     with a.active():
@@ -262,6 +344,40 @@ def test_partitioned_edits_resolve_by_clock_with_conflicts_on_both(workers):
         with worker.active():
             assert engine.scan_all() == 0
     assert exchange(a, b).applied == 0 and exchange(b, a).applied == 0
+
+
+@pytest.mark.asyncio
+async def test_curated_provider_models_survive_first_sync_without_refetch(workers, monkeypatch):
+    from unittest.mock import Mock
+    from app.api import model_providers as api
+    from app.api.model_registry import list_models
+    from app.core import encryption
+    from app.api import settings_crypto
+    monkeypatch.setattr(encryption, "_encryption_key", encryption.Fernet.generate_key())
+    monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", lambda _name: None)
+    source, fresh = workers("configured"), workers("first-load")
+    model = {"id": "synced/chat", "label": "My saved model", "context_window": 128000,
+             "reasoning_capabilities": {"version": 1, "effort_levels": [], "default_effort": None}}
+    # No upstream catalog refresh is needed to use a previously saved selection.
+    upstream = Mock(side_effect=AssertionError("First sync must retain curated models"))
+    monkeypatch.setattr(api, "fetch_upstream_models", upstream)
+    with source.active():
+        engine.create_network("Home")
+        provider = await api.create_provider(api.ModelProviderCreate(
+            name="My gateway", provider_type="openai", base_url="https://provider.example/v1",
+            auth_token="test-key"), token="")
+        await api.update_provider(provider.id, api.ModelProviderUpdate(
+            models=[model], default_model=model["id"]), token="")
+        engine.scan_all()
+    join(source, fresh)
+    with fresh.active():
+        registry = await list_models(token="")
+        synced = next(p for p in registry["providers"] if p["id"] == provider.id)
+        assert synced["default_model"] == model["id"]
+        assert [(m["id"], m["label"]) for m in synced["models"]] == [(model["id"], model["label"])]
+        assert synced["models"][0]["context_window"] == model["context_window"]
+        assert registry["claude"]["auth_kind"] is None
+    upstream.assert_not_called()
 
 
 def test_secret_added_on_a_is_usable_on_c_joined_from_b(workers):

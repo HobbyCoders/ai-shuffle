@@ -180,7 +180,7 @@ def load(*, create: bool = True) -> DeviceIdentity:
             _cached = _read(path)
         except FileNotFoundError:
             if not create:
-                raise IdentityError("No device identity yet") from None
+                raise IdentityError("Device identity is missing. Restore this worker's .credential-keys backup; refusing to create a replacement device.") from None
             fresh = DeviceIdentity(
                 signing_private=crypto.generate_signing_key(),
                 encryption_private=crypto.generate_encryption_key(),

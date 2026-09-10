@@ -22,6 +22,16 @@ def identity(monkeypatch, tmp_path):
     return config, settings
 
 
+@pytest.mark.parametrize("contents", [b"", b"existing-lock-marker"])
+def test_lock_acquisition_does_not_write_into_the_locked_range(identity, tmp_path, contents):
+    config, _settings = identity
+    path = tmp_path / ".instance_id.lock"
+    path.write_bytes(contents)
+    with config._lock_instance_id_file(path):
+        assert path.stat().st_size == len(contents)
+    assert path.read_bytes() == contents
+
+
 @pytest.mark.parametrize("override", ["operator-id", "  operator-id  "])
 def test_explicit_identity_bypasses_file_and_cache(identity, tmp_path, override):
     config, settings = identity
@@ -45,7 +55,7 @@ def test_existing_identity_is_preserved_without_writing(identity, tmp_path, over
     assert not (tmp_path / ".instance_id.lock").exists()
 
 
-@pytest.mark.parametrize("existing", [None, "", " \n"])
+@pytest.mark.parametrize("existing", [None])
 def test_new_identity_survives_cache_reset(identity, tmp_path, existing):
     config, settings = identity
     if existing is not None:
@@ -101,6 +111,12 @@ def test_concurrent_first_use_returns_one_identity(identity, monkeypatch, writab
         first = executor.submit(lambda: settings.effective_instance_id)
         assert generating.wait(10)
         second = executor.submit(lambda: settings.effective_instance_id)
+        if not writable:
+            for future in (first, second):
+                with pytest.raises(RuntimeError, match="Cannot persist worker instance ID"):
+                    future.result(timeout=15)
+            assert config._cached_persisted_instance_id is None
+            return
         values = [first.result(timeout=15), second.result(timeout=15)]
     assert values[0] == values[1] == settings.effective_instance_id
     if writable:
@@ -150,7 +166,7 @@ def _first_use_process(data_dir, barrier, results):
         raise
 
 
-@pytest.mark.parametrize("existing", [None, "", " \n"])
+@pytest.mark.parametrize("existing", [None])
 def test_concurrent_processes_adopt_the_published_identity(tmp_path, existing):
     path = tmp_path / ".instance_id"
     if existing is not None:
@@ -180,7 +196,7 @@ def test_concurrent_processes_adopt_the_published_identity(tmp_path, existing):
         results.join_thread()
 
 
-@pytest.mark.parametrize("existing", [None, " \n"])
+@pytest.mark.parametrize("existing", [None])
 def test_publication_is_atomic(identity, tmp_path, monkeypatch, existing):
     config, settings = identity
     path = tmp_path / ".instance_id"
@@ -206,7 +222,7 @@ def test_publication_is_atomic(identity, tmp_path, monkeypatch, existing):
 
 
 @pytest.mark.parametrize("operation", ["fsync", "replace"])
-@pytest.mark.parametrize("existing", [None, " \n"])
+@pytest.mark.parametrize("existing", [None])
 def test_failed_publication_leaves_original_and_cleans_temporary(
     identity, tmp_path, monkeypatch, caplog, operation, existing,
 ):
@@ -219,11 +235,39 @@ def test_failed_publication_leaves_original_and_cleans_temporary(
         raise OSError("simulated interrupted publication")
 
     monkeypatch.setattr(config.os, operation, fail)
-    result = settings.effective_instance_id
-    assert settings.effective_instance_id == result
+    with pytest.raises(RuntimeError, match="Cannot persist worker instance ID"):
+        _ = settings.effective_instance_id
+    assert config._cached_persisted_instance_id is None
     assert (path.read_text() if path.exists() else None) == existing
     assert not list(tmp_path.glob(".instance_id-*"))
-    assert "using a process-local ID" in caplog.text
+    assert "using a process-local ID" not in caplog.text
+
+
+@pytest.mark.parametrize("contents", ["", " \n"])
+def test_empty_saved_identity_is_not_replaced(identity, tmp_path, contents):
+    config, settings = identity
+    path = tmp_path / ".instance_id"
+    path.write_text(contents)
+    with pytest.raises(RuntimeError, match="Saved worker instance ID is empty"):
+        _ = settings.effective_instance_id
+    assert path.read_text() == contents
+    assert config._cached_persisted_instance_id is None
+
+
+def test_unreadable_saved_identity_is_not_replaced(identity, tmp_path, monkeypatch):
+    config, settings = identity
+    path = tmp_path / ".instance_id"
+    path.write_text("original-worker")
+    original_read = Path.read_text
+    def denied_read(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError("volume inaccessible")
+        return original_read(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", denied_read)
+    with pytest.raises(RuntimeError, match="Cannot read saved worker instance ID"):
+        _ = settings.effective_instance_id
+    assert config._cached_persisted_instance_id is None
+    assert original_read(path) == "original-worker"
 
 
 def test_cached_identity_is_stable_even_if_file_disappears(identity, tmp_path):

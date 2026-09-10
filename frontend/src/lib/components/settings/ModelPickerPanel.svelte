@@ -102,7 +102,8 @@
 	);
 	const hasFavorites = $derived(favoriteOptions.length > 0);
 	const contextControl = $derived(
-		contextChoice && onContextChoiceSelect ? getModelContextControl(value) : null
+		contextChoice && onContextChoiceSelect && options.some(option => option.value === value)
+			? getModelContextControl(value) : null
 	);
 
 	// ---- rail selection -------------------------------------------------------
