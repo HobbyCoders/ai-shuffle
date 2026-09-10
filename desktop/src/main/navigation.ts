@@ -12,6 +12,7 @@
  *   web UI actually uses (microphone for voice, notifications, clipboard).
  */
 import { BrowserWindow, shell, session, type WebContents } from 'electron';
+import { attachTextContextMenu } from './context-menu';
 import { PARTITION } from './window';
 
 const CHILD_ALLOWED_PERMISSIONS = new Set(['clipboard-read', 'clipboard-sanitized-write']);
@@ -60,6 +61,7 @@ export function attachNavigationPolicy(
 	onLoadFailure: (message: string) => void
 ): void {
 	const contents = win.webContents;
+	attachTextContextMenu(win);
 
 	contents.on('will-navigate', (event, url) => {
 		if (url.startsWith('file:')) return;
@@ -96,7 +98,10 @@ export function attachNavigationPolicy(
 		return { action: 'deny' };
 	});
 
-	contents.on('did-create-window', (child) => hardenChild(child.webContents));
+	contents.on('did-create-window', (child) => {
+		hardenChild(child.webContents);
+		attachTextContextMenu(child);
+	});
 
 	contents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
 		if (!isMainFrame || code === -3 /* aborted by a newer navigation */) return;
