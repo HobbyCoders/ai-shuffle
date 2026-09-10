@@ -11,6 +11,7 @@
 	import { highlightGenerationForSource, onHighlighterReady } from '$lib/utils/shiki';
 	import { Typewriter } from '$lib/utils/typewriter';
 	import MessageActions from './MessageActions.svelte';
+	import HtmlPreviews from './HtmlPreviews.svelte';
 	import { formatMessageTime } from '$lib/utils/message-time';
 
 	interface Props {
@@ -501,6 +502,7 @@
 				{/if}
 			</div>
 		</div>
+		<HtmlPreviews content={_twBestContent} {streaming} />
 		{#if metadata && !streaming}
 			<div class="ameta">
 				{#if timestamp}<span>{formatMessageTime(timestamp)}</span>{/if}

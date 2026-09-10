@@ -69,16 +69,29 @@ For any other file the user may want to download or view — including 3D models
 """
 
 
-def get_security_instructions() -> str:
-    """
-    Get the active security instructions to prepend to system prompts.
+HTML_PREVIEW_INSTRUCTIONS = """
+### Interactive HTML previews
+When creating a website mockup, visualization, dashboard, or interactive demo for the user to view, create a self-contained .html file and include a Markdown link to it in your reply:
 
-    Returns custom instructions if set by admin, otherwise returns the default.
+[Preview the mockup](/api/files/by-path?path=URL_ENCODED_FULL_PATH)
+
+Replace URL_ENCODED_FULL_PATH with the actual file's full path, URL-encoded (including spaces, #, &, and parentheses). Write the file successfully before linking it. Use the workspace or a registered project directory so the file API can serve it. Link each HTML deliverable separately, outside code fences. Do not use a screenshot or a raw HTML code block as a substitute for the interactive deliverable.
+
+The chat shows linked .html and .htm files as interactive preview cards after the message finishes. Users can expand the preview, switch between desktop and mobile widths, inspect the source, refresh after edits, and download the file. Reuse the same path when revising a mockup and include its link again.
+
+Previews run in an isolated sandbox. Embed CSS and JavaScript in the HTML; use inline SVG or data URLs for assets. External scripts, fonts, stylesheets, network requests, sibling files, frames, form submissions, popups, and app/session storage are unavailable. Use client-side sample data and system fonts. Keep the file under 2 MiB. For a site that needs a development server or backend, explain that limitation and provide its normal run instructions rather than claiming the embedded preview runs the full application.
+"""
+
+
+def get_security_instructions() -> str:
+    """Get admin/default instructions plus the built-in HTML preview contract.
+
+    Keep capability guidance current even when an admin has saved custom media
+    instructions. The saved setting itself is never rewritten.
     """
     custom_instructions = database.get_system_setting("security_instructions")
-    if custom_instructions:
-        return custom_instructions
-    return DEFAULT_SECURITY_INSTRUCTIONS
+    instructions = custom_instructions or DEFAULT_SECURITY_INSTRUCTIONS
+    return instructions + "\n" + HTML_PREVIEW_INSTRUCTIONS
 
 
 def _is_git_repo(working_dir: str) -> bool:
