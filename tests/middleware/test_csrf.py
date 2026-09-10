@@ -37,6 +37,28 @@ def client(monkeypatch):
     return TestClient(api)
 
 
+@pytest.mark.parametrize("path", ["/api/v1/network/peer/auth/challenge", "/api/v1/network/peer/auth/token"])
+@pytest.mark.parametrize("local", [False, True])
+def test_peer_bootstrap_has_no_ambient_browser_authority(monkeypatch, path, local):
+    from app.core import owner_auth
+    monkeypatch.setattr(csrf_mod.settings, "cors_origins", "https://app.example.com")
+    monkeypatch.setattr(owner_auth, "local_access", lambda request: local)
+    api = FastAPI()
+    api.add_middleware(CSRFProtectionMiddleware)
+
+    @api.post(path)
+    async def peer_auth():
+        return {"signed_challenge_required": True}
+
+    @api.post("/api/v1/network/create")
+    async def owner_action():
+        return {"ok": True}
+
+    client = TestClient(api)
+    assert client.post(path, json={}).json() == {"signed_challenge_required": True}
+    assert client.post("/api/v1/network/create", json={}).status_code == 403
+
+
 def test_mobile_register_exempt_without_origin(client):
     """Native registration has no Origin header and must NOT be CSRF-blocked."""
     resp = client.post("/api/v1/mobile/register", json={"device_info": {}})

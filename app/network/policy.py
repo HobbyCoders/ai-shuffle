@@ -173,7 +173,7 @@ _register(Collection(
 _register(Collection(
     name="agents", table="agents", keys=("id",),
     fields=("id", "name", "description", "is_builtin", "config", "mcp_tools", "created_at", "updated_at"),
-    json_fields=("config", "mcp_tools"), resource="profiles", priority=20,
+    json_fields=("config", "mcp_tools"), resource="agents", priority=20,
     notes="Profiles and their MCP definitions."))
 
 _register(Collection(
@@ -185,14 +185,14 @@ _register(Collection(
     encrypted=("auth_token", "codex_access_token", "codex_refresh_token"),
     local_fields=("codex_refresh_lease_owner", "codex_refresh_lease_expires_at",
                   "openai_billing_org_id", "openai_billing_instance_id"),
-    resource="model_providers", priority=30,
+    resource="settings", priority=30,
     notes="API keys travel encrypted under the network key. Refresh leases and billing bindings stay local."))
 
 _register(Collection(
     name="claude_accounts", table="claude_accounts", keys=("id",),
     fields=("id", "name", "email", "subscription_type", "credentials", "credential_fingerprint",
             "expires_at", "has_refresh_token", "sync_pending", "created_at", "updated_at"),
-    encrypted=("credentials",), resource="claude_accounts", priority=30,
+    encrypted=("credentials",), resource="settings", priority=30,
     notes="OAuth bundles. Whether a restored bundle is usable is decided at use time."))
 
 _register(Collection(
@@ -233,7 +233,7 @@ _register(Collection(
 _register(Collection(
     name="permission_rules", table="permission_rules", keys=("id",),
     fields=("id", "profile_id", "tool_name", "tool_pattern", "decision", "created_at"),
-    resource="permission_rules", priority=51))
+    resource="settings", priority=51))
 
 _register(Collection(
     name="project_hooks", table="project_hooks", keys=("id",),
@@ -244,7 +244,7 @@ _register(Collection(
 _register(Collection(
     name="webhooks", table="webhooks", keys=("id",),
     fields=("id", "url", "secret", "events", "is_active", "created_at"), json_fields=("events",),
-    local_fields=("last_triggered_at", "failure_count"), resource="webhooks", priority=52))
+    local_fields=("last_triggered_at", "failure_count"), resource="hooks", priority=52))
 
 _register(Collection(
     name="projects_v2", table="projects_v2", keys=("id",),

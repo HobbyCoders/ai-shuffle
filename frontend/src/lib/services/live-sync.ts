@@ -23,6 +23,7 @@ import { resourceSync } from './resource-sync';
 import { resetUserEventDedupe } from './user-event-dedupe';
 import { handleGlobalUserEvent, activeSession } from '$lib/stores/active-session';
 import { appData } from '$lib/stores/app-data.svelte';
+import { hydrateModelRegistry } from '$lib/constants/models';
 import { notify } from '$lib/stores/notifications';
 import { feedController } from '$lib/stores/session/v2/feed-controller';
 
@@ -40,7 +41,14 @@ export function startLiveSync() {
    await Promise.all([appData.loadProjects(), appData.loadClusterProjects(), appData.loadSessions()]);
    activeSession.applyComposerDefaults();
   }),
-  resourceSync.subscribe(['agents'], () => appData.loadProfiles()),
+  resourceSync.subscribe(['agents'], async () => {
+   await appData.loadProfiles();
+   activeSession.applyComposerDefaults();
+  }),
+  resourceSync.subscribe(['settings'], async () => {
+   await hydrateModelRegistry();
+   activeSession.applyComposerDefaults();
+  }),
   resourceSync.subscribe(['notifications'], () => notify.loadHistory())
  ];
  function disconnect(reset: boolean) {

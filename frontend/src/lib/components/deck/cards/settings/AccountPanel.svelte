@@ -117,13 +117,20 @@
 	async function start(kind: 'signin' | 'signup') {
 		if (busy || !canStart || !connection || connection.signed_in) return;
 		intent = kind; actionError = ''; copied = false; showPhone = false;
-		// Reopen an existing offer without creating a second one.
-		if (connection.code) return;
+		// Reserve the tab in the click handler so popup blockers do not treat
+		// the asynchronous offer response as an unsolicited window.
+		const tab = window.open('about:blank', '_blank');
+		if (tab) tab.opener = null;
 		busy = true; requestVersion++;
 		try {
-			connection = await beginAccountConnection(workerName);
+			// Reuse a pending offer rather than registering another worker.
+			if (!connection.code) connection = await beginAccountConnection(workerName);
+			const url = kind === 'signup' ? connection.signup_url || connection.authorization_url : connection.authorization_url;
+			if (tab && url) tab.location.replace(url);
+			else tab?.close();
 			statusError = '';
 		} catch (e) {
+			tab?.close();
 			intent = null;
 			actionError = getErrorMessage(e, 'Could not start the account sign-in');
 		} finally { busy = false; scheduleRefresh(); }

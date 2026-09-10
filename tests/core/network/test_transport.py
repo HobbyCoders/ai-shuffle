@@ -43,6 +43,8 @@ def _app():
     app = FastAPI()
     app.include_router(network_api.router)
     app.include_router(pairing_api.router)
+    from app.middleware.csrf import CSRFProtectionMiddleware
+    app.add_middleware(CSRFProtectionMiddleware)
     app.dependency_overrides[require_admin] = lambda: "admin"
     app.dependency_overrides[require_auth] = lambda: "admin"
     return app
@@ -89,8 +91,10 @@ def _pref(worker, key):
 
 
 async def test_peer_link_exchanges_both_ways_and_detects_rollback(workers, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "cors_origins", "https://app.example.com")
     a, b = workers("a"), workers("b")
-    served = ServedBy(a, "http://a.local:8000")
+    served = ServedBy(a, "https://a.example.com")
     with a.active():
         engine.create_network("Home", device_name="A")
         engine.admit_device(device_id=b.device_id, signing_public=b.identity.signing_public,
@@ -112,10 +116,10 @@ async def test_peer_link_exchanges_both_ways_and_detects_rollback(workers, monke
 
     async with httpx.AsyncClient(transport=served.transport()) as client:
         with b.active():
-            link = transport.PeerLink(a.device_id, ["http://dead.local:1", "http://a.local:8000"])
+            link = transport.PeerLink(a.device_id, ["http://172.17.0.11:8000", "https://a.example.com"])
             summary = await link.sync_once(client, engine.context())
             assert summary["received"] >= 1 and summary["sent"] >= 1
-            assert link.base_url == "http://a.local:8000" and link.token
+            assert link.base_url == "https://a.example.com" and link.token
             token_before = link.token
             # Second pass reuses the token and moves nothing.
             summary = await link.sync_once(client, engine.context())
@@ -135,14 +139,14 @@ async def test_peer_link_exchanges_both_ways_and_detects_rollback(workers, monke
         assert b.identity.incarnation == 1
     async with httpx.AsyncClient(transport=served.transport()) as client:
         with b.active():
-            link = transport.PeerLink(a.device_id, ["http://a.local:8000"])
+            link = transport.PeerLink(a.device_id, ["https://a.example.com"])
             await link.sync_once(client, engine.context())
             assert identity.load().incarnation == 2
             assert engine.context().identity.incarnation == 2
     _set_pref(b, "after_restore", True)
     async with httpx.AsyncClient(transport=served.transport()) as client:
         with b.active():
-            link = transport.PeerLink(a.device_id, ["http://a.local:8000"])
+            link = transport.PeerLink(a.device_id, ["https://a.example.com"])
             link.token = None
             summary = await link.sync_once(client, engine.context())
             assert summary["sent"] >= 1

@@ -195,8 +195,10 @@ def _on_applied(touched) -> None:
             resources.add("network")
     for resource in resources:
         try:
-            global_events.resources_changed(resource)
-            global_events.resources_changed(resource, user_type="api_user")
+            # Remote applies bypass the local mutation decorators. Account and
+            # paired browsers need the same content-free refetch signal.
+            for kind in ("admin", "api_user", "account", "paired"):
+                global_events.resources_changed(resource, user_type=kind)
         except Exception:  # noqa: BLE001
             pass
 

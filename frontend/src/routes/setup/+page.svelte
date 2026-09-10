@@ -28,7 +28,7 @@
 	import AccountPanel from '$lib/components/deck/cards/settings/AccountPanel.svelte';
 	import JoinNetworkPanel from '$lib/components/deck/cards/settings/JoinNetworkPanel.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
-	import { Check, FolderOpen, Loader2, Plus, Sparkles, UserRound, Link2, KeyRound, AlertTriangle, ChevronLeft } from 'lucide-svelte';
+	import { Check, FolderOpen, Loader2, Plus, KeyRound, AlertTriangle, ChevronLeft } from 'lucide-svelte';
 
 	// ── Steps ────────────────────────────────────────────────────────────────
 	type SetupStep = 'start' | 'workspace' | 'providers';
@@ -191,7 +191,7 @@
 			if (startStepNeeded) {
 				currentStep = 'start';
 				if (networkStatus.enrollment) choose('invite');
-				else if (networkStatus.hub?.linked || networkStatus.network?.bootstrap_state === 'syncing') choose('account');
+				else choose('account');
 			}
 		} catch {
 			startStepNeeded = false;
@@ -247,37 +247,7 @@
 						<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Copying settings from your other worker. This continues in the background when it is available.</div>
 						<button type="button" onclick={refreshNetwork} class="btn btn-secondary w-full py-3">Check sync status</button>
 						<button type="button" onclick={finishStartStep} class="btn btn-primary w-full py-3">Continue setup</button>
-					{:else if choice === null}
-						<div class="grid gap-3">
-							<button type="button" onclick={cleanInstall} disabled={networkBusy} class="text-left bg-muted/30 hover:bg-primary/10 border border-border hover:border-primary/40 rounded-lg p-4 transition-colors">
-								<div class="flex items-start gap-3">
-									<Sparkles size={20} strokeWidth={1.5} class="text-primary mt-0.5 shrink-0" />
-									<div>
-										<h3 class="text-foreground font-medium mb-1">Clean install</h3>
-										<p class="text-muted-foreground text-sm">Fresh settings on this computer. You can sign in or connect other devices any time later.</p>
-									</div>
-								</div>
-							</button>
-							<button type="button" onclick={() => choose('account')} disabled={networkBusy} class="text-left bg-muted/30 hover:bg-primary/10 border border-border hover:border-primary/40 rounded-lg p-4 transition-colors">
-								<div class="flex items-start gap-3">
-									<UserRound size={20} strokeWidth={1.5} class="text-primary mt-0.5 shrink-0" />
-									<div>
-										<h3 class="text-foreground font-medium mb-1">Sign in to your Shuffle account</h3>
-										<p class="text-muted-foreground text-sm">Sync settings, profiles and provider keys from your other workers, and control this one from your phone. New accounts start clean.</p>
-									</div>
-								</div>
-							</button>
-							<button type="button" onclick={() => choose('invite')} disabled={networkBusy} class="text-left bg-muted/30 hover:bg-primary/10 border border-border hover:border-primary/40 rounded-lg p-4 transition-colors">
-								<div class="flex items-start gap-3">
-									<Link2 size={20} strokeWidth={1.5} class="text-primary mt-0.5 shrink-0" />
-									<div>
-										<h3 class="text-foreground font-medium mb-1">Join with an invite</h3>
-										<p class="text-muted-foreground text-sm">Another worker on your network shows a QR code and link under Add device. Paste it here; no account needed.</p>
-									</div>
-								</div>
-							</button>
-						</div>
-					{:else if choice === 'account'}
+					{:else if choice === null || choice === 'account'}
 						<div class="space-y-3">
 							{#if !linked}
 								<div>
@@ -317,7 +287,10 @@
 							{/if}
 						</div>
 						<div class="flex gap-3">
-							<button type="button" onclick={backToChoices} class="btn btn-secondary flex-1 py-3" disabled={networkBusy}><ChevronLeft size={16} class="inline-block" /> Back</button>
+							{#if !linked}
+								<button type="button" onclick={cleanInstall} class="btn btn-secondary flex-1 py-3" disabled={networkBusy}>Continue without an account</button>
+								<button type="button" onclick={() => choose('invite')} class="btn btn-secondary flex-1 py-3" disabled={networkBusy}>Use a worker invite</button>
+							{/if}
 							{#if waitingOnAccount}
 								<button type="button" onclick={finishStartStep} class="btn btn-primary flex-1 py-3">Continue setup</button>
 							{/if}

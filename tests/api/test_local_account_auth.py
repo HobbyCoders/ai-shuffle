@@ -318,6 +318,44 @@ def test_owner_browser_can_authorize_only_same_account_native_targets(app, monke
     assert identity.authorized_device_ids('browser-chat') == []
 
 
+def test_linked_worker_preferences_use_account_before_any_controller_enrolls(app, monkeypatch):
+    from app.core import preference_identity as identity
+    identity._owner_cache.clear()
+    bind()
+    assert identity.pairing.list_paired_clients() == []
+    call = Mock(return_value={"account": {"id": ACCOUNT, "username": "owner"}})
+    monkeypatch.setattr(account_hub, "call", call)
+    expected = ("account", "https://hub.example.com#" + ACCOUNT)
+    assert identity.principal_preference_identity({"kind": "admin"}) == expected
+    assert identity.principal_preference_identity({"kind": "admin"}) == expected
+    call.assert_called_once()
+    mobile_hub.disconnect()
+    assert identity.principal_preference_identity({"kind": "admin"})[0] == "admin"
+
+
+@pytest.mark.parametrize("response", [{}, {"account": {}}, {"account": {"id": "invalid"}}])
+def test_linked_worker_does_not_fall_back_to_local_preferences_on_bad_profile(app, monkeypatch, response):
+    from fastapi import HTTPException
+    from app.core import preference_identity as identity
+    identity._owner_cache.clear()
+    bind()
+    monkeypatch.setattr(account_hub, "call", Mock(return_value=response))
+    with pytest.raises(HTTPException) as exc:
+        identity.principal_preference_identity({"kind": "admin"})
+    assert exc.value.status_code == 502
+
+
+def test_linked_worker_profile_outage_does_not_switch_preference_namespace(app, monkeypatch):
+    from fastapi import HTTPException
+    from app.core import preference_identity as identity
+    identity._owner_cache.clear()
+    bind()
+    monkeypatch.setattr(account_hub, "call", Mock(side_effect=HTTPException(503, "Unavailable")))
+    with pytest.raises(HTTPException) as exc:
+        identity.principal_preference_identity({"kind": "admin"})
+    assert exc.value.status_code == 503
+
+
 def test_api_user_web_login_cannot_be_enabled():
     from app.core.models import ApiUserCreate, ApiUserUpdate
     from pydantic import ValidationError

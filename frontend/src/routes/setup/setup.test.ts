@@ -48,6 +48,7 @@ let connection: Record<string, unknown>;
 
 beforeEach(() => {
 	vi.resetAllMocks(); status = fresh(); connection = disconnected; mocks.hasCredential = false; mocks.providers = [];
+	vi.spyOn(window, 'open').mockReturnValue(null);
 	mocks.claudeAuthenticated = false; mocks.claudeAccounts = []; mocks.anthropicKeySet = false; mocks.falKeySet = false;
 	mocks.refreshProviders.mockResolvedValue(undefined); mocks.loadClaudeAccounts.mockResolvedValue(undefined); mocks.loadIntegrations.mockResolvedValue(undefined);
 	mocks.getStatus.mockImplementation(async () => status);
@@ -65,7 +66,7 @@ afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 async function cleanInstall() {
 	render(Setup);
-	await fireEvent.click(await screen.findByRole('button', { name: /Clean install/ }));
+	await fireEvent.click(await screen.findByRole('button', { name: /Continue without an account/ }));
 	await screen.findByLabelText('Or type a path manually');
 }
 async function continueToProviders() {
@@ -100,11 +101,13 @@ describe('first-run setup', () => {
 		expect(mocks.loadIntegrations).toHaveBeenCalledOnce();
 	});
 
-	it('offers exactly three ways to start and lists three steps', async () => {
+	it('shows sign-in immediately with local and invite alternatives and three steps', async () => {
 		render(Setup);
-		expect(await screen.findByRole('button', { name: /Clean install/ })).toBeTruthy();
-		expect(screen.getByRole('button', { name: /Sign in to your Shuffle account/ })).toBeTruthy();
-		expect(screen.getByRole('button', { name: /Join with an invite/ })).toBeTruthy();
+		expect(await screen.findByRole('button', { name: /Continue without an account/ })).toBeTruthy();
+		expect(await screen.findByRole('button', { name: 'Sign in' })).toBeTruthy();
+			expect(screen.getByRole('button', { name: 'Create account' })).toBeTruthy();
+			expect(mocks.post).not.toHaveBeenCalled();
+		expect(screen.getByRole('button', { name: /Use a worker invite/ })).toBeTruthy();
 		const progress = screen.getByRole('navigation', { name: 'Setup progress' });
 		expect(progress.textContent).toContain('Start');
 		expect(progress.textContent).toContain('Workspace');
@@ -144,7 +147,7 @@ describe('first-run setup', () => {
 	it('resumes an initialized worker at the workspace step', async () => {
 		await cleanInstall(); cleanup(); render(Setup);
 		expect((await screen.findByLabelText('Or type a path manually') as HTMLInputElement).value).toBe('D:\\Work');
-		expect(screen.queryByRole('button', { name: /Clean install/ })).toBeNull();
+		expect(screen.queryByRole('button', { name: /Continue without an account/ })).toBeNull();
 		await continueToProviders(); await fireEvent.click(screen.getByRole('button', { name: 'Finish without a provider' }));
 		await waitFor(() => expect(mocks.complete).toHaveBeenCalledOnce());
 		expect(mocks.create).toHaveBeenCalledOnce();
@@ -152,15 +155,15 @@ describe('first-run setup', () => {
 
 	it('retries a clean install after a failed response without recreating persisted settings', async () => {
 		mocks.create.mockImplementationOnce(async () => { status = enrolled(); throw new Error('Response lost'); });
-		render(Setup); await fireEvent.click(await screen.findByRole('button', { name: /Clean install/ }));
+		render(Setup); await fireEvent.click(await screen.findByRole('button', { name: /Continue without an account/ }));
 		await screen.findByRole('alert');
-		await fireEvent.click(screen.getByRole('button', { name: /Clean install/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /Continue without an account/ }));
 		await screen.findByLabelText('Or type a path manually'); expect(mocks.create).toHaveBeenCalledOnce();
 	});
 
 	it('signs in to an account, waits for another worker without any approval step, and lets setup continue', async () => {
 		render(Setup);
-		await fireEvent.click(await screen.findByRole('button', { name: /Sign in to your Shuffle account/ }));
+		await screen.findByRole('button', { name: 'Sign in' });
 		await fireEvent.input(screen.getByLabelText('Name for this worker'), { target: { value: 'Studio laptop' } });
 		mocks.post.mockResolvedValue(waiting);
 		await fireEvent.click(await screen.findByRole('button', { name: 'Create account' }));
@@ -202,7 +205,7 @@ describe('first-run setup', () => {
 	});
 
 	it('joins from an invite link without a fingerprint checkbox and keeps this machine local', async () => {
-		render(Setup); await fireEvent.click(await screen.findByRole('button', { name: /Join with an invite/ }));
+		render(Setup); await fireEvent.click(await screen.findByRole('button', { name: /Use a worker invite/ }));
 		const join = screen.getByRole('button', { name: 'Join' }) as HTMLButtonElement;
 		expect(join.disabled).toBe(true);
 		expect(screen.queryByRole('checkbox')).toBeNull();
@@ -226,14 +229,12 @@ describe('first-run setup', () => {
 		expect(mocks.cancel).not.toHaveBeenCalled(); expect(mocks.create).not.toHaveBeenCalled();
 	});
 
-	it('goes back from the account path to the three choices', async () => {
+	it('keeps local setup available when account sign-in is unavailable', async () => {
 		connection = { ...disconnected, status: 'unavailable', error: 'Missing remote connector' };
-		render(Setup); await fireEvent.click(await screen.findByRole('button', { name: /Sign in to your Shuffle account/ }));
+		render(Setup); await screen.findByRole('button', { name: 'Sign in' });
 		await screen.findByText('Missing remote connector');
 		expect((screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement).disabled).toBe(true);
-		await fireEvent.click(screen.getByRole('button', { name: 'Back' }));
-		expect(screen.queryByText('Missing remote connector')).toBeNull();
-		await fireEvent.click(screen.getByRole('button', { name: /Clean install/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /Continue without an account/ }));
 		await screen.findByLabelText('Or type a path manually');
 	});
 });

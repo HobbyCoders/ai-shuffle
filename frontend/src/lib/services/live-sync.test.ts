@@ -4,8 +4,9 @@ vi.mock('$lib/stores/auth.svelte',()=>({auth:{subscribe:(fn:(s:any)=>void)=>{m.l
 vi.mock('./preferences',()=>({preferenceSync:{start:m.start,stop:m.stop,reconnect:m.reconnect,refresh:m.refresh,register:(key:string)=>m.bindings.add(key)}}));
 vi.mock('./resource-sync',()=>({resourceSync:{subscribe:vi.fn(()=>vi.fn()),invalidate:m.invalidate,clear:m.clear}}));
 vi.mock('$lib/stores/active-session',()=>({handleGlobalUserEvent:m.handle,activeSession:{current:{sessionId:null},applyComposerDefaults:vi.fn(),resetForAccountChange:vi.fn()}}));
-vi.mock('$lib/stores/app-data.svelte',()=>({appData:{loadProjects:m.loadProjects,loadClusterProjects:m.loadClusterProjects,loadSessions:m.loadSessions}}));
+vi.mock('$lib/stores/app-data.svelte',()=>({appData:{loadProfiles:vi.fn().mockResolvedValue(undefined),loadProjects:m.loadProjects,loadClusterProjects:m.loadClusterProjects,loadSessions:m.loadSessions}}));
 vi.mock('$lib/stores/notifications',()=>({notify:{resetLocal:vi.fn()}}));
+vi.mock('$lib/constants/models',()=>({hydrateModelRegistry:vi.fn().mockResolvedValue(true)}));
 vi.mock('$lib/stores/session/v2/feed-controller',()=>({feedController:{invalidate:vi.fn()}}));
 vi.mock('$lib/stores/theme.svelte',()=>({}));
 vi.mock('$lib/stores/timezonePreference.svelte',()=>({}));
@@ -22,7 +23,9 @@ vi.mock('$lib/stores/browser-panel.svelte',()=>({}));
 vi.mock('./notificationSound',()=>({}));
 import { startLiveSync } from './live-sync';
 import { resourceSync } from './resource-sync';
+import { hydrateModelRegistry } from '$lib/constants/models';
 import { activeSession } from '$lib/stores/active-session';
+import { appData } from '$lib/stores/app-data.svelte';
 import { TAB_ACTIVE_SESSION_KEY } from '$lib/stores/device-id';
 import { TAB_SESSION_OWNER_KEY } from '$lib/stores/session-owner';
 import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
@@ -38,6 +41,17 @@ function account(username:string|null) {m.listener?.({loading:false,status:{auth
 beforeEach(()=>{vi.useFakeTimers();vi.clearAllMocks();Socket.all=[];localStorage.clear();sessionStorage.clear();vi.stubGlobal('WebSocket',Socket);});
 afterEach(()=>{stop?.();vi.useRealTimers();vi.unstubAllGlobals();});
 describe('root authenticated live-sync lifecycle',()=>{
+ it.each(['settings','agents'])('refreshes synced %s and reapplies composer defaults without opening Settings',async(resource)=>{
+  stop=startLiveSync();account('alice');
+  const subscription=vi.mocked(resourceSync.subscribe).mock.calls.find(([names])=>names.includes(resource));
+  const loader=resource==='settings'?hydrateModelRegistry:appData.loadProfiles;
+  expect(subscription).toBeDefined();
+  await subscription![1]();
+  expect(loader).toHaveBeenCalledOnce();
+  expect(activeSession.applyComposerDefaults).toHaveBeenCalledOnce();
+  expect(vi.mocked(loader).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(activeSession.applyComposerDefaults).mock.invocationCallOrder[0]);
+ });
+
  it('registers Build and install choices before authentication starts the first snapshot',()=>{
   expect(m.bindings.has('build_subtab')).toBe(true);
   expect(m.bindings.has('install_prompt')).toBe(true);

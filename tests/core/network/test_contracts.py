@@ -181,6 +181,15 @@ def test_settings_policy_keeps_device_bound_keys_local():
     assert not any(policy.is_shared_setting_key(k) for k in local)
 
 
+@pytest.mark.parametrize("resource,collections", [
+    ("agents", {"agents"}),
+    ("settings", {"system_settings", "model_providers", "claude_accounts", "permission_rules"}),
+    ("hooks", {"project_hooks", "webhooks"}),
+])
+def test_catalog_changes_use_ui_resource_names(resource, collections):
+    assert collections <= {coll.name for coll in policy.collections_for_resource(resource)}
+
+
 def test_collection_registry_shapes():
     prefs = policy.collection("user_preferences")
     assert prefs.record_id({"user_type": "admin", "user_id": "x", "key": "layout"}) == "admin|x|layout"

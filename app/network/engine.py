@@ -1164,12 +1164,25 @@ def join_response(*, device_id: str, encryption_public: bytes, certificate: Mapp
 
 
 def _own_endpoints() -> List[str]:
+    endpoints = []
     try:
         from app.core.cluster import advertise_url
         url, _ = advertise_url()
-        return [url] if url else []
+        if url:
+            endpoints.append(url)
     except Exception:  # noqa: BLE001
-        return []
+        pass
+    # Docker's guessed LAN address can be private to its bridge. Advertise the
+    # verified managed route too; peers still authenticate the device identity.
+    try:
+        from app.core import managed_connection
+        connection = managed_connection.status()
+        url = connection.get("url")
+        if connection.get("status") == "connected" and url and url not in endpoints:
+            endpoints.append(url)
+    except Exception:  # noqa: BLE001
+        pass
+    return endpoints
 
 
 def _public_member(row: Mapping[str, Any]) -> dict:

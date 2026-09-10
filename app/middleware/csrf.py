@@ -156,6 +156,13 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         return is_match
 
     async def dispatch(self, request: Request, call_next) -> Response:
+        # These two bootstrap endpoints authenticate a network device by its
+        # signed challenge, not by cookies or local-owner access. Peers have no
+        # browser Origin, on either the LAN listener or the managed tunnel.
+        if request.url.path in (
+            "/api/v1/network/peer/auth/challenge", "/api/v1/network/peer/auth/token"
+        ):
+            return await call_next(request)
         from app.core import owner_auth
         # Passwordless LAN ownership needs its own strict boundary even when
         # development CORS is wildcard. A fabricated bearer disables local auth

@@ -36,6 +36,99 @@ def _pref(worker, key):
         return row["value"] if row else None
 
 
+@pytest.mark.asyncio
+async def test_account_preferences_reach_fresh_worker_without_controller(workers, monkeypatch):
+    from fastapi import Request
+    from app.api import preferences as api
+    from app.core import account_hub, encryption, preference_identity
+    from app.core.config import settings
+    from app.db import mobile_hub
+    a, b = workers("account-source"), workers("fresh-desktop")
+    account_id = "22222222-2222-2222-2222-222222222222"
+    monkeypatch.setattr(settings, "mobile_account_hub_url", "https://hub.example.com")
+    monkeypatch.setattr(account_hub, "call", lambda *args, **kwargs: {"account": {"id": account_id}})
+    preference_identity._owner_cache.clear()
+    monkeypatch.setattr(encryption, "_encryption_key", encryption.Fernet.generate_key())
+    request = Request({"type": "http", "headers": []})
+    request.state.is_admin = True
+    values = {
+        "composer.profile": "coding", "composer.permissionMode": "bypassPermissions",
+        "composer.model": "prov:provider:model", "composer.effort": "high", "composer.fastMode": "1",
+        "composer.contextWindowChoice": "standard", "composer.worktreeIntent": "worktree",
+        "theme": {"preference": "dark", "presetId": "vercel"}, "timezone": "local",
+        "chat_behavior": {"showThinkingBlocks": False}, "hotkey_settings": {"globalSttEnabled": False},
+        "git_action_settings": {"mergeMethod": "squash"}, "notification_sound": False,
+        "model_favorites": ["prov:provider:model"], "files_preferences": {"showHidden": True},
+        "layout": {"sidebarWidth": 393}, "sidebar_workspace": {"shown": ["notes", "settings"]},
+        "groups": {}, "context_usage_sections": {"plan": False}, "context_breakdown_open": False,
+        "sidebar_collapsed_groups": {}, "build_subtab": "hooks", "session_mode": "code",
+        "browser_panel": {"width": 550}, "install_prompt": {"never": True},
+    }
+    for worker, server in [(a, "11111111-1111-1111-1111-111111111111"),
+                           (b, "33333333-3333-3333-3333-333333333333")]:
+        with worker.active():
+            mobile_hub.bind("https://hub.example.com", server, encryption.encrypt_value("test-secret"),
+                            "managed:" + settings.effective_instance_id)
+            mobile_hub.activate()
+    with a.active():
+        engine.create_network("Account")
+        for key, value in values.items():
+            await api.set_preference(request, key, api.PreferenceValue(key=key, value=value))
+        engine.scan_all()
+    join(a, b)
+    with b.active():
+        assert preference_identity.local_owner_account() == account_id
+        result = await api.get_all_preferences(request)
+        assert all(result.preferences[key] == value for key, value in values.items())
+        await api.set_preference(request, "composer.fastMode", api.PreferenceValue(key="composer.fastMode", value=""))
+        engine.scan_all()
+    exchange(b, a)
+    with a.active():
+        assert (await api.get_preference(request, "composer.fastMode")).value == ""
+
+
+@pytest.mark.parametrize("state", ["disconnected", "connecting", "reconnecting", "connected"])
+def test_presence_advertises_only_verified_cloud_route(workers, monkeypatch, state):
+    from app.core import cluster, managed_connection
+    a, b = workers("docker"), workers("desktop")
+    lan, cloud = "http://172.17.0.11:8000", "https://worker.example.com"
+    monkeypatch.setattr(cluster, "advertise_url", lambda: (lan, "guess"))
+    monkeypatch.setattr(managed_connection, "status", lambda: {"status": state, "url": cloud})
+    with a.active():
+        engine.create_network("Home")
+        engine.publish_presence(version="test")
+        endpoints = engine.presence_of(a.device_id)["endpoints"]
+        assert endpoints == ([lan, cloud] if state == "connected" else [lan])
+    join(a, b)
+    with b.active():
+        assert engine.presence_of(a.device_id)["endpoints"] == endpoints
+
+
+def test_remote_catalog_updates_refresh_account_and_paired_views(workers, monkeypatch):
+    from unittest.mock import Mock
+    from app.core.global_events import global_events
+    from app.network import startup
+    a, b = workers("catalog-source"), workers("catalog-reader")
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    monkeypatch.setattr(engine, "_listeners", [startup._on_applied])
+    emit = Mock()
+    monkeypatch.setattr(global_events, "resources_changed", emit)
+    with a.active():
+        database.set_system_setting("tts_model", "synced-voice")
+        database.create_profile("agent-sync", "My agent", "", {"system_prompt": "Test agent"})
+        engine.scan_all()
+    emit.reset_mock()
+    exchange(a, b)
+    for resource in ("settings", "agents"):
+        for kind in ("admin", "api_user", "account", "paired"):
+            emit.assert_any_call(resource, user_type=kind)
+    with b.active():
+        assert database.get_system_setting("tts_model") == "synced-voice"
+        assert database.get_profile("agent-sync")["name"] == "My agent"
+
+
 def test_network_of_one_records_and_scans(workers):
     a = workers("a")
     with a.active():

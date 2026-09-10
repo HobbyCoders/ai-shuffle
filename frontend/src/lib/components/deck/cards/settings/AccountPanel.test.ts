@@ -19,7 +19,7 @@ function reads(path: string, connection: unknown, account: unknown = profile) {
 	});
 	void path;
 }
-beforeEach(() => { vi.resetAllMocks(); authState.current.status = { auth_mode: 'local' }; reads('', disconnected); });
+beforeEach(() => { vi.resetAllMocks(); vi.spyOn(window, 'open').mockReturnValue(null); authState.current.status = { auth_mode: 'local' }; reads('', disconnected); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 it('waits for account activation before loading the profile and loads it on the next poll', async () => {
@@ -34,6 +34,29 @@ it('waits for account activation before loading the profile and loads it on the 
 	await vi.advanceTimersByTimeAsync(4000);
 	expect(screen.getByText('@desk.owner')).toBeTruthy();
 	expect(screen.getByText('Remote access is on')).toBeTruthy();
+});
+
+it('opens the account page from the first click and clears the opener', async () => {
+ const tab = { opener: {}, location: { replace: vi.fn() }, close: vi.fn() };
+ vi.mocked(window.open).mockReturnValue(tab as unknown as Window);
+ api.post.mockResolvedValue(waiting);
+ render(AccountPanel, { variant: 'setup' });
+ await fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+ expect(window.open).toHaveBeenCalledExactlyOnceWith('about:blank', '_blank');
+ expect(tab.opener).toBeNull();
+ expect(tab.location.replace).toHaveBeenCalledExactlyOnceWith(waiting.authorization_url);
+ expect(api.post).toHaveBeenCalledOnce();
+});
+
+it('closes the reserved tab on a failed offer and keeps a retry available', async () => {
+ const tab = { opener: {}, location: { replace: vi.fn() }, close: vi.fn() };
+ vi.mocked(window.open).mockReturnValue(tab as unknown as Window);
+ api.post.mockRejectedValue(new Error('Account service unavailable'));
+ render(AccountPanel);
+ await fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+ expect(tab.close).toHaveBeenCalledOnce();
+ expect(tab.location.replace).not.toHaveBeenCalled();
+ expect(await screen.findByRole('button', { name: 'Sign in' })).toBeTruthy();
 });
 
 it('offers only sign in in settings', async () => {

@@ -3,6 +3,33 @@ from app.core import account_hub, owner_auth
 from app.core.config import settings
 from app.db import mobile_hub, pairing
 from fastapi import HTTPException
+import threading
+import time
+
+
+_owner_cache_lock = threading.Lock()
+_owner_cache = {}
+_OWNER_CACHE_SECONDS = 60
+
+
+def _binding_account(binding):
+    """Resolve the owning account without requiring a phone to enroll first."""
+    key = (settings.effective_instance_id, account_hub.configured_origin(),
+           binding["server_id"], binding.get("encrypted_secret"))
+    with _owner_cache_lock:
+        cached = _owner_cache.get(key)
+        if cached and time.monotonic() - cached[1] < _OWNER_CACHE_SECONDS:
+            return cached[0]
+        # This is the trusted worker backchannel, not a caller-supplied account ID.
+        result = account_hub.call(binding, "GET", "account")
+        account = result.get("account") if isinstance(result, dict) else None
+        try:
+            account_id = account_hub.identifier(account.get("id") if isinstance(account, dict) else None)
+        except (HTTPException, ValueError, TypeError) as exc:
+            raise HTTPException(502, "The account service did not return a valid owner identity") from exc
+        _owner_cache.clear()
+        _owner_cache[key] = (account_id, time.monotonic())
+        return account_id
 
 
 def account_identity(account_id):
@@ -11,10 +38,10 @@ def account_identity(account_id):
 
 
 def local_owner_account():
-    """Resolve this managed worker's owner using a live enrolled controller.
+    """Resolve the managed owner from an enrolled controller or the account hub.
 
-    A worker binding alone has no account ID. Require live proof rather than
-    deriving an alias from another install, a username, or a caller's header.
+    A fresh worker has no enrolled controller yet. Its authenticated account
+    profile supplies the same stable identity, never a username or local alias.
     """
     binding = mobile_hub.get_binding()
     if (not binding or not binding.get('active')
@@ -33,7 +60,7 @@ def local_owner_account():
                 raise  # Do not silently switch namespaces during hub outages.
     if len(accounts) > 1:
         raise PermissionError('Worker owner identity is ambiguous')
-    return next(iter(accounts), None)
+    return next(iter(accounts)) if accounts else _binding_account(binding)
 
 
 def principal_preference_identity(principal):
