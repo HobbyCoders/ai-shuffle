@@ -682,7 +682,6 @@ const messageSender = createMessageSender({
 		isConnected: () => wsConn.isConnected(),
 		connect: () => wsConn.connect(),
 		send: (data) => wsConn.send(data),
-		resetLastMessageTime: () => wsConn.resetLastMessageTime(),
 		resetReconnectAttempts: () => wsConn.resetReconnectAttempts(),
 	},
 	sessionEphemeralCache,
@@ -1062,14 +1061,11 @@ export const activeSession = {
 	// ── Connection ──────────────────────────────────────────────────
 
 	/**
-	 * Manually re-establish the WebSocket after a disconnect. Resets the
-	 * exponential-backoff counter so the retry is immediate (the user just
-	 * asked for it), then reconnects. Idempotent: connect() is a no-op if the
-	 * socket is already open/connecting.
+	 * Replace a failed control socket immediately, even when the browser still
+	 * reports OPEN/CONNECTING. The independent transcript feed keeps running.
 	 */
 	reconnect: () => {
-		wsConn.resetReconnectAttempts();
-		wsConn.connect();
+		wsConn.reconnect();
 	},
 
 	// ── Getters for derived stores ──────────────────────────────────

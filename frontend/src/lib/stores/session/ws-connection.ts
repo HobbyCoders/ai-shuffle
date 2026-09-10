@@ -16,6 +16,7 @@ const TOOL_EXECUTION_TIMEOUT_MS = 120_000;
 const MAX_RECONNECT_ATTEMPTS = 50;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 const PING_INTERVAL_MS = 30_000;
+const CONNECT_TIMEOUT_MS = 15_000;
 // The server sends heartbeats every 30 seconds and does not reply to client
 // pongs. Allow a full heartbeat interval plus scheduling/network delay on resume.
 const RESUME_HEALTH_TIMEOUT_MS = PING_INTERVAL_MS + 5_000;
@@ -55,14 +56,14 @@ export interface WsConnection {
 	activate: () => void;
 	/** Establish the WebSocket connection. No-op if already connected or connecting. */
 	connect: () => void;
+	/** Replace the current socket immediately, including a stuck OPEN/CONNECTING socket. */
+	reconnect: () => void;
 	/** Intentionally disconnect (no auto-reconnect). Clears all timers. */
 	disconnect: () => void;
 	/** Send a JSON-serializable payload. Returns false if not connected. */
 	send: (data: unknown) => boolean;
 	/** Whether the WebSocket is currently in OPEN state. */
 	isConnected: () => boolean;
-	/** Update lastMessageTime to now (called externally when messages are sent). */
-	resetLastMessageTime: () => void;
 	/** Reset reconnect attempt counter (e.g., before a manual reconnect). */
 	resetReconnectAttempts: () => void;
 	/** Full cleanup — disconnect + remove event listeners. */
@@ -79,8 +80,9 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 	let ws: WebSocket | null = null;
 	let pingTimer: ReturnType<typeof setInterval> | null = null;
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+	let connectTimer: ReturnType<typeof setTimeout> | null = null;
 	let reconnectAttempts = 0;
-	let intentionalDisconnect = false;
+	let enabled = true;
 	let lastMessageTime = 0;
 	let destroyed = false;
 
@@ -103,6 +105,53 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		}
 	}
 
+	function stopConnectTimer() {
+		if (connectTimer !== null) clearTimeout(connectTimer);
+		connectTimer = null;
+	}
+
+	function stopReconnectTimer() {
+		if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+		reconnectTimer = null;
+	}
+
+	// Retire ownership before closing. TCP close can stall or arrive after a
+	// replacement has opened; neither may affect the new socket's state/timers.
+	function retireSocket(code: number, reason: string) {
+		const socket = ws;
+		ws = null;
+		stopPing();
+		stopVisibilityCheck();
+		stopConnectTimer();
+		if (socket && socket.readyState !== WebSocket.CLOSED) {
+			try { socket.close(code, reason); } catch { /* Already unusable. */ }
+		}
+		return socket;
+	}
+
+	function scheduleReconnect() {
+		if (destroyed || !enabled) return;
+		stopReconnectTimer();
+		if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+			console.error('[WsConnection] Max reconnect attempts reached');
+			config.onMaxReconnectAttempts?.();
+			return;
+		}
+		const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY_MS);
+		reconnectAttempts++;
+		reconnectTimer = setTimeout(() => {
+			reconnectTimer = null;
+			connect();
+		}, delay + Math.random() * 1000);
+	}
+
+	function connectionLost(code: number, reason: string) {
+		retireSocket(code, reason);
+		console.warn(`[WsConnection] Connection lost: code=${code}, reason=${reason || '(none)'}`);
+		if (code !== 4001) scheduleReconnect();
+		config.onDisconnected(code, reason, false);
+	}
+
 	// ── Ping / Health Check ──────────────────────────────────────────────
 
 	function stopPing() {
@@ -123,7 +172,7 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 				} catch (e) {
 					console.warn('[WsConnection] Failed to send ping:', e);
 					reconnectAttempts = 0;
-					ws.close(4000, 'Keepalive failed');
+					connectionLost(4000, 'Keepalive failed');
 					return;
 				}
 
@@ -134,14 +183,9 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 
 				const timeSinceLastMessage = Date.now() - lastMessageTime;
 				if (timeSinceLastMessage > healthTimeout) {
-					if (config.isStreaming()) {
-						// If streaming, the poller may be active — WS is secondary.
-						// Let the consumer decide via the callback whether to skip force-close.
-						// For now, replicate original behavior: skip force-close if streaming.
-					} else {
-						console.warn(`[WsConnection] Connection stale (${Math.round(timeSinceLastMessage / 1000)}s), forcing reconnect`);
-						ws.close(4000, 'Connection health timeout');
-					}
+					// Transcript streaming uses SSE and says nothing about control
+					// socket health. Server heartbeats continue during tools/turns.
+					connectionLost(4000, 'Connection health timeout');
 				}
 			}
 		}, PING_INTERVAL_MS);
@@ -151,7 +195,10 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 
 	function connect() {
 		if (destroyed) return;
+		enabled = true;
 		if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+		stopReconnectTimer();
+		retireSocket(4000, 'Replacing closed connection');
 
 		const deviceId = config.getDeviceId();
 		// Web UI: same-origin socket, cookie auth (plus an explicit token when the
@@ -161,57 +208,31 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 
 		const socket = new WebSocket(url);
 		ws = socket;
+		connectTimer = setTimeout(() => {
+			if (socket === ws) connectionLost(4000, 'Connection attempt timed out');
+		}, CONNECT_TIMEOUT_MS);
 
 		ws.onopen = () => {
 			if (destroyed || socket !== ws) return;
+			stopConnectTimer();
 			reconnectAttempts = 0;
 			lastSeq = 0; // Reset sequence tracking for new connection
-			config.onConnected();
 			startPing();
+			config.onConnected();
 		};
 
 		ws.onclose = (event) => {
-			if (destroyed) return;
-			// Guard: ignore stale close events from a previous WebSocket instance.
-			// Without this, an old WS's onclose can call stopPing() and kill the
-			// health-check timer that belongs to the new, active connection.
-			if (event.target !== ws && ws !== null) {
-				return;
-			}
-
-			stopPing();
-			stopVisibilityCheck();
-
-			const wasClean = intentionalDisconnect;
-			config.onDisconnected(event.code, event.reason || '', wasClean);
-
-			if (event.code === 4001) {
-				// Auth failure — consumer handles redirect, no reconnect
-				console.warn('[WsConnection] WebSocket auth failed (4001)');
-			} else if (intentionalDisconnect) {
-				intentionalDisconnect = false;
-			} else {
-				// Unexpected close — reconnect with exponential backoff + jitter
-				if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-					console.error('[WsConnection] Max reconnect attempts reached');
-					config.onMaxReconnectAttempts?.();
-					return;
-				}
-
-				if (reconnectTimer) clearTimeout(reconnectTimer);
-				const baseDelay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY_MS);
-				const jitter = Math.random() * 1000;
-				reconnectAttempts++;
-				reconnectTimer = setTimeout(() => connect(), baseDelay + jitter);
-			}
+			if (destroyed || socket !== ws) return;
+			connectionLost(event.code, event.reason || '');
 		};
 
 		ws.onerror = (error) => {
+			if (destroyed || socket !== ws) return;
 			console.error('[WsConnection] WebSocket error:', error);
 		};
 
 		ws.onmessage = (event) => {
-			if (socket !== ws) return;
+			if (destroyed || socket !== ws) return;
 			lastMessageTime = Date.now();
 			stopVisibilityCheck();
 			try {
@@ -240,18 +261,20 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 	// ── Disconnect ───────────────────────────────────────────────────────
 
 	function disconnect() {
-		if (reconnectTimer) {
-			clearTimeout(reconnectTimer);
-			reconnectTimer = null;
-		}
-		stopPing();
-		stopVisibilityCheck();
+		enabled = false;
+		stopReconnectTimer();
+		const socket = retireSocket(1000, '');
+		if (socket && !destroyed) config.onDisconnected(1000, '', true);
+	}
 
-		intentionalDisconnect = true;
-		if (ws) {
-			ws.close(1000);
-			ws = null;
-		}
+	function reconnect() {
+		if (destroyed) return;
+		enabled = true;
+		reconnectAttempts = 0;
+		stopReconnectTimer();
+		const socket = retireSocket(4000, 'Manual reconnect');
+		if (socket) config.onDisconnected(4000, 'Manual reconnect', false);
+		connect();
 	}
 
 	// ── Send ─────────────────────────────────────────────────────────────
@@ -263,6 +286,7 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 			return true;
 		} catch (e) {
 			console.warn('[WsConnection] Failed to send message:', e);
+			connectionLost(4000, 'Send failed');
 			return false;
 		}
 	}
@@ -273,7 +297,7 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		if (typeof document === 'undefined') return;
 
 		visibilityHandler = () => {
-			if (destroyed) return;
+			if (destroyed || !enabled) return;
 
 			// Cancel any pending health-check from a previous visibility change
 			stopVisibilityCheck();
@@ -302,14 +326,14 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 						resumedSocket.send(JSON.stringify({ type: 'pong' }));
 					} catch {
 						reconnectAttempts = 0;
-						resumedSocket.close(4000, 'Resume keepalive failed');
+						connectionLost(4000, 'Resume keepalive failed');
 						return;
 					}
 					visibilityCheckTimer = setTimeout(() => {
 						visibilityCheckTimer = null;
 						if (ws === resumedSocket && resumedSocket.readyState === WebSocket.OPEN) {
 							console.warn('[WsConnection] No server response after tab return, forcing reconnect');
-							resumedSocket.close(4000, 'Half-open connection detected');
+							connectionLost(4000, 'Half-open connection detected');
 						}
 					}, RESUME_HEALTH_TIMEOUT_MS);
 				}
@@ -322,7 +346,7 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 	// ── Network / BFCache Resume Handlers ────────────────────────────────
 
 	function forceReconnectIfNeeded(reason: string) {
-		if (destroyed) return;
+		if (destroyed || !enabled) return;
 		// Notify consumer so it can trigger an immediate HTTP poll in parallel
 		// with the WS reconnect. This is the key latency win on phone unlock:
 		// fresh messages render before the socket handshake completes.
@@ -333,10 +357,10 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 			connect();
 			return;
 		}
-		if (ws.readyState === WebSocket.OPEN) {
-			// Close suspect socket; reconnect path handles the rest.
+		if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+			// Retire immediately: a close handshake on a dead network may stall.
 			console.warn(`[WsConnection] Force reconnect: ${reason}`);
-			try { ws.close(4000, reason); } catch { /* ignore */ }
+			connectionLost(4000, reason);
 		}
 	}
 
@@ -367,21 +391,18 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		activate() {
 			if (!destroyed) return;
 			destroyed = false;
-			intentionalDisconnect = false;
+			enabled = true;
 			reconnectAttempts = 0;
 			setupVisibilityHandler();
 			setupNetworkHandlers();
 		},
 		connect,
+		reconnect,
 		disconnect,
 		send,
 
 		isConnected(): boolean {
 			return ws !== null && ws.readyState === WebSocket.OPEN;
-		},
-
-		resetLastMessageTime() {
-			lastMessageTime = Date.now();
 		},
 
 		resetReconnectAttempts() {

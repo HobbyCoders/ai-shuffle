@@ -443,6 +443,15 @@ describe('ws-connection', () => {
 	});
 
 	describe('ping / health check', () => {
+		it('recovers a silent control socket while the independent transcript is streaming', () => {
+			const conn = createWsConnection(createMockConfig({ isStreaming: () => true }));
+			conn.connect();
+			createdSockets[0].simulateOpen();
+			vi.advanceTimersByTime(62_001);
+			expect(createdSockets).toHaveLength(2);
+			conn.destroy();
+		});
+
 		it('replaces a socket whose keepalive fails while the browser still reports OPEN', () => {
 			const conn = createWsConnection(createMockConfig());
 			conn.connect();
@@ -521,14 +530,14 @@ describe('ws-connection', () => {
 			conn.destroy();
 		});
 
-		it('reconnects a half-open socket even when local sends reset the activity time', () => {
+		it('reconnects a half-open socket even when local sends succeed', () => {
 			const conn = createWsConnection(createMockConfig());
 			conn.connect();
 			const socket = createdSockets[0];
 			socket.simulateOpen();
 			resume();
 			vi.advanceTimersByTime(20_000);
-			conn.resetLastMessageTime();
+			conn.send({ type: 'pong' });
 			vi.advanceTimersByTime(15_001);
 			expect(socket.readyState).toBe(MockWebSocket.CLOSED);
 			vi.advanceTimersByTime(2_000);
@@ -652,10 +661,107 @@ describe('ws-connection', () => {
 		});
 	});
 
-	// Phase 3.1: the manual "Reconnect" button calls activeSession.reconnect(),
-	// which is resetReconnectAttempts() + connect(). Verify that sequence forces
-	// an immediate new socket even after backoff attempts have accumulated.
-	describe('manual reconnect (resetReconnectAttempts + connect)', () => {
+	describe('manual reconnect', () => {
+		it('recovers after a send fails without replaying the user command', () => {
+			const conn = createWsConnection(createMockConfig());
+			conn.connect();
+			const socket = createdSockets[0];
+			socket.simulateOpen();
+			vi.spyOn(socket, 'send').mockImplementation(() => { throw new Error('Transport lost'); });
+			vi.spyOn(socket, 'close').mockImplementation(() => {});
+			expect(conn.send({ type: 'query', prompt: 'hello' })).toBe(false);
+			expect(conn.isConnected()).toBe(false);
+			vi.advanceTimersByTime(2_001);
+			expect(createdSockets).toHaveLength(2);
+			createdSockets[1].simulateOpen();
+			expect(createdSockets[1].sentMessages).toEqual([]);
+			conn.destroy();
+		});
+
+		it('keeps a streaming control socket healthy when server heartbeats arrive', () => {
+			const conn = createWsConnection(createMockConfig({ isStreaming: () => true }));
+			conn.connect();
+			const socket = createdSockets[0];
+			socket.simulateOpen();
+			for (let i = 0; i < 10; i++) {
+				vi.advanceTimersByTime(30_000);
+				socket.simulateMessage({ type: 'ping' });
+			}
+			expect(createdSockets).toHaveLength(1);
+			expect(conn.isConnected()).toBe(true);
+			conn.destroy();
+		});
+
+		it('cancels a pending handshake and ignores resume events after intentional disconnect', () => {
+			const conn = createWsConnection(createMockConfig());
+			conn.connect();
+			conn.disconnect();
+			window.dispatchEvent(new Event('online'));
+			document.dispatchEvent(new Event('visibilitychange'));
+			vi.advanceTimersByTime(60_000);
+			expect(createdSockets).toHaveLength(1);
+			conn.destroy();
+		});
+
+		it('cancels a pending automatic retry, including before an auth refusal', () => {
+			const conn = createWsConnection(createMockConfig());
+			conn.connect();
+			createdSockets[0].simulateClose(1006);
+			conn.reconnect();
+			createdSockets[1].simulateOpen();
+			createdSockets[1].simulateClose(4001, 'Authentication failed');
+			vi.advanceTimersByTime(60_000);
+			expect(createdSockets).toHaveLength(2);
+			conn.destroy();
+		});
+
+		it.each([MockWebSocket.CONNECTING, MockWebSocket.OPEN, MockWebSocket.CLOSING])(
+			'replaces a stuck socket in state %s without waiting for its close event', (state) => {
+				const config = createMockConfig();
+				const conn = createWsConnection(config);
+				conn.connect();
+				const first = createdSockets[0];
+				first.readyState = state;
+				vi.spyOn(first, 'close').mockImplementation(() => { first.readyState = MockWebSocket.CLOSING; });
+				conn.reconnect();
+				expect(createdSockets).toHaveLength(2);
+				createdSockets[1].simulateOpen();
+				first.simulateClose(1006, 'Late close');
+				expect(conn.isConnected()).toBe(true);
+				expect(config.onConnected).toHaveBeenCalledOnce();
+				createdSockets[1].simulateClose(1006);
+				vi.advanceTimersByTime(2_001);
+				expect(createdSockets).toHaveLength(3);
+				conn.destroy();
+			}
+		);
+
+		it('retries a handshake that never opens or closes', () => {
+			const config = createMockConfig();
+			const conn = createWsConnection(config);
+			conn.connect();
+			vi.spyOn(createdSockets[0], 'close').mockImplementation(() => {});
+			vi.advanceTimersByTime(17_001);
+			expect(createdSockets).toHaveLength(2);
+			expect(config.onDisconnected).toHaveBeenCalledWith(4000, 'Connection attempt timed out', false);
+			conn.destroy();
+		});
+
+		it('does not inherit an intentional disconnect from a retired socket', () => {
+			const config = createMockConfig();
+			const conn = createWsConnection(config);
+			conn.connect();
+			createdSockets[0].simulateOpen();
+			conn.disconnect();
+			conn.connect();
+			createdSockets[1].simulateOpen();
+			vi.advanceTimersByTime(1);
+			createdSockets[1].simulateClose(1006);
+			vi.advanceTimersByTime(2_001);
+			expect(createdSockets).toHaveLength(3);
+			conn.destroy();
+		});
+
 		it('opens a fresh socket immediately when triggered while disconnected', () => {
 			const config = createMockConfig();
 			const conn = createWsConnection(config);
@@ -671,9 +777,7 @@ describe('ws-connection', () => {
 
 			const socketsBefore = createdSockets.length;
 
-			// User clicks Reconnect → the two calls activeSession.reconnect() makes.
-			conn.resetReconnectAttempts();
-			conn.connect();
+			conn.reconnect();
 
 			// A new socket is created synchronously — no waiting on the backoff timer.
 			expect(createdSockets.length).toBe(socketsBefore + 1);

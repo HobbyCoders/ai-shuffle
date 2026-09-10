@@ -659,8 +659,10 @@ class ChatWebSocketHandler:
                     elif not is_task_done:
                         logger.debug(f"Session {self.current_session_id} has active query, deferring cleanup")
 
-        except WebSocketDisconnect:
-            logger.debug("Chat WebSocket disconnected")
+        except WebSocketDisconnect as exc:
+            # Keep the close code in normal desktop/worker logs so a dropped
+            # control socket can be diagnosed while the SSE feed keeps working.
+            logger.info("Chat WebSocket disconnected (code=%s)", exc.code)
 
         except RuntimeError as e:
             # Handle "WebSocket is not connected" error that happens when we try to

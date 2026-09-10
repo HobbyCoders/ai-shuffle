@@ -185,8 +185,7 @@
 	}
 
 	// Manually re-establish the WebSocket (the Reconnect button on the
-	// disconnection banner). Delegates to the existing reconnect machinery —
-	// resets backoff then reconnects — rather than inventing a new path.
+	// disconnection banner). Replace a suspect socket and reset retry backoff.
 	function handleReconnect() {
 		activeSession.reconnect();
 	}
@@ -274,8 +273,8 @@
 						<Banner
 							severity="warning"
 							message={$activeSession.wsReconnectRequired
-								? 'Connection interrupted. Reconnect to resume live updates.'
-								: 'Connection lost — trying to reconnect. Live updates are paused.'}
+								? 'Chat controls disconnected. Reconnect to send messages.'
+								: 'Chat controls disconnected — trying to reconnect. Running sessions continue.'}
 							action={{ label: 'Reconnect', onClick: handleReconnect }}
 						/>
 					</div>
