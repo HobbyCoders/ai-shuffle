@@ -76,6 +76,26 @@ def account_profile(_admin=Depends(require_admin)):
     return JSONResponse(_profile(account_hub.call(binding, 'GET', 'account'), binding['server_id']), headers={'Cache-Control': 'no-store'})
 
 
+@router.delete('/account/{kind}/{registration_id}')
+def revoke_account_registration(kind: str, registration_id: str, _admin=Depends(require_admin)):
+    if kind not in ('servers', 'devices'):
+        raise HTTPException(404, 'Unknown account registration type')
+    try:
+        account_hub.identifier(registration_id)
+    except ValueError:
+        raise HTTPException(400, 'Invalid account registration')
+    binding = _active_binding()
+    if kind == 'servers' and registration_id == binding['server_id']:
+        raise HTTPException(409, 'Use Sign out to disconnect this worker')
+    result = account_hub.call(binding, 'DELETE', f'account/{kind}/{registration_id}')
+    if result.get('ok') is not True:
+        raise HTTPException(503, 'Account revocation was not confirmed')
+    if kind == 'devices':
+        account_hub.reset_verification_cache()
+    return JSONResponse({'ok': True, 'cleanup_pending': result.get('cleanup_pending') is True},
+                        headers={'Cache-Control': 'no-store'})
+
+
 @router.patch('/account')
 def update_account_username(body: UsernameUpdate, _admin=Depends(require_admin)):
     username = body.username.strip().lower()

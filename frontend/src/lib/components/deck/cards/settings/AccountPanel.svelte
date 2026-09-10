@@ -91,8 +91,8 @@
 		}
 	}
 
-	async function loadProfile() {
-		if (loadingProfile || savingUsername || !connection?.signed_in || connection.profile_ready === false) return;
+	export async function loadProfile(force = false) {
+		if ((!force && loadingProfile) || savingUsername || !connection?.signed_in || connection.profile_ready === false) return;
 		loadingProfile = true;
 		profileCheckedAt = Date.now();
 		const version = ++profileVersion;
@@ -106,7 +106,7 @@
 				profileError = getErrorMessage(e, 'Could not load the account profile');
 				inventoryReady = false;
 			}
-		} finally { loadingProfile = false; }
+		} finally { if (version === profileVersion) loadingProfile = false; }
 	}
 
 	onMount(() => {
@@ -206,7 +206,7 @@
 		<div class="head-actions">
 			{#if signedIn}
 				<button type="button" class="btn" disabled={busy} onclick={signOut}><LogOut size={14} /> {busy ? 'Signing out…' : 'Sign out'}</button>
-				<button type="button" class="btn icon-btn refresh" disabled={loadingProfile || busy || savingUsername || connection?.profile_ready === false} onclick={loadProfile} aria-label="Refresh account" title="Refresh account"><RefreshCw size={15} class={loadingProfile ? 'refreshing' : ''} /></button>
+				<button type="button" class="btn icon-btn refresh" disabled={loadingProfile || busy || savingUsername || connection?.profile_ready === false} onclick={() => loadProfile()} aria-label="Refresh account" title="Refresh account"><RefreshCw size={15} class={loadingProfile ? 'refreshing' : ''} /></button>
 			{:else if connection && !(intent && connection.code)}
 				<button type="button" class="btn primary" disabled={busy || !canStart} aria-describedby={!canStart && connection.error ? 'account-panel-error' : undefined} onclick={() => start('signin')}>{busy && intent === 'signin' ? 'Preparing…' : 'Sign in'}</button>
 				{#if variant === 'setup'}<button type="button" class="btn" disabled={busy || !canStart} aria-describedby={!canStart && connection.error ? 'account-panel-error' : undefined} onclick={() => start('signup')}>{busy && intent === 'signup' ? 'Preparing…' : 'Create account'}</button>{/if}
@@ -270,7 +270,7 @@
 			</div>
 			<p class="muted">These are account registrations, including offline devices. Local network members and direct pairings are separate from account registrations.</p>
 		{/if}
-		{#if profileError}<div class="error-row"><p role="alert">{profileError}</p><button type="button" class="btn" onclick={loadProfile}>Retry profile</button></div>{/if}
+		{#if profileError}<div class="error-row"><p role="alert">{profileError}</p><button type="button" class="btn" onclick={() => loadProfile()}>Retry profile</button></div>{/if}
 		{#if browserSignedInThroughAccount}
 			<button type="button" class="btn subtle" onclick={signOutBrowser}><LogOut size={13} /> Sign this browser out</button>
 		{/if}

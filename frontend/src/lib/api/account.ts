@@ -78,6 +78,11 @@ export async function getAccountProfile(): Promise<AccountProfile> {
 	return api.get<AccountProfile>('/mobile/hub/account', { cache: 'no-store' });
 }
 
+/** Revoke an account registration, not a separate local pairing or network membership. */
+export async function revokeAccountRegistration(kind: 'servers' | 'devices', id: string): Promise<{ ok: boolean; cleanup_pending?: boolean }> {
+	return (await api.delete<{ ok: boolean; cleanup_pending?: boolean }>(`/mobile/hub/account/${kind}/${encodeURIComponent(id)}`))!;
+}
+
 export async function setAccountUsername(username: string): Promise<AccountProfile> {
 	return api.patch<AccountProfile>('/mobile/hub/account', { username: username.trim() });
 }

@@ -237,6 +237,43 @@ it('does not expose advanced network settings or load their data', async () => {
 	expect(api.get.mock.calls.some(([path]) => ['/cluster/advertise', '/network/conflicts'].includes(path))).toBe(false);
 });
 
+
+it.each(['servers', 'devices'] as const)('confirms account %s revocation, refreshes inventory and retains failures', async (kind) => {
+	const id = 'offline';
+	let profile = {
+		account: { id: 'account', username: 'owner', profile_complete: true },
+		servers: [{ id, name: 'Offline PC', current: false, url: null }],
+		devices: [{ id, name: 'Offline phone', platform: 'android' }]
+	};
+	api.get.mockImplementation(async (path: string) => {
+		if (path === '/mobile/hub/connection') return { ...disconnected, signed_in: true, status: 'connected' };
+		if (path === '/mobile/hub/account') return structuredClone(profile);
+		return reads(path);
+	});
+	render(DevicesSection);
+	const name = kind === 'servers' ? 'Offline PC' : 'Offline phone';
+	const button = await screen.findByRole('button', { name: `Revoke ${name} from account` });
+	await fireEvent.click(button);
+	expect(api.delete).not.toHaveBeenCalled();
+	await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+	expect(api.delete).not.toHaveBeenCalled();
+	await fireEvent.click(screen.getByRole('button', { name: `Revoke ${name} from account` }));
+	api.delete.mockRejectedValueOnce(new Error('Account service unavailable'));
+	await fireEvent.click(screen.getByRole('button', { name: 'Confirm revoke' }));
+	expect(await screen.findByText('Account service unavailable')).toBeTruthy();
+	expect(screen.getByText(name)).toBeTruthy();
+	let finish!: (value: unknown) => void;
+	api.delete.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+	await fireEvent.click(screen.getByRole('button', { name: 'Confirm revoke' }));
+	expect(screen.getByRole('button', { name: 'Revoking…' }).hasAttribute('disabled')).toBe(true);
+	profile = { ...profile, [kind]: [] };
+	finish({ ok: true });
+	await waitFor(() => expect(screen.queryByText(name)).toBeNull());
+	expect(api.delete).toHaveBeenLastCalledWith(`/mobile/hub/account/${kind}/${id}`);
+	expect(api.get.mock.calls.filter(([path]) => path === '/mobile/hub/account').length).toBeGreaterThan(1);
+	expect(screen.getByText('My phone')).toBeTruthy();
+});
+
 it('includes offline account devices in the same list, merges known local identities, and refreshes registrations', async () => {
 	vi.useFakeTimers();
 	status.members![1].endpoints = ['https://laptop.example/'];
@@ -271,6 +308,10 @@ it('includes offline account devices in the same list, merges known local identi
 	expect(screen.queryByText('Laptop account name')).toBeNull();
 	expect(screen.queryByText('Phone account name')).toBeNull();
 	expect(screen.queryByText('Browser account name')).toBeNull();
+	expect(within(row('member:laptop')).getByRole('button', { name: 'Revoke Laptop account name from account' })).toBeTruthy();
+	expect(within(row('client:phone')).getByRole('button', { name: 'Revoke Phone account name from account' })).toBeTruthy();
+	expect(within(row('client:browser')).getByRole('button', { name: 'Revoke Browser account name from account' })).toBeTruthy();
+	expect(screen.queryByRole('button', { name: 'Revoke Desk account name from account' })).toBeNull();
 	profile = { ...profile, devices: [] };
 	await vi.advanceTimersByTimeAsync(32_000);
 	expect(screen.queryByText('Offline phone')).toBeNull();

@@ -17,8 +17,8 @@
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { listPairedClients, revokePairedClient, type PairedClient } from '$lib/api/pairing';
-	import type { AccountProfile } from '$lib/api/account';
-	import { accountOnlyDevices } from './account-devices';
+	import { revokeAccountRegistration, type AccountProfile } from '$lib/api/account';
+	import { accountRegistrations, type AccountDeviceRow } from './account-devices';
 	import { listInstalls, renameInstall, deleteInstall, setInstallApproval, type Install } from '$lib/api/installs';
 	import {
 		adoptAccountNetwork, createNetwork, getNetworkStatus, renameNetworkMember, revokeNetworkMember, unlockWithRecoveryKey,
@@ -36,6 +36,7 @@
 	// ── Data ────────────────────────────────────────────────────────────────
 	let status = $state<NetworkStatus | null>(null);
 	let accountProfile = $state<AccountProfile | null>(null);
+	let accountPanel: AccountPanel;
 	let accountInventoryReady = $state(false);
 	let stale = $state(false);
 	let statusError = $state('');
@@ -80,7 +81,8 @@
 		...(status?.hub?.pending_devices ?? []).map((device) => ({ key: `hub:${device.device_id}`, name: device.name || device.device_id, platform: device.platform, via: 'account' as const }))
 	]);
 	const workerName = $derived(self?.name ?? installs.find((install) => install.is_self || install.id === selfInstallId)?.device_name ?? 'My worker');
-	const accountDevices = $derived(accountOnlyDevices(accountProfile, status, installs, clients));
+	const registrations = $derived(accountRegistrations(accountProfile, status, installs, clients));
+	const accountDevices = $derived(registrations.filter((device) => !device.localKey));
 	const workerCount = $derived((status ? 1 : 0) + members.length + legacyInstalls.length);
 	const total = $derived(workerCount + clients.length + accountDevices.length);
 	const complete = $derived(workersLoaded && clientsLoaded && accountInventoryReady && !workersError && !clientsError && status !== null);
@@ -202,6 +204,25 @@
 		finally { saving = null; }
 	}
 
+	async function revokeAccountDevice(device: AccountDeviceRow) {
+		if (saving || device.current) return;
+		saving = device.key; error = '';
+		try {
+			const result = await revokeAccountRegistration(device.registration, device.id);
+			if (!result.ok) throw new Error('Account revocation was not confirmed');
+			confirmation = null;
+			if (accountProfile) accountProfile = {
+				...accountProfile,
+				servers: accountProfile.servers.filter((worker) => device.registration !== 'servers' || worker.id !== device.id),
+				devices: accountProfile.devices?.filter((item) => device.registration !== 'devices' || item.id !== device.id)
+			};
+			await accountPanel.loadProfile(true);
+			flash(`${device.name} revoked from your account`);
+			if (result.cleanup_pending) error = 'Account access was revoked, but remote connection cleanup is still pending.';
+		} catch (e) { error = getErrorMessage(e, 'Could not revoke account access'); }
+		finally { saving = null; }
+	}
+
 	async function removeMember(member: NetworkMember) {
 		if (saving) return;
 		saving = `member:${member.device_id}`; error = '';
@@ -283,6 +304,22 @@
 	}
 </script>
 
+{#snippet accountControl(device: AccountDeviceRow)}
+	{#if $isAdmin && !device.current}
+		{#if confirmation?.key !== device.key}
+			<div class="actions" class:account-local={Boolean(device.localKey)}><button type="button" class="btn" class:icon={!device.localKey} aria-label="Revoke {device.name} from account" title="Revoke account access" disabled={saving !== null} onclick={() => { confirmation = { key: device.key, action: 'revoke' }; }}><ShieldOff size={15} />{#if device.localKey}Revoke from account{/if}</button></div>
+		{:else}
+			<div class="confirm">
+				<p>Revoke {device.name} from your account? {device.kind === 'Worker' ? 'This worker will lose account access and its remote connection.' : 'This device will need to sign in again.'} Separate local pairings and network membership are not removed.</p>
+				<div class="row">
+					<button type="button" class="btn sm danger" disabled={saving !== null} onclick={() => revokeAccountDevice(device)}>{saving === device.key ? 'Revoking…' : 'Confirm revoke'}</button>
+					<button type="button" class="btn sm" disabled={saving !== null} onclick={() => { confirmation = null; }}>Cancel</button>
+				</div>
+			</div>
+		{/if}
+	{/if}
+{/snippet}
+
 <section class="devices" aria-labelledby="devices-heading">
 	<header class="head">
 		<div class="heading">
@@ -297,7 +334,7 @@
 		{/if}
 	</header>
 
-	<AccountPanel {workerName} bind:profile={accountProfile} bind:inventoryReady={accountInventoryReady} />
+	<AccountPanel bind:this={accountPanel} {workerName} bind:profile={accountProfile} bind:inventoryReady={accountInventoryReady} />
 
 	<div id="device-enrollment" hidden={!showAdd}>{#if addMounted}<AddDevicePanel {enrolled} allowLegacyRunner={workersLoaded && !enrolled && installs.length > 0} />{/if}</div>
 
@@ -417,6 +454,9 @@
 						</div>
 					</div>
 				{/if}
+				{#each registrations.filter((device) => device.localKey === key) as device (device.key)}
+					{@render accountControl(device)}
+				{/each}
 			</li>
 		{/each}
 		{#each joining as device (device.key)}
@@ -467,6 +507,9 @@
 						</div>
 					</div>
 				{/if}
+				{#each registrations.filter((device) => device.localKey === key) as device (device.key)}
+					{@render accountControl(device)}
+				{/each}
 			</li>
 		{/each}
 		{#each clients as client (client.id)}
@@ -493,6 +536,9 @@
 						</div>
 					</div>
 				{/if}
+				{#each registrations.filter((device) => device.localKey === key) as device (device.key)}
+					{@render accountControl(device)}
+				{/each}
 			</li>
 		{/each}
 		{#each accountDevices as device (device.key)}
@@ -502,6 +548,7 @@
 					<div class="name-line"><span class="name">{device.name}</span><span class="tag">On your account</span></div>
 					<div class="meta"><span>{device.kind}</span>{#if device.platform}<span>{device.platform}</span>{/if}<span>Availability unknown</span></div>
 				</div>
+				{@render accountControl(device)}
 			</li>
 		{/each}
 	</ul>
@@ -560,6 +607,7 @@
 	.meta span { overflow-wrap: anywhere; }
 	.meta span + span::before { content: '·'; margin-right: 8px; }
 	.actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+	.account-local { grid-column: 2 / -1; justify-content: flex-end; }
 	.editor { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
 	.editor .inp { flex: 1 1 120px; width: 100%; }
 	.confirm { grid-column: 2 / -1; display: flex; flex-direction: column; gap: 8px; }

@@ -146,6 +146,14 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
         if response.status != 200:
             if suffix.startswith('browser-logins') and response.status in (401, 403):
                 raise HTTPException(response.status, 'Account sign-in expired or authorization was rejected.')
+            if suffix.startswith('account/') and response.status in (401, 403, 404, 409):
+                messages = {
+                    401: 'This worker is no longer linked to its account. Sign in again.',
+                    403: 'Account revocation is not allowed for this worker.',
+                    404: 'Registration unavailable, or the account service needs an update.',
+                    409: 'Use Sign out to disconnect this worker.',
+                }
+                raise HTTPException(response.status, messages[response.status])
             if suffix == 'account' and response.status in ACCOUNT_PROFILE_ERRORS:
                 # Fixed messages: the hub body is never echoed.
                 raise HTTPException(response.status, ACCOUNT_PROFILE_ERRORS[response.status])

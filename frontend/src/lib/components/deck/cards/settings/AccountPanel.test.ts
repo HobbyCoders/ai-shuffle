@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, within, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }));
@@ -21,6 +21,23 @@ function reads(path: string, connection: unknown, account: unknown = profile) {
 }
 beforeEach(() => { vi.resetAllMocks(); vi.spyOn(window, 'open').mockReturnValue(null); authState.current.status = { auth_mode: 'local' }; reads('', disconnected); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
+
+it('ignores an older inventory response after a forced refresh', async () => {
+	let finish!: (value: unknown) => void;
+	api.get.mockImplementation(async (path: string) => {
+		if (path === '/mobile/hub/connection') return { ...disconnected, signed_in: true, status: 'connected' };
+		return new Promise((resolve) => { finish = resolve; });
+	});
+	const view = render(AccountPanel, { variant: 'setup' });
+	await waitFor(() => expect(finish).toBeTypeOf('function'));
+	const newer = { ...profile, servers: [profile.servers[0]] };
+	api.get.mockResolvedValue(newer);
+	await view.component.loadProfile(true);
+	finish(profile);
+	await tick();
+	expect(screen.queryByText('Laptop')).toBeNull();
+	expect(screen.getByText('Desk (this worker)')).toBeTruthy();
+});
 
 it('waits for account activation before loading the profile and loads it on the next poll', async () => {
 	vi.useFakeTimers();

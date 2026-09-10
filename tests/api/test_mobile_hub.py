@@ -147,6 +147,30 @@ def test_account_profile_proxies_only_owning_account_inventory_metadata(setup, m
     assert len([call for call in seen if call[0] == 'PATCH']) == 2  # the invalid name never reached the hub
 
 
+@pytest.mark.parametrize('kind', ['servers', 'devices'])
+def test_account_revocation_requires_owner_and_active_link(setup, monkeypatch, kind):
+    path = f'/api/v1/mobile/hub/account/{kind}/{DEVICE}'
+    call = Mock(return_value={'ok': True, 'cleanup_pending': True})
+    monkeypatch.setattr(account_hub, 'call', call)
+    assert setup.delete(path).status_code == 403
+    client = admin_client()
+    assert client.delete(path).status_code == 409
+    bind()
+    response = client.delete(path)
+    assert response.status_code == 200
+    assert response.json() == {'ok': True, 'cleanup_pending': True}
+    assert call.call_args.args[1:] == ('DELETE', f'account/{kind}/{DEVICE}')
+    call.reset_mock()
+    assert client.delete(f'/api/v1/mobile/hub/account/servers/{SERVER}').status_code == 409
+    assert client.delete('/api/v1/mobile/hub/account/devices/invalid').status_code == 400
+    assert client.delete(f'/api/v1/mobile/hub/account/other/{DEVICE}').status_code == 404
+    call.assert_not_called()
+    call.return_value = {}
+    assert client.delete(path).status_code == 503
+    call.side_effect = HTTPException(404, 'Registration unavailable')
+    assert client.delete(path).status_code == 404
+
+
 def test_account_profile_preserves_unknown_devices_for_older_hubs():
     result = mobile_hub._profile({'account': {'id': ACCOUNT, 'username': 'owner'}, 'servers': []})
     assert 'devices' not in result
