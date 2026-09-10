@@ -8,8 +8,7 @@ import {
 	resolveLiveTurnStartedAt,
 	resolveTurnNavigationIndex,
 	splitTurnPreview,
-	turnAnchorId,
-	turnBarWeight
+	turnAnchorId
 } from './transcript-navigation';
 
 function message(over: Partial<ChatMessage>): ChatMessage {
@@ -30,8 +29,6 @@ describe('transcript navigation derivation', () => {
 			{ id: 'user/one', label: 'First prompt', title: 'First', preview: 'prompt' },
 			{ id: 'user-two', label: 'Second prompt', title: 'Second prompt', preview: '' }
 		]);
-		expect(items[0].weight).toBeGreaterThan(0);
-		expect(items[0].weight).toBeLessThanOrEqual(1);
 		expect(turnAnchorId(items[0].id)).toBe('user-turn-user%2Fone');
 	});
 
@@ -52,12 +49,6 @@ describe('transcript navigation derivation', () => {
 			title: `${'A'.repeat(63)}…`,
 			preview: long
 		});
-	});
-
-	it('maps longer prompts to longer timeline bars', () => {
-		expect(turnBarWeight('hi')).toBe(0.38);
-		expect(turnBarWeight('A'.repeat(400))).toBe(1);
-		expect(turnBarWeight('A'.repeat(100))).toBeGreaterThan(turnBarWeight('A'.repeat(40)));
 	});
 
 	it('recognizes only non-command user messages', () => {

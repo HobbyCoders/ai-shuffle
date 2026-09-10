@@ -3,15 +3,14 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import TurnNavigator from './TurnNavigator.svelte';
 
 const items = [
-	{ id: 'one', label: 'Set up the project', title: 'Set up the project', preview: '', weight: 0.4 },
+	{ id: 'one', label: 'Set up the project', title: 'Set up the project', preview: '' },
 	{
 		id: 'two',
 		label: 'Fix the transcript',
 		title: 'Fix the transcript',
-		preview: 'Details about the bug',
-		weight: 0.7
+		preview: 'Details about the bug'
 	},
-	{ id: 'three', label: 'Run verification', title: 'Run verification', preview: '', weight: 0.5 }
+	{ id: 'three', label: 'Run verification', title: 'Run verification', preview: '' }
 ];
 
 afterEach(cleanup);
@@ -31,6 +30,39 @@ describe('TurnNavigator', () => {
 			screen.getByRole('button', { name: 'User message 1 of 3: Set up the project' }).getAttribute('aria-current')
 		).toBe('true');
 		expect(screen.getByText('Details about the bug')).toBeTruthy();
+	});
+
+	it('moves a ripple between neighboring lines and resets when the cursor leaves', async () => {
+		render(TurnNavigator, { props: { items, currentIndex: 0, onSelect: vi.fn() } });
+		const ticks = screen.getAllByRole('button');
+		const proximity = () => ticks.map((tick) => Number(tick.style.getPropertyValue('--proximity')));
+		expect(proximity()).toEqual([0, 0, 0]);
+
+		await fireEvent.mouseEnter(ticks[1]);
+		expect(proximity()[1]).toBe(1);
+		expect(proximity()[0]).toBeCloseTo(2 / 3);
+		expect(proximity()[2]).toBeCloseTo(2 / 3);
+
+		// Crossing the gap should not snap the ripple back to its resting position.
+		await fireEvent.mouseLeave(ticks[1]);
+		expect(proximity()[1]).toBe(1);
+		await fireEvent.mouseEnter(ticks[2]);
+		expect(proximity()[2]).toBe(1);
+		expect(proximity()[0]).toBeCloseTo(1 / 3);
+
+		await fireEvent.mouseLeave(screen.getByRole('navigation'));
+		expect(proximity()).toEqual([0, 0, 0]);
+	});
+
+	it('shows the same ripple and preview for keyboard focus', async () => {
+		render(TurnNavigator, { props: { items, currentIndex: 0, onSelect: vi.fn() } });
+		const tick = screen.getAllByRole('button')[1];
+		await fireEvent.focus(tick);
+		expect(tick.classList.contains('is-hovered')).toBe(true);
+		expect(tick.style.getPropertyValue('--proximity')).toBe('1');
+		await fireEvent.blur(tick);
+		expect(tick.classList.contains('is-hovered')).toBe(false);
+		expect(tick.style.getPropertyValue('--proximity')).toBe('0');
 	});
 
 	it('moves with the arrow keys while focused', async () => {

@@ -34,6 +34,7 @@
 	aria-label="Navigate user turns"
 	onfocusin={() => (focused = true)}
 	onfocusout={() => (focused = false)}
+	onmouseleave={() => (hoveredIndex = null)}
 >
 	{#each items as item, index (item.id)}
 		<button
@@ -41,15 +42,12 @@
 			class="tick"
 			class:is-current={index === resolvedIndex}
 			class:is-hovered={hoveredIndex === index}
-			style="--w: {item.weight}"
+			style="--proximity: {hoveredIndex === null ? 0 : Math.max(0, 1 - Math.abs(index - hoveredIndex) / 3)}"
 			aria-label="User message {index + 1} of {items.length}: {item.label}"
 			aria-current={index === resolvedIndex ? 'true' : undefined}
 			onclick={() => onSelect(index)}
 			onkeydown={onKeydown}
 			onmouseenter={() => (hoveredIndex = index)}
-			onmouseleave={() => {
-				if (hoveredIndex === index) hoveredIndex = null;
-			}}
 			onfocus={() => (hoveredIndex = index)}
 			onblur={() => {
 				if (hoveredIndex === index) hoveredIndex = null;
@@ -80,7 +78,7 @@
 		max-height: 56vh;
 		padding: 10px 12px 10px 2px;
 		transform: translateY(-50%);
-		pointer-events: none;
+		pointer-events: auto;
 	}
 
 	.tick {
@@ -99,33 +97,29 @@
 	.bar {
 		display: block;
 		height: 2px;
-		width: calc(7px + var(--w, 0.5) * 15px);
+		width: 20px;
 		border-radius: 999px;
 		background: color-mix(in oklch, var(--subtle-foreground) 72%, transparent);
-		transform-origin: left center;
+		transform: translateX(calc(var(--proximity, 0) * 6px));
 		transition:
-			width 180ms ease,
 			background-color 180ms ease,
-			transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+			transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
 			opacity 160ms ease;
 	}
 
 	.turn-nav:hover .tick:not(:hover):not(.is-current) .bar,
 	.turn-nav.is-focused .tick:not(:focus-visible):not(.is-current) .bar {
-		opacity: 0.42;
+		opacity: calc(0.42 + var(--proximity, 0) * 0.58);
 	}
 
 	.tick.is-current .bar {
-		width: calc(10px + var(--w, 0.5) * 15px);
 		background: color-mix(in oklch, var(--foreground) 82%, transparent);
 	}
 
 	.tick:hover .bar,
 	.tick.is-hovered .bar,
 	.tick:focus-visible .bar {
-		width: calc(14px + var(--w, 0.5) * 14px);
 		background: var(--foreground);
-		transform: scaleY(1.65);
 	}
 
 	.tick:focus-visible {
@@ -203,5 +197,6 @@
 	@media (prefers-reduced-motion: reduce) {
 		.bar,
 		.preview { transition: none; }
+		.bar { transform: none; }
 	}
 </style>
