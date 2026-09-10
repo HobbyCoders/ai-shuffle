@@ -19,6 +19,7 @@ const hoisted = vi.hoisted(() => ({
 	onDisconnected: null as ((code: number, reason: string, wasClean: boolean) => void) | null,
 	onConnected: null as (() => void) | null,
 	connect: vi.fn(),
+	reconnect: vi.fn(),
 	resetReconnectAttempts: vi.fn(),
 	goto: vi.fn(),
 }));
@@ -34,6 +35,7 @@ vi.mock('./session/ws-connection', () => ({
 		hoisted.onConnected = config.onConnected;
 		return {
 			connect: hoisted.connect,
+			reconnect: hoisted.reconnect,
 			disconnect: vi.fn(),
 			send: vi.fn(() => true),
 			isConnected: vi.fn(() => false),
@@ -66,8 +68,8 @@ describe('chat authentication close recovery', () => {
 			expect(hoisted.goto).not.toHaveBeenCalled();
 			expect(activeSession.current.wsReconnectRequired).toBe(true);
 			activeSession.reconnect();
-			expect(hoisted.resetReconnectAttempts).toHaveBeenCalledOnce();
-			expect(hoisted.connect).toHaveBeenCalledOnce();
+			expect(hoisted.reconnect).toHaveBeenCalledOnce();
+			expect(hoisted.connect).not.toHaveBeenCalled();
 			hoisted.onConnected!();
 			expect(activeSession.current.wsReconnectRequired).toBe(false);
 		} else {

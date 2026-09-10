@@ -88,7 +88,6 @@ function makeDeps(initial: ActiveSessionState) {
 		isConnected: vi.fn(() => true),
 		connect: vi.fn(),
 		send: vi.fn((_data: Record<string, unknown>) => true),
-		resetLastMessageTime: vi.fn(),
 		resetReconnectAttempts: vi.fn(),
 	};
 

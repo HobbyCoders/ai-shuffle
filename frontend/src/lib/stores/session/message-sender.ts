@@ -89,7 +89,6 @@ export interface MessageSenderDeps {
 		isConnected: () => boolean;
 		connect: () => void;
 		send: (data: Record<string, unknown>) => boolean;
-		resetLastMessageTime: () => void;
 		resetReconnectAttempts: () => void;
 	};
 
@@ -429,7 +428,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				});
 			}
 
-			wsConn.resetLastMessageTime();
 			const remoteOnly = !_state.project && !!_state.projectV2Id;
 			const querySent = wsConn.send({
 				type: 'query',
