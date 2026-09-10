@@ -46,29 +46,65 @@ jobs:
           body: |
             ## AI Shuffle ${{ env.VERSION }}
 
-            ### Windows desktop download
+            ### Downloads
 
-            The desktop release includes the Windows x64 installer.
+            | Build | Platform | Download / install |
+            |-------|----------|--------------------|
+            | **Desktop** | Windows x64 (Intel / AMD) | [Windows installer (.exe)](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Desktop-${{ env.DESKTOP_VERSION }}-win-x64.exe) |
+            | **Mobile** | Android 8.0+ | [Signed Android APK](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Android.apk) |
+            | **Docker** | Linux amd64 | [Container image](https://github.com/${{ github.repository }}/pkgs/container/ai-shuffle) — `ghcr.io/hobbycoders/ai-shuffle:${{ env.DESKTOP_VERSION }}`; see install instructions below |
 
-            | Platform | Processor | Download |
-            |----------|-----------|----------|
-            | **Windows** | Intel / AMD (x64) | [Windows installer (.exe)](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Desktop-${{ env.DESKTOP_VERSION }}-win-x64.exe) |
+            Downloads become available as their builds finish. Docker is pulled from
+            the container registry, not downloaded from the release assets.
 
-            The app runs an AI Shuffle worker on your computer and opens its web UI.
-            It bundles Python, Node and its own persistent PostgreSQL database.
-            There is no database server setup or database environment configuration.
+            ### Desktop install
+
+            Run the Windows installer. The app runs an AI Shuffle worker on your
+            computer and opens its web UI. It bundles Python, Node and its own
+            persistent PostgreSQL database; no database configuration is needed.
             Other workers are managed inside the app under Devices.
-            Linux Docker image: `ghcr.io/hobbycoders/ai-shuffle:latest`.
 
-            The Windows installer becomes available when its build finishes.
+            ### Mobile install
 
-            ### Android APK
+            Install the Android APK over the existing app to keep your accounts and
+            workers. The APK appears after Android verification passes and the
+            compatible-worker rollout is approved (`ANDROID_WORKERS_READY=true`).
 
-            [Download Android APK](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Android.apk) · [Latest verified Android build](https://github.com/${{ github.repository }}/releases/tag/android-latest)
+            ### Docker install
 
-            Requires Android 8.0 or newer. Install over the existing app to keep
-            your accounts and workers. The APK appears after Android verification passes
-            and the compatible-worker rollout is approved (`ANDROID_WORKERS_READY=true`).
+            For a **new install**, use Docker Engine on a Linux amd64 host, or Docker
+            Desktop with Linux containers on an x64 computer. Run these commands in
+            a Bash-compatible terminal:
+
+            ```bash
+            docker pull ghcr.io/hobbycoders/ai-shuffle:${{ env.DESKTOP_VERSION }}
+            docker run -d --name ai-shuffle --restart unless-stopped \
+              --stop-timeout 90 --shm-size 1g \
+              -p 127.0.0.1:8000:8000 \
+              -v ai-shuffle-data:/data \
+              -v ai-shuffle-workspace:/workspace \
+              -v ai-shuffle-fluid:/home/appuser/.fluid \
+              -v ai-shuffle-claude:/home/appuser/.claude \
+              -v ai-shuffle-gh:/home/appuser/.config/gh \
+              -v ai-shuffle-browser:/home/appuser/chrome-profile \
+              ghcr.io/hobbycoders/ai-shuffle:${{ env.DESKTOP_VERSION }}
+            ```
+
+            Open [http://localhost:8000](http://localhost:8000) on the Docker host
+            after startup. Check readiness with `docker inspect --format '{{.State.Health.Status}}' ai-shuffle`
+            and startup logs with `docker logs ai-shuffle`.
+
+            The image includes a private PostgreSQL database. Named volumes retain
+            the database, projects, settings and sign-ins when the container is
+            replaced. Do not delete them. No external database or `.env` is needed.
+            The port is bound to loopback only; do not expose it to the internet.
+
+            **Updating an existing install:** back up first and keep your existing
+            mounts and configuration; do not substitute the new-install volume
+            names above. Change only the image tag to `${{ env.DESKTOP_VERSION }}`
+            and recreate the container with a 90-second shutdown timeout. Existing
+            deployments using an external database must stay on their previous
+            release until a separately tested migration is approved.
 
   android:
     name: Android APK
