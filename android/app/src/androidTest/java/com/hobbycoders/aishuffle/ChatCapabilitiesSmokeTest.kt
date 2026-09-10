@@ -113,6 +113,29 @@ class ChatCapabilitiesSmokeTest {
             a.href = url; a.download = 'fixture.txt'; a.click(); URL.revokeObjectURL(url); })()
         """.trimIndent(), null) }
     }
+    // Run this method alone in a fresh instrumentation process to cover Chromium
+    // cold start (not just a WebView warmed by another test). WebView 151 used to
+    // throw in ChatDownloads.install before the activity could show its first page.
+    @Test fun coldChatStartsWithBootstrapAndNativeBridges() {
+        fixture({ _, _ -> Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(destination)) }) { scenario, _ ->
+            var ready = false
+            waitFor("First chat document is missing its bootstrap or native bridges") {
+                scenario.onActivity { activity ->
+                    web(activity).evaluateJavascript("""
+                        location.origin === '${MobileUi.ORIGIN}' &&
+                        window.__SHUFFLE_MOBILE__?.token === 'fixture-cookie' &&
+                        typeof window.shuffleFileSave?.postMessage === 'function' &&
+                        typeof window.shuffleNativeVoice?.postMessage === 'function'
+                    """.trimIndent()) { ready = it == "true" }
+                }
+                ready
+            }
+            // Exercise the injected download script, not just the bridge object.
+            saveBlob(scenario, "cold-start download")
+            status(scenario, "File saved.")
+            assertEquals("cold-start download", context.contentResolver.openInputStream(destination)!!.bufferedReader().use { it.readText() })
+        }
+    }
     @Test fun blobAndInlineImageSaveThroughRealWebViewWithoutBrowserHandoff() {
         val chosen = CopyOnWriteArrayList<String>()
         fixture({ intent, _ -> chosen.add(intent.getStringExtra(Intent.EXTRA_TITLE).orEmpty()); Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(destination)) }) { scenario, _ ->
