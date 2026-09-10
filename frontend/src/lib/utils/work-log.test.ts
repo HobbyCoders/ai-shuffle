@@ -3,6 +3,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { ChatMessage } from '$lib/stores/types';
+import type { SwarmSnapshot } from './swarm';
 import { initialState, reduce, type WireEvent } from '$lib/stores/session/v2/reducer';
 import {
 	buildDisplayItems,
@@ -86,6 +87,97 @@ describe('Swarm workflow visibility', () => {
   const messages = [user('Review release'), tool(), workflow, text('Agents are working.')];
   expect(collapsedVisibleMessages(buildDisplayItems(messages, SETTLED))).toContain(workflow);
  });
+});
+
+describe('Swarm child deduplication', () => {
+	const snapshot: SwarmSnapshot = {
+		id: 'swarm-1', session_id: 'session-1', title: 'Review', status: 'running',
+		created_at: '2026-09-07T10:00:00Z', updated_at: '2026-09-07T10:01:00Z',
+		tasks: [{ id: 'review', title: 'Review', agent: 'Explore', depends_on: [], status: 'running',
+			task_id: 'task-1', worker_session_id: 'worker-1' }]
+	};
+	const allRows = (items: DisplayItem[]) => items.flatMap((item) =>
+		item.kind === 'work_log' ? item.sequence.map((entry) => entry.message)
+			: item.kind === 'system_group' ? item.messages : [item.message]);
+
+	it.each([LIVE, SETTLED, { ...SETTLED, groupingEnabled: false }])(
+		'hides owned cards and Task/Agent rows, not standalone agents in mixed turns (%j)', (options) => {
+			const workflow = tool({ toolName: 'mcp__fluid__Swarm', toolId: 'swarm-launch', toolResult: JSON.stringify({ swarm: snapshot }) });
+			const children = [
+				subagent({ toolId: 'task-1', agentStatus: 'running' }),
+				subagent({ toolId: 'other-task', agentSessionId: 'worker-1', agentStatus: 'completed', agentLaunchToolUseId: 'child-launch' }),
+				subagent({ toolId: 'early-worker', agentLaunchToolUseId: 'swarm-launch' }),
+				tool({ toolName: 'Task', toolId: 'task-1', toolStatus: 'running' }),
+				tool({ toolName: 'mcp__fluid__Agent', toolId: 'child-launch' }),
+				msg({ type: 'tool_result', toolId: 'task-1', content: 'child done' })
+			];
+			const standalone = subagent({ toolId: 'standalone', agentLaunchToolUseId: 'standalone-launch' });
+			const standaloneTool = tool({ toolName: 'Task', toolId: 'standalone-launch' });
+			const messages = [user('Review'), standaloneTool, workflow, ...children, standalone, text('Done'), user('Review'), subagent()];
+			const model = buildTranscriptModel(messages, { ...options, sessionId: snapshot.session_id });
+			const rows = allRows(model.items);
+			for (const child of children) expect(rows).not.toContain(child);
+			expect(rows).toEqual(messages.filter((message) => !children.includes(message)));
+			expect(model.promptOccurrence[messages.length - 2]).toBe(1);
+			expect(model.items[model.itemIndexByTurnId.get(messages[messages.length - 2].id)!]).toMatchObject({ message: messages[messages.length - 2] });
+			for (const item of model.items) {
+				const entries = item.kind === 'work_log' ? [...item.sequence, ...item.folded, ...item.tail]
+					: item.kind === 'message' ? [item] : item.messages.map((message, i) => ({ message, index: item.indices[i] }));
+				for (const entry of entries) expect(messages[entry.index]).toBe(entry.message);
+			}
+		}
+	);
+
+	it('uses live/hydrated worker IDs before the Swarm tool result and keeps the raw transcript intact', () => {
+		const workflow = tool({ toolName: 'Swarm', toolId: 'launch', toolStatus: 'running', toolInput: { tasks: snapshot.tasks } });
+		const child = subagent({ toolId: 'unknown-task', agentSessionId: 'worker-1' });
+		const messages = [user('Review'), workflow, child];
+		expect(allRows(buildDisplayItems(messages, LIVE))).toContain(child);
+		for (const status of ['running', 'completed'] as const) {
+			const rows = allRows(buildDisplayItems(messages, { ...LIVE, sessionId: snapshot.session_id, swarms: [{ ...snapshot, status }] }));
+			expect(rows).toEqual([messages[0], workflow]);
+		}
+		expect(messages).toContain(child);
+	});
+
+	it('uses the aggregate launch ID even with a truncated result and no snapshot yet', () => {
+		const workflow = tool({ toolName: 'Swarm', toolId: 'launch', toolResult: '{"swarm":' });
+		const child = subagent({ toolId: 'worker', agentLaunchToolUseId: 'launch' });
+		const standalone = subagent({ toolId: 'independent', agentLaunchToolUseId: 'other-launch' });
+		expect(allRows(buildDisplayItems([workflow, child, standalone], LIVE))).toEqual([workflow, standalone]);
+	});
+
+	it('does not infer ownership from task labels, malformed payloads, unrelated tools or other sessions', () => {
+		const children = [subagent({ toolId: 'review', agentName: 'Explore' }), subagent({ toolId: 'task-1' }), subagent()];
+		const unrelated = tool({ toolName: 'Bash', toolId: 'task-1' });
+		for (const workflow of [
+			tool({ toolName: 'Swarm', toolResult: '{"swarm":', toolInput: {} }),
+			tool({ toolName: 'Swarm', toolResult: JSON.stringify({ ...snapshot, tasks: [{ task_id: 'task-1' }] }) }),
+			tool({ toolName: 'SwarmStatus', toolResult: JSON.stringify(snapshot) }),
+			tool({ toolName: 'Swarm', toolResult: JSON.stringify({ ...snapshot, session_id: 'other-session' }) })
+		]) {
+			const messages = [workflow, unrelated, ...children];
+			expect(allRows(buildDisplayItems(messages, { ...LIVE, sessionId: snapshot.session_id,
+				swarms: [{ ...snapshot, session_id: 'other-session' }] }))).toEqual(messages);
+		}
+		const workflow = tool({ toolName: 'Swarm', toolResult: JSON.stringify(snapshot) });
+		expect(allRows(buildDisplayItems([workflow, unrelated, children[0]], LIVE))).toEqual([workflow, unrelated, children[0]]);
+	});
+
+	it('excludes duplicate results from settled group summaries and keeps original indices', () => {
+		const workflow = tool({ toolName: 'Swarm', toolId: 'launch', toolResult: JSON.stringify(snapshot) });
+		const read = tool({ toolName: 'Read', toolInput: { file_path: '/tmp/a' } });
+		const standalone = tool({ toolName: 'Agent', toolId: 'independent' });
+		const duplicate = tool({ toolName: 'Task', toolId: 'task-1' });
+		const messages = [user('Review'), read, workflow, duplicate, subagent({ toolId: 'task-1' }), standalone, text('Done')];
+		const work = buildDisplayItems(messages, SETTLED).find((item) => item.kind === 'work_log');
+		expect(work?.kind).toBe('work_log');
+		if (work?.kind !== 'work_log') return;
+		expect(work.folded).toEqual([{ message: read, index: 1 }]);
+		expect(work.summary).toBe('Read 1 file');
+		expect(work.compactSummary).toBe('Read 1');
+		expect(work.sequence.map((entry) => entry.index)).toEqual([1, 2, 5, 6]);
+	});
 });
 
 describe('buildDisplayItems — settled turns', () => {

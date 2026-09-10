@@ -151,6 +151,7 @@ def test_subagent_maps_to_started_progress_completed():
     started = events[0]["payload"]
     assert started["task_id"] == "task_1"
     assert started["agent_id"] == "agent-9"
+    assert started["worker_session_id"] is None
     assert started["agent_type"] == "Explore"
     assert started["description"] == "search the repo"
     assert started["prompt_preview"] == "find all callers"
@@ -161,6 +162,20 @@ def test_subagent_maps_to_started_progress_completed():
     assert done["status"] == "completed"
     assert done["result_preview"] == "found 3 callers"
     assert done["usage"] == {"totalTokensOut": 42}
+
+
+@pytest.mark.parametrize("worker_session_id", [None, "worker-session"])
+def test_subagent_history_preserves_transcript_and_launch_ids(worker_session_id):
+    events = convert_messages_to_events(SID, [{
+        "role": "assistant", "type": "subagent",
+        "toolId": "worker-key", "agentId": "worker-key",
+        "agentSessionId": worker_session_id,
+        "agentLaunchToolUseId": "call-launch",
+    }])
+    started = events[0]["payload"]
+    assert started["worker_session_id"] == worker_session_id
+    assert started["launch_tool_use_id"] == "call-launch"
+    assert started["task_id"] == "worker-key"
 
 
 def test_subagent_children_payloads_translated_to_v2_shape():

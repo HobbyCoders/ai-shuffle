@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { reduceAll, type WireEvent } from '$lib/stores/session/v2/reducer';
 import { swarms } from '$lib/stores/swarms';
+import { get } from 'svelte/store';
 import { buildDisplayItems } from '$lib/utils/work-log';
 import type { SwarmSnapshot } from '$lib/utils/swarm';
 import SystemMessage from '../SystemMessage.svelte';
@@ -80,6 +81,8 @@ describe('Swarm transcript acceptance', () => {
 		const row = running.messages.find((message) => message.type === 'tool_use' && message.toolId === fixture.launchId);
 		expect(row).toBeDefined();
 		expect(running.messages.filter((message) => message.type === 'subagent')).toHaveLength(11);
+		const liveItems = buildDisplayItems(running.messages, { groupingEnabled: true, isStreaming: true });
+		expect(liveItems.some((item) => item.kind === 'message' && item.message.type === 'subagent')).toBe(false);
 		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ swarms: [fixture.queued] }), { status: 200 })));
 		swarms.receive(fixture.queued, fixture.queued.session_id);
 		render(ToolUseMessage, {
@@ -87,13 +90,14 @@ describe('Swarm transcript acceptance', () => {
 			result: row!.toolResult, status: row!.toolStatus!,
 		});
 		expect(screen.getAllByTestId('swarm-card')).toHaveLength(1);
+		await fireEvent.click(screen.getByRole('button', { name: 'Swarm Swarm' }));
 		expect(screen.getByText('Stage 1')).toBeTruthy();
 		expect(screen.getByText('Stage 2')).toBeTruthy();
-		expect(screen.getByText('0 of 11 tasks completed')).toBeTruthy();
+		expect(screen.getByRole('status')).toBeTruthy();
 		swarms.receive(fixture.completed, fixture.completed.session_id);
-		await waitFor(() => expect(screen.getByText('11 of 11 tasks completed')).toBeTruthy());
+		await waitFor(() => expect(screen.getByRole('status').textContent).toBe('completed'));
 		await fireEvent.click(screen.getByText('c00', { selector: 'strong' }));
-		expect(screen.getAllByRole('link', { name: 'Open Swarm probe helper session' }).some((link) => link.getAttribute('href') === '/?session=worker-c00')).toBe(true);
+		expect(screen.getAllByRole('link', { name: 'Open transcript' }).some((link) => link.getAttribute('href') === '/?session=worker-c00')).toBe(true);
 		expect(screen.queryByRole('button', { name: 'Cancel workflow' })).toBeNull();
 
 		const replay = reduceAll([...fixture.launch, ...fixture.finish]);
@@ -102,7 +106,36 @@ describe('Swarm transcript acceptance', () => {
 		expect(work?.kind).toBe('work_log');
 		if (work?.kind === 'work_log') {
 			expect(work.sequence.find((entry) => entry.message.toolId === fixture.launchId)?.hiddenWhenCollapsed).toBe(false);
+			expect(work.sequence.some((entry) => entry.message.type === 'subagent')).toBe(false);
+			expect(work.folded.some((entry) => entry.message.type === 'subagent')).toBe(false);
 		}
+	});
+
+	it('joins live and hydrated worker receipts without launch IDs while preserving an independent Task in the same turn', async () => {
+		const fixture = transcript('acceptance-worker-ids');
+		const launch = fixture.launch.map((event) => event.type === 'subagent.started'
+			? { ...event, launch_tool_use_id: undefined, worker_session_id: event.task_id } : event);
+		const independent = [
+			{ type: 'tool.use', tool_use_id: 'standalone-launch', name: 'Task', input: { agent: 'Explore' } },
+			{ type: 'subagent.started', task_id: 'standalone-worker', worker_session_id: 'standalone-worker', launch_tool_use_id: 'standalone-launch' }
+		].map((event, index) => ({ ...event, id: `independent-${index}`, session_id: fixture.queued.session_id }));
+		const events = [...launch, ...independent, ...fixture.finish].map((event, index) => ({ ...event, seq: index + 1 }));
+		const running = reduceAll(events.slice(0, launch.length + independent.length));
+		const visibleAgents = (messages: typeof running.messages, isStreaming: boolean) => buildDisplayItems(messages, {
+			groupingEnabled: true, isStreaming, sessionId: fixture.queued.session_id,
+			swarms: Object.values(get(swarms).bySession[fixture.queued.session_id] ?? {})
+		}).flatMap((item) => item.kind === 'work_log' ? item.sequence.map((entry) => entry.message)
+			: item.kind === 'system_group' ? item.messages : [item.message])
+			.filter((message) => message.type === 'subagent').map((message) => message.toolId);
+		expect(visibleAgents(running.messages, true)).toHaveLength(12);
+		// bind_worker emits these identities before the dispatcher returns a Task receipt.
+		const update = { ...fixture.completed, status: 'running', tasks: fixture.completed.tasks.map((task) => ({ ...task, task_id: null, status: 'running' })) };
+		swarms.receive(update, fixture.queued.session_id);
+		expect(visibleAgents(running.messages, true)).toEqual(['standalone-worker']);
+		expect(running.messages.filter((message) => message.type === 'subagent')).toHaveLength(12);
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ swarms: [fixture.completed] }), { status: 200 })));
+		await swarms.hydrate(fixture.queued.session_id);
+		expect(visibleAgents(reduceAll(events).messages, false)).toEqual(['standalone-worker']);
 	});
 
 	it('formats the aggregate wake notification without dumping its snapshot JSON', () => {

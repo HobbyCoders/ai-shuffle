@@ -467,6 +467,8 @@ def _convert_subagent(session_id: str, msg: Dict[str, Any]) -> List[Dict[str, An
         contract.SubagentStarted, session_id,
         task_id=task_id,
         agent_id=msg.get("agentId"),
+        worker_session_id=msg.get("agentSessionId") or None,
+        launch_tool_use_id=msg.get("agentLaunchToolUseId") or None,
         agent_type=msg.get("agentType"),
         agent_name=msg.get("agentName") or None,
         description=msg.get("agentDescription"),

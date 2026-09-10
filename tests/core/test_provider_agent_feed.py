@@ -144,11 +144,25 @@ class TestParentTriple:
         payload = _parent_rows()[0]["payload"]
         assert payload["task_id"] == WORKER
         assert payload["agent_id"] == WORKER
+        assert payload["worker_session_id"] == WORKER
         # Unknown agent types render as their raw string badge on the card;
         # agent_type keeps carrying the MODEL id for compatibility.
         assert payload["agent_type"] == "gpt-5.5"
         assert payload["description"] == "reviewer"
         assert payload["prompt_preview"] == "review the diff"
+
+    @pytest.mark.parametrize("task_id", [None, "custom-task-key"])
+    @pytest.mark.parametrize("launch_tool_use_id", [None, "call-launch"])
+    def test_started_records_transcript_session_independently_of_join_keys(
+        self, db, task_id, launch_tool_use_id,
+    ):
+        f = _feed(task_id=task_id, launch_tool_use_id=launch_tool_use_id)
+        asyncio.run(f.started())
+
+        payload = _parent_rows()[0]["payload"]
+        assert payload["worker_session_id"] == WORKER
+        assert payload["task_id"] == (task_id or WORKER)
+        assert payload["launch_tool_use_id"] == launch_tool_use_id
 
     def test_started_carries_the_agent_name_when_one_was_dispatched(self, db):
         """The card's IDENTITY (2026-08-17 ruling): the agent's display name

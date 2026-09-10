@@ -1235,6 +1235,18 @@
           "default": "subagent.started",
           "title": "Type",
           "type": "string"
+        },
+        "worker_session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Session Id"
         }
       },
       "required": [

@@ -15,7 +15,7 @@
  */
 import type { ChatMessage } from '$lib/stores/types';
 import { displayToolName } from './tool-icons';
-import { isSwarmTool } from './swarm';
+import { isSwarmTool, parseSwarm, resolveSwarm, type SwarmSnapshot } from './swarm';
 
 export interface WorkLogEntry {
 	message: ChatMessage;
@@ -54,7 +54,7 @@ export type DisplayItem =
 	  };
 
 /**
- * Everything the transcript view needs, derived in ONE pass over `messages`.
+ * Everything the transcript view needs, derived together from `messages`.
  *
  * The view used to compute two of these per RENDERED ROW inside the template:
  * `userPromptOccurrence()` scanned every preceding message for each user row,
@@ -523,6 +523,55 @@ export interface BuildOptions {
 	latestTurnUnsettled?: boolean;
 	/** User preference: false renders work rows flat, with no folds. */
 	groupingEnabled: boolean;
+	/** Session-scoped live/hydrated workflows, including updates before tool.result. */
+	swarms?: readonly SwarmSnapshot[];
+	sessionId?: string | null;
+}
+
+/** Remove only delegation rows whose exact identities belong to a rendered Swarm. */
+function swarmOwnedMessages(messages: ChatMessage[], options: BuildOptions): Set<ChatMessage> {
+	const launches = new Set<string>();
+	const tasks = new Set<string>();
+	const workers = new Set<string>();
+	const snapshots = (options.swarms ?? []).map(parseSwarm).filter(
+		(s): s is SwarmSnapshot => !!s && (!options.sessionId || s.session_id === options.sessionId)
+	);
+	for (const message of messages) {
+		if (message.type !== 'tool_use' || !isSwarmTool(message.toolName ?? '')) continue;
+		if (message.toolId) launches.add(message.toolId);
+		const parsed = parseSwarm(message.toolResult);
+		const initial = parsed && (!options.sessionId || parsed.session_id === options.sessionId) ? parsed : null;
+		// Use the same workflow association as SwarmCard, then join children by
+		// execution IDs, never task labels, agent names, or proximity in the turn.
+		const snapshot = resolveSwarm(snapshots, initial, message.toolInput);
+		for (const task of snapshot?.tasks ?? []) {
+			if (task.task_id) tasks.add(task.task_id);
+			if (task.worker_session_id) workers.add(task.worker_session_id);
+		}
+	}
+	const hidden = new Set<ChatMessage>();
+	const toolIds = new Set([...tasks, ...workers, ...launches]);
+	for (const message of messages) {
+		if (message.type !== 'subagent') continue;
+		if (
+			(message.toolId && (tasks.has(message.toolId) || workers.has(message.toolId) || launches.has(message.toolId))) ||
+			(message.agentSessionId && workers.has(message.agentSessionId)) ||
+			(message.agentId && workers.has(message.agentId)) ||
+			(message.agentLaunchToolUseId && launches.has(message.agentLaunchToolUseId))
+		) {
+			hidden.add(message);
+			if (message.toolId) toolIds.add(message.toolId);
+			if (message.agentLaunchToolUseId) toolIds.add(message.agentLaunchToolUseId);
+		}
+	}
+	for (const message of messages) {
+		if (!message.toolId || !toolIds.has(message.toolId)) continue;
+		const name = message.toolName?.split('__').at(-1)?.toLowerCase();
+		if (message.type === 'tool_result' || (message.type === 'tool_use' && (name === 'task' || name === 'agent'))) {
+			hidden.add(message);
+		}
+	}
+	return hidden;
 }
 
 function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
@@ -553,7 +602,7 @@ export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions
 }
 
 /**
- * One pass over `messages` producing the grouped display list AND the two
+ * Linear passes over `messages` producing the grouped display list AND the two
  * whole-array lookups the template used to recompute per rendered row.
  *
  * The walk that de-duplicates ids and drops assistant phantoms already touches
@@ -566,6 +615,7 @@ export function buildTranscriptModel(
 ): TranscriptModel {
 	const { isStreaming, groupingEnabled } = options;
 	const latestTurnUnsettled = options.latestTurnUnsettled ?? isStreaming;
+	const swarmOwned = swarmOwnedMessages(messages, options);
 
 	// Duplicate ids crash Svelte's keyed each; drop repeats defensively.
 	const seen = new Set<string>();
@@ -593,7 +643,7 @@ export function buildTranscriptModel(
 		}
 		// Empty assistant placeholders intentionally have no visual row. Keeping them
 		// in this model can split the final live tool run and hide its active tail.
-		if (isAssistantPhantom(message)) return;
+		if (isAssistantPhantom(message) || swarmOwned.has(message)) return;
 		if (message.id) {
 			if (seen.has(message.id)) return;
 			seen.add(message.id);

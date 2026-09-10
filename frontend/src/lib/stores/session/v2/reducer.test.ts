@@ -1009,6 +1009,51 @@ describe('tool cards', () => {
 // ─── Subagents (correlated by task_id) ──────────────────────────────────────
 
 describe('subagent cards', () => {
+	it('preserves the explicit worker transcript session through completion and replay', () => {
+		const events = [
+			ev('subagent.started', {
+				task_id: 'custom-task-key', agent_id: 'native-agent-id',
+				worker_session_id: 'worker-session',
+			}),
+			ev('subagent.completed', { task_id: 'custom-task-key', status: 'completed', result_preview: 'done' }),
+		];
+		const live = events.reduce(reduce, initialState());
+		expect(live.messages[0].agentSessionId).toBe('worker-session');
+		expect(live.messages[0].agentId).toBe('native-agent-id');
+		expect(fold(events)).toEqual(live);
+	});
+
+	it('infers legacy app worker sessions only from their separate launch ID and matching join keys', () => {
+		const s = fold([ev('subagent.started', {
+			task_id: 'worker-session', agent_id: 'worker-session', launch_tool_use_id: 'call-launch',
+		})]);
+		expect(s.messages[0].agentSessionId).toBe('worker-session');
+	});
+
+	it.each([
+		{ task_id: 'native-task', agent_id: 'native-agent' },
+		{ task_id: 'worker-session', agent_id: 'worker-session' },
+		{ task_id: 'worker-session', agent_id: 'worker-session', launch_tool_use_id: 'worker-session' },
+		{ task_id: 'native-task', agent_id: 'native-agent', launch_tool_use_id: 'call-launch' },
+		{ task_id: 'native-task', agent_id: 'b04af642-8f43-48a2-b9bd-904c27f75283' },
+		{ task_id: 'native-task', worker_session_id: 123 },
+	])('does not invent a transcript session for an ambiguous event: %j', (fields) => {
+		const s = fold([ev('subagent.started', fields)]);
+		expect(s.messages[0].agentSessionId).toBeUndefined();
+	});
+
+	it.each([false, true])('retains the worker session when absorbing a launch card (worker first: %s)', (workerFirst) => {
+		const worker = {
+			task_id: 'worker-key', agent_id: 'worker-key', worker_session_id: 'worker-session',
+			launch_tool_use_id: 'call-launch',
+		};
+		const launch = { task_id: 'call-launch' };
+		const s = fold((workerFirst ? [worker, launch] : [launch, worker])
+			.map((fields) => ev('subagent.started', fields)));
+		expect(s.messages).toHaveLength(1);
+		expect(s.messages[0].agentSessionId).toBe('worker-session');
+	});
+
 	it('carries agent_name onto the card as its identity', () => {
 		const s = fold([
 			ev('subagent.started', {

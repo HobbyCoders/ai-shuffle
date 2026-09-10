@@ -289,6 +289,7 @@ class WorkerFeed:
             # same join key.
             "tool_id": self.task_id,
             "agent_id": self.task_id,
+            "worker_session_id": self.worker_session_id,
             "launch_tool_use_id": self.launch_tool_use_id,
             # The card's IDENTITY: the agent's own name. Absent (a bare
             # ProviderAgent worker with no agent behind it) the card falls back

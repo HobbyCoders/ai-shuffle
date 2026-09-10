@@ -1593,6 +1593,11 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				content: '',
 				toolId: taskId,
 				agentId: typeof event.agent_id === 'string' ? event.agent_id : undefined,
+				// Older app workers used the session ID as both join keys and
+				// carried a separate launch ID. Native SDK IDs alone are not links.
+				agentSessionId: str(event.worker_session_id) ||
+					(event.agent_id === taskId && launchToolUseId && launchToolUseId !== taskId
+						? taskId : undefined),
 				agentType: typeof event.agent_type === 'string' ? event.agent_type : undefined,
 				// The dispatched agent's display NAME — the card's identity, with
 				// agentType (the model slug) demoted to a secondary chip.

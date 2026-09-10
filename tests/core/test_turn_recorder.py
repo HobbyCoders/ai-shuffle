@@ -248,6 +248,7 @@ async def test_subagent_start_maps_to_subagent_started(mock_db):
     assert row["payload"]["agent_type"] == "Explore"
     assert row["payload"]["description"] == "look around"
     assert row["payload"]["prompt_preview"] == "find things"
+    assert row["payload"].get("worker_session_id") is None
     await rec.close()
 
 

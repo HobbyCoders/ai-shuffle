@@ -322,6 +322,7 @@ def _translate_shared(
             contract.SubagentStarted, session_id,
             task_id=event.get("tool_id") or event.get("agent_id") or "",
             agent_id=event.get("agent_id"),
+            worker_session_id=event.get("worker_session_id") or None,
             agent_type=event.get("agent_type"),
             agent_name=event.get("agent_name") or None,
             description=event.get("description"),

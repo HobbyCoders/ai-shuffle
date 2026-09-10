@@ -198,6 +198,7 @@ export type SessionId14 = string;
 export type TaskId = string;
 export type TurnId14 = string | null;
 export type Type14 = 'subagent.started';
+export type WorkerSessionId = string | null;
 export type CommandId15 = string | null;
 export type CreatedAt15 = string;
 export type Id15 = string;
@@ -298,7 +299,7 @@ export type StartedAt = string | null;
 export type Status3 = 'queued' | 'running' | 'completed' | 'failed' | 'blocked' | 'cancelled' | 'interrupted';
 export type TaskId4 = string | null;
 export type Title = string;
-export type WorkerSessionId = string | null;
+export type WorkerSessionId1 = string | null;
 export type Tasks = SwarmTask[];
 export type Title1 = string;
 export type UpdatedAt = string;
@@ -597,6 +598,7 @@ export interface SubagentStarted {
   task_id: TaskId;
   turn_id?: TurnId14;
   type?: Type14;
+  worker_session_id?: WorkerSessionId;
   [k: string]: unknown;
 }
 export interface SubagentProgress {
@@ -734,7 +736,7 @@ export interface SwarmTask {
   status: Status3;
   task_id?: TaskId4;
   title: Title;
-  worker_session_id?: WorkerSessionId;
+  worker_session_id?: WorkerSessionId1;
   [k: string]: unknown;
 }
 export interface SystemNote {

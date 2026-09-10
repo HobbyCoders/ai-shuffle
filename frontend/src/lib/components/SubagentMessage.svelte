@@ -1,58 +1,18 @@
 <script lang="ts">
-	/**
-	 * SubagentMessage - Display for subagent work (matching tool message group style)
-	 */
 	import type { ChatMessage } from '$lib/stores/types';
-	import { sanitizeHtml } from '$lib/utils/sanitize';
-	import { extractToolResultMedia, mediaHtml } from '$lib/utils/media';
 	import { isSubagentRunning } from '$lib/utils/subagent-status';
-	import ToolUseMessage from '$lib/components/chat/ToolUseMessage.svelte';
+	import { openSessionLink } from '$lib/services/session-navigation';
 
-	/** Child toolStatus values are trusted — they only arrive as these three. */
-	type ChildStatus = 'running' | 'complete' | 'error';
-
-	interface Props {
+	let { message, runningToolIds }: {
 		message: ChatMessage;
-		/** Launch tool_use ids of background tasks the registry reports as currently running. */
 		runningToolIds?: Set<string>;
-	}
+	} = $props();
 
-	let { message, runningToolIds }: Props = $props();
-
-	// Code mode: a run_python cell that is running or succeeded is plumbing, not
-	// work. The tool calls it makes arrive as their own child rows, so showing
-	// the cell adds a wall of Python and inflates the done/total counter. A
-	// failed cell still renders - that one is a problem worth reading.
-	const isHiddenCodeModeCell = (c: { toolName?: string; toolStatus?: string }) =>
-		c.toolName === 'run_python' && c.toolStatus !== 'error';
-
-	// Filter valid children (ensure they have required id field)
-	const validChildren = $derived(
-		(message.agentChildren || []).filter(c => c && c.id && !isHiddenCodeModeCell(c))
-	);
-
-	// Count children by type — the collapsed header shows a completed/total
-	// ratio only.
-	const childCounts = $derived.by(() => {
-		const children = validChildren;
-		const toolUseChildren = children.filter(c => c.type === 'tool_use');
-		const completedTools = toolUseChildren.filter(c => c.toolStatus === 'complete').length;
-
-		return {
-			total: children.length,
-			toolUse: toolUseChildren.length,
-			completedTools
-		};
-	});
-
-	// Get status display. `isRunning` also honors the registry truth of running
-	// background tasks (activeTasks), so a subagent card whose launch tool id is
-	// still running is forced to the spinner even if the server-supplied status
-	// is stale (e.g. fresh loads of parked sessions).
 	const statusInfo = $derived({
 		isRunning: isSubagentRunning(message.agentStatus, message.toolId, runningToolIds),
 		isError: message.agentStatus === 'error'
 	});
+	const statusLabel = $derived(statusInfo.isRunning ? 'Running' : statusInfo.isError ? 'Failed' : message.agentStatus === 'pending' ? 'Pending' : 'Completed');
 
 	// Map known SDK agent types to display labels
 	const KNOWN_AGENT_LABELS: Record<string, string> = {
@@ -86,86 +46,11 @@
 		return { label: agentType, color: 'bg-primary/20 text-primary' };
 	}
 
-	// Format usage stats from task_progress updates
-	function formatUsage(usage?: ChatMessage['agentUsage']): string | null {
-		if (!usage) return null;
-		const parts: string[] = [];
-		if (usage.tool_uses) parts.push(`${usage.tool_uses} tools`);
-		// ProviderAgent workers report raw input/output counts and no
-		// `total_tokens`, which used to render as nothing at all.
-		const totalTokens =
-			usage.total_tokens || (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
-		if (totalTokens) {
-			const k = totalTokens >= 1000
-				? `${(totalTokens / 1000).toFixed(0)}k`
-				: String(totalTokens);
-			parts.push(`${k} tokens`);
-		}
-		if (usage.duration_ms && usage.duration_ms > 1000) {
-			const secs = Math.round(usage.duration_ms / 1000);
-			if (secs >= 60) {
-				const mins = Math.floor(secs / 60);
-				const rem = secs % 60;
-				parts.push(rem > 0 ? `${mins}m ${rem}s` : `${mins}m`);
-			} else {
-				parts.push(`${secs}s`);
-			}
-		}
-		return parts.length > 0 ? parts.join(' · ') : null;
-	}
-
-	function truncateContent(content: string, maxLength: number = 500): string {
-		if (content.length <= maxLength) return content;
-		return content.substring(0, maxLength) + '...';
-	}
-
-	/**
-	 * Split a worker result that is really a payload object into
-	 * `{ message, rest }`.
-	 *
-	 * A failed worker's result arrives as a JSON object — or, from the Python
-	 * side, a dict repr with single quotes — whose `message`/`error` field is the
-	 * only part a human needs; everything else (status codes, rate-limit headers)
-	 * is noise that used to be dumped verbatim into a <pre>. Returns `null` when
-	 * the content is ordinary prose, which is the common case.
-	 *
-	 * Deliberately regex-based and dependency-free: a dict repr is not JSON, and
-	 * pulling in a parser for a display nicety is not worth it.
-	 */
-	function splitResultPayload(content: string): { message: string; rest: string } | null {
-		const text = (content ?? '').trim();
-		if (!(text.startsWith('{') || text.includes("'message'") || text.includes('"message"')))
-			return null;
-		const match = /['"](?:message|error_message)['"]\s*:\s*['"]([\s\S]+?)['"]\s*[,}]/.exec(text);
-		if (!match?.[1]) return null;
-		const message = match[1].replace(/\\n/g, '\n').trim();
-		if (!message) return null;
-		const rest = (text.slice(0, match.index) + text.slice(match.index + match[0].length))
-			.replace(/\s+/g, ' ')
-			.trim();
-		return { message, rest };
-	}
-
-	// Check if a tool result contains embeddable media (image/video/audio)
-	function toolResultHasMedia(content: string): boolean {
-		return extractToolResultMedia(content) !== null;
-	}
-
-	// Render tool result media (image/video/audio) inline using the shared
-	// media renderer, so subagent output matches the main chat card.
-	function renderToolResult(content: string): string {
-		const media = extractToolResultMedia(content);
-		if (!media) return '';
-		const label = media.kind.charAt(0).toUpperCase() + media.kind.slice(1);
-		return `<div class="mb-2 text-xs text-green-500">✓ ${label} generated successfully</div>` +
-			mediaHtml(media.kind, media.src, '', media.filename);
-	}
 </script>
 
 <details class="w-full subagent-card group">
 	<summary class="subagent-summary">
-		<!-- Agent glyph — a subagent reads as one more tool row, just expandable
-		     into its nested tools and responses. -->
+		<!-- Agent identity stays in the parent; activity lives in the transcript. -->
 		<svg class="sa-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 			<rect width="16" height="11" x="4" y="9" rx="2" />
 			<path d="M12 5v4" />
@@ -192,21 +77,7 @@
 		<span class="sa-desc">{message.agentDescription || 'Subagent'}</span>
 
 		<span class="sa-right">
-			<!-- Usage stats from task_progress (tokens, duration) -->
-			{#if message.agentUsage}
-				{@const usageText = formatUsage(message.agentUsage)}
-				{#if usageText}
-					<span class="sa-usage mono">{usageText}</span>
-				{/if}
-			{/if}
-
-			<!-- Tool count. Failures are NOT spelled out here: the extra
-			     "(n failed)" text overflowed the summary row on phones and put a
-			     horizontal scrollbar on the whole chat. The red X glyph and the
-			     completed/total ratio still carry the signal. -->
-			{#if childCounts.toolUse > 0}
-				<span class="sa-count mono">{childCounts.completedTools}/{childCounts.toolUse}</span>
-			{/if}
+			<span class="sa-status" role="status">{statusLabel}</span>
 
 			<svg class="sa-chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 				<path d="m6 9 6 6 6-6" />
@@ -220,6 +91,8 @@
 				<svg class="sa-glyph is-error" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
 					<path d="M18 6 6 18M6 6l12 12" />
 				</svg>
+			{:else if message.agentStatus === 'pending'}
+				<svg class="sa-glyph" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9" /></svg>
 			{:else}
 				<svg class="sa-glyph is-ok" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 					<path d="M20 6 9 17l-5-5" />
@@ -228,115 +101,15 @@
 		</span>
 	</summary>
 
-	<!-- Expanded content: indented past the icon gutter like every other
-	     expanded tool row -->
 	<div class="sa-body">
-		<div class="max-h-128 overflow-y-auto">
-			<!-- Initial prompt section -->
-			{#if message.agentPrompt}
-				<div class="px-4 py-3 border-b border-border/50">
-					<div class="text-xs text-muted-foreground mb-1 font-medium">Prompt</div>
-					<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap wrap-break-word font-mono">{message.agentPrompt}</pre>
-				</div>
-			{/if}
-
-			<!-- Agent children (tool calls and text messages) -->
-			{#if validChildren.length > 0}
-				{#each validChildren as child (child.id)}
-					{#if child.type === 'tool_use'}
-						<!-- Same work-log row the main feed uses, so nested tool calls
-						     read exactly like top-level ones instead of a legacy style. -->
-						<ToolUseMessage
-							name={child.toolName || 'Tool'}
-							input={child.toolInput}
-							partialInput={child.partialToolInput}
-							result={child.toolResult ?? ''}
-							status={(child.toolStatus as ChildStatus) || 'running'}
-							screenshot={child.toolScreenshot}
-						/>
-					{:else if child.type === 'tool_result'}
-						<!-- Standalone tool result (fallback) — no matching tool_use row
-						     arrived, so render the payload as a plain muted block. -->
-						<div class="sa-orphan-result">
-							<pre>{truncateContent(child.content)}</pre>
-						</div>
-						{#if child.toolScreenshot}
-							<ToolUseMessage
-								name={child.toolName || 'Tool'}
-								result={child.content ?? ''}
-								status="complete"
-								screenshot={child.toolScreenshot}
-							/>
-						{/if}
-					{:else if child.type === 'text'}
-						<!-- Text child (subagent's text output) -->
-						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">
-							<div class="flex items-start gap-2">
-								<svg class="w-4 h-4 text-primary shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
-								</svg>
-								<div class="text-sm text-foreground whitespace-pre-wrap wrap-break-word">
-									{child.content}
-								</div>
-							</div>
-						</div>
-					{/if}
-				{/each}
-			{:else if message.streaming}
-				<div class="px-4 py-3 text-sm text-muted-foreground flex items-center gap-2">
-					<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-						<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-						<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-					</svg>
-					Working...
-				</div>
-			{:else if !message.agentPrompt}
-				<div class="px-4 py-3 text-sm text-muted-foreground">
-					No activity recorded
-				</div>
-			{/if}
-
-			<!-- Final result section. A FAILED worker's result gets error chrome
-			     (the header read exactly like a success before), and a payload
-			     object is shown message-first with the raw dict collapsed. -->
-			{#if message.content && message.agentStatus !== 'running'}
-				{@const payload = statusInfo.isError ? splitResultPayload(message.content) : null}
-				<div
-					class="px-4 py-3 border-t {statusInfo.isError
-						? 'border-red-500/40 bg-red-500/5'
-						: 'border-border/50'}"
-				>
-					<div
-						class="text-xs mb-1 font-medium {statusInfo.isError
-							? 'text-red-500'
-							: 'text-muted-foreground'}"
-					>
-						{statusInfo.isError ? 'Error' : 'Result'}
-					</div>
-					{#if toolResultHasMedia(message.content)}
-						{@html sanitizeHtml(renderToolResult(message.content))}
-					{:else if payload}
-						<div class="text-sm text-foreground whitespace-pre-wrap wrap-break-word">
-							{payload.message}
-						</div>
-						{#if payload.rest}
-							<details class="mt-2">
-								<summary class="text-xs text-muted-foreground cursor-pointer list-none">
-									Show raw error payload
-								</summary>
-								<pre class="mt-1 text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap wrap-break-word font-mono">{payload.rest}</pre>
-							</details>
-						{/if}
-					{:else}
-						<pre
-							class="text-xs overflow-x-auto max-h-48 whitespace-pre-wrap wrap-break-word font-mono {statusInfo.isError
-								? 'text-foreground'
-								: 'text-muted-foreground'}"
-						>{message.content}</pre>
-					{/if}
-				</div>
-			{/if}
-		</div>
+		{#if message.agentSessionId}
+			<a class="transcript-link" href={`/?session=${encodeURIComponent(message.agentSessionId)}`}
+				onclick={(event) => openSessionLink(event, message.agentSessionId!)} data-sveltekit-reload>
+				Open transcript <span aria-hidden="true">↗</span>
+			</a>
+		{:else}
+			<p class="transcript-unavailable">{statusInfo.isRunning ? 'The transcript is not available yet.' : 'No separate transcript is available for this agent.'}</p>
+		{/if}
 	</div>
 </details>
 
@@ -375,7 +148,8 @@
 		display: none;
 	}
 
-	.subagent-summary:hover {
+	.subagent-summary:hover,
+	.subagent-card[open] > .subagent-summary {
 		background: var(--scrim);
 	}
 
@@ -429,20 +203,15 @@
 		color: var(--subtle-foreground);
 	}
 
-	.sa-usage,
-	.sa-count {
-		font-family: var(--font-mono);
-		font-size: 11px;
-		font-variant-numeric: tabular-nums;
-		white-space: nowrap;
-	}
-
-	.sa-usage {
-		display: none;
-	}
-
-	@media (min-width: 640px) {
-		.sa-usage { display: inline; }
+	.sa-status { font-size: 11px; color: var(--muted-foreground); }
+	.transcript-link { display: inline-flex; align-items: center; gap: 6px; padding: 5px 0; color: var(--primary); font-size: 11px; text-decoration: none; }
+	.transcript-link:hover { text-decoration: underline; }
+	.transcript-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.transcript-unavailable { padding: 10px 0; margin: 0; color: var(--muted-foreground); font-size: 12px; }
+	@media (max-width: 639px) {
+		.sa-chip { display: none; }
+		.sa-name { flex-shrink: 0; max-width: 45%; }
+		.transcript-link { min-height: 44px; }
 	}
 
 	.sa-chev {
@@ -468,24 +237,4 @@
 		.sa-glyph.is-running { animation-duration: 2.4s; }
 	}
 
-	/* Orphan tool_result fallback (no matching tool_use row arrived). */
-	.sa-orphan-result {
-		max-height: 15rem;
-		overflow: auto;
-		border-radius: 7px;
-		border: 1px solid var(--border);
-		background: var(--code-bg);
-		padding: 7px 9px;
-		margin-bottom: 6px;
-	}
-
-	.sa-orphan-result pre {
-		margin: 0;
-		font-family: var(--font-mono);
-		font-size: 11.5px;
-		line-height: 1.6;
-		color: var(--muted-foreground);
-		white-space: pre-wrap;
-		word-break: break-word;
-	}
 </style>

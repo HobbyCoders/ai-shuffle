@@ -15,6 +15,8 @@
 	 */
 	import { tick, untrack, onMount, onDestroy } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import { swarms } from '$lib/stores/swarms';
+	import type { SwarmSnapshot } from '$lib/utils/swarm';
 	import { forkOfferedSessionHere } from './fork-here';
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import type { ChatMessage, TodoItem } from '$lib/stores/types';
@@ -389,7 +391,7 @@
 	// made streaming get progressively choppier as a session grew. A plain
 	// object (not $state) avoids Svelte 5 compiling these into reactive signals
 	// inside the derived.
-	const _displayCache: { messages: ChatMessage[] | null; isStreaming: boolean; latestTurnUnsettled: boolean; groupingEnabled: boolean; model: TranscriptModel } =
+	const _displayCache: { messages: ChatMessage[] | null; sessionId?: string | null; swarms?: Record<string, SwarmSnapshot>; isStreaming: boolean; latestTurnUnsettled: boolean; groupingEnabled: boolean; model: TranscriptModel } =
 		{
 			messages: null,
 			isStreaming: false,
@@ -407,6 +409,8 @@
 
 	const transcript: TranscriptModel = $derived.by(() => {
 		const messages = $activeSession.messages;
+		const sessionId = $activeSession.sessionId;
+		const sessionSwarms = $swarms.bySession[sessionId ?? ''];
 		const isStreamingNow = $activeSession.isStreaming;
 		const latestIsUnsettled = latestTurnUnsettled;
 		// When grouping is off, groupable tools fall through to the plain
@@ -414,6 +418,8 @@
 		const groupingEnabled = chatPrefs?.groupToolCalls !== false;
 		if (
 			messages === _displayCache.messages
+			&& sessionId === _displayCache.sessionId
+			&& sessionSwarms === _displayCache.swarms
 			&& isStreamingNow === _displayCache.isStreaming
 			&& latestIsUnsettled === _displayCache.latestTurnUnsettled
 			&& groupingEnabled === _displayCache.groupingEnabled
@@ -432,10 +438,14 @@
 		const model = buildTranscriptModel(messages, {
 			isStreaming: isStreamingNow,
 			latestTurnUnsettled: latestIsUnsettled,
+			sessionId,
+			swarms: Object.values(sessionSwarms ?? {}),
 			groupingEnabled
 		});
 
 		_displayCache.messages = messages;
+		_displayCache.sessionId = sessionId;
+		_displayCache.swarms = sessionSwarms;
 		_displayCache.isStreaming = isStreamingNow;
 		_displayCache.latestTurnUnsettled = latestIsUnsettled;
 		_displayCache.groupingEnabled = groupingEnabled;

@@ -133,6 +133,8 @@ class SubagentStarted(EventBase):
     type: Literal["subagent.started"] = "subagent.started"
     task_id: str  # the Task/Agent tool_use_id — join key to the tool card
     agent_id: str | None = None
+    # App worker transcript session; native SDK agent IDs are not session IDs.
+    worker_session_id: str | None = None
     agent_type: str | None = None
     # The dispatched agent's display NAME ("Frontend Designer") — the card's
     # identity. ``agent_type`` keeps carrying the model slug (unchanged for
