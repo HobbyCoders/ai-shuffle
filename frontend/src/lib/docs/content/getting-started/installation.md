@@ -103,7 +103,7 @@ For production deployments, consider:
 - Using Shuffle's managed remote connection, or directing a custom HTTPS reverse proxy to the protected loopback listener on port 8001 in the same network namespace. Never expose the local owner listener through a public proxy or tunnel.
 - Setting specific CORS origins instead of `*`
 - Using the desktop or Docker supervisor for ordered worker/database restarts
-- Reviewing security settings (rate limiting, audit logging)
+- Reviewing security settings and audit logging
 
 ## Updating
 

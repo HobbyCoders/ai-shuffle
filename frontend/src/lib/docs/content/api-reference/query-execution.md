@@ -221,7 +221,3 @@ curl http://localhost:8000/api/v1/streaming/active \
 - Non-streaming responses include cost and token data under `metadata`
 - `metadata.total_cost_usd` is the query cost; `metadata.tokens_in` / `metadata.tokens_out` are the token counts
 - Use automation budget controls for automated queries
-
-### Rate Limits
-- API queries are subject to rate limiting
-- Streaming connections count as one request

@@ -2012,74 +2012,6 @@ class TestUserCredentials:
 
 
 # =============================================================================
-# Rate Limit Tests
-# =============================================================================
-
-class TestRateLimitOperations:
-    """Test rate limit operations."""
-
-    def test_create_rate_limit(self, mock_db, setup_api_user):
-        """create_rate_limit should create rate limit config."""
-        result = db.create_rate_limit(
-            "rl-1", api_key_id="user-1",
-            requests_per_minute=10,
-            requests_per_hour=100
-        )
-
-        assert result["id"] == "rl-1"
-        assert result["requests_per_minute"] == 10
-
-    def test_get_rate_limit(self, mock_db, setup_api_user):
-        """get_rate_limit should return rate limit by ID."""
-        db.create_rate_limit("rl-1", api_key_id="user-1")
-
-        result = db.get_rate_limit("rl-1")
-
-        assert result is not None
-        assert result["id"] == "rl-1"
-
-    def test_delete_rate_limit(self, mock_db, setup_api_user):
-        """delete_rate_limit should delete rate limit."""
-        db.create_rate_limit("rl-1", api_key_id="user-1")
-
-        result = db.delete_rate_limit("rl-1")
-
-        assert result is True
-        assert db.get_rate_limit("rl-1") is None
-
-
-# =============================================================================
-# Request Log Tests
-# =============================================================================
-
-class TestRequestLog:
-    """Test request logging operations."""
-
-    def test_log_request(self, mock_db, setup_api_user):
-        """log_request should log API request."""
-        # Signature: request_id, user_id, api_key_id, endpoint, status, duration_ms
-        result = db.log_request(
-            "req-1", None, "user-1",
-            "/api/v1/chat",
-            duration_ms=150
-        )
-
-        assert result["id"] == "req-1"
-        assert result["endpoint"] == "/api/v1/chat"
-
-    def test_get_request_count(self, mock_db, setup_api_user):
-        """get_request_count should return count of requests."""
-        db.log_request("req-1", None, "user-1", "/api")
-        db.log_request("req-2", None, "user-1", "/api")
-
-        # Get count for last hour - signature: user_id, api_key_id, since, endpoint
-        since = datetime.now(timezone.utc) - timedelta(hours=1)
-        count = db.get_request_count(None, "user-1", since)
-
-        assert count == 2
-
-
-# =============================================================================
 # Webhook Update Tests
 # =============================================================================
 
@@ -2306,18 +2238,6 @@ class TestRunDatabaseMaintenance:
             ("evt-new", "conn-1", "message", recent_ts),
         )
 
-        # request_log uses 'timestamp' column, not 'created_at', so the
-        # maintenance function's DELETE WHERE created_at < ? will error
-        # (handled gracefully). Insert rows to confirm they are untouched.
-        cursor.execute(
-            "INSERT INTO request_log (id, endpoint, timestamp) VALUES (?, ?, ?)",
-            ("req-old", "/api/test", old_ts),
-        )
-        cursor.execute(
-            "INSERT INTO request_log (id, endpoint, timestamp) VALUES (?, ?, ?)",
-            ("req-new", "/api/test", recent_ts),
-        )
-
         mock_db.commit()
         return mock_db
 
@@ -2355,9 +2275,6 @@ class TestRunDatabaseMaintenance:
 
         # connector_event_log: 1 old deleted, 1 recent kept
         assert results["cleaned_connector_event_log"] == 1
-
-        # request_log: uses 'timestamp' column, 1 old deleted, 1 recent kept
-        assert results["cleaned_request_log"] == 1
 
     def test_maintenance_returns_wal_checkpoint_info(self, setup_log_tables):
         """run_database_maintenance should return WAL checkpoint details."""

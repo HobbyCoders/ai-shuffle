@@ -86,10 +86,6 @@ API users can be restricted to:
 
 HTTP status codes: `400` (bad request), `401` (unauthorized), `403` (forbidden), `404` (not found), `422` (validation error), `429` (rate limited), `500` (server error).
 
-## Rate Limiting
-
-The API enforces rate limits per-IP and per-user. When rate limited, you'll receive a `429` response with a `Retry-After` header.
-
 ## WebSocket
 
 Real-time chat uses WebSocket connections:

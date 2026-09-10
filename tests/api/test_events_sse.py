@@ -273,7 +273,7 @@ async def test_close_unsubscribes(mock_db, gw):
 #
 # On disconnect Starlette cancels the streaming task, throwing the exception
 # into this generator at its current ``await``. If it escapes, the app's
-# BaseHTTPMiddleware stack (CSRF/access-log/rate-limit) collapses it into an
+# BaseHTTPMiddleware stack (CSRF/access-log) collapses it into an
 # anyio ExceptionGroup that surfaces as an unhandled 500 + error_log row instead
 # of a clean connection close. ``athrow`` injects the exact exception shapes at
 # the live suspension point without a buffering ASGI test client.

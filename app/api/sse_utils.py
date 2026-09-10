@@ -18,7 +18,7 @@ def is_client_disconnect(exc: BaseException) -> bool:
     On client disconnect (tab close, navigation, network blip) Starlette
     cancels the streaming task, throwing ``CancelledError`` into this generator
     at its current ``await``. Because the app wraps every request in a stack of
-    ``BaseHTTPMiddleware`` (CSRF, access-log, rate-limit, ...), a cancellation
+    ``BaseHTTPMiddleware`` (CSRF, access-log, ...), a cancellation
     that escapes the generator collapses into an anyio ``ExceptionGroup`` that
     surfaces as an unhandled 500 instead of a clean connection close (issue
     #627). This recognizes both the plain form and that group-wrapped form so

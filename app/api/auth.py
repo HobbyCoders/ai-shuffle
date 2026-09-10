@@ -112,7 +112,6 @@ def _set_paired_request_state(request: Request, token: str, client: dict) -> str
     request.state.api_user = None
     request.state.paired_client = client
     request.state.auth_token = f"paired_client:{client['id']}"
-    request.state.user_info = (client.get("device_name") or "paired-device", client["id"], owner_admin)
     return f"paired_client:{client['id']}"
 
 
@@ -132,8 +131,6 @@ def require_auth(request: Request) -> str:
             request.state.is_admin = True
             request.state.api_user = None
             request.state.auth_token = token
-            # Store user_info tuple for rate_limit / csrf middleware reuse
-            request.state.user_info = ("admin", None, True)
             return token
 
         # Diagnostic logging - session token exists but validation failed
@@ -160,9 +157,6 @@ def require_auth(request: Request) -> str:
             request.state.is_admin = False
             request.state.api_user = api_user
             request.state.auth_token = f"api_key:{api_user['id']}"
-            user_id = api_user.get("username") or api_user["name"]
-            # Store user_info tuple for rate_limit / csrf middleware reuse
-            request.state.user_info = (user_id, api_user["id"], False)
             return f"api_key:{api_user['id']}"
 
     if owner_auth.local_access(request):
@@ -171,7 +165,6 @@ def require_auth(request: Request) -> str:
         request.state.is_admin = True
         request.state.api_user = None
         request.state.auth_token = 'local-owner'
-        request.state.user_info = ('local-owner', None, True)
         return 'local-owner'
 
     # Log what auth methods were attempted
@@ -409,13 +402,6 @@ async def logout(request: Request, response: Response):
                     await run_sync(audit_service.log_logout, request, username)
                 except Exception:
                     logger.warning("Logout audit recording failed", exc_info=True)
-        # Purge the rate-limit middleware's short-TTL auth cache so the revoked
-        # session isn't classified against its old tier for up to the TTL.
-        try:
-            from app.middleware.rate_limit import invalidate_auth_cache_for_session
-            invalidate_auth_cache_for_session(token)
-        except Exception:  # noqa: BLE001 - cache purge must never break logout
-            logger.debug("Auth-cache purge on logout failed (ignored)", exc_info=True)
 
     response.delete_cookie(key="session")
     return {"status": "ok", "message": "Logged out"}

@@ -176,24 +176,6 @@ class TestAnalyticsOperations:
 
 
 # =============================================================================
-# Rate Limit Extended Tests
-# =============================================================================
-
-
-class TestRateLimitExtended:
-    """Test extended rate limit operations."""
-
-    def test_update_rate_limit(self, mock_db, setup_api_user):
-        """update_rate_limit should update existing limit."""
-        db.create_rate_limit("rl-1", api_key_id="user-1", requests_per_minute=10)
-
-        result = db.update_rate_limit("rl-1", requests_per_minute=20)
-
-        assert result is not None
-        assert result["requests_per_minute"] == 20
-
-
-# =============================================================================
 # Git Repository Extended Tests
 # =============================================================================
 
