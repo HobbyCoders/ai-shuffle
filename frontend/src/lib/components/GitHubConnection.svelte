@@ -1,9 +1,11 @@
 <script lang="ts">
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	import { onMount, onDestroy } from 'svelte';
 	import { Github, ExternalLink, Copy, Loader2 } from 'lucide-svelte';
 	import { getGithubAuthStatus, startGithubWebLogin, loginGithubWithToken, cancelGithubWebLogin, logoutGithub } from '$lib/api/auth';
 	import { getErrorMessage } from '$lib/api/client';
 	import { auth } from '$lib/stores/auth.svelte';
+	let { embedded = false }: { embedded?: boolean } = $props();
 
 	let method = $state<'web' | 'token'>('web');
 	let authenticated = $state(false);
@@ -139,16 +141,16 @@
 	}
 
 	async function copyCode() {
-		try { await navigator.clipboard.writeText(code); copied = true; }
-		catch { error = 'Could not copy the code. Select and copy it manually.'; }
+		try { await copyText(code); copied = true; }
+		catch { copied = false; error = COPY_ERROR_MESSAGE; }
 	}
 </script>
 
-<section class="github-connection" aria-label="GitHub connection">
+<section class="github-connection" class:embedded class:linked={authenticated} aria-label="GitHub connection">
 	<h4><Github size={18} /> GitHub</h4>
 	{#if authenticated}
-		<p class="connected" role="status">GitHub is connected{user ? ` as @${user}` : ''}.</p>
-		<button type="button" onclick={disconnect} disabled={busy}>Disconnect GitHub</button>
+		<p class="connected" role="status">{embedded ? (user ? `@${user}` : 'Connected') : `GitHub is connected${user ? ` as @${user}` : ''}.`}</p>
+		<button type="button" onclick={disconnect} disabled={busy} aria-label="Disconnect GitHub">{embedded ? 'Disconnect' : 'Disconnect GitHub'}</button>
 	{:else}
 		<div class="actions" aria-label="GitHub sign-in method">
 			<button type="button" aria-pressed={method === 'web'} disabled={busy || !!code} onclick={() => { method = 'web'; error = ''; }}>Web sign-in</button>
@@ -197,4 +199,12 @@
 	.device-flow { margin-top: 12px; }
 	.connected { color: var(--success, #16a34a); }
 	.error { color: var(--destructive); margin-bottom: 0; }
+	.embedded { padding: 10px 14px; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; }
+	.embedded.linked { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
+	.embedded.linked h4 { margin: 0; font-size: 13px; gap: 12px; }
+	.embedded.linked h4 :global(svg) { color: var(--muted-foreground); }
+	.embedded.linked .connected { flex: 1; margin: 0; font-size: 12px; }
+	.embedded.linked > button { margin-left: auto; min-width: 104px; font-size: 12px; }
+	.embedded.linked .error { flex-basis: 100%; }
+	@media (max-width: 560px) { .embedded { padding-left: 12px; padding-right: 12px; } }
 </style>

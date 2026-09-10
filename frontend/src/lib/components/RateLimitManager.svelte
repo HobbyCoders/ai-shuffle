@@ -220,7 +220,6 @@
 <div class="rate-limit-manager">
 	<div class="header">
 		<h3>Rate Limit Settings</h3>
-		<p class="description">Configure request rate limits for users and API keys</p>
 	</div>
 
 	{#if error}
@@ -450,12 +449,6 @@
 		font-size: 1.125rem;
 		font-weight: 600;
 		color: var(--text-primary);
-	}
-
-	.header .description {
-		margin: 0;
-		font-size: 0.875rem;
-		color: var(--text-secondary);
 	}
 
 	.loading {

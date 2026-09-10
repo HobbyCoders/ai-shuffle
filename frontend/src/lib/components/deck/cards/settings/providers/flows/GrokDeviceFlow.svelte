@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	/**
 	 * GrokDeviceFlow — SuperGrok device-code enrollment.
 	 *
@@ -20,12 +21,13 @@
 
 	interface Props {
 		onDone: () => void;
+		onConnected?: (providerId: string) => void;
 		onCancel: () => void;
 		onBusyChange?: (busy: boolean) => void;
 		existingProviderId?: string | null;
 	}
 
-	let { onDone, onCancel, onBusyChange, existingProviderId }: Props = $props();
+	let { onDone, onCancel, onBusyChange, existingProviderId, onConnected }: Props = $props();
 
 	const ownsRow = !existingProviderId;
 
@@ -36,6 +38,7 @@
 	let verificationUri = $state('');
 	let errorMessage = $state('');
 	let copied = $state(false);
+	let copyError = $state('');
 
 	let providerId: string | null = null;
 	let pollIntervalMs = 3000;
@@ -123,7 +126,7 @@
 		clearPollTimer();
 		phase = 'finishing';
 		setBusy(true);
-		await seedModels();
+		if (!onConnected) await seedModels();
 		try {
 			await providers.refreshProviders();
 		} catch {
@@ -131,7 +134,8 @@
 		}
 		if (destroyed) return;
 		setBusy(false);
-		onDone();
+		if (onConnected && providerId) onConnected(providerId);
+		else onDone();
 	}
 
 	async function seedModels() {
@@ -190,15 +194,17 @@
 
 	async function copyCode() {
 		if (!userCode) return;
+		copied = false;
+		copyError = '';
 		try {
-			await navigator.clipboard.writeText(userCode);
+			await copyText(userCode);
 			copied = true;
 			if (copyTimer !== null) clearTimeout(copyTimer);
 			copyTimer = setTimeout(() => {
 				copied = false;
 			}, 2000);
 		} catch {
-			// Clipboard blocked — the code is select-all-able.
+			copyError = COPY_ERROR_MESSAGE;
 		}
 	}
 
@@ -257,6 +263,7 @@
 					{/if}
 				</button>
 			</div>
+			{#if copyError}<p role="alert" class="text-center text-sm text-destructive">{copyError}</p>{/if}
 			<a
 				href={verificationUri}
 				target="_blank"

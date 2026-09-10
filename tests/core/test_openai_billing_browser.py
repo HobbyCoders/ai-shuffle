@@ -458,3 +458,117 @@ async def test_login_input_rejects_unexpected_cdp_method(browser, session, monke
         await browser.dispatch_input(session.provider_id, session.flow_id, {"method": method})
 
     send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_typing_does_not_wait_for_mouse_acknowledgement(browser, session):
+    session.ws = AsyncMock()
+    payloads = [
+        {"type": "input", "kind": "mouse", "event": "move", "x": 100, "y": 80},
+        {"type": "input", "kind": "mouse", "event": "down", "x": 100, "y": 80},
+        {"type": "input", "kind": "mouse", "event": "up", "x": 100, "y": 80},
+        {"type": "input", "kind": "key", "event": "down", "key": "a", "text": "a"},
+        {"type": "input", "kind": "key", "event": "up", "key": "a"},
+        {"type": "input", "kind": "text", "text": "bc"},
+    ]
+    commands = [translate_input(payload) for payload in payloads]
+    try:
+        # No ACK is delivered until the entire click/type sequence is sent.
+        for command in commands:
+            await asyncio.wait_for(
+                browser.dispatch_input(session.provider_id, session.flow_id, command), 0.5,
+            )
+        sent = [json.loads(call.args[0]) for call in session.ws.send.await_args_list]
+        assert sent == [{"id": index + 1, **command} for index, command in enumerate(commands)]
+        assert len(session.input_tasks) == len(commands)
+        # Responses can arrive out of order without changing dispatch order.
+        for future in reversed(list(session.replies.values())):
+            future.set_result({})
+        await asyncio.gather(*session.input_tasks)
+        assert not session.replies
+        assert not session.input_tasks
+    finally:
+        await browser.close(session.provider_id)
+
+
+@pytest.mark.asyncio
+async def test_login_input_pipeline_has_bounded_backpressure(browser, session, monkeypatch):
+    monkeypatch.setattr(mod, "_MAX_PENDING_INPUTS", 2)
+    session.ws = AsyncMock()
+    command = {"method": "Input.insertText", "params": {"text": "x"}}
+    waiting = None
+    try:
+        for _ in range(2):
+            await browser.dispatch_input(session.provider_id, session.flow_id, command)
+        waiting = asyncio.create_task(browser.dispatch_input(session.provider_id, session.flow_id, command))
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        assert session.ws.send.await_count == 2
+        session.replies[1].set_result({})
+        await asyncio.wait_for(waiting, 0.5)
+        assert session.ws.send.await_count == 3
+        assert len(session.input_tasks) == 2
+        assert len(session.replies) == 2
+    finally:
+        if waiting:
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+        await browser.close(session.provider_id)
+    assert not session.input_tasks
+    assert not session.replies
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["cdp-error", "timeout", "disconnect"])
+async def test_delayed_input_failure_stops_login(browser, session, monkeypatch, failure):
+    session.ws = AsyncMock()
+    if failure == "timeout":
+        monkeypatch.setattr(mod, "_CDP_REPLY_TIMEOUT", 0.01)
+    command = {"method": "Input.insertText", "params": {"text": "test"}}
+    try:
+        await browser.dispatch_input(session.provider_id, session.flow_id, command)
+        if failure == "cdp-error":
+            session.ws.__aiter__.return_value = [json.dumps({"id": 1, "error": {"message": "test"}})]
+            await browser._read(session)
+        elif failure == "disconnect":
+            session.ws.__aiter__.return_value = []
+            await browser._read(session)
+        await asyncio.wait_for(asyncio.gather(*session.input_tasks), 0.5)
+        assert session.status == "unavailable"
+        assert session.error_kind == "billing_browser_unavailable"
+        with pytest.raises(mod.BillingBrowserError, match="billing_browser_unavailable"):
+            await browser.dispatch_input(session.provider_id, session.flow_id, command)
+        assert session.ws.send.await_count == 1
+        assert not session.replies
+    finally:
+        await browser.close(session.provider_id)
+
+
+@pytest.mark.asyncio
+async def test_close_cleans_input_even_before_reply_task_starts(browser, session):
+    session.ws = AsyncMock()
+    await browser.dispatch_input(session.provider_id, session.flow_id, {
+        "method": "Input.insertText", "params": {"text": "test"},
+    })
+    await browser.close(session.provider_id)
+    assert not session.input_tasks
+    assert not session.replies
+
+
+@pytest.mark.asyncio
+async def test_late_input_error_does_not_invalidate_confirmed_connection(browser, session):
+    session.ws = AsyncMock()
+    try:
+        await browser.dispatch_input(session.provider_id, session.flow_id, {
+            "method": "Input.insertText", "params": {"text": "test"},
+        })
+        session.status = "ready"
+        session.observation_id = "observation"
+        session.observation = mod._observation({"total_available": 21.09}, "org-test")
+        browser.confirm(session.provider_id, session.flow_id, session.observation_id, "org-test")
+        session.replies[1].set_exception(mod.BillingBrowserError("billing_browser_unavailable"))
+        await asyncio.gather(*session.input_tasks)
+        assert session.status == "connected"
+        assert session.error_kind is None
+    finally:
+        await browser.close(session.provider_id)

@@ -22,9 +22,45 @@ function reads(path: string, connection: unknown, account: unknown = profile) {
 beforeEach(() => { vi.resetAllMocks(); authState.current.status = { auth_mode: 'local' }; reads('', disconnected); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
-it('offers sign in and account creation before anything is linked, then opens the matching page', async () => {
+it('waits for account activation before loading the profile and loads it on the next poll', async () => {
+	vi.useFakeTimers();
+	reads('', { ...disconnected, signed_in: true, profile_ready: false, status: 'connecting' });
+	render(AccountPanel);
+	await tick(); await vi.advanceTimersByTimeAsync(0);
+	expect(screen.getByText('Signed in · finishing connection…')).toBeTruthy();
+	expect(api.get.mock.calls.some(([path]) => path === '/mobile/hub/account')).toBe(false);
+	expect(screen.queryByRole('alert')).toBeNull();
+	reads('', { ...disconnected, signed_in: true, profile_ready: true, status: 'connected' });
+	await vi.advanceTimersByTimeAsync(4000);
+	expect(screen.getByText('@desk.owner')).toBeTruthy();
+	expect(screen.getByText('Remote access is on')).toBeTruthy();
+});
+
+it('offers only sign in in settings', async () => {
 	api.post.mockResolvedValue(waiting);
-	render(AccountPanel, { workerName: 'Desk worker' });
+	render(AccountPanel);
+	await fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
+	expect(screen.queryByRole('button', { name: 'Create account' })).toBeNull();
+	expect((await screen.findByRole('link', { name: 'Sign in in browser' })).getAttribute('href')).toBe(waiting.authorization_url);
+});
+
+it('keeps settings compact with an icon-only refresh immediately after sign out', async () => {
+	reads('', { ...disconnected, signed_in: true, status: 'connected' });
+	render(AccountPanel);
+	await screen.findByText('@desk.owner');
+	expect(screen.queryByRole('list')).toBeNull();
+	expect(screen.queryByText('This is the name your other devices see.')).toBeNull();
+	const refresh = screen.getByRole('button', { name: 'Refresh account' });
+	expect(refresh.textContent).toBe('');
+	expect(screen.getByRole('button', { name: 'Sign out' }).nextElementSibling).toBe(refresh);
+	api.get.mockClear();
+	await fireEvent.click(refresh);
+	expect(api.get).toHaveBeenCalledWith('/mobile/hub/account', { cache: 'no-store' });
+});
+
+it('offers account creation during setup, then opens the matching page', async () => {
+	api.post.mockResolvedValue(waiting);
+	render(AccountPanel, { workerName: 'Desk worker', variant: 'setup' });
 	expect(await screen.findByText('Not signed in')).toBeTruthy();
 	expect(screen.queryByRole('link')).toBeNull();
 	await fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
@@ -49,12 +85,12 @@ it('reopens an existing offer for sign in without minting a second code', async 
 	expect((await screen.findByRole('link', { name: 'Sign in in browser' })).getAttribute('href')).toBe(waiting.authorization_url);
 });
 
-it.each(['locked', 'unavailable'])('disables both entry points when the link is %s and explains why', async (status) => {
+it.each(['locked', 'unavailable'])('disables sign in when the link is %s and explains why', async (status) => {
 	reads('', { ...disconnected, status, error: 'Connection prerequisite unavailable' });
 	render(AccountPanel);
 	const signIn = await screen.findByRole('button', { name: 'Sign in' });
 	expect((signIn as HTMLButtonElement).disabled).toBe(true);
-	expect((screen.getByRole('button', { name: 'Create account' }) as HTMLButtonElement).disabled).toBe(true);
+	expect(screen.queryByRole('button', { name: 'Create account' })).toBeNull();
 	expect(screen.getByRole('alert').textContent).toBe('Connection prerequisite unavailable');
 	expect(signIn.getAttribute('aria-describedby')).toBe('account-panel-error');
 });
@@ -62,7 +98,7 @@ it.each(['locked', 'unavailable'])('disables both entry points when the link is 
 it('shows the username, every worker on the account and signs out', async () => {
 	reads('', { ...disconnected, signed_in: true, status: 'connected' });
 	api.delete.mockResolvedValue(disconnected);
-	render(AccountPanel);
+	render(AccountPanel, { variant: 'setup' });
 	expect(await screen.findByText('@desk.owner')).toBeTruthy();
 	const workers = screen.getByRole('list', { name: 'Workers on this account' });
 	expect(within(workers).getByText('Laptop')).toBeTruthy();
@@ -148,12 +184,12 @@ it('does not guess the account state before the first answer arrives', async () 
 	expect(await screen.findByRole('button', { name: 'Sign in' })).toBeTruthy();
 });
 
-it.each(['settings', 'setup'] as const)('refreshes account-wide workers and devices in the %s panel without losing offline registrations', async (variant) => {
+it('refreshes account-wide workers and devices during setup without losing offline registrations', async () => {
 	vi.useFakeTimers();
 	let inventory = { ...profile, devices: [{ id: 'phone', name: 'Phone', platform: 'android' }] };
 	api.get.mockImplementation(async (p: string) => p === '/mobile/hub/connection'
 		? { ...disconnected, signed_in: true, status: 'connected' } : inventory);
-	render(AccountPanel, { variant });
+	render(AccountPanel, { variant: 'setup' });
 	await tick(); await vi.advanceTimersByTimeAsync(0);
 	expect(within(screen.getByRole('list', { name: 'Phones and browsers on this account' })).getByText('Phone · android')).toBeTruthy();
 	inventory = { ...profile, servers: [profile.servers[0]], devices: [{ id: 'browser', name: 'Browser', platform: 'web' }] };
@@ -162,16 +198,16 @@ it.each(['settings', 'setup'] as const)('refreshes account-wide workers and devi
 	expect(screen.queryByText('Phone · android')).toBeNull();
 	expect(screen.getByText('Browser · web')).toBeTruthy();
 	inventory = { ...inventory, servers: [...profile.servers, { id: 'offline', name: 'Offline PC', url: null, current: false }] };
-	await fireEvent.click(screen.getByRole('button', { name: 'Refresh account devices' }));
+	await fireEvent.click(screen.getByRole('button', { name: 'Refresh account' }));
 	await tick();
 	expect(screen.getByText('Offline PC')).toBeTruthy();
 });
 
 it('distinguishes an old hub from an account with no phone or browser registrations', async () => {
 	reads('', { ...disconnected, signed_in: true, status: 'connected' });
-	render(AccountPanel);
+	render(AccountPanel, { variant: 'setup' });
 	expect(await screen.findByText('Update the account service to see its phones and browsers here.')).toBeTruthy();
 	reads('', { ...disconnected, signed_in: true, status: 'connected' }, { ...profile, devices: [] });
-	await fireEvent.click(screen.getByRole('button', { name: 'Refresh account devices' }));
+	await fireEvent.click(screen.getByRole('button', { name: 'Refresh account' }));
 	expect(await screen.findByText('No phones or browsers registered to this account.')).toBeTruthy();
 });

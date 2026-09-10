@@ -217,6 +217,7 @@ def test_browser_is_provider_scoped_and_redacted(authenticated_client, provider,
 @pytest.mark.asyncio
 async def test_initial_viewport_and_typing_reach_the_owned_login_tab(monkeypatch):
     """Do not mock hub.dispatch_input: it rejects all workspace mutations."""
+    import asyncio
     import json
 
     from app.api import browser_panel as panel
@@ -224,10 +225,16 @@ async def test_initial_viewport_and_typing_reach_the_owned_login_tab(monkeypatch
     from app.core.browser_stream import BrowserStreamHub, _Viewer
 
     service = billing_module.OpenAIBillingBrowser()
-    session = billing_module._Session("provider", target_id="login-target", ws=object())
+    session = billing_module._Session("provider", target_id="login-target", ws=AsyncMock())
     service._sessions["provider"] = session
-    call = AsyncMock(return_value={})
-    monkeypatch.setattr(service, "_call", call)
+
+    async def reply_to_viewport(raw):
+        command = json.loads(raw)
+        if command["method"] == "Emulation.setDeviceMetricsOverride":
+            session.replies[command["id"]].set_result({})
+
+    session.ws.send.side_effect = reply_to_viewport
+    monkeypatch.setattr(billing_module.native_chrome, "cdp_get", AsyncMock())
     monkeypatch.setattr(api, "openai_billing_browser", service)
     monkeypatch.setattr(api, "_provider", AsyncMock(return_value={"id": "provider"}))
     monkeypatch.setattr(api, "authenticate_websocket", AsyncMock(return_value=(True, None)))
@@ -235,6 +242,7 @@ async def test_initial_viewport_and_typing_reach_the_owned_login_tab(monkeypatch
     socket = AsyncMock()
     socket.receive_text.side_effect = [
         json.dumps({"type": "viewport", "width": 390, "height": 844}),
+        json.dumps({"type": "input", "kind": "mouse", "event": "move", "x": 100, "y": 80}),
         json.dumps({"type": "input", "kind": "text", "text": "login test"}),
         WebSocketDisconnect(),
     ]
@@ -244,12 +252,16 @@ async def test_initial_viewport_and_typing_reach_the_owned_login_tab(monkeypatch
     detach = AsyncMock()
     monkeypatch.setattr(panel.browser_stream, "detach_viewer", detach)
 
-    await api.billing_browser(socket, "provider", token=None)
-
-    assert [entry.args[1] for entry in call.await_args_list] == [
-        "Emulation.setDeviceMetricsOverride", "Input.insertText",
-    ]
-    assert all(entry.args[0] is session for entry in call.await_args_list)
-    assert call.await_args_list[0].args[2]["width"] == 390
-    socket.close.assert_not_awaited()
-    detach.assert_awaited_once_with(service.panel_key("provider"), viewer)
+    try:
+        # The socket must read and forward text even without a mouse ACK.
+        await asyncio.wait_for(api.billing_browser(socket, "provider", token=None), 0.5)
+        commands = [json.loads(entry.args[0]) for entry in session.ws.send.await_args_list]
+        assert [command["method"] for command in commands] == [
+            "Emulation.setDeviceMetricsOverride", "Input.dispatchMouseEvent", "Input.insertText",
+        ]
+        assert commands[0]["params"]["width"] == 390
+        assert commands[2]["params"]["text"] == "login test"
+        socket.close.assert_not_awaited()
+        detach.assert_awaited_once_with(service.panel_key("provider"), viewer)
+    finally:
+        await service.close("provider")

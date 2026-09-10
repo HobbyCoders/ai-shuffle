@@ -11,12 +11,14 @@
 	 * install switches to the account's settings by itself.
 	 */
 	import { onMount } from 'svelte';
-	import { AlertTriangle, Check, Globe, KeyRound, Loader2, MonitorSmartphone, Pencil, Plus, Server, ShieldAlert, ShieldCheck, ShieldOff, Smartphone, Trash2, X } from 'lucide-svelte';
+	import { AlertTriangle, Check, Globe, KeyRound, Loader2, MonitorSmartphone, Pencil, Plus, Server, ShieldCheck, ShieldOff, Smartphone, Trash2, X } from 'lucide-svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { getErrorMessage } from '$lib/api/client';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { listPairedClients, revokePairedClient, type PairedClient } from '$lib/api/pairing';
+	import type { AccountProfile } from '$lib/api/account';
+	import { accountOnlyDevices } from './account-devices';
 	import { listInstalls, renameInstall, deleteInstall, setInstallApproval, type Install } from '$lib/api/installs';
 	import {
 		adoptAccountNetwork, createNetwork, getNetworkStatus, renameNetworkMember, revokeNetworkMember, unlockWithRecoveryKey,
@@ -26,7 +28,6 @@
 	import AccountPanel from './AccountPanel.svelte';
 	import AddDevicePanel from './AddDevicePanel.svelte';
 	import JoinNetworkPanel from './JoinNetworkPanel.svelte';
-	import NetworkAdvanced from './NetworkAdvanced.svelte';
 
 	const STATUS_MS = 5000;
 	const JOINING_MS = 3000;
@@ -34,6 +35,8 @@
 
 	// ── Data ────────────────────────────────────────────────────────────────
 	let status = $state<NetworkStatus | null>(null);
+	let accountProfile = $state<AccountProfile | null>(null);
+	let accountInventoryReady = $state(false);
 	let stale = $state(false);
 	let statusError = $state('');
 	let installs = $state<Install[]>([]);
@@ -77,9 +80,10 @@
 		...(status?.hub?.pending_devices ?? []).map((device) => ({ key: `hub:${device.device_id}`, name: device.name || device.device_id, platform: device.platform, via: 'account' as const }))
 	]);
 	const workerName = $derived(self?.name ?? installs.find((install) => install.is_self || install.id === selfInstallId)?.device_name ?? 'My worker');
-	const workerCount = $derived((enrolled ? 1 + members.length : installs.length ? 1 : 0) + legacyInstalls.length);
-	const total = $derived(workerCount + clients.length);
-	const complete = $derived(workersLoaded && clientsLoaded && !workersError && !clientsError && status !== null);
+	const accountDevices = $derived(accountOnlyDevices(accountProfile, status, installs, clients));
+	const workerCount = $derived((status ? 1 : 0) + members.length + legacyInstalls.length);
+	const total = $derived(workerCount + clients.length + accountDevices.length);
+	const complete = $derived(workersLoaded && clientsLoaded && accountInventoryReady && !workersError && !clientsError && status !== null);
 	const enrollmentPending = $derived(!enrolled && (status?.enrollment?.status === 'pending' || status?.enrollment?.status === 'syncing'));
 	const waitingOnAccount = $derived(!enrolled && !status?.enrollment && Boolean(status?.hub?.linked) && status?.hub?.status === 'pending');
 	const switchingToAccount = $derived(enrolled && Boolean(status?.hub?.linked) && status?.hub?.status === 'conflict');
@@ -293,7 +297,7 @@
 		{/if}
 	</header>
 
-	<AccountPanel {workerName} />
+	<AccountPanel {workerName} bind:profile={accountProfile} bind:inventoryReady={accountInventoryReady} />
 
 	<div id="device-enrollment" hidden={!showAdd}>{#if addMounted}<AddDevicePanel {enrolled} allowLegacyRunner={workersLoaded && !enrolled && installs.length > 0} />{/if}</div>
 
@@ -352,9 +356,8 @@
 	{#if workersError}<div class="load-error"><p role="alert">Workers: {workersError}</p><button type="button" class="btn sm" onclick={loadWorkers}>Retry workers</button></div>{/if}
 	{#if clientsError}<div class="load-error"><p role="alert">Phones and browsers: {clientsError}</p><button type="button" class="btn sm" onclick={loadClients}>Retry phones and browsers</button></div>{/if}
 
-	<!-- Workers -->
-	<h4 class="group"><Server size={14} /> Workers</h4>
-	<ul class="list" aria-label="Workers">
+	{#if !clientsLoaded && !clientsError}<p class="empty" role="status">Loading devices…</p>{/if}
+	<ul class="list" aria-label="Devices">
 		{#if status}
 			<li class="row-item" data-device-key="self">
 				<span class="icon" aria-hidden="true"><Server size={18} /></span>
@@ -466,15 +469,6 @@
 				{/if}
 			</li>
 		{/each}
-		{#if status && enrolled && members.length === 0 && joining.length === 0 && legacyInstalls.length === 0}
-			<li class="empty">No other workers yet. Add device → Worker invites one, or sign in to your Shuffle account on it.</li>
-		{/if}
-	</ul>
-
-	<!-- Phones and browsers -->
-	<h4 class="group"><Smartphone size={14} /> Phones and browsers</h4>
-	{#if !clientsLoaded && !clientsError}<p class="empty" role="status">Loading phones and browsers…</p>{/if}
-	<ul class="list" aria-label="Phones and browsers">
 		{#each clients as client (client.id)}
 			{@const key = `client:${client.id}`}
 			<li class="row-item" data-device-key={key}>
@@ -501,22 +495,28 @@
 				{/if}
 			</li>
 		{/each}
-		{#if clientsLoaded && clients.length === 0}
-			<li class="empty">No phones or browsers yet. Add device → Phone or browser, or sign in to your Shuffle account in the app.</li>
-		{/if}
+		{#each accountDevices as device (device.key)}
+			<li class="row-item" data-device-key={device.key}>
+				<span class="icon" aria-hidden="true">{#if device.kind === 'Worker'}<Server size={18} />{:else if device.kind === 'Phone'}<Smartphone size={18} />{:else if device.kind === 'Browser'}<Globe size={18} />{:else}<MonitorSmartphone size={18} />{/if}</span>
+				<div class="main">
+					<div class="name-line"><span class="name">{device.name}</span><span class="tag">On your account</span></div>
+					<div class="meta"><span>{device.kind}</span>{#if device.platform}<span>{device.platform}</span>{/if}<span>Availability unknown</span></div>
+				</div>
+			</li>
+		{/each}
 	</ul>
+	{#if accountProfile && accountProfile.devices === undefined}<p class="empty">Update the account service to include all account phones and browsers.</p>{/if}
 
 	{#if error}<p class="feedback error" role="alert">{error}</p>{/if}
 	{#if success}<p class="feedback" role="status">{success}</p>{/if}
 
-	<NetworkAdvanced {status} onChanged={loadStatus} />
 </section>
 
 <style>
 	.devices { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); color: var(--foreground); min-width: 0; }
-	.head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+	.head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
 	.heading { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; min-width: 0; }
-	h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-family: var(--font-display); font-size: 18px; font-weight: 600; letter-spacing: -.02em; }
+	h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-family: var(--font-display); font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
 	.count { color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 	.pill { padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 500; background: var(--muted); color: var(--muted-foreground); }
 	.pill.s-ready { background: color-mix(in oklch, var(--success) 15%, transparent); color: var(--success); }
@@ -527,7 +527,7 @@
 	.btn:hover:not(:disabled) { background: var(--hover-overlay); }
 	.btn:disabled { opacity: .5; cursor: default; }
 	.btn:focus-visible, .inp:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.btn.add { flex-shrink: 0; color: var(--primary); }
+	.btn.add { flex-shrink: 0; min-height: 36px; padding: 6px 10px; color: var(--primary); }
 	.btn.sm { min-height: 34px; padding: 6px 10px; }
 	.btn.primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
 	.btn.icon { width: 40px; padding: 0; border-color: transparent; color: var(--muted-foreground); flex-shrink: 0; }
@@ -544,9 +544,8 @@
 	.inp.mono { flex: 1 1 220px; font-family: var(--font-mono); font-size: 12px; }
 	.inp:disabled { opacity: .55; }
 	.stale { display: flex; align-items: center; gap: 6px; margin: 8px 18px 0; font-size: 12px; color: var(--muted-foreground); }
-	.group { display: flex; align-items: center; gap: 6px; margin: 14px 18px 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted-foreground); }
-	.list { list-style: none; margin: 0; padding: 0 18px; }
-	.row-item { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 8px 10px; padding: 12px 0; }
+	.list { list-style: none; margin: 0; padding: 0 14px; }
+	.row-item { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 8px 10px; padding: 10px 0; }
 	.row-item + .row-item { border-top: 1px solid var(--border); }
 	.row-item.joining .icon { color: var(--primary); }
 	.icon { display: flex; color: var(--muted-foreground); }
@@ -574,10 +573,8 @@
 	@keyframes devices-spin { to { transform: rotate(360deg); } }
 	@media (max-width: 560px) {
 		.head { padding: 12px; }
-		.heading { flex-direction: column; align-items: flex-start; }
 		.notice, .stale { margin-left: 12px; margin-right: 12px; }
-		.group, .list, .feedback, .load-error { padding-left: 12px; padding-right: 12px; margin-left: 0; margin-right: 0; }
-		.group { margin: 14px 12px 0; padding: 0; }
+		.list, .feedback, .load-error { padding-left: 12px; padding-right: 12px; margin-left: 0; margin-right: 0; }
 		.row-item { grid-template-columns: 20px minmax(0, 1fr); gap: 6px 8px; }
 		.actions { grid-column: 2; justify-content: flex-end; }
 		.btn, .inp { min-height: 44px; }

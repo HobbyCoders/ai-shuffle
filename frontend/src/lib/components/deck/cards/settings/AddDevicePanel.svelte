@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	/**
 	 * AddDevicePanel — one code for one device.
 	 *
@@ -97,11 +98,11 @@
 
 	async function copy(value: string, what: 'code' | 'link') {
 		try {
-			await navigator.clipboard.writeText(value);
+			await copyText(value);
 			copied = what;
 			clearTimeout(copyTimer);
 			copyTimer = setTimeout(() => { copied = null; }, 1800);
-		} catch { error = 'Clipboard access is unavailable. Select and copy the value manually.'; }
+		} catch { copied = null; error = COPY_ERROR_MESSAGE; }
 	}
 </script>
 
@@ -169,7 +170,7 @@
 				</select>
 			</label>
 			{#if kind === 'worker' && usableEndpoints.length === 0}
-				<p class="error" role="alert">No address other computers can reach was detected. Set one under Advanced → This worker's address.</p>
+				<p class="error" role="alert">No address other computers can reach was detected. Connect this worker to a reachable network, then retry.</p>
 			{/if}
 		{/if}
 		<div class="actions">

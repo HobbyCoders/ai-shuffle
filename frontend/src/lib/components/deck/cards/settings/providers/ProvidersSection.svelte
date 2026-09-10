@@ -23,7 +23,7 @@
 	 * `ensureLoaded()`; that path is untouched.)
 	 */
 	import { onMount } from 'svelte';
-	import { Info, Server, FileInput, Type } from 'lucide-svelte';
+	import { Server, FileInput, Type } from 'lucide-svelte';
 	import { providers } from '$lib/stores/providers.svelte';
 	import MediaToolsSection from './MediaToolsSection.svelte';
 	import ProviderList from './ProviderList.svelte';
@@ -120,29 +120,16 @@
 	});
 </script>
 
-<!-- One home for every credential -->
-<div class="ed-note">
-	<Info />
-	<div><b>One home for every credential.</b> Your Claude account, API keys and model gateways live here together — each row shows its status and is masked. Open a row to pick which models that provider offers; chats choose among them when you start them.</div>
-</div>
-
 <!-- Group A: model providers -->
 <div class="set-group" id="providers-section">
 	<div class="set-grouphead">
 		<h3><Server />Providers</h3>
-		<p>Your Claude subscription and API key, plus any OpenRouter / OpenAI / custom gateways. Enabled providers and their curated models appear in the agent editor.</p>
+		<button type="button" class="ed-btn prov-import-btn" onclick={onImportSettings}>
+			<FileInput />Import settings
+		</button>
 	</div>
 
 	<div class="prov-groupbody">
-		<div class="prov-toolbar">
-			<h4>All providers</h4>
-			<div class="prov-actions">
-				<button type="button" class="ed-btn prov-import-btn" onclick={onImportSettings}>
-					<FileInput />Import settings
-				</button>
-			</div>
-		</div>
-
 		<ProviderList />
 	</div>
 </div>
@@ -151,12 +138,10 @@
 <div class="set-group">
 	<div class="set-grouphead">
 		<h3><Type />Generated text</h3>
-		<p>Short pieces of text the app writes for you, outside any chat.</p>
 	</div>
 	<div class="set-row">
 		<div class="lab">
 			<h4>Text generation model</h4>
-			<p>Used for session titles, commit messages, PR descriptions, branch names, and generating agents. Chats pick their own model when you start them.</p>
 		</div>
 		<div class="ctl textgen-ctl">
 			<div class="textgen-model">
@@ -210,28 +195,14 @@
 		min-width: 0;
 	}
 	.prov-groupbody {
-		padding: 4px 18px 14px;
+		padding: 10px 14px;
 	}
-	.prov-toolbar {
+	.set-grouphead {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		gap: 12px;
-		margin: 6px 0 10px;
-	}
-	.prov-toolbar h4 {
-		margin: 0;
-		font-size: 12px;
-		font-weight: 600;
-		letter-spacing: 0.03em;
-		text-transform: uppercase;
-		color: var(--muted-foreground);
-	}
-	.prov-actions {
-		display: flex;
-		align-items: center;
-		justify-content: flex-end;
-		gap: 8px;
+		flex-wrap: wrap;
 	}
 	.prov-import-btn {
 		display: inline-flex;
@@ -259,18 +230,6 @@
 		.textgen-model,
 		.textgen-effort {
 			width: 100%;
-		}
-		.prov-toolbar {
-			align-items: flex-start;
-			flex-direction: column;
-		}
-		.prov-actions {
-			width: 100%;
-			justify-content: stretch;
-		}
-		.prov-actions :global(button) {
-			flex: 1;
-			justify-content: center;
 		}
 	}
 </style>

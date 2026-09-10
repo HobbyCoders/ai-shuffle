@@ -26,6 +26,8 @@ export type AccountLinkState =
 
 export interface AccountConnection {
 	signed_in: boolean;
+	/** False while the saved account link is still being activated. Absent on older workers. */
+	profile_ready?: boolean;
 	status: AccountLinkState;
 	server_id?: string | null;
 	/** The public address of this worker once remote access is up. */
@@ -54,7 +56,7 @@ export interface AccountProfile {
 	/** Every registered worker, independent of this worker's local network. */
 	servers: AccountWorker[];
 	/** Account-wide phone/browser metadata. Absent when the hub predates this inventory. */
-	devices?: { id: string; name: string; platform: string }[];
+	devices?: { id: string; name: string; platform: string; local_device_id?: string }[];
 }
 
 export async function getAccountConnection(): Promise<AccountConnection> {

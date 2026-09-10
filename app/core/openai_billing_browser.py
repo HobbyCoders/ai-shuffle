@@ -23,6 +23,8 @@ CREDIT_URL = "https://api.openai.com/v1/dashboard/billing/credit_grants"
 LOGIN_TIMEOUT = 600
 REFRESH_TIMEOUT = 20
 OBSERVATION_MAX_AGE = 120_000
+_MAX_PENDING_INPUTS = 32
+_CDP_REPLY_TIMEOUT = 8
 _RAW_FIELDS = ("total_granted", "total_used", "total_available")
 
 
@@ -79,6 +81,7 @@ class _Session:
     reader: Optional[asyncio.Task] = None
     expiry: Optional[asyncio.Task] = None
     body_tasks: set = field(default_factory=set)
+    input_tasks: set = field(default_factory=set)
     replies: dict = field(default_factory=dict)
     requests: dict = field(default_factory=dict)
     extra_orgs: dict = field(default_factory=dict)
@@ -129,7 +132,7 @@ class OpenAIBillingBrowser:
             session.status = "unavailable" if kind == "billing_browser_unavailable" else "reconnect_required"
         session.changed.set()
 
-    async def _call(self, session: _Session, method: str, params: Optional[dict] = None) -> dict:
+    async def _send(self, session: _Session, method: str, params: dict | None = None) -> tuple[int, asyncio.Future]:
         async with session.send_lock:
             session.command_id += 1
             command_id = session.command_id
@@ -137,15 +140,60 @@ class OpenAIBillingBrowser:
             session.replies[command_id] = future
             try:
                 await session.ws.send(json.dumps({"id": command_id, "method": method, "params": params or {}}))
-            except Exception:
+            except (Exception, asyncio.CancelledError) as error:
                 session.replies.pop(command_id, None)
+                future.cancel()
+                if isinstance(error, asyncio.CancelledError):
+                    raise
                 raise BillingBrowserError("billing_browser_unavailable") from None
+        return command_id, future
+
+    async def _reply(self, session: _Session, command_id: int, future: asyncio.Future) -> dict:
         try:
-            return await asyncio.wait_for(future, 8)
+            return await asyncio.wait_for(future, _CDP_REPLY_TIMEOUT)
         except asyncio.TimeoutError:
             raise BillingBrowserError("billing_timeout") from None
         finally:
             session.replies.pop(command_id, None)
+
+    async def _call(self, session: _Session, method: str, params: dict | None = None) -> dict:
+        command_id, future = await self._send(session, method, params)
+        return await self._reply(session, command_id, future)
+
+    async def _input_reply(self, session: _Session, command_id: int, future: asyncio.Future) -> None:
+        try:
+            await self._reply(session, command_id, future)
+        except BillingBrowserError:
+            # A late reply must not invalidate a confirmed connection.
+            if session.status in {"pending", "ready"} and session.expected_org is None:
+                self._fail(session, "billing_browser_unavailable")
+
+    async def _send_input(self, session: _Session, method: str, params: dict) -> None:
+        # Keep wire order, but do not serialize input on renderer ACKs. Mouse
+        # moves arrive every animation frame and otherwise hold up clicks/keys.
+        # Bound outstanding replies so an unresponsive renderer cannot grow
+        # an unlimited queue. Replies still have timeouts and propagate failure.
+        while len(session.input_tasks) >= _MAX_PENDING_INPUTS:
+            await asyncio.wait(session.input_tasks, return_when=asyncio.FIRST_COMPLETED)
+            if not self._current(session) or session.status not in {"pending", "ready"}:
+                raise BillingBrowserError("billing_browser_unavailable")
+        command_id, future = await self._send(session, method, params)
+        if future.done():
+            await self._reply(session, command_id, future)
+            return
+        task = asyncio.create_task(self._input_reply(session, command_id, future))
+        session.input_tasks.add(task)
+
+        def finished(task: asyncio.Task) -> None:
+            session.input_tasks.discard(task)
+            session.replies.pop(command_id, None)
+            # Also clean up if disposal cancels the task before it starts.
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                future.exception()
+
+        task.add_done_callback(finished)
 
     async def dispatch_input(self, provider_id: str, flow_id: str, command: dict) -> None:
         """Send translated login controls to this flow's owned CDP session.
@@ -169,6 +217,9 @@ class OpenAIBillingBrowser:
                 "Page.getNavigationHistory",
             }:
                 raise BillingBrowserError("billing_invalid_input")
+            if method.startswith("Input."):
+                await self._send_input(session, method, command.get("params", {}))
+                return
             result = await self._call(session, method, command.get("params", {}))
             if method == "Page.getNavigationHistory":
                 offset = command.get("__history_offset__")
@@ -400,7 +451,7 @@ class OpenAIBillingBrowser:
                 self._fail(session, "billing_invalid_response")
 
     async def _dispose(self, session: _Session) -> None:
-        tasks = [session.reader, session.expiry, *session.body_tasks]
+        tasks = [session.reader, session.expiry, *session.body_tasks, *session.input_tasks]
         tasks = [task for task in tasks if task and task is not asyncio.current_task()]
         for task in tasks:
             task.cancel()

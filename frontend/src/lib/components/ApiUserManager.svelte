@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	import { EFFORT_OPTIONS, modelEffortOptions, resolveModelEffort, reconcileModelEffort } from '$lib/constants/model-effort';
 	import { watchResources } from '$lib/services/watch-resources';
 	/**
@@ -211,19 +212,12 @@
 
 	async function copyToClipboard(text: string) {
 		try {
-			await navigator.clipboard.writeText(text);
+			await copyText(text);
 			copied = true;
 			setTimeout(() => { copied = false; }, 2000);
 		} catch {
-			// Fallback
-			const input = document.createElement('input');
-			input.value = text;
-			document.body.appendChild(input);
-			input.select();
-			document.execCommand('copy');
-			document.body.removeChild(input);
-			copied = true;
-			setTimeout(() => { copied = false; }, 2000);
+			copied = false;
+			error = COPY_ERROR_MESSAGE;
 		}
 	}
 
@@ -349,9 +343,6 @@
 		<div class="flex items-center justify-between">
 			<div>
 				<h3 class="text-sm font-medium text-foreground">API Users</h3>
-				<p class="text-xs text-muted-foreground mt-0.5">
-					Manage API users for connectors and external integrations
-				</p>
 			</div>
 			{#if !showCreateForm}
 				<button

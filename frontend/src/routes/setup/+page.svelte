@@ -14,7 +14,7 @@
 	 */
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
-	import { auth, anyCredential } from '$lib/stores/auth.svelte';
+	import { auth, anyCredential, claudeAuthenticated } from '$lib/stores/auth.svelte';
 	import {
 		getWorkspaceConfig, setupInstallation, setWorkspaceConfig,
 		completeOnboarding
@@ -134,11 +134,16 @@
 
 	// ── Providers & GitHub ──────────────────────────────────────────────────
 	let addProviderOpen = $state(false);
+	// Native Claude credentials and media keys live outside model_providers.
+	const hasClaude = $derived($claudeAuthenticated || providers.current.claudeAccounts.length > 0);
+	const hasProviders = $derived(hasClaude || providers.current.anthropicKeySet || providers.current.falKeySet || providers.current.providers.length > 0);
 
 	function closeAddProvider() {
 		addProviderOpen = false;
 		auth.checkAuth().catch(() => {});
 		providers.refreshProviders().catch(() => {});
+		providers.loadClaudeAccounts(true).catch(() => {});
+		providers.loadIntegrations().catch(() => {});
 	}
 
 	async function loadProvidersStep() {
@@ -204,8 +209,8 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
 </svelte:head>
 
-<div class="min-h-screen flex items-center justify-center p-4">
-	<div class="card p-6 sm:p-8 w-full transition-all duration-300 {currentStep === 'workspace' || currentStep === 'start' ? 'max-w-xl' : 'max-w-lg'}">
+<div class="setup-viewport flex flex-col items-center overflow-y-auto p-4">
+	<div class="card my-auto shrink-0 p-6 sm:p-8 w-full transition-all duration-300 {currentStep === 'workspace' || currentStep === 'start' ? 'max-w-xl' : 'max-w-lg'}">
 		{#if loadingConfig}
 			<div class="text-center py-8">
 				<Loader2 size={32} strokeWidth={1.5} class="mx-auto mb-4 animate-spin text-muted-foreground" />
@@ -379,10 +384,28 @@
 							<span class="text-sm font-semibold text-foreground">Model providers</span>
 							<span class="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border font-medium">Optional</span>
 						</div>
-						{#if providers.current.providers.length === 0}
-							<p class="text-sm text-muted-foreground">Connect a Claude, OpenAI, Grok or OpenRouter account or API key to start chatting. {#if enrolled && networkStatus?.network && networkStatus.network.member_count > 1}Providers synced from your other workers appear here once sync finishes.{/if}</p>
+						{#if !hasProviders}
+							<p class="text-sm text-muted-foreground">Connect a Claude, OpenAI, Grok or OpenRouter account or API key to start chatting. Add fal.ai for media generation. {#if enrolled && networkStatus?.network && networkStatus.network.member_count > 1}Providers synced from your other workers appear here once sync finishes.{/if}</p>
 						{:else}
 							<div class="space-y-2">
+								{#if hasClaude}
+									<div class="flex items-center justify-between gap-2 bg-muted/30 border border-border rounded-lg px-3 py-2">
+										<span class="text-sm text-foreground truncate">Claude Code</span>
+										<span class="text-xs text-muted-foreground shrink-0">Subscription added</span>
+									</div>
+								{/if}
+								{#if providers.current.anthropicKeySet}
+									<div class="flex items-center justify-between gap-2 bg-muted/30 border border-border rounded-lg px-3 py-2">
+										<span class="text-sm text-foreground truncate">Anthropic</span>
+										<span class="text-xs text-muted-foreground shrink-0">API key added</span>
+									</div>
+								{/if}
+								{#if providers.current.falKeySet}
+									<div class="flex items-center justify-between gap-2 bg-muted/30 border border-border rounded-lg px-3 py-2">
+										<span class="text-sm text-foreground truncate">fal.ai</span>
+										<span class="text-xs text-muted-foreground shrink-0">Media API key added</span>
+									</div>
+								{/if}
 								{#each providers.current.providers as provider (provider.id)}
 									<div class="flex items-center justify-between gap-2 bg-muted/30 border border-border rounded-lg px-3 py-2">
 										<span class="text-sm text-foreground truncate">{provider.name}</span>
@@ -403,10 +426,10 @@
 					<div class="border-t border-border pt-4">
 						<div class="flex gap-3">
 							<button type="button" onclick={goBack} class="btn btn-secondary flex-1 py-3">Back</button>
-							<button type="button" onclick={finishSetup} class="btn btn-primary flex-1 py-3">{$anyCredential ? 'Finish Setup' : 'Finish without a provider'}</button>
+							<button type="button" onclick={finishSetup} class="btn btn-primary flex-1 py-3">{$anyCredential || hasProviders ? 'Finish Setup' : 'Finish without a provider'}</button>
 						</div>
 						{#if !$anyCredential}
-							<p class="text-xs text-muted-foreground text-center mt-2">You can add a model provider later in Settings → Providers.</p>
+							<p class="text-xs text-muted-foreground text-center mt-2">You can add a chat model provider later in Settings → Providers.</p>
 						{/if}
 					</div>
 				</div>
@@ -418,3 +441,12 @@
 		{/if}
 	</div>
 </div>
+
+<style>
+	/* The app disables document scrolling, so setup owns its scroll area.
+	   Auto margins center a short card and collapse when it needs to scroll. */
+	.setup-viewport {
+		height: 100vh;
+		height: var(--app-viewport-height, 100dvh);
+	}
+</style>

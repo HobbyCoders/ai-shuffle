@@ -51,8 +51,6 @@
 		pendingMinutes ?? String(settings?.voice_max_call_minutes ?? '')
 	);
 
-	const selectedModel = $derived(VOICE_MODELS.find((m) => m.id === settings?.voice_model));
-	const selectedVoice = $derived(VOICE_VOICES.find((v) => v.id === settings?.voice_voice));
 
 	async function refreshSettings() {
 		const generation = ++request;
@@ -180,10 +178,6 @@
 <div class="set-group" data-testid="voice-section">
 	<div class="set-grouphead">
 		<h3><AudioLines />Voice</h3>
-		<p>
-			Talk to an agent that hands the work to your other agents. Runs on OpenAI Realtime over a
-			direct browser connection — audio never passes through this server.
-		</p>
 	</div>
 
 	{#if loading}
@@ -194,7 +188,6 @@
 		<div class="set-row">
 			<div class="lab">
 				<h4>Enable voice mode</h4>
-				<p>Adds a call button next to the send button in every new chat.</p>
 			</div>
 			<div class="ctl">
 				<button
@@ -213,7 +206,6 @@
 		<div class="set-row">
 			<div class="lab">
 				<h4>Provider</h4>
-				<p>The OpenAI API-key provider that funds calls.</p>
 			</div>
 			<div class="ctl">
 				{#if providers.length === 0}
@@ -241,7 +233,6 @@
 		<div class="set-row">
 			<div class="lab">
 				<h4>Model</h4>
-				<p>{selectedModel?.hint ?? 'Which speech-to-speech model answers. Billed per minute of conversation.'}</p>
 			</div>
 			<div class="ctl">
 				<select
@@ -261,7 +252,6 @@
 		<div class="set-row">
 			<div class="lab">
 				<h4>Voice</h4>
-				<p>{selectedVoice?.hint ?? 'How the agent sounds.'} Press play to hear a sample.</p>
 			</div>
 			<div class="ctl">
 				<select
@@ -298,7 +288,6 @@
 		<div class="set-row">
 			<div class="lab">
 				<h4>Max call minutes</h4>
-				<p>Total length cap for one call. OpenAI's own 60-minute session wall is bridged automatically.</p>
 			</div>
 			<div class="ctl">
 				<input

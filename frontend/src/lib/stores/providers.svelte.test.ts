@@ -129,11 +129,12 @@ describe('providers store — model_providers registry', () => {
 });
 
 describe('providers store — Anthropic API key integration', () => {
-	it('loadIntegrations populates the anthropic key status from /settings/integrations', async () => {
+	it('loadIntegrations populates native API key status from /settings/integrations', async () => {
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
 			json: async () => ({
 				anthropic_api_key_set: true,
+				fal_api_key_set: true,
 				anthropic_api_key_masked: 'sk-ant-…zzz',
 				claude_code_auth_method: 'api_key'
 			})
@@ -146,6 +147,7 @@ describe('providers store — Anthropic API key integration', () => {
 			credentials: 'include'
 		});
 		expect(providers.current.anthropicKeySet).toBe(true);
+		expect(providers.current.falKeySet).toBe(true);
 		expect(providers.current.anthropicKeyMasked).toBe('sk-ant-…zzz');
 		expect(providers.current.claudeCodeAuthMethod).toBe('api_key');
 		expect(providers.current.integrationsError).toBe(null);

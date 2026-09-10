@@ -97,12 +97,16 @@ def test_approved_connection_survives_restart_and_lost_activation(monkeypatch):
         managed._credentials()
     binding = mobile_hub.get_binding()
     assert not binding['active']
+    assert managed.status()['signed_in'] is True
+    assert managed.status()['profile_ready'] is False
+    assert managed.status()['status'] == 'connecting'
     assert encryption.decrypt_value(binding['encrypted_secret']) == pending['secret']
     server_call.side_effect = None
     server_call.return_value = {'tunnel_token': 'x' * 64, 'url': 'https://worker.example.com', 'remote_port': 8001}
     assert managed._credentials() == ('x' * 64, 'https://worker.example.com')
     assert managed._pending() is None
     assert mobile_hub.get_binding()['active']
+    assert managed.status()['profile_ready'] is True
     managed._credentials()
     assert server_call.call_args.args[2] == 'connector'
 

@@ -1,15 +1,16 @@
 <script lang="ts">
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	/**
 	 * AccountPanel — the Shuffle account this worker belongs to.
 	 *
-	 * Signed out: sign in or create an account (both finish in the browser on
+	 * Signed out: sign in (or create an account during setup) in the browser on
 	 * the account service, or on the phone with a QR/code). Signed in: the
 	 * username (with first-time setup when the account has none yet), the
 	 * other workers on the account, remote access state and sign-out. The
 	 * account is optional for local and LAN use.
 	 */
 	import { onMount } from 'svelte';
-	import { Check, Copy, ExternalLink, Loader2, LogOut, Pencil, Server, Smartphone, UserRound } from 'lucide-svelte';
+	import { Check, Copy, ExternalLink, LogOut, Pencil, RefreshCw, Server, Smartphone, UserRound } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
 	import { auth } from '$lib/stores/auth.svelte';
 	import {
@@ -17,14 +18,15 @@
 		setAccountUsername, USERNAME_HINT, USERNAME_PATTERN, type AccountConnection, type AccountProfile
 	} from '$lib/api/account';
 
-	let { workerName = 'My worker', variant = 'settings' }: { workerName?: string; variant?: 'settings' | 'setup' } = $props();
+	let { workerName = 'My worker', variant = 'settings', profile = $bindable<AccountProfile | null>(null), inventoryReady = $bindable(false) }: {
+		workerName?: string; variant?: 'settings' | 'setup'; profile?: AccountProfile | null; inventoryReady?: boolean;
+	} = $props();
 
 	const POLL_MS = 4000;
 	const INVENTORY_MS = 30_000;
 	let profileCheckedAt = 0;
 	let loadingProfile = $state(false);
 	let connection = $state<AccountConnection | null>(null);
-	let profile = $state<AccountProfile | null>(null);
 	let checking = $state(true);
 	let busy = $state(false);
 	let statusError = $state('');
@@ -69,14 +71,18 @@
 			const next = await getAccountConnection();
 			if (stopped || version !== requestVersion) return;
 			const wasSignedIn = connection?.signed_in ?? false;
+			const wasProfilePending = connection?.profile_ready === false;
+			const reconnected = connection?.status !== 'connected' && next.status === 'connected';
 			connection = next;
 			statusError = '';
 			if (next.signed_in) {
+				if (!wasSignedIn) inventoryReady = false;
 				intent = null; showPhone = false;
-				if (!wasSignedIn || Date.now() - profileCheckedAt >= INVENTORY_MS) void loadProfile();
+				if (!wasSignedIn || wasProfilePending || reconnected || Date.now() - profileCheckedAt >= INVENTORY_MS) void loadProfile();
 			} else {
+				inventoryReady = true;
 				profileVersion++; profileCheckedAt = 0;
-				profile = null; editingName = false;
+				profile = null; profileError = ''; editingName = false;
 			}
 		} catch (e) {
 			if (!stopped && version === requestVersion) statusError = getErrorMessage(e, 'Could not check account status');
@@ -86,17 +92,20 @@
 	}
 
 	async function loadProfile() {
-		if (loadingProfile || savingUsername || !connection?.signed_in) return;
+		if (loadingProfile || savingUsername || !connection?.signed_in || connection.profile_ready === false) return;
 		loadingProfile = true;
 		profileCheckedAt = Date.now();
 		const version = ++profileVersion;
 		try {
 			const next = await getAccountProfile();
 			if (stopped || version !== profileVersion) return;
-			profile = next; profileError = '';
+			profile = next; profileError = ''; inventoryReady = true;
 			if (!next.account.profile_complete && !editingName) usernameInput = next.account.username;
 		} catch (e) {
-			if (!stopped && version === profileVersion) profileError = getErrorMessage(e, 'Could not load the account profile');
+			if (!stopped && version === profileVersion) {
+				profileError = getErrorMessage(e, 'Could not load the account profile');
+				inventoryReady = false;
+			}
 		} finally { loadingProfile = false; }
 	}
 
@@ -122,8 +131,8 @@
 
 	async function copyCode() {
 		if (!connection?.code) return;
-		try { await navigator.clipboard.writeText(connection.code); copied = true; }
-		catch { actionError = 'Select the code to copy it.'; }
+		try { await copyText(connection.code); copied = true; }
+		catch { copied = false; actionError = COPY_ERROR_MESSAGE; }
 	}
 
 	async function signOut() {
@@ -137,7 +146,7 @@
 				actionError = result.error || '';
 				statusError = '';
 			}
-			profile = null; intent = null; showPhone = false; editingName = false;
+			profile = null; profileError = ''; profileCheckedAt = 0; inventoryReady = true; intent = null; showPhone = false; editingName = false;
 		} catch (e) {
 			actionError = getErrorMessage(e, 'Could not sign out');
 		} finally { busy = false; scheduleRefresh(); }
@@ -172,26 +181,33 @@
 			<span class="icon" aria-hidden="true"><UserRound size={16} /></span>
 			<div class="text">
 				<h4>Shuffle account</h4>
-				<span class="status" role="status">
-					{#if connection}
-						{#if connection.signed_in}
-							{#if profile}Signed in as <strong>@{profile.account.username}</strong>{:else if profileError}Signed in{:else}Signed in · loading profile…{/if}
-						{:else}Not signed in{/if}
-					{:else}{checking ? 'Checking account…' : 'Account status unavailable'}{/if}
-				</span>
+				<div class="identity">
+					<span class="status" role="status">
+						{#if connection}
+							{#if connection.signed_in}
+								{#if profile}Signed in as <strong>@{profile.account.username}</strong>{:else if connection.profile_ready === false}Signed in · finishing connection…{:else if profileError}Signed in{:else}Signed in · loading profile…{/if}
+							{:else}Not signed in{/if}
+						{:else}{checking ? 'Checking account…' : 'Account status unavailable'}{/if}
+					</span>
+					{#if signedIn && profile && !needsUsername && !editingName}
+						<button type="button" class="btn icon-btn edit" onclick={startEdit} aria-label="Edit username" title="Edit username"><Pencil size={13} /></button>
+					{/if}
+				</div>
+				{#if signedIn && remoteAccess}<span class="remote" class:connected={connection?.status === 'connected'}><span class="connection-dot" aria-hidden="true"></span>{remoteAccess}</span>{/if}
 			</div>
 		</div>
 		<div class="head-actions">
 			{#if signedIn}
 				<button type="button" class="btn" disabled={busy} onclick={signOut}><LogOut size={14} /> {busy ? 'Signing out…' : 'Sign out'}</button>
+				<button type="button" class="btn icon-btn refresh" disabled={loadingProfile || busy || savingUsername || connection?.profile_ready === false} onclick={loadProfile} aria-label="Refresh account" title="Refresh account"><RefreshCw size={15} class={loadingProfile ? 'refreshing' : ''} /></button>
 			{:else if connection && !(intent && connection.code)}
 				<button type="button" class="btn primary" disabled={busy || !canStart} aria-describedby={!canStart && connection.error ? 'account-panel-error' : undefined} onclick={() => start('signin')}>{busy && intent === 'signin' ? 'Preparing…' : 'Sign in'}</button>
-				<button type="button" class="btn" disabled={busy || !canStart} aria-describedby={!canStart && connection.error ? 'account-panel-error' : undefined} onclick={() => start('signup')}>{busy && intent === 'signup' ? 'Preparing…' : 'Create account'}</button>
+				{#if variant === 'setup'}<button type="button" class="btn" disabled={busy || !canStart} aria-describedby={!canStart && connection.error ? 'account-panel-error' : undefined} onclick={() => start('signup')}>{busy && intent === 'signup' ? 'Preparing…' : 'Create account'}</button>{/if}
 			{/if}
 		</div>
 	</div>
 
-	{#if !signedIn}
+	{#if !signedIn && variant === 'setup'}
 		<p class="hint">Sign in on every worker you want to see from your phone or another worker. Workers on one account share settings, profiles and provider keys; the account's settings replace this worker's own. Local use needs no account.</p>
 	{/if}
 
@@ -225,13 +241,8 @@
 					{#if !needsUsername}<button type="button" class="btn" disabled={savingUsername} onclick={() => (editingName = false)}>Cancel</button>{/if}
 				</div>
 			</form>
-		{:else if profile}
-			<div class="profile-row">
-				<span class="muted">This is the name your other devices see.</span>
-				<button type="button" class="btn subtle" onclick={startEdit}><Pencil size={13} /> Edit username</button>
-			</div>
 		{/if}
-		{#if profile}
+		{#if profile && variant === 'setup'}
 			<div class="workers">
 				<span class="muted"><Server size={13} /> Workers on this account</span>
 				<ul aria-label="Workers on this account">
@@ -250,10 +261,8 @@
 					</ul>
 				{/if}
 			</div>
-			<p class="muted">These are account registrations, including offline devices. {variant === 'settings' ? 'Local network members and direct pairings are listed separately below.' : 'Local network members and direct pairings are separate from account registrations.'}</p>
-			<button type="button" class="btn subtle" disabled={loadingProfile || busy || savingUsername} onclick={loadProfile}>{loadingProfile ? 'Refreshing…' : 'Refresh account devices'}</button>
+			<p class="muted">These are account registrations, including offline devices. Local network members and direct pairings are separate from account registrations.</p>
 		{/if}
-		{#if remoteAccess}<p class="muted">{remoteAccess}</p>{/if}
 		{#if profileError}<div class="error-row"><p role="alert">{profileError}</p><button type="button" class="btn" onclick={loadProfile}>Retry profile</button></div>{/if}
 		{#if browserSignedInThroughAccount}
 			<button type="button" class="btn subtle" onclick={signOutBrowser}><LogOut size={13} /> Sign this browser out</button>
@@ -267,12 +276,18 @@
 </section>
 
 <style>
-	.account { padding: 14px 18px; border-bottom: 1px solid var(--border); color: var(--foreground); }
+	.account { padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--foreground); }
 	.account.setup { padding: 0; border: 0; }
 	.head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 	.title { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
 	.icon { display: flex; margin-top: 2px; color: var(--primary); }
 	.text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+	.account:not(.setup) .text { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 0 10px; }
+	.account:not(.setup) .remote { flex-basis: 100%; }
+	.identity { display: flex; align-items: center; gap: 6px; min-height: 28px; }
+	.remote { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; line-height: 1.5; color: var(--muted-foreground); }
+	.connection-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+	.connected .connection-dot { color: var(--success); }
 	h4 { margin: 0; font-family: var(--font-sans); font-size: 13px; font-weight: 600; }
 	.status { font-size: 12px; color: var(--muted-foreground); overflow-wrap: anywhere; }
 	.head-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; flex-shrink: 0; }
@@ -282,6 +297,11 @@
 	.btn:disabled { opacity: .55; cursor: default; }
 	.btn.primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
 	.btn.subtle { border-color: transparent; color: var(--muted-foreground); padding-left: 6px; padding-right: 6px; }
+	.btn.icon-btn { width: 36px; padding: 0; flex-shrink: 0; color: var(--muted-foreground); }
+	.btn.edit { width: 28px; min-height: 28px; border-color: transparent; }
+	.refresh :global(.refreshing) { animation: account-refresh 1s linear infinite; }
+	@keyframes account-refresh { to { transform: rotate(360deg); } }
+	@media (prefers-reduced-motion: reduce) { .refresh :global(.refreshing) { animation: none; } }
 	.hint, p, .muted { font-size: 12px; line-height: 1.5; color: var(--muted-foreground); overflow-wrap: anywhere; }
 	.hint { margin: 8px 0 0; }
 	.flow { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--primary) 4%, var(--card)); }
@@ -295,7 +315,7 @@
 	.username p { margin: 4px 0 8px; }
 	.row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 	.input { box-sizing: border-box; flex: 1 1 200px; min-width: 0; min-height: 36px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--foreground); font: inherit; font-size: 13px; }
-	.profile-row, .workers { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 10px; }
+	.workers { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 10px; }
 	.workers { align-items: baseline; }
 	.workers .muted { display: inline-flex; align-items: center; gap: 6px; }
 	.workers ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }

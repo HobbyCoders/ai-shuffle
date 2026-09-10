@@ -53,7 +53,7 @@ try {
   const login = account.getByRole('button', { name: 'Sign in', exact: true });
   await login.waitFor();
   assert.equal(await login.isEnabled(), true, 'Fresh local owner must be able to link a Shuffle account for phone access');
-  assert.equal(await account.getByRole('button', { name: 'Create account', exact: true }).isEnabled(), true, 'Fresh local owner must be able to create an account');
+  assert.equal(await account.getByRole('button', { name: 'Create account', exact: true }).count(), 0, 'Account creation belongs to setup; settings offers sign in');
   assert.equal(await page.getByText(/Pending approvals/).count(), 0, 'Devices must not show an approval queue');
   assert.equal(await account.getByText(/Ask the operator to enable it/).count(), 0);
   assert.deepEqual(pageErrors, [], 'Bundled UI raised JavaScript errors');

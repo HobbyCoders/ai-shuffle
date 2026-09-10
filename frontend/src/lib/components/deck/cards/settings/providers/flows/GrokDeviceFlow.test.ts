@@ -166,4 +166,47 @@ describe('GrokDeviceFlow — model seeding on completion', () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it('continues a new subscription to model selection without auto-saving the full catalog', async () => {
+		vi.useFakeTimers();
+		try {
+			mocks.createModelProvider.mockResolvedValue({ id: 'draft-1' });
+			mocks.xaiDevicePoll.mockResolvedValue({ status: 'complete' });
+			const onDone = vi.fn();
+			const onConnected = vi.fn();
+			render(GrokDeviceFlow, { props: { onDone, onConnected, onCancel: vi.fn() } });
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(onConnected).toHaveBeenCalledWith('draft-1');
+			expect(onDone).not.toHaveBeenCalled();
+			expect(mocks.updateModelProvider).not.toHaveBeenCalled();
+			expect(mocks.refreshProviders).toHaveBeenCalled();
+		} finally { vi.useRealTimers(); }
+	});
+});
+
+
+describe('GrokDeviceFlow clipboard', () => {
+ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+ it.each(['missing', 'blocked'])('copies the sign-in code when clipboard API is %s', async (mode) => {
+  vi.stubGlobal('navigator', mode === 'missing' ? {} : { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('blocked')) } });
+  const exec = vi.fn(() => {
+   expect((document.activeElement as HTMLTextAreaElement).value).toBe(DEVICE.user_code);
+   return true;
+  });
+  Object.defineProperty(document, 'execCommand', { value: exec, configurable: true });
+  const { findByRole } = render(GrokDeviceFlow, { props: { existingProviderId: 'prov-9', onDone: vi.fn(), onCancel: vi.fn() } });
+  await fireEvent.click(await findByRole('button', { name: 'Copy' }));
+  expect(exec).toHaveBeenCalledWith('copy');
+  expect(await findByRole('button', { name: 'Copied' })).toBeTruthy();
+ });
+ it('shows copy failure while keeping sign-in available', async () => {
+  vi.stubGlobal('navigator', {});
+  Object.defineProperty(document, 'execCommand', { value: vi.fn(() => false), configurable: true });
+  const { findByRole, queryByRole } = render(GrokDeviceFlow, { props: { existingProviderId: 'prov-9', onDone: vi.fn(), onCancel: vi.fn() } });
+  await fireEvent.click(await findByRole('button', { name: 'Copy' }));
+  expect((await findByRole('alert')).textContent).toContain('Could not copy');
+  expect(queryByRole('button', { name: 'Copied' })).toBeNull();
+  expect(await findByRole('link', { name: 'Open sign-in page' })).toBeTruthy();
+ });
 });

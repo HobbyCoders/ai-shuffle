@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	/**
 	 * DocsContent - Markdown content renderer for documentation pages
 	 *
@@ -44,18 +45,25 @@
 				${langLabel}
 				<button type="button" class="code-copy-btn">Copy</button>
 			</div>
-			<pre><code class="${langClass}">${text}</code></pre>
+			<pre><code class="${langClass}">${text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}</code></pre>
 		</div>`;
 	};
 
-	function handleContentClick(e: MouseEvent) {
+	async function handleContentClick(e: MouseEvent) {
 		const target = e.target as HTMLElement | null;
 		const btn = target?.closest?.('.code-copy-btn') as HTMLElement | null;
 		if (!btn) return;
 		e.preventDefault();
 		const code = btn.closest('.code-block-wrapper')?.querySelector('code')?.textContent ?? '';
 		if (!code) return;
-		void navigator.clipboard?.writeText(code).catch(() => {});
+		try {
+			await copyText(code);
+		} catch {
+			btn.textContent = 'Copy failed';
+			btn.title = COPY_ERROR_MESSAGE;
+			return;
+		}
+		btn.removeAttribute('title');
 		btn.textContent = 'Copied!';
 		setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
 	}

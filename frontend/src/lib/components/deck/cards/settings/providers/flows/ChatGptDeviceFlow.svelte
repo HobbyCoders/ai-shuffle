@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	/**
 	 * ChatGptDeviceFlow — Codex/ChatGPT-subscription device-code enrollment.
 	 *
@@ -66,6 +67,8 @@
 	interface Props {
 		/** Enrollment complete → parent closes the modal. */
 		onDone: () => void;
+		/** New-provider setup can continue to model selection after enrollment. */
+		onConnected?: (providerId: string) => void;
 		/** Parent returns to its chooser step (draft already cleaned up here). */
 		onCancel: () => void;
 		/** Report while any request/poll is in flight (guards the parent close). */
@@ -78,7 +81,7 @@
 		existingProviderId?: string | null;
 	}
 
-	let { onDone, onCancel, onBusyChange, existingProviderId }: Props = $props();
+	let { onDone, onCancel, onBusyChange, existingProviderId, onConnected }: Props = $props();
 
 	// Draft mode owns (creates + deletes) the row; reconnect mode does not.
 	// A non-reactive const is fine — props don't change post-mount here.
@@ -91,6 +94,7 @@
 	let verificationUri = $state('');
 	let errorMessage = $state('');
 	let copied = $state(false);
+	let copyError = $state('');
 
 	// Non-reactive latches (never rendered directly).
 	let providerId: string | null = null;
@@ -188,12 +192,12 @@
 		}
 	}
 
-	/** complete → seed the preset roster → refresh list + registry → onDone. */
+	/** Complete enrollment, then continue to the picker or finish a reconnect. */
 	async function finish() {
 		clearPollTimer();
 		phase = 'finishing';
 		setBusy(true);
-		await seedModels();
+		if (!onConnected) await seedModels();
 		try {
 			await providers.refreshProviders();
 		} catch {
@@ -201,12 +205,13 @@
 		}
 		if (destroyed) return;
 		setBusy(false);
-		onDone();
+		if (onConnected && providerId) onConnected(providerId);
+		else onDone();
 	}
 
 	/**
-	 * Auto-seed the ChatGPT provider's model roster on completion (mirrors
-	 * OpenAiKeyFlow): fetch its live Codex catalog and persist the FULL returned list. Best-effort: a fetch/persist
+	 * For callers without a model picker, seed from the live Codex catalog.
+	 * Best-effort: a fetch/persist
 	 * hiccup must not block the enrollment from completing.
 	 *
 	 * RECONNECT exception: never clobber a curated subset. When reconnecting an
@@ -280,16 +285,17 @@
 
 	async function copyCode() {
 		if (!userCode) return;
+		copied = false;
+		copyError = '';
 		try {
-			await navigator.clipboard.writeText(userCode);
+			await copyText(userCode);
 			copied = true;
 			if (copyTimer !== null) clearTimeout(copyTimer);
 			copyTimer = setTimeout(() => {
 				copied = false;
 			}, 2000);
 		} catch {
-			// Clipboard blocked (permissions/insecure context) — the code is
-			// select-all-able, so this is a silent no-op.
+			copyError = COPY_ERROR_MESSAGE;
 		}
 	}
 
@@ -350,6 +356,7 @@
 					{/if}
 				</button>
 			</div>
+			{#if copyError}<p role="alert" class="text-center text-sm text-destructive">{copyError}</p>{/if}
 			<a
 				href={verificationUri}
 				target="_blank"
