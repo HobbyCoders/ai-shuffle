@@ -8,6 +8,7 @@
 
 import { describe, it, expect } from 'vitest';
 import type { Install } from '$lib/api/installs';
+import { checkoutEligibility } from '../layout/execution-mode-eligibility';
 import {
 	runnerBadgeMenuItems,
 	gitStateQuery,
@@ -66,6 +67,17 @@ describe('runnerBadgeMenuItems', () => {
 			kind: 'move',
 			targetInstanceId: 'inst-online'
 		});
+	});
+
+	it('does not label an unavailable checkout read as a missing project', () => {
+		const eligibility = checkoutEligibility({
+			project_v2_id: 'pv2-project', recent_ops: [],
+			installs: [{ ...onlinePeer, eligible: false, checkouts: [], availability_error: 'Timed out' }]
+		});
+		const items = runnerBadgeMenuItems(input({ eligibility }));
+		const desk = items.find((i) => i.id === 'move-inst-online')!;
+		expect(desk.disabled).toBe(false);
+		expect(desk.title).not.toContain('No checkout');
 	});
 
 	it('greys an offline runner even when eligible', () => {

@@ -21,13 +21,14 @@
 	import { listInstalls, getClusterGitState, type Install } from '$lib/api/installs';
 	import {
 		peerRunners,
+		checkoutEligibility,
 		isIneligible,
 		isBlocked,
 		runnerTitle,
 		emptyRunnersCopy
 	} from './execution-mode-eligibility';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch, gitStatus } from '$lib/stores/git.svelte';
-	import { ChevronDown, ChevronRight, Cloud, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
+	import { ChevronDown, ChevronRight, Server, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
 	import { untrack, type Snippet } from 'svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 	import Banner from '$lib/components/Banner.svelte';
@@ -241,13 +242,7 @@
 			installsLoading = false;
 		}
 		const gitState = await gitStateReq;
-		if (!gitState || gitState.project_v2_id === null) {
-			eligibility = null;
-			return;
-		}
-		const map: Record<string, boolean> = {};
-		for (const row of gitState.installs) map[row.id] = row.eligible;
-		eligibility = map;
+		eligibility = checkoutEligibility(gitState);
 	}
 
 	function toggleCloud() {
@@ -346,7 +341,7 @@
 				aria-expanded={showModeDropdown}
 			>
 				{#if deviceIntent}
-					<Cloud size={12} strokeWidth={1.6} />
+					<Server size={12} strokeWidth={1.6} />
 				{:else}
 					<Monitor size={12} strokeWidth={1.6} />
 				{/if}
@@ -381,8 +376,8 @@
 						title="Run this session on another runner"
 						aria-expanded={cloudExpanded}
 					>
-						<Cloud size={13} strokeWidth={1.5} />
-						<span class="branch-item-name">Cloud</span>
+						<Server size={13} strokeWidth={1.5} />
+						<span class="branch-item-name">Other workers</span>
 						<ChevronRight size={12} strokeWidth={1.5} class={cloudExpanded ? 'cloud-caret open' : 'cloud-caret'} />
 					</button>
 
@@ -408,9 +403,11 @@
 										aria-checked={deviceIntent?.id === install.id}
 										aria-disabled={isBlocked(install, worktreeOn, eligibility)}
 									>
-										<Cloud size={13} strokeWidth={1.5} />
+										<Server size={13} strokeWidth={1.5} />
 										<span class="branch-item-name">{install.device_name}</span>
-										{#if isIneligible(eligibility, install.id)}
+										{#if !install.online}
+											<span class="device-nocheckout">offline</span>
+										{:else if isIneligible(eligibility, install.id)}
 											<span class="device-nocheckout">no checkout</span>
 										{/if}
 									</button>

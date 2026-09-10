@@ -281,6 +281,8 @@ async def git_state(
         for install in installs:
             entry = {**install, "is_self": install.get("id") == me,
                      "eligible": False, "checkouts": []}
+            if not entry["is_self"] and not install.get("online"):
+                entry["availability_error"] = "Worker is offline"
             if pv2_id and (entry["is_self"] or install.get("online")):
                 try:
                     owned = await network_git.state(install["id"], pv2_id)

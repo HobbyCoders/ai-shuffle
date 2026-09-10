@@ -41,7 +41,7 @@ export interface ClusterSecretStatus {
 
 export interface AdvertiseStatus {
 	url: string | null; // current peer-reachable URL (null = view-only)
-	source: 'config' | 'guess' | 'none';
+	source: 'config' | 'observed' | 'guess' | 'none';
 	env_pinned: boolean; // pinned via CLUSTER_ADVERTISE_URL env (override ignored)
 	override: string | null; // the stored admin override, if any
 	instance_id: string;
@@ -107,6 +107,7 @@ export interface CheckoutRow {
 /** An install row annotated with this project's git state on that runner. */
 export interface GitStateInstall extends Install {
 	eligible: boolean; // has an ACTIVE base checkout of this project
+	availability_error?: string; // checkout state could not be read; not proof of absence
 	checkouts: CheckoutRow[];
 }
 
@@ -211,7 +212,7 @@ export async function refreshClusterGitState(opts: {
 export interface AdvertiseReachability {
 	ok: boolean;
 	url: string | null;
-	source: 'config' | 'guess' | 'none';
+	source: 'config' | 'observed' | 'guess' | 'none';
 	detail: string;
 }
 

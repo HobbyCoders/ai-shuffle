@@ -143,6 +143,16 @@ def test_cluster_headers_use_bearer_scheme_and_install_id():
 # advertise_url — env → DB override → host guess → none
 # ---------------------------------------------------------------------------
 
+def test_docker_does_not_guess_its_bridge_ip_or_internal_port():
+    with patch.object(cluster, "settings") as config, \
+         patch.object(cluster.database, "get_system_setting", return_value=None), \
+         patch.object(cluster, "_primary_lan_ip", return_value="172.17.0.11") as guess:
+        config.cluster_advertise_url = ""
+        config.is_local_mode.return_value = False
+        assert cluster.advertise_url() == (None, "none")
+        guess.assert_not_called()
+
+
 def test_advertise_url_prefers_env_override():
     with patch.object(cluster, "settings") as mock_settings, \
          patch.object(cluster.database, "get_system_setting", return_value="http://ignored"):
