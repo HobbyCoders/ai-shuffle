@@ -5,8 +5,6 @@ export interface UserTurnNavigationItem {
 	label: string;
 	title: string;
 	preview: string;
-	/** 0–1 bar length, derived from prompt size so the rail reads as a minimap. */
-	weight: number;
 }
 
 /** Stable, DOM-safe transcript anchor derived from the message identity. */
@@ -38,13 +36,6 @@ export function splitTurnPreview(content: string): { title: string; preview: str
 	};
 }
 
-export function turnBarWeight(content: string): number {
-	const len = content.replace(/\s+/g, ' ').trim().length;
-	if (len <= 24) return 0.38;
-	if (len >= 360) return 1;
-	return 0.38 + ((len - 24) / 336) * 0.62;
-}
-
 export function isNavigableUserTurn(message: ChatMessage): boolean {
 	return message.role === 'user' && message.type !== 'command';
 }
@@ -58,8 +49,7 @@ export function deriveUserTurnNavigationItems(messages: ChatMessage[]): UserTurn
 		result.push({
 			id: message.id,
 			label: compactTurnLabel(message.content),
-			...splitTurnPreview(message.content),
-			weight: turnBarWeight(message.content)
+			...splitTurnPreview(message.content)
 		});
 	}
 	return result;
