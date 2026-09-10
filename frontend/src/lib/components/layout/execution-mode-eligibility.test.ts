@@ -8,9 +8,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { Install } from '$lib/api/installs';
+import type { ClusterGitState, GitStateInstall, Install } from '$lib/api/installs';
 import {
 	peerRunners,
+	checkoutEligibility,
 	isIneligible,
 	isBlocked,
 	runnerTitle,
@@ -42,6 +43,39 @@ const offlinePeer = install({
 });
 const ineligible: EligibilityMap = { 'inst-online': false, 'inst-offline': true };
 const eligible: EligibilityMap = { 'inst-online': true, 'inst-offline': true };
+
+describe('checkoutEligibility', () => {
+	function state(overrides: Partial<GitStateInstall> = {}): ClusterGitState {
+		return {
+			project_v2_id: 'pv2-project',
+			installs: [{ ...onlinePeer, eligible: false, checkouts: [], ...overrides }],
+			recent_ops: []
+		};
+	}
+
+	it('does not turn an offline worker into a missing checkout, including older servers', () => {
+		const map = checkoutEligibility(state({ online: false }));
+		expect(map).toEqual({});
+		expect(isIneligible(map, onlinePeer.id)).toBe(false);
+		expect(isBlocked({ ...onlinePeer, online: false }, true, map)).toBe(true);
+	});
+
+	it('keeps checkout state unknown when the worker read fails', () => {
+		const map = checkoutEligibility(state({ availability_error: 'Worker Git state is unavailable' }));
+		expect(map).toEqual({});
+		expect(isIneligible(map, onlinePeer.id)).toBe(false);
+	});
+
+	it('preserves both positive and negative successful checkout reads', () => {
+		expect(checkoutEligibility(state())).toEqual({ [onlinePeer.id]: false });
+		expect(checkoutEligibility(state({ eligible: true }))).toEqual({ [onlinePeer.id]: true });
+	});
+
+	it('keeps missing project state unknown', () => {
+		expect(checkoutEligibility(null)).toBeNull();
+		expect(checkoutEligibility({ ...state(), project_v2_id: null })).toBeNull();
+	});
+});
 
 describe('peerRunners', () => {
 	it('lists offline peers and excludes this install', () => {

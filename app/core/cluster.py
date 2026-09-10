@@ -182,14 +182,16 @@ def _primary_lan_ip() -> Optional[str]:
 
 
 def _guess_advertise_url() -> Optional[str]:
-    """Best-effort peer-reachable URL when none is configured.
+    """Best-effort address for a native install when none is configured.
 
-    Prefers the primary LAN IP (routable from peers on the same network) over
-    the host name, since a guessed FQDN often fails DNS on peers (``[Errno -2]``).
-    Falls back to the host name only when no usable IP is found. A wrong guess
-    simply surfaces later as an unreachable peer — recoverable by setting
-    ``CLUSTER_ADVERTISE_URL`` or the advertise-URL override.
+    Prefer its primary LAN IP over a hostname that may not resolve on peers.
+    Docker cannot infer the host address or published port from its network
+    namespace; it needs explicit configuration or an observed direct LAN URL.
     """
+    # Docker sees its own network namespace, not the host's LAN interface or
+    # published port. A bridge address is not a safe default for other workers.
+    if not settings.is_local_mode():
+        return None
     ip = _primary_lan_ip()
     if ip:
         return f"http://{ip}:{settings.port}"
@@ -244,11 +246,74 @@ def _get_advertise_override() -> Optional[str]:
     return legacy
 
 
+def _observed_advertise_key() -> str:
+    # cluster_* settings stay local; another worker must never inherit this URL.
+    return f"cluster_observed_url:{settings.effective_instance_id}"
+
+
+def _publish_advertise_change() -> None:
+    register_self()
+    try:
+        from app.network import engine
+        if engine.context() is not None:
+            engine.publish_presence(
+                capabilities=_build_capabilities(advertise_url()[1]), version=settings.version
+            )
+            from app.network import hub
+            hub.kick()
+    except Exception:  # noqa: BLE001 — the periodic presence publisher retries
+        logger.warning("Could not publish changed worker address", exc_info=True)
+
+
+def observe_local_advertise_url(request: Request) -> bool:
+    """Learn Docker's externally reached host AND port from direct owner access.
+
+    Never trust proxy headers, remote/paired clients, or loopback URLs. Explicit
+    settings always win. Persist the observation so a container restart does not
+    revert to its bridge IP; later direct LAN access can learn a changed address.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+    from app.core import owner_auth
+
+    if settings.is_local_mode() or not owner_auth.local_access(request):
+        return False
+    if (settings.cluster_advertise_url or "").strip() or _get_advertise_override():
+        return False
+    try:
+        parsed = urlsplit(str(request.base_url))
+        host = parsed.hostname
+        if (parsed.scheme not in {"http", "https"} or not host
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment or parsed.path not in {"", "/"}
+                or host.lower() == "localhost" or host.lower().endswith(".localhost")):
+            return False
+        port = parsed.port
+        if port is not None and not 1 <= port <= 65535:
+            return False
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address and (address.is_loopback or address.is_unspecified or address.is_link_local):
+            return False
+        url = f"{parsed.scheme}://{parsed.netloc}"
+    except (ValueError, AttributeError):
+        return False
+    key = _observed_advertise_key()
+    if database.get_system_setting(key) == url:
+        return False
+    database.set_system_setting(key, url)
+    _publish_advertise_change()
+    return True
+
+
 def advertise_url() -> tuple[Optional[str], str]:
     """Resolve this install's peer-reachable base URL and where it came from.
 
     Returns ``(url, source)`` where source is ``"config"`` (env or admin
-    override), ``"guess"`` (host-name fallback), or ``"none"``. A NULL url means
+    override), ``"observed"`` (direct Docker LAN access), ``"guess"`` (native
+    host detection), or ``"none"``. A NULL url means
     this install is view-only: its sessions are visible/readable cluster-wide
     but cannot be controlled remotely.
     """
@@ -257,6 +322,10 @@ def advertise_url() -> tuple[Optional[str], str]:
         explicit = (_get_advertise_override() or "").strip()
     if explicit:
         return explicit.rstrip("/"), "config"
+    if not settings.is_local_mode():
+        observed = database.get_system_setting(_observed_advertise_key())
+        if observed:
+            return observed, "observed"
     guess = _guess_advertise_url()
     if guess:
         return guess.rstrip("/"), "guess"
@@ -290,7 +359,7 @@ def set_advertise_url_override(value: Optional[str]) -> dict:
     """
     cleaned = (value or "").strip().rstrip("/")
     database.set_system_setting(_advertise_override_key(), cleaned)
-    register_self()
+    _publish_advertise_change()
     return advertise_status()
 
 
