@@ -30,7 +30,7 @@ const mocks = vi.hoisted(() => {
 		loadMoreSessions: vi.fn(),
 		projects: store<unknown[]>([]),
 		clusterProjects: store<unknown[]>([]),
-		activeSession: store({ sessionId: null as string | null, isStreaming: false, activeTasks: [] as { status: string }[] }),
+		activeSession: store<{ sessionId: string | null; isStreaming: boolean; optimisticStreaming?: boolean; activeTasks: { status: string }[] }>({ sessionId: null, isStreaming: false, activeTasks: [] }),
 		streamingSessions: store(new Set<string>()),
 		backgroundPermissions: store(new Map<string, { count: number; kind: 'permission' | 'question' }>()),
 		activeView: store<unknown>(null),
@@ -433,9 +433,14 @@ describe('Sidebar session groups', () => {
 			'open',
 			100,
 		);
+		for (const streaming of [true, false, true]) {
+			mocks.streamingSessions.set(new Set(streaming ? ['prsession'] : []));
+			await tick();
+			expect(cardFrame('PR chat').textContent).toContain('PR open');
+		}
 	});
 
-	it('marks the project ghost row active once a project filter is applied', async () => {
+	it('keeps a selected session Working while its transcript loads', async () => {
 		// Regression: switchSession resets $activeSession.isStreaming=false before
 		// the SSE replay re-derives it, which flashed an open working session's
 		// card to Done. The cross-device streaming map carries the durable busy
@@ -577,11 +582,11 @@ describe('Sidebar background work', () => {
 		expect(cardFrame('Monitor chat').textContent).toContain('Working');
 	});
 
-	it.each(['agent', 'shell'])('keeps an unopened parked %s session Working until its marker clears', async (kind) => {
+	it.each(['agent', 'shell'])('keeps an unopened parked %s session Parked until its marker clears', async (kind) => {
 		const parked = session('parked', 'Parked chat', 'visible-project', true, false, { parked_task_kind: kind });
 		mocks.sessions.set([parked]);
 		render(Sidebar, { props: sidebarProps });
-		expect(cardFrame('Parked chat').textContent).toContain('Working');
+		expect(cardFrame('Parked chat').textContent).toContain('Parked');
 		expect(cardFrame('Parked chat').textContent).not.toContain('Done');
 
 		mocks.sessions.set([{ ...parked, parked_task_kind: null }]);
@@ -590,24 +595,27 @@ describe('Sidebar background work', () => {
 		expect(cardFrame('Parked chat').textContent).not.toContain('Working');
 	});
 
-	it('uses live running tasks only for the open session and preserves fold performance', async () => {
-		mocks.activeSession.set({ sessionId: 'active', isStreaming: false, activeTasks: [{ status: 'running' }] });
+	it('does not revive completed work from cached transcript or task state on selection', async () => {
 		render(Sidebar, { props: sidebarProps });
 		await tick();
-		expect(cardFrame('Active chat').textContent).toContain('Working');
-		expect(cardFrame('Settled chat').textContent).not.toContain('Working');
 		const before = vi.mocked(sessionTimestamp).mock.calls.length;
-		for (let i = 0; i < 5; i++) {
-			mocks.activeSession.set({ sessionId: 'active', isStreaming: false, activeTasks: [{ status: 'running' }] });
+		for (const sessionId of ['active', 'settled', 'active']) {
+			mocks.activeSession.set({ sessionId, isStreaming: true, activeTasks: [{ status: 'running' }] });
 			await tick();
+			expect(cardFrame('Active chat').textContent).toContain('Done');
+			expect(cardFrame('Settled chat').textContent).not.toContain('Working');
 		}
 		expect(vi.mocked(sessionTimestamp).mock.calls.length).toBe(before);
-
-		mocks.activeSession.set({ sessionId: 'active', isStreaming: false, activeTasks: [{ status: 'completed' }, { status: 'error' }, { status: 'killed' }] });
+		mocks.activeSession.set({ sessionId: 'active', isStreaming: true, optimisticStreaming: true, activeTasks: [] });
+		await tick();
+		expect(cardFrame('Active chat').textContent).toContain('Working');
+		mocks.streamingSessions.set(new Set(['active']));
+		mocks.activeSession.set({ sessionId: 'active', isStreaming: true, optimisticStreaming: false, activeTasks: [] });
+		await tick();
+		expect(cardFrame('Active chat').textContent).toContain('Working');
+		mocks.streamingSessions.set(new Set());
 		await tick();
 		expect(cardFrame('Active chat').textContent).toContain('Done');
-		expect(cardFrame('Active chat').textContent).not.toContain('Working');
-		expect(vi.mocked(sessionTimestamp).mock.calls.length).toBeGreaterThan(before);
 	});
 
 	it.each([

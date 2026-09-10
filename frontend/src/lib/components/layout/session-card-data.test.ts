@@ -129,6 +129,14 @@ describe('deriveStatus', () => {
 			.toBe(kind === 'question' ? 'has_question' : 'needs_permission');
 	});
 
+	it('distinguishes parked work from streaming and completed work', () => {
+		expect(deriveStatus({ ...base, parked: true, backgroundWork: true })).toBe('parked');
+		expect(deriveStatus({ ...base, parked: true, streaming: true })).toBe('working');
+		expect(deriveStatus({ ...base, parked: true, attention: { count: 1, kind: 'question' } })).toBe('has_question');
+		expect(isLiveStatus('parked')).toBe(true);
+		expect(RUNTIME_STATUS_WORDS.parked).toBe('Parked');
+	});
+
 	it('shows Working while streaming', () => {
 		expect(deriveStatus({ ...base, streaming: true })).toBe('working');
 	});

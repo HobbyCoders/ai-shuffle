@@ -182,26 +182,10 @@
 		$sessions.filter((s) => isVisibleSidebarSession(s, liveKeys) && sessionModeOf(s) === $sessionMode)
 	);
 
-	// The open session's streaming flag, narrowed to a SINGLE scalar (R2).
-	//
-	// `$activeSession` folds ~60×/s while a turn streams. Reading it inside
-	// `rows` made the sidebar re-filter, re-map and re-sort the whole session
-	// list on every frame. This derived collapses the fold to "which session id
-	// is the open one streaming, if any" — a value that only changes when the
-	// flag actually flips, so `rows` stays clean across folds.
-	//
-	// On switch-in, $activeSession.isStreaming is reset to false until the SSE
-	// replay re-derives it — trusting it alone flashes the card to Done while
-	// the transcript loads. The cross-device map carries the durable busy
-	// signal (backend runs table), so OR it in for the open session too.
-	const activeStreamingId = $derived($activeSession.isStreaming ? $activeSession.sessionId : null);
-	// Narrow task updates to an identity too: retained terminal tasks are not work,
-	// and ordinary active-session folds must not invalidate the whole row list.
-	const activeBackgroundWorkId = $derived(
-		$activeSession.activeTasks.some((task) => task.status === 'running')
-			? $activeSession.sessionId
-			: null
-	);
+	// User-wide run and task updates own sidebar state, not transcript replay.
+	// A cached turn/task can be out of date when a session is selected. Only a
+	// local send bridges the wait for the server's run-start broadcast.
+	const activeStreamingId = $derived($activeSession.optimisticStreaming ? $activeSession.sessionId : null);
 	const streamingMap = $derived($streamingSessions);
 
 	function isStreaming(id: string): boolean {
@@ -394,7 +378,7 @@
 	// `ts` is the row's last-activity time, resolved ONCE per row (R2). The
 	// comparator used to call sessionTimestamp() — a `Date` parse — on every
 	// comparison, i.e. O(n log n) date parses per recompute.
-	interface CardRow { session: Session; status: SessionCardStatus; ts: number }
+	interface CardRow { session: Session; status: SessionCardStatus; openPr: boolean; ts: number }
 
 	const rows = $derived.by((): CardRow[] =>
 		visibleSessions
@@ -404,9 +388,11 @@
 				const prSet = branch && s.project_id ? openPrBranches.get(s.project_id) : undefined;
 				return {
 					session: s,
+					openPr: !!(branch && prSet?.has(branch)),
 					status: deriveStatus({
 						streaming: isStreaming(s.id),
-						backgroundWork: !!s.has_running_tasks || !!s.parked_task_kind || activeBackgroundWorkId === s.id,
+						backgroundWork: !!s.has_running_tasks,
+						parked: !!s.parked_task_kind,
 						attention: $backgroundPermissions.get(s.id) ?? null,
 						prState: s.pr_state ?? null,
 						openPr: !s.pr_state && !!(branch && prSet?.has(branch)),
@@ -428,7 +414,7 @@
 	const archivedRows = $derived.by((): CardRow[] =>
 		visibleSessions
 			.filter((s) => isArchived(s))
-			.map((s) => ({ session: s, status: 'idle' as SessionCardStatus, ts: sessionTimestamp(s) }))
+			.map((s) => ({ session: s, status: 'idle' as SessionCardStatus, openPr: false, ts: sessionTimestamp(s) }))
 			.sort((a, b) => b.ts - a.ts)
 			.slice(0, ARCHIVED_LIMIT)
 	);
@@ -738,6 +724,7 @@
 						<SessionCard
 							session={row.session}
 							status={row.status}
+							openPr={row.openPr}
 							projectLabel={projectLabel(row.session)}
 							active={row.session.id === activeId}
 							{now}
@@ -769,6 +756,7 @@
 						<SessionCard
 							session={row.session}
 							status={row.status}
+							openPr={row.openPr}
 							projectLabel={projectLabel(row.session)}
 							active={row.session.id === activeId}
 							{now}
@@ -824,6 +812,7 @@
 						<SessionCard
 							session={row.session}
 							status={row.status}
+							openPr={row.openPr}
 							projectLabel={projectLabel(row.session)}
 							active={row.session.id === activeId}
 							{now}

@@ -13,6 +13,7 @@ import { parseUTC } from '$lib/utils/dateFormatting';
 /** Status shown on a card's first line. */
 export type SessionCardStatus =
 	| 'working'
+	| 'parked'
 	| 'needs_permission'
 	| 'has_question'
 	| 'await'
@@ -23,6 +24,7 @@ export type SessionCardStatus =
 
 export const STATUS_LABELS: Record<SessionCardStatus, string> = {
 	working: 'Working',
+	parked: 'Parked',
 	needs_permission: 'Needs Permission',
 	has_question: 'Has Question',
 	await: 'Awaiting input',
@@ -43,6 +45,7 @@ export type StatusTone = 'accent' | 'amber' | 'muted';
 
 export const RUNTIME_STATUS_WORDS: Record<SessionCardStatus, string> = {
 	working: 'Working',
+	parked: 'Parked',
 	needs_permission: 'Needs permission',
 	has_question: 'Has question',
 	await: 'Awaiting input',
@@ -54,6 +57,7 @@ export const RUNTIME_STATUS_WORDS: Record<SessionCardStatus, string> = {
 
 export const RUNTIME_STATUS_TONES: Record<SessionCardStatus, StatusTone> = {
 	working: 'accent',
+	parked: 'muted',
 	needs_permission: 'amber',
 	has_question: 'amber',
 	await: 'amber',
@@ -74,6 +78,7 @@ export function isAttentionStatus(status: SessionCardStatus): boolean {
 export function isLiveStatus(status: SessionCardStatus): boolean {
 	return (
 		status === 'working' ||
+		status === 'parked' ||
 		status === 'needs_permission' ||
 		status === 'has_question' ||
 		status === 'await'
@@ -82,8 +87,9 @@ export function isLiveStatus(status: SessionCardStatus): boolean {
 
 /**
  * Resolve a card status from the signals the app already tracks:
- * - streaming (activeSession.isStreaming / streamingSessions map)
- * - backgroundWork (durable parked marker or running tasks for the open session)
+ * - streaming (user-wide run map, or an optimistic local send)
+ * - parked (durable parked marker)
+ * - backgroundWork (durable running-task summary)
  * - attention (backgroundPermissions map entry — the session is parked on one
  *   or more permission/question prompts; `kind` drives WHICH prompt label shows)
  * - prState   (persisted session PR lifecycle: open / merged / closed)
@@ -98,6 +104,7 @@ export function isLiveStatus(status: SessionCardStatus): boolean {
 export function deriveStatus(input: {
 	streaming: boolean;
 	backgroundWork?: boolean;
+	parked?: boolean;
 	attention: { count: number; kind: 'permission' | 'question' } | null;
 	openPr?: boolean;
 	prState?: 'open' | 'merged' | 'closed' | null;
@@ -106,7 +113,9 @@ export function deriveStatus(input: {
 	if (input.attention && input.attention.count > 0) {
 		return input.attention.kind === 'question' ? 'has_question' : 'needs_permission';
 	}
-	if (input.streaming || input.backgroundWork) return 'working';
+	if (input.streaming) return 'working';
+	if (input.parked) return 'parked';
+	if (input.backgroundWork) return 'working';
 	if (input.prState === 'open' || (!input.prState && input.openPr)) return 'pr';
 	if (input.prState === 'merged') return 'pr_merged';
 	if (input.isActive) return 'done';

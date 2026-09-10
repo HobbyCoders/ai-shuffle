@@ -66,6 +66,8 @@
 	interface Props {
 		session: Session;
 		status: SessionCardStatus;
+		/** Branch PR lookup, independent of the runtime status. */
+		openPr?: boolean;
 		/** Display name of the session's project. */
 		projectLabel: string;
 		/** True when this session is the one open in the main panel. */
@@ -92,6 +94,7 @@
 	let {
 		session,
 		status,
+		openPr = false,
 		projectLabel,
 		active = false,
 		now,
@@ -125,10 +128,14 @@
 	const openGit = $derived.by(() => {
 		if (compact) return null;
 		const current = git.current;
-		if (!current) return null;
-		if (current.sessionId && current.sessionId === session.id) return current;
+		// Unhydrated values belong to the previous checkout, not this session.
+		if (!current?.hydrated) return null;
+		if (current.sessionId === session.id &&
+			current.projectId === session.project_id &&
+			(current.worktreeId ?? null) === (session.worktree_id ?? null)) return current;
 		if (
 			active &&
+			!current.sessionId &&
 			current.projectId &&
 			current.projectId === session.project_id &&
 			(current.worktreeId ?? null) === (session.worktree_id ?? null)
@@ -144,6 +151,13 @@
 	const usesOpenGit = $derived(openGit !== null);
 
 	$effect(() => {
+		if (!openGit?.status || !session.project_id) return;
+		sessionGitState.remember(session.id, session.project_id, session.worktree_id ?? null, {
+			status: openGit.status, diffStats: openGit.diffStats, loaded: true
+		});
+	});
+
+	$effect(() => {
 		if (compact || usesOpenGit) return;
 		return sessionGitState.watch(session.id, session.project_id ?? null, session.worktree_id ?? null);
 	});
@@ -151,12 +165,12 @@
 	const gitStatus = $derived.by(() => {
 		if (compact) return null;
 		if (openGit) return openGit.status;
-		return sessionGitState.get(session.id)?.status ?? null;
+		return sessionGitState.get(session.id, session.project_id ?? null, session.worktree_id ?? null)?.status ?? null;
 	});
 	const gitDiffStats = $derived.by(() => {
 		if (compact) return null;
 		if (openGit) return openGit.diffStats;
-		return sessionGitState.get(session.id)?.diffStats ?? null;
+		return sessionGitState.get(session.id, session.project_id ?? null, session.worktree_id ?? null)?.diffStats ?? null;
 	});
 	const gitFacts = $derived.by<SessionGitFacts | null>(() => {
 		const s = gitStatus;
@@ -175,7 +189,7 @@
 	// head branch, before the lifecycle is persisted on the row — trust that
 	// rather than drawing a session with a live PR as a bare dot.
 	const prState = $derived(
-		session.pr_state ?? (status === 'pr' ? 'open' : status === 'pr_merged' ? 'merged' : null)
+		session.pr_state ?? (openPr || status === 'pr' ? 'open' : status === 'pr_merged' ? 'merged' : null)
 	);
 	const stage = $derived(
 		deriveGitStage({
@@ -189,12 +203,8 @@
 	const stageTone = $derived(GIT_STAGE_TONES[stage]);
 	const stageTip = $derived(GIT_STAGE_TIPS[stage]);
 	const prText = $derived(prStateText(prState, session.pr_number));
-	// Only name the PR while the glyph is still about that PR. After merge,
-	// new uncommitted work restarts the stage so the stale "PR #N merged"
-	// segment does not sit next to a fresh diffstat.
-	const showPr = $derived(
-		Boolean(prText) && (stage === 'pr' || stage === 'merged' || stage === 'closed')
-	);
+	// Follow-up edits do not erase the PR history. Show both facts.
+	const showPr = $derived(Boolean(prText));
 	/** Compact rows carry one git word; a PR names its number, the rest use the
 	 *  stage's own label ("uncommitted", "pushed", …). */
 	const stageWord = $derived(
@@ -452,7 +462,7 @@
 						</span>{/if}</span>
 					{#if showPr}
 						<span class="dot" aria-hidden="true"></span>
-						<span class="st {stageTone}">{prText}</span>
+						<span class="st" class:green={prState === 'open'} class:purple={prState === 'merged'}>{prText}</span>
 					{/if}
 					{#if diff}
 						<span class="dot" aria-hidden="true"></span>

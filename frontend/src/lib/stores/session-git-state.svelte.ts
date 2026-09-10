@@ -116,8 +116,20 @@ function teardown(sessionId: string, watch: Watch) {
 
 export const sessionGitState = {
 	/** Last known state for a session, or null when nobody has fetched it. */
-	get(sessionId: string): SessionGitEntry | null {
-		return entries[sessionId] ?? null;
+	get(sessionId: string, projectId?: string | null, worktreeId: string | null = null): SessionGitEntry | null {
+		// Read the reactive slot even before its first scope has been cached.
+		const entry = entries[sessionId] ?? null;
+		if (projectId !== undefined && (!projectId || cachedScopes.get(sessionId) !== scopeKey(projectId, worktreeId))) return null;
+		return entry;
+	},
+
+	/** Retain a hydrated main-panel snapshot when selection moves elsewhere. */
+	remember(sessionId: string, projectId: string, worktreeId: string | null, entry: SessionGitEntry) {
+		const watch = watches.get(sessionId);
+		// A slow sidebar request must not replace this newer snapshot.
+		watch?.abort?.abort();
+		entries[sessionId] = entry;
+		cachedScopes.set(sessionId, scopeKey(projectId, worktreeId));
 	},
 
 	/**

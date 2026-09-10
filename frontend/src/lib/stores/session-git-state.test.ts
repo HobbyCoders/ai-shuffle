@@ -53,6 +53,29 @@ afterEach(() => {
 });
 
 describe('sessionGitState', () => {
+	it('retains hydrated main-panel state when returning to a background card', async () => {
+		const clean = { status: status({ has_changes: false }), diffStats: null, loaded: true };
+		sessionGitState.remember('s1', 'proj-1', 'wt-1', clean);
+		mocks.getGitStatus.mockImplementation(() => new Promise(() => {}));
+		sessionGitState.watch('s1', 'proj-1', 'wt-1');
+		expect(sessionGitState.get('s1')).toEqual(clean);
+		expect(sessionGitState.get('s1', 'proj-1', 'wt-1')).toEqual(clean);
+		expect(sessionGitState.get('s1', 'proj-1', 'wt-2')).toBeNull();
+		expect(sessionGitState.get('s1', 'other', 'wt-1')).toBeNull();
+	});
+
+	it('does not let an older poll overwrite a hydrated main-panel snapshot', async () => {
+		let finish!: (value: ReturnType<typeof status>) => void;
+		mocks.getGitStatus.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+		sessionGitState.watch('s1', 'proj-1');
+		const clean = { status: status({ has_changes: false }), diffStats: null, loaded: true };
+		sessionGitState.remember('s1', 'proj-1', null, clean);
+		finish(status({ has_changes: true }));
+		await flush();
+		expect(sessionGitState.get('s1')).toEqual(clean);
+		expect(mocks.getDiffStats).not.toHaveBeenCalled();
+	});
+
 	it('fetches the checkout once a card watches it', async () => {
 		sessionGitState.watch('s1', 'proj-1', 'wt-1');
 		await flush();

@@ -30,7 +30,9 @@ const mocks = vi.hoisted(() => {
 		newChat: vi.fn(),
 		setTitle: vi.fn(),
 		toastPush: vi.fn(),
+		remember: vi.fn(),
 		gitCurrent: {
+			hydrated: true,
 			sessionId: null as string | null,
 			projectId: null as string | null,
 			worktreeId: null as string | null,
@@ -80,6 +82,7 @@ vi.mock('$lib/stores/git.svelte', () => ({
 vi.mock('$lib/stores/session-git-state.svelte', () => ({
 	sessionGitState: {
 		watch: mocks.watch,
+		remember: mocks.remember,
 		get: mocks.getSessionGit,
 	},
 }));
@@ -154,6 +157,7 @@ beforeEach(() => {
 		})),
 	});
 	mocks.activeSession.set({ sessionId: null });
+	mocks.gitCurrent.hydrated = true;
 	mocks.gitCurrent.sessionId = null;
 	mocks.gitCurrent.projectId = null;
 	mocks.gitCurrent.worktreeId = null;
@@ -352,6 +356,34 @@ describe('SessionCard actions', () => {
 });
 
 describe('SessionCard git state', () => {
+	it('ignores a previous checkout placeholder assigned to a new worktree session', () => {
+		mocks.gitCurrent.sessionId = 'session-a';
+		mocks.gitCurrent.hydrated = false;
+		mocks.gitCurrent.status = gitStatus({ has_changes: true });
+		mocks.gitCurrent.diffStats = { additions: 70, deletions: 4 };
+		const { container } = renderCard({ worktree_branch: 'feat/new' }, { active: true });
+		expect(container.querySelector('.diff')).toBeNull();
+		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('No changes');
+		expect(mocks.watch).toHaveBeenCalled();
+		expect(mocks.remember).not.toHaveBeenCalled();
+	});
+
+	it('keeps the branch PR visible across runtime transitions', async () => {
+		const { container, rerender } = renderCard({}, { openPr: true, status: 'done' });
+		for (const status of ['working', 'parked', 'needs_permission', 'done'] as const) {
+			await rerender({ status });
+			expect(container.querySelector('.l2')?.textContent).toContain('PR open');
+		}
+	});
+
+	it('does not borrow another session on the same project and legacy worktree', () => {
+		mocks.gitCurrent.sessionId = 'other';
+		mocks.gitCurrent.projectId = 'project-a';
+		mocks.gitCurrent.status = gitStatus({ has_changes: true });
+		const { container } = renderCard({}, { active: true });
+		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('No changes');
+	});
+
 	it('leads a merged session with the purple merge glyph', () => {
 		const { container } = renderCard({ pr_state: 'merged', pr_number: 1071 });
 
@@ -408,8 +440,9 @@ describe('SessionCard git state', () => {
 		const lead = container.querySelector('.lead');
 		expect(lead?.getAttribute('aria-label')).toBe('Uncommitted changes');
 		expect(lead?.classList.contains('amber')).toBe(true);
-		expect(container.querySelector('.l2')?.textContent).not.toContain('PR #1071 merged');
+		expect(container.querySelector('.l2')?.textContent).toContain('PR #1071 merged');
 		expect(container.querySelector('.diff')?.textContent).toBe('+12 −3');
+		expect(container.querySelector('.l2 .st.purple')?.textContent).toBe('PR #1071 merged');
 	});
 
 	it('leads a pushed session branch with the upload glyph', () => {
@@ -525,6 +558,7 @@ describe('SessionCard git state', () => {
 
 	it('reuses the main panel git store for the session that is open', () => {
 		mocks.gitCurrent.sessionId = 'session-a';
+		mocks.gitCurrent.projectId = 'project-a';
 		mocks.gitCurrent.status = gitStatus({ has_changes: true });
 		mocks.gitCurrent.diffStats = { additions: 7, deletions: 1, files_changed: 1 };
 
