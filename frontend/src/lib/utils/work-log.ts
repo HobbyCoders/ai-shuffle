@@ -6,7 +6,7 @@
  * adopting its data model:
  *
  * - assistant prose is never withheld while a turn is live;
- * - a contiguous live tool run keeps its newest active call visible;
+ * - every live work row stays visible until the turn settles;
  * - once a turn settles, non-final commentary, reasoning, and routine tools fold
  *   behind one compact work row while the final answer remains visible;
  * - failed tool calls fold with the rest of the run and are counted in the work
@@ -513,7 +513,7 @@ function emitWithSystemGroups(entries: Positioned[], out: DisplayItem[]) {
 }
 
 export interface BuildOptions {
-	/** Main-lane streaming state, retained for live work-run behavior. */
+	/** Main-lane streaming state; live turns render without work folds. */
 	isStreaming: boolean;
 	/**
 	 * Authoritative presentation lifecycle for the latest turn. This is true for
@@ -526,89 +526,20 @@ export interface BuildOptions {
 }
 
 function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
-	// The live tail is the NEWEST routine row — running or just-finished. A
-	// completed tail stays visible until the next row replaces it, so the
-	// transcript never collapses to nothing between calls mid-turn.
-	const newestLiveTool =
-		turn.findLast((entry) => isRoutineTool(entry.message) && !isHiddenCodeModeCell(entry.message)) ??
-		null;
-	// While a code-mode cell streams AND nothing has been dispatched from inside
-	// it yet, it IS the active work surface — showing it tells the reader why
-	// nothing else has moved. Once its own inner tool calls exist after it, that
-	// newer work owns the tail: a long-running cell must never mask the tool it
-	// dispatched, or the transcript reads "Python" for minutes. Non-routine inner
-	// rows (screenshots, delegations) count too — they render on their own.
-	const streamingCell =
-		turn.findLast(
-			(entry) => entry.message.type === 'tool_use' && entry.message.toolName === 'run_python' && entry.message.streaming === true
-		) ?? null;
-	const lastVisibleIndex = (() => {
-		for (let i = turn.length - 1; i >= 0; i--) {
-			if (!isHiddenCodeModeCell(turn[i].message)) return i;
-		}
-		return -1;
-	})();
-	const streamingCellIsTail = streamingCell !== null && turn.indexOf(streamingCell) > lastVisibleIndex;
-	let plain: Positioned[] = [];
-	let run: WorkLogEntry[] = [];
-
-	const flushPlain = () => {
-		if (plain.length === 0) return;
-		emitWithSystemGroups(plain, items);
-		plain = [];
-	};
-	const flushRun = () => {
-		if (run.length === 0) return;
-		// One live row is already compact. It stays flat so active state never gets
-		// hidden behind a disclosure just because the lifecycle is parked. The lone
-		// exception is the streaming cell that lost the tail to newer inner work:
-		// alone in a run it means that work renders elsewhere, so it draws nothing.
-		if (run.length === 1) {
-			const only = run[0];
-			// The streaming cell flattens ONLY while it still owns the tail; once
-			// newer inner work exists it draws nothing instead of masking that work.
-			if (
-				!isHiddenCodeModeCell(only.message) ||
-				(streamingCellIsTail && only.message.id === streamingCell?.message.id)
-			) {
-				plain.push({ message: only.message, index: only.index });
-			}
-			run = [];
-			return;
-		}
-		flushPlain();
-		const hasActiveTail = run.at(-1)?.message.id === newestLiveTool?.message.id;
-		const folded = hasActiveTail ? run.slice(0, -1) : run;
-		const tail = hasActiveTail ? run.slice(-1) : [];
-		items.push({
-			kind: 'work_log',
-			key: `wl-live-${run[0].message.id ?? run[0].index}`,
-			mode: 'live',
-			folded,
-			tail,
-			sequence: [],
-			durationLabel: null,
-			summary: summarizeWork(folded),
-			compactSummary: summarizeWorkCompact(folded)
-		});
-		run = [];
-	};
-
-	for (const entry of turn) {
-		const isLiveTail =
-			entry === newestLiveTool || (streamingCellIsTail && entry === streamingCell);
-		// A code-mode cell that no longer owns the tail folds with the rest of the
-		// run — its inner calls are the visible work, not the enclosing Python.
-		const cellBehindFold = isHiddenCodeModeCell(entry.message) && !isLiveTail;
-		if (isCompletedRoutineWork(entry.message) || isLiveTail || cellBehindFold) {
-			run.push({ message: entry.message, index: entry.index });
-		} else {
-			flushRun();
-			plain.push(entry);
-		}
+	// Code-mode wrappers are not transcript rows: their dispatched tools are.
+	// Keep a streaming cell visible only until its first visible inner call arrives.
+	const lastVisibleIndex = turn.findLastIndex((entry) => !isHiddenCodeModeCell(entry.message));
+	const streamingCell = turn.findLast(
+		(entry) => isHiddenCodeModeCell(entry.message) && entry.message.streaming === true
+	);
+	for (const [index, entry] of turn.entries()) {
+		if (
+			isHiddenCodeModeCell(entry.message) &&
+			!(entry === streamingCell && index > lastVisibleIndex)
+		) continue;
+		// Nothing in the current turn folds, even between tool runs or while parked.
+		items.push({ kind: 'message', message: entry.message, index: entry.index });
 	}
-	flushRun();
-	flushPlain();
 }
 
 /**

@@ -3,6 +3,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { ChatMessage } from '$lib/stores/types';
+import { initialState, reduce, type WireEvent } from '$lib/stores/session/v2/reducer';
 import {
 	buildDisplayItems,
 	buildTranscriptModel,
@@ -353,17 +354,11 @@ describe('buildDisplayItems — settled turns', () => {
 });
 
 describe('buildDisplayItems — live turn', () => {
-	it('keeps the newest running tool visible and discloses older completed work', () => {
+	it('keeps every completed and running tool visible', () => {
 		const messages = [user('go'), tool(), tool(), tool({ toolStatus: 'running', streaming: true })];
 		const items = buildDisplayItems(messages, LIVE);
-		const fold = items.find((item) => item.kind === 'work_log');
-		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
-
-		expect(fold.mode).toBe('live');
-		expect(fold.folded).toHaveLength(2);
-		expect(fold.tail).toHaveLength(1);
-		expect(fold.tail[0].message.id).toBe(messages[3].id);
-		expect(fold.summary).toBe('Ran 2 commands');
+		expect(items.every((item) => item.kind === 'message')).toBe(true);
+		expect(collapsedVisibleMessages(items)).toEqual(messages);
 	});
 
 	it('keeps live prose and streaming reasoning visible', () => {
@@ -383,38 +378,19 @@ describe('buildDisplayItems — live turn', () => {
 		expect(items.map((item) => item.kind)).toEqual(['message', 'message']);
 	});
 
-	it('ignores an empty assistant phantom when identifying the live tool tail', () => {
-		const running = tool({ toolStatus: 'running', streaming: true });
-		const items = buildDisplayItems(
-			[user('go'), tool(), tool(), running, text('')],
-			LIVE
-		);
-		const fold = items.find((item) => item.kind === 'work_log');
-		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
-		expect(fold.mode).toBe('live');
-		expect(fold.tail[0].message.id).toBe(running.id);
-		expect(items.some((item) => item.kind === 'message' && item.message.content === '')).toBe(false);
+	it('ignores an empty assistant phantom without hiding completed tools', () => {
+		const messages = [user('go'), tool(), tool(), tool({ toolStatus: 'running', streaming: true })];
+		expect(collapsedVisibleMessages(buildDisplayItems([...messages, text('')], LIVE))).toEqual(messages);
 	});
 
-	it('keeps the newest completed tool visible until the next row replaces it', () => {
-		const messages = [user('go'), tool(), tool({ toolStatus: 'complete' })];
-		const items = buildDisplayItems(messages, LIVE);
-		const fold = items.find((item) => item.kind === 'work_log');
-		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
-		expect(fold.folded).toHaveLength(1);
-		expect(fold.tail.map((entry) => entry.message.id)).toEqual([messages[2].id]);
+	it('keeps completed tools visible between calls', () => {
+		const messages = [user('go'), tool(), tool()];
+		expect(collapsedVisibleMessages(buildDisplayItems(messages, LIVE))).toEqual(messages);
 	});
 
-	it('keeps one live chip across a settled subagent card', () => {
-		const items = buildDisplayItems([user('go'), tool(), subagent(), tool()], LIVE);
-		const folds = items.filter((item) => item.kind === 'work_log');
-		expect(folds).toHaveLength(1);
-		if (folds[0].kind !== 'work_log') throw new Error('expected a work_log');
-		expect(folds[0].mode).toBe('live');
-		// The newest (completed) tool stays visible as the live tail.
-		expect(folds[0].folded).toHaveLength(2);
-		expect(folds[0].tail).toHaveLength(1);
-		expect(folds[0].summary).toBe('Ran 1 command and delegated 1 task');
+	it('keeps completed subagent cards visible alongside tools', () => {
+		const messages = [user('go'), tool(), subagent(), tool()];
+		expect(collapsedVisibleMessages(buildDisplayItems(messages, LIVE))).toEqual(messages);
 	});
 
 	it('shows a streaming code-mode cell as the live tail instead of going silent', () => {
@@ -423,15 +399,13 @@ describe('buildDisplayItems — live turn', () => {
 		const lone = buildDisplayItems([user('go'), cell], LIVE);
 		expect(lone.some((item) => item.kind === 'message' && item.message.id === cell.id)).toBe(true);
 
-		// Once the cell is executing inner calls (no longer streaming), it hides
-		// again and the newest inner call becomes the tail.
+		// Once the cell executes inner calls, only those calls need visible rows.
 		const executing = tool({ toolName: 'run_python', toolStatus: 'running', streaming: false });
 		const inner = tool({ toolName: 'Read', toolStatus: 'running', streaming: true });
-		const items = buildDisplayItems([user('go'), executing, inner], LIVE);
-		const fold = items.find((item) => item.kind === 'work_log');
-		if (fold?.kind !== 'work_log') throw new Error('expected a work_log');
-		expect(fold.folded.map((entry) => entry.message.id)).toContain(executing.id);
-		expect(fold.tail.map((entry) => entry.message.id)).toEqual([inner.id]);
+		const prompt = user('go');
+		const items = buildDisplayItems([prompt, executing, inner], LIVE);
+		expect(items.some((item) => item.kind === 'work_log')).toBe(false);
+		expect(collapsedVisibleMessages(items)).toEqual([prompt, inner]);
 	});
 
 	it('never lets a still-streaming cell mask the long-running tool it dispatched', () => {
@@ -471,29 +445,18 @@ describe('buildDisplayItems — live turn', () => {
 	});
 
 	it('does not fold a parked or otherwise unsettled latest turn', () => {
-		const items = buildDisplayItems([user('go'), tool(), text('waiting on background work')], {
+		const items = buildDisplayItems([user('go'), tool(), tool(), text('waiting on background work'), tool(), tool()], {
 			isStreaming: false,
 			latestTurnUnsettled: true,
 			groupingEnabled: true
 		});
-		expect(items.some((item) => item.kind === 'work_log' && item.mode === 'settled')).toBe(false);
+		expect(items.some((item) => item.kind === 'work_log')).toBe(false);
 		expect(items.some((item) => item.kind === 'message' && item.message.content === 'waiting on background work')).toBe(true);
 	});
 
-	it('keeps one live chip across a settled retry card', () => {
-		const settledRetry = retryCard({ settled: true, attempt: 2 });
-		const items = buildDisplayItems(
-			[user('go'), tool(), settledRetry, tool({ toolStatus: 'running', streaming: true })],
-			LIVE
-		);
-		const folds = items.filter((item) => item.kind === 'work_log');
-		expect(folds).toHaveLength(1);
-		if (folds[0].kind !== 'work_log') throw new Error('expected a work_log');
-		expect(folds[0].mode).toBe('live');
-		expect(folds[0].folded.map((entry) => entry.message.id)).toContain(settledRetry.id);
-		expect(folds[0].tail).toHaveLength(1);
-		expect(items.some((item) => item.kind === 'message' && item.message.id === settledRetry.id))
-			.toBe(false);
+	it('keeps settled retry cards visible until the turn finishes', () => {
+		const messages = [user('go'), tool(), retryCard({ settled: true, attempt: 2 }), tool()];
+		expect(collapsedVisibleMessages(buildDisplayItems(messages, LIVE))).toEqual(messages);
 	});
 
 	it('keeps an active retry card out of the live run', () => {
@@ -507,6 +470,65 @@ describe('buildDisplayItems — live turn', () => {
 			expect([...item.folded, ...item.tail].map((entry) => entry.message.id))
 				.not.toContain(activeRetry.id);
 		}
+	});
+	it('keeps all rows across commentary boundaries, then folds once after the final response', () => {
+		const messages = [
+			user('go'), tool(), tool(), text('progress'),
+			msg({ type: 'thinking', content: 'reasoning', streaming: false }),
+			msg({ role: 'system', type: 'system', systemSubtype: 'hook_started' }),
+			msg({ role: 'system', type: 'system', systemSubtype: 'hook_response' }),
+			tool(), tool(), text('done')
+		];
+		// Check every arrival, including final prose before turn.completed.
+		for (let length = 1; length <= messages.length; length++) {
+			const prefix = messages.slice(0, length);
+			const live = buildDisplayItems(prefix, LIVE);
+			expect(live.every((item) => item.kind === 'message')).toBe(true);
+			expect(collapsedVisibleMessages(live)).toEqual(prefix);
+		}
+		const settled = buildDisplayItems(messages, SETTLED);
+		expect(settled.filter((item) => item.kind === 'work_log')).toHaveLength(1);
+		expect(collapsedVisibleMessages(settled)).toEqual([messages[0], messages.at(-1)]);
+	});
+
+});
+
+describe('work folds from wire events', () => {
+	it('waits for turn completion rather than each assistant text segment', () => {
+		let state = initialState();
+		let seq = 0;
+		const events: Array<[string, Record<string, unknown>]> = [
+			['message.user', { content: 'Check two files', turn_id: 'turn-1' }],
+			['turn.started', { turn_id: 'turn-1' }],
+			['assistant.text_delta', { text: 'Checking the first file.' }],
+			['tool.use', { tool_use_id: 'read-1', name: 'Read', input: { file_path: 'one.txt' } }],
+			['tool.result', { tool_use_id: 'read-1', content_preview: 'one', is_error: false }],
+			['assistant.text_delta', { text: 'Now the second file.' }],
+			['tool.use', { tool_use_id: 'read-2', name: 'Read', input: { file_path: 'two.txt' } }],
+			['tool.result', { tool_use_id: 'read-2', content_preview: 'two', is_error: false }],
+			['assistant.text_delta', { text: 'Both files checked.' }]
+		];
+		const apply = (type: string, fields: Record<string, unknown> = {}) => {
+			const event: WireEvent = {
+				type, id: `event-${++seq}`, seq, session_id: 'work-fold-test',
+				created_at: '2026-09-10T10:00:00Z', ...fields
+			};
+			state = reduce(state, event);
+			return buildDisplayItems(state.messages, {
+				isStreaming: state.isStreaming,
+				latestTurnUnsettled: state.isStreaming || Boolean(state.liveTurnId),
+				groupingEnabled: true
+			});
+		};
+		for (const [type, fields] of events) {
+			const items = apply(type, fields);
+			expect(items.every((item) => item.kind === 'message')).toBe(true);
+			expect(collapsedVisibleMessages(items)).toEqual(state.messages);
+		}
+		const settled = apply('turn.completed');
+		expect(settled.filter((item) => item.kind === 'work_log')).toHaveLength(1);
+		expect(collapsedVisibleMessages(settled).map((message) => message.content))
+			.toEqual(['Check two files', 'Both files checked.']);
 	});
 });
 
