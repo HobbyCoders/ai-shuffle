@@ -9,6 +9,15 @@ export default defineConfig({
 	// Keep generated caches local when dependencies are shared by worktrees.
 	cacheDir: '.svelte-kit/vitest-cache',
 	plugins: [svelte({ hot: !process.env.VITEST })],
+	server: {
+		fs: {
+			// The docs registry imports Markdown from the sibling content directory.
+			allow: [
+				fileURLToPath(new URL('./', import.meta.url)),
+				fileURLToPath(new URL('../docs/content/', import.meta.url))
+			]
+		}
+	},
 	test: {
 		globals: true,
 		environment: 'jsdom',

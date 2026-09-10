@@ -5,6 +5,10 @@ on:
   # Manual trigger (with the no-cache escape hatch).
   workflow_dispatch:
     inputs:
+      release_tag:
+        description: 'Rebuild an existing vX.Y.Z tag using the verification tools from this workflow ref'
+        required: false
+        type: string
       no_cache:
         description: 'Build without Docker cache (forces full rebuild)'
         required: false
@@ -36,6 +40,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Validate requested release tag
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: '[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]'
+
+      # Keep release source immutable while allowing repaired verification tools.
+      - name: Checkout release source
+        if: inputs.release_tag != ''
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+          path: release-source
+
+      - name: Identify image source
+        id: source
+        working-directory: ${{ inputs.release_tag && 'release-source' || '.' }}
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@v2
         with:
@@ -59,25 +84,27 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
           tags: |
             # Tag with 'latest' on main/master branch
             type=raw,value=latest,enable={{is_default_branch}}
             # Tag with version on tags (v1.2.3 -> 1.2.3)
-            type=semver,pattern={{version}}
+            type=semver,pattern={{version}},value=${{ inputs.release_tag || github.ref_name }}
             # Tag with major.minor on tags (v1.2.3 -> 1.2)
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.release_tag || github.ref_name }}
             # Tag with major on tags (v1.2.3 -> 1)
-            type=semver,pattern={{major}}
+            type=semver,pattern={{major}},value=${{ inputs.release_tag || github.ref_name }}
             # Tag with branch name (only for push events, not PRs)
-            type=ref,event=branch
+            type=ref,event=branch,enable=${{ inputs.release_tag == '' }}
             # Tag with git short SHA (simple prefix, works for all events)
-            type=sha,prefix=sha-
+            type=raw,value=sha-${{ steps.source.outputs.short_sha }}
 
       - name: Build candidate image
         uses: useblacksmith/build-push-action@v2
         with:
-          context: .
-          file: ./Dockerfile
+          context: ${{ inputs.release_tag && 'release-source' || '.' }}
+          file: ${{ inputs.release_tag && 'release-source/Dockerfile' || './Dockerfile' }}
           platforms: linux/amd64
           labels: ${{ steps.meta.outputs.labels }}
           tags: ai-shuffle:postgres-candidate
@@ -88,23 +115,29 @@ jobs:
           no-cache: ${{ inputs.no_cache == true }}
           build-args: |
             ${{ inputs.no_cache && format('CACHEBUST={0}', github.run_id) || '' }}
-            GIT_SHA=${{ github.sha }}
+            GIT_SHA=${{ steps.source.outputs.sha }}
           # Layer caching is automatic via Blacksmith's sticky disk:
           # useblacksmith/setup-docker-builder persists /var/lib/buildkit across
           # runs, so no cache-from/cache-to registry round-trip is needed.
 
+      # The container verification (boot the image, PostgreSQL bootstrap, UI
+      # through a browser) roughly triples the job. Release tags get it;
+      # manual `latest` rebuilds, which happen several times a day, do not —
+      # container-postgres.yml already runs the same check on packaging PRs
+      # and as a daily canary on main.
       - name: Verify actual container lifecycle and UI
+        if: startsWith(github.ref, 'refs/tags/')
         run: python scripts/verify_container_postgres.py --image ai-shuffle:postgres-candidate --artifacts "$RUNNER_TEMP/container-postgres"
 
       - name: Upload container evidence
-        if: always()
+        if: always() && startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: container-postgres-${{ github.sha }}
           path: ${{ runner.temp }}/container-postgres
           if-no-files-found: ignore
 
-      - name: Push verified candidate without rebuilding
+      - name: Push the candidate without rebuilding
         env:
           IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         run: |

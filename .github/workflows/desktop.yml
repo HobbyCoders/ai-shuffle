@@ -1,33 +1,11 @@
 name: Desktop CI
 
-# Desktop app (desktop/). Path-filtered like the other CI workflows. The
-# release build that publishes installers lives in release.yml.
-#
-# Default packaging is Windows-only. Cheap typechecks/unit tests run on Linux;
-# full Linux desktop-runtime assembly requires an explicit manual opt-in.
-# Windows installs an isolated preview and exercises its real worker/PostgreSQL
-# before publishing a CI artifact, never a stable release/update.
+# Validate native desktop packaging and the preview installer; ordinary application checks have separate
+# coverage.
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'desktop/**'
-      - 'app/**'
-      - 'frontend/**'
-      - 'fluid/**'
-      - 'tools/**'
-      - 'browser-mcp/**'
-      - 'requirements*.txt'
-      - '.github/workflows/desktop.yml'
   pull_request:
     paths:
       - 'desktop/**'
-      - 'app/**'
-      - 'frontend/**'
-      - 'fluid/**'
-      - 'tools/**'
-      - 'browser-mcp/**'
-      - 'requirements*.txt'
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
     inputs:
