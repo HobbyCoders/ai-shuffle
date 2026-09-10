@@ -45,7 +45,7 @@ try {
   }
   await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'More', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Settings', exact: true }).click();
-  await page.getByRole('button', { name: 'Account', exact: true }).click();
+  await page.getByRole('button', { name: 'Providers', exact: true }).click();
   const account = page.getByRole('region', { name: 'Shuffle account', exact: true });
   const login = account.getByRole('button', { name: 'Sign in', exact: true });
   await login.waitFor();
