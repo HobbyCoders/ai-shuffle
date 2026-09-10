@@ -349,6 +349,25 @@ def remove_queued(turn_id: str) -> Optional[Dict[str, Any]]:
     return turns.remove_queued_turn(turn_id)
 
 
+def _interrupt_turn(session_id, mode, stop_background=False, turn_id=None):
+    # A dead runner cannot observe interrupt intent. Settle its turn and append
+    # the terminal event so connected clients also leave their working state.
+    if mode == "stop":
+        recovered = turns.stop_orphaned_turns(session_id, turn_id)
+        if recovered:
+            from app.db.session_events import append_events
+
+            append_events(session_id, [
+                {"type": "turn.aborted", "turn_id": row["id"],
+                 "payload": {"reason": "interrupt", "message": "Session stopped"}}
+                for row in recovered
+            ])
+            return recovered[0]
+    return turns.interrupt_turn(
+        session_id, mode, stop_background=stop_background, turn_id=turn_id,
+    )
+
+
 def interrupt(
     session_id: str,
     mode: str,
@@ -361,8 +380,9 @@ def interrupt(
     background children should be torn down. Flips the durable row FIRST (the
     guarded ``running -> interrupting`` transition — the durable intent), THEN
     fires the interrupt executor so the live runtime reacts (SDK interrupt +
-    escalation). Returns the now-interrupting turn row, or ``None`` when there
-    is no running turn to interrupt.
+    escalation). A Stop with no valid lease settles the orphaned turn and
+    records its terminal event instead. Returns the changed turn row, or
+    ``None`` when there is no matching live turn.
 
     ``turn_id`` (optional) binds the interrupt to a specific turn identity: it
     is threaded to BOTH the DB transition (so a stale stop whose target turn
@@ -375,10 +395,10 @@ def interrupt(
     coroutine use :func:`interrupt_async`** — this is the stop button's hot
     path, and a sync DB write there freezes every other connection.
     """
-    row = turns.interrupt_turn(
+    row = _interrupt_turn(
         session_id, mode, stop_background=stop_background, turn_id=turn_id
     )
-    if row is not None:
+    if row is not None and row["state"] == "interrupting":
         _fire_interrupt_executor(session_id, mode, turn_id)
     if mode == "send_now":
         # Parking releases the live slot. There may be nothing to interrupt,
@@ -403,13 +423,13 @@ async def interrupt_async(
     Ordering is unchanged: durable row first, runtime signal second.
     """
     row = await asyncio.to_thread(
-        turns.interrupt_turn,
+        _interrupt_turn,
         session_id,
         mode,
         stop_background=stop_background,
         turn_id=turn_id,
     )
-    if row is not None:
+    if row is not None and row["state"] == "interrupting":
         _fire_interrupt_executor(session_id, mode, turn_id)
     if mode == "send_now":
         # Parking releases the live slot. There may be nothing to interrupt,

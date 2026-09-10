@@ -14,6 +14,7 @@
  * default port the app attaches to it instead of starting a second.
  */
 import { EventEmitter } from 'node:events';
+import { randomBytes } from 'node:crypto';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createWriteStream, existsSync, type WriteStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
@@ -227,6 +228,34 @@ export function fetchHealth(port: number, pathname = '/health', timeoutMs = 2500
 	});
 }
 
+
+/** Authenticated, loopback-only control of the child we launched. Never a renderer API. */
+export function requestLifecycle(port: number, token: string, action: 'active-sessions' | 'stop-sessions'): Promise<Record<string, unknown>> {
+	return new Promise((resolve, reject) => {
+		const req = http.request({
+			host: '127.0.0.1', port, path: `/api/v1/internal/desktop/${action}`,
+			method: action === 'active-sessions' ? 'GET' : 'POST',
+			timeout: action === 'active-sessions' ? 3000 : 30_000,
+			headers: { authorization: `Bearer ${token}`, accept: 'application/json' }
+		}, (res) => {
+			let body = '';
+			res.setEncoding('utf8');
+			res.on('error', reject);
+			res.on('data', (chunk) => {
+				body += chunk;
+				if (body.length > 4096) req.destroy(new Error('Worker response too large'));
+			});
+			res.on('end', () => {
+				if (res.statusCode !== 200) return reject(new Error(`Worker lifecycle request failed (${res.statusCode})`));
+				try { resolve(JSON.parse(body)); } catch { reject(new Error('Invalid worker response')); }
+			});
+		});
+		req.on('timeout', () => req.destroy(new Error('Worker did not respond in time')));
+		req.on('error', reject);
+		req.end();
+	});
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export interface SupervisorOptions {
@@ -249,6 +278,7 @@ export class WorkerSupervisor extends EventEmitter {
 	private logStream: WriteStream | null = null;
 	private _state: WorkerState;
 	private stopping = false;
+	private readonly lifecycleToken = randomBytes(32).toString('hex');
 	private recentLog: string[] = [];
 	private crashRestarts: number[] = [];
 
@@ -335,6 +365,7 @@ export class WorkerSupervisor extends EventEmitter {
 			return this.state;
 		}
 		const env = buildWorkerEnv({ ...this.opts, port });
+		env.SHUFFLE_DESKTOP_LIFECYCLE_TOKEN = this.lifecycleToken;
 		const child = spawn(this.opts.runtime.python, ['-m', 'app.main'], {
 			cwd: this.opts.runtime.serverDir,
 			env,
@@ -404,7 +435,27 @@ export class WorkerSupervisor extends EventEmitter {
 		return `${lead}${code !== null ? ` (exit code ${code})` : ''}${last ? `\n${last}` : ''}`;
 	}
 
+	/** Only work owned by this app will be stopped; attached workers stay up. */
+	async activeSessionCount(): Promise<number> {
+		if (this._state.external || this._state.phase !== 'ready') return 0;
+		const reply = await this.lifecycleRequest('active-sessions');
+		if (!Number.isSafeInteger(reply.active_sessions) || (reply.active_sessions as number) < 0) {
+			throw new Error('Invalid active-session response');
+		}
+		return reply.active_sessions as number;
+	}
+
+	private lifecycleRequest(action: 'active-sessions' | 'stop-sessions'): Promise<Record<string, unknown>> {
+		return requestLifecycle(this._state.port, this.lifecycleToken, action);
+	}
+
 	async stop(): Promise<void> {
+		// Windows taskkill does not run Python's lifespan cleanup. Persist Stop
+		// BEFORE terminating the process tree, while PostgreSQL is still alive.
+		if (this.child && this.child.exitCode === null && this._state.phase === 'ready' && !this._state.external) {
+			const reply = await this.lifecycleRequest('stop-sessions');
+			if (reply.stopped !== true) throw new Error('Worker did not finish stopping sessions');
+		}
 		this.stopping = true;
 		const child = this.child;
 		if (!child || child.exitCode !== null) {

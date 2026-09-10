@@ -167,7 +167,9 @@ async def test_handle_query_busy_queues_behind_live_turn_and_acks(mock_db):
     queue_updated frame carrying the new pending message."""
     _make_session("sess-1")
     live = turns_db.enqueue_turn("sess-1", "user", prompt="live turn")["id"]
-    turns_db.start_turn(live, run_id="run-1")
+    from app.db import runs
+    lease = runs.claim_run("sess-1", "test-runner", 60)
+    turns_db.start_turn(live, run_id=lease["id"])
 
     with _Patches() as p:
         handler = _make_handler()
@@ -201,7 +203,9 @@ async def test_handle_query_busy_defers_the_transcript_record(mock_db):
     turn row carries the marker that says who owes the record."""
     _make_session("sess-1")
     live = turns_db.enqueue_turn("sess-1", "user", prompt="live turn")["id"]
-    turns_db.start_turn(live, run_id="run-1")
+    from app.db import runs
+    lease = runs.claim_run("sess-1", "test-runner", 60)
+    turns_db.start_turn(live, run_id=lease["id"])
 
     with _Patches() as p:
         handler = _make_handler()
@@ -249,7 +253,9 @@ async def test_handle_query_busy_tries_to_steer_the_running_turn(mock_db):
     rather than at the next turn."""
     _make_session("sess-1")
     live = turns_db.enqueue_turn("sess-1", "user", prompt="live turn")["id"]
-    turns_db.start_turn(live, run_id="run-1")
+    from app.db import runs
+    lease = runs.claim_run("sess-1", "test-runner", 60)
+    turns_db.start_turn(live, run_id=lease["id"])
 
     with _Patches():
         with patch(
@@ -445,7 +451,9 @@ async def test_handle_stop_interrupts_live_turn_and_stops_background(mock_db):
     """Stop interrupts the live turn and explicitly tears down all owned tasks."""
     _make_session("sess-1")
     live = turns_db.enqueue_turn("sess-1", "user", prompt="p")["id"]
-    turns_db.start_turn(live, run_id="run-1")
+    from app.db import runs
+    lease = runs.claim_run("sess-1", "test-runner", 60)
+    turns_db.start_turn(live, run_id=lease["id"])
 
     with _Patches():
         with patch(
@@ -471,7 +479,9 @@ async def test_handle_stop_with_current_turn_id_interrupts(mock_db):
     stop, #585)."""
     _make_session("sess-1")
     live = turns_db.enqueue_turn("sess-1", "user", prompt="p")["id"]
-    turns_db.start_turn(live, run_id="run-1")
+    from app.db import runs
+    lease = runs.claim_run("sess-1", "test-runner", 60)
+    turns_db.start_turn(live, run_id=lease["id"])
 
     with _Patches():
         handler = _make_handler()
@@ -520,7 +530,9 @@ async def test_interrupt_for_query_send_now_confirms(mock_db, monkeypatch):
     monkeypatch.setattr(cwh, "_INTERRUPT_DRAIN_TIMEOUT_SECONDS", 0.2)
     _make_session("sess-1")
     live = turns_db.enqueue_turn("sess-1", "user", prompt="p")["id"]
-    turns_db.start_turn(live, run_id="run-1")
+    from app.db import runs
+    lease = runs.claim_run("sess-1", "test-runner", 60)
+    turns_db.start_turn(live, run_id=lease["id"])
 
     with _Patches():
         handler = _make_handler()

@@ -81,7 +81,9 @@ async def test_handle_query_submits_off_the_event_loop(mock_db, loop_thread):
 async def test_handle_queue_message_submits_off_the_event_loop(mock_db, loop_thread):
     _make_session("sess-1")
     live = turns_db.enqueue_turn("sess-1", "user", prompt="live")["id"]
-    turns_db.start_turn(live, run_id="run-1")
+    from app.db import runs
+    lease = runs.claim_run("sess-1", "test-runner", 60)
+    turns_db.start_turn(live, run_id=lease["id"])
 
     spy = _ThreadSpy(turn_manager._submit_blocking)
     with _Patches():
@@ -107,7 +109,9 @@ async def test_handle_stop_interrupts_off_the_event_loop(mock_db, loop_thread):
     the interrupt executor still has to fire on the loop."""
     _make_session("sess-1")
     live = turns_db.enqueue_turn("sess-1", "user", prompt="live")["id"]
-    turns_db.start_turn(live, run_id="run-1")
+    from app.db import runs
+    lease = runs.claim_run("sess-1", "test-runner", 60)
+    turns_db.start_turn(live, run_id=lease["id"])
 
     spy = _ThreadSpy(turns_db.interrupt_turn)
     executor_threads = []
@@ -136,7 +140,9 @@ async def test_handle_interrupt_for_query_interrupts_off_the_event_loop(
 ):
     _make_session("sess-1")
     live = turns_db.enqueue_turn("sess-1", "user", prompt="live")["id"]
-    turns_db.start_turn(live, run_id="run-1")
+    from app.db import runs
+    lease = runs.claim_run("sess-1", "test-runner", 60)
+    turns_db.start_turn(live, run_id=lease["id"])
 
     spy = _ThreadSpy(turns_db.interrupt_turn)
     with _Patches():

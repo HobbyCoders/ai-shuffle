@@ -1254,6 +1254,10 @@ class TaskRegistry:
         except Exception:
             logger.debug("task persistence snapshot failed", exc_info=True)
 
+    def active_session_ids(self) -> list[str]:
+        """Sessions with running tasks owned by this process, including parked work."""
+        return [sid for sid in self._tasks if self.get_active(sid)]
+
     def get_active(self, session_id: str) -> List[Dict[str, Any]]:
         """Running tasks only, newest-first, each as a wire dict.
 

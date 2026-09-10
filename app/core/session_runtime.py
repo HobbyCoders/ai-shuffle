@@ -2732,6 +2732,24 @@ class SessionRuntime:
             raise
 
 
+# Include turns still acquiring their lease, not just registered live runtimes.
+_executions: Dict[asyncio.Task, str] = {}
+
+
+def active_executions() -> Dict[asyncio.Task, str]:
+    """Snapshot of turn executions owned by this process."""
+    return dict(_executions)
+
+
 async def execute(turn_row: Dict[str, Any], **kwargs: Any) -> Optional[str]:
-    """Convenience: build a :class:`SessionRuntime` and run its ``execute``."""
-    return await SessionRuntime(turn_row, **kwargs).execute()
+    """Build and track a runtime through settlement and lease release."""
+    from app.core import startup
+
+    if startup.is_shutting_down:
+        return None
+    task = asyncio.current_task()
+    _executions[task] = turn_row["session_id"]
+    try:
+        return await SessionRuntime(turn_row, **kwargs).execute()
+    finally:
+        _executions.pop(task, None)

@@ -303,6 +303,31 @@ def start_turn(
     return _row(row)
 
 
+def stop_orphaned_turns(
+    session_id: str, turn_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Stop stranded live turns, never a session with a valid execution lease.
+
+    The lease guard is part of the UPDATE, not an earlier read. A late Stop
+    remains bound to its original turn and cannot stop a successor.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        sql = (
+            "UPDATE turns SET state='aborted', stop_reason='interrupted', "
+            "interrupt_mode='stop', stop_background=TRUE, ended_at=NOW() "
+            "WHERE session_id=%s AND state IN ('running','interrupting','draining') "
+            "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.session_id=turns.session_id "
+            "AND r.state='active' AND r.lease_expires_at >= NOW())"
+        )
+        params = [session_id]
+        if turn_id is not None:
+            sql += " AND id=%s"
+            params.append(turn_id)
+        cursor.execute(sql + " RETURNING *", tuple(params))
+        return _rows(cursor.fetchall())
+
+
 def interrupt_turn(
     session_id: str,
     mode: str,

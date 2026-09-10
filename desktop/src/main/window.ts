@@ -32,6 +32,7 @@ const LIGHT_TITLE_BAR: TitleBarTheme = { background: '#ffffff', symbol: '#1d1d1f
 export type PageMode = 'status';
 
 export class MainWindow {
+	onClose?: (event: { preventDefault(): void }) => void;
 	private win: BrowserWindow | null = null;
 	private workerUrl: string | null = null;
 	private page: PageMode | null = null;
@@ -106,6 +107,7 @@ export class MainWindow {
 			if (state.maximized) win.maximize();
 			win.show();
 		});
+		win.on('close', (event) => this.onClose?.(event));
 		win.on('closed', () => {
 			this.win = null;
 		});

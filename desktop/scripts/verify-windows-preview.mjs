@@ -223,7 +223,7 @@ try {
   assert(Number(probe.stdout.trim()) > 0, 'App did not create schema in its managed PostgreSQL');
   passed('Bundled PostgreSQL authenticates and contains the actual application schema; inherited DB env ignored');
   // Start step: a clean install needs no account, invite or approval.
-  await page.getByRole('button', { name: /^Clean install/ }).click();
+  await page.getByRole('button', { name: 'Continue without an account', exact: true }).click();
   await page.getByRole('heading', { name: 'Select Workspace Folder', exact: true }).waitFor();
   await page.getByLabel('Or type a path manually').fill(workspace);
   const saved = page.waitForResponse(response => response.url().endsWith('/workspace/config') && response.request().method() === 'POST');

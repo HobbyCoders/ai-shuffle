@@ -158,6 +158,21 @@ async def test_opt_in_keeps_monitor_shells_but_still_latches_the_stop():
     assert task_registry.is_user_stopped(session_id)
 
 
+async def test_shutdown_overrides_keep_shells_preference():
+    session_id = "shutdown-optin"
+    _seed(session_id, [("agent-1", "agent"), ("shell-1", "shell")])
+    with _StopPatches() as p, patch(
+        "app.core.query_session_lifecycle._keep_monitor_shells_on_stop",
+        return_value=True,
+    ):
+        await stop_all_background_tasks(
+            session_id, user_stop=True, respect_shell_preference=False,
+        )
+    assert sorted(p.stopped) == ["agent-1", "shell-1"]
+    assert all(task_registry.get_task(session_id, tid)["status"] == "killed"
+               for tid in ("agent-1", "shell-1"))
+
+
 async def test_ghost_shell_row_is_still_reaped_when_shells_are_spared():
     """A registry row whose process already exited has nothing to spare."""
     session_id = "stop-ghost"

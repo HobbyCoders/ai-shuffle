@@ -6,7 +6,9 @@
  * to one already running on this computer), and opens its web UI. A first
  * run needs no setup: the embedded cluster is created on the spot.
  */
-import { app, nativeTheme, safeStorage, session, shell } from 'electron';
+import { app, dialog, nativeTheme, safeStorage, session, shell } from 'electron';
+import { QuitGuard } from './quit';
+import { showCloseDialog } from './close-dialog';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { registerIpc, type DesktopState, type PostgresStatus, type WorkerControl } from './ipc';
@@ -219,21 +221,40 @@ async function main(): Promise<void> {
 	installMenu(actions);
 	installTray(actions);
 
-	app.on('before-quit', (event) => {
-		if (quitting) return;
-		const stopWorker = supervisor !== null && !supervisor.state.external;
-		const stopPostgres = postgres !== null && (postgres.state.phase === 'starting' || postgres.state.phase === 'ready' || postgres.state.phase === 'failed');
-		if (!stopWorker && !stopPostgres) return;
-		event.preventDefault();
-		quitting = true;
-		void (async () => {
+	const quitGuard = new QuitGuard({
+		activeSessionCount: () => supervisor?.activeSessionCount() ?? Promise.resolve(0),
+		confirm: (activeCount) => showCloseDialog(window.browserWindow, activeCount),
+		stop: async () => {
+			quitting = true;
 			try {
-				if (stopWorker) await supervisor.stop();
-			} finally {
-				if (stopPostgres) await postgres.stop();
-				if (stopWorker) await supervisor.clearConnectionFile();
+				// Do not stop the database if session cleanup failed. Keep the app
+				// open so the user can retry rather than stranding another session.
+				if (supervisor && !supervisor.state.external) await supervisor.stop();
+				if (postgres) await postgres.stop();
+				if (supervisor && !supervisor.state.external) await supervisor.clearConnectionFile();
+			} catch (error) {
+				quitting = false;
+				throw error;
 			}
-		})().finally(() => app.quit());
+		},
+		quit: () => app.quit(),
+		failed: async () => {
+			await showCloseDialog(window.browserWindow, null, true).catch(() => {
+				// A failed renderer must never turn an error into permission to quit.
+			});
+		}
+	});
+	// Windows/Linux window close must be intercepted BEFORE its renderer dies.
+	// On macOS closing the window leaves the app running; Cmd+Q uses before-quit.
+	window.onClose = (event) => {
+		if (process.platform === 'darwin' || quitGuard.canQuit) return;
+		event.preventDefault();
+		void quitGuard.request();
+	};
+	app.on('before-quit', (event) => {
+		if (quitGuard.canQuit) return;
+		event.preventDefault();
+		void quitGuard.request();
 	});
 	app.on('activate', () => void open());
 

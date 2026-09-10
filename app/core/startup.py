@@ -595,7 +595,7 @@ async def shutdown_services() -> None:
     The pinned order is:
 
         1. is_shutting_down = True   (gates new unpark follow-ups everywhere)
-        2. session pool shutdown     (disconnect SDK subprocesses; reaps may write)
+        2. stop sessions, then pool  (settle turns before disconnecting clients)
         3. in-memory reset_all()s    (live store / permissions / task registry)
         4. remaining services        (http client, automations, connectors)
         5. close_pool — VERY LAST    (every step above may still need the DB)
@@ -639,6 +639,13 @@ async def shutdown_services() -> None:
             logger.info("V2 interaction sweeper stopped")
     except Exception:
         pass
+
+    # Settle turns and release their leases before disconnecting clients or DB.
+    try:
+        from app.core.desktop_lifecycle import stop_running_sessions
+        await stop_running_sessions()
+    except Exception:
+        logger.exception("Failed to stop sessions during shutdown")
 
     # Shutdown SDK session pool (disconnect all live subprocesses)
     try:

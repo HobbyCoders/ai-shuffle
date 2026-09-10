@@ -47,7 +47,9 @@ async def test_close_pool_runs_strictly_after_pool_shutdown():
 
     # (V2: the live session store is deleted — the in-memory resets are the
     # permission handler and the task registry only.)
-    with patch("app.core.session_pool.get_session_pool", return_value=pool), \
+    with patch("app.core.desktop_lifecycle.stop_running_sessions",
+               new=AsyncMock(side_effect=lambda: calls.append("sessions_stopped"))), \
+         patch("app.core.session_pool.get_session_pool", return_value=pool), \
          patch("app.core.permission_handler.permission_handler.reset_all",
                side_effect=lambda: calls.append("perm_reset")), \
          patch("app.core.task_registry.task_registry.reset_all",
@@ -61,6 +63,7 @@ async def test_close_pool_runs_strictly_after_pool_shutdown():
                side_effect=lambda: calls.append("close_pool")):
         await startup.shutdown_services()
 
+    assert calls.index("sessions_stopped") < calls.index("pool_shutdown")
     assert "pool_shutdown" in calls
     assert "close_pool" in calls
     # The DB pool closes only after the SDK pool teardown (its reaps may still

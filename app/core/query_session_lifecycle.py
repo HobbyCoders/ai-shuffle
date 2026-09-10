@@ -567,7 +567,8 @@ async def _settle_stopped_task(session_id: str, task_id: str) -> Optional[dict]:
 
 
 async def stop_all_background_tasks(
-    session_id: str, *, include_shells: bool = True, user_stop: bool = False
+    session_id: str, *, include_shells: bool = True, user_stop: bool = False,
+    respect_shell_preference: bool = True,
 ) -> list[dict]:
     """Stop EVERY in-flight background task in a session, one at a time.
 
@@ -603,7 +604,8 @@ async def stop_all_background_tasks(
     park on it forever.
 
     ``include_shells=False`` spares Monitor shells whose subprocess is still
-    alive. Force paths (session delete, eviction reap) don't come through here
+    alive. Shutdown passes ``respect_shell_preference=False`` because no shell
+    can survive termination of the worker process tree. Force paths (session delete, eviction reap) don't come through here
     at all — they use ``reap_session_background_shells``, which is unchanged.
 
     Snapshots the active list first so mutations during iteration (a task
@@ -617,7 +619,7 @@ async def stop_all_background_tasks(
         # Latch + durable quiesce BEFORE the snapshot: a task completing while
         # we work through the list finds a stopped session and enqueues nothing.
         await enter_user_stop(session_id)
-        if include_shells and _keep_monitor_shells_on_stop():
+        if include_shells and respect_shell_preference and _keep_monitor_shells_on_stop():
             include_shells = False
 
     active = task_registry.get_active(session_id)

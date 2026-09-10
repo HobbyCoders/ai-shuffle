@@ -15,6 +15,13 @@ from app.db import turns
 _REAL_ENSURE_GATEWAY_LISTENER = turn_manager._ensure_gateway_listener
 
 
+def _start_live_turn(turn_id):
+    from app.db import runs
+    sid = turns.get_turn(turn_id)["session_id"]
+    run = runs.get_active_run(sid) or runs.claim_run(sid, "test-runner", 60)
+    return turns.start_turn(turn_id, run_id=run["id"])
+
+
 @pytest.fixture
 def test_db():
     from tests.pg_shim import new_sqlite_connection
@@ -169,7 +176,7 @@ async def test_async_kick_is_scheduled(mock_db):
 
 def test_interrupt_running_turn(mock_db):
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
     row = turn_manager.interrupt("s1", "stop")
     assert row is not None
     assert row["state"] == "interrupting"
@@ -179,7 +186,7 @@ def test_interrupt_running_turn(mock_db):
 
 def test_interrupt_send_now_with_stop_background(mock_db):
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
     row = turn_manager.interrupt("s1", "send_now", stop_background=True)
     assert row["state"] == "interrupting"
     assert row["interrupt_mode"] == "send_now"
@@ -204,7 +211,7 @@ def test_interrupt_flips_row_before_firing_executor(mock_db):
 
     turn_manager.register_interrupt_executor(executor)
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
 
     row = turn_manager.interrupt("s1", "send_now")
     assert row["state"] == "interrupting"
@@ -218,7 +225,7 @@ def test_interrupt_executor_failure_does_not_raise(mock_db):
 
     turn_manager.register_interrupt_executor(boom)
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
     # The durable flip still happened; the executor failure was swallowed.
     row = turn_manager.interrupt("s1", "stop")
     assert row["state"] == "interrupting"
@@ -232,7 +239,7 @@ async def test_async_interrupt_executor_is_scheduled(mock_db):
 
     turn_manager.register_interrupt_executor(aexec)
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
     turn_manager.interrupt("s1", "stop")
     await asyncio.wait_for(ran.wait(), timeout=1.0)
 
@@ -271,7 +278,7 @@ def test_remove_queued_leaves_running_turn_alone(mock_db):
     # this call. The atomic state='queued' guard means remove_queued is a no-op
     # (None) and the running turn is untouched — never aborted mid-flight.
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")  # queued -> running
+    _start_live_turn(tid)  # queued -> running
     assert turn_manager.remove_queued(tid) is None
     assert turns.get_turn(tid)["state"] == "running"
 
@@ -286,7 +293,7 @@ def test_remove_queued_unknown_turn_returns_none(mock_db):
 
 async def test_wait_settled_returns_terminal_row(mock_db):
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
     turns.settle_turn(tid, "completed")
     settled = await turn_manager.wait_settled(tid, timeout=1.0)
     assert settled is not None
@@ -295,7 +302,7 @@ async def test_wait_settled_returns_terminal_row(mock_db):
 
 async def test_wait_settled_times_out_on_live_turn(mock_db):
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
     # Never settles -> None within the short timeout.
     got = await turn_manager.wait_settled(tid, timeout=0.15, poll_interval=0.02)
     assert got is None
@@ -303,7 +310,7 @@ async def test_wait_settled_times_out_on_live_turn(mock_db):
 
 async def test_wait_settled_unblocks_when_turn_settles_later(mock_db):
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
 
     async def settle_soon():
         await asyncio.sleep(0.05)
@@ -321,7 +328,7 @@ async def test_wait_session_idle_true_when_empty(mock_db):
 
 async def test_wait_session_idle_false_while_live(mock_db):
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
     assert await turn_manager.wait_session_idle("s1", timeout=0.15, poll_interval=0.02) is False
 
 
@@ -340,7 +347,7 @@ async def test_wait_session_idle_busy_in_every_non_terminal_state(mock_db):
     tid = turn_manager.submit("s1", "user", prompt="p")
     assert await turn_manager.wait_session_idle("s1", timeout=0.0) is False
     # running
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
     assert await turn_manager.wait_session_idle("s1", timeout=0.0) is False
     # interrupting
     turns.interrupt_turn("s1", "stop")
@@ -377,7 +384,7 @@ async def test_wait_session_idle_not_fooled_by_queued_to_running_handoff(mock_db
 
     def get_live_then_scheduler_claims(session_id):
         row = real_get_live(session_id)
-        turns.start_turn(tid, run_id="run-1")  # the claim lands "between reads"
+        _start_live_turn(tid)  # the claim lands "between reads"
         return row
 
     with patch.object(turns, "get_live_turn", get_live_then_scheduler_claims):
@@ -392,7 +399,7 @@ async def test_wait_session_idle_not_fooled_by_queued_to_running_handoff(mock_db
 
 async def test_wait_session_idle_true_after_settle(mock_db):
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
 
     async def settle_soon():
         await asyncio.sleep(0.05)
@@ -502,7 +509,7 @@ async def test_interrupt_async_flips_off_the_loop_and_fires_executor(mock_db):
     )
 
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
 
     with patch.object(turns, "interrupt_turn", spy):
         row = await turn_manager.interrupt_async(
@@ -525,7 +532,7 @@ async def test_interrupt_async_schedules_an_async_executor(mock_db):
 
     turn_manager.register_interrupt_executor(executor)
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
 
     await turn_manager.interrupt_async("s1", "stop")
     await asyncio.wait_for(ran.wait(), timeout=1.0)
@@ -555,7 +562,7 @@ async def test_wait_settled_reads_off_the_event_loop(mock_db):
         return real_get(turn_id)
 
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
     turns.settle_turn(tid, "completed")
 
     with patch.object(turns, "get_turn", spy):
@@ -631,7 +638,7 @@ async def test_wait_settled_wakes_on_the_gateway_tick(mock_db):
     """The NOTIFY path, not the poll, is what returns in the common case: with a
     5 s poll interval only a gateway tick can settle this wait in time."""
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
 
     async def settle_and_notify():
         await asyncio.sleep(0.05)
@@ -649,7 +656,7 @@ async def test_wait_settled_wakes_on_the_gateway_tick(mock_db):
 
 async def test_wait_session_idle_wakes_on_the_gateway_tick(mock_db):
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
 
     async def settle_and_notify():
         await asyncio.sleep(0.05)
@@ -670,7 +677,7 @@ async def test_wait_session_idle_wakes_on_the_gateway_tick(mock_db):
 async def test_gateway_tick_for_another_session_does_not_wake(mock_db):
     """A tick is per-session: a busy neighbour must not spin this waiter."""
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
 
     calls = []
     real_get = turns.get_turn
@@ -732,7 +739,7 @@ async def test_wait_settled_timeout_zero_checks_once(mock_db):
     """Timeout semantics preserved: the state is read once BEFORE any sleep, so
     an already-terminal turn returns even with no time budget."""
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
     turns.settle_turn(tid, "completed")
     assert (await turn_manager.wait_settled(tid, timeout=0.0))["state"] == "completed"
 
@@ -761,7 +768,7 @@ async def test_wait_settled_unknown_turn_times_out_to_none(mock_db):
 async def test_wait_session_idle_timeout_zero_checks_once(mock_db):
     assert await turn_manager.wait_session_idle("s1", timeout=0.0) is True
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
     assert await turn_manager.wait_session_idle("s1", timeout=0.0) is False
 
 
@@ -769,7 +776,7 @@ async def test_wait_settled_cancellation_unregisters_the_waiter(mock_db):
     """A cancelled wait must not leave a registration behind (the autouse
     fixture asserts the registry is empty, but be explicit here)."""
     tid = turn_manager.submit("s1", "user", prompt="p")
-    turns.start_turn(tid, run_id="run-1")
+    _start_live_turn(tid)
 
     task = asyncio.create_task(
         turn_manager.wait_settled(tid, timeout=30.0, poll_interval=5.0)
