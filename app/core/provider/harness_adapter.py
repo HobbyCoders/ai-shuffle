@@ -620,8 +620,9 @@ class HarnessAdapter(ProviderAdapter):
             try:
                 from app.core.config import settings
 
-                if settings.fluid_code_mode or settings.fluid_continual:
-                    skills = SkillStore(_fluid_skills_root())
+                if settings.fluid_code_mode or settings.fluid_continual or settings.fluid_memory_enabled:
+                    from app.core.fluid_memory import session_memory
+                    skills, memory_project = session_memory(self._resolve_app_session_id(), options.cwd)
                     try:
                         # Opportunistic lifecycle pass, mirroring fluid's own
                         # loader (interval-gated, deterministic, archive-not-
@@ -634,6 +635,9 @@ class HarnessAdapter(ProviderAdapter):
                     # memories in every scope, saved skills); wiring the handle
                     # is what makes the tool visible (requires_extra gate).
                     native_ctx.extra.setdefault("recall_store", skills)
+                    native_ctx.extra.setdefault("memory_store", skills)
+                    native_ctx.extra.setdefault("memory_project", memory_project)
+                    skills.journal_context(session_id=self._resolve_app_session_id(), project=memory_project)
                     synthesizer = None
                     if settings.fluid_continual:
                         # Materialized HERE rather than letting NativeLoop
@@ -677,7 +681,7 @@ class HarnessAdapter(ProviderAdapter):
                             provider_client,
                             settings.fluid_continual_model or cast(str, native_model),
                             skills,
-                            project=project_key_for(options.cwd or "."),
+                            project=memory_project,
                             on_change=_announce,
                             session_model=session_model,
                             guidance_snapshot=_session_guidance_snapshot(
@@ -1312,26 +1316,17 @@ class HarnessAdapter(ProviderAdapter):
             return None
 
     def _memory_snapshot(self) -> Optional[str]:
-        """The continual learner's ``# Memory`` block for this turn.
+        """The owner-scoped memory snapshot for native and delegated turns.
 
-        Same text the prompt compiler used to render into the system prompt,
-        and the same project scoping — only the position changed. Native legs
-        with continual learning on; the delegated claude CLI owns its own
-        memory and would double up.
+        Explicit saves are available independently of background learning and
+        independently of any provider SDK's own memory files.
         """
-        if self._is_delegated or self._options is None:
+        if self._options is None:
             return None
         try:
-            from app.core.config import settings
-
-            if not settings.fluid_continual:
-                return None
-            from fluid.codemode.skills import SkillStore, project_key_for
-
-            store = SkillStore(_fluid_skills_root())
-            section = store.render_memory_section(
-                project_key_for(self._options.cwd or ".")
-            )
+            from app.core.fluid_memory import session_memory
+            store, project = session_memory(self._resolve_app_session_id(), self._options.cwd)
+            section = store.render_memory_section(project)
             if not section:
                 return None
             return f"<system-reminder>\n{section}\n</system-reminder>"
@@ -1610,6 +1605,16 @@ class HarnessAdapter(ProviderAdapter):
                 seed(session_id, head)  # never moves numbering backwards
         self._event_cursor = max(self._event_cursor, head)
 
+    def _permission_tool_name(self, name: str) -> str:
+        """Resolve a bundled CLI alias only through this engine's registry.
+
+        App profile policies name the registered tool, not Claude's transport
+        prefix. Unknown names stay unknown so their usual denials still apply.
+        """
+        lookup = getattr(self._engine, "_registry_spec", None)
+        spec = lookup(name) if callable(lookup) else None
+        return spec.name if spec is not None else name
+
     async def _bridge_permission(self, ev: PermissionRequestEvent) -> None:
         """Route one fluid permission request through the app's can_use_tool
         callback and submit the decision back to the engine.
@@ -1631,7 +1636,7 @@ class HarnessAdapter(ProviderAdapter):
             # an ``and self._can_use_tool`` guard — non-None by construction.
             can_use_tool = cast(Any, self._can_use_tool)
             result = await can_use_tool(
-                ev.name,
+                self._permission_tool_name(ev.name),
                 ev.input,
                 SimpleNamespace(tool_use_id=ev.tool_use_id, agent_id=None),
             )
@@ -1681,7 +1686,7 @@ class HarnessAdapter(ProviderAdapter):
         try:
             can_use_tool = cast(Any, self._can_use_tool)
             result = await can_use_tool(
-                ev.name,
+                self._permission_tool_name(ev.name),
                 ev.input,
                 SimpleNamespace(tool_use_id=ev.tool_use_id, agent_id=None),
             )
@@ -3122,9 +3127,16 @@ def _delegated_disallowed(options: SessionOptions) -> list:
     if surface:
         known = cached_cli_tools()
         if known:
-            banned.update(
-                name for name in known if not tool_permitted(name, surface, None)
-            )
+            def permitted_cli_name(name: str) -> bool:
+                if tool_permitted(name, surface, None):
+                    return True
+                # The warm CLI cache includes qualified names for our bundle.
+                # Compare the registered spelling too, or the second session
+                # would hide memory tools that the first session could use.
+                prefix = "mcp__fluid_bundled__"
+                return name.startswith(prefix) and tool_permitted(name[len(prefix):], surface, None)
+
+            banned.update(name for name in known if not permitted_cli_name(name))
         else:
             logger.debug(
                 "[HarnessAdapter] no cached claude CLI tool surface yet — "

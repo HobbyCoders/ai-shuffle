@@ -196,11 +196,11 @@ def test_reap_skips_while_another_holder_has_the_journal_lock(
     assert store.reap_journal() == 8
 
 
-def test_append_waits_for_the_lock_then_writes_anyway(tmp_path, monkeypatch) -> None:
-    """An appender never drops its entry: a stuck holder only delays it."""
+def test_inference_append_respects_an_unavailable_lock(tmp_path, monkeypatch) -> None:
+    """A stuck inference queue cannot bypass its lock; explicit saves are separate."""
     monkeypatch.setattr(skills_mod, "JOURNAL_APPEND_LOCK_WAIT", 0.05)
     store = SkillStore(tmp_path)
     with journal_lock(tmp_path / "journal.jsonl") as held:
         assert held
         store.journal_append({"code": "under contention"})
-    assert [e["code"] for e in store.journal_entries(0)] == ["under contention"]
+    assert store.journal_entries(0) == []

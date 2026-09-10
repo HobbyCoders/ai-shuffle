@@ -453,9 +453,10 @@ def test_reap_journal_drops_the_whole_prefix_past_the_byte_cap(
     from fluid.codemode import skills as skills_mod
 
     monkeypatch.setattr(skills_mod, "JOURNAL_KEEP_ENTRIES", 500)
-    monkeypatch.setattr(skills_mod, "JOURNAL_MAX_BYTES", 64)
     store = SkillStore(tmp_path)
     _journal(store, 10)
+    # Exercise an oversized legacy journal; new appends enforce the byte cap.
+    monkeypatch.setattr(skills_mod, "JOURNAL_MAX_BYTES", 64)
     store.set_synth_cursor(10)
     assert store.reap_journal() == 10  # tail budget yields to the size cap
     assert store.journal_count() == 0

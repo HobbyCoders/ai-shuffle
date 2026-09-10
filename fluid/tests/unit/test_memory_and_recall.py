@@ -62,8 +62,8 @@ def test_memories_cap_archives_oldest(tmp_path) -> None:
     assert len(texts) == MAX_MEMORIES
     assert "durable fact number 0" not in texts  # oldest archived, not kept
     archive = tmp_path / ".archive" / "memories-archive.jsonl"
-    assert archive.exists()
-    archived = [json.loads(line) for line in archive.read_text().splitlines()]
+    assert not archive.exists()
+    archived = json.loads(store.memories_path.read_text())["archived"]
     assert any(e["text"] == "durable fact number 0" for e in archived)
 
 
@@ -486,10 +486,10 @@ def test_memory_archive_is_capped(tmp_path, monkeypatch) -> None:
     for i in range(MAX_MEMORIES + 12):
         store.save_memory(f"durable fact number {i}")
     before = [m.text for m in store.archived_memories()]
-    assert len(before) > 5  # the archive really did overflow the cap
+    assert len(before) == 5  # ingress enforces the cap
 
     dropped = store.reap()
-    assert dropped["memory_archive"] == len(before) - 5
+    assert dropped.get("memory_archive", 0) == 0
     after = [m.text for m in store.archived_memories()]
     assert after == before[-5:]  # newest archived entries survive
     # Recall still searches what is left.
@@ -622,8 +622,8 @@ async def test_tool_only_memories_are_held_out_of_the_prompt(tmp_path) -> None:
     assert "1 entry distilled only from tool output held back" in section
     assert "User wants the tests run" in section
 
-    # Recall still finds it (Recall output is tool output, framed as such).
-    assert any(m.id == held[0].id for m, _ in store.search_memories("prod"))
+    # Held facts stay outside Recall as well as the prompt.
+    assert not store.search_memories("prod")
 
     # The user says it: the rewrite carries user provenance and renders.
     await synth._apply(

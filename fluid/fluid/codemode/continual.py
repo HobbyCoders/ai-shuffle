@@ -197,10 +197,10 @@ Output format — nothing else:
 _SKILL_RE = re.compile(r'<skill name="([a-z0-9_]+)">\n?(.*?)</skill>', re.DOTALL)
 _DELETE_RE = re.compile(r'<delete-skill name="([a-z0-9_]+)"\s*/>')
 _MEMORY_RE = re.compile(
-    r'<memory(?:\s+id="(m\d+)")?(?:\s+scope="([^"]*)")?\s*>\n?(.*?)</memory>',
+    r'<memory(?:\s+id="([A-Za-z0-9_:.\-]{1,160})")?(?:\s+scope="([^"]*)")?\s*>\n?(.*?)</memory>',
     re.DOTALL,
 )
-_DELETE_MEMORY_RE = re.compile(r'<delete-memory id="(m\d+)"\s*/>')
+_DELETE_MEMORY_RE = re.compile(r'<delete-memory id="([A-Za-z0-9_:.\-]{1,160})"\s*/>')
 _GUIDANCE_RE = re.compile(
     r'<guidance stem="([^"]{1,64})">\n?(.*?)</guidance>', re.DOTALL
 )
@@ -434,15 +434,35 @@ class Synthesizer:
 
     async def _run_locked(self) -> list[str]:
         cursor = self._store.synth_cursor()
+        forgotten_before = self._store._facts.snapshot().get("forgotten_before", 0)
         entries, reached = self._store.journal_slice(cursor, self._max_entries)
+        entries = [e for e in entries if e.get("ts", 0) > forgotten_before]
         if not entries:
             if reached > cursor:
                 # Only malformed lines in the slice: step past them, or every
                 # later pass would stop at the same corrupt line.
                 self._store.set_synth_cursor(reached)
             return []
-        text, usage = await self._complete(self._prompt(entries), _SYNTH_SYSTEM)
-        changed = await self._apply(text, entries)  # sets last_error (None on a clean pass)
+        groups: dict[str | None, list[dict]] = {}
+        for entry in entries:
+            groups.setdefault(entry.get("project"), []).append(entry)
+        changed = []
+        usage = {}
+        text = ""
+        original_project = self._project
+        try:
+            for project, group in groups.items():
+                # Unattributed legacy input may produce global facts, but must
+                # not be assigned to whichever project happens to run next.
+                self._project = project or "legacy:unassigned"
+                text, group_usage = await self._complete(self._prompt(group), _SYNTH_SYSTEM)
+                for key, value in group_usage.items():
+                    usage[key] = usage.get(key, 0) + value
+                if self._store._facts.snapshot().get("forgotten_before", 0) > forgotten_before:
+                    return []
+                changed.extend(await self._apply(text, group))
+        finally:
+            self._project = original_project
         self._store.set_synth_cursor(reached)
         # Consumed entries have no reader left: drop the ones past the
         # retention tail and rebase the cursor. Best-effort — a failed reap
@@ -488,9 +508,8 @@ class Synthesizer:
             record["usage"] = dict(usage)
         if error:
             record["error"] = error
-        if output_preview is not None and not changed:
-            # Only when nothing landed: the raw head is what explains why.
-            record["output_head"] = " ".join(output_preview.split())[:400]
+        if output_preview is not None:
+            record["output_chars"] = len(output_preview)
         path = self._store.root / ".synthesis-log.jsonl"
         try:
             with path.open("a", encoding="utf-8") as fh:
@@ -524,7 +543,6 @@ class Synthesizer:
         deterministic reap runs first, so the model curates a store that is
         already trimmed and never sees (or controls) the reaping itself.
         """
-        self._store.set_last_consolidated_at(time.time())
         try:
             self._store.reap()
         except Exception:  # cleanup is opportunistic, never fatal
@@ -532,6 +550,7 @@ class Synthesizer:
         lines = ["## Memory store (id, recalls, age, scope, text)"]
         now = time.time()
         memories = self._store.memories()
+        revisions = {m.id: m.revision for m in memories if not m.protected}
         if not memories:
             lines.append("(empty)")
         for m in memories:
@@ -551,13 +570,14 @@ class Synthesizer:
         changed: list[str] = []
         for match in _MEMORY_RE.finditer(text or ""):
             memory_id, scope_attr, memory_text = match.groups()
-            if memory_id is None:
-                continue  # consolidation rewrites; it does not add
+            if memory_id not in revisions:
+                continue  # no inserts, protected edits, or unknown snapshot IDs
             try:
                 saved = self._store.save_memory(
                     memory_text.strip(),
                     memory_id=memory_id,
                     scope=self._resolve_scope(scope_attr),
+                    expected_revision=revisions[memory_id],
                 )
             except ValueError:
                 continue
@@ -568,7 +588,8 @@ class Synthesizer:
         for match in _DELETE_RE.finditer(text or ""):
             if self._store.delete(match.group(1)):
                 changed.append(f"-{match.group(1)}")
-        self._log_pass("consolidation", changed, output_preview=text, usage=usage)
+        self._log_pass("consolidation", changed, usage=usage)
+        self._store.set_last_consolidated_at(time.time())
         return changed
 
     def _resolve_scope(self, scope_attr: str | None) -> str | None:
@@ -686,6 +707,9 @@ class Synthesizer:
         value per counter wins within the call before it is added to the
         running totals.
         """
+        if not self._store._facts.claim_inference_call():
+            raise RuntimeError("Daily inference-model budget reached; explicit memory saves remain available")
+        prompt = prompt[:32000]
         request = ProviderRequest(
             model=self._model,
             messages=[Message(role="user", content=[Text(text=prompt)])],

@@ -11,6 +11,7 @@ across turns that changed all three, and the model still reads all three.
 from __future__ import annotations
 
 import hashlib
+import uuid
 
 import pytest
 
@@ -87,27 +88,36 @@ def test_turn_note_outside_worktree_mode_is_just_the_date(monkeypatch):
 
 
 @pytest.fixture
-def memory_store(tmp_path, monkeypatch):
-    """A continual store rooted in tmp, with the learner switched on."""
-    from fluid.codemode.skills import SkillStore
+def memory_session_id():
+    from app.db.sessions import create_session
 
-    root = tmp_path / "skills"
-    monkeypatch.setattr(
-        "app.core.provider.harness_adapter._fluid_skills_root", lambda: root
-    )
+    session_id = str(uuid.uuid4())
+    create_session(session_id, "default", derive_provider_from_profile=False)
+    return session_id
+
+
+@pytest.fixture
+def memory_store(tmp_path, monkeypatch, memory_session_id):
+    """A real session-owned store, with no dependence on a learning model."""
     from app.core.config import settings
+    from app.core.fluid_memory import session_memory
 
-    monkeypatch.setattr(settings, "fluid_continual", True, raising=False)
-    return SkillStore(root)
+    monkeypatch.setattr(settings, "fluid_skills_dir", str(tmp_path / "skills"))
+    monkeypatch.setattr(settings, "fluid_continual", False)
+    # Exercise authenticated session lookup in the isolated test database.
+    # Do not bypass owner resolution.
+    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
+    store, _ = session_memory(memory_session_id, str(tmp_path))
+    return store
 
 
 def test_compiled_system_survives_another_sessions_memory_write(
-    tmp_path, memory_store
+    tmp_path, memory_store, memory_session_id
 ):
     """The memories file is install-global: any session's Remember used to
     rewrite the ``# Memory`` section of every other session's prompt, and with
     it their cached prefix."""
-    options = SessionOptions(model="fake-model", cwd=str(tmp_path))
+    options = SessionOptions(model="fake-model", cwd=str(tmp_path), extra={"app_session_id": memory_session_id})
     memory_store.save_memory("the deploy script lives in ops/deploy.sh")
 
     first = HarnessAdapter._compile_prompt_sections(
@@ -126,10 +136,11 @@ def test_compiled_system_survives_another_sessions_memory_write(
     assert not [s for s in first.sections if s.text.startswith("# Memory\n")]
 
 
-def test_memory_snapshot_rides_the_turn_instead(tmp_path, memory_store):
+@pytest.mark.parametrize("delegated", [False, True])
+def test_memory_snapshot_rides_the_turn_instead(tmp_path, memory_store, memory_session_id, delegated):
     adapter = HarnessAdapter()
-    adapter._options = SessionOptions(model="fake-model", cwd=str(tmp_path))
-    adapter._is_delegated = False
+    adapter._options = SessionOptions(model="fake-model", cwd=str(tmp_path), extra={"app_session_id": memory_session_id})
+    adapter._is_delegated = delegated
 
     assert adapter._memory_snapshot() is None  # empty store costs nothing
 
@@ -140,12 +151,13 @@ def test_memory_snapshot_rides_the_turn_instead(tmp_path, memory_store):
     assert "ops/deploy.sh" in snapshot
 
 
-def test_memory_snapshot_skips_the_delegated_leg(tmp_path, memory_store):
-    """The claude CLI gathers its own memory; ours would double it up."""
+@pytest.mark.parametrize("delegated", [False, True])
+def test_memory_snapshot_fails_closed_without_owner_identity(tmp_path, memory_store, delegated):
+    """An unstamped adapter cannot read the installation owner's facts."""
     memory_store.save_memory("the deploy script lives in ops/deploy.sh")
     adapter = HarnessAdapter()
     adapter._options = SessionOptions(model="fake-model", cwd=str(tmp_path))
-    adapter._is_delegated = True
+    adapter._is_delegated = delegated
     assert adapter._memory_snapshot() is None
 
 
@@ -162,7 +174,7 @@ class _RecordingEngine:
 
 @pytest.mark.asyncio
 async def test_send_query_appends_the_volatile_context(
-    tmp_path, memory_store, monkeypatch
+    tmp_path, memory_store, memory_session_id, monkeypatch
 ):
     monkeypatch.setattr("app.core.environment._today", lambda: "2026-09-04")
     memory_store.save_memory("the deploy script lives in ops/deploy.sh")
@@ -172,6 +184,7 @@ async def test_send_query_appends_the_volatile_context(
         model="fake-model",
         cwd=str(tmp_path),
         extra={
+            "app_session_id": memory_session_id,
             "turn_env": {
                 "execution_mode": "worktree",
                 "worktree_info": {"branch": "claude/one", "base_branch": "main"},

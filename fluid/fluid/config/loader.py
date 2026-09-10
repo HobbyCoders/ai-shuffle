@@ -712,7 +712,7 @@ def _wire_continual(
     from fluid.codemode.skills import SkillStore, project_key_for
 
     skills = SkillStore(config.skills_dir)  # None → ~/.fluid/skills
-    skills.journal_context(session_id=session_id, agent=agent)
+    skills.journal_context(session_id=session_id, agent=agent, project=project_key_for(config.cwd))
     try:
         # Opportunistic lifecycle pass (interval-gated, deterministic,
         # archive-not-delete). Best-effort: curation must never block an
@@ -723,6 +723,8 @@ def _wire_continual(
     # The Recall builtin searches this store (live + archived memories,
     # saved skills); wiring the handle makes the tool visible.
     ctx.extra.setdefault("recall_store", skills)
+    ctx.extra.setdefault("memory_store", skills)
+    ctx.extra.setdefault("memory_project", project_key_for(config.cwd))
     if not config.continual:
         return skills, None
 
@@ -1008,25 +1010,24 @@ def build_engine(
 
     codemode = None
     journal = None
-    if config.code_mode or config.continual:
-        synth_client = client
-        if config.continual and config.continual_provider:
-            synth_client = _build_provider_client(config, config.continual_provider)
-        skills, synthesizer = _wire_continual(
-            config, ctx=ctx, bus=bus, session_id=session_id, model=model,
-            client=synth_client if config.continual else None,
-            synthesizer=synthesizer, agent=agent,
-        )
-        if config.code_mode:
-            from fluid.codemode.session import CodeModeSession
+    synth_client = client
+    if config.continual and config.continual_provider:
+        synth_client = _build_provider_client(config, config.continual_provider)
+    skills, synthesizer = _wire_continual(
+        config, ctx=ctx, bus=bus, session_id=session_id, model=model,
+        client=synth_client if config.continual else None,
+        synthesizer=synthesizer, agent=agent,
+    )
+    if config.code_mode:
+        from fluid.codemode.session import CodeModeSession
 
-            codemode = CodeModeSession(registry, skills=skills, synthesizer=synthesizer)
-        elif config.continual:
-            # JSON-mode leg of the learning loop: same journal file, same
-            # synthesizer, fed from the engine's turn/tool seams.
-            from fluid.codemode.journal import ToolJournal
+        codemode = CodeModeSession(registry, skills=skills, synthesizer=synthesizer)
+    elif config.continual:
+        # JSON-mode leg of the learning loop: same journal file, same
+        # synthesizer, fed from the engine's turn/tool seams.
+        from fluid.codemode.journal import ToolJournal
 
-            journal = ToolJournal(skills, synthesizer)
+        journal = ToolJournal(skills, synthesizer)
 
     mcp_servers = _mcp_server_map(config, disabled_mcp, child_env)
 

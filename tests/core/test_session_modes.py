@@ -2,7 +2,7 @@
 
 The ceiling has two halves and both are tested here. The NAME half is
 ``CHAT_MODE_TOOL_SURFACE``: whatever the agent's own ``tool_selection_mode``
-says, a chat session reaches the two web tools plus ``Read`` and nothing else —
+says, a chat session reaches web tools, attachment ``Read`` and account memory —
 and when the agent already denies all of those, the answer is a ``["*"]`` deny,
 never an empty allow list (ruling T2). The PATH half is
 ``chat_mode_read_permitted``, which fences that ``Read`` to the chat lane's
@@ -117,7 +117,7 @@ def test_non_chat_modes_are_untouched(mode):
         # "all" — unrestricted agent, so the mode surface IS the surface.
         (
             {"tool_selection_mode": "all"},
-            ["WebSearch", "WebFetch", "Read"],
+            CHAT_MODE_TOOL_SURFACE,
             True,
             True,
             True,
@@ -126,7 +126,7 @@ def test_non_chat_modes_are_untouched(mode):
         # and still beats the allow surface.
         (
             {"tool_selection_mode": "none"},
-            ["WebSearch", "WebFetch", "Read"],
+            CHAT_MODE_TOOL_SURFACE,
             False,
             False,
             False,
@@ -144,7 +144,7 @@ def test_non_chat_modes_are_untouched(mode):
         # "disallow" listing a web tool — the other one survives.
         (
             {"tool_selection_mode": "disallow", "disallowed_tools": ["WebFetch"]},
-            ["WebSearch", "WebFetch", "Read"],
+            CHAT_MODE_TOOL_SURFACE,
             True,
             False,
             True,
@@ -153,7 +153,7 @@ def test_non_chat_modes_are_untouched(mode):
         # WIDENS nothing, it only ever narrows (ruling T3).
         (
             {"tool_selection_mode": "disallow", "disallowed_tools": ["Read"]},
-            ["WebSearch", "WebFetch", "Read"],
+            CHAT_MODE_TOOL_SURFACE,
             True,
             True,
             False,
@@ -295,17 +295,17 @@ def test_build_options_chat_mode_keeps_only_the_chat_surface():
     builder appends unconditionally (builtin bridge tools, ``mcp__<server>``
     wildcards) has to be gone too."""
     options = _build_for_mode("chat", {"model": "opus"})
-    assert sorted(options.allowed_tools) == ["Read", "WebFetch", "WebSearch"]
+    assert set(options.allowed_tools) == set(CHAT_MODE_TOOL_SURFACE)
     assert options.tools is None
 
 
 def test_build_options_chat_mode_ignores_a_tools_preset():
     """A ``claude_code`` preset hands the leg its whole built-in toolset without
     consulting ``allowed_tools``, so chat mode has to drop the preset outright —
-    and still keep its own three tools rather than ending up with nothing."""
+    and still keep its own narrow surface rather than ending up with nothing."""
     options = _build_for_mode("chat", {"model": "opus", "tools_preset": "claude_code"})
     assert options.tools is None
-    assert sorted(options.allowed_tools) == ["Read", "WebFetch", "WebSearch"]
+    assert set(options.allowed_tools) == set(CHAT_MODE_TOOL_SURFACE)
 
 
 def test_build_options_chat_mode_denies_all_when_the_agent_bars_the_surface():
@@ -608,3 +608,24 @@ def test_code_sessions_are_not_narrowed_at_all():
     access = ToolAccess(allowed=["Read", "Bash", "Task"], disallowed=None)
     for mode in ("code", None, "voice"):
         assert narrow_tool_access_for_mode(access, mode).allowed == ["Read", "Bash", "Task"]
+
+
+@pytest.mark.parametrize("name", ["Remember", "Recall", "Forget", "mcp__builtins__Remember", "mcp__builtins__Recall", "mcp__builtins__Forget"])
+def test_chat_allows_account_memory_but_preserves_agent_denials(name):
+    access = narrow_tool_access_for_mode(ToolAccess(), "chat")
+    assert tool_permitted(name, access.allowed, access.disallowed)
+    denied = narrow_tool_access_for_mode(ToolAccess(disallowed=[name]), "chat")
+    assert not tool_permitted(name, denied.allowed, denied.disallowed)
+    assert not tool_permitted("Bash", access.allowed, access.disallowed)
+    assert not tool_permitted("Edit", access.allowed, access.disallowed)
+
+
+def test_chat_delegated_surface_exposes_memory_bridge_without_widening_reads():
+    from app.core.provider.types import SessionOptions
+    from app.core.provider.harness_adapter import _delegated_allowed
+    options = SessionOptions(model="sonnet", tool_allowlist=list(CHAT_MODE_TOOL_SURFACE), extra={"session_mode":"chat"})
+    names = _delegated_allowed(options)
+    assert "mcp__builtins__Remember" in names
+    assert "mcp__builtins__Recall" in names
+    assert "mcp__builtins__Forget" in names
+    assert "Read" not in names

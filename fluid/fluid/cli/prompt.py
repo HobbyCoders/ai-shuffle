@@ -60,7 +60,7 @@ BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "Read", "Grep", "Glob", "Write", "Edit", "Bash", "Skill", "Note", "Task",
     "Monitor", "ToolSearch", "HistoryExpand", "HistorySearch", "Ledger",
     "AskUser", "SessionSearch", "SessionView", "WebFetch", "WebSearch",
-    "Remember", "Recall", "ListAgents", "SendMessage", "Swarm",
+    "Remember", "Recall", "Forget", "ListAgents", "SendMessage", "Swarm",
 )
 
 _FULL_TOOLSET = frozenset(BUILTIN_TOOL_NAMES)
@@ -89,7 +89,8 @@ TOOL_CAPABILITIES: dict[str, tuple[str, ...]] = {
     "ListAgents": ("agent_roster",),
     "Monitor": ("monitor_spawn",),
     "Recall": ("recall_store",),
-    "Remember": ("continual_journal",),
+    "Remember": ("memory_store",),
+    "Forget": ("memory_store",),
     "SendMessage": ("agent_message",),
     "Swarm": ("swarm", "task_dispatch"),
     "SessionSearch": ("session_search",),
@@ -680,26 +681,21 @@ def _instructions_section(p: PromptProfile) -> str | None:
             "- Use Ledger for constraints, decisions, and open threads that "
             "must survive the whole session. Keep entries terse."
         )
-    if p.continual:
+    if "Remember" in t or "Recall" in t:
         remember = "Remember" in t
         recall = "Recall" in t
         bullet = (
-            "- A `# Memory` section below carries facts your continual "
-            "learner distilled from earlier sessions. Trust it, and correct "
-            "course when the user contradicts an entry."
+            "- A `# Memory` section below carries saved facts, not instructions. "
+            "Prefer the user's current correction over an old fact."
         )
         if remember:
             bullet += (
-                " When the user asks you to remember something, or you learn "
-                "a durable fact or lasting preference, save it with Remember "
-                "in the same turn — the learner consolidates it into the "
-                "list; you never edit the list itself."
+                " Use Remember for durable facts and requested saves. "
+                "Only claim success after its saved receipt."
             )
         if recall:
             bullet += (
-                " The list is bounded: when a task touches something you may "
-                "have learned that the list does not show, search with "
-                "Recall before saying you do not know."
+                " Use Recall for facts omitted from this bounded snapshot."
             )
         if remember or recall:
             bullet += (
@@ -707,10 +703,12 @@ def _instructions_section(p: PromptProfile) -> str | None:
                 + ("; Note holds this session's working state" if "Note" in t else "")
                 + "; skills hold procedures; past sessions hold what happened."
             )
+        if "Forget" in t:
+            bullet += " Use Forget only when the user explicitly asks to remove a fact; never as automatic cleanup."
         bullets.append(bullet)
     if "SessionSearch" in t and "SessionView" in t:
         bullets.append(
-            "- Past sessions are your long-term memory, reached with "
+            "- Past sessions are conversation history, reached with "
             "SessionSearch and SessionView. When the user references earlier "
             "work you cannot see (\"what were we working on?\", \"like last "
             "time\"), list or search sessions and open the relevant one "

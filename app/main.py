@@ -230,6 +230,8 @@ async def lifespan(app: FastAPI):
     if runner_approved:
         await start_services()
         bg_tasks = start_background_tasks()
+        from app.core.fluid_memory import maintain_memories
+        bg_tasks.append(asyncio.create_task(maintain_memories(), name="memory-maintenance"))
         monitor_task = await start_resource_monitor(interval_seconds=300)
         # Thread-based: keeps working while the loop is frozen and logs the
         # loop thread's stack so a stall is diagnosable after the fact.

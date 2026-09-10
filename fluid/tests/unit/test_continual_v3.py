@@ -37,28 +37,24 @@ def _remember_ctx(store: SkillStore, synth: Synthesizer | None = None) -> ToolCt
 
     ctx = ToolCtx()
     ctx.extra["continual_journal"] = _journal
+    ctx.extra["memory_store"] = store
+    ctx.extra["memory_project"] = "my-proj"
     return ctx
 
 
 @pytest.mark.asyncio
-async def test_remember_journals_a_high_salience_entry(tmp_path) -> None:
+async def test_remember_commits_a_protected_fact(tmp_path) -> None:
     store = SkillStore(tmp_path)
     out = await remember_mod.handler(
         {"text": "user prefers rebase over merge", "scope": "project"},
         _remember_ctx(store),
     )
     assert not out.is_error
-    entries = store.journal_entries()
-    assert entries == [
-        {
-            "kind": "remember",
-            "text": "user prefers rebase over merge",
-            "scope": "project",
-            "ts": entries[0]["ts"],
-        }
-    ]
-    # Propose, not dispose: the memory file itself is untouched.
-    assert store.memories() == []
+    assert store.journal_entries() == []
+    (entry,) = SkillStore(tmp_path).memories()
+    assert entry.text == "user prefers rebase over merge"
+    assert entry.scope == "my-proj" and entry.protected
+    assert "Saved" in out.text
 
 
 @pytest.mark.asyncio
@@ -70,7 +66,7 @@ async def test_remember_rejects_secrets_and_essays(tmp_path) -> None:
     )
     assert secret.is_error and "credential" in secret.text
     essay = await remember_mod.handler({"text": "x" * 600}, ctx)
-    assert essay.is_error and "one or two sentences" in essay.text
+    assert essay.is_error and "500" in essay.text
     assert store.journal_entries() == []
 
 
@@ -90,7 +86,7 @@ def test_urgent_flag_lowers_synthesis_threshold(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_urgent_remember_lands_as_memory_via_synthesis(tmp_path) -> None:
+async def test_explicit_remember_bypasses_synthesis(tmp_path) -> None:
     """The full propose→curate loop: Remember journals, urgent synthesis
     distills, memories.json carries the fact with the requested scope."""
 
@@ -120,16 +116,11 @@ async def test_urgent_remember_lands_as_memory_via_synthesis(tmp_path) -> None:
         _remember_ctx(store, synth),
     )
     assert not out.is_error
-    assert synth.due()
-    changed = await synth.run()
-    assert changed and changed[0].startswith("memory:")
-    (entry,) = store.memories()
-    assert entry.text == "User prefers rebase over merge"
-    assert entry.scope == "my-proj"
-    # The synthesis prompt showed the [remember] entry with its scope hint.
-    assert "[remember] (scope=project) remember: prefer rebase" in (
-        provider.requests[0].messages[0].content[0].text
-    )
+    assert not synth.due()
+    (entry,) = SkillStore(tmp_path).memories()
+    assert entry.text == "remember: prefer rebase"
+    assert entry.scope == "my-proj" and entry.protected
+    assert provider.requests == []
 
 
 # ─── Recall: the retrieval channel ───────────────────────────────────────────
@@ -157,7 +148,7 @@ async def test_recall_finds_live_and_archived_and_bumps_usage(tmp_path) -> None:
     if kept.id in live_by_id:  # live hit → counter bumped
         assert live_by_id[kept.id].uses == 1
     else:  # it aged out → shown from the archive, labeled
-        assert "(archived)" in out.text
+        assert "archived" in out.text
 
 
 @pytest.mark.asyncio
@@ -363,14 +354,14 @@ def test_build_engine_wires_continual_channels(tmp_path) -> None:
     assert {"Remember", "Recall"} <= names
 
 
-def test_remember_recall_absent_without_continual(tmp_path) -> None:
+def test_explicit_memory_available_without_continual(tmp_path) -> None:
     from fluid.config.loader import build_engine
     from fluid.store import MemoryStore
 
     config = _config(tmp_path)
     engine = build_engine(config, MemoryStore(), provider=FakeProvider())
     names = {t["name"] for t in engine._tools_api()}
-    assert "Remember" not in names and "Recall" not in names
+    assert {"Remember", "Recall", "Forget"} <= names
 
 
 # ─── prompt surfaces ─────────────────────────────────────────────────────────
@@ -380,8 +371,8 @@ def test_continual_bullet_teaches_remember_and_recall() -> None:
     from fluid.cli.prompt import PromptProfile, compose_base_prompt
 
     text = compose_base_prompt(PromptProfile(continual=True, model="claude"))
-    assert "save it with Remember" in text
-    assert "search with Recall" in text
+    assert "Use Remember for durable facts" in text
+    assert "Use Recall for facts omitted" in text
     assert "never manage it" not in text  # the old stand-down order is gone
 
     # Without the tools in the surface, the bullet cannot name them.

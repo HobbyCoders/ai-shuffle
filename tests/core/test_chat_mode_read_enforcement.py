@@ -149,7 +149,8 @@ def test_read_is_withheld_from_the_cli_grant_for_chat(workspace):
     """A bare name in ``--allowed-tools`` is a blanket pre-approval — the CLI
     says so itself. Granting Read there would retire the fence."""
     opts = _options("chat")
-    assert _delegated_allowed(opts) == ["WebSearch", "WebFetch"]
+    assert set(_delegated_allowed(opts)) == set(CHAT_MODE_TOOL_SURFACE) - {"Read"}
+    assert "Read" not in _delegated_allowed(opts)
     assert "Read" in (_tool_allowlist(opts) or [])
 
 

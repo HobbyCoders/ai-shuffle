@@ -88,9 +88,16 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
 
     lines: list[str] = []
     try:
-        memory_hits = store.search_memories(query, limit=limit)
+        memory_hits = store.search_memories(query, limit=limit, project=ctx.extra.get("memory_project"))
     except Exception as exc:
         return ToolOutcome(text=f"recall failed: {exc}", is_error=True)
+    project = ctx.extra.get("memory_project")
+    conflicts = [e for e in store.memories() if e.conflicted and e.provenance != "tool"
+                 and (project is None or e.scope in ("global", project))
+                 and any(t in (e.text + " " + (e.key or "")).lower() for t in query.lower().split())]
+    for entry in conflicts[:limit]:
+        lines.append(f"- [{entry.id}] Unresolved conflict; revision: {entry.revision}; key: {entry.key or 'unspecified'}. "
+                     "Ask the user for the current fact, then correct this ID and revision with Remember. Do not guess a value.")
     if memory_hits:
         lines.append("Memories:")
         for entry, archived in memory_hits:
@@ -101,7 +108,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                     f"pattern(s): {', '.join(findings)}]"
                 )
                 continue
-            tags = []
+            tags = [f"revision: {entry.revision}", f"source: {entry.provenance}"]
+            if entry.key:
+                tags.append(f"key: {entry.key}")
+            if entry.protected:
+                tags.append("explicit save")
             if archived:
                 tags.append("archived")
             if entry.scope != "global":

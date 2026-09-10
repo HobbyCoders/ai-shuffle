@@ -33,48 +33,51 @@ def _skills_root(worker):
 
 
 def test_facts_and_skills_reach_other_workers(workers):
+    from fluid.codemode.skills import SkillStore
     a, b = workers("a"), workers("b")
     with a.active():
         engine.create_network("Home", device_name="A")
         root = _skills_root(a)
-        root.mkdir(parents=True)
-        (root / "memories.json").write_text(json.dumps({"next_id": 2, "entries": [
-            {"id": "m1", "text": "The user prefers tabs.", "scope": "global", "provenance": "user",
-             "created_at": 1.0, "updated_at": 2.0, "uses": 3}]}))
+        facts_a = SkillStore(root)
+        first = facts_a.save_memory("The user prefers tabs.", protected=True)
+        origin_a = facts_a._facts.snapshot()["store_id"]
         (root / "greet.py").write_text("def run():\n    return 'hi'\n")
         (root / "journal.jsonl").write_text('{"kind": "cell"}\n')
         assert memory_records.publish() >= 2
         ops = [o for o in store.ops_since({}) if o["collection"] == "memory"]
-        assert {o["record_id"] for o in ops} == {f"fact:{a.device_id}:m1", "skill:greet"}
+        ids_a = [o["record_id"] for o in ops]
+        assert "skill:greet" in ids_a
+        assert any(r.startswith("memory-v2:") for r in ids_a)
     join(a, b)
     with b.active():
         rows = b.sql("SELECT id, kind FROM network_memory_records ORDER BY id")
         assert [r["kind"] for r in rows] == ["fact", "skill"]
-        applied = memory_records.apply_to_files([r["id"] for r in rows])
-        assert applied == 2
+        assert memory_records.apply_to_files([r["id"] for r in rows]) == 2
         root = _skills_root(b)
-        doc = json.loads((root / "memories.json").read_text())
-        assert doc["entries"][0]["id"] == f"{a.device_id}:m1" and "tabs" in doc["entries"][0]["text"]
+        facts_b = SkillStore(root)
+        imported = facts_b.memories()[0]
+        assert imported.id == f"{origin_a}:{first.id}" and "tabs" in imported.text
+        assert imported.protected
         assert (root / "greet.py").read_text().startswith("def run")
         assert not (root / "journal.jsonl").exists()
-        # B's own facts publish under B's namespace; A's facts are not republished by B.
-        doc["entries"].append({"id": "m1", "text": "B likes spaces.", "scope": "global", "provenance": "user"})
-        (root / "memories.json").write_text(json.dumps(doc))
+        facts_b.save_memory("B likes spaces.", protected=True)
         assert memory_records.publish() == 1
-        ops = [o["record_id"] for o in store.ops_since({}) if o["collection"] == "memory" and o["origin_device_id"] == b.device_id]
-        assert ops == [f"fact:{b.device_id}:m1"]
+        ids_b = [o["record_id"] for o in store.ops_since({}) if o["collection"] == "memory" and o["origin_device_id"] == b.device_id]
+        assert len(ids_b) == 1 and ids_b[0].startswith("memory-v2:")
     converge([a, b])
     with a.active():
-        memory_records.apply_to_files([f"fact:{b.device_id}:m1"])
-        doc = json.loads((_skills_root(a) / "memories.json").read_text())
-        assert {e["id"] for e in doc["entries"]} == {"m1", f"{b.device_id}:m1"}
-        # Deleting a skill on A tombstones it everywhere.
+        memory_records.apply_to_files(ids_b)
+        assert {e.text for e in facts_a.memories()} == {"The user prefers tabs.", "B likes spaces."}
+        # A forget is explicit state, not absence from a hot file.
+        assert facts_a.delete_memory(first.id, explicit=True, expected_revision=1)
         (_skills_root(a) / "greet.py").unlink()
-        assert memory_records.publish() == 1
+        assert memory_records.publish() >= 2
     converge([a, b])
     with b.active():
-        memory_records.apply_to_files(["skill:greet"])
+        memory_records.apply_to_files(ids_a)
         assert not (_skills_root(b) / "greet.py").exists()
+        assert not facts_b.search_memories("tabs")
+        assert [e.text for e in facts_b.memories()] == ["B likes spaces."]
 
 
 def test_plugin_desired_state_is_published_and_applied(workers, monkeypatch):

@@ -4,8 +4,8 @@ The claude CLI subprocess sees the app's tools only through MCP, so the
 builtins server re-exposes the memory surface fluid's builtins give native
 legs: Remember and Recall over the continual SkillStore, SessionSearch and
 SessionView over the Postgres store's recall hooks. These tests pin the
-gating (which tools exist under which settings) and drive the journal-backed
-pair end to end against a temp skills root; the session pair is registration-
+gating (which tools exist under which settings) and drive the durable-memory
+tools end to end against a temp skills root; the session pair is registration-
 gated on a database, so only its wiring is asserted here.
 """
 
@@ -62,24 +62,24 @@ def test_session_pair_needs_a_database(monkeypatch):
     assert "HistorySearch" not in tools["SessionSearch"].description
 
 
-def test_continual_off_drops_remember_but_keeps_recall(monkeypatch):
+def test_continual_off_keeps_explicit_memory(monkeypatch):
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "fluid_continual", False)
     tools = _bridge_tools()
-    assert "Remember" not in tools
+    assert "Remember" in tools
     # The store still holds whatever was learned before the switch-off.
     assert "Recall" in tools
 
 
-def test_store_off_drops_recall_too(monkeypatch):
+def test_inference_and_code_mode_off_keep_explicit_memory(monkeypatch):
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "fluid_continual", False)
     monkeypatch.setattr(settings, "fluid_code_mode", False)
     tools = _bridge_tools()
-    assert "Recall" not in tools
-    assert "Remember" not in tools
+    assert "Recall" in tools
+    assert "Remember" in tools
 
 
 def test_native_shadow_set_covers_the_memory_four():
@@ -87,7 +87,7 @@ def test_native_shadow_set_covers_the_memory_four():
     bridged copies must be dropped there or the model sees two of each."""
     from app.core.provider.fluid_tool_bridge import NATIVE_SHADOWED_BUILTINS
 
-    assert {"Remember", "Recall", "SessionSearch", "SessionView"} <= set(
+    assert {"Remember", "Recall", "Forget", "SessionSearch", "SessionView"} <= set(
         NATIVE_SHADOWED_BUILTINS
     )
 
@@ -96,7 +96,7 @@ def test_native_shadow_set_covers_the_memory_four():
 
 
 @pytest.mark.asyncio
-async def test_remember_journals_the_fact(monkeypatch, tmp_path):
+async def test_remember_commits_the_fact_before_returning(monkeypatch, tmp_path):
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "fluid_skills_dir", str(tmp_path / "skills"))
@@ -107,15 +107,13 @@ async def test_remember_journals_the_fact(monkeypatch, tmp_path):
     )
 
     assert not result.get("isError")
-    assert "Recorded" in result["content"][0]["text"]
-    lines = (
-        (tmp_path / "skills" / "journal.jsonl")
-        .read_text(encoding="utf-8").strip().splitlines()
-    )
-    entry = json.loads(lines[-1])
-    assert entry["kind"] == "remember"
-    assert entry["scope"] == "project"
-    assert "blue box" in entry["text"]
+    assert "Saved" in result["content"][0]["text"]
+    from fluid.codemode.skills import SkillStore
+    (entry,) = SkillStore(tmp_path / "skills").memories()
+    assert entry.protected
+    assert entry.scope != "global"
+    assert "blue box" in entry.text
+    assert not (tmp_path / "skills" / "journal.jsonl").exists()
 
 
 @pytest.mark.asyncio

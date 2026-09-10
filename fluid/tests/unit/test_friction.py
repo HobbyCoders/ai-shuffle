@@ -302,7 +302,8 @@ def test_salience_makes_a_pass_due_immediately(tmp_path) -> None:
 def _nudge_loop(provider, *, dispatch=None, tmp_path=None, store=None):
     registry = ToolRegistry()
     register_builtins(registry)
-    ctx = ToolCtx(extra={"continual_journal": lambda *a, **k: None})
+    ctx = ToolCtx(extra={"continual_journal": lambda *a, **k: None,
+                         "memory_store": SkillStore(tmp_path)})
     if dispatch is not None:
         ctx.extra["task_dispatch"] = dispatch
     skills = SkillStore(tmp_path) if tmp_path is not None else None

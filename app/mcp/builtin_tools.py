@@ -1069,161 +1069,40 @@ def _build_memory_bridge_tools(
 ) -> list:
     """The app-memory tools for the delegated (claude CLI) leg.
 
-    2026-08-31 decision (docs/MEMORY_ARCHITECTURE.md): the delegated leg gets
-    a BRIDGE to the app's memory rather than a note saying it has none. Each
-    tool reuses the fluid builtin handler over the same stores the native leg
-    wires through ``ctx.extra`` — Recall over the continual SkillStore,
-    SessionSearch/SessionView over PgFluidStore's recall hooks, Remember into
-    the same episodic journal. One difference is inherent to the leg: no
-    engine means no live synthesizer, so a Remember journals the fact and the
-    next NATIVE session's synthesis pass distills it into memories.json.
-
-    Gating mirrors the native side's: Recall needs the continual store
-    (code-mode or continual on), Remember needs continual learning, the
-    session pair needs a database. The returned list may be empty.
+    Remember, Recall and Forget share the native leg's owner-scoped store and
+    builtin handlers. Explicit writes commit before returning; neither a
+    native engine nor a background learner is required. SessionSearch and
+    SessionView remain separate database-backed conversation tools.
     """
     from app.core.config import settings
 
     tools: list = []
-    store_on = settings.fluid_code_mode or settings.fluid_continual
-    continual_on = settings.fluid_continual
     db_on = settings.managed_database_available()
+    frozen = frozenset({"Remember", "Recall", "Forget"} | ({"SessionSearch", "SessionView"} if db_on else set()))
 
-    # The bridged surface itself, for fluid's describe() specialization —
-    # cross-tool routing clauses collapse to the tools that actually exist
-    # here (ruling T9 for descriptions), e.g. SessionSearch does not point at
-    # HistorySearch, which the CLI leg does not have.
-    surface = set()
-    if store_on:
-        surface.add("Recall")
-    if continual_on:
-        surface.add("Remember")
-    if db_on:
-        surface.update({"SessionSearch", "SessionView"})
-    frozen = frozenset(surface)
+    def _err(message: str) -> dict:
+        return {"content": [{"type": "text", "text": message}], "isError": True}
 
     def _fluid_ctx() -> Any:
         from fluid.tools.registry import ToolCtx
-
         return ToolCtx(cwd=cwd or ".", session_id=session_id)
 
-    if continual_on:
-        # Description is the bridge's own: fluid's speaks of "the # Memory
-        # list shown at the start of every future session", which only native
-        # legs render — here the honest promise is Recall + future native
-        # sessions' snapshots.
-        @tool(
-            "Remember",
-            "Save a durable fact to the app's cross-session memory (shared by "
-            "every session and model). Call it the moment the user asks you to "
-            "remember something, states a lasting preference, or corrects you "
-            "on something worth never repeating; also for durable facts you "
-            "establish yourself. One call per fact; `text` is the fact itself "
-            "in one or two plain sentences — a statement about the world, not "
-            "an instruction to yourself. A background learner distills it into "
-            "the shared memory shortly after; retrieve with Recall. Never "
-            "store secrets: record where a credential lives, not its value.",
-            {
-                "type": "object",
-                "properties": {
-                    "text": {
-                        "type": "string",
-                        "description": (
-                            "The fact, in one or two plain sentences. State "
-                            "what is true, not what to do."
-                        ),
-                    },
-                    "scope": {
-                        "type": "string",
-                        "enum": ["global", "project"],
-                        "description": (
-                            "'project' when the fact is about this project's "
-                            "code, layout, or conventions; 'global' (default) "
-                            "when it is about the user or their machine in "
-                            "general."
-                        ),
-                    },
-                },
-                "required": ["text"],
-            },
-        )
-        async def remember_tool(args: dict) -> dict:
+    from fluid.tools.builtins import remember, recall, forget
+
+    def _memory_bridge(module):
+        async def handler(args: dict) -> dict:
             try:
-                from fluid.codemode.skills import SkillStore
-                from fluid.tools.builtins import remember as remember_mod
-
-                from app.core.fluid_memory import skills_root
-
-                skills = SkillStore(skills_root())
-
-                def _journal(text: str, scope: Optional[str] = None) -> None:
-                    entry: Dict[str, Any] = {"kind": "remember", "text": text}
-                    if scope:
-                        entry["scope"] = scope
-                    skills.journal_append(entry)
-
+                from app.core.fluid_memory import session_memory
+                store, project = session_memory(session_id, cwd)
                 ctx = _fluid_ctx()
-                ctx.extra["continual_journal"] = _journal
-                outcome = await remember_mod.handler(args, ctx)
-                return _fluid_outcome_result(outcome)
-            except Exception as e:  # noqa: BLE001
-                logger.exception("Remember bridge failed")
-                return _err(f"failed to record: {e}")
+                ctx.extra.update(memory_store=store, recall_store=store, memory_project=project)
+                return _fluid_outcome_result(await module.handler(args, ctx))
+            except Exception:
+                logger.exception("Memory bridge failed")
+                return {"content": [{"type": "text", "text": "Memory storage is unavailable; no successful save or deletion is confirmed."}], "isError": True}
+        return tool(module.SPEC.name, module.SPEC.description, module.SPEC.input_schema)(handler)
 
-        tools.append(remember_tool)
-
-    if store_on:
-        @tool(
-            "Recall",
-            "Search the app's long-term memory: every fact the continual "
-            "learner has kept (archived entries and other projects' entries "
-            "included) plus the saved-skill index. Use it when the task "
-            "touches something that may have been learned before — a "
-            "preference, a convention, a port, a past correction. Returns the "
-            "top matches per category with their source."
-            + (
-                " For past conversations and what happened in them, use "
-                "SessionSearch instead — Recall covers learned facts and "
-                "skills, not transcripts."
-                if "SessionSearch" in frozen
-                else ""
-            ),
-            {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": (
-                            "Keywords (matched case-insensitively, best "
-                            "matches first)."
-                        ),
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": (
-                            "Maximum matches per category (default 3, max 10)."
-                        ),
-                    },
-                },
-                "required": ["query"],
-            },
-        )
-        async def recall_tool(args: dict) -> dict:
-            try:
-                from fluid.codemode.skills import SkillStore
-                from fluid.tools.builtins import recall as recall_mod
-
-                from app.core.fluid_memory import skills_root
-
-                ctx = _fluid_ctx()
-                ctx.extra["recall_store"] = SkillStore(skills_root())
-                outcome = await recall_mod.handler(args, ctx)
-                return _fluid_outcome_result(outcome)
-            except Exception as e:  # noqa: BLE001
-                logger.exception("Recall bridge failed")
-                return _err(f"recall failed: {e}")
-
-        tools.append(recall_tool)
+    tools.extend(_memory_bridge(module) for module in (remember, recall, forget))
 
     if db_on:
         from fluid.tools.builtins import session_search as session_search_mod
@@ -2583,6 +2462,7 @@ def get_builtin_tool_names() -> List[str]:
         # unconditionally — per-session registration gates real availability.
         "mcp__builtins__Remember",
         "mcp__builtins__Recall",
+        "mcp__builtins__Forget",
         "mcp__builtins__SessionSearch",
         "mcp__builtins__SessionView",
     ]

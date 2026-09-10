@@ -1647,10 +1647,10 @@ async def test_native_leg_code_mode_failure_degrades_to_none(monkeypatch, tmp_pa
     plain JSON tool calling."""
     import app.core.provider.harness_adapter as ha
 
-    def _boom(root):
+    def _boom(*args, **kwargs):
         raise OSError("no such volume")
 
-    monkeypatch.setattr(ha, "SkillStore", _boom)
+    monkeypatch.setattr("app.core.fluid_memory.session_memory", _boom)
     captured = await _connect_native_capturing(monkeypatch, tmp_path)
     assert captured["codemode"] is None
     assert captured["journal"] is None
@@ -1861,10 +1861,10 @@ async def test_code_mode_prompt_keys_on_the_session_not_the_setting(
     not have."""
     import app.core.provider.harness_adapter as ha
 
-    def _boom(root):
+    def _boom(*args, **kwargs):
         raise OSError("no such volume")
 
-    monkeypatch.setattr(ha, "SkillStore", _boom)
+    monkeypatch.setattr("app.core.fluid_memory.session_memory", _boom)
     captured = await _connect_code_mode(monkeypatch, agent_workspace)
 
     assert captured["codemode"] is None
@@ -5821,6 +5821,9 @@ async def test_native_prompt_carries_the_recall_block_with_a_db(
 ):
     import app.core.provider.harness_adapter as ha
     from app.core.provider.fluid_pg_store import PgFluidStore
+    from fluid.codemode.skills import SkillStore
+    monkeypatch.setattr("app.core.fluid_memory.session_memory",
+                        lambda *args: (SkillStore(agent_workspace / "memory"), "project:test"))
 
     captured = await _connect_with_github(monkeypatch, agent_workspace, False)
     assert isinstance(captured["store"], PgFluidStore)

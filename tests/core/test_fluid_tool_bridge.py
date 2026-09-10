@@ -170,7 +170,7 @@ async def test_build_registry_bridges_recorded_servers_and_dispatches():
     assert "Monitor" in str(text)
 
 
-def test_every_static_risk_map_tool_name_is_current():
+def test_every_static_risk_map_tool_name_is_current(monkeypatch):
     """The risk maps must track the modules' actual @tool names — a rename in
     app/mcp/* without a map update silently regresses that tool to the gated
     default, so surface drift here (informational, cheap to keep exact)."""
@@ -196,6 +196,18 @@ def test_every_static_risk_map_tool_name_is_current():
             m = re.search(r"_TOOL_NAMES\s*=\s*\[(.*?)\]", src, re.S)
             if m:
                 actual |= set(re.findall(r'["\']([\w\-]+)["\']', m.group(1)))
+        if server == "builtins":
+            from app.core.config import settings
+            from app.mcp.builtin_tools import _build_memory_bridge_tools
+            from claude_agent_sdk import tool
+
+            # Building these tool objects does not execute their handlers or
+            # open a store. Conversation-history registration is covered by
+            # the literal decorators above and has its own database tests.
+            monkeypatch.setattr(type(settings), "managed_database_available", lambda self: False)
+            actual.update(entry.name for entry in _build_memory_bridge_tools(
+                tool, session_id="risk-map-probe", cwd=None,
+            ))
         mapped = set(SERVER_RISK_MAPS[server])
         stale = mapped - actual
-        assert not stale, f"{server}: risk map entries with no matching @tool: {sorted(stale)}"
+        assert not stale, f"{server}: risk map entries with no matching registered tool: {sorted(stale)}"

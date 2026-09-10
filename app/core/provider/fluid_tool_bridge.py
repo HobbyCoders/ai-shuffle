@@ -136,8 +136,9 @@ def register_sdk_tools(
 
 BUILTINS_RISK_MAP: Mapping[str, str] = {
     # The delegated leg's app-memory bridge — same risk fluid assigns the
-    # bare-named originals (Remember journals a proposal; the curator decides).
-    "Remember": "safe",
+    # bare-named originals. Explicit memory writes require the write policy.
+    "Remember": "write",
+    "Forget": "write",
     "Recall": "safe",
     "SessionSearch": "safe",
     "SessionView": "safe",
@@ -261,7 +262,7 @@ DEFERRED_SDK_SERVERS: frozenset[str] = frozenset({
 # stores via ctx.extra.
 NATIVE_SHADOWED_BUILTINS: frozenset[str] = frozenset({
     "Task", "Monitor", "ToolSearch",
-    "Remember", "Recall", "SessionSearch", "SessionView",
+    "Remember", "Recall", "Forget", "SessionSearch", "SessionView",
 })
 
 

@@ -72,11 +72,16 @@ DEFAULT_SESSION_MODE = "code"
 # reader for the files the user attached to the chat itself. ``Read`` is on the
 # list because the composer keeps its attach button and an attachment reaches
 # the model as an ``@<fullPath>`` text reference — without a reader the model
-# can see the filename and nothing else. Nothing here can write or run anything
-# on the host, and ``Read`` is fenced to the uploads directory by
+# can see the filename and nothing else. Memory tools can change only the
+# authenticated owner's bounded fact store; no shell or general file writer is
+# exposed. ``Read`` is fenced to the uploads directory by
 # ``chat_mode_read_permitted`` (the name half of the ceiling is this list; the
 # path half is that function).
-CHAT_MODE_TOOL_SURFACE: List[str] = ["WebSearch", "WebFetch", "Read"]
+CHAT_MODE_MEMORY_TOOLS: List[str] = [
+    "Remember", "Recall", "Forget",
+    "mcp__builtins__Remember", "mcp__builtins__Recall", "mcp__builtins__Forget",
+]
+CHAT_MODE_TOOL_SURFACE: List[str] = ["WebSearch", "WebFetch", "Read", *CHAT_MODE_MEMORY_TOOLS]
 
 # Where the chat lane's attachments land, under the workspace root. ONE shared
 # directory rather than one per session: a brand-new chat has no session id at

@@ -436,6 +436,7 @@ class Settings(BaseSettings):
     #     None = <data_dir>/fluid/skills (never fluid's ~/.fluid default).
     fluid_code_mode: bool = True
     fluid_continual: bool = True
+    fluid_memory_enabled: bool = True
     fluid_continual_model: Optional[str] = None
     fluid_skills_dir: Optional[str] = None
 
