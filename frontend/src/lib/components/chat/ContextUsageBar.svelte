@@ -78,6 +78,7 @@
 		type UsageWindow,
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance } from '$lib/stores/usage-target';
+	import { claudeAuthenticated } from '$lib/stores/auth.svelte';
 
 	interface Props {
 		onOpenChange?: (open: boolean) => void;
@@ -454,7 +455,14 @@
 	//
 	// With neither known the subtext falls back to the resolved install's device
 	// name / "Other device" hint rather than dropping that disambiguation.
-	const isSelf = $derived(resolvedKey != null && resolvedKey === selfBucketKey($rateLimit));
+	const isSelf = $derived(target == null || target === $rateLimit.selfInstanceId ||
+		(resolvedKey != null && resolvedKey === selfBucketKey($rateLimit)));
+	// Empty usage buckets also exist on installs without Claude. Subscription
+	// display metadata defaults to "subscription", so it is not proof of an account.
+	const hasClaude = $derived(Boolean(
+		resolvedBucket?.available || resolvedBucket?.accountId || resolvedBucket?.accountEmail ||
+		(isSelf && ($claudeAuthenticated || getClaudeAuth().auth_kind === 'api'))
+	));
 	const deviceLabel = $derived(resolvedBucket?.deviceName ?? null);
 	const claudeDisplay = $derived<ProviderDisplay>(
 		getClaudeDisplay({
@@ -687,70 +695,74 @@
 				{/if}
 			</div>
 
-			<div class="popover-divider"></div>
+			{#if hasClaude || Object.keys($rateLimit.providerBuckets ?? {}).length > 0}
+				<div class="popover-divider"></div>
+			{/if}
 
 			<!-- ═══ Plan usage limits (Claude) ═══ -->
-			<!-- The header always renders (provider parity): the "Claude" brand +
-			     its auth-kind subtext (plan / "API"), falling back to the resolved
-			     device name or "Other device". It is the collapse toggle for the window rows;
-			     collapsed shows the least quota remaining and hides the rows +
-			     "No usage data" line. No account naming, no "as of" staleness line. -->
-			<div class="popover-section">
-				<button
-					type="button"
-					class="sec-header"
-					aria-expanded={planRowsVisible}
-					aria-label="Plan usage limits — {planRowsVisible ? 'collapse' : 'expand'}"
-					onclick={() => toggleSection('plan')}
-				>
-					<span class="sec-head-labels">
-						<span class="section-device">{claudeDisplay.name}</span>
-						{#if claudeSubtext}
-							<span class="section-account">{claudeSubtext}</span>
-						{/if}
-					</span>
-					{#if !planRowsVisible && planMinRemaining != null}
-						<span class="row-pct {remainingSeverity(planMinRemaining)} sec-summary"
-							>{planMinRemaining}% left</span
-						>
-					{/if}
-					<svg
-						class="ctx-chevron {planRowsVisible ? '' : 'collapsed'}"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						aria-hidden="true"
+			{#if hasClaude}
+				<!-- The configured account's header shows the "Claude" brand +
+				     its auth-kind subtext (plan / "API"), falling back to the resolved
+				     device name or "Other device". It is the collapse toggle for the window rows;
+				     collapsed shows the least quota remaining and hides the rows +
+				     "No usage data" line. No account naming, no "as of" staleness line. -->
+				<div class="popover-section">
+					<button
+						type="button"
+						class="sec-header"
+						aria-expanded={planRowsVisible}
+						aria-label="Plan usage limits — {planRowsVisible ? 'collapse' : 'expand'}"
+						onclick={() => toggleSection('plan')}
 					>
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-					</svg>
-				</button>
-			</div>
-			{#if planRowsVisible}
-				{#if items.length > 0}
-					{#each items as item (item.type)}
-						<div class="popover-row">
-							<div class="row-line">
-								<span class="row-label">{item.label}</span>
-								<span class="row-value">
-									<span class="row-reset-inline">
-										{#if item.countdown}
-											resets in {item.countdown}
-										{:else if item.hasReset}
-											resets soon
-										{:else}
-											no reset window
-										{/if}
+						<span class="sec-head-labels">
+							<span class="section-device">{claudeDisplay.name}</span>
+							{#if claudeSubtext}
+								<span class="section-account">{claudeSubtext}</span>
+							{/if}
+						</span>
+						{#if !planRowsVisible && planMinRemaining != null}
+							<span class="row-pct {remainingSeverity(planMinRemaining)} sec-summary"
+								>{planMinRemaining}% left</span
+							>
+						{/if}
+						<svg
+							class="ctx-chevron {planRowsVisible ? '' : 'collapsed'}"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							aria-hidden="true"
+						>
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+						</svg>
+					</button>
+				</div>
+				{#if planRowsVisible}
+					{#if items.length > 0}
+						{#each items as item (item.type)}
+							<div class="popover-row">
+								<div class="row-line">
+									<span class="row-label">{item.label}</span>
+									<span class="row-value">
+										<span class="row-reset-inline">
+											{#if item.countdown}
+												resets in {item.countdown}
+											{:else if item.hasReset}
+												resets soon
+											{:else}
+												no reset window
+											{/if}
+										</span>
+										<span class="row-pct {item.severity}">{item.pct}% left</span>
 									</span>
-									<span class="row-pct {item.severity}">{item.pct}% left</span>
-								</span>
+								</div>
+								<div class="row-bar">
+									<div class="row-fill {item.severity}" style="width: {item.pct}%"></div>
+								</div>
 							</div>
-							<div class="row-bar">
-								<div class="row-fill {item.severity}" style="width: {item.pct}%"></div>
-							</div>
-						</div>
-					{/each}
-				{:else}
-					<div class="row-reset no-data">No usage data yet</div>
+						{/each}
+					{:else}
+						<div class="row-reset no-data">No usage data yet</div>
+					{/if}
 				{/if}
 			{/if}
 

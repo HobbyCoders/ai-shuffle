@@ -64,6 +64,7 @@ const mocks = vi.hoisted(() => {
 		// real one needs a live `GET /models`. Reset in beforeEach, so every
 		// other test in this file sees the un-hydrated (all-null) state.
 		claudeAuth: { auth_kind: null as string | null, plan_type: null as string | null },
+		claudeAuthenticated: false,
 	};
 });
 
@@ -82,6 +83,15 @@ vi.mock('$lib/api/sessions', async (importOriginal) => {
 vi.mock('$lib/constants/models', async (importOriginal) => {
 	const actual = await importOriginal<Record<string, unknown>>();
 	return { ...actual, getClaudeAuth: () => mocks.claudeAuth };
+});
+vi.mock('$lib/stores/auth.svelte', async (importOriginal) => {
+	const actual = await importOriginal<Record<string, unknown>>();
+	return { ...actual, claudeAuthenticated: {
+		subscribe(fn: (value: boolean) => void) {
+			fn(mocks.claudeAuthenticated);
+			return () => {};
+		},
+	} };
 });
 
 const future = () => new Date(Date.now() + 3_600_000).toISOString();
@@ -103,11 +113,13 @@ beforeEach(() => {
 	mocks.getContextUsage.mockReset();
 	mocks.getContextUsage.mockResolvedValue({ available: false, reason: 'not_connected' });
 	mocks.claudeAuth = { auth_kind: null, plan_type: null };
+	mocks.claudeAuthenticated = false;
 });
 afterEach(() => cleanup());
 
 describe('ContextUsageBar — popover positioning', () => {
 	it('updates mounted expansion controls from remote preferences without closing the popover or echoing', async () => {
+		rateLimit.applySnapshot({ available: true, windows: [] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		mocks.adapters.get('context_breakdown_open')!.apply(false);
@@ -240,7 +252,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 			expect(container.textContent).toContain('42%');
 			expect(container.textContent).toMatch(/resets in/);
 		} else {
-			expect(container.textContent).toContain('No usage data yet');
+			expect(container.textContent).not.toContain('Claude');
 			expect(container.textContent).not.toContain('$0.00');
 		}
 		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
@@ -340,6 +352,7 @@ describe('ContextUsageBar — context breakdown', () => {
 	});
 
 	it('collapses on toggle: hides rows, collapses the bar to a single fill, keeps limits, persists to localStorage', async () => {
+		rateLimit.applySnapshot({ available: true, windows: [] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		const header = container.querySelector('.ctx-header') as HTMLButtonElement;
@@ -678,7 +691,41 @@ describe('ContextUsageBar — footer', () => {
 });
 
 describe('ContextUsageBar — plan usage limits', () => {
-	it('shows "No usage data yet" when no windows are known', async () => {
+	it('hides Claude without an account while keeping other providers visible', async () => {
+		// The registry defaults to subscription metadata even without an account.
+		mocks.claudeAuth = { auth_kind: 'subscription', plan_type: null };
+		rateLimit.applySnapshot({ available: false, windows: [], providers: [
+			{ provider_id: 'codex-1', provider_type: 'chatgpt', provider_name: 'ChatGPT',
+				windows: [{ type: 'five_hour', utilization: 30, resets_at: future() }] },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.ctx-header')).not.toBeNull();
+		expect(Array.from(container.querySelectorAll('.section-device'), e => e.textContent)).toEqual(['OpenAI']);
+		expect(container.textContent).toContain('70% left');
+		expect(container.querySelectorAll('.popover-divider')).toHaveLength(1);
+	});
+
+	it('hides Claude before credentials or snapshots are known', async () => {
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.ctx-header')).not.toBeNull();
+		expect(container.querySelector('.popover-section')).toBeNull();
+		expect(container.querySelector('.popover-divider')).toBeNull();
+	});
+
+	it('updates Claude visibility when credentials become available or are removed', async () => {
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		rateLimit.applySnapshot({ available: true, windows: [] });
+		await waitFor(() => expect(container.querySelector('.section-device')?.textContent).toBe('Claude'));
+		rateLimit.applySnapshot({ available: false, windows: [] });
+		await waitFor(() => expect(container.querySelector('.popover-section')).toBeNull());
+	});
+
+	it.each(['api', 'subscription'])('shows "No usage data yet" for %s credentials before a usage snapshot arrives', async (authKind) => {
+		mocks.claudeAuth = { auth_kind: authKind, plan_type: null };
+		mocks.claudeAuthenticated = authKind === 'subscription';
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.querySelector('.usage-popover')).not.toBeNull();
@@ -687,6 +734,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 	});
 
 	it('never shows the "Plan usage limits" title, whether the section is empty or has rows', async () => {
+		rateLimit.applySnapshot({ available: true, windows: [] });
 		const { container: empty } = render(ContextUsageBar);
 		await openPopover(empty);
 		expect(empty.textContent).not.toContain('Plan usage limits');

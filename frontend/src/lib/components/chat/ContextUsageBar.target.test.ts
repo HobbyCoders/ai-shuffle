@@ -4,7 +4,7 @@
  * The 5-hour window is per account, and each install runs a different account.
  * The limits section must track the bucket of the install that owns the viewed
  * session — an offloaded (remote) session shows the worker's usage, and a remote
- * target with no snapshot yet shows "No usage data yet" (never the local
+ * target with no account snapshot hides Claude (never showing the local
  * account's numbers). Here we mock `usage-target` to drive the resolved install
  * directly.
  */
@@ -124,7 +124,7 @@ describe('ContextUsageBar — resolved target', () => {
 		expect(container.textContent).not.toContain('88%');
 	});
 
-	it('shows "No usage data yet" for a remote target with no snapshot yet', async () => {
+	it('hides Claude for a remote target with no account snapshot', async () => {
 		// Only the self install is known; the viewed session runs on an install we
 		// have no bucket for → the limits section must NOT fall back to self numbers.
 		rateLimit.applySnapshot({
@@ -145,10 +145,21 @@ describe('ContextUsageBar — resolved target', () => {
 		// The pill is always present now.
 		expect(container.querySelector('.usage-indicator')).not.toBeNull();
 		await openPopover(container);
-		expect(container.textContent).toContain('No usage data yet');
+		expect(container.querySelector('.popover-section')).toBeNull();
 		expect(container.querySelectorAll('.popover-row').length).toBe(0);
 		// Never borrow the self install's window/label.
 		expect(container.textContent).not.toContain('Studio');
 		expect(container.textContent).not.toContain('88%');
+	});
+
+	it('keeps a configured remote account visible when usage is unavailable', async () => {
+		rateLimit.applySnapshot({ available: false, windows: [], self_instance_id: 'primary', snapshots: [
+			{ instance_id: 'worker', account_id: 'claude-account', available: false, windows: [] },
+		] });
+		setTarget('worker');
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
+		expect(container.textContent).toContain('No usage data yet');
 	});
 });
