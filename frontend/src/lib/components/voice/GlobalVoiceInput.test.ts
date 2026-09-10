@@ -78,7 +78,10 @@ describe('global voice input', () => {
 		await tick();
 		expect(screen.getByText('Hello')).toBeTruthy();
 		handlers.onSpeech?.(false);
-		await vi.advanceTimersByTimeAsync(1800);
+		// Server VAD has already waited 700ms before reporting silence.
+		await vi.advanceTimersByTimeAsync(4299);
+		expect(stop).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
 		expect(stop).toHaveBeenCalledTimes(1);
 		expect(screen.getByRole('status').textContent).toContain('Transcribing');
 		// Clicking a composer microphone during the drain must not take over
@@ -105,7 +108,10 @@ describe('global voice input', () => {
 		await vi.advanceTimersByTimeAsync(2000);
 		expect(stop).not.toHaveBeenCalled();
 		handlers.onSpeech?.(false);
-		await vi.advanceTimersByTimeAsync(1800);
+		// Server VAD has already waited 700ms before reporting silence.
+		await vi.advanceTimersByTimeAsync(4299);
+		expect(stop).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
 		expect(stop).toHaveBeenCalledTimes(1);
 	});
 
@@ -152,7 +158,10 @@ describe('global voice input', () => {
 		expect(screen.queryByRole('complementary')).toBeNull();
 		handlers.onSpeech?.(true);
 		handlers.onSpeech?.(false);
-		await vi.advanceTimersByTimeAsync(1800);
+		// Server VAD has already waited 700ms before reporting silence.
+		await vi.advanceTimersByTimeAsync(4299);
+		expect(stop).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
 		expect(sink).toHaveBeenCalledWith('Hello world.');
 		expect(writeText).not.toHaveBeenCalled();
 	});
@@ -165,7 +174,10 @@ describe('global voice input', () => {
 		expect(get(globalSttState).isRecording).toBe(true);
 		handlers.onSpeech?.(true);
 		handlers.onSpeech?.(false);
-		await vi.advanceTimersByTimeAsync(1800);
+		// Server VAD has already waited 700ms before reporting silence.
+		await vi.advanceTimersByTimeAsync(4299);
+		expect(stop).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
 		expect(writeText).toHaveBeenCalledWith('Hello world.');
 	});
 });

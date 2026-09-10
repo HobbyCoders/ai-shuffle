@@ -10,6 +10,7 @@ vi.mock('./sttStream', () => ({
 	startSttStream: vi.fn(), SttUnsupportedError: class extends Error {}
 }));
 import { cancelVoiceInput, globalSttState, triggerToggle } from './globalStt';
+import { playEarcon } from '$lib/utils/earcon';
 
 describe('batch voice input automatic finish', () => {
 	let volume: number;
@@ -86,7 +87,10 @@ describe('batch voice input automatic finish', () => {
 		volume = 0.1;
 		await vi.advanceTimersByTimeAsync(600);
 		volume = 0;
-		await vi.advanceTimersByTimeAsync(2551);
+		await vi.advanceTimersByTimeAsync(5049);
+		expect(get(globalSttState).isRecording).toBe(true);
+		expect(requests).toHaveLength(0);
+		await vi.advanceTimersByTimeAsync(2);
 		expect(get(globalSttState).isRecording).toBe(false);
 		expect(get(globalSttState).isTranscribing).toBe(true);
 		expect(stopTrack).toHaveBeenCalledOnce();
@@ -97,6 +101,10 @@ describe('batch voice input automatic finish', () => {
 		expect(writeText).toHaveBeenCalledWith('Batch transcript.');
 		expect(get(globalSttState).isTranscribing).toBe(false);
 		expect(get(globalSttState).mode).toBe('idle');
+		vi.mocked(playEarcon).mockClear();
+		cancelVoiceInput({ discard: false });
+		cancelVoiceInput({ discard: false });
+		expect(playEarcon).not.toHaveBeenCalled();
 	});
 
 	it('waits for first speech, resets the quiet countdown on resumed speech, and clears timers on discard', async () => {

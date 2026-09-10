@@ -135,9 +135,9 @@ const MIN_RECORDING_DURATION = 500; // 500ms minimum
 // natural gesture (stop talking) had no natural outcome.
 //
 // Server VAD has already waited 700ms before reporting silence. Batch and
-// live models without VAD detect silence locally and need the full 2.5s.
-const SILENCE_AUTO_STOP_LIVE_MS = 1800;
-const SILENCE_AUTO_STOP_BATCH_MS = 2500;
+// live models without VAD detect silence locally and need the full five seconds.
+const SILENCE_AUTO_STOP_BATCH_MS = 5000;
+const SILENCE_AUTO_STOP_LIVE_MS = SILENCE_AUTO_STOP_BATCH_MS - 700;
 
 // A session where nothing is ever said should not hold the microphone open
 // indefinitely either.
@@ -1112,6 +1112,7 @@ export function clearError(): void {
 export function cancelVoiceInput({ discard = true }: { discard?: boolean } = {}): void {
 	if (!browser) return;
 
+	const wasRecording = get(globalSttState).isRecording;
 	runId++;
 	clearAutoStop();
 	if (discard) liveSink?.onDiscard?.();
@@ -1139,7 +1140,8 @@ export function cancelVoiceInput({ discard = true }: { discard?: boolean } = {})
 	mediaStream = null;
 	audioChunks = [];
 
-	playEarcon('stop');
+	// Navigation also cleans up completed runs; only active recording needs a stop cue.
+	if (wasRecording) playEarcon('stop');
 	globalSttUpload.set(null);
 	globalSttState.set({ ...initialState });
 }

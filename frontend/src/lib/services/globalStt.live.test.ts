@@ -9,6 +9,7 @@ vi.mock('$lib/stores/hotkeyPreferences.svelte', () => ({ hotkeyPreferences: {} }
 vi.mock('$lib/utils/earcon', () => ({ playEarcon: vi.fn(), primeEarcons: vi.fn(), setEarconsEnabled: vi.fn() }));
 vi.mock('./sttStream', () => ({ fetchSttCapability: mocks.capability, startSttStream: mocks.start, SttUnsupportedError: class extends Error {} }));
 import { cancelVoiceInput, globalSttState, toggleVoiceInput } from './globalStt';
+import { playEarcon } from '$lib/utils/earcon';
 
 describe('composer live transcription delivery', () => {
 	let handlers: SttStreamHandlers;
@@ -45,10 +46,13 @@ describe('composer live transcription delivery', () => {
 		expect(onCommit).not.toHaveBeenCalled();
 		expect(onText).toHaveBeenCalledTimes(1);
 	});
-	it('keeps no-VAD speech past 12 seconds and commits after 2.5 seconds of local silence', async () => {
+	it.each([
+		{ serverVad: false, silenceMs: 5000 },
+		{ serverVad: true, silenceMs: 4300 }
+	])('waits for five seconds of silence including server VAD ($serverVad)', async ({ serverVad, silenceMs }) => {
 		mocks.start.mockImplementation(async (callbacks: SttStreamHandlers) => {
 			handlers = callbacks;
-			callbacks.onReady?.({ model: 'gpt-live-transcribe', modelName: 'GPT Live Transcribe', partials: true, serverVad: false });
+			callbacks.onReady?.({ model: 'gpt-live-transcribe', modelName: 'GPT Live Transcribe', partials: true, serverVad });
 			callbacks.onCapture?.(); return session;
 		});
 		const onCommit = vi.fn();
@@ -59,7 +63,7 @@ describe('composer live transcription delivery', () => {
 		expect(get(globalSttState).isRecording).toBe(true);
 		expect(session.stop).not.toHaveBeenCalled();
 		handlers.onSpeech?.(false);
-		await vi.advanceTimersByTimeAsync(2499);
+		await vi.advanceTimersByTimeAsync(silenceMs - 1);
 		expect(session.stop).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(1);
 		expect(session.stop).toHaveBeenCalledOnce();
@@ -81,6 +85,40 @@ describe('composer live transcription delivery', () => {
 		toggleVoiceInput(vi.fn());
 		await vi.advanceTimersByTimeAsync(0);
 		expect(session.stop).toHaveBeenCalledTimes(2);
+	});
+	it('does not replay the stop cue when navigating after a completed transcription', async () => {
+		toggleVoiceInput(vi.fn(), { onText: vi.fn(), onCommit: vi.fn() });
+		await vi.advanceTimersByTimeAsync(0);
+		toggleVoiceInput(vi.fn());
+		await vi.advanceTimersByTimeAsync(0);
+		expect(get(globalSttState)).toMatchObject({ mode: 'idle', lastTranscription: 'Hello world.' });
+		expect(vi.mocked(playEarcon).mock.calls.filter(([cue]) => cue === 'stop')).toHaveLength(1);
+		vi.mocked(playEarcon).mockClear();
+		cancelVoiceInput({ discard: false });
+		cancelVoiceInput({ discard: false });
+		expect(playEarcon).not.toHaveBeenCalled();
+	});
+	it('plays a stop cue once when navigation interrupts recording', async () => {
+		toggleVoiceInput(vi.fn(), { onText: vi.fn(), onCommit: vi.fn() });
+		await vi.advanceTimersByTimeAsync(0);
+		vi.mocked(playEarcon).mockClear();
+		cancelVoiceInput({ discard: false });
+		cancelVoiceInput({ discard: false });
+		expect(playEarcon).toHaveBeenCalledExactlyOnceWith('stop');
+	});
+	it('does not replay the stop cue when cancelling a pending final transcript', async () => {
+		let resolve!: (text: string) => void;
+		session.stop.mockImplementation(() => new Promise((r) => { resolve = r; }));
+		toggleVoiceInput(vi.fn(), { onText: vi.fn(), onCommit: vi.fn() });
+		await vi.advanceTimersByTimeAsync(0);
+		toggleVoiceInput(vi.fn());
+		await vi.advanceTimersByTimeAsync(0);
+		expect(get(globalSttState).isTranscribing).toBe(true);
+		vi.mocked(playEarcon).mockClear();
+		cancelVoiceInput({ discard: false });
+		resolve('Late transcript');
+		await vi.advanceTimersByTimeAsync(0);
+		expect(playEarcon).not.toHaveBeenCalled();
 	});
 	it('navigation settles visible speech into the old draft and rejects pending final', async () => {
 		const onText = vi.fn(); const onCommit = vi.fn(); const onDiscard = vi.fn();
