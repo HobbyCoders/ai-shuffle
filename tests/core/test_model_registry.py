@@ -602,10 +602,15 @@ class TestRegistryPayloadClaude:
         claude = m.registry_payload()["claude"]
         assert claude == {"auth_kind": "subscription", "plan_type": None}
 
-    def test_no_active_account_reports_subscription_with_no_plan(self, mock_db, monkeypatch):
+    def test_no_active_account_does_not_advertise_a_subscription(self, mock_db, monkeypatch):
         monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", lambda _name: None)
         claude = m.registry_payload()["claude"]
-        assert claude == {"auth_kind": "subscription", "plan_type": None}
+        assert claude == {"auth_kind": None, "plan_type": None}
+
+    def test_stale_active_pointer_does_not_advertise_a_subscription(self, mock_db, monkeypatch):
+        monkeypatch.setattr(settings_crypto, "get_decrypted_api_key", lambda _name: None)
+        db.set_system_setting(f"claude_active_account:{settings.effective_instance_id}", "deleted-account")
+        assert m.registry_payload()["claude"]["auth_kind"] is None
 
     def test_db_failure_degrades_to_nulls(self, monkeypatch):
         """Same contract as ``_providers_payload``: never 500 GET /api/models."""

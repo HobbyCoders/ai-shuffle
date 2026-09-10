@@ -24,6 +24,7 @@ beforeAll(async () => {
 		],
 		default: 'sonnet',
 		legacy_map: {},
+		claude: { auth_kind: 'subscription', plan_type: null },
 		providers: [
 			{
 				id: 'openai-row',

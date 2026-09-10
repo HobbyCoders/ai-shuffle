@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ModelPickerPanel from './ModelPickerPanel.svelte';
 import { reloadFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 import { hydrateModelRegistry } from '$lib/constants/models';
+import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 
 const mocks = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api: { get: mocks.get } }));
@@ -54,9 +55,10 @@ describe('ModelPickerPanel', () => {
 		const onContextChoiceSelect = vi.fn();
 		const onSelect = vi.fn();
 		const { rerender } = render(ModelPickerPanel, {
-			props: { groups, options, value: 'prov:openai:gpt-6-astra', onSelect,
+			props: { ...buildModelPickerCatalog(), value: 'prov:openai:gpt-6-astra', onSelect,
 				contextChoice: '1m', onContextChoiceSelect }
 		});
+		expect(screen.getByRole('option', { name: 'GPT-6 Astra' })).toBeTruthy();
 		const standard = screen.getByRole('radio', { name: '256K · Standard' });
 		const extended = screen.getByRole('radio', { name: '1M · Extended' });
 		expect(extended.tabIndex).toBe(0);

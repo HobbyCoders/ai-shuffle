@@ -14,6 +14,12 @@
 
 import { api } from './client';
 
+export const ACCOUNT_CHANGED_EVENT = 'shuffle-account-changed';
+
+function notifyAccountChanged() {
+	if (typeof window !== 'undefined') window.dispatchEvent(new Event(ACCOUNT_CHANGED_EVENT));
+}
+
 export type AccountLinkState =
 	| 'disconnected'
 	| 'waiting'
@@ -71,6 +77,7 @@ export async function beginAccountConnection(workerName: string): Promise<Accoun
 /** Sign this worker out of its account (other workers and phones keep theirs). */
 export async function disconnectAccount(): Promise<AccountConnection> {
 	const result = await api.delete<AccountConnection>('/mobile/hub/connection');
+	notifyAccountChanged();
 	return result as AccountConnection;
 }
 
@@ -84,7 +91,9 @@ export async function revokeAccountRegistration(kind: 'servers' | 'devices', id:
 }
 
 export async function setAccountUsername(username: string): Promise<AccountProfile> {
-	return api.patch<AccountProfile>('/mobile/hub/account', { username: username.trim() });
+	const profile = await api.patch<AccountProfile>('/mobile/hub/account', { username: username.trim() });
+	notifyAccountChanged();
+	return profile;
 }
 
 /** Mirrors the hub rule so the form can validate before a round trip. */

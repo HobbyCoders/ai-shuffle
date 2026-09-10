@@ -143,9 +143,8 @@ def _lock_instance_id_file(path: Path):
     with path.open("a+b") as lock_file:
         if os.name == "nt":
             import msvcrt
-            if lock_file.tell() == 0:
-                lock_file.write(b"\0")
-                lock_file.flush()
+            # Byte-range locks can extend past EOF. A marker write before
+            # locking races another process that already owns that byte.
             lock_file.seek(0)
             msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
         else:
@@ -164,9 +163,9 @@ def _lock_instance_id_file(path: Path):
 def _get_or_create_persisted_instance_id(data_dir: Path, service_name: str) -> str:
     """Return one process-stable ID, persisted to data_dir/.instance_id.
 
-    The mutex covers the cache AND the nonfatal in-memory fallback. A sidecar
-    file lock and atomic rename additionally make first use safe for multiple
-    processes sharing a volume. Existing nonempty IDs are never replaced.
+    A sidecar file lock and atomic rename make first use safe across processes.
+    Broken storage must not manufacture a new process-local identity: doing so
+    loses the existing account binding and can register a duplicate on restart.
     """
     global _cached_persisted_instance_id
     with _persisted_instance_id_lock:
@@ -176,24 +175,29 @@ def _get_or_create_persisted_instance_id(data_dir: Path, service_name: str) -> s
         id_file = data_dir / ".instance_id"
         try:
             stored = id_file.read_text().strip()
-            if stored:
-                _cached_persisted_instance_id = stored
-                return stored  # Reading an established ID needs no writable lock.
-        except OSError:
+            if not stored:
+                raise RuntimeError(f"Saved worker instance ID is empty: {id_file}. Restore the data volume before starting.")
+            _cached_persisted_instance_id = stored
+            return stored  # Reading an established ID needs no writable lock.
+        except FileNotFoundError:
             pass
+        except (OSError, UnicodeError) as exc:
+            raise RuntimeError(f"Cannot read saved worker instance ID: {id_file}. Restore access to the data volume.") from exc
 
         import uuid
         new_id = f"{service_name}-{uuid.uuid4().hex[:8]}"
         try:
             data_dir.mkdir(parents=True, exist_ok=True)
             with _lock_instance_id_file(data_dir / ".instance_id.lock"):
-                # Another process may have published while we waited. Only an
-                # absent or empty file is repairable, not an unreadable one.
+                # Another process may have published while we waited. Never
+                # replace an existing empty/corrupt/unreadable identity.
                 try:
                     stored = id_file.read_text().strip()
                 except FileNotFoundError:
-                    stored = ""
-                if stored:
+                    stored = None
+                if stored is not None:
+                    if not stored:
+                        raise RuntimeError(f"Saved worker instance ID is empty: {id_file}. Restore the data volume.")
                     new_id = stored
                 else:
                     temporary = None
@@ -210,11 +214,11 @@ def _get_or_create_persisted_instance_id(data_dir: Path, service_name: str) -> s
                     finally:
                         if temporary is not None:
                             temporary.unlink(missing_ok=True)
-        except OSError as exc:
-            # Keep startup nonfatal on unwritable storage, but never change
-            # identity between callers in this process. Cross-process stability
-            # requires a writable volume (or an explicit INSTANCE_ID).
-            logger.warning("Cannot persist instance ID; using a process-local ID: %s", exc)
+        except (OSError, UnicodeError) as exc:
+            raise RuntimeError(
+                f"Cannot persist worker instance ID in {data_dir}. "
+                "Restore access to the data volume; a temporary identity would break account registration."
+            ) from exc
 
         _cached_persisted_instance_id = new_id
         return new_id

@@ -8,9 +8,9 @@
  * the boot fetch resolves.
  *
  * If the boot fetch never completes (offline, auth error, network flake),
- * the module falls back to the compiled-in `STATIC_*` constants — which
- * mirror `app/core/model_registry.py` at build time. That keeps the app
- * fully functional without a backend connection.
+ * the module retains `STATIC_*` metadata to label stored Claude selections.
+ * Pickers do not offer those models until the backend reports a configured
+ * Claude credential; provider choices always come from the synced registry.
  *
  * Callers should never hardcode a model ID inline — import `getModels`,
  * the helper functions below, or one of the sentinel constants instead.
@@ -796,11 +796,17 @@ export async function hydrateModelRegistry(): Promise<boolean> {
 	return hydrateRegistry(true);
 }
 
+let registryRequest = 0;
+
 async function hydrateRegistry(refreshCapabilities: boolean): Promise<boolean> {
+	const request = ++registryRequest;
 	try {
 		const payload = await api.get<RegistryPayload>('/models');
-		if (!payload || !Array.isArray(payload.models) || payload.models.length === 0) {
-			console.warn('[model-registry] hydrate returned empty payload, keeping static fallback');
+		// A boot request can finish after the post-sync refresh. Never let its
+		// older (often empty) provider snapshot erase the newly synced catalog.
+		if (request !== registryRequest) return false;
+		if (!payload || !Array.isArray(payload.models)) {
+			console.warn('[model-registry] hydrate returned invalid payload, keeping previous registry');
 			return false;
 		}
 		const models = payload.models.map(mapPayloadModel);

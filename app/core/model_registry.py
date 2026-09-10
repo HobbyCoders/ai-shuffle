@@ -460,12 +460,10 @@ def _claude_payload() -> Dict[str, object]:
         from app.db import database
 
         account_id = claude_accounts.get_active_account_id()
-        plan = None
-        if account_id:
-            row = database.get_claude_account(account_id)
-            if row:
-                plan = row.get("subscription_type")
-        return {"auth_kind": "subscription", "plan_type": plan}
+        row = database.get_claude_account(account_id, include_credentials=True) if account_id else None
+        if not row or not row.get("credentials"):
+            return {"auth_kind": None, "plan_type": None}
+        return {"auth_kind": "subscription", "plan_type": row.get("subscription_type")}
     except Exception as e:  # noqa: BLE001 — display metadata is never fatal
         logger.warning("Could not resolve Claude auth metadata for registry: %s", e)
         return {"auth_kind": None, "plan_type": None}

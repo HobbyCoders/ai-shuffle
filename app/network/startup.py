@@ -32,9 +32,14 @@ class PrivateDatabaseRequiredError(RuntimeError):
 
 
 def initialize() -> Optional[engine.NetworkContext]:
-    ident = identity_mod.load()
-    logger.info("Device identity %s (%s)", ident.device_id, ident.fingerprint)
     state = store.get_state()
+    try:
+        ident = identity_mod.load(create=state is None)
+    except identity_mod.IdentityError as exc:
+        # The application treats this as fatal before starting hub registration
+        # or schedulers. A missing key is recovery, not a brand-new worker.
+        raise PrivateDatabaseRequiredError(str(exc)) from exc
+    logger.info("Device identity %s (%s)", ident.device_id, ident.fingerprint)
     if state is not None and not any(
         row["device_id"] == ident.device_id for row in store.list_members()
     ):
@@ -205,6 +210,7 @@ def _on_applied(touched) -> None:
 
 async def start() -> List[asyncio.Task]:
     from app.network import transport, enrollment, hub
+    from app.core import managed_connection
     engine.on_applied(_on_applied)
     _tasks[:] = transport.start()
     enrollment.resume_enrollment()
@@ -212,6 +218,9 @@ async def start() -> List[asyncio.Task]:
         _tasks.extend(hub.start())
     except Exception:  # noqa: BLE001
         logger.debug("Hub feed not started", exc_info=True)
+    # Account connectivity is enrollment infrastructure, not workload execution.
+    # It must run before approval, including when approval arrives after boot.
+    _tasks.append(asyncio.create_task(managed_connection.supervise(), name="managed-account-connection"))
     return list(_tasks)
 
 
@@ -222,4 +231,7 @@ async def stop() -> None:
         await hub.stop()
     except Exception:  # noqa: BLE001
         pass
+    for task in _tasks:
+        task.cancel()
+    await asyncio.gather(*_tasks, return_exceptions=True)
     _tasks.clear()

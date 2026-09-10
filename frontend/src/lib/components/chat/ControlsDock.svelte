@@ -45,6 +45,8 @@
 	import {
 		getModelLabel,
 		getDefaultModel,
+		getClaudeAuth,
+		decodeProviderModel,
 		supportsAutoPermission,
 		isFastModeCapable,
 		isReroute
@@ -228,7 +230,8 @@
 	const rerouted = $derived(
 		isReroute(liveModel, liveRequestedModel, $activeSession.liveProvider)
 	);
-	const selectedModelLabel = $derived(getModelLabel(modelValue));
+	const hasModelRoute = $derived(Boolean($activeSession.sessionId || getClaudeAuth().auth_kind || decodeProviderModel(modelValue)));
+	const selectedModelLabel = $derived(hasModelRoute ? getModelLabel(modelValue) : 'Select model');
 	const actualModelLabel = $derived(getModelLabel(liveModel));
 	const requestedModelLabel = $derived(getModelLabel(liveRequestedModel));
 	// When rerouted the model text shows the ACTUAL model (what's really

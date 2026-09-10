@@ -17,7 +17,8 @@
 	 */
 	import type { Snippet } from 'svelte';
 	import { PanelLeft, ChevronRight } from 'lucide-svelte';
-	import { username } from '$lib/stores/auth.svelte';
+	import { isAdmin, username } from '$lib/stores/auth.svelte';
+	import { ACCOUNT_CHANGED_EVENT, getAccountConnection, getAccountProfile } from '$lib/api/account';
 	import SessionTitleMenu from './SessionTitleMenu.svelte';
 
 	interface Props {
@@ -45,8 +46,47 @@
 		actions
 	}: Props = $props();
 
+	let shuffleName = $state('');
+	const accountName = $derived(shuffleName || ($username ?? '').trim());
+
+	$effect(() => {
+		// Account metadata is owner-only; paired guests keep their device name.
+		if (!$isAdmin) { shuffleName = ''; return; }
+		let stopped = false;
+		let version = 0;
+		let timer: ReturnType<typeof setTimeout>;
+		async function refresh() {
+			clearTimeout(timer);
+			const request = ++version;
+			try {
+				const connection = await getAccountConnection();
+				if (stopped || request !== version) return;
+				const profile = connection.signed_in && connection.profile_ready !== false
+					? await getAccountProfile() : null;
+				if (!stopped && request === version) shuffleName = profile?.account.username.trim() ?? '';
+			} catch {
+				if (!stopped && request === version) shuffleName = '';
+			} finally {
+				if (!stopped && request === version) timer = setTimeout(refresh, 30_000);
+			}
+		}
+		function accountChanged() {
+			shuffleName = '';
+			void refresh();
+		}
+		void refresh();
+		window.addEventListener(ACCOUNT_CHANGED_EVENT, accountChanged);
+		window.addEventListener('focus', refresh);
+		return () => {
+			stopped = true;
+			clearTimeout(timer);
+			window.removeEventListener(ACCOUNT_CHANGED_EVENT, accountChanged);
+			window.removeEventListener('focus', refresh);
+		};
+	});
+
 	const initials = $derived.by(() => {
-		const name = ($username ?? '').trim();
+		const name = accountName;
 		if (!name) return '·';
 		const parts = name.split(/[\s._-]+/).filter(Boolean);
 		const letters = parts.length > 1 ? parts[0][0] + parts[1][0] : name.slice(0, 2);
@@ -88,7 +128,7 @@
 			{@render actions()}
 		{/if}
 		<div class="tb-sep" aria-hidden="true"></div>
-		<span class="tb-avatar" title={$username || 'Account'}>{initials}</span>
+		<span class="tb-avatar" title={accountName || 'Account'}>{initials}</span>
 	</div>
 </header>
 
