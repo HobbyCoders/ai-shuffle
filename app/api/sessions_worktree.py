@@ -38,6 +38,8 @@ _SESSION_CREATE_OVERRIDE_KEYS = {
     "effort",
     "permission_mode",
     "context_window",
+    "voice_config",
+    "derive_provider_from_profile",
     "fast",
     "mode",
     "hidden",

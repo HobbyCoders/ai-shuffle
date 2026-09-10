@@ -10,6 +10,14 @@ vi.hoisted(() => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }));
 });
 
+it('keeps an integrated voice model visible but locked', async () => {
+ render(MobileComposerControlsSheet, { props: props({ modelLabel: 'PersonaPlex', modelLocked: true }) });
+ const button = screen.getByRole('button', { name: 'Model: PersonaPlex' }) as HTMLButtonElement;
+ expect(button.disabled).toBe(true);
+ await fireEvent.click(button);
+ expect(screen.queryByRole('region', { name: 'Model picker' })).toBeNull();
+ expect(screen.queryByRole('switch', { name: 'Fast mode' })).toBeNull();
+});
 it('explains no adjustable effort and keeps fast mode available', async () => {
 	const onToggleFast = vi.fn();
 	render(MobileComposerControlsSheet, { props: props({ effortOptions: [], effortValue: null, fastSupported: true, onToggleFast }) });

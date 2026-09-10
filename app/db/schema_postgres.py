@@ -226,6 +226,7 @@ def create_postgres_schema(cursor) -> None:
             fork_point_message_index INTEGER,
             instance_id TEXT,
             launched_model TEXT,
+            voice_config JSONB,
             -- The FIRST model this session ever ran on. launched_model is
             -- overwritten by every mid-session switch, so a session that ran
             -- turns 1-6 on grok-4.5 and 7-16 on grok-4.6 was recorded as

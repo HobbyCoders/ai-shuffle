@@ -25,7 +25,8 @@
 	import { AudioLines, Play, Square } from 'lucide-svelte';
 	import {
 		VOICE_MODELS,
-		VOICE_VOICES,
+		voicesForModel,
+		FAL_VOICE_PROVIDER,
 		getVoiceProviders,
 		loadVoiceSettings,
 		previewVoice,
@@ -38,6 +39,10 @@
 	let providers = $state<VoiceProvider[]>([]);
 	let loading = $state(true);
 	let saving = $state(false);
+	const falSelected = $derived(settings?.voice_provider_id === FAL_VOICE_PROVIDER);
+	const models = $derived(VOICE_MODELS.filter(m => (m.id === 'fal-ai/personaplex/realtime') === falSelected));
+	const voices = $derived(voicesForModel(settings?.voice_model ?? ''));
+
 	let error = $state('');
 	let success = $state('');
 	const owner = sessionOwnerEpoch();
@@ -206,12 +211,12 @@
 		<div class="set-row">
 			<div class="lab">
 				<h4>Provider</h4>
+
 			</div>
 			<div class="ctl">
 				{#if providers.length === 0}
 					<p class="msg err">
-						Add an OpenAI API-key provider in Settings → Providers. ChatGPT logins can't do
-						Realtime.
+						Add an OpenAI provider or a fal.ai API key in Settings.
 					</p>
 				{:else}
 					<select
@@ -242,7 +247,7 @@
 					aria-label="Realtime model"
 					onchange={(e) => save({ voice_model: e.currentTarget.value })}
 				>
-					{#each VOICE_MODELS as model}
+					{#each models as model}
 						<option value={model.id}>{model.label}</option>
 					{/each}
 				</select>
@@ -261,7 +266,7 @@
 					aria-label="Agent voice"
 					onchange={(e) => changeVoice(e.currentTarget.value)}
 				>
-					{#each VOICE_VOICES as voice}
+					{#each voices as voice}
 						<option value={voice.id}>{voice.label}</option>
 					{/each}
 				</select>
@@ -269,7 +274,7 @@
 					type="button"
 					class="preview-btn"
 					class:playing={previewing}
-					disabled={saving || (loadingPreview && !previewing)}
+					disabled={falSelected || saving || (loadingPreview && !previewing)}
 					aria-label={previewing ? 'Stop the voice preview' : 'Preview the selected voice'}
 					title={previewing ? 'Stop preview' : 'Hear this voice'}
 					onclick={togglePreview}

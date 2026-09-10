@@ -94,6 +94,7 @@ export interface ComposerSheetProps {
 	modelGroups?: PickerGroup[];
 	modelValue: string;
 	modelLabel: string;
+	modelLocked?: boolean;
 	modelNotice?: string;
 	onModelSelect: (value: string) => void;
 	contextChoice: ContextWindowChoice;

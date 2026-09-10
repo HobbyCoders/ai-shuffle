@@ -516,7 +516,9 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
 
 # The realtime models a voice session may run on. Anything outside this
 # allowlist is rejected on write, so a typo can never reach OpenAI.
-VOICE_MODELS = ("gpt-realtime-2.1", "gpt-realtime-2.1-mini", "gpt-realtime")
+from app.core.voice_models import (
+    VOICE_MODELS, FAL_PROVIDER_ID, PERSONAPLEX_MODEL, voices_for,
+)
 DEFAULT_VOICE_MODEL = "gpt-realtime-2.1"
 
 # The voices the realtime models can speak with (ruling VM21). Same allowlist
@@ -590,8 +592,8 @@ def get_voice_settings() -> dict:
         model = DEFAULT_VOICE_MODEL
 
     voice = (database.get_system_setting(VOICE_VOICE_KEY) or "").strip()
-    if voice not in VOICE_VOICES:
-        voice = DEFAULT_VOICE_VOICE
+    if voice not in voices_for(model):
+        voice = "NATF2" if model == PERSONAPLEX_MODEL else DEFAULT_VOICE_VOICE
 
     provider_id = (database.get_system_setting(VOICE_PROVIDER_ID_KEY) or "").strip() or None
 
@@ -621,76 +623,57 @@ async def update_voice_settings(
 
     Validation: ``voice_model`` must be in the allowlist, ``voice_max_call_minutes``
     must be positive, and a non-empty ``voice_provider_id`` must name a provider
-    row that is eligible to fund realtime calls (an enabled ``openai`` API-key
-    row — never a ChatGPT/Codex subscription row, which cannot do Realtime).
+    row that is eligible to fund voice calls, or the configured fal.ai voice
+    provider. Provider, model, and voice must form a valid combination.
 
     Admin only.
     """
     def _apply() -> dict:
-        """Every validation, write and the closing re-read in ONE hop.
+        """Validate the complete provider/model/voice combination before writing."""
+        from app.api.voice import list_eligible_voice_providers
 
-        Read-decide-write: the provider check reads the eligible-provider
-        list and that result gates the write, so the two must not be split
-        across awaits. The trailing ``get_voice_settings()`` read joins the
-        same hop so the response reflects the writes made just above it.
-        HTTPExceptions raised in here propagate unchanged, and the order of
-        writes vs. a later 400 is exactly as before.
-        """
-        provided = request.model_fields_set
+        supplied = request.model_fields_set
+        current = get_voice_settings()
+        model = request.voice_model if "voice_model" in supplied else current["voice_model"]
+        provider = request.voice_provider_id if "voice_provider_id" in supplied else current["voice_provider_id"]
+        provider = (provider or "").strip() or None
+        if "voice_provider_id" in supplied and "voice_model" not in supplied:
+            if provider == FAL_PROVIDER_ID:
+                model = PERSONAPLEX_MODEL
+            elif current["voice_provider_id"] == FAL_PROVIDER_ID:
+                model = DEFAULT_VOICE_MODEL
+        if model not in VOICE_MODELS:
+            raise HTTPException(400, f"voice_model must be one of {list(VOICE_MODELS)}")
+        if "voice_model" in supplied and "voice_provider_id" not in supplied:
+            if model == PERSONAPLEX_MODEL:
+                provider = FAL_PROVIDER_ID
+            elif provider == FAL_PROVIDER_ID:
+                provider = None
+        if provider and ("voice_provider_id" in supplied or provider != current["voice_provider_id"]):
+            if provider not in {p["id"] for p in list_eligible_voice_providers()}:
+                raise HTTPException(400, "Pick a configured voice provider with an API key.")
+        if provider and ((provider == FAL_PROVIDER_ID) != (model == PERSONAPLEX_MODEL)):
+            raise HTTPException(400, "The voice model does not belong to the selected provider.")
+        voice = request.voice_voice if "voice_voice" in supplied else current["voice_voice"]
+        if voice not in voices_for(model):
+            if "voice_voice" in supplied:
+                raise HTTPException(400, f"voice_voice must be one of {list(voices_for(model))}")
+            voice = "NATF2" if model == PERSONAPLEX_MODEL else DEFAULT_VOICE_VOICE
+        minutes = request.voice_max_call_minutes if "voice_max_call_minutes" in supplied else current["voice_max_call_minutes"]
+        if minutes is None or minutes <= 0:
+            raise HTTPException(400, "voice_max_call_minutes must be a positive integer")
 
-        if "voice_model" in provided:
-            model = (request.voice_model or "").strip()
-            if model not in VOICE_MODELS:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"voice_model must be one of {list(VOICE_MODELS)}",
-                )
+        if supplied & {"voice_model", "voice_provider_id", "voice_voice"}:
             database.set_system_setting(VOICE_MODEL_KEY, model)
-
-        if "voice_voice" in provided:
-            voice = (request.voice_voice or "").strip()
-            if voice not in VOICE_VOICES:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"voice_voice must be one of {list(VOICE_VOICES)}",
-                )
             database.set_system_setting(VOICE_VOICE_KEY, voice)
-
-        if "voice_max_call_minutes" in provided:
-            minutes = request.voice_max_call_minutes
-            if minutes is None or minutes <= 0:
-                raise HTTPException(
-                    status_code=400,
-                    detail="voice_max_call_minutes must be a positive integer",
-                )
-            database.set_system_setting(VOICE_MAX_CALL_MINUTES_KEY, str(minutes))
-
-        if "voice_mode_enabled" in provided:
-            database.set_system_setting(
-                VOICE_MODE_ENABLED_KEY, "true" if request.voice_mode_enabled else "false"
-            )
-
-        if "voice_provider_id" in provided:
-            # Imported lazily: app.api.voice imports this module for the reader
-            # above, so a module-level import here would be circular.
-            from app.api.voice import list_eligible_voice_providers
-
-            provider_id = (request.voice_provider_id or "").strip()
-            if not provider_id:
-                database.delete_system_setting(VOICE_PROVIDER_ID_KEY)
+            if provider:
+                database.set_system_setting(VOICE_PROVIDER_ID_KEY, provider)
             else:
-                eligible_ids = {p["id"] for p in list_eligible_voice_providers()}
-                if provider_id not in eligible_ids:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"Provider {provider_id!r} cannot fund voice calls. Pick an "
-                            "enabled OpenAI provider that stores an API key (Realtime "
-                            "does not support ChatGPT-subscription logins)."
-                        ),
-                    )
-                database.set_system_setting(VOICE_PROVIDER_ID_KEY, provider_id)
-
+                database.delete_system_setting(VOICE_PROVIDER_ID_KEY)
+        if "voice_max_call_minutes" in supplied:
+            database.set_system_setting(VOICE_MAX_CALL_MINUTES_KEY, str(minutes))
+        if "voice_mode_enabled" in supplied:
+            database.set_system_setting(VOICE_MODE_ENABLED_KEY, "true" if request.voice_mode_enabled else "false")
         return get_voice_settings()
 
     return VoiceSettingsResponse(**await run_sync(_apply))

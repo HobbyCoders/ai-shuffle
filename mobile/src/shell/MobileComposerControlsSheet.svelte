@@ -2,7 +2,7 @@
 	import { tick } from 'svelte';
 	import { NO_ADJUSTABLE_EFFORT } from '$lib/constants/model-effort';
 	import { isMobileUi } from '$lib/stores/platform.svelte';
-	import { ArrowLeft, ChevronRight, Zap } from 'lucide-svelte';
+	import { ArrowLeft, ChevronRight, Zap, Lock } from 'lucide-svelte';
 	import ContextPillBar from '$lib/components/chat/ContextPillBar.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import type { PickerGroup } from '$lib/constants/model-picker';
@@ -17,7 +17,7 @@
 	} from '$lib/components/chat/composer-shell';
 	let {
 		open, onClose, panelId = 'mobile-composer-panel', inertToolbar = false,
-		modelOptions, modelGroups, modelValue, modelLabel, modelNotice, onModelSelect,
+		modelOptions, modelGroups, modelValue, modelLabel, modelNotice, onModelSelect, modelLocked = false,
 		contextChoice, onContextChoiceSelect, effortOptions, effortValue, onEffortSelect,
 		effortExplanation = NO_ADJUSTABLE_EFFORT, effortKnown = true,
 		fastSupported = false, fastEnabled = false, onToggleFast, showCodeControls = true,
@@ -25,6 +25,7 @@
 	}: Props = $props();
 
 	let page = $state<'overview' | 'models'>('overview');
+	$effect(() => { if (modelLocked) page = 'overview'; });
 	let panelRef = $state<HTMLElement | null>(null);
 	let modelButtonRef = $state<HTMLButtonElement | null>(null);
 	let panelHeight = $state(0);
@@ -45,6 +46,7 @@
 
 	function closePanel() { onClose(); }
 	async function openPage(next: 'models') {
+		if (modelLocked) return;
 		page = next;
 		await tick();
 		panelRef?.focus({ preventScroll: true });
@@ -141,8 +143,8 @@
 			tabindex="-1"
 		>
 			{#if page === 'overview'}
-				<button bind:this={modelButtonRef} type="button" class="model-control" onclick={() => openPage('models')} aria-label="Model: {modelLabel}">
-					<span class="control-label">Model</span><strong>{modelLabel}</strong><ChevronRight size={16} aria-hidden="true" />
+				<button bind:this={modelButtonRef} type="button" class="model-control" disabled={modelLocked} onclick={() => openPage('models')} aria-label="Model: {modelLabel}">
+					<span class="control-label">Model</span><strong>{modelLabel}</strong>{#if modelLocked}<Lock size={16} aria-hidden="true" />{:else}<ChevronRight size={16} aria-hidden="true" />{/if}
 				</button>
 				{#if modelNotice}<p class="model-notice">{modelNotice}</p>{/if}
 				{#if showCodeControls && open}
@@ -155,7 +157,7 @@
 					{:else}
 					<div class="effort-choices" style={`grid-template-columns: repeat(${Math.min(effortOptions.length, 4)}, minmax(0, 1fr))`}>
 						{#each effortOptions as option (option.value)}
-							<button type="button" class="quick-choice" aria-pressed={option.value === effortValue}
+							<button type="button" class="quick-choice" disabled={modelLocked} aria-pressed={option.value === effortValue}
 								title={option.description} onclick={() => onEffortSelect(option.value)}>{option.label}</button>
 						{/each}
 					</div>
@@ -174,7 +176,7 @@
 						<p class="setting-description" aria-live="polite">{permissionLabel} · {permissionDescription}</p>
 					</div>
 				{/if}
-				{#if fastSupported}
+				{#if fastSupported && !modelLocked}
 					<div class="fast-row">
 						<div class="fast-copy"><span><Zap size={14} aria-hidden="true" />Fast mode</span><small id={`${panelId}-fast-help`}>Higher price; switching clears the prompt cache.</small></div>
 						<button type="button" class="fast-switch" role="switch" aria-label="Fast mode" aria-describedby={`${panelId}-fast-help`} aria-checked={fastEnabled} onclick={() => onToggleFast?.()}><span></span></button>

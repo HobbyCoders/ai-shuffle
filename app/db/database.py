@@ -662,6 +662,9 @@ def _run_column_migrations(cursor):
         # Written once and never overwritten (see sessions.update_session);
         # pre-existing rows stay NULL rather than being back-stamped with a
         # model that may not be the one they started on.
+        if not column_exists(cursor, "sessions", "voice_config"):
+            cursor.execute("ALTER TABLE sessions ADD COLUMN voice_config JSONB")
+            migrations_applied.append("sessions.voice_config")
         if not column_exists(cursor, "sessions", "first_model"):
             cursor.execute("ALTER TABLE sessions ADD COLUMN first_model TEXT")
             migrations_applied.append("sessions.first_model")

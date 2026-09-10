@@ -38,6 +38,10 @@
 import { get, writable } from 'svelte/store';
 import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, getVoiceCallState } from '$lib/api/voice';
 import { openNativeVoice } from './nativeVoice';
+import { usesAudioStream } from '$lib/constants/voice-engines';
+import type { VoiceAudioStream } from './voiceAudioStream';
+let audioStream: VoiceAudioStream | null = null;
+let audioAbort: AbortController | null = null;
 
 // ============================================================================
 // Public state
@@ -626,6 +630,7 @@ export function toggleMic(): void {
 /** Mute/unmute the agent's voice (playback only — the model keeps talking). */
 export function setAgentMuted(muted: boolean): void {
 	if (audioEl) audioEl.muted = muted;
+	audioStream?.muteOutput(muted);
 	patch({ agentMuted: muted });
 }
 
@@ -675,7 +680,7 @@ export async function startCall(
 	});
 
 	try {
-		if (await handoffNativeVoice(sessionIdIn, myGeneration)) return;
+		if (!usesAudioStream(cred.model) && await handoffNativeVoice(sessionIdIn, myGeneration)) return;
 		if (myGeneration !== generation) return;
 		const acquired = await acquireMic();
 		if (myGeneration !== generation) {
@@ -683,6 +688,28 @@ export async function startCall(
 			return;
 		}
 		micStream = acquired;
+		if (usesAudioStream(cred.model)) {
+			const { openVoiceAudioStream } = await import('./voiceAudioStream');
+			if (myGeneration !== generation) return;
+			audioAbort = new AbortController();
+			const stream = await openVoiceAudioStream(sessionIdIn, acquired, {
+				caption: (id, role, delta) => { if (myGeneration === generation) appendCaption(id, role, delta, false); },
+				speaking: active => { if (myGeneration === generation) patch({ agentSpeaking: active }); },
+				closed: message => {
+					if (myGeneration !== generation) return;
+					const ending = teardown({ notifyBackend: true, status: message ? 'error' : 'ended' });
+					const endedGeneration = generation;
+					void ending.then(() => {
+						if (endedGeneration === generation) patch({ sessionId: sessionIdIn, error: message });
+					});
+				},
+			}, audioAbort.signal);
+			if (myGeneration !== generation) { await stream.close(); return; }
+			audioStream = stream;
+			startLevelMonitor(acquired);
+			patch({ status: 'live', startedAt: Date.now() });
+			return;
+		}
 
 		const conn = await openConnection(cred.client_secret, cred.model, micStream);
 		if (myGeneration !== generation) {
@@ -793,6 +820,10 @@ async function teardown(opts: {
 	typedResponsePending = false;
 	clearReconnectTimer();
 	stopLevelMonitor();
+	audioAbort?.abort();
+	audioAbort = null;
+	await audioStream?.close();
+	audioStream = null;
 
 	const endedSession = sessionId ?? get(voiceCallState).sessionId;
 	closeConnection(connection);

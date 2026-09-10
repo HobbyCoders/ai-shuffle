@@ -39,6 +39,12 @@ async function mountSection(appToolsEnabled = false) {
 }
 
 describe('voice settings controls', () => {
+ it('offers GPT Live 1 without a fal.ai limitation notice', async () => {
+  await mountSection();
+  expect(screen.getByRole('option', { name: 'GPT Live 1' }).getAttribute('value')).toBe('gpt-live-1');
+  expect(screen.queryByText(/not integrated with voice calls yet/)).toBeNull();
+ });
+
  it.each([false, true])('omits the entire voice-agent capabilities group and roster when the legacy API flag is %s', async (enabled) => {
   await mountSection(enabled);
   await screen.findByLabelText('Voice provider');
@@ -81,6 +87,7 @@ describe('remaining voice settings writes', () => {
  it.each([
   ['Voice provider', 'openai-key', { voice_provider_id: 'openai-key' }],
   ['Voice provider', '', { voice_provider_id: null }],
+  ['Realtime model', 'gpt-live-1', { voice_model: 'gpt-live-1' }],
   ['Realtime model', 'gpt-realtime-2.1-mini', { voice_model: 'gpt-realtime-2.1-mini' }],
   ['Agent voice', 'cedar', { voice_voice: 'cedar' }],
  ] as const)('saves %s as %s without writing the removed capability flag', async (label, value, patch) => {
@@ -109,7 +116,7 @@ describe('remaining voice settings writes', () => {
    render(VoiceSection);
    await screen.findByLabelText('Agent voice');
    await waitFor(() => expect(warning).toHaveBeenCalledWith('[voice] could not list eligible providers', failure));
-   expect(screen.getByText(/Add an OpenAI API-key provider/)).toBeTruthy();
+   expect(screen.getByText(/Add an OpenAI provider or a fal.ai API key/)).toBeTruthy();
    expect(screen.getByRole('button', { name: 'Preview the selected voice' })).toBeTruthy();
    expect(transport.get.mock.calls.map(([path]) => path)).toEqual(['/settings/voice', '/voice/providers']);
   } finally {

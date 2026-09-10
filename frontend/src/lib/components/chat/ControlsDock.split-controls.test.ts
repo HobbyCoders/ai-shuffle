@@ -1,10 +1,11 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { createRawSnippet, tick } from 'svelte';
 import { get } from 'svelte/store';
 import { activeSession } from '$lib/stores/active-session';
 import { appMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
 import ControlsDock from './ControlsDock.svelte';
+import { loadVoiceSettings } from '$lib/api/voice';
 import '../../test-stubs/composer-dom';
 import { api, getUsageLimits } from '$lib/api/client';
 import { getModels, hydrateModelRegistry } from '$lib/constants/models';
@@ -64,6 +65,26 @@ const voiceActions = createRawSnippet(() => ({
 }));
 
 describe('ControlsDock split controls', () => {
+ it.each(['gpt-realtime-2.1', 'fal-ai/personaplex/realtime'])('locks the model block for %s', async model => {
+  const request = vi.spyOn(api, 'get').mockResolvedValue({ voice_model: model });
+  await loadVoiceSettings(true);
+  setLane('voice');
+  renderDock();
+  const label = model.startsWith('fal-') ? 'PersonaPlex' : 'GPT Realtime 2.1';
+  await waitFor(() => expect((screen.getByRole('button', { name: `Model: ${label}` }) as HTMLButtonElement).disabled).toBe(true));
+  await fireEvent.click(screen.getByRole('button', { name: `Model: ${label}` }));
+  expect(screen.queryByRole('listbox')).toBeNull();
+  request.mockRestore();
+ });
+ it('keeps the selected delegation model editable for GPT Live 1', async () => {
+  const request = vi.spyOn(api, 'get').mockResolvedValue({ voice_model: 'gpt-live-1' });
+  await loadVoiceSettings(true);
+  setLane('voice');
+  renderDock();
+  await waitFor(() => expect((screen.getByRole('button', { name: /^Model:/ }) as HTMLButtonElement).disabled).toBe(false));
+  expect(screen.queryByRole('button', { name: 'Model: GPT Live 1' })).toBeNull();
+  request.mockRestore();
+ });
  it('does not label a fresh provider-only composer with the bundled Sonnet default', async () => {
   const registryGet = vi.spyOn(api, 'get').mockResolvedValue({ models: getModels(), providers: [], claude: { auth_kind: null, plan_type: null } });
   await hydrateModelRegistry();

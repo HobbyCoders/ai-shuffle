@@ -120,6 +120,7 @@ class SessionRow(TypedDict):
     # 'voice' for an OpenAI Realtime call (v74, ruling VM4). See
     # ``app.core.session_modes``.
     mode: Optional[str]
+    voice_config: Optional[Dict[str, Any]]
     # List-visibility flag (v75): TRUE keeps the row out of the sessions-list
     # queries (wake-word "command" voice sessions); NULL/FALSE = visible.
     hidden: Optional[bool]
@@ -506,6 +507,7 @@ def create_session(
     is_worker: bool = False,
     target_instance_id: Optional[str] = None,
     project_v2_id: Optional[str] = None,
+    voice_config: Optional[Dict[str, Any]] = None,
     _conn=None
 ) -> SessionRow:
     """Create a new session
@@ -650,6 +652,9 @@ def create_session(
         owner_device_id = None
     columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "owner_device_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "context_window", "fast", "mode", "hidden", "is_worker"]
     params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, owner_device_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_context_window, selected_fast, resolved_mode, hidden, bool(is_worker)]
+    if voice_config is not None:
+        columns.append("voice_config")
+        params.append(json.dumps(voice_config))
     if target_instance_id:
         # Serialized to a JSON string (not a dict) so the SQLite test shim, which
         # stores JSONB columns as TEXT, round-trips identically to Postgres —

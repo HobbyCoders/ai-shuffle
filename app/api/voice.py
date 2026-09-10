@@ -19,7 +19,10 @@ Deliberately small surface:
   WebRTC handshake and hands us the ``call_id``; the backend joins the same
   call over its sideband WebSocket (:mod:`app.core.voice_bridge`). Posting a
   new ``call_id`` REPLACES any existing attachment.
-* ``POST /api/v1/voice/sessions/{id}/hangup`` — detach + stop the bridge.
+* ``GET /api/v1/voice/sessions/{id}/config`` — the pinned voice engine and funding provider.
+* ``WS /api/v1/voice/sessions/{id}/audio`` — server-owned PCM streaming for
+  GPT Live client delegation and fal.ai PersonaPlex; no provider key reaches the browser.
+* ``POST /api/v1/voice/sessions/{id}/hangup`` — stop either voice transport.
   Idempotent.
 * ``GET  /api/v1/voice/sessions/{id}/state`` — is a bridge attached, and is its
   sideband still connected.
@@ -33,13 +36,16 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_auth
 from app.db import database
 from app.db.async_database import run_sync
+from app.core.voice_models import (
+    FAL_PROVIDER_ID, LIVE_MODEL, PERSONAPLEX_MODEL, session_config, transport_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,15 +118,22 @@ def list_eligible_voice_providers() -> List[Dict[str, str]]:
     can test for a stored key, and that blob must never travel outward.
     """
     rows = database.get_enabled_model_providers(include_token=True)
-    return [
+    providers = [
         {"id": row["id"], "name": row.get("name") or row["id"]}
         for row in rows
         if _is_eligible_voice_provider(row)
     ]
+    if database.get_system_setting("fal_api_key"):
+        providers.append({"id": FAL_PROVIDER_ID, "name": "fal.ai"})
+    return providers
 
 
 def _eligible_provider_row(provider_id: str) -> Optional[Dict[str, Any]]:
     """The full (token-carrying) provider row for ``provider_id``, if eligible."""
+    if provider_id == FAL_PROVIDER_ID:
+        if database.get_system_setting("fal_api_key"):
+            return {"id": FAL_PROVIDER_ID, "name": "fal.ai", "provider_type": "fal"}
+        return None
     row = database.get_model_provider(provider_id, include_token=True)
     if row and _is_eligible_voice_provider(row):
         return row
@@ -247,11 +260,7 @@ class VoiceStateResponse(BaseModel):
 
 @router.get("/providers", response_model=List[VoiceProvider])
 async def get_voice_providers(token: str = Depends(require_auth)):
-    """List the provider rows eligible to fund an OpenAI Realtime call.
-
-    An empty list is the signal for the UI's "add an OpenAI API-key provider"
-    setup pointer (ruling VM3).
-    """
+    """List configured OpenAI and fal.ai voice providers, without credentials."""
     return await run_sync(list_eligible_voice_providers)
 
 
@@ -379,8 +388,8 @@ def _resolve_provider_row(
                 status_code=400,
                 detail=(
                     f"Provider {requested!r} cannot fund voice calls. Pick an "
-                    "enabled OpenAI provider that stores an API key (Realtime "
-                    "does not support ChatGPT-subscription logins)."
+                    "enabled OpenAI API-key provider or configure a fal.ai API key. "
+                    "ChatGPT-subscription logins cannot fund voice calls."
                 ),
             )
         return row
@@ -393,13 +402,13 @@ def _resolve_provider_row(
                 status_code=400,
                 detail=(
                     f"The provider configured for voice ({pinned!r}) is no longer "
-                    "eligible — it must be an enabled OpenAI provider with a "
-                    "stored API key. Update the voice settings."
+                    "eligible. Check its API key or choose another voice provider "
+                    "in Settings."
                 ),
             )
         return row
 
-    eligible = list_eligible_voice_providers()
+    eligible = [p for p in list_eligible_voice_providers() if p["id"] != FAL_PROVIDER_ID]
     if not eligible:
         raise HTTPException(
             status_code=400,
@@ -577,7 +586,11 @@ async def _provider_api_key(provider_row: Dict[str, Any]) -> str:
     """
     from app.core.provider.fluid_credentials import _decrypt_auth_token
 
-    api_key = await run_sync(_decrypt_auth_token, provider_row)
+    if provider_row["id"] == FAL_PROVIDER_ID:
+        from app.api.settings import get_decrypted_api_key
+        api_key = await run_sync(get_decrypted_api_key, "fal_api_key")
+    else:
+        api_key = await run_sync(_decrypt_auth_token, provider_row)
     if not api_key:
         raise HTTPException(
             status_code=400,
@@ -711,8 +724,14 @@ async def create_voice_session(
     api_key = await _provider_api_key(provider_row)
 
     model = voice_settings["voice_model"]
-    body = await _mint_client_secret(api_key, model, voice_settings["voice_voice"])
-    client_secret, expires_at = _extract_client_secret(body)
+    if (model == PERSONAPLEX_MODEL) != (provider_row["id"] == FAL_PROVIDER_ID):
+        raise HTTPException(400, "The voice model does not belong to the selected provider.")
+    if model == LIVE_MODEL and not (request.model or "").strip():
+        raise HTTPException(400, "Choose a delegation model before starting GPT Live 1.")
+    client_secret, expires_at = "", None
+    if transport_for(model) == "webrtc":
+        body = await _mint_client_secret(api_key, model, voice_settings["voice_voice"])
+        client_secret, expires_at = _extract_client_secret(body)
 
     # Resolve the profile the same way normal session creation does (explicit →
     # project default → first configured agent). A literal fallback id here hits
@@ -733,7 +752,8 @@ async def create_voice_session(
     session_create_overrides = {
         "title": "Voice session",
         "is_active": True,
-        "provider_id": provider_row["id"],
+        "provider_id": None if model == LIVE_MODEL else provider_row["id"],
+        "derive_provider_from_profile": model != LIVE_MODEL,
         "model": request.model,
         "effort": request.effort,
         "permission_mode": request.permission_mode,
@@ -741,6 +761,10 @@ async def create_voice_session(
         "fast": request.fast,
         "mode": "voice",
         "hidden": session_mode == "command",
+        "voice_config": {
+            "model": model, "voice": voice_settings["voice_voice"],
+            "provider_id": provider_row["id"],
+        },
     }
 
     # Current branch sessions have no legacy worktree row. Reuse the normal V2
@@ -866,16 +890,15 @@ async def mint_voice_session_secret(
     session_row = await _require_voice_session(session_id)
     _reject_when_capped(session_id)
 
-    provider_row = await run_sync(
-        _resolve_provider_row,
-        session_row.get("provider_id"),
-        voice_settings["voice_provider_id"],
-    )
+    config = session_config(session_row, voice_settings)
+    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None)
     api_key = await _provider_api_key(provider_row)
 
-    model = voice_settings["voice_model"]
-    body = await _mint_client_secret(api_key, model, voice_settings["voice_voice"])
-    client_secret, expires_at = _extract_client_secret(body)
+    model = config["model"]
+    client_secret, expires_at = "", None
+    if transport_for(model) == "webrtc":
+        body = await _mint_client_secret(api_key, model, config["voice"])
+        client_secret, expires_at = _extract_client_secret(body)
     _remember_client_secret(session_id, client_secret, expires_at)
     logger.info("Voice: re-minted client secret for session %s", session_id)
 
@@ -1036,11 +1059,10 @@ async def attach_voice_call(
     # until the user speaks (its mode appendix says so), so it never greets.
     greet = session_mode is None
 
-    provider_row = await run_sync(
-        _resolve_provider_row,
-        session_row.get("provider_id"),
-        voice_settings["voice_provider_id"],
-    )
+    config = session_config(session_row, voice_settings)
+    if transport_for(config["model"]) != "webrtc":
+        raise HTTPException(400, "This voice model uses the audio stream, not the Realtime sideband.")
+    provider_row = await run_sync(_resolve_provider_row, config["provider_id"], None)
     api_key = await _provider_api_key(provider_row)
 
     try:
@@ -1048,7 +1070,7 @@ async def attach_voice_call(
             session_id,
             call_id,
             api_key=api_key,
-            model=voice_settings["voice_model"],
+            model=config["model"],
             max_call_minutes=voice_settings["voice_max_call_minutes"],
             # Fallback bearer for the handshake — see _remember_client_secret.
             client_secret=_recall_client_secret(session_id),
@@ -1117,7 +1139,9 @@ async def hangup_voice_call(
 
     await _require_voice_session(session_id)
     _forget_client_secret(session_id)
-    stopped = await voice_bridge.registry.detach(session_id)
+    from app.core import voice_stream
+    stream_stopped = await voice_stream.stop(session_id)
+    stopped = await voice_bridge.registry.detach(session_id) or stream_stopped
 
     # Creation stamps ``is_active`` True and, until this, nothing in the voice
     # lane ever wrote it back — so every finished call left a session card that
@@ -1153,4 +1177,50 @@ async def get_voice_call_state(
     from app.core import voice_bridge
 
     await _require_voice_session(session_id)
-    return VoiceStateResponse(**voice_bridge.registry.state(session_id))
+    from app.core import voice_stream
+    return VoiceStateResponse(**(voice_stream.state(session_id) or voice_bridge.registry.state(session_id)))
+
+@router.get("/sessions/{session_id}/config")
+async def get_voice_session_config(session_id: str, token: str = Depends(require_auth)):
+    from app.api.settings import get_voice_settings
+    row = await _require_voice_session(session_id)
+    return session_config(row, await run_sync(get_voice_settings))
+
+
+@router.websocket("/sessions/{session_id}/audio")
+async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optional[str] = Query(None)):
+    from app.api.ws_auth import authenticate_websocket
+    from app.core import voice_stream
+
+    authenticated, api_user = await authenticate_websocket(websocket, token)
+    if not authenticated:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+    try:
+        settings = await _require_voice_enabled()
+        row = await _require_voice_session(session_id)
+        if api_user and row.get("api_user_id") != api_user["id"]:
+            raise HTTPException(403, "This voice session belongs to another user.")
+        _reject_when_capped(session_id)
+        config = session_config(row, settings)
+        if transport_for(config["model"]) != "stream":
+            raise HTTPException(400, "This voice model uses WebRTC.")
+        provider = await run_sync(_resolve_provider_row, config["provider_id"], None)
+        key = await _provider_api_key(provider)
+        if session_id in voice_stream.calls:
+            raise HTTPException(409, "This voice session already has an audio connection.")
+        if len(voice_stream.calls) >= voice_stream.MAX_CONNECTIONS:
+            raise HTTPException(429, "Too many voice calls are connected.")
+        call = voice_stream.VoiceStream(websocket, row, config, key, settings["voice_max_call_minutes"])
+        # Reserve before accepting: there is no await between capacity check
+        # and reservation, so concurrent handshakes cannot exceed the bound.
+        voice_stream.calls[session_id] = call
+    except HTTPException as exc:
+        await websocket.close(code=4400 + (exc.status_code % 100), reason=str(exc.detail)[:120])
+        return
+    try:
+        await websocket.accept()
+        await call.run()
+    finally:
+        if voice_stream.calls.get(session_id) is call:
+            voice_stream.calls.pop(session_id, None)

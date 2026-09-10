@@ -33,6 +33,8 @@
 	 */
 	import { onDestroy, tick, type Snippet } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import { getVoiceSessionConfig, loadVoiceSettings, usesDelegation, voiceModelLabel } from '$lib/api/voice';
+	import { watchResources } from '$lib/services/watch-resources';
 	import { anyCredential } from '$lib/stores/auth.svelte';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import EffortPopoverCard from './EffortPopoverCard.svelte';
@@ -41,7 +43,7 @@
 	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort } from '$lib/constants/model-effort';
 	// The controls sheet is the mobile app's; the web build registers none.
 	import { composerShell } from './composer-shell';
-	import { Globe, Plus, SlidersHorizontal } from 'lucide-svelte';
+	import { Globe, Plus, SlidersHorizontal, Lock } from 'lucide-svelte';
 	import {
 		getModelLabel,
 		getDefaultModel,
@@ -198,6 +200,24 @@
 	// when an existing one is opened, so the registry default is only ever the
 	// first-run floor.
 	const modelValue = $derived($activeSession.modelOverride ?? getDefaultModel());
+	let voiceEngine = $state<string | null>(null);
+	let voiceRevision = $state(0);
+	watchResources(['settings'], () => { voiceRevision++; });
+	const voiceLane = $derived($activeSession.mode === 'voice');
+	const modelLocked = $derived(voiceLane && (!voiceEngine || !usesDelegation(voiceEngine)));
+	$effect(() => {
+		const id = $activeSession.sessionId;
+		const voice = voiceLane;
+		void voiceRevision;
+		let stale = false;
+		voiceEngine = null;
+		if (voice) {
+			const request = id ? getVoiceSessionConfig(id).then(c => c.model) : loadVoiceSettings().then(s => s.voice_model);
+			void request.then(model => { if (!stale) voiceEngine = model; }).catch(() => {});
+		}
+		return () => { stale = true; };
+	});
+	$effect(() => { if (modelLocked && (openPopover === 'model' || openPopover === 'effort')) closePopover(); });
 
 	// ── Fast service tier ───────────────────────────────────────────
 	// Offered only on models that carry the tier (Claude Opus, GPT-5 and Astra on
@@ -236,7 +256,7 @@
 	const requestedModelLabel = $derived(getModelLabel(liveRequestedModel));
 	// When rerouted the model text shows the ACTUAL model (what's really
 	// running); otherwise it shows the selection.
-	const modelButtonLabel = $derived(rerouted ? actualModelLabel : selectedModelLabel);
+	const modelButtonLabel = $derived(modelLocked ? (voiceEngine ? voiceModelLabel(voiceEngine) : 'Voice model…') : voiceLane ? selectedModelLabel : rerouted ? actualModelLabel : selectedModelLabel);
 	const modelWarnTitle = $derived(
 		rerouted
 			? `Model rerouted: running ${actualModelLabel} (requested ${requestedModelLabel})`
@@ -334,7 +354,7 @@
 		{ value: 'bypassPermissions', label: 'Bypass', description: 'Execute all tools' }
 	]);
 
-	const effortModel = $derived(resolveEffortModel(
+	const effortModel = $derived(voiceLane ? modelValue : resolveEffortModel(
 		$activeSession.modelOverride, liveModel, liveRequestedModel, $activeSession.liveProvider
 	));
 	const effortCapability = $derived(resolveModelEffort(effortModel));
@@ -493,13 +513,14 @@
 				type="button"
 				class="dock-txt model-btn"
 				class:open={openPopover === 'model'}
-				class:warn={rerouted}
-				onclick={() => togglePopover('model')}
-				title={modelWarnTitle ?? `Model: ${modelButtonLabel}`}
+				class:warn={rerouted && !voiceLane}
+				disabled={modelLocked}
+				onclick={() => { if (!modelLocked) togglePopover('model'); }}
+				title={modelLocked ? `Voice model: ${modelButtonLabel}` : modelWarnTitle ?? `Delegation model: ${modelButtonLabel}`}
 				aria-haspopup="listbox"
 				aria-expanded={openPopover === 'model'}
 				aria-label="Model: {modelButtonLabel}"
-			>{modelButtonLabel}</button>
+			>{#if modelLocked}<Lock size={11} aria-hidden="true" />{/if}<span>{modelButtonLabel}</span></button>
 
 			{#if openPopover === 'model'}
 				<div
@@ -530,7 +551,8 @@
 				type="button"
 				class="dock-tag effort-btn"
 				class:open={openPopover === 'effort'}
-				onclick={() => togglePopover('effort')}
+				disabled={modelLocked}
+				onclick={() => { if (!modelLocked) togglePopover('effort'); }}
 				title={effortCapability.explanation ?? (effortValue ? `Reasoning effort: ${effortLabel}` : 'Reasoning effort: model default')}
 				aria-haspopup="dialog"
 				aria-expanded={openPopover === 'effort'}
@@ -574,6 +596,7 @@
 	modelGroups={modelCatalog.groups}
 	{modelValue}
 	modelLabel={modelButtonLabel}
+		{modelLocked}
 	modelNotice={modelNotice}
 	onModelSelect={(value) => activeSession.setModelOverride(value)}
 	contextChoice={$activeSession.contextWindowChoice}
@@ -621,6 +644,8 @@
 	.dock-right {
 		margin-left: auto;
 	}
+	.model-btn:disabled { display: inline-flex; align-items: center; gap: 4px; }
+	.model-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 	.dock-pop-wrap {
 		position: relative;

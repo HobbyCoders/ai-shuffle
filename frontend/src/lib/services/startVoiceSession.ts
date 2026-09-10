@@ -41,7 +41,7 @@ export async function startNewVoiceSession(): Promise<boolean> {
 			base_branch: from.worktreeBaseBranch || null,
 			execution_mode: from.worktreeIntent,
 			target_instance_id: from.deviceIntent?.id || null,
-			model: from.modelOverride,
+			model: from.modelOverride || getDefaultModel(),
 			permission_mode: from.permissionModeOverride,
 			effort: from.effortLevelOverride,
 			fast: from.fastMode,

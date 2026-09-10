@@ -32,6 +32,11 @@ import { sessionOwnerBoundary, sessionOwnerEpoch } from '$lib/stores/session-own
 /** The realtime models a voice session may run on (backend allowlist). */
 export const VOICE_MODELS = [
 	{
+		id: 'gpt-live-1',
+		label: 'GPT Live 1',
+		hint: 'Voice with your selected delegation model',
+	},
+	{
 		id: 'gpt-realtime-2.1',
 		label: 'GPT Realtime 2.1',
 		hint: 'Best quality · about $0.05–0.45 per minute',
@@ -46,7 +51,21 @@ export const VOICE_MODELS = [
 		label: 'GPT Realtime (legacy)',
 		hint: 'Previous generation',
 	},
+	{ id: 'fal-ai/personaplex/realtime', label: 'PersonaPlex', hint: 'Full-duplex voice and reasoning' },
 ] as const;
+
+export { FAL_VOICE_PROVIDER, usesDelegation, usesAudioStream } from '$lib/constants/voice-engines';
+export const voiceModelLabel = (model: string): string => VOICE_MODELS.find(m => m.id === model)?.label ?? model;
+export function voicesForModel(model: string): readonly { id: string; label: string; hint: string }[] {
+	if (model !== 'fal-ai/personaplex/realtime') return VOICE_VOICES;
+	return ['NATF', 'NATM', 'VARF', 'VARM'].flatMap(prefix =>
+		Array.from({ length: prefix.startsWith('NAT') ? 4 : 5 }, (_, i) => ({ id: `${prefix}${i}`, label: `${prefix}${i}`, hint: '' })));
+}
+
+export interface VoiceSessionConfig { model: string; voice: string; provider_id: string | null }
+export function getVoiceSessionConfig(id: string): Promise<VoiceSessionConfig> {
+	return api.get<VoiceSessionConfig>(`/voice/sessions/${encodeURIComponent(id)}/config`);
+}
 
 /**
  * The voices the realtime models can speak with (backend allowlist, VM21).
