@@ -179,6 +179,57 @@ async def test_remote_owner_receives_turns_interrupts_and_answers(workers, monke
             await control.submit_turn(a.device_id, "s1", prompt="again")
 
 
+@pytest.mark.parametrize("aware", [False, True], ids=["naive", "timezone-aware"])
+async def test_create_remote_session_serializes_database_timestamps(workers, monkeypatch, aware):
+    """Keep the DB producer and HTTP encoder; the SQLite shim returns date strings."""
+    from datetime import datetime, timezone
+    import json
+
+    a, b = workers("a"), workers("b")
+    served = ServedBy(a, "http://a.local:8000")
+    real_async = httpx.AsyncClient
+    sent = []
+
+    def handle(request):
+        if request.url.path.endswith("/control/sessions"):
+            sent.append(json.loads(request.content))
+        return served.handler(request)
+
+    def async_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handle)
+        return real_async(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", async_client)
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    with b.active():
+        store.touch_member(a.device_id, endpoints=[served.base_url])
+        database.create_session(session_id="remote-dates", profile_id="default", project_id=None,
+                                title="Remote branch", is_active=True, target_instance_id=a.device_id)
+        database.set_session_branch("remote-dates", "fix/remote-dates", None)
+        row = dict(database.get_session("remote-dates"))
+        # PostgreSQL yields datetime objects for these actual database columns.
+        for key in ("created_at", "updated_at"):
+            value = row[key]
+            timestamp = datetime.fromisoformat(value) if isinstance(value, str) else value
+            row[key] = timestamp.replace(tzinfo=timezone.utc if aware else None)
+        original = dict(row)
+        result = await control.call(a.device_id, "sessions", {"session": row, "uploads": []})
+        assert result["session_id"] == row["id"]
+        assert row == original  # Encoding must not mutate the caller's database row.
+
+    assert sent[0]["session"]["created_at"] == row["created_at"].isoformat()
+    assert sent[0]["session"]["updated_at"] == row["updated_at"].isoformat()
+    assert sent[0]["session"]["project_id"] is None
+    assert sent[0]["uploads"] == []
+    with a.active():
+        received = database.get_session("remote-dates")
+        assert received["owner_device_id"] == a.device_id
+        assert received["title"] == "Remote branch"
+        assert received["branch"] == "fix/remote-dates"
+
+
 def test_fork_here_seeds_a_local_session_from_the_mirror(workers):
     a, b = workers("a"), workers("b")
     with a.active():

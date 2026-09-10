@@ -186,6 +186,23 @@ def test_remote_worktree_target_queues_only_on_the_target_owner(
     _seed_project(b, tmp_path)
     _serve_peer(monkeypatch, b)
 
+    # The SQLite shim returns strings; production PostgreSQL returns datetimes.
+    # Wrap the actual DB read instead of substituting a hand-built session row.
+    from datetime import datetime
+
+    get_session = database.get_session
+
+    def get_session_with_dates(*args, **kwargs):
+        row = get_session(*args, **kwargs)
+        if row is not None:
+            row = dict(row)
+            for key in ("created_at", "updated_at"):
+                if isinstance(row.get(key), str):
+                    row[key] = datetime.fromisoformat(row[key])
+        return row
+
+    monkeypatch.setattr(database, "get_session", get_session_with_dates)
+
     body = CreateWorktreeSessionRequest(
         project_id=PROJECT_ID,
         branch_name="feature/network-owner",

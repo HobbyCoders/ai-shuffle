@@ -21,6 +21,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import httpx
+from fastapi.encoders import jsonable_encoder
 
 from app.db import network as store
 from app.network import engine, runners, transport
@@ -73,7 +74,12 @@ async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = Non
     async with httpx.AsyncClient(follow_redirects=False) as client:
         try:
             await link.authenticate(client, ctx)
-            result = await link._request(client, "POST", f"/api/v1/network/peer/control/{action}", json_body=body or {})
+            # DB-backed control payloads contain datetimes (notably session rows).
+            # httpx does not apply FastAPI's response encoding to outgoing JSON.
+            result = await link._request(
+                client, "POST", f"/api/v1/network/peer/control/{action}",
+                json_body=jsonable_encoder(body or {}),
+            )
         except transport.PeerError as exc:
             message = str(exc)
             if message.startswith("HTTP 4"):
