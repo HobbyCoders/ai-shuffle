@@ -253,12 +253,6 @@ async def _collect_metrics() -> dict:
         metrics["question_pending_sessions"] = len(user_question_handler._pending_questions)
     except Exception:
         pass
-    try:
-        from app.core.rate_limiter import rate_limiter
-        metrics["rate_limiter_windows"] = len(rate_limiter._windows)
-        metrics["rate_limiter_config_cache"] = len(rate_limiter._config_cache)
-    except Exception:
-        pass
 
     return metrics
 
@@ -671,15 +665,6 @@ async def _periodic_cleanup() -> dict:
             cleaned["repo_record_cache_expired"] = len(expired_keys)
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to purge repo record cache: {e}")
-
-    # Clean up expired rate limiter windows and stale config cache
-    try:
-        from app.core.rate_limiter import rate_limiter
-        rate_limiter.cleanup()
-        rate_limiter.clear_cache()
-        cleaned["rate_limiter_cleanup"] = True
-    except Exception as e:
-        logger.debug(f"{_PREFIX} Failed to clean rate limiter: {e}")
 
     return cleaned
 

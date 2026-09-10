@@ -14,7 +14,6 @@ API users provide authentication for external integrations, connectors, and auto
 
 - A unique API key (prefix: `aih_`)
 - Optional project and profile restrictions
-- Rate limits independent from admin session
 
 API users are connector/application credentials, not human sign-in accounts.
 They cannot become administrators, even when a request arrives over the trusted

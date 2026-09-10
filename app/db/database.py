@@ -2562,11 +2562,9 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
             results["analyze"] = f"error: {e}"
 
         # 2. Cleanup unbounded log tables (older than 7 days).
-        # request_log uses 'timestamp' column; all others use 'created_at'.
         log_tables = {
             "usage_log": "created_at",
             "audit_log": "created_at",
-            "request_log": "timestamp",
             "sync_log": "created_at",
             "connector_event_log": "created_at",
         }
@@ -2971,18 +2969,6 @@ from app.db.provider_usage_snapshots import (  # noqa: F401
     upsert_provider_usage_snapshot,
     get_all_provider_usage_snapshots,
     delete_provider_usage_snapshot,
-)
-
-from app.db.rate_limits import (  # noqa: F401
-    get_rate_limit,
-    get_rate_limit_for_user,
-    get_all_rate_limits,
-    create_rate_limit,
-    update_rate_limit,
-    delete_rate_limit,
-    log_request,
-    get_request_count,
-    cleanup_old_request_logs,
 )
 
 from app.db.git import (  # noqa: F401

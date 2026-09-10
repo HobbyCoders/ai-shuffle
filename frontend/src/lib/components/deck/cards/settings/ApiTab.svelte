@@ -2,22 +2,11 @@
 	/**
 	 * ApiTab — programmatic-access settings.
 	 *
-	 * Groups the two API-facing admin panels that previously lived in the System
-	 * tab: rate limiting (how often sessions may call the model) and API users
-	 * (keys for programmatic access).
+	 * Manage API users and keys for programmatic access.
 	 */
-	import { Gauge, Users } from 'lucide-svelte';
-	import RateLimitManager from '$lib/components/RateLimitManager.svelte';
+	import { Users } from 'lucide-svelte';
 	import ApiUserManager from '$lib/components/ApiUserManager.svelte';
 </script>
-
-<!-- Rate limits -->
-<div class="set-group">
-	<div class="set-grouphead">
-		<h3><Gauge />Rate limits</h3>
-	</div>
-	<div class="sg-body"><RateLimitManager /></div>
-</div>
 
 <!-- API users -->
 <div class="set-group">

@@ -552,41 +552,6 @@ def create_postgres_schema(cursor) -> None:
     """)
 
     # ------------------------------------------------------------------
-    # 27. Rate limit configurations
-    # ------------------------------------------------------------------
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS rate_limits (
-            id TEXT PRIMARY KEY,
-            user_id TEXT,
-            api_key_id TEXT,
-            requests_per_minute INTEGER DEFAULT 20,
-            requests_per_hour INTEGER DEFAULT 200,
-            requests_per_day INTEGER DEFAULT 1000,
-            concurrent_requests INTEGER DEFAULT 3,
-            priority INTEGER DEFAULT 0,
-            is_unlimited BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            FOREIGN KEY (api_key_id) REFERENCES api_users(id) ON DELETE CASCADE
-        )
-    """)
-
-    # ------------------------------------------------------------------
-    # 28. Request log for rate limit tracking
-    # ------------------------------------------------------------------
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS request_log (
-            id TEXT PRIMARY KEY,
-            user_id TEXT,
-            api_key_id TEXT,
-            endpoint TEXT,
-            timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            duration_ms INTEGER,
-            status TEXT DEFAULT 'success'
-        )
-    """)
-
-    # ------------------------------------------------------------------
     # 29. Notes (global, not project-scoped)
     # ------------------------------------------------------------------
     cursor.execute("""
@@ -1450,15 +1415,6 @@ def create_postgres_schema(cursor) -> None:
 
     # -- webhooks
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_active ON webhooks(is_active)")
-
-    # -- rate_limits
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rate_limits_user ON rate_limits(user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rate_limits_api_key ON rate_limits(api_key_id)")
-
-    # -- request_log
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_request_log_user ON request_log(user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_request_log_api_key ON request_log(api_key_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_request_log_timestamp ON request_log(timestamp)")
 
     # -- audit_log
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id)")

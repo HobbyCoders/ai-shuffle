@@ -6,7 +6,7 @@ import pytest
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
-from app.api import auth, mobile, mobile_hub, rate_limits, settings as settings_api
+from app.api import auth, mobile, mobile_hub, settings as settings_api
 from app.core import account_hub, encryption, pairing
 from app.core.config import settings
 from app.core.models import DeviceInfo
@@ -35,7 +35,7 @@ def owner_app(monkeypatch):
     monkeypatch.setattr(auth.audit_service, 'log_logout', lambda *args: None)
     mobile_hub._limiter.reset()
     app = FastAPI()
-    for router in (auth.router, mobile.router, settings_api.router, rate_limits.router):
+    for router in (auth.router, mobile.router, settings_api.router):
         app.include_router(router)
 
     @app.get('/principal')
@@ -81,7 +81,6 @@ def test_existing_managed_owner_gets_all_admin_settings_and_keeps_device_identit
     assert change_voice(client).status_code == 200
     assert client.get('/api/v1/settings/voice').json()['voice_max_call_minutes'] == 37
     assert client.get('/api/v1/mobile/devices').status_code == 200
-    assert client.get('/api/v1/rate-limits').status_code == 200
     owner = hub_store.ownership(DEVICE)
     assert client.get('/principal').json() == {
         'admin': True, 'principal': 'paired_client:' + owner['paired_client_id'], 'device_id': DEVICE}

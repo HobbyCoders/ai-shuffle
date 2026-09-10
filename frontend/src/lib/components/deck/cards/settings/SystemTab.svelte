@@ -31,7 +31,7 @@
 </script>
 
 <!-- System prompt -->
-<!-- Rate limits + API users now live in the API tab; Devices lives in the
+<!-- API users now live in the API tab; Devices lives in the
      Connections tab. This tab is the global system prompt only. -->
 <div class="set-group">
 	<div class="set-grouphead">

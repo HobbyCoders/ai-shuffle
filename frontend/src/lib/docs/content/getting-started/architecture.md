@@ -104,6 +104,5 @@ Key tables:
 - **Encryption** — Stored credentials use a persistent data key wrapped by a private key under `DATA_DIR/.credential-keys`. Adoption retains existing ciphertext and data keys; fresh installations generate random keys. Key backups are required alongside PostgreSQL backups.
 - **Authentication** — Trusted local/LAN owner access on the local listener; account-authorized cookie sessions on protected remote ingress; scoped Bearer tokens for API users. Local setup requires no account or password.
 - **Authorization** — Admin-only endpoints, API user scoping by project/profile
-- **Rate Limiting** — Per-IP and per-user request limits
 - **CORS** — Configurable origin restrictions
 - **Input Validation** — Pydantic models for all request/response schemas
