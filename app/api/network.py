@@ -214,12 +214,18 @@ async def list_members(_: str = Depends(require_auth)) -> dict:
 
 @router.patch("/members/{device_id}")
 async def rename_member(device_id: str, body: RenameMember, _: str = Depends(require_admin)) -> dict:
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Device name is required")
     ctx = engine.context()
     if ctx is None or ctx.member(device_id) is None:
         raise HTTPException(404, "Unknown device")
-    row = await run_sync(store.rename_member, device_id, body.name.strip())
+    row = await run_sync(store.rename_member, device_id, name)
+    ctx = await run_sync(engine.load_context)
     if device_id == ctx.device_id:
         await run_sync(engine.publish_presence, version=settings.version)
+        from app.network import hub
+        hub.kick()
     return _member_view(row, ctx)
 
 

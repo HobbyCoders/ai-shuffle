@@ -66,6 +66,9 @@ def test_status_create_members_recovery_and_conflicts(workers, make_client):
         assert me["is_self"] and me["online"] and me["name"] == "Desk" and me["fingerprint"].count("-") == 7
         renamed = client.patch(f"/api/v1/network/members/{a.device_id}", json={"name": "Desk 2"})
         assert renamed.json()["name"] == "Desk 2"
+        assert engine.context().member(a.device_id).name == "Desk 2"
+        assert client.patch(f"/api/v1/network/members/{a.device_id}", json={"name": "   "}).status_code == 400
+        assert store.get_member(a.device_id)["name"] == "Desk 2"
         assert client.delete(f"/api/v1/network/members/{a.device_id}").status_code == 400
         assert client.delete("/api/v1/network/members/dev_nobody").status_code == 404
         policy_doc = client.get("/api/v1/network/policy").json()

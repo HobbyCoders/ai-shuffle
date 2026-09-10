@@ -4,6 +4,7 @@ import pytest
 from app.core import account_hub
 from app.db import database
 from app.db import mobile_hub as binding_store
+from app.db import network as store
 from app.network import engine, hub, recovery, tokens, transport
 from tests.core.network.fake_hub import FakeHub
 from tests.core.network.harness import Worker, exchange
@@ -61,6 +62,50 @@ def _pref(worker, key):
         from app.core import owner_auth
         row = database.get_user_preference("admin", owner_auth.preference_identity(), key)
         return row["value"] if row else None
+
+
+async def test_worker_rename_retries_registration_and_survives_restart(workers, fake, monkeypatch):
+    a = workers("a")
+    with a.active():
+        engine.create_network("Home", device_name="Old name")
+        _signed_in(fake, a)
+        hub.register()
+        # A pre-upgrade rename can exist in the DB with a stale cached context.
+        store.rename_member(a.device_id, "Unraid")
+        original_call = account_hub.call
+
+        def unavailable(*args, **kwargs):
+            from fastapi import HTTPException
+            raise HTTPException(503, "Unavailable")
+
+        monkeypatch.setattr(account_hub, "call", unavailable)
+        await hub._loop_body()
+        assert hub._hub_state()["registered_name"] == "Old name"
+        assert fake.devices[a.device_id]["name"] == "Old name"
+
+        hub.reset_for_tests()
+        engine.load_context()
+        monkeypatch.setattr(account_hub, "call", original_call)
+        await hub._loop_body()
+        assert fake.devices[a.device_id]["name"] == "Unraid"
+        assert hub._hub_state()["registered_name"] == "Unraid"
+        calls = fake.calls.count(("server-a", "POST", "network"))
+        await hub._loop_body()
+        assert fake.calls.count(("server-a", "POST", "network")) == calls
+
+
+async def test_existing_registration_refreshes_name_after_upgrade(workers, fake):
+    a = workers("a")
+    with a.active():
+        engine.create_network("Home", device_name="Unraid")
+        _signed_in(fake, a)
+        hub.register()
+        state = hub._hub_state()
+        state.pop("registered_name")
+        store.update_state(hub=state)
+        fake.devices[a.device_id]["name"] = "Old name"
+        await hub._loop_body()
+        assert fake.devices[a.device_id]["name"] == "Unraid"
 
 
 async def test_register_push_pull_and_device_approval(workers, fake):

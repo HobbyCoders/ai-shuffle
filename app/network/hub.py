@@ -164,7 +164,8 @@ def register() -> dict:
     """Tell the hub about this device and learn where the network stands."""
     ident = identity_mod.load()
     ctx = engine.context()
-    body = {"device": _device_description(ident, ctx.member(ctx.device_id).name if ctx and ctx.member(ctx.device_id) else None)}
+    member = store.get_member(ctx.device_id) if ctx else None
+    body = {"device": _device_description(ident, member["name"] if member else None)}
     if ctx is not None:
         body["network_id"] = ctx.network_id
         body["founder_device_id"] = ctx.founder_device_id
@@ -180,6 +181,7 @@ def register() -> dict:
         _state["account_network"] = _account_network(_summary_or_none())
     if ctx is not None:
         _save_hub_state(registered=result.get("status") != "conflict", status=result.get("status"),
+                        registered_name=body["device"]["name"],
                         network_hub_id=result.get("network_hub_id"), quota=result.get("quota"))
     return result
 
@@ -500,7 +502,11 @@ async def _loop_body() -> bool:
                     return True
             _state["last_error"] = None
             return False
-        if not hub_state.get("registered"):
+        # Read the durable name, including renames made before this process
+        # started. Remember it only after registration succeeds so outages retry.
+        member = await asyncio.to_thread(store.get_member, ctx.device_id)
+        name_changed = member is not None and hub_state.get("registered_name") != member["name"]
+        if not hub_state.get("registered") or name_changed:
             result = await asyncio.to_thread(register)
             if result.get("status") == "conflict":
                 # The account already syncs other workers: the account wins.
