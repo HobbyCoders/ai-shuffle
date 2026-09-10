@@ -11,10 +11,7 @@ try {
   await page.goto('http://127.0.0.1:8000/setup', { waitUntil: 'domcontentloaded' });
   await page.getByRole('heading', { name: 'Welcome to AI Shuffle', exact: true }).waitFor();
   // Start step: a clean install needs no account, invite or approval.
-  const create = page.getByRole('button', { name: /^Clean install/ });
-  if (await create.isVisible()) {
-    await create.click();
-  }
+  await page.getByRole('button', { name: 'Continue without an account', exact: true }).click();
   await page.getByRole('heading', { name: 'Select Workspace Folder', exact: true }).waitFor();
   await page.getByLabel('Or type a path manually').fill('/workspace/container-onboarding-check');
   const saved = page.waitForResponse(response => response.url().endsWith('/workspace/config') && response.request().method() === 'POST');
@@ -48,7 +45,7 @@ try {
   }
   await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'More', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Settings', exact: true }).click();
-  await page.getByRole('button', { name: 'Providers', exact: true }).click();
+  await page.getByRole('button', { name: 'Account', exact: true }).click();
   const account = page.getByRole('region', { name: 'Shuffle account', exact: true });
   const login = account.getByRole('button', { name: 'Sign in', exact: true });
   await login.waitFor();

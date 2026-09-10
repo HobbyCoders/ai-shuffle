@@ -165,8 +165,11 @@ class Check:
                     "from pathlib import Path; Path('/workspace/container-onboarding-check').mkdir(exist_ok=True)")
         script = ROOT / "tests/integration/container_ui_smoke.mjs"
         self.docker("cp", script, app + ":/tmp/container-ui-smoke.mjs")
-        self.docker("exec", "--user", "99:100", app, "node", "/tmp/container-ui-smoke.mjs", timeout=120)
-        self.docker("cp", app + ":/tmp/container-ui.png", self.artifacts / "container-ui.png")
+        try:
+            self.docker("exec", "--user", "99:100", app, "node", "/tmp/container-ui-smoke.mjs", timeout=120)
+        finally:
+            # Keep the failing page too; it explains stale selectors and UI errors.
+            self.docker("cp", app + ":/tmp/container-ui.png", self.artifacts / "container-ui.png", check=False)
         self.passed("bundled UI initialization and onboarding write through the real browser")
 
         self.docker("restart", "--time", "90", app, timeout=100)

@@ -44,3 +44,13 @@ def test_docker_commands_pin_release_and_preserve_runtime_data():
     assert ":latest" not in body
     assert "back up first" in body
     assert "external database must stay on their previous" in body
+
+
+def test_docker_release_rebuild_keeps_container_verification_gate():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docker-publish.yml").read_text())
+    steps = {step["name"]: step for step in workflow["jobs"]["build"]["steps"] if "name" in step}
+    gate = "startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''"
+    assert steps["Verify actual container lifecycle and UI"]["if"] == gate
+    assert steps["Upload container evidence"]["if"] == f"always() && ({gate})"
+    assert steps["Checkout release source"]["with"]["ref"] == "refs/tags/${{ inputs.release_tag }}"
+
