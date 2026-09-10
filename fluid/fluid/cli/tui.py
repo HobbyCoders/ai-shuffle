@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover
     _HAVE_TEXTUAL = False
 
 # Slash commands the TUI answers in place (read-only views; no turn submitted).
-_INFO_COMMANDS = frozenset({"/help", "/context", "/usage", "/tools", "/skills", "/model"})
+_INFO_COMMANDS = frozenset({"/help", "/context", "/usage", "/tools", "/skills", "/model", "/questions", "/answer"})
 
 _INSTALL_HINT = (
     "The TUI needs the optional 'textual' dependency.\n"
@@ -89,6 +89,9 @@ async def run_tui(engine, session_id: str) -> int:
             self.run_worker(self._pump_events(), exclusive=False)
 
         async def _pump_events(self) -> None:
+            for question in await self.engine.pending_questions():
+                render_event(question, self._writer)
+            await self.engine.resume_question_delivery()
             async with contextlib.aclosing(
                 self.engine.bus.subscribe(self.session_id, from_store=False)
             ) as events:

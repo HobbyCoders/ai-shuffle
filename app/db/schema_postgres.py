@@ -1767,7 +1767,7 @@ def create_postgres_schema(cursor) -> None:
             answer JSONB,
             answered_by_device TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            expires_at TIMESTAMP WITH TIME ZONE,
             answered_at TIMESTAMP WITH TIME ZONE
         )
     """)

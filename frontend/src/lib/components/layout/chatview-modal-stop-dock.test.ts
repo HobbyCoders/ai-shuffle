@@ -6,8 +6,8 @@
  * ChatInput's `.input-wrapper` stacking context — stayed clickable while a
  * prompt was open. It read as a stray control punching through the dialog, so
  * the whole workaround is reverted: no floating Stop renders while a permission
- * prompt OR an AskUserQuestion modal is up. The user answers or dismisses the
- * modal, then uses the composer's normal Stop.
+ * permission prompt is up. Questions now live above the composer without a
+ * backdrop, so the composer's normal Stop remains reachable.
  *
  * Mounting ChatView pulls in the entire session/store graph, and the dock's
  * defining property is that it renders NOTHING — so these tests pin the source
@@ -51,9 +51,12 @@ describe('ChatView — floating modal Stop dock removed entirely', () => {
 		expect(codeOnly).not.toMatch(/hasPendingQuestions/);
 	});
 
-	it('still renders the permission queue and the question modal in the overlay', () => {
+	it('keeps permissions in the overlay and questions beside the persistent composer', () => {
 		expect(codeOnly).toMatch(/<PermissionQueue/);
-		expect(codeOnly).toMatch(/<UserQuestion/);
+		expect(codeOnly).toMatch(/<QuestionTray[\s\S]*?<ChatInput/);
+		const overlay = codeOnly.slice(codeOnly.indexOf('class="modal-overlay"'));
+		expect(overlay).not.toMatch(/<QuestionTray|<UserQuestion/);
+		expect(codeOnly).toContain('{#if !showEmptyHero && showPermissionModal}');
 	});
 });
 

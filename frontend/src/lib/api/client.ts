@@ -473,6 +473,8 @@ export interface UserQuestionRequest {
 	session_id?: string;
 	tool_use_id: string;
 	questions: UserQuestion[];
+	/** AskUser posted without blocking the running turn. */
+	nonblocking?: boolean;
 	created_at?: string;
 }
 

@@ -1983,7 +1983,12 @@ class ChatWebSocketHandler:
         """Handle 'user_question_response' message type."""
         request_id = data.get("request_id")
         response_session_id = data.get("session_id") or self.current_session_id
+        if response_session_id and not await self._authorize_mobile_session(response_session_id):
+            return
         answers = data.get("answers", {})
+        if not isinstance(answers, dict):
+            await self.send_json({"type": "error", "message": "Invalid user question response"})
+            return
         # The modal's "X" dismisses without answers, and per-question "Skip"
         # sends the skipped question keys out-of-band (they carry no answer of
         # their own). Both still resolve the pending interaction, so neither may
@@ -2043,6 +2048,8 @@ class ChatWebSocketHandler:
 
     async def handle_get_pending_questions(self, data: dict) -> None:
         """Handle 'get_pending_questions' message type."""
+        if self.current_session_id and not await self._authorize_mobile_session(self.current_session_id):
+            return
         if self.current_session_id:
             # Pending questions are read straight from the shared
             # ``pending_interactions`` table, which every install sees — no

@@ -9,6 +9,7 @@ Handles AskUserQuestion tool calls by:
 
 import asyncio
 import logging
+import uuid
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -82,7 +83,7 @@ def resolve_answer_envelope(envelope: Any) -> Dict[str, Any]:
 # AskUserQuestion permission gate. The adapter translates each event into the
 # same {question, schema} shape and expects a single string back on
 # RespondQuestion. These helpers normalize that shape onto the existing
-# UserQuestion modal payload and extract the answer the engine wants.
+# UserQuestion payload and extract the answer the engine wants.
 FLUID_ANSWER_KEY = "_fluid_answer"
 # Set truthy beside FLUID_ANSWER_KEY when a PERSON produced the answer (the
 # question was answered in the UI) rather than a host policy. The adapter forwards it as ``RespondQuestion(
@@ -109,8 +110,9 @@ def questions_from_tool_input(tool_input: Any) -> List[Dict[str, Any]]:
     if isinstance(schema, dict) and str(schema.get("question") or "").strip():
         q = dict(schema)
         message = str(tool_input.get("question") or "").strip()
-        if message and message != str(q.get("question") or "").strip():
-            # Show extra context supplied by the host in the message.
+        if not tool_input.get("_nonblocking") and message and message != str(q.get("question") or "").strip():
+            # Generic MCP elicitation may supply extra host context. AskUser's
+            # message is its terminal rendering; the tray already renders options.
             q["question"] = message
         return [q]
     message = str(tool_input.get("question") or "").strip()
@@ -239,6 +241,7 @@ class UserQuestionHandler:
             "request_id": payload.get("request_id"),
             "tool_use_id": payload.get("tool_use_id"),
             "questions": payload.get("questions"),
+            "nonblocking": bool(payload.get("nonblocking")),
             "created_at": created_at,
         }
 
@@ -250,8 +253,10 @@ class UserQuestionHandler:
         questions: List[Dict[str, Any]],
         broadcast_func: callable,
         fanout_func: Optional[callable] = None,
+        *,
+        nonblocking: bool = False,
     ) -> Dict[str, Any]:
-        """Table-backed request_answers (V2 Phase 4)."""
+        """Persist and publish a question, optionally waiting for its answer."""
         from app.core import interaction_wait
         from app.db import interactions
 
@@ -260,11 +265,22 @@ class UserQuestionHandler:
             "tool_use_id": tool_use_id,
             "questions": questions,
         }
-        ttl = _question_ttl_seconds()
+        if nonblocking:
+            payload["nonblocking"] = True
+        ttl = None if nonblocking else _question_ttl_seconds()
+        create_kwargs = {}
+        if nonblocking:
+            # Engine replay and reconnect must recover one card, not post a copy.
+            create_kwargs["interaction_id"] = str(uuid.uuid5(
+                uuid.NAMESPACE_URL, f"question:{session_id}:{request_id}"
+            ))
         row = await asyncio.to_thread(
-            interactions.create_interaction, session_id, QUESTION_KIND, payload, ttl
+            interactions.create_interaction, session_id, QUESTION_KIND, payload, ttl,
+            **create_kwargs,
         )
         interaction_id = row["id"]
+        if nonblocking and row["state"] != "pending":
+            return {"status": row["state"], "request_id": request_id}
 
         question_payload = {
             "type": "user_question",
@@ -272,8 +288,15 @@ class UserQuestionHandler:
             "request_id": request_id,
             "tool_use_id": tool_use_id,
             "questions": questions,
+            "nonblocking": nonblocking,
         }
-        delivered = await broadcast_func(question_payload)
+        try:
+            delivered = await broadcast_func(question_payload)
+        except Exception:
+            if not nonblocking:
+                raise
+            logger.warning("Question %s persisted; socket broadcast failed", request_id, exc_info=True)
+            delivered = False
         if delivered is False:
             logger.warning(
                 f"User question {request_id} could not be delivered to the origin "
@@ -314,6 +337,9 @@ class UserQuestionHandler:
             )
         except Exception:
             pass
+
+        if nonblocking:
+            return {"status": "posted", "request_id": request_id}
 
         result_row = await interaction_wait.await_interaction(
             interaction_id, session_id, float(ttl)
@@ -429,6 +455,86 @@ class UserQuestionHandler:
                 exc_info=True,
             )
 
+    async def post_question(self, **kwargs: Any) -> Dict[str, Any]:
+        """Publish a durable AskUser prompt without holding the provider callback."""
+        return await self._request_answers_v2(**kwargs, nonblocking=True)
+
+    async def _retire_native_question(self, session_id: str) -> None:
+        try:
+            from app.core.session_pool import get_session_pool
+            state = get_session_pool().peek(session_id)
+            adapter = getattr(state, "adapter", None) if state is not None else None
+            reconcile = getattr(adapter, "reconcile_user_questions", None)
+            if reconcile is not None:
+                await reconcile()
+        except Exception:
+            # The durable host answer is authoritative; reconnect retries this.
+            logger.warning("Native question retirement failed for %s", session_id, exc_info=True)
+
+    async def _answer_nonblocking(
+        self, row: Dict[str, Any], envelope: Dict[str, Any],
+        answered_by_device: Optional[str],
+    ) -> bool:
+        from app.core import interaction_events, interaction_wait, turn_claim, turn_manager
+        from app.core import turn_scheduler
+        from app.core.session_runtime import try_steer_pending
+        from app.db import interactions
+
+        session_id = row["session_id"]
+        request_id = row["payload"]["request_id"]
+        if envelope.get(DISMISSED_KEY):
+            cancelled = await asyncio.to_thread(interactions.cancel_interaction, row["id"])
+            if cancelled:
+                await self._retire_native_question(session_id)
+                interaction_wait.notify_changed(session_id)
+                await interaction_events.emit_interaction_expired(
+                    session_id, row["id"], request_id, reason="cancelled",
+                )
+            return cancelled
+
+        # Only the questions this request actually posted can become user input.
+        keys = [str(q.get("question") or "") for q in row["payload"].get("questions", [])]
+        resolved = resolve_answer_envelope(envelope)
+        answers = {key: resolved[key] for key in keys if key in resolved}
+        if not answers:
+            return False
+        prompt = "Answer to your question:\n" + "\n".join(
+            f"{key}\n{', '.join(map(str, value)) if isinstance(value, list) else value}"
+            for key, value in answers.items()
+        )
+        # Inherit the latest runnable context, not settings from when a days-old
+        # question was posted. Keep only transport attribution from its payload.
+        context = await asyncio.to_thread(turn_scheduler._latest_context_turn, session_id) or {}
+        context = {**context, "payload": turn_scheduler._context_payload(context)}
+        accepted = await asyncio.to_thread(
+            interactions.answer_question_and_enqueue, row, envelope,
+            answered_by_device, prompt, context,
+        )
+        if not accepted:
+            return False
+        interaction_wait.notify_changed(session_id)
+        # Match an ordinary human send: release Stop and supersede stale wakes.
+        try:
+            from app.core import wakeup_service
+            from app.core.task_registry import task_registry
+            await asyncio.to_thread(wakeup_service.cancel_session_wakeups, session_id)
+            task_registry.clear_user_stop(session_id)
+        except Exception:
+            logger.warning("Question answer wake cleanup failed for %s", session_id, exc_info=True)
+        # Steer first, then ALWAYS kick. If the turn ends during steering, the
+        # durable queued row is still there for the drain/claim loop.
+        await self._retire_native_question(session_id)
+        await try_steer_pending(session_id)
+        turn_manager._kick(session_id)
+        try:
+            await asyncio.to_thread(turn_claim.notify_turns_changed, session_id)
+        except Exception:
+            logger.warning("Question answer claim notification failed for %s", session_id, exc_info=True)
+        await interaction_events.emit_interaction_answered(
+            session_id, row["id"], request_id, envelope,
+        )
+        return True
+
     async def _respond_v2(
         self,
         request_id: str,
@@ -453,6 +559,8 @@ class UserQuestionHandler:
             logger.warning(f"Question request not found: {request_id}")
             return False
         envelope = build_answer_envelope(answers, dismissed=dismissed, skipped=skipped)
+        if (row.get("payload") or {}).get("nonblocking"):
+            return await self._answer_nonblocking(row, envelope, answered_by_device)
         answered = await asyncio.to_thread(
             interactions.answer_interaction, row["id"], envelope, answered_by_device
         )
@@ -515,14 +623,16 @@ class UserQuestionHandler:
             for row in self._v2_pending_questions(session_id)
         ]
 
-    async def cancel_all(self, session_id: str):
-        """Cancel all pending questions for a session."""
+    async def cancel_all(self, session_id: str, *, include_nonblocking: bool = True):
+        """Cancel pending questions, retaining durable prompts on pool eviction."""
         from app.core import interaction_wait
         from app.db import interactions
 
         cancelled = 0
         cancelled_rows: List[tuple] = []
         for row in self._v2_pending_questions(session_id):
+            if not include_nonblocking and (row.get("payload") or {}).get("nonblocking"):
+                continue
             if await asyncio.to_thread(interactions.cancel_interaction, row["id"]):
                 cancelled += 1
                 cancelled_rows.append(

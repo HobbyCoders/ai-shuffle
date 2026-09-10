@@ -2464,7 +2464,7 @@ async def _stream_to_websocket_impl(
                         await _bump_attention(-1, "permission")
 
                 # Handle AskUserQuestion (SDK) and AskUser (fluid)
-                # specially — both park the turn on the UserQuestion modal.
+                # specially — post durable questions without holding the turn.
                 from app.core.user_question_handler import (
                     FLUID_ANSWER_KEY,
                     FLUID_QUESTION_TOOLS,
@@ -2478,7 +2478,10 @@ async def _stream_to_websocket_impl(
                     if not questions:
                         return PermissionResultAllow(updated_input=tool_input)
 
-                    request_id = f"question-{_sid}-{uuid.uuid4().hex[:8]}"
+                    request_id = (
+                        getattr(context, "question_request_id", None)
+                        or f"question-{_sid}-{uuid.uuid4().hex[:8]}"
+                    )
                     logger.debug(f"[WS] {tool_name} canUseTool triggered: {request_id} with {len(questions)} questions (tool_use_id={_ctx_tool_use_id}, agent_id={_ctx_agent_id})")
 
                     # Fan the question to every device watching this session, not
@@ -2491,6 +2494,24 @@ async def _stream_to_websocket_impl(
                         if not _user_id:
                             return
                         await sync_engine.broadcast_user_question(_user_id, payload)
+
+                    if tool_name == "AskUserQuestion" or getattr(context, "nonblocking_question", False):
+                        posted = await user_question_handler.post_question(
+                            request_id=request_id,
+                            tool_use_id=_ctx_tool_use_id or request_id,
+                            session_id=_sid,
+                            questions=questions,
+                            broadcast_func=_broadcast,
+                            fanout_func=_fanout_question,
+                        )
+                        if tool_name == "AskUserQuestion":
+                            # The SDK has no posted tool-result variant. Denial
+                            # ends its callback without executing a blocking UI.
+                            return PermissionResultDeny(message=(
+                                f"Question posted (request_id={request_id}). Continue working; "
+                                "the answer will arrive as a user message. Do not ask again."
+                            ))
+                        return PermissionResultAllow(updated_input={**tool_input, **posted})
 
                     await _bump_attention(1, "question")
                     try:

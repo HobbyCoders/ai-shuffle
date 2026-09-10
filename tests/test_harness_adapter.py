@@ -1019,6 +1019,144 @@ def _fluid_question_request(*, name="AskUser", message="Pick one?", schema=None)
 
 
 @pytest.mark.asyncio
+async def test_real_native_askuser_posts_continues_and_consumes_host_answer_once(monkeypatch):
+    import json
+    from unittest.mock import AsyncMock
+    from fluid.engine.native import NativeLoop
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins import ask_user
+    from fluid.tools.registry import ToolRegistry
+    from app.core.user_question_handler import UserQuestionHandler, questions_from_tool_input
+    from app.db import turns
+
+    def response(*, tool=False):
+        if tool:
+            block = {"index": 0, "block_type": "tool_use", "tool_name": "AskUser", "tool_use_id": "real-ask"}
+            delta = StreamChunk("tool_args_delta", {"index": 0, "partial_json": json.dumps({
+                "questions": [{"question": "Color?", "options": [{"label": "blue"}, {"label": "red"}]}],
+            })})
+        else:
+            block = {"index": 0, "block_type": "text"}
+            delta = StreamChunk("text_delta", {"index": 0, "text": "Continuing independent work."})
+        return [StreamChunk("message_start", {"usage": {"input_tokens": 10}}),
+                StreamChunk("block_start", block), delta,
+                StreamChunk("block_stop", {"index": 0}),
+                StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": "tool_use" if tool else "end_turn"}),
+                StreamChunk("message_stop", {})]
+
+    class Provider(FakeProvider):
+        def __init__(self):
+            self.requests = []
+
+        async def stream(self, request):
+            self.requests.append(request)
+            for chunk in response(tool=len(self.requests) == 1):
+                yield chunk
+
+    monkeypatch.setattr("app.core.interaction_wait.notify_changed", lambda sid: None)
+    monkeypatch.setattr("app.core.turn_claim.notify_turns_changed", lambda sid: None)
+    monkeypatch.setattr("app.core.turn_manager._kick", lambda sid: None)
+    registry = ToolRegistry()
+    registry.register_builtin(ask_user.SPEC, ask_user.handler)
+    provider = Provider()
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="fake-model",
+                      registry=registry, permissions=PermissionEngine("never_ask"))
+    adapter = _adapter_with(loop)
+    monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: "real-native")
+    handler = UserQuestionHandler()
+
+    async def callback(name, tool_input, context):
+        assert name == "AskUser" and context.nonblocking_question
+        posted = await handler.post_question(
+            request_id=context.question_request_id, tool_use_id=context.tool_use_id,
+            session_id="real-native", questions=questions_from_tool_input(tool_input),
+            broadcast_func=AsyncMock(),
+        )
+        return _FakeAllow(posted)
+
+    adapter._can_use_tool = callback
+    try:
+        await adapter.send_query("start")
+        await asyncio.wait_for(_collect(adapter), 5)
+        assert len(provider.requests) == 2  # The model continued before any answer.
+        pending = handler.get_pending_questions("real-native")
+        assert len(pending) == 1 and pending[0]["nonblocking"] is True
+        question = pending[0]
+        text = question["questions"][0]["question"]
+        assert text == "Color?"  # Do not repeat Fluid's numbered terminal options in the tray.
+        assert await handler.respond(question["request_id"], "real-native", {text: "unique-blue-answer"})
+        queued, = turns.get_queued_turns("real-native")
+        await adapter.send_query(queued["prompt"])
+        await asyncio.wait_for(_collect(adapter), 5)
+        assert len(provider.requests) == 3
+        assert provider.requests[-1].messages[-1].text().count("unique-blue-answer") == 1
+        assert await loop.pending_questions() == []
+        assert await loop.pending_question_answers() == []
+        assert not await handler.respond(question["request_id"], "real-native", {text: "red"})
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_nonblocking_question_posts_before_terminal_without_response_op():
+    from unittest.mock import AsyncMock
+    from app.core.user_question_handler import UserQuestionHandler
+    handler = UserQuestionHandler()
+    events = _fluid_question_request()
+    from dataclasses import replace
+    events[0] = replace(events[0], nonblocking=True)
+    engine = FakeEngine(events)
+    adapter = _adapter_with(engine)
+
+    async def can_use_tool(tool_name, tool_input, context):
+        assert context.nonblocking_question is True
+        await handler.post_question(
+            request_id=context.question_request_id, tool_use_id=context.tool_use_id,
+            session_id="native-post", questions=[tool_input["schema"]],
+            broadcast_func=AsyncMock(),
+        )
+        return _FakeAllow({"status": "posted"})
+
+    adapter._can_use_tool = can_use_tool
+    await _collect(adapter)
+    assert handler.get_pending_questions("native-post")[0]["request_id"] == "q-fluid-1"
+    assert engine.ops == []
+    assert adapter._pending_question_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answered_before_crash", [False, True])
+async def test_reconnect_retires_durable_host_answer_without_injecting_twice(monkeypatch, answered_before_crash):
+    from unittest.mock import AsyncMock
+    from dataclasses import replace
+    from app.core.user_question_handler import UserQuestionHandler
+    from app.db import turns
+    handler = UserQuestionHandler()
+    question = replace(_fluid_question_request()[0], nonblocking=True)
+    await handler.post_question(request_id=question.request_id, tool_use_id="tu", session_id="native-post",
+                                questions=[question.schema], broadcast_func=AsyncMock())
+    monkeypatch.setattr("app.core.interaction_wait.notify_changed", lambda sid: None)
+    monkeypatch.setattr("app.core.turn_claim.notify_turns_changed", lambda sid: None)
+    monkeypatch.setattr("app.core.turn_manager._kick", lambda sid: None)
+    assert await handler.respond(question.request_id, "native-post", {"Pick one?": "Approve"})
+    engine = FakeEngine([])
+    engine.pending_questions = AsyncMock(return_value=[] if answered_before_crash else [question])
+    engine.pending_question_answers = AsyncMock(return_value=[
+        lm.QuestionAnswered(session_id=SID, request_id=question.request_id, answer="Approve",
+                            user_answered=True, wake=False),
+    ] if answered_before_crash else [])
+    adapter = _adapter_with(engine)
+    monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: "native-post")
+    await adapter.reconcile_user_questions()
+    assert len(engine.ops) == 1
+    op = engine.ops[0]
+    assert isinstance(op, RespondQuestion)
+    assert op.answer == "Approve"
+    assert op.external_delivery is True and op.wake is False and op.user_answered is True
+    assert len(turns.get_queued_turns("native-post")) == 1
+
+
+@pytest.mark.asyncio
 async def test_fluid_question_submits_respond_question_with_label():
     """An answered AskUser lands as RespondQuestion(answer=label), not permission."""
     from app.core.user_question_handler import FLUID_ANSWER_KEY

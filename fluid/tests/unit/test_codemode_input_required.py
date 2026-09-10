@@ -1,16 +1,8 @@
-"""Code mode must be able to ask the user something.
+"""Code mode posts AskUser questions and preserves generic MRTR round trips.
 
-The shipped bug: ``AskUser`` called from inside
-``run_python`` returned ``''``. Their first leg is an EMPTY ToolOutcome
-carrying an ``input_required`` marker, and code mode's host-call gate dispatched
-once and threw the marker away — no QuestionRequest, no modal, no second leg.
-Models read ``=> ''`` as "the tool ran and said nothing", invented the user's
-answers and left the tool waiting for input
-nobody had been asked for. Plan mode never turned off.
-
-These tests drive the real subprocess kernel through a real ``NativeLoop``, so
-they pin the whole round-trip: in-kernel call → QuestionRequest on the bus →
-RespondQuestion → retry leg → the answer text back inside the cell.
+The subprocess-kernel test exercises the real AskUser receipt and asynchronous
+answer delivery. Elicit is a separate blocking MRTR fixture: its second leg,
+missing host, interrupt and retry-limit assertions remain independent of AskUser.
 """
 
 from __future__ import annotations
@@ -102,7 +94,7 @@ async def _drive(loop: NativeLoop, sid: str, answer: str) -> list[QuestionReques
 # ── AskUser, from inside the kernel ───────────────────────────────────────
 
 
-async def test_in_kernel_ask_user_completes_the_round_trip() -> None:
+async def test_in_kernel_ask_user_posts_and_receives_answer_asynchronously() -> None:
     registry = ToolRegistry()
     registry.register_builtin(ask_user.SPEC, ask_user.handler)
     session = CodeModeSession(registry)
@@ -131,14 +123,18 @@ async def test_in_kernel_ask_user_completes_the_round_trip() -> None:
         results = [e for e in loop.bus.log(sid) if isinstance(e, ToolResult)]
         inner = next(e for e in results if e.name == "AskUser")
         assert inner.output != ""  # the bug: first leg's empty text
-        assert "The user answered:" in inner.output
-        assert "Region: eu-west" in inner.output
+        assert json.loads(inner.output)["status"] == "queued"
+        assert asked[0].nonblocking
+        assert json.loads(inner.output)["request_ids"] == [asked[0].request_id]
         assert not inner.is_error
 
         # And the kernel — the model's own code — saw the same text.
         cell = next(e for e in results if e.name == "run_python")
-        assert "The user answered:" in cell.output
-        assert "Region: eu-west" in cell.output
+        assert '"status": "queued"' in cell.output
+        history = await store.load_path(sid)
+        assert any("eu-west" in part.text for n in history
+                   for block in n.message.content if hasattr(block, "content")
+                   for part in block.content if hasattr(part, "text"))
         assert not cell.is_error
     finally:
         await loop.aclose()
@@ -148,8 +144,19 @@ async def test_in_kernel_ask_user_completes_the_round_trip() -> None:
 
 
 def _ask_registry() -> ToolRegistry:
+    async def elicit(input, ctx):
+        answers = input.get("__input_responses__")
+        if answers is not None:
+            return ToolOutcome(text="The user answered: Region: " + answers["q0"])
+        return ToolOutcome(text="", input_required=InputRequired(
+            server="test", tool="Elicit", request_state="state",
+            requests={"q0": {"message": "Which region?"}},
+        ))
+
     registry = ToolRegistry()
-    registry.register_builtin(ask_user.SPEC, ask_user.handler)
+    registry.register_builtin(ToolSpec(
+        name="Elicit", description="Generic MRTR elicitation.", input_schema={},
+    ), elicit)
     return registry
 
 
@@ -164,11 +171,11 @@ async def test_standalone_bridge_refuses_instead_of_answering_nothing() -> None:
     """
     bridge = HostBridge(_ask_registry(), PermissionEngine("never_ask"))
 
-    reply = await bridge.on_host_call("AskUser", {"questions": _QUESTIONS})
+    reply = await bridge.on_host_call("Elicit", {"questions": _QUESTIONS})
 
     assert reply.result is None
     assert reply.error is not None
-    assert "AskUser" in reply.error
+    assert "Elicit" in reply.error
     assert "was NOT asked" in reply.error
     assert "JSON tool interface" in reply.error
 
@@ -178,7 +185,7 @@ async def test_bridge_with_a_round_trip_returns_the_second_leg() -> None:
 
     async def collect(name: str, tool_use_id: str | None, marker: InputRequired):
         seen.append(marker)
-        assert name == "AskUser"
+        assert name == "Elicit"
         assert tool_use_id == "call_1"
         return {key: "eu-west" for key in marker.requests}
 
@@ -187,7 +194,7 @@ async def test_bridge_with_a_round_trip_returns_the_second_leg() -> None:
     )
 
     reply = await bridge.on_host_call(
-        "AskUser", {"questions": _QUESTIONS}, tool_use_id="call_1"
+        "Elicit", {"questions": _QUESTIONS}, tool_use_id="call_1"
     )
 
     assert len(seen) == 1
@@ -241,7 +248,7 @@ async def test_bridge_interrupted_round_trip_is_an_error_not_a_result() -> None:
     bridge = HostBridge(
         _ask_registry(), PermissionEngine("never_ask"), on_input_required=collect
     )
-    reply = await bridge.on_host_call("AskUser", {"questions": _QUESTIONS})
+    reply = await bridge.on_host_call("Elicit", {"questions": _QUESTIONS})
 
     assert reply.result is None
     assert reply.error is not None and "interrupted" in reply.error
@@ -280,11 +287,11 @@ async def test_bundled_server_reports_an_unresolvable_round_trip() -> None:
     """
     reply = await _answer(
         _ask_registry(), ToolCtx(),
-        {"op": "call", "name": "AskUser", "arguments": {"questions": _QUESTIONS}},
+        {"op": "call", "name": "Elicit", "arguments": {"questions": _QUESTIONS}},
     )
 
     assert reply["is_error"] is True
-    assert "AskUser" in reply["text"]
+    assert "Elicit" in reply["text"]
     assert "was NOT asked" in reply["text"]
 
 

@@ -14,7 +14,7 @@
 	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
-	import UserQuestion from '$lib/components/UserQuestion.svelte';
+	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
 	import ChatModeHero from './ChatModeHero.svelte';
 	import VoiceModeHero from './VoiceModeHero.svelte';
@@ -173,10 +173,11 @@
 			$activeSession.pendingQuestions.find(q => q.request_id === request_id)?.session_id ??
 			$activeSession.sessionId ??
 			undefined;
-		activeSession.sendUserQuestionResponse(request_id, tool_use_id, answers, sessionId, {
+		const sent = activeSession.sendUserQuestionResponse(request_id, tool_use_id, answers, sessionId, {
 			dismissed,
 			skipped
 		});
+		if (!sent) notify.error('Your answer was not sent. Reconnect and try again.');
 	}
 
 	// Handle project selection from WorkspaceSelector
@@ -307,6 +308,7 @@
 				<VoiceCallPanel sessionId={$activeSession.sessionId} compact />
 			{/if}
 			{#key $sessionOwnerBoundary}
+				<QuestionTray requests={$activeSession.pendingQuestions ?? []} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
 				<ChatInput compact={!showEmptyHero} {onBrowserToggle} {onBrowserPreload} {browserOpen} />
 			{/key}
 		</div>
@@ -320,39 +322,15 @@
 		<div class="empty-bottom-spacer" aria-hidden="true"></div>
 	{/if}
 
-	<!-- Modal Overlay for Permission/Question Queues. Now anchored to .chat-view
-	     (position:absolute; inset:0; z-index:50) so it still overlays the whole
-	     surface, including the persistent input. Active-state only. -->
-	{#if !showEmptyHero && (showPermissionModal || ($activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0))}
+	<!-- Permission gates still block their tool. Questions live above the composer. -->
+	{#if !showEmptyHero && showPermissionModal}
 		<div class="modal-overlay">
 			<div class="modal-backdrop"></div>
 			<div class="modal-content">
-				{#if showPermissionModal}
-					<div class="modal-card-wrapper">
-						<PermissionQueue
-							requests={$activeSession.pendingPermissions}
-							onRespond={handlePermissionResponse}
-						/>
-					</div>
-				{/if}
-
-				{#if $activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0}
-					<div class="modal-card-wrapper space-y-3">
-						{#each $activeSession.pendingQuestions as question (question.request_id)}
-							<UserQuestion
-								data={question}
-								onRespond={handleQuestionResponse}
-							/>
-						{/each}
-					</div>
-				{/if}
+				<div class="modal-card-wrapper">
+					<PermissionQueue requests={$activeSession.pendingPermissions} onRespond={handlePermissionResponse} />
+				</div>
 			</div>
-			<!-- No floating Stop control lives here. #789 (c6082dd2) used to dock a
-			     second StopButton above the backdrop so the composer's own Stop
-			     stayed reachable during a prompt; it read as a stray control
-			     punching through the dialog, so it is gone for BOTH the permission
-			     prompt and the question modal. A modal is answered or dismissed
-			     first; the composer's normal Stop takes over once it clears. -->
 		</div>
 	{/if}
 </div>

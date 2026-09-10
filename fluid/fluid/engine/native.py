@@ -1417,8 +1417,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                 fut.set_result(op)
         elif isinstance(op, RespondQuestion):
             fut = self._pending_questions.get(op.request_id)
-            if fut is not None and not fut.done():
-                fut.set_result(op)
+            if fut is not None:
+                if not fut.done():
+                    fut.set_result(op)
+            elif not await self._answer_question(op):
+                raise ValueError(f"unknown question: {op.request_id}")
         elif isinstance(op, SetModel):
             # Hot-swap: the next _build_request reads self.model.
             self.model = op.model
@@ -1846,6 +1849,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             await self._start_and_loop(sid, turn_id, head)
             return
 
+        op, question_ids = await self._question_turn_content(op)
         content: list[Any] = (
             [Text(op.content)] if isinstance(op.content, str) else list(op.content)
         )
@@ -1881,6 +1885,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             message=Message(role="user", content=content),
         )
         await self.store.append(sid, user_node)
+        await self._mark_questions_delivered(question_ids)
         await self._mark_background_woken(op, sid, user_node.node_id, turn_id)
         if self._codemode is not None:
             # Episodic half of the continual journal: the intent behind the turn.
@@ -2621,11 +2626,19 @@ class NativeLoop(BackgroundLifecycleMixin):
                     blocks.append(
                         await self._dispatch_tool_interruptible(sid, turn_id, tu)
                     )
+            answers = await self.pending_question_answers()
+            if answers and blocks and not self._interrupted.is_set():
+                blocks[-1] = replace(
+                    blocks[-1], content=[*blocks[-1].content, Text(self._question_text(answers))],
+                )
+            else:
+                answers = []
             tr_node = SessionNode(
                 node_id=new_id("node"), parent_id=parent.node_id,
                 message=Message(role="user", content=blocks),
             )
             await self.store.append(sid, tr_node)
+            await self._mark_questions_delivered(a.request_id for a in answers)
             parent = tr_node
             if call_cap_reached:
                 final_stop = "max_calls"

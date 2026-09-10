@@ -377,33 +377,34 @@ async def test_jsonl_recent_sessions_orders_and_summarizes(tmp_path) -> None:
 # ─── AskUser ─────────────────────────────────────────────────────────────────
 
 
-async def test_ask_user_first_leg_parks_on_input_required(tmp_path) -> None:
+async def test_ask_user_posts_and_returns_receipt(tmp_path) -> None:
     questions = [{
         "question": "Which target?",
         "header": "Target",
         "options": [{"label": "staging (recommended)"}, {"label": "prod"}],
     }]
-    outcome = await ask_handler({"questions": questions}, ToolCtx())
-    assert outcome.input_required is not None
-    requests = outcome.input_required.requests
-    assert set(requests) == {"q0"}
-    assert "Which target?" in requests["q0"]["message"]
-    assert "1. staging (recommended)" in requests["q0"]["message"]
+    posted = []
 
+    async def post(items):
+        posted.extend(items)
+        return ["q0"]
 
-async def test_ask_user_second_leg_maps_numeric_answers(tmp_path) -> None:
-    questions = [
-        {"question": "Which target?", "header": "Target",
-         "options": [{"label": "staging"}, {"label": "prod"}]},
-        {"question": "Anything else?", "header": "Notes"},
-    ]
-    outcome = await ask_handler(
-        {"questions": questions, "__input_responses__": {"q0": "2", "q1": "ship it"}},
-        ToolCtx(),
-    )
+    outcome = await ask_handler({"questions": questions}, ToolCtx(extra={"post_questions": post}))
     assert outcome.input_required is None
-    assert "- Target: prod" in outcome.text
-    assert "- Notes: ship it" in outcome.text
+    assert not outcome.is_error
+    assert posted == questions
+    assert '"request_ids": ["q0"]' in outcome.text
+    assert '"status": "queued"' in outcome.text
+
+
+def test_ask_user_maps_numeric_answers() -> None:
+    from fluid.tools.builtins.ask_user import _resolve_answer
+
+    question = {"question": "Which target?", "header": "Target",
+                "options": [{"label": "staging"}, {"label": "prod"}]}
+    assert _resolve_answer("2", question) == "prod"
+    assert _resolve_answer("ship it", question) == "ship it"
+    assert _resolve_answer("1,2", question) == "staging, prod"
 
 
 async def test_ask_user_validation() -> None:

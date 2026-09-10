@@ -25,7 +25,7 @@ async def cleanup_session_handlers(session_id: str) -> None:
     except Exception:
         logger.debug(f"Permission handler cleanup failed for {session_id}", exc_info=True)
     try:
-        await user_question_handler.cancel_all(session_id)
+        await user_question_handler.cancel_all(session_id, include_nonblocking=False)
     except Exception:
         logger.debug(f"Question handler cleanup failed for {session_id}", exc_info=True)
 

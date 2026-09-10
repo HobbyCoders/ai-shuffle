@@ -1416,6 +1416,25 @@ describe('ws-message-handlers', () => {
 	});
 
 	describe('question handling', () => {
+		it('preserves nonblocking on a live question without changing streaming state', () => {
+			const state = mockState(); state.sessionId = 'session-1'; state.isStreaming = true;
+			let applied: ActiveSessionState | undefined;
+			deps = createMockDeps({ getState: vi.fn(() => state), update: vi.fn(fn => { applied = fn(state); return applied; }) });
+			handlers = createMessageHandlers(deps);
+			handlers.handleMessage({ type: 'user_question', session_id: 'session-1', request_id: 'posted-1', tool_use_id: 'tool-1', nonblocking: true, questions: [{ question: 'Proceed?', header: 'Confirm' }] });
+			expect(applied?.pendingQuestions[0].nonblocking).toBe(true);
+			expect(applied?.isStreaming).toBe(true);
+		});
+
+		it('hydrates durable nonblocking questions after the originating turn ended', () => {
+			const state = mockState(); state.sessionId = 'session-1'; state.isStreaming = false;
+			let applied: ActiveSessionState | undefined;
+			deps = createMockDeps({ getState: vi.fn(() => state), update: vi.fn(fn => { applied = fn(state); return applied; }) });
+			handlers = createMessageHandlers(deps);
+			handlers.handleMessage({ type: 'pending_questions', session_id: 'session-1', questions: [{ request_id: 'posted-1', tool_use_id: 'tool-1', nonblocking: true, questions: [{ question: 'Proceed?', header: 'Confirm' }] }] });
+			expect(applied?.pendingQuestions[0].nonblocking).toBe(true);
+			expect(applied?.isStreaming).toBe(false);
+		});
 		it('should keep user questions for inactive sessions out of the active modal', () => {
 			const state = mockState();
 			state.sessionId = 'session-2';

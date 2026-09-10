@@ -803,6 +803,81 @@ class TestThreadSafety(TestUserQuestionHandler):
         assert result is not None
 
 
+class TestNonblockingQuestions(TestUserQuestionHandler):
+    @pytest.fixture(autouse=True)
+    def quiet_delivery(self, monkeypatch):
+        monkeypatch.setattr("app.core.interaction_wait.notify_changed", lambda sid: None)
+        monkeypatch.setattr("app.core.turn_claim.notify_turns_changed", lambda sid: None)
+        monkeypatch.setattr("app.core.turn_manager._kick", lambda sid: None)
+        monkeypatch.setattr("app.core.user_question_handler.UserQuestionHandler._retire_native_question", AsyncMock())
+
+    async def test_post_survives_cleanup_reconnect_and_sweeper(self, handler, mock_broadcast):
+        from app.db import interactions
+        from app.core.interaction_sweeper import sweep_once
+        from app.core.user_question_handler import UserQuestionHandler
+        kwargs = dict(request_id="durable-q", tool_use_id="tu", session_id="s1",
+                      questions=[{"question": "Color?"}], broadcast_func=mock_broadcast)
+        assert (await handler.post_question(**kwargs))["status"] == "posted"
+        row = interactions.get_pending_interactions("s1")[0]
+        assert row["expires_at"] is None
+        assert mock_broadcast.call_args.args[0]["nonblocking"] is True
+        await handler.cancel_all("s1", include_nonblocking=False)
+        assert await sweep_once() == 0
+        reconnected = UserQuestionHandler()
+        assert reconnected.get_pending_questions("s1")[0]["nonblocking"] is True
+        await reconnected.post_question(**kwargs)
+        assert len(interactions.get_pending_interactions("s1")) == 1
+
+    async def test_answer_acceptance_enqueues_once_and_replay_stays_closed(self, handler, mock_broadcast):
+        from app.db import turns, interactions
+        kwargs = dict(request_id="durable-q", tool_use_id="tu", session_id="s1",
+                      questions=[{"question": "Color?"}], broadcast_func=mock_broadcast)
+        await handler.post_question(**kwargs)
+        assert not await handler.respond("durable-q", "other", {"Color?": "blue"})
+        assert await handler.respond("durable-q", "s1", {"Color?": "blue"}, "device-two")
+        assert not await handler.respond("durable-q", "s1", {"Color?": "red"}, "device-one")
+        queued = turns.get_queued_turns("s1")
+        assert len(queued) == 1
+        assert queued[0]["source"] == "user"
+        assert queued[0]["prompt"] == "Answer to your question:\nColor?\nblue"
+        assert interactions.get_answered_interactions("s1")[0]["answered_by_device"] == "device-two"
+        mock_broadcast.reset_mock()
+        assert (await handler.post_question(**kwargs))["status"] == "answered"
+        mock_broadcast.assert_not_called()
+        assert handler.get_pending_questions("s1") == []
+
+    async def test_concurrent_answers_accept_only_one(self, handler, mock_broadcast):
+        from app.db import turns
+        await handler.post_question(request_id="q-race", tool_use_id="tu", session_id="s1",
+                                    questions=[{"question": "Color?"}], broadcast_func=mock_broadcast)
+        results = await asyncio.gather(
+            handler.respond("q-race", "s1", {"Color?": "blue"}),
+            handler.respond("q-race", "s1", {"Color?": "red"}),
+        )
+        assert sorted(results) == [False, True]
+        assert len(turns.get_queued_turns("s1")) == 1
+
+    async def test_enqueue_failure_rolls_back_answer(self, handler, mock_broadcast):
+        from app.db import turns, interactions
+        await handler.post_question(request_id="q", tool_use_id="tu", session_id="s1",
+                                    questions=[{"question": "Color?"}], broadcast_func=mock_broadcast)
+        with patch.object(turns, "enqueue_turn", side_effect=RuntimeError("write failed")):
+            with pytest.raises(RuntimeError, match="write failed"):
+                await handler.respond("q", "s1", {"Color?": "blue"})
+        assert len(interactions.get_pending_interactions("s1")) == 1
+        assert turns.get_queued_turns("s1") == []
+        assert await handler.respond("q", "s1", {"Color?": "blue"})
+
+    async def test_explicit_cancel_does_not_wake_and_unknown_keys_do_not_answer(self, handler, mock_broadcast):
+        from app.db import turns
+        await handler.post_question(request_id="q", tool_use_id="tu", session_id="s1",
+                                    questions=[{"question": "Color?"}], broadcast_func=mock_broadcast)
+        assert not await handler.respond("q", "s1", {"unrelated": "blue"})
+        assert await handler.respond("q", "s1", {}, dismissed=True)
+        assert turns.get_queued_turns("s1") == []
+        assert handler.get_pending_questions("s1") == []
+
+
 class TestLogging(TestUserQuestionHandler):
     """Test logging behavior."""
 

@@ -379,7 +379,7 @@
 		Boolean($activeSession.liveTurnId) ||
 		($activeSession.activeTasks ?? []).some((task) => task.status === 'running') ||
 		($activeSession.pendingPermissions ?? []).length > 0 ||
-		($activeSession.pendingQuestions ?? []).length > 0
+		($activeSession.pendingQuestions ?? []).some(question => !question.nonblocking)
 	);
 
 	// Memoize the grouped display list by message and lifecycle identity.

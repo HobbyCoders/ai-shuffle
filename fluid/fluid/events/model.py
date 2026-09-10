@@ -229,7 +229,11 @@ class PermissionRequest(Event):
 
 @dataclass(frozen=True, kw_only=True)
 class QuestionRequest(Event):
-    """The engine needs a user-supplied answer to finish a tool call.
+    """A question for the host to display.
+
+    ``nonblocking=True`` marks a durable AskUser question. Its tool already
+    returned a receipt; RespondQuestion delivers the answer asynchronously.
+    False preserves the blocking MRTR contract below.
 
     Emitted once per MRTR ``input_required`` request (MCP spec 2026-07-28: a
     ``tools/call`` can pause for elicitation/sampling input). Clients answer
@@ -242,6 +246,25 @@ class QuestionRequest(Event):
     name: str  # tool being retried
     message: str  # human-facing prompt from the server's request descriptor
     schema: dict[str, Any] | None = None  # expected answer shape, if declared
+    nonblocking: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class QuestionAnswered(Event):
+    """A durable answer accepted from the host, not yet necessarily delivered."""
+
+    request_id: str
+    answer: str
+    user_answered: bool = False
+    wake: bool = True
+    external_delivery: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class QuestionDelivered(Event):
+    """Answers incorporated into model-visible history."""
+
+    request_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -499,7 +522,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         Interrupted, ErrorEvent,
         BlockStart, BlockStop, TextDelta, ThinkingDelta, ToolArgsDelta,
         ToolUse, ToolResult, SteerDelivered,
-        PermissionRequest, QuestionRequest, HandoffCreated,
+        PermissionRequest, QuestionRequest, QuestionAnswered, QuestionDelivered, HandoffCreated,
         ContextCompaction, Usage, RateLimit, ProviderRetry, SubagentEvent, HookEvent,
         CacheMissAlert,
         ContinualUpdate, DelegatedSurface, SwarmUpdated,

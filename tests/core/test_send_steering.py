@@ -109,6 +109,51 @@ def _start_live(session_id, **kwargs):
 # 1. try_steer_pending — reach and eligibility
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("ending", [False, True])
+async def test_question_producer_answer_steers_or_drains_once(mock_db, ending):
+    from app.core.user_question_handler import UserQuestionHandler
+    from app.core import turn_manager
+    sid = _seed_session("question-delivery")
+    live = _start_live(sid)
+    runtime = _live_runtime(sid, live)
+    handler = UserQuestionHandler()
+    await handler.post_question(request_id="q-delivery", tool_use_id="tu", session_id=sid,
+                                questions=[{"question": "Color?"}], broadcast_func=AsyncMock())
+
+    class RacingAdapter(_Adapter):
+        async def steer(self, text, *, id=None, origin="user"):
+            if ending:
+                turns_db.settle_turn(live["id"], "completed")
+                session_runtime._live_runtimes.pop(sid, None)
+                raise RuntimeError("turn ended during answer submission")
+            await super().steer(text, id=id, origin=origin)
+
+    adapter = RacingAdapter()
+    with _pooled(adapter), patch.object(turn_manager, "_kick") as kick, \
+            patch("app.core.turn_claim.notify_turns_changed"), \
+            patch("app.core.interaction_wait.notify_changed"):
+        assert await handler.respond("q-delivery", sid, {"Color?": "blue"})
+        kick.assert_called_once_with(sid)
+        assert not await handler.respond("q-delivery", sid, {"Color?": "red"})
+    queued = turns_db.get_queued_turns(sid)
+    assert len(queued) == 1
+    answer = queued[0]
+    if ending:
+        # A refused active steer leaves the exact accepted user turn for idle execution.
+        with _pump_env(_pump([{"type": "done", "metadata": {}}])):
+            assert await session_runtime.SessionRuntime(answer).execute() == "completed"
+        assert _messages(mock_db, sid) == [("user", answer["prompt"])]
+    else:
+        assert adapter.calls == [(answer["prompt"], answer["id"])]
+        recorder = MagicMock(record_steered_user_message=AsyncMock(return_value=True))
+        receipt = {"steers": [{"id": answer["id"], "text": answer["prompt"]}]}
+        await runtime._on_steer_delivered(recorder, receipt)
+        await runtime._on_steer_delivered(recorder, receipt)
+        recorder.record_steered_user_message.assert_awaited_once()
+        assert _messages(mock_db, sid) == [("user", answer["prompt"])]
+    assert turns_db.get_queued_turns(sid) == []
+
+
 async def test_no_live_runtime_is_a_no_op(mock_db):
     """A session this process does not own falls back to the ordinary drain."""
     _start_live("s1")

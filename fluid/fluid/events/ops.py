@@ -143,7 +143,7 @@ class RespondPermission(Op):
 
 @dataclass(kw_only=True)
 class RespondQuestion(Op):
-    """Answer a parked ``QuestionRequest``.
+    """Answer a persistent AskUser question or a parked MCP ``QuestionRequest``.
 
     ``user_answered`` is the host's word that a PERSON produced ``answer`` —
     clicked the approval, typed the reply — as opposed to a policy (an
@@ -155,6 +155,10 @@ class RespondQuestion(Op):
     request_id: str
     answer: str
     user_answered: bool = False
+    # False leaves idle scheduling to the host; the next turn consumes it.
+    wake: bool = True
+    # Host has durably queued the answer itself; retire without injecting it.
+    external_delivery: bool = False
 
 
 @dataclass(kw_only=True)

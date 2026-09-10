@@ -116,6 +116,49 @@ def _queue_frames(handler):
 # ═══ _v2_queue_view — B3 wire shape ══════════════════════════════════════════
 
 
+async def test_nonblocking_question_ws_ack_hydration_and_authorization(mock_db, monkeypatch):
+    from app.core.user_question_handler import user_question_handler
+    monkeypatch.setattr("app.core.turn_manager._kick", lambda sid: None)
+    monkeypatch.setattr("app.core.turn_claim.notify_turns_changed", lambda sid: None)
+    monkeypatch.setattr("app.core.interaction_wait.notify_changed", lambda sid: None)
+    sid = _make_session("question-session")
+    await user_question_handler.post_question(
+        request_id="ws-question", tool_use_id="tu", session_id=sid,
+        questions=[{"question": "Color?"}], broadcast_func=AsyncMock(),
+    )
+    handler = _make_handler()
+    handler.current_session_id = sid
+    await handler.handle_get_pending_questions({})
+    pending = _sent(handler, "pending_questions")[0]["questions"]
+    assert pending[0]["request_id"] == "ws-question" and pending[0]["nonblocking"] is True
+    data = {"request_id": "ws-question", "session_id": sid, "answers": {"Color?": "blue"}}
+    handler._authorize_mobile_session = AsyncMock(return_value=False)
+    await handler.handle_user_question_response(data)
+    assert turns_db.get_queued_turns(sid) == []
+    assert _sent(handler, "user_question_response_ack") == []
+    handler._authorize_mobile_session = AsyncMock(return_value=True)
+    await handler.handle_user_question_response(data)
+    await handler.handle_user_question_response(data)
+    assert [f["success"] for f in _sent(handler, "user_question_response_ack")] == [True, False]
+    assert len(turns_db.get_queued_turns(sid)) == 1
+
+
+async def test_nonblocking_question_ws_forwards_to_owner_without_local_answer(mock_db):
+    from app.network import control
+    handler = _make_handler()
+    handler._network_owner = AsyncMock(return_value="owner-device")
+    handler._authorize_mobile_session = AsyncMock(return_value=True)
+    with patch.object(control, "answer_question", AsyncMock(return_value={"success": True})) as forwarded, \
+            patch.object(cwh.user_question_handler, "respond", AsyncMock()) as local:
+        await handler.handle_user_question_response({
+            "request_id": "q-remote", "session_id": "remote", "answers": {"Q": "A"},
+        })
+    local.assert_not_awaited()
+    assert forwarded.await_args.args == ("owner-device",)
+    assert forwarded.await_args.kwargs["answered_by_device"] == "dev-1"
+    assert _sent(handler, "user_question_response_ack")[0]["success"] is True
+
+
 def test_v2_queue_view_filters_sources_and_numbers_sequentially(mock_db):
     """Only user/queue queued turns render as chips, with sequential integer
     positions and id<-turn id / content<-prompt (the float turns.position never

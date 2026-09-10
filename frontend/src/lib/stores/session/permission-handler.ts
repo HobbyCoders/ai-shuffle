@@ -67,13 +67,10 @@ export function createPermissionHandler(deps: PermissionHandlerDeps) {
 		/**
 		 * Answer (or dismiss) an AskUserQuestion prompt.
 		 *
-		 * `options.dismissed` is the modal's "X": the dialog closed with nothing
-		 * answered, and the backend resolves the tool call with a "user
-		 * dismissed" tool_result. `options.skipped` lists question keys the user
-		 * explicitly skipped; the backend fills each with its own
-		 * "user skipped this question" answer so a partially-answered form still
-		 * submits. Both are omitted from the payload when unset so the ordinary
-		 * answer frame stays byte-identical to before.
+		 * Collapsing the tray does not call this method. `options.dismissed` is
+		 * retained for older clients; `options.skipped` names questions the user
+		 * explicitly skipped. Return the transport result so failed sends leave
+		 * the draft available for retry.
 		 */
 		sendUserQuestionResponse(
 			requestId: string,
@@ -91,7 +88,7 @@ export function createPermissionHandler(deps: PermissionHandlerDeps) {
 			};
 			if (options?.dismissed) payload.dismissed = true;
 			if (options?.skipped && options.skipped.length > 0) payload.skipped = options.skipped;
-			wsSend(payload);
+			return wsSend(payload);
 		},
 
 		syncPendingPermissions() {

@@ -577,7 +577,9 @@ def _tools_section(p: PromptProfile) -> str | None:
             "- Use AskUser only for a decision that is genuinely the user's — "
             "materially different readings, expensive-to-reverse choices, "
             "missing credentials. Never ask what a tool can answer, and put "
-            "the options in the tool's fields, not in prose."
+            "the options in the tool's fields, not in prose. Questions are posted "
+            "without waiting: continue independent work, or end your turn if "
+            "blocked. Answers arrive automatically; never poll for them."
         )
     bullets.append(
         "- Keep tool output out of the reply. The user saw the "

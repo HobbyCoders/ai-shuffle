@@ -32,6 +32,7 @@ wired at the runtime/command layer (Phase 2 A4), not here.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 import logging
 import sqlite3
@@ -103,6 +104,7 @@ def enqueue_turn(
     parent_turn_id: Optional[str] = None,
     instance_id: Optional[str] = None,
     at_front: bool = False,
+    _conn: Any = None,
 ) -> Dict[str, Any]:
     """Append a new ``queued`` turn to a session's queue.
 
@@ -127,7 +129,7 @@ def enqueue_turn(
     Returns the created turn row.
     """
     turn_id = f"turn-{uuid.uuid4().hex}"
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
         if at_front:
             cursor.execute(

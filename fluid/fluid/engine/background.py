@@ -19,6 +19,7 @@ from fluid.events.model import (
     TurnComplete,
 )
 from fluid.events.ops import BackgroundTaskFinished, UserTurn
+from fluid.engine.questions import QuestionLifecycleMixin
 from fluid.tools.hardening import defang_harness_markers
 from fluid.tools.registry import BackgroundTaskReceipt
 
@@ -36,7 +37,7 @@ _BACKGROUND_WAKE_MAX_ATTEMPTS = 3
 _BACKGROUND_WAKE_RETRY_BASE_SECONDS = 0.5
 
 
-class BackgroundLifecycleMixin:
+class BackgroundLifecycleMixin(QuestionLifecycleMixin):
     """Engine mixin implementing durable background-task park and wake.
 
     The embedding host owns worker execution. Fluid owns the session semantics:
@@ -48,6 +49,7 @@ class BackgroundLifecycleMixin:
     """
 
     def _init_background_lifecycle(self) -> None:
+        self._init_questions()
         self._background_pending: dict[str, BackgroundTaskReceipt] = {}
         self._background_terminal: set[str] = set()
         self._background_early: dict[str, BackgroundTaskFinished] = {}
@@ -436,7 +438,7 @@ class BackgroundLifecycleMixin:
         observed: set[asyncio.Task[Any]] = set()
         while True:
             tasks: list[asyncio.Task[Any]] = []
-            for candidate in (self._background_wake_task, self._turn_task):
+            for candidate in (self._background_wake_task, self._question_wake_task, self._turn_task):
                 if candidate is not None and candidate not in observed and candidate not in tasks:
                     tasks.append(candidate)
             if tasks:
@@ -450,6 +452,10 @@ class BackgroundLifecycleMixin:
 
     async def _close_background_lifecycle(self) -> None:
         self._background_closed = True
+        question_wake = self._question_wake_task
+        if question_wake is not None and not question_wake.done():
+            question_wake.cancel()
+            await asyncio.gather(question_wake, return_exceptions=True)
         if self._background_wake_retry is not None:
             self._background_wake_retry.cancel()
             self._background_wake_retry = None

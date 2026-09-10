@@ -83,6 +83,7 @@ from fluid.events.ops import (
     Interrupt,
     Op,
     RespondPermission,
+    RespondQuestion,
     Resume,
     SetModel,
     SetPermissionMode,
@@ -350,6 +351,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         elif isinstance(op, Interrupt):
             self._interrupted.set()
             await self._send_interrupt()
+        elif isinstance(op, RespondQuestion):
+            if not await self._answer_question(op):
+                raise ValueError(f"unknown question: {op.request_id}")
         elif isinstance(op, RespondPermission):
             fut = self._pending_permissions.get(op.request_id)
             if fut is not None and not fut.done():
@@ -620,6 +624,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if reused:
                 async with self._stdout_lock:
                     await self._discard_stale_stdout()
+            op, question_ids = await self._question_turn_content(op)
             content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
             user_node = SessionNode(
                 node_id=new_id("node"),
@@ -627,6 +632,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 message=Message(role="user", content=content),
             )
             await self.store.append(sid, user_node)
+            await self._mark_questions_delivered(question_ids)
             await self._mark_background_woken(op, sid, user_node.node_id, turn_id)
             # TurnStarted is emitted here (not from the init frame): a
             # persistent CLI process emits `init` only once, so per-turn
@@ -926,6 +932,28 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 continue  # non-JSON diagnostic line — skip
 
             mapped = mapper.feed(frame)
+            # Claude's native question tool is a posting operation, not a
+            # permission decision. Never fabricate synchronous user answers.
+            if mapped.permission is not None and mapped.permission.tool_name == "AskUserQuestion":
+                from fluid.tools.builtins.ask_user import _validate
+
+                bridge = mapped.permission
+                questions = bridge.input.get("questions")
+                error = _validate(questions)
+                if error is None:
+                    ids = await self._post_questions(questions, tool_use_id=bridge.tool_use_id)
+                    message = json.dumps({
+                        "status": "queued", "request_ids": ids,
+                        "message": "Questions posted. Continue independent work or end "
+                        "your turn if blocked; answers arrive automatically. Do not poll.",
+                    })
+                else:
+                    message = error
+                await self._write_control_response(
+                    bridge.cli_request_id, False, bridge.input, message=message,
+                )
+                mapped.events = [e for e in mapped.events if not isinstance(e, PermissionRequest)]
+                mapped.permission = None
             if mapper.cli_tools is not None and mapper.cli_tools != self.cli_tools:
                 self.cli_tools = mapper.cli_tools
                 self.cli_mcp_servers = mapper.cli_mcp_servers

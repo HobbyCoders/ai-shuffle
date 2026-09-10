@@ -10,6 +10,7 @@ elsewhere — this module deliberately does not touch the event log.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 import logging
 import uuid
@@ -43,11 +44,13 @@ def create_interaction(
     session_id: str,
     kind: str,
     payload: Dict[str, Any],
-    ttl_seconds: int,
+    ttl_seconds: Optional[int],
     run_id: Optional[str] = None,
+    *,
+    interaction_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Create a pending interaction with a TTL. Returns the new row."""
-    interaction_id = str(uuid.uuid4())
+    """Create a pending interaction; a None TTL means no automatic expiry."""
+    interaction_id = interaction_id or str(uuid.uuid4())
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -55,7 +58,7 @@ def create_interaction(
             "(id, session_id, run_id, kind, payload, state, expires_at) "
             "VALUES (%s, %s, %s, %s, %s, 'pending', "
             "NOW() + (%s * INTERVAL '1 second')) "
-            "RETURNING *",
+            "ON CONFLICT (id) DO UPDATE SET id=EXCLUDED.id RETURNING *",
             (
                 interaction_id,
                 session_id,
@@ -75,17 +78,40 @@ def answer_interaction(
     interaction_id: str,
     answer: Dict[str, Any],
     answered_by_device: Optional[str] = None,
+    *,
+    _conn: Any = None,
 ) -> bool:
     """Answer a still-pending, unexpired interaction. False otherwise."""
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE pending_interactions SET state='answered', answer=%s, "
             "answered_by_device=%s, answered_at=NOW() "
-            "WHERE id=%s AND state='pending' AND expires_at >= NOW()",
+            "WHERE id=%s AND state='pending' AND (expires_at IS NULL OR expires_at >= NOW())",
             (json.dumps(answer or {}), answered_by_device, interaction_id),
         )
         return cursor.rowcount > 0
+
+
+def answer_question_and_enqueue(
+    row: Dict[str, Any], answer: Dict[str, Any], answered_by_device: Optional[str],
+    prompt: str, context: Dict[str, Any],
+) -> bool:
+    """Accept an answer and its user turn in one commit; retries cannot enqueue twice."""
+    from app.db import turns
+
+    with get_db() as conn:
+        if not answer_interaction(row["id"], answer, answered_by_device, _conn=conn):
+            return False
+        turns.enqueue_turn(
+            row["session_id"], "user", prompt=prompt,
+            profile_id=context.get("profile_id"), project_id=context.get("project_id"),
+            worktree_id=context.get("worktree_id"), overrides=context.get("overrides"),
+            payload={**(context.get("payload") or {}), "deferred_user_record": True,
+                     "question_request_id": (row.get("payload") or {}).get("request_id")},
+            command_id=f"question-answer-{row['id']}", _conn=conn,
+        )
+    return True
 
 
 def cancel_interaction(interaction_id: str) -> bool:
@@ -189,7 +215,7 @@ def get_pending_interactions(session_id: str) -> List[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM pending_interactions "
-            "WHERE session_id=%s AND state='pending' AND expires_at >= NOW() "
+            "WHERE session_id=%s AND state='pending' AND (expires_at IS NULL OR expires_at >= NOW()) "
             "ORDER BY created_at",
             (session_id,),
         )

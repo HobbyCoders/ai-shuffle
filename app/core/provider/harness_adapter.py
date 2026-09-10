@@ -1074,6 +1074,7 @@ class HarnessAdapter(ProviderAdapter):
         await self.prepare_background_completions(
             getattr(sdk_options, "aih_background_task_completions", None)
         )
+        await self.reconcile_user_questions()
         # Rehydrate reconcile (2026-09-05 audit F1). Fluid rebuilds its pending
         # set from the SubagentEvent log alone, so a completion that never
         # reached the engine is re-created as a phantom on every resume and
@@ -1267,9 +1268,47 @@ class HarnessAdapter(ProviderAdapter):
         output_file = frame.get("output_file")
         return str(output_file) if output_file else None
 
+    async def reconcile_user_questions(self) -> None:
+        """Recover native posts and retire answers already owned by the host queue."""
+        pending = getattr(self._engine, "pending_questions", None)
+        if pending is None:
+            return
+        from app.core.user_question_handler import fluid_answer_from_envelope, resolve_answer_envelope
+        from app.db import interactions
+        import uuid
+
+        session_id = await asyncio.to_thread(self._resolve_app_session_id)
+        if not session_id:
+            return
+        questions = list(await pending())
+        pending_answers = getattr(self._engine, "pending_question_answers", None)
+        if pending_answers is not None:
+            # A crash can split Fluid's answered/delivered event pair. The
+            # host queue still owns that answer; retire it before UserTurn.
+            questions.extend(await pending_answers())
+        for question in questions:
+            interaction_id = str(uuid.uuid5(
+                uuid.NAMESPACE_URL, f"question:{session_id}:{question.request_id}"
+            ))
+            row = await asyncio.to_thread(interactions.get_interaction, interaction_id)
+            if row is None:
+                if self._can_use_tool and hasattr(question, "schema"):
+                    for translated in self._translate(question):
+                        await self._bridge_question(translated)
+                continue
+            if row["state"] not in ("answered", "cancelled"):
+                continue
+            await self._engine.submit(RespondQuestion(
+                request_id=question.request_id,
+                answer=fluid_answer_from_envelope(resolve_answer_envelope(row.get("answer") or {})),
+                user_answered=row["state"] == "answered", wake=False,
+                external_delivery=True,
+            ))
+
     async def send_query(self, prompt: str) -> None:
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
+        await self.reconcile_user_questions()
         self._mark_turn_floor()
         if not self._is_delegated and self._options is not None and prompt.startswith("/"):
             from app.core.slash_commands import expand_native_command
@@ -1448,6 +1487,11 @@ class HarnessAdapter(ProviderAdapter):
                     # in the message stream. Spawned as a task — the callback
                     # blocks on the user while other stream events keep flowing.
                     if getattr(translated, "risk", None) == "question":
+                        if translated.input.get("_nonblocking"):
+                            # Posting only waits for durable storage, never a
+                            # person. Finish before consuming a turn terminal.
+                            await self._bridge_question(translated)
+                            continue
                         task = asyncio.ensure_future(self._bridge_question(translated))
                     else:
                         task = asyncio.ensure_future(self._bridge_permission(translated))
@@ -1681,7 +1725,7 @@ class HarnessAdapter(ProviderAdapter):
             )
 
     async def _bridge_question(self, ev: PermissionRequestEvent) -> None:
-        """Route one fluid QuestionRequest through the app's question modal."""
+        """Post AskUser to the tray; retain blocking generic elicitation."""
         from types import SimpleNamespace
 
         from app.core.user_question_handler import (
@@ -1696,8 +1740,14 @@ class HarnessAdapter(ProviderAdapter):
             result = await can_use_tool(
                 self._permission_tool_name(ev.name),
                 ev.input,
-                SimpleNamespace(tool_use_id=ev.tool_use_id, agent_id=None),
+                SimpleNamespace(
+                    tool_use_id=ev.tool_use_id, agent_id=None,
+                    question_request_id=ev.request_id,
+                    nonblocking_question=bool(ev.input.get("_nonblocking")),
+                ),
             )
+            if ev.input.get("_nonblocking"):
+                return
             if type(result).__name__ == "PermissionResultAllow":
                 candidate = getattr(result, "updated_input", None)
                 if isinstance(candidate, dict):
@@ -1716,7 +1766,8 @@ class HarnessAdapter(ProviderAdapter):
                 "[HarnessAdapter] can_use_tool question bridge failed for %s — empty answer",
                 ev.name, exc_info=True,
             )
-        await self._submit_question_answer(ev, answer, user_answered=user_answered)
+        if not ev.input.get("_nonblocking"):
+            await self._submit_question_answer(ev, answer, user_answered=user_answered)
 
     async def _submit_question_answer(
         self, ev: PermissionRequestEvent, answer: str, *, user_answered: bool = False
@@ -2139,8 +2190,12 @@ class HarnessAdapter(ProviderAdapter):
             # the id and surface as a permission-shaped event with
             # risk="question" so receive_events routes it through
             # _bridge_question → app interaction UI → RespondQuestion.
-            self._pending_question_id = event.request_id
+            nonblocking = bool(getattr(event, "nonblocking", False))
+            if not nonblocking:
+                self._pending_question_id = event.request_id
             question_input = {"question": event.message, "schema": event.schema}
+            if nonblocking:
+                question_input["_nonblocking"] = True
             return [
                 PermissionRequestEvent(
                     tool_use_id=event.tool_use_id,

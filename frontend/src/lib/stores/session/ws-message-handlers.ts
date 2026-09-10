@@ -1159,6 +1159,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					request_id: data.request_id as string,
 					tool_use_id: data.tool_use_id as string,
 					questions: normalizedQuestions,
+					nonblocking: data.nonblocking === true,
 				} as UserQuestionRequest;
 
 				setNeedsAttention(request.session_id, 0);

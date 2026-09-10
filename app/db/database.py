@@ -1564,11 +1564,13 @@ def _run_column_migrations(cursor):
                 answer JSONB,
                 answered_by_device TEXT,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                expires_at TIMESTAMP WITH TIME ZONE,
                 answered_at TIMESTAMP WITH TIME ZONE
             )
         """)
         migrations_applied.append("pending_interactions")
+    # Nonblocking questions remain answerable until the person resolves them.
+    cursor.execute("ALTER TABLE pending_interactions ALTER COLUMN expires_at DROP NOT NULL")
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_pending_interactions_session_state "
         "ON pending_interactions(session_id, state)"

@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { createPermissionHandler } from './permission-handler';
 
 describe('permission-handler', () => {
+	it('returns a failed question send so the UI can keep the draft and report it', () => {
+		const wsSend = vi.fn(() => false);
+		const handler = createPermissionHandler({ wsSend });
+		expect(handler.sendUserQuestionResponse('q', 'tool', { Answer: 'yes' }, 'session')).toBe(false);
+	});
 	it('sends session-scoped permission responses', () => {
 		const wsSend = vi.fn(() => true);
 		const handler = createPermissionHandler({ wsSend });

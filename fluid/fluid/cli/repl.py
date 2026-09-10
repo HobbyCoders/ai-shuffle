@@ -326,6 +326,8 @@ def render_event(event: Event, out: TextIO) -> None:
     elif isinstance(event, QuestionRequest):
         _switch_mode(out, "text")
         out.write(f"\n  [question] {event.message}\n")
+        if event.nonblocking:
+            out.write(f"  Answer later with /answer {event.request_id} <text>; /questions lists pending questions.\n")
     elif isinstance(event, Usage):
         out.write(
             f"\n  [usage] in={event.input_tokens} out={event.output_tokens} "
@@ -547,6 +549,8 @@ async def stream_turn(
                 await engine.submit(_to_response(event, await on_permission(event)))
                 continue
             if isinstance(event, QuestionRequest):
+                if event.nonblocking:
+                    continue
                 await engine.submit(
                     RespondQuestion(
                         request_id=event.request_id, answer=await on_question(event)
@@ -683,7 +687,7 @@ class Repl:
                 await self.engine.submit(
                     RespondPermission(request_id=event.request_id, decision=decision)
                 )
-            elif isinstance(event, QuestionRequest):
+            elif isinstance(event, QuestionRequest) and not event.nonblocking:
                 await self.engine.submit(
                     RespondQuestion(
                         request_id=event.request_id,
@@ -692,7 +696,7 @@ class Repl:
                 )
 
     def _start_watcher(self) -> None:
-        if self._watcher is None and host_of(self.engine) is not None:
+        if self._watcher is None:
             self._watcher = asyncio.create_task(self._watch_background())
 
     async def _stop_watcher(self) -> None:
@@ -715,7 +719,7 @@ class Repl:
             self.out.write(
                 "commands: /model <name>, /fork <node_id>, /rewind <node_id>,\n"
                 "  /context (or /usage), /tools, /skills, /tasks, /cancel <task_id>,\n"
-                "  /exit\n"
+                "  /questions, /answer <request_id> <text>, /exit\n"
                 "resume a session later with: fluid chat --resume <session-id> (or --continue)\n"
             )
         elif cmd in ("/context", "/usage"):
@@ -724,6 +728,25 @@ class Repl:
             self.out.write(format_tools(getattr(self.engine, "registry", None)) + "\n")
         elif cmd == "/skills":
             self.out.write(self.render_skills() + "\n")
+        elif cmd == "/questions":
+            questions = await self.engine.pending_questions()
+            if not questions:
+                self.out.write("(no pending questions)\n")
+            for question in questions:
+                render_event(question, self.out)
+        elif cmd == "/answer":
+            answer_parts = arg.split(maxsplit=1)
+            if len(answer_parts) != 2:
+                self.out.write("usage: /answer <request_id> <text>\n")
+            else:
+                request_id, answer = answer_parts
+                pending = await self.engine.pending_questions()
+                if not any(q.request_id == request_id for q in pending):
+                    self.out.write(f"no pending question {request_id}\n")
+                else:
+                    await self.engine.submit(RespondQuestion(
+                        request_id=request_id, answer=answer, user_answered=True,
+                    ))
         elif cmd == "/tasks":
             host = host_of(self.engine)
             workers = list(host.workers.values()) if host is not None else []
@@ -837,6 +860,11 @@ class Repl:
         self._loop_task = asyncio.current_task()
         self._start_watcher()
         try:
+            pending = getattr(self.engine, "pending_questions", None)
+            if pending is not None:
+                for question in await pending():
+                    render_event(question, self.out)
+                await self.engine.resume_question_delivery()
             with sigint_scope(self.on_sigint):
                 while not self._exit_requested:
                     try:

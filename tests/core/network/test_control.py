@@ -99,6 +99,50 @@ def test_placement_treats_own_device_id_as_me(workers):
         assert placement.resolve_placement(row).kind == "local"
 
 
+async def test_remote_nonblocking_answer_is_durable_only_on_owner(workers, monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.core.user_question_handler import user_question_handler
+    from app.db import turns, interactions
+    a, b = workers("a"), workers("b")
+    served = ServedBy(a, "http://a.local:8000")
+    real_async = httpx.AsyncClient
+
+    def async_client(*args, **kwargs):
+        kwargs["transport"] = served.transport()
+        return real_async(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", async_client)
+    monkeypatch.setattr("app.core.turn_manager._kick", lambda sid: None)
+    monkeypatch.setattr("app.core.turn_claim.notify_turns_changed", lambda sid: None)
+    monkeypatch.setattr("app.core.interaction_wait.notify_changed", lambda sid: None)
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    _new_session(a, "s-question", "On A")
+    with a.active():
+        await user_question_handler.post_question(
+            request_id="remote-q", tool_use_id="tu", session_id="s-question",
+            questions=[{"question": "Color?"}], broadcast_func=AsyncMock(),
+        )
+        catalog.publish_owned()
+    converge([a, b])
+    with a.active():
+        store.touch_member(b.device_id, endpoints=[])
+    with b.active():
+        assert user_question_handler.get_pending_questions("s-question")[0]["nonblocking"] is True
+        store.touch_member(a.device_id, endpoints=[served.base_url])
+        kwargs = dict(request_id="remote-q", session_id="s-question", answers={"Color?": "blue"},
+                      answered_by_device=None, dismissed=False, skipped=None)
+        assert (await control.answer_question(a.device_id, **kwargs))["success"] is True
+        assert (await control.answer_question(a.device_id, **kwargs))["success"] is False
+        assert turns.get_queued_turns("s-question") == []
+        with pytest.raises(control.ControlRefused):
+            await control.answer_question(a.device_id, **{**kwargs, "session_id": "not-owned"})
+    with a.active():
+        assert len(turns.get_queued_turns("s-question")) == 1
+        assert interactions.get_answered_interactions("s-question")[0]["answered_by_device"] == b.device_id
+
+
 async def test_remote_owner_receives_turns_interrupts_and_answers(workers, monkeypatch):
     a, b = workers("a"), workers("b")
     served = ServedBy(a, "http://a.local:8000")

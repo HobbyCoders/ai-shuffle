@@ -142,10 +142,10 @@ def turn_compacting(sid: str) -> None:
     emit(result_frame(sid))
 
 
-def turn_tool(sid: str) -> None:
+def turn_tool(sid: str, *, question: bool = False) -> None:
     tid = "toolu_fake_1"
-    tool_name = "mcp__fluid_bundled__get_weather"
-    args = {"city": "Paris"}
+    tool_name = "AskUserQuestion" if question else "mcp__fluid_bundled__get_weather"
+    args = {"questions": [{"question": "Which region?"}]} if question else {"city": "Paris"}
     emit(assistant_frame(
         sid, [{"type": "tool_use", "id": tid, "name": tool_name, "input": args}], "tool_use",
     ))
@@ -167,7 +167,17 @@ def turn_tool(sid: str) -> None:
     behavior = None
     if resp is not None:
         behavior = resp.get("response", {}).get("response", {}).get("behavior")
-    if behavior == "allow":
+    if question:
+        response = resp.get("response", {}).get("response", {}) if resp else {}
+        assert response.get("behavior") == "deny"
+        queued = json.loads(response["message"])
+        assert queued["status"] == "queued" and queued["request_ids"]
+        emit({"type": "user", "session_id": sid, "message": {"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": tid,
+            "content": [{"type": "text", "text": response["message"]}], "is_error": True,
+        }]}})
+        emit(assistant_frame(sid, [{"type": "text", "text": "Independent work completed."}], "end_turn"))
+    elif behavior == "allow":
         emit({"type": "user", "session_id": sid, "message": {"role": "user", "content": [{
             "type": "tool_result", "tool_use_id": tid,
             "content": [{"type": "text", "text": "Paris: sunny, 21C"}], "is_error": False,
@@ -349,6 +359,9 @@ def main() -> int:
             turn_compacting(session_id)
         elif scenario == "j":
             turn_inline_context(session_id)
+        elif scenario == "q":
+            turn_tool(session_id, question=True)
+            scenario = "a"
         elif scenario == "b":
             turn_tool(session_id)
         elif scenario == "d":

@@ -1,21 +1,12 @@
-"""AskUser — structured questions answered by the human, mid-turn.
-
-Rides the engine's existing input-required round-trip (the MRTR seam): the
-first dispatch returns ``input_required`` with one request per question; the
-engine emits ``QuestionRequest`` events, parks until ``RespondQuestion`` ops
-arrive (the REPL/TUI render the options and prompt), then re-dispatches this
-tool with the collected answers, which become the tool result.
-
-Each question carries its option list in the *schema* field so a UI can render
-selectable choices; a plain-text host falls back to numbered options in the
-message text.
-"""
+"""AskUser posts persistent questions without waiting for human answers."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from fluid.tools.registry import InputRequired, ToolCtx, ToolOutcome, ToolSpec
+import json
+
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 MAX_QUESTIONS = 4
 MAX_OPTIONS = 4
@@ -29,6 +20,9 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "change what you do next — when a choice has an obvious conventional "
         "default, take it, say so, and keep going.\n"
         "\n"
+        "This tool posts persistent questions and immediately returns request ids. "
+        "Continue independent work, or end your turn when blocked. Answers arrive "
+        "automatically during work or in a new turn; never poll or wait.\n"
         "Usage notes:\n"
         f"- Ask 1–{MAX_QUESTIONS} questions per call. Batch independent "
         "questions into ONE call instead of a chain of single-question calls.\n"
@@ -143,29 +137,15 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if error is not None:
         return ToolOutcome(text=error, is_error=True)
 
-    answers = input.get("__input_responses__")
-    if answers is None:
-        # First leg: hand the engine one request per question and park.
-        requests = {
-            f"q{i}": {"message": _render_message(q), "schema": q}
-            for i, q in enumerate(questions)
-        }
-        return ToolOutcome(
-            text="",
-            input_required=InputRequired(
-                server="builtin", tool="AskUser", request_state=None,
-                requests=requests,
-            ),
-        )
-
-    # Second leg: the collected answers are the result. Numeric answers map
-    # back to option labels so the model reads the choice, not an index.
-    lines: list[str] = []
-    for i, q in enumerate(questions):
-        header = str(q.get("header") or "").strip() or f"question {i + 1}"
-        raw = str(answers.get(f"q{i}", "")).strip()
-        lines.append(f"- {header}: {_resolve_answer(raw, q) or '(no answer)'}")
-    return ToolOutcome(text="The user answered:\n" + "\n".join(lines))
+    post = ctx.extra.get("post_questions")
+    if post is None:
+        return ToolOutcome(text="AskUser requires a persistent question host.", is_error=True)
+    request_ids = await post(questions)
+    return ToolOutcome(text=json.dumps({
+        "status": "queued", "request_ids": request_ids,
+        "message": "Questions posted. Continue independent work, or end your turn "
+        "if blocked. Answers will arrive automatically; do not poll.",
+    }))
 
 
 def _resolve_answer(raw: str, q: dict[str, Any]) -> str:
