@@ -86,9 +86,9 @@ it('renames this worker and removes another worker through the network API', asy
 	await fireEvent.input(screen.getByRole('textbox', { name: 'Device name' }), { target: { value: 'Studio desk' } });
 	await fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
 	expect(api.patch).toHaveBeenCalledWith('/network/members/self', { name: 'Studio desk' });
-	await fireEvent.click(within(row('member:laptop')).getByRole('button', { name: 'Remove Laptop' }));
+	await fireEvent.click(within(row('member:laptop')).getByRole('button', { name: 'Revoke Laptop' }));
 	expect(api.delete).not.toHaveBeenCalled();
-	await fireEvent.click(within(row('member:laptop')).getByRole('button', { name: 'Confirm remove' }));
+	await fireEvent.click(within(row('member:laptop')).getByRole('button', { name: 'Confirm revoke' }));
 	expect(api.delete).toHaveBeenCalledWith('/network/members/laptop');
 	expect((await screen.findByRole('alert')).textContent).toContain('Laptop');
 	expect(screen.getByRole('alert').textContent).toContain('rotate those keys');
@@ -308,13 +308,82 @@ it('includes offline account devices in the same list, merges known local identi
 	expect(screen.queryByText('Laptop account name')).toBeNull();
 	expect(screen.queryByText('Phone account name')).toBeNull();
 	expect(screen.queryByText('Browser account name')).toBeNull();
-	expect(within(row('member:laptop')).getByRole('button', { name: 'Revoke Laptop account name from account' })).toBeTruthy();
-	expect(within(row('client:phone')).getByRole('button', { name: 'Revoke Phone account name from account' })).toBeTruthy();
-	expect(within(row('client:browser')).getByRole('button', { name: 'Revoke Browser account name from account' })).toBeTruthy();
+	expect(within(row('member:laptop')).getByRole('button', { name: 'Revoke Laptop' })).toBeTruthy();
+	expect(within(row('client:phone')).getByRole('button', { name: 'Revoke My phone' })).toBeTruthy();
+	expect(within(row('client:browser')).getByRole('button', { name: 'Revoke Work browser' })).toBeTruthy();
 	expect(screen.queryByRole('button', { name: 'Revoke Desk account name from account' })).toBeNull();
 	profile = { ...profile, devices: [] };
 	await vi.advanceTimersByTimeAsync(32_000);
 	expect(screen.queryByText('Offline phone')).toBeNull();
 	expect(screen.getByText('5 devices')).toBeTruthy();
 	expect(row('client:phone')).toBeTruthy();
+});
+
+it.each(['phone', 'member', 'legacy'] as const)('uses one icon to revoke both account and local %s access', async (kind) => {
+	status.members![1].endpoints = ['https://laptop.example/'];
+	if (kind === 'legacy') installs.push(install('old', { device_name: 'Old worker', base_url: 'https://old.example' }));
+	const isPhone = kind === 'phone';
+	let profile = {
+		account: { id: 'account', username: 'owner', profile_complete: true },
+		servers: isPhone ? [] : [{ id: 'linked', name: 'Account worker', current: false, url: kind === 'member' ? 'https://laptop.example' : 'https://old.example' }],
+		devices: isPhone ? [{ id: 'linked', local_device_id: 'phone', name: 'Account phone', platform: 'android' }] : []
+	};
+	api.get.mockImplementation(async (path: string) => {
+		if (path === '/mobile/hub/connection') return { ...disconnected, signed_in: true, status: 'connected' };
+		if (path === '/mobile/hub/account') return structuredClone(profile);
+		return reads(path);
+	});
+	const events: string[] = [];
+	api.delete.mockImplementation(async (path: string) => {
+		events.push(path);
+		if (path.startsWith('/mobile/hub/account/')) profile = { ...profile, servers: [], devices: [] };
+		if (path.startsWith('/network/members/')) status.members = status.members!.filter((item) => item.device_id !== 'laptop');
+		return { ok: true, rotate_provider_keys_recommended: true };
+	});
+	api.put.mockImplementation(async (path: string) => { events.push(path); return install('old', { approved: false }); });
+	render(DevicesSection);
+	await screen.findByText('@owner');
+	const key = isPhone ? 'client:phone' : kind === 'member' ? 'member:laptop' : 'legacy:old';
+	const actions = within(row(key)).getAllByRole('button', { name: /^Revoke / });
+	expect(actions).toHaveLength(1);
+	expect(actions[0].classList.contains('icon')).toBe(true);
+	expect(actions[0].textContent).toBe('');
+	expect(screen.queryByText('Revoke from account')).toBeNull();
+	await fireEvent.click(actions[0]);
+	expect(within(row(key)).getByText(/also revokes its account access/)).toBeTruthy();
+	await fireEvent.click(within(row(key)).getByRole('button', { name: 'Cancel' }));
+	expect(events).toEqual([]);
+	await fireEvent.click(within(row(key)).getByRole('button', { name: /^Revoke / }));
+	await fireEvent.click(within(row(key)).getByRole('button', { name: 'Confirm revoke' }));
+	await waitFor(() => expect(events).toEqual([
+		`/mobile/hub/account/${isPhone ? 'devices' : 'servers'}/linked`,
+		isPhone ? '/pairing/clients/phone' : kind === 'member' ? '/network/members/laptop' : '/cluster/installs/old/approval'
+	]));
+});
+
+it('stops on account failure and lets local cleanup retry after account revocation succeeds', async () => {
+	let profile = { account: { id: 'account', username: 'owner', profile_complete: true }, servers: [],
+		devices: [{ id: 'linked', local_device_id: 'phone', name: 'Account phone', platform: 'android' }] };
+	api.get.mockImplementation(async (path: string) => {
+		if (path === '/mobile/hub/connection') return { ...disconnected, signed_in: true, status: 'connected' };
+		if (path === '/mobile/hub/account') return structuredClone(profile);
+		return reads(path);
+	});
+	render(DevicesSection);
+	await screen.findByText('@owner');
+	await fireEvent.click(within(row('client:phone')).getByRole('button', { name: 'Revoke My phone' }));
+	api.delete.mockRejectedValueOnce(new Error('Account service unavailable'));
+	await fireEvent.click(screen.getByRole('button', { name: 'Confirm revoke' }));
+	expect(await screen.findByText('Account service unavailable')).toBeTruthy();
+	expect(api.delete.mock.calls).toEqual([['/mobile/hub/account/devices/linked']]);
+	api.delete.mockImplementationOnce(async () => { profile = { ...profile, devices: [] }; return { ok: true }; });
+	api.delete.mockRejectedValueOnce(new Error('Local cleanup failed'));
+	await fireEvent.click(screen.getByRole('button', { name: 'Confirm revoke' }));
+	expect(await screen.findByText(/Account access was revoked. Retry/)).toBeTruthy();
+	api.delete.mockResolvedValue({ ok: true });
+	await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm revoke' }).hasAttribute('disabled')).toBe(false));
+	await fireEvent.click(screen.getByRole('button', { name: 'Confirm revoke' }));
+	await waitFor(() => expect(document.querySelector('[data-device-key="client:phone"]')).toBeNull());
+	expect(api.delete.mock.calls.filter(([path]) => path === '/mobile/hub/account/devices/linked')).toHaveLength(2);
+	expect(api.delete.mock.calls.filter(([path]) => path === '/pairing/clients/phone')).toHaveLength(2);
 });

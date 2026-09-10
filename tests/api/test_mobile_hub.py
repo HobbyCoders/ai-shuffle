@@ -171,6 +171,24 @@ def test_account_revocation_requires_owner_and_active_link(setup, monkeypatch, k
     assert client.delete(path).status_code == 404
 
 
+@pytest.mark.parametrize('kind', ['servers', 'devices'])
+@pytest.mark.parametrize('probe_status', [200, 401, 503])
+def test_revocation_distinguishes_old_hub_from_lost_worker_link(setup, monkeypatch, kind, probe_status):
+    bind()
+    replies = [HTTPException(401, 'This worker is no longer linked to its account. Sign in again.')]
+    replies.append({'account': {'username': 'owner'}} if probe_status == 200 else HTTPException(probe_status, 'Probe failed'))
+    call = Mock(side_effect=replies)
+    monkeypatch.setattr(account_hub, 'call', call)
+    response = admin_client().delete(f'/api/v1/mobile/hub/account/{kind}/{DEVICE}')
+    assert response.status_code == (503 if probe_status == 200 else probe_status)
+    if probe_status == 200:
+        assert 'needs an update' in response.json()['error']
+        assert 'still signed in' in response.json()['error']
+    assert [args.args[1:] for args in call.call_args_list] == [
+        ('DELETE', f'account/{kind}/{DEVICE}'), ('GET', 'account')]
+    assert store.get_binding()['active']
+
+
 def test_account_profile_preserves_unknown_devices_for_older_hubs():
     result = mobile_hub._profile({'account': {'id': ACCOUNT, 'username': 'owner'}, 'servers': []})
     assert 'devices' not in result

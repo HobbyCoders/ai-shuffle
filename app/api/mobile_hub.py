@@ -87,7 +87,16 @@ def revoke_account_registration(kind: str, registration_id: str, _admin=Depends(
     binding = _active_binding()
     if kind == 'servers' and registration_id == binding['server_id']:
         raise HTTPException(409, 'Use Sign out to disconnect this worker')
-    result = account_hub.call(binding, 'DELETE', f'account/{kind}/{registration_id}')
+    try:
+        result = account_hub.call(binding, 'DELETE', f'account/{kind}/{registration_id}')
+    except HTTPException as exc:
+        if exc.status_code != 401:
+            raise
+        # Older hubs route unknown worker endpoints through consumer-session
+        # auth and return 401 even though the worker credential is still valid.
+        # Probe a known read-only endpoint; never retry the destructive request.
+        account_hub.call(binding, 'GET', 'account')
+        raise HTTPException(503, 'The account service needs an update before it can revoke devices. This worker is still signed in.') from exc
     if result.get('ok') is not True:
         raise HTTPException(503, 'Account revocation was not confirmed')
     if kind == 'devices':

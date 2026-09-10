@@ -204,48 +204,55 @@
 		finally { saving = null; }
 	}
 
-	async function revokeAccountDevice(device: AccountDeviceRow) {
-		if (saving || device.current) return;
-		saving = device.key; error = '';
-		try {
-			const result = await revokeAccountRegistration(device.registration, device.id);
-			if (!result.ok) throw new Error('Account revocation was not confirmed');
-			confirmation = null;
-			if (accountProfile) accountProfile = {
-				...accountProfile,
-				servers: accountProfile.servers.filter((worker) => device.registration !== 'servers' || worker.id !== device.id),
-				devices: accountProfile.devices?.filter((item) => device.registration !== 'devices' || item.id !== device.id)
-			};
-			await accountPanel.loadProfile(true);
-			flash(`${device.name} revoked from your account`);
-			if (result.cleanup_pending) error = 'Account access was revoked, but remote connection cleanup is still pending.';
-		} catch (e) { error = getErrorMessage(e, 'Could not revoke account access'); }
-		finally { saving = null; }
-	}
-
-	async function removeMember(member: NetworkMember) {
+	async function revokeAccess(key: string, name: string, action: 'revoke' | 'remove' = 'revoke') {
 		if (saving) return;
-		saving = `member:${member.device_id}`; error = '';
+		const accounts = registrations.filter((device) => device.key === key || device.localKey === key);
+		if (accounts.some((device) => device.current)) return;
+		saving = key; error = '';
+		let accountRevoked = false;
+		let cleanupPending = false;
 		try {
-			const result = await revokeNetworkMember(member.device_id);
+			// Revoke account authority first so it cannot readmit the local device.
+			for (const device of accounts) {
+				const result = await revokeAccountRegistration(device.registration, device.id);
+				if (!result.ok) throw new Error('Account revocation was not confirmed');
+				accountRevoked = true;
+				cleanupPending ||= Boolean(result.cleanup_pending);
+				if (accountProfile) accountProfile = {
+					...accountProfile,
+					servers: accountProfile.servers.filter((worker) => device.registration !== 'servers' || worker.id !== device.id),
+					devices: accountProfile.devices?.filter((item) => device.registration !== 'devices' || item.id !== device.id)
+				};
+			}
+			if (key.startsWith('client:')) {
+				const id = key.slice('client:'.length);
+				await revokePairedClient(id);
+				clients = clients.filter((item) => item.id !== id);
+			} else if (key.startsWith('member:')) {
+				const result = await revokeNetworkMember(key.slice('member:'.length));
+				revokedNotice = result.rotate_provider_keys_recommended ? name : null;
+				await loadStatus();
+			} else if (key.startsWith('legacy:')) {
+				const id = key.slice('legacy:'.length);
+				if (action === 'remove') {
+					await deleteInstall(id);
+					installs = installs.filter((item) => item.id !== id);
+					appData.dropDeviceSessions(id);
+				} else {
+					const updated = await setInstallApproval(id, false);
+					installs = installs.map((item) => item.id === id ? { ...item, ...updated } : item);
+				}
+			}
 			confirmation = null;
-			revokedNotice = result.rotate_provider_keys_recommended ? member.name : null;
-			flash(`${member.name} removed`);
-			await loadStatus();
-		} catch (e) { error = getErrorMessage(e, 'Could not remove the worker'); }
-		finally { saving = null; }
-	}
-
-	async function removeLegacy(install: Install) {
-		if (saving) return;
-		saving = `legacy:${install.id}`; error = '';
-		try {
-			await deleteInstall(install.id);
-			installs = installs.filter((item) => item.id !== install.id);
-			appData.dropDeviceSessions(install.id);
-			confirmation = null; flash('Device removed');
-		} catch (e) { error = getErrorMessage(e, 'Could not remove the device'); }
-		finally { saving = null; }
+			flash(`${name} access revoked`);
+			if (cleanupPending) error = 'Access was revoked, but remote connection cleanup is still pending.';
+		} catch (e) {
+			error = getErrorMessage(e, 'Could not revoke device access');
+			if (accountRevoked) error += ' Account access was revoked. Retry to finish removing the remaining access.';
+		} finally {
+			if (accountRevoked) await accountPanel.loadProfile(true);
+			saving = null;
+		}
 	}
 
 	async function approveLegacy(install: Install, approved: boolean) {
@@ -257,17 +264,6 @@
 			confirmation = null;
 			flash(approved ? 'Worker approved' : 'Worker access revoked');
 		} catch (e) { error = getErrorMessage(e, approved ? 'Could not approve the worker' : 'Could not revoke the worker'); }
-		finally { saving = null; }
-	}
-
-	async function revokeClient(client: PairedClient) {
-		if (saving) return;
-		saving = `client:${client.id}`; error = '';
-		try {
-			await revokePairedClient(client.id);
-			clients = clients.filter((item) => item.id !== client.id);
-			confirmation = null; flash('Device access revoked');
-		} catch (e) { error = getErrorMessage(e, 'Could not revoke the device'); }
 		finally { saving = null; }
 	}
 
@@ -307,12 +303,12 @@
 {#snippet accountControl(device: AccountDeviceRow)}
 	{#if $isAdmin && !device.current}
 		{#if confirmation?.key !== device.key}
-			<div class="actions" class:account-local={Boolean(device.localKey)}><button type="button" class="btn" class:icon={!device.localKey} aria-label="Revoke {device.name} from account" title="Revoke account access" disabled={saving !== null} onclick={() => { confirmation = { key: device.key, action: 'revoke' }; }}><ShieldOff size={15} />{#if device.localKey}Revoke from account{/if}</button></div>
+			<div class="actions"><button type="button" class="btn icon" aria-label="Revoke {device.name} from account" title="Revoke account access" disabled={saving !== null} onclick={() => { confirmation = { key: device.key, action: 'revoke' }; }}><ShieldOff size={15} /></button></div>
 		{:else}
 			<div class="confirm">
-				<p>Revoke {device.name} from your account? {device.kind === 'Worker' ? 'This worker will lose account access and its remote connection.' : 'This device will need to sign in again.'} Separate local pairings and network membership are not removed.</p>
+				<p>Revoke {device.name} from your account? {device.kind === 'Worker' ? 'This worker will lose account access and its remote connection.' : 'This device will need to sign in again.'}</p>
 				<div class="row">
-					<button type="button" class="btn sm danger" disabled={saving !== null} onclick={() => revokeAccountDevice(device)}>{saving === device.key ? 'Revoking…' : 'Confirm revoke'}</button>
+					<button type="button" class="btn sm danger" disabled={saving !== null} onclick={() => revokeAccess(device.key, device.name)}>{saving === device.key ? 'Revoking…' : 'Confirm revoke'}</button>
 					<button type="button" class="btn sm" disabled={saving !== null} onclick={() => { confirmation = null; }}>Cancel</button>
 				</div>
 			</div>
@@ -442,21 +438,18 @@
 				{#if editing !== key && confirmation?.key !== key && $isAdmin}
 					<div class="actions">
 						<button type="button" class="btn icon" aria-label="Rename {member.name}" title="Rename worker" disabled={saving !== null} onclick={() => startEdit(key, member.name)}><Pencil size={15} /></button>
-						<button type="button" class="btn icon" aria-label="Remove {member.name}" title="Remove from network" disabled={saving !== null} onclick={() => { confirmation = { key, action: 'remove' }; }}><Trash2 size={15} /></button>
+						<button type="button" class="btn icon" aria-label="Revoke {member.name}" title="Revoke device access" disabled={saving !== null} onclick={() => { confirmation = { key, action: 'remove' }; }}><ShieldOff size={15} /></button>
 					</div>
 				{/if}
 				{#if confirmation?.key === key}
 					<div class="confirm">
-						<p>Remove <strong>{member.name}</strong> from the network? It stops receiving your settings and sessions. Its copies of provider keys should be rotated afterwards.</p>
+						<p>Revoke access for <strong>{member.name}</strong>? {#if registrations.some((device) => device.localKey === key)}This also revokes its account access.{/if} It stops receiving your settings and sessions. Its copies of provider keys should be rotated afterwards.</p>
 						<div class="row">
-							<button type="button" class="btn sm danger" disabled={saving !== null} onclick={() => removeMember(member)}>Confirm remove</button>
+							<button type="button" class="btn sm danger" disabled={saving !== null} onclick={() => revokeAccess(key, member.name)}>Confirm revoke</button>
 							<button type="button" class="btn sm" disabled={saving !== null} onclick={() => { confirmation = null; }}>Cancel</button>
 						</div>
 					</div>
 				{/if}
-				{#each registrations.filter((device) => device.localKey === key) as device (device.key)}
-					{@render accountControl(device)}
-				{/each}
 			</li>
 		{/each}
 		{#each joining as device (device.key)}
@@ -500,16 +493,13 @@
 				{/if}
 				{#if confirmation?.key === key}
 					<div class="confirm">
-						<p>{confirmation.action === 'remove' ? 'Remove this device from the list? It may reappear if it reconnects.' : 'Revoke access? This worker will no longer receive new tasks.'}</p>
+						<p>{confirmation.action === 'remove' ? 'Remove this device from the list? It may reappear if it reconnects.' : 'Revoke access? This worker will no longer receive new tasks.'} {#if registrations.some((device) => device.localKey === key)}This also revokes its account access.{/if}</p>
 						<div class="row">
-							<button type="button" class="btn sm danger" disabled={saving !== null} onclick={() => confirmation?.action === 'remove' ? removeLegacy(install) : approveLegacy(install, false)}>{confirmation.action === 'remove' ? 'Confirm remove' : 'Confirm revoke'}</button>
+							<button type="button" class="btn sm danger" disabled={saving !== null} onclick={() => revokeAccess(key, install.device_name, confirmation?.action)}>{confirmation.action === 'remove' ? 'Confirm remove' : 'Confirm revoke'}</button>
 							<button type="button" class="btn sm" disabled={saving !== null} onclick={() => { confirmation = null; }}>Cancel</button>
 						</div>
 					</div>
 				{/if}
-				{#each registrations.filter((device) => device.localKey === key) as device (device.key)}
-					{@render accountControl(device)}
-				{/each}
 			</li>
 		{/each}
 		{#each clients as client (client.id)}
@@ -529,16 +519,13 @@
 				{/if}
 				{#if confirmation?.key === key}
 					<div class="confirm">
-						<p>Revoke access? This device will need to pair or sign in again.</p>
+						<p>Revoke access? {#if registrations.some((device) => device.localKey === key)}This also revokes its account access.{/if} This device will need to pair or sign in again.</p>
 						<div class="row">
-							<button type="button" class="btn sm danger" disabled={saving !== null} onclick={() => revokeClient(client)}>Confirm revoke</button>
+							<button type="button" class="btn sm danger" disabled={saving !== null} onclick={() => revokeAccess(key, client.device_name)}>Confirm revoke</button>
 							<button type="button" class="btn sm" disabled={saving !== null} onclick={() => { confirmation = null; }}>Cancel</button>
 						</div>
 					</div>
 				{/if}
-				{#each registrations.filter((device) => device.localKey === key) as device (device.key)}
-					{@render accountControl(device)}
-				{/each}
 			</li>
 		{/each}
 		{#each accountDevices as device (device.key)}
@@ -607,7 +594,6 @@
 	.meta span { overflow-wrap: anywhere; }
 	.meta span + span::before { content: '·'; margin-right: 8px; }
 	.actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
-	.account-local { grid-column: 2 / -1; justify-content: flex-end; }
 	.editor { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
 	.editor .inp { flex: 1 1 120px; width: 100%; }
 	.confirm { grid-column: 2 / -1; display: flex; flex-direction: column; gap: 8px; }
