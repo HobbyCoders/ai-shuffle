@@ -482,6 +482,7 @@ class HarnessAdapter(ProviderAdapter):
                 # Reasoning depth (profile config or chat override) → CLI
                 # --effort. Validated app-side to the CLI's vocabulary.
                 effort=_valid_effort(getattr(options, "effort", None)),
+                setting_sources=_fluid_setting_sources(options),
                 # Per-session fast mode (v81) → the CLI's ``fastMode`` setting,
                 # handed over as a --settings JSON blob. Only sent when the user
                 # turned it on: an explicit ``{"fastMode": false}`` would be the
@@ -1270,6 +1271,13 @@ class HarnessAdapter(ProviderAdapter):
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
         self._mark_turn_floor()
+        if not self._is_delegated and self._options is not None and prompt.startswith("/"):
+            from app.core.slash_commands import expand_native_command
+
+            prompt = await asyncio.to_thread(
+                expand_native_command, self._options.cwd or ".", prompt,
+                setting_sources=_fluid_setting_sources(self._options),
+            )
         # Everything that changes between turns rides HERE, at the tail of the
         # request, rather than in the system prompt: today's date, the branch
         # pair, and the continual learner's # Memory snapshot. The system

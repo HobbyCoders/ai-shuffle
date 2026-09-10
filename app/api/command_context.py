@@ -15,7 +15,7 @@ from app.db import database
 
 def command_context(
     request: Optional[Request], project_id: Optional[str],
-    worktree_id: Optional[str], session_id: Optional[str],
+    worktree_id: Optional[str], session_id: Optional[str], profile_id: Optional[str] = None,
 ) -> tuple[str, Optional[dict]]:
     """Authorize every supplied identity before resolving or scanning any path."""
     user = get_api_user_from_request(request) if request is not None else None
@@ -66,7 +66,28 @@ def command_context(
         if not project:
             raise HTTPException(404, "Project not found")
         return str(get_project_working_dir(project)), None
-    return str(Path(settings.workspace_dir)), None
+    config = _command_profile_config(request, None, profile_id)
+    return str(config.get("cwd") or Path(settings.workspace_dir)), None
+
+
+def command_setting_sources(
+    request: Optional[Request], session: Optional[dict], profile_id: Optional[str],
+):
+    """Resolve the same profile field passed by build_sdk_options to the adapter."""
+    from app.core.provider.harness_adapter import _fluid_setting_sources
+    from app.core.provider.types import SessionOptions
+
+    config = _command_profile_config(request, session, profile_id)
+    return _fluid_setting_sources(SessionOptions(model="", setting_sources=config.get("setting_sources")))
+
+
+def _command_profile_config(request, session, profile_id):
+    user = get_api_user_from_request(request) if request is not None else None
+    profile_id = profile_id or (session or {}).get("profile_id") or (user or {}).get("profile_id")
+    if user and user.get("profile_id") and profile_id != user["profile_id"]:
+        raise HTTPException(403, "Access denied to this profile")
+    profile = database.get_profile(profile_id) if profile_id else None
+    return (profile or {}).get("config") or {}
 
 
 def command_provider_kind(
@@ -80,14 +101,9 @@ def command_provider_kind(
     from app.core.query_options import decode_provider_model, is_native_claude_model
     from app.core.provider_agent import curated_model_ids
 
+    config = _command_profile_config(request, session, profile_id)
     if (session or {}).get("mode", mode) == "voice":
         return "voice"
-    user = get_api_user_from_request(request) if request is not None else None
-    profile_id = profile_id or (session or {}).get("profile_id") or (user or {}).get("profile_id")
-    if user and user.get("profile_id") and profile_id != user["profile_id"]:
-        raise HTTPException(403, "Access denied to this profile")
-    profile = database.get_profile(profile_id) if profile_id else None
-    config = (profile or {}).get("config") or {}
     provider_id = session.get("provider_id") if session is not None else config.get("provider")
     selected = model or (session or {}).get("model")
     raw_model = selected or (session or {}).get("launched_model") or config.get("model") or DEFAULT_MODEL

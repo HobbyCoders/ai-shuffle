@@ -101,9 +101,12 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     sources = ctx.extra.get("setting_sources")
     user_on = sources is None or "user" in sources
     project_on = sources is None or "project" in sources
+    from fluid.context.plugins import discover_plugins
+
+    plugins = discover_plugins(ctx.cwd, sources=sources) if user_on and sources is not None else None
     skills = discover_skills(
         ctx.cwd, include_global=user_on, include_project=project_on,
-        include_plugins=user_on,
+        include_plugins=user_on, plugins=plugins,
     )
     match, ambiguous = _resolve(skills, name)
     if match is None:

@@ -1065,7 +1065,10 @@ Custom content""")
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("app.core.slash_commands.discover_plugin_commands", return_value=[plugin_cmd]):
+            command = SlashCommand(name="plugin:action", description="Plugin action",
+                                   content="Plugin body", file_path="/fixture/plugin.md",
+                                   source="plugin-id", type="plugin")
+            with patch("app.core.slash_commands._delegated_commands", return_value=[command]):
                 result = get_all_commands(tmpdir)
 
                 found = next((c for c in result if c["name"] == "plugin:action"), None)

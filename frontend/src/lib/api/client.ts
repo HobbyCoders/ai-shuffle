@@ -315,12 +315,10 @@ export interface AuthStatus {
 	username: string | null;
 }
 
-// Profile types — fluid harness options only. SDK-era keys (thinking_mode,
-// setting_sources, max_buffer_size, user, strict_mcp_config, …) were dropped
-// from the editor; the backend tolerates them on old rows but the fluid
-// harness ignores them. effort and max_turns ARE honored (adapter maps them
-// onto --effort / provider effort params and the per-turn model-call cap).
+// Profile types — Fluid harness options. Legacy SDK keys remain tolerated on
+// old rows; setting_sources selects the user/project/local settings scopes.
 export interface ProfileConfig {
+	setting_sources?: string[] | null;  // null/unset = all scopes; [] = none
 	model?: string;
 	provider?: string | null;  // model_providers.id this model runs through; unset/null = native Anthropic
 	provider_models?: Record<string, string>;  // subagent model by caller provider; values are a Claude alias or prov:<id>:<model> (any leg). __native__ = native Claude callers; missing key = unavailable

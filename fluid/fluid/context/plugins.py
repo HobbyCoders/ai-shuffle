@@ -179,13 +179,13 @@ def read_manifest(root: Path) -> dict[str, Any]:
     return data
 
 
-def resolve_plugin_root(name: str, marketplace: str) -> tuple[Path, str | None] | None:
+def resolve_plugin_root(name: str, marketplace: str, *, home: Path | None = None) -> tuple[Path, str | None] | None:
     """Where ``name@marketplace`` lives on disk, with its version when known.
 
     Returns ``None`` when the plugin is enabled in settings but not installed —
     a stale ``enabledPlugins`` entry must not break the session (CE11).
     """
-    home = plugins_home()
+    home = plugins_home() if home is None else home
 
     cache = home / "cache" / marketplace / name
     if cache.is_dir():
@@ -480,9 +480,10 @@ def load_plugin(
     *,
     cwd: Path | str | os.PathLike[str] = ".",
     disabled_mcp: set[str] | None = None,
+    home: Path | None = None,
 ) -> Plugin | None:
     """Resolve and read one plugin. ``None`` when it is not installed."""
-    resolved = resolve_plugin_root(name, marketplace)
+    resolved = resolve_plugin_root(name, marketplace, home=home)
     if resolved is None:
         log.warning(
             "enabled plugin %s@%s is not installed under %s — skipping",
@@ -516,6 +517,7 @@ def discover_plugins(
     *,
     settings: dict[str, Any] | None = None,
     sources: tuple[str, ...] | list[str] = SETTING_SOURCES,
+    home: Path | None = None,
 ) -> list[Plugin]:
     """Every enabled, installed plugin visible from ``cwd``.
 
@@ -540,7 +542,7 @@ def discover_plugins(
         if not name:
             continue
         try:
-            plugin = load_plugin(name, marketplace, cwd=cwd, disabled_mcp=disabled)
+            plugin = load_plugin(name, marketplace, cwd=cwd, disabled_mcp=disabled, home=home)
         except Exception as exc:  # noqa: BLE001 — one bad plugin never breaks the rest
             log.warning("skipping plugin %s: %s", ref, exc)
             continue

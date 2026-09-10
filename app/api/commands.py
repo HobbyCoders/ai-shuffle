@@ -21,11 +21,11 @@ from app.db.async_database import run_sync
 from app.api.auth import require_auth
 from app.api.sessions import check_session_access
 from app.api.common import resolve_project_path
-from app.api.command_context import command_context, command_provider_kind
+from app.api.command_context import command_context, command_provider_kind, command_setting_sources
 from app.core.slash_commands import (
     get_command_by_name, get_all_commands,
     is_interactive_command, is_rest_api_command, get_rest_api_command_info,
-    parse_command_input
+    parse_command_input, expand_command_prompt
 )
 # Legacy JSONL fallback and checkpoint-backed rewind services.
 from app.core.jsonl_rewind import jsonl_rewind_service
@@ -149,9 +149,10 @@ async def list_commands(
     built-ins supported by the selected runtime. Does not connect to a model.
     """
     def _list():
-        working_dir, session = command_context(http_request, project_id, worktree_id, session_id)
+        working_dir, session = command_context(http_request, project_id, worktree_id, session_id, profile_id)
         kind = command_provider_kind(http_request, session, model, profile_id, mode)
-        return get_all_commands(working_dir, provider_kind=kind)
+        sources = command_setting_sources(http_request, session, profile_id)
+        return get_all_commands(working_dir, provider_kind=kind, setting_sources=sources)
 
     commands = await run_sync(_list)
 
@@ -167,6 +168,9 @@ async def get_command(
     project_id: Optional[str] = None,
     worktree_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    model: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    mode: Optional[str] = None,
     http_request: Request = None,
 ):
     """
@@ -174,11 +178,13 @@ async def get_command(
 
     The command_name should not include the leading slash.
     """
-    working_dir, _ = await run_sync(
-        command_context, http_request, project_id, worktree_id, session_id
+    working_dir, session = await run_sync(
+        command_context, http_request, project_id, worktree_id, session_id, profile_id
     )
+    kind = await run_sync(command_provider_kind, http_request, session, model, profile_id, mode)
+    sources = await run_sync(command_setting_sources, http_request, session, profile_id)
     # Check if it's an interactive command
-    if is_interactive_command(command_name):
+    if kind == "delegated" and is_interactive_command(command_name):
         from app.core.slash_commands import INTERACTIVE_COMMANDS
         info = INTERACTIVE_COMMANDS.get(command_name)
         if info:
@@ -191,9 +197,16 @@ async def get_command(
             )
 
     # Look for custom command
-    cmd = await run_sync(get_command_by_name, working_dir, command_name)
+    cmd = await run_sync(
+        get_command_by_name, working_dir, command_name,
+        provider_kind=kind, setting_sources=sources,
+    )
 
     if not cmd:
+        entries = await run_sync(get_all_commands, working_dir, provider_kind=kind, setting_sources=sources)
+        builtin = next((entry for entry in entries if entry["name"] == command_name and entry["type"] == "sdk_builtin"), None)
+        if builtin:
+            return CommandDetailResponse(**builtin)
         raise HTTPException(status_code=404, detail=f"Command not found: {command_name}")
 
     return CommandDetailResponse(
@@ -202,7 +215,7 @@ async def get_command(
         description=cmd.description,
         content=cmd.content,
         argument_hint=cmd.argument_hint,
-        type="custom",
+        type=getattr(cmd, "type", "custom"),
         source=cmd.source,
         namespace=cmd.namespace,
         allowed_tools=cmd.allowed_tools,
@@ -241,12 +254,14 @@ async def execute_command(request: ExecuteCommandRequest, http_request: Request 
     if not command_name:
         raise HTTPException(status_code=400, detail="Invalid command format")
 
-    working_dir, _ = await run_sync(
+    working_dir, session = await run_sync(
         command_context, http_request, None, None, request.session_id
     )
+    kind = await run_sync(command_provider_kind, http_request, session, None, None, None)
+    sources = await run_sync(command_setting_sources, http_request, session, None)
 
     # Check if it's an interactive command (like /resume)
-    if is_interactive_command(command_name):
+    if kind == "delegated" and is_interactive_command(command_name):
         return ExecuteCommandResponse(
             success=True,
             message=f"Command /{command_name} requires interactive terminal",
@@ -263,7 +278,10 @@ async def execute_command(request: ExecuteCommandRequest, http_request: Request 
             is_interactive=False
         )
 
-    cmd = await run_sync(get_command_by_name, working_dir, command_name)
+    cmd = await run_sync(
+        get_command_by_name, working_dir, command_name,
+        provider_kind=kind, setting_sources=sources,
+    )
     if not cmd:
         raise HTTPException(status_code=404, detail=f"Command not found: {command_name}")
 
@@ -276,7 +294,7 @@ async def execute_command(request: ExecuteCommandRequest, http_request: Request 
         )
 
     # Expand the prompt
-    expanded_prompt = cmd.expand_prompt(arguments)
+    expanded_prompt = expand_command_prompt(cmd, arguments)
 
     return ExecuteCommandResponse(
         success=True,

@@ -63,6 +63,16 @@ FAKE = str(Path(__file__).parent.parent / "fixtures" / "fake_claude.py")
 GOLDEN = Path(__file__).parent.parent / "golden" / "simple_turn.jsonl"
 
 
+@pytest.mark.parametrize("sources,expected", [(None, None), ((), ""), (("user", "local"), "user,local")])
+def test_setting_sources_reaches_cli_even_when_empty(sources, expected):
+    loop = DelegatedLoop(store=MemoryStore(), model="fake", setting_sources=sources)
+    argv = loop._build_argv()
+    if expected is None:
+        assert "--setting-sources" not in argv
+    else:
+        assert argv[argv.index("--setting-sources") + 1] == expected
+
+
 def _cmd() -> list[str]:
     return [sys.executable, FAKE]
 

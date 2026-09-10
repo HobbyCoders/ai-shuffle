@@ -30,6 +30,8 @@ class SlashCommand:
     argument_hint: Optional[str] = None
     model: Optional[str] = None
     disable_model_invocation: bool = False
+    type: str = "custom"
+    user_invocable: bool = True
 
     def get_display_name(self) -> str:
         """Get display name with leading /"""
@@ -53,20 +55,17 @@ class SlashCommand:
         """
         prompt = self.content
 
-        # Split arguments
-        args = arguments.split() if arguments else []
+        from fluid.context.instructions import split_command_args
 
-        # Replace $ARGUMENTS with all arguments
-        prompt = prompt.replace("$ARGUMENTS", arguments)
+        args = split_command_args(arguments)
 
-        # Replace positional arguments $1, $2, etc.
-        for i, arg in enumerate(args, 1):
-            prompt = prompt.replace(f"${i}", arg)
+        def substitute(match):
+            if match.group(1) is None:
+                return arguments
+            index = int(match.group(1)) - 1
+            return args[index] if 0 <= index < len(args) else ""
 
-        # Remove any unreplaced positional arguments
-        prompt = re.sub(r'\$\d+', '', prompt)
-
-        return prompt.strip()
+        return re.sub(r"\$ARGUMENTS\b|\$(\d+)", substitute, prompt).strip()
 
 
 def parse_frontmatter(content: str) -> tuple[Dict[str, Any], str]:
@@ -99,6 +98,9 @@ def parse_frontmatter(content: str) -> tuple[Dict[str, Any], str]:
         logger.warning(f"Failed to parse frontmatter: {e}")
         frontmatter = {}
 
+    if not isinstance(frontmatter, dict):
+        logger.warning("Ignoring non-mapping command frontmatter")
+        frontmatter = {}
     return frontmatter, remaining_content
 
 
@@ -155,7 +157,8 @@ def parse_command_file(file_path: Path, source: str, namespace: Optional[str] = 
         allowed_tools=allowed_tools,
         argument_hint=argument_hint,
         model=frontmatter.get("model"),
-        disable_model_invocation=frontmatter.get("disable-model-invocation", False)
+        disable_model_invocation=frontmatter.get("disable-model-invocation", False),
+        user_invocable=frontmatter.get("user-invocable", True) is not False,
     )
 
 
@@ -238,7 +241,94 @@ def _scan_commands_directory(
     return commands
 
 
-def get_command_by_name(working_dir: str, command_name: str) -> Optional[SlashCommand]:
+def _delegated_commands(working_dir: str, setting_sources=None) -> List[SlashCommand]:
+    """Read Claude's selected settings and package roots, never Fluid's plugins."""
+    from fluid.context.plugins import discover_plugins
+    from fluid.context.settings_stack import _load_json, merge_settings, project_dirs
+    from app.core.plugin_models import _get_claude_dir
+
+    sources = ("user", "project", "local") if setting_sources is None else setting_sources
+    user_dir = _get_claude_dir()
+    dirs = project_dirs(working_dir)
+    settings_paths = []
+    roots = []
+    if "user" in sources:
+        settings_paths.append(user_dir / "settings.json")
+        roots.append((user_dir, "user"))
+    if "project" in sources:
+        settings_paths.extend(directory / ".claude" / "settings.json" for directory in dirs)
+        roots.extend((directory / ".claude", "project") for directory in dirs)
+    if "local" in sources:
+        settings_paths.extend(directory / ".claude" / "settings.local.json" for directory in dirs)
+    settings = merge_settings([data for path in settings_paths if (data := _load_json(path))])
+    by_name = {}
+    for root, source in roots:
+        for cmd in _scan_commands_directory(root / "commands", source) if (root / "commands").is_dir() else []:
+            by_name[cmd.name] = cmd
+        for skill_md in sorted((root / "skills").glob("*/SKILL.md")):
+            cmd = parse_command_file(skill_md, source)
+            if cmd:
+                cmd.name = skill_md.parent.name
+                cmd.type = "skill"
+                if cmd.user_invocable:
+                    by_name[cmd.name] = cmd
+    for plugin in discover_plugins(working_dir, settings=settings, home=user_dir / "plugins"):
+        for kind, entries in (("plugin", plugin.commands), ("skill", plugin.skills)):
+            for entry in entries:
+                cmd = parse_command_file(Path(entry.path), plugin.ref, namespace=plugin.name)
+                if cmd:
+                    cmd.name = entry.name
+                    cmd.type = kind
+                    if kind != "skill" or cmd.user_invocable:
+                        by_name.setdefault(cmd.name, cmd)
+    return list(by_name.values())
+
+
+def _runtime_commands(working_dir, provider_kind, setting_sources):
+    if provider_kind in ("voice", "unavailable"):
+        return []
+    discover = _delegated_commands if provider_kind == "delegated" else _fluid_commands
+    return discover(working_dir, setting_sources)
+
+
+def _fluid_commands(working_dir: str, setting_sources=None) -> List[SlashCommand]:
+    """Use the native runtime's discovery, including its plugin settings stack."""
+    from fluid.context.instructions import discover_commands as native_commands
+    from fluid.context.instructions import discover_skills as native_skills
+    from fluid.context.plugins import discover_plugins
+
+    sources = ("user", "project", "local") if setting_sources is None else setting_sources
+    user_on = "user" in sources
+    project_on = "project" in sources
+    # Native prompt compilation and the Skill tool gate plugins on user scope.
+    plugins = discover_plugins(working_dir, sources=sources) if user_on else []
+    options = dict(include_global=user_on, include_project=project_on,
+                   include_plugins=True, plugins=plugins)
+    plugin_sources = {entry.path: plugin.ref for plugin in plugins
+                      for entry in [*plugin.commands, *plugin.skills]}
+    commands = []
+    seen = set()
+    for kind, entries in (("custom", native_commands(working_dir, **options)),
+                          ("skill", native_skills(working_dir, **options))):
+        for entry in entries:
+            if entry.name in seen:
+                continue
+            source = plugin_sources.get(entry.path, "user" if entry.scope == "global" else entry.scope)
+            cmd = parse_command_file(Path(entry.path), source=source)
+            if cmd is None or (kind == "skill" and not cmd.user_invocable):
+                continue
+            cmd.name = entry.name
+            cmd.type = "plugin" if kind == "custom" and entry.path in plugin_sources else kind
+            cmd.namespace = entry.name.split(":", 1)[0] if entry.path in plugin_sources else None
+            seen.add(entry.name)
+            commands.append(cmd)
+    return commands
+
+
+def get_command_by_name(
+    working_dir: str, command_name: str, *, provider_kind: str = "delegated",
+    setting_sources=None,
+) -> Optional[SlashCommand]:
     """
     Get a specific command by name.
 
@@ -252,12 +342,32 @@ def get_command_by_name(working_dir: str, command_name: str) -> Optional[SlashCo
     # Normalize command name
     name = command_name.lstrip("/")
 
-    commands = discover_commands(working_dir)
+    commands = _runtime_commands(working_dir, provider_kind, setting_sources)
     for cmd in commands:
         if cmd.name == name:
             return cmd
 
     return None
+
+
+def expand_native_command(working_dir: str, prompt: str, *, setting_sources=None) -> str:
+    """Expand a native file command before submission, without executing shell code."""
+    name, arguments = parse_command_input(prompt)
+    if not name:
+        return prompt
+    cmd = get_command_by_name(working_dir, name, provider_kind="native", setting_sources=setting_sources)
+    if cmd is None:
+        return prompt
+    return expand_command_prompt(cmd, arguments)
+
+
+def expand_command_prompt(cmd: SlashCommand, arguments: str) -> str:
+    expanded = cmd.expand_prompt(arguments)
+    if getattr(cmd, "type", "custom") == "skill":
+        if arguments and not re.search(r"\$ARGUMENTS\b|\$\d+", cmd.content):
+            expanded += f"\n\nArguments: {arguments}"
+        return f"# Skill: {cmd.name}\n# From: {cmd.file_path}\n\n{expanded}"
+    return expanded
 
 
 def is_slash_command(text: str) -> bool:
@@ -671,56 +781,25 @@ NONINTERACTIVE_SDK_COMMANDS = frozenset({
 })
 
 
-def get_all_commands(working_dir: str, *, provider_kind: str = "delegated") -> List[Dict[str, Any]]:
+def get_all_commands(working_dir: str, *, provider_kind: str = "delegated", setting_sources=None) -> List[Dict[str, Any]]:
     """
     Get all available commands for the popup autocomplete.
 
     Returns list of command info dicts for autocomplete.
     Note: /resume and /rewind are excluded as they are handled separately.
     """
-    # NativeLoop receives literal user text; the app does not run Fluid's CLI
-    # dispatcher or expand custom/plugin/skill slash invocations on that path.
-    # Keep discovery/explicit expansion available to their existing callers,
-    # but do not advertise a raw slash action the selected runtime cannot run.
-    if provider_kind != "delegated":
-        return []
-    commands = []
-
-    # Add custom commands from .claude/commands/
-    for cmd in discover_commands(working_dir):
-        commands.append({
-            "name": cmd.name,
-            "display": cmd.get_display_name(),
-            "description": cmd.get_description_with_source(),
-            "argument_hint": cmd.argument_hint,
-            "type": "custom"
-        })
-
-    # The app submits directly to NativeLoop, not Fluid's CLI slash dispatcher.
-    # Only the delegated Claude CLI handles these commands. Its interactive
-    # terminal/settings commands have no connected UI action in this composer.
-    for name, info in SDK_BUILTIN_COMMANDS.items():
-        if name not in NONINTERACTIVE_SDK_COMMANDS:
-            continue
-        commands.append({
-            "name": name,
-            "display": f"/{name}",
-            "description": info["description"],
-            "argument_hint": info.get("argument_hint"),
-            "type": "sdk_builtin"
-        })
-
-    # Add plugin commands from enabled plugins
-    commands.extend(discover_plugin_commands())
-
-    # Add skills (project + user-global + plugin). Skills are invoked just like
-    # slash commands (/skill-name) and are loaded by the SDK at runtime.
-    commands.extend(discover_skills(working_dir))
-
-    # Note: INTERACTIVE_COMMANDS (/resume) and REST_API_COMMANDS (/rewind)
-    # are intentionally excluded from the popup as they are handled separately
-
-    # Sort by name
-    commands.sort(key=lambda x: x["name"])
-
-    return commands
+    commands = [{
+        "name": cmd.name, "display": cmd.get_display_name(),
+        "description": cmd.description, "argument_hint": cmd.argument_hint,
+        "type": cmd.type, "source": cmd.source, "namespace": cmd.namespace,
+    } for cmd in _runtime_commands(working_dir, provider_kind, setting_sources)]
+    if provider_kind == "delegated":
+        custom_names = {cmd["name"] for cmd in commands}
+        for name, info in SDK_BUILTIN_COMMANDS.items():
+            if name in NONINTERACTIVE_SDK_COMMANDS and name not in custom_names:
+                commands.append({
+                    "name": name, "display": f"/{name}",
+                    "description": info["description"],
+                    "argument_hint": info.get("argument_hint"), "type": "sdk_builtin",
+                })
+    return sorted(commands, key=lambda cmd: cmd["name"])

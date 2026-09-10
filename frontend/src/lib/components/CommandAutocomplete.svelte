@@ -1,5 +1,6 @@
 <script lang="ts">
   import './autocomplete/autocomplete-design-system.css';
+  import { untrack } from 'svelte';
   import { apiBase, withAuth } from '$lib/api/runtime';
 
   interface Command {
@@ -18,18 +19,18 @@
     sessionId?: string;
     model?: string;
     profileId?: string;
+    settingsKey?: string;
     mode?: string;
     onSelect: (command: Command, andSubmit?: boolean) => void;
     onClose: () => void;
     visible: boolean;
   }
 
-  let { inputValue, projectId, worktreeId, sessionId, model, profileId, mode, onSelect, onClose, visible }: Props = $props();
+  let { inputValue, projectId, worktreeId, sessionId, model, profileId, settingsKey, mode, onSelect, onClose, visible }: Props = $props();
 
   let commands = $state<Command[]>([]);
   let filteredCommands = $state<Command[]>([]);
   let selectedIndex = $state(0);
-  let loading = $state(false);
   let loaded = $state(false);
   let listElement = $state<HTMLUListElement | null>(null);
 
@@ -57,34 +58,47 @@
     return breaks;
   });
 
-  // A response belongs to the exact checkout/model selection that requested it.
+  // Store emissions during streaming may invalidate every prop getter. Depend on
+  // the serialized selection instead, so unchanged values never restart discovery.
+  const contextKey = $derived.by(() => {
+    const params = new URLSearchParams();
+    if (projectId) params.set('project_id', projectId);
+    if (worktreeId) params.set('worktree_id', worktreeId);
+    if (sessionId) params.set('session_id', sessionId);
+    if (model) params.set('model', model);
+    if (profileId) params.set('profile_id', profileId);
+    if (mode) params.set('mode', mode);
+    return JSON.stringify([params.toString(), settingsKey ?? '']);
+  });
+  const activeContext = $derived(visible ? contextKey : null);
+  const isCommandInput = $derived(inputValue.startsWith('/'));
   let requestGeneration = 0;
+  let loadedContext: string | undefined;
   $effect(() => {
-    if (visible) {
-      const params = new URLSearchParams();
-      if (projectId) params.set('project_id', projectId);
-      if (worktreeId) params.set('worktree_id', worktreeId);
-      if (sessionId) params.set('session_id', sessionId);
-      if (model) params.set('model', model);
-      if (profileId) params.set('profile_id', profileId);
-      if (mode) params.set('mode', mode);
-      const controller = new AbortController();
-      const generation = ++requestGeneration;
-      commands = [];
-      loaded = false;
-      void fetchCommands(params, controller.signal, generation);
-      return () => { ++requestGeneration; controller.abort(); };
-    }
+    const key = activeContext;
+    if (key === null) return;
+    const controller = new AbortController();
+    const generation = ++requestGeneration;
+    untrack(() => {
+      // Retain the current catalog while reopening it, but never display a
+      // different agent's or checkout's commands while its request is pending.
+      if (loadedContext !== key) {
+        commands = [];
+        loaded = false;
+      }
+      void fetchCommands(key, controller.signal, generation);
+    });
+    return () => { ++requestGeneration; controller.abort(); };
   });
 
   // Filter and sort commands based on input
   $effect(() => {
-    if (!inputValue.startsWith('/')) {
+    if (!isCommandInput) {
       filteredCommands = [];
       return;
     }
 
-    const query = inputValue.slice(1).toLowerCase().trim();
+    const query = currentQuery;
 
     if (!query) {
       // Sort by type when showing all commands
@@ -122,21 +136,28 @@
     selectedIndex = 0;
   });
 
-  async function fetchCommands(params: URLSearchParams, signal: AbortSignal, generation: number) {
-    loading = true;
+  async function fetchCommands(key: string, signal: AbortSignal, generation: number) {
     try {
-      const response = await fetch(`${apiBase()}/commands/?${params}`, withAuth({
+      const [query] = JSON.parse(key) as [string, string];
+      const response = await fetch(`${apiBase()}/commands/?${query}`, withAuth({
          signal
       }));
 
       if (response.ok) {
         const data = await response.json();
-        if (generation === requestGeneration) { commands = data.commands; loaded = true; }
+        if (generation === requestGeneration) {
+          // Identical refreshes preserve row identity, keyboard selection and scroll.
+          if (JSON.stringify(commands) !== JSON.stringify(data.commands)) commands = data.commands;
+          loadedContext = key;
+          loaded = true;
+        }
+      } else if (generation === requestGeneration) {
+        commands = [];
+        loaded = false;
+        loadedContext = undefined;
       }
     } catch (error) {
       if (!signal.aborted) console.error('Failed to fetch commands:', error);
-    } finally {
-      if (generation === requestGeneration) loading = false;
     }
   }
 
@@ -233,7 +254,7 @@
     </div>
 
     <ul bind:this={listElement} class="autocomplete-list" role="listbox" aria-label="Commands" style="max-height: 14rem;">
-      {#each filteredCommands as command, index}
+      {#each filteredCommands as command, index (command.name)}
         {#if sectionBreaks.has(index)}
           <li class="autocomplete-section-header" role="presentation">
             {sectionBreaks.get(index)}
@@ -243,6 +264,7 @@
           <button
             type="button"
             class="autocomplete-item"
+            title={command.source ? `${command.display} · ${command.source}` : command.display}
             class:selected={index === selectedIndex}
             onclick={() => onSelect(command)}
             onmouseenter={() => selectedIndex = index}
@@ -279,7 +301,7 @@
       <span><kbd class="autocomplete-kbd">Esc</kbd> <span class="autocomplete-hint-text">close</span></span>
     </div>
   </div>
-{:else if visible && filteredCommands.length === 0 && !loading && loaded}
+{:else if visible && filteredCommands.length === 0 && loaded}
   <div class="autocomplete-panel command-autocomplete-panel">
     <div class="autocomplete-header">
       <span class="autocomplete-count">0 commands</span>

@@ -76,6 +76,10 @@
 	// once one is open, and only falls back to the sidepanel's pick on a fresh
 	// compose screen.
 	const composerMode = $derived($activeSession.mode);
+	const commandSettingsKey = $derived.by(() => {
+		const config = $profiles.find(profile => profile.id === $activeSession.profile)?.config;
+		return JSON.stringify([config?.setting_sources ?? null, config?.cwd ?? null, config?.provider ?? null, config?.model ?? null]);
+	});
 
 	$effect(() => {
 		const state = $activeSession;
@@ -987,6 +991,7 @@
 							sessionId={$activeSession.sessionId ?? undefined}
 							model={$activeSession.modelOverride ?? undefined}
 							profileId={$activeSession.profile || undefined}
+							settingsKey={commandSettingsKey}
 							mode={$activeSession.mode}
 							visible={showCommandAutocomplete}
 							onSelect={handleCommandSelect}

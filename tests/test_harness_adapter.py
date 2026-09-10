@@ -1096,6 +1096,49 @@ async def test_fluid_question_does_not_yield_permission_event():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sources,expected", [(["project"], "Hello world"), ([], "/greet world")])
+async def test_native_slash_submission_expands_from_selected_sources(tmp_path, monkeypatch, sources, expected):
+    from fluid.engine.native import NativeLoop
+    from fluid.tools.registry import ToolCtx
+
+    (tmp_path / ".git").mkdir()
+    command_dir = tmp_path / ".fluid" / "commands"
+    command_dir.mkdir(parents=True)
+    (command_dir / "greet.md").write_text("Hello $ARGUMENTS", encoding="utf-8")
+    requests = []
+
+    class RecordingProvider(FakeProvider):
+        async def stream(self, request):
+            requests.append(request)
+            async for chunk in super().stream(request):
+                yield chunk
+
+    chunks = [
+        StreamChunk("message_start", {}),
+        StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+        StreamChunk("text_delta", {"index": 0, "text": "Done"}),
+        StreamChunk("block_stop", {"index": 0}),
+        StreamChunk("usage", {"stop_reason": "end_turn"}),
+    ]
+    loop = NativeLoop(provider=RecordingProvider(chunks), store=MemoryStore(), model="fake",
+                      ctx=ToolCtx(cwd=str(tmp_path)), setting_sources=sources)
+    adapter = _adapter_with(loop)
+    adapter._options = SessionOptions(model="fake", cwd=str(tmp_path), setting_sources=sources)
+    monkeypatch.setattr(adapter, "_turn_context_note", lambda: None)
+    await loop._ensure_session()
+    try:
+        await adapter.send_query("/greet world")
+        events = await _collect(adapter)
+        assert isinstance(events[-1], ResultMessage)
+        assert requests
+        assert expected in str(requests[0].messages)
+        if sources:
+            assert "/greet world" not in str(requests[0].messages)
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_native_loop_text_turn():
     from fluid.engine.native import NativeLoop
 
@@ -1414,6 +1457,7 @@ async def test_delegated_loop_kwargs_filter_sdk_servers_and_stream_partial(monke
         model="fable",
         mcp_servers=mcp_servers,
         include_partial_messages=True,
+        setting_sources=[],
         extra={"fluid_registry": ToolRegistry()},
     )
 
@@ -1429,6 +1473,7 @@ async def test_delegated_loop_kwargs_filter_sdk_servers_and_stream_partial(monke
 
     # include_partial_messages drives --include-partial-messages on the CLI.
     assert captured["partial"] is True
+    assert captured["setting_sources"] == ()
 
     # extra["fluid_partial"] remains a manual override when the SDK flag is off.
     await adapter.connect(

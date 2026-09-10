@@ -172,6 +172,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         disallowed_tools: list[str] | None = None,
         effort: str | None = None,
         settings: str | None = None,
+        setting_sources: tuple[str, ...] | None = None,
         permissions: PermissionEngine | None = None,
         hooks: HookBus | None = None,
         journal: Any | None = None,
@@ -236,6 +237,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # which and what goes in it (``fastMode``, ``env``, hooks, …). None
         # omits the flag entirely, leaving the CLI on its own settings files.
         self.settings = settings
+        self.setting_sources = setting_sources
         self.cli_version: str | None = None
         # The tool surface the child CLI announced in its `init` frame — the
         # names it will actually accept, MCP servers included. The CLI decides
@@ -562,6 +564,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             argv += ["--effort", self.effort]
         if self.settings:
             argv += ["--settings", self.settings]
+        if self.setting_sources is not None:
+            argv += ["--setting-sources", ",".join(self.setting_sources)]
         if self.partial:
             argv += ["--include-partial-messages"]
         return argv
