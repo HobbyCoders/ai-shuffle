@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 SYNC_IDLE_SECONDS = 10.0
 SYNC_ACTIVE_SECONDS = 1.0
 SCAN_INTERVAL_SECONDS = 2.0
+SCAN_IDLE_MAX_SECONDS = 60.0
 PRESENCE_INTERVAL_SECONDS = 300.0
 ONLINE_WINDOW_SECONDS = 90
 BATCH_LIMIT = 500
@@ -320,10 +321,19 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 async def scan_loop() -> None:
-    """Publish rows domain code changed; runs every few seconds and on demand."""
+    """Back off quiet full scans; local writes wake us without a scan per write.
+
+    Unhooked changes (including external file edits) still get a full scan:
+    the next pass starts within SCAN_IDLE_MAX_SECONDS of the last completion.
+    """
     global _scan_wake
     _scan_wake = asyncio.Event()
+    delay = SCAN_INTERVAL_SECONDS
     while True:
+        # Consume only requests preceding this pass. A write DURING the scan
+        # may touch a collection already read, so it must cause another pass.
+        _scan_wake.clear()
+        published = 0
         try:
             published = await asyncio.to_thread(engine.scan_all)
             if published:
@@ -332,11 +342,21 @@ async def scan_loop() -> None:
             raise
         except Exception:  # noqa: BLE001
             logger.warning("Scan pass failed", exc_info=True)
-        try:
-            await asyncio.wait_for(_scan_wake.wait(), timeout=SCAN_INTERVAL_SECONDS)
-        except asyncio.TimeoutError:
-            pass
-        _scan_wake.clear()
+        delay = (
+            SCAN_INTERVAL_SECONDS if published
+            else min(delay * 2, SCAN_IDLE_MAX_SECONDS)
+        )
+        # Coalesce streaming writes and requests arriving during the scan.
+        # Even a slow scan or repeated failure must leave the worker some rest.
+        await asyncio.sleep(SCAN_INTERVAL_SECONDS)
+        if not _scan_wake.is_set() and delay > SCAN_INTERVAL_SECONDS:
+            try:
+                await asyncio.wait_for(
+                    _scan_wake.wait(), timeout=delay - SCAN_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+        if _scan_wake.is_set():
+            delay = SCAN_INTERVAL_SECONDS
 
 
 async def presence_loop() -> None:
