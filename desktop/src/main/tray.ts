@@ -2,6 +2,9 @@
 import { app, Menu, nativeImage, Tray } from 'electron';
 import path from 'node:path';
 
+// Keep the native tray alive for the lifetime of the app.
+let tray: Tray | null = null;
+
 export interface TrayActions {
 	show(): void;
 	restartWorker(): void;
@@ -17,7 +20,7 @@ export function installTray(actions: TrayActions): Tray | null {
 	if (image.isEmpty()) return null;
 	const size = process.platform === 'darwin' ? 18 : 16;
 	image = image.resize({ width: size, height: size });
-	const tray = new Tray(image);
+	tray = new Tray(image);
 	tray.setToolTip(app.name);
 	tray.setContextMenu(
 		Menu.buildFromTemplate([
