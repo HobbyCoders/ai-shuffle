@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 from app.api.auth import require_auth, require_admin
+from app.db.async_database import run_sync
 from app.api.common import api_error_handler
 from app.core.plugin_service import (
     get_plugin_service
@@ -62,6 +63,7 @@ class PluginResponse(BaseModel):
     has_skills: bool
     has_hooks: bool
     has_mcp: bool = False
+    connector_type: Optional[str] = None
 
 
 class PluginDetailsResponse(PluginResponse):
@@ -84,6 +86,7 @@ class AvailablePluginResponse(BaseModel):
     has_skills: bool
     has_hooks: bool
     has_mcp: bool = False
+    connector_type: Optional[str] = None
     installed: bool
     enabled: bool
 
@@ -271,6 +274,7 @@ async def list_available_plugins(
                 has_agents=p.has_agents,
                 has_skills=p.has_skills,
                 has_hooks=p.has_hooks,
+                connector_type=p.connector_type,
                 has_mcp=p.has_mcp,
                 installed=p.installed,
                 enabled=p.enabled
@@ -304,6 +308,7 @@ async def list_installed_plugins(token: str = Depends(require_auth)):
                 has_agents=p.has_agents,
                 has_skills=p.has_skills,
                 has_hooks=p.has_hooks,
+                connector_type=p.connector_type,
                 has_mcp=p.has_mcp
             )
             for p in plugins
@@ -369,7 +374,7 @@ async def update_plugin(
     async with api_error_handler("update plugin"):
         service = get_plugin_service()
         try:
-            plugin = service.update_plugin(request.plugin_id)
+            plugin = await run_sync(service.update_plugin, request.plugin_id)
             return PluginResponse(
                 id=plugin.id,
                 name=plugin.name,
@@ -384,7 +389,7 @@ async def update_plugin(
                 has_agents=plugin.has_agents,
                 has_skills=plugin.has_skills,
                 has_hooks=plugin.has_hooks,
-                has_mcp=plugin.has_mcp
+                connector_type=plugin.connector_type, has_mcp=plugin.has_mcp
             )
         except ValueError as e:
             raise HTTPException(
@@ -398,7 +403,7 @@ async def update_all_plugins(token: str = Depends(require_admin)):
     """Update all plugins that have available updates - Admin only"""
     async with api_error_handler("update all plugins"):
         service = get_plugin_service()
-        plugins = service.update_all_plugins()
+        plugins = await run_sync(service.update_all_plugins)
         return [
             PluginResponse(
                 id=p.id,
@@ -414,6 +419,7 @@ async def update_all_plugins(token: str = Depends(require_admin)):
                 has_agents=p.has_agents,
                 has_skills=p.has_skills,
                 has_hooks=p.has_hooks,
+                connector_type=p.connector_type,
                 has_mcp=p.has_mcp
             )
             for p in plugins
@@ -495,6 +501,27 @@ async def get_enabled_plugins(token: str = Depends(require_auth)):
 # Plugin Details (catch-all - MUST be last among GET routes)
 # ============================================================================
 
+@router.get("/runtime/{plugin_id}/connections")
+async def runtime_connections(plugin_id: str, token: str = Depends(require_admin)):
+    from app.core import connector_packages as packages
+    kind = packages.kind_for(plugin_id)
+    if not kind:
+        raise HTTPException(404, "Connector plugin not found")
+    return await run_sync(packages.dependencies, kind)
+
+
+@router.post("/runtime/{plugin_id}/rollback", response_model=PluginResponse)
+async def rollback_runtime(plugin_id: str, token: str = Depends(require_admin)):
+    from app.core import connector_packages as packages
+    kind = packages.kind_for(plugin_id)
+    if not kind:
+        raise HTTPException(404, "Connector plugin not found")
+    try:
+        return (await run_sync(packages.rollback, kind)).to_dict()
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+
+
 @router.get("/{plugin_id:path}", response_model=PluginDetailsResponse)
 async def get_plugin_details(
     plugin_id: str,
@@ -528,7 +555,7 @@ async def get_plugin_details(
         has_agents=plugin.has_agents,
         has_skills=plugin.has_skills,
         has_hooks=plugin.has_hooks,
-        has_mcp=plugin.has_mcp,
+        connector_type=plugin.connector_type, has_mcp=plugin.has_mcp,
         commands=plugin.commands,
         agents=plugin.agents,
         skills=plugin.skills,
@@ -548,7 +575,7 @@ async def install_plugin(
     """Install a plugin from a marketplace - Admin only"""
     service = get_plugin_service()
     try:
-        plugin = service.install_plugin(request.plugin_id, request.scope)
+        plugin = await run_sync(service.install_plugin, request.plugin_id, request.scope)
         return PluginResponse(
             id=plugin.id,
             name=plugin.name,
@@ -563,7 +590,7 @@ async def install_plugin(
             has_agents=plugin.has_agents,
             has_skills=plugin.has_skills,
             has_hooks=plugin.has_hooks,
-            has_mcp=plugin.has_mcp
+            connector_type=plugin.connector_type, has_mcp=plugin.has_mcp
         )
     except ValueError as e:
         logger.warning(f"Plugin install failed for {request.plugin_id}: {e}")
@@ -586,7 +613,7 @@ async def install_plugins_batch(
 ):
     """Install multiple plugins in batch - Admin only"""
     service = get_plugin_service()
-    plugins = service.install_plugins_batch(request.plugin_ids, request.scope)
+    plugins = await run_sync(service.install_plugins_batch, request.plugin_ids, request.scope)
     return [
         PluginResponse(
             id=p.id,
@@ -602,7 +629,7 @@ async def install_plugins_batch(
             has_agents=p.has_agents,
             has_skills=p.has_skills,
             has_hooks=p.has_hooks,
-            has_mcp=p.has_mcp
+            connector_type=p.connector_type, has_mcp=p.has_mcp
         )
         for p in plugins
     ]
@@ -616,7 +643,7 @@ async def uninstall_plugin(
     """Uninstall a plugin - Admin only"""
     service = get_plugin_service()
     try:
-        service.uninstall_plugin(plugin_id)
+        await run_sync(service.uninstall_plugin, plugin_id)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -635,7 +662,10 @@ async def enable_plugin(
 ):
     """Enable a plugin globally - Admin only"""
     service = get_plugin_service()
-    success = service.enable_plugin(plugin_id)
+    try:
+        success = await run_sync(service.enable_plugin, plugin_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
     if not success:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -651,7 +681,10 @@ async def disable_plugin(
 ):
     """Disable a plugin globally - Admin only"""
     service = get_plugin_service()
-    success = service.disable_plugin(plugin_id)
+    try:
+        success = await run_sync(service.disable_plugin, plugin_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
     if not success:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

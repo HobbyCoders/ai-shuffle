@@ -43,6 +43,19 @@ def _isolated_computer_use_halt_state(monkeypatch):
         monkeypatch.setattr(abort, "_HALTED", {})
         monkeypatch.setattr(abort, "_GENERATIONS", {})
 
+@pytest.fixture(autouse=True)
+def _isolated_connector_package_store(tmp_path, monkeypatch):
+    from app.core import connector_packages
+    monkeypatch.setattr(connector_packages, "root", lambda: tmp_path / "connector-packages")
+
+
+@pytest.fixture
+def bundled_connector_catalog(monkeypatch):
+    """Legacy service tests do not test plugin installation; package tests do."""
+    from app.core import connector_packages
+    monkeypatch.setattr(connector_packages, "require_installed", connector_packages.package_id)
+
+
 # The FastAPI TestClient issues same-origin requests but sends no Origin/Referer
 # header and reports a client host of "testclient" (not localhost), so the CSRF
 # middleware would reject every state-changing request (POST/PUT/DELETE/PATCH)

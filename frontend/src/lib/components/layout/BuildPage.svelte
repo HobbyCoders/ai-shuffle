@@ -38,7 +38,6 @@
 	import { Users, Server, Puzzle, Webhook } from 'lucide-svelte';
 	import { appData, profiles } from '$lib/stores/app-data.svelte';
 	import { mcp, globalMcpServers } from '$lib/stores/mcp.svelte';
-	import { plugins, installedPlugins } from '$lib/stores/plugins.svelte';
 	import { hooks, projectHooks } from '$lib/stores/hooks.svelte';
 	import LazyPanel from '$lib/components/deck/lazy/LazyPanel.svelte';
 	import {
@@ -59,7 +58,7 @@
 			import('$lib/components/deck/cards/McpManagerCard.svelte')
 		),
 		plugins: createLazyComponent('build:plugins', () =>
-			import('$lib/components/layout/build/BuildPluginList.svelte')
+			import('$lib/components/plugins/PluginsHub.svelte')
 		),
 		hooks: createLazyComponent('build:hooks', () =>
 			import('$lib/components/deck/cards/HooksCard.svelte')
@@ -134,14 +133,13 @@
 		lastCountsLoadAt = Date.now();
 		appData.loadProfiles();
 		mcp.loadGlobalServers();
-		plugins.loadInstalled();
 		hooks.loadAppHooks();
 	});
 
 	const counts = $derived<Record<BuildSub, number>>({
 		profile: ($profiles ?? []).length,
 		mcp: ($globalMcpServers ?? []).length,
-		plugins: ($installedPlugins ?? []).length,
+		plugins: 0,
 		hooks: ($projectHooks ?? []).length
 	});
 </script>

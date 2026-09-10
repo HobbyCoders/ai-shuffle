@@ -18,7 +18,8 @@ def get_connector_class(connector_type: str) -> Type[BaseConnector]:
     """Look up the connector class for a given type. Raises ValueError if unknown."""
     if connector_type not in _CONNECTOR_CLASSES:
         raise ValueError(f"Unknown connector type: {connector_type}")
-    return _CONNECTOR_CLASSES[connector_type]
+    from app.core.connector_packages import runtime_class
+    return runtime_class(connector_type) or _CONNECTOR_CLASSES[connector_type]
 
 
 def get_available_types() -> List[str]:

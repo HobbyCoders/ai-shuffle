@@ -238,6 +238,7 @@
 		</div>
 	</div>
 
+	{#if plugin.connector_type}<p>Connector runtime · {plugin.connector_type}</p>{/if}
 	<!-- Feature badges -->
 	{#if hasCommands || hasAgents || hasSkills || hasHooks}
 		<div class="plugin-detail-features">

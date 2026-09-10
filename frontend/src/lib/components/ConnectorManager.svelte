@@ -11,6 +11,7 @@
 	 */
 
 	import { onMount, onDestroy } from 'svelte';
+	import GoogleConnection from '$lib/components/plugins/GoogleConnection.svelte';
 	import Banner from '$lib/components/Banner.svelte';
 	import { slide, fade } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
@@ -23,6 +24,8 @@
 	} from '$lib/api/connectors';
 	import {
 		getConnectors,
+		getConnectionDependencies,
+		type ConnectionDependency,
 		createConnector,
 		updateConnector,
 		deleteConnector,
@@ -39,6 +42,9 @@
 	import { listInstalls } from '$lib/api/installs';
 	import { formatDateTime } from '$lib/utils/dateFormatting';
 	import { notify } from '$lib/stores/notifications';
+
+	let { typeFilter = '', onChanged }: { typeFilter?: string; onChanged?: () => void } = $props();
+	let showAdvanced = $state(false);
 
 	// State
 	let connectors: Connector[] = $state([]);
@@ -86,6 +92,9 @@
 	let formError = $state('');
 	let testingId: string | null = $state(null);
 	let deletingId: string | null = $state(null);
+	let dependencies: ConnectionDependency[] = $state([]);
+	let checkingDependencies = $state(false);
+	let dependencyError = $state('');
 
 	// -----------------------------------------------------------------
 	// Discord guided setup state
@@ -288,7 +297,7 @@
 		pollInterval = setInterval(async () => {
 			try {
 				const updated = await getConnectors();
-				connectors = updated;
+				connectors = updated.filter(c => !typeFilter || c.type === typeFilter);
 				// Refresh logs for any expanded connector
 				for (const cid of expandedLogs) {
 					const logs = await getConnectorLogs(cid);
@@ -315,8 +324,8 @@
 				getConnectorEvents(),
 				getApiUsers()
 			]);
-			connectors = connectorsData;
-			connectorTypes = typesData;
+			connectors = connectorsData.filter(c => !typeFilter || c.type === typeFilter);
+			connectorTypes = typesData.filter(t => !typeFilter || t.type === typeFilter);
 			availableEvents = eventsData;
 			apiUsers = apiUsersData.filter(u => u.is_active);
 		} catch (e: any) {
@@ -343,10 +352,6 @@
 		if (!selectedType) return;
 		if (!formName.trim()) {
 			formError = 'Name is required';
-			return;
-		}
-		if (formEvents.length === 0) {
-			formError = 'At least one event must be selected';
 			return;
 		}
 
@@ -382,6 +387,7 @@
 			// stayed stuck). Refresh in the background instead.
 			cancelForm();
 			void loadData();
+			onChanged?.();
 		} catch (e: any) {
 			formError = e.detail || 'Failed to create connector';
 		} finally {
@@ -410,6 +416,7 @@
 			// this view stuck.
 			cancelForm();
 			void loadData();
+			onChanged?.();
 		} catch (e: any) {
 			formError = e.detail || 'Failed to update connector';
 		} finally {
@@ -419,9 +426,21 @@
 
 	async function handleDelete(id: string) {
 		deletingId = id;
+		dependencies = [];
+		dependencyError = '';
+		checkingDependencies = true;
+		try {
+			const result = await getConnectionDependencies(id);
+			if (deletingId === id) dependencies = result;
+		} catch {
+			if (deletingId === id) dependencyError = 'Could not check automation dependencies. Cancel and try again.';
+		} finally {
+			if (deletingId === id) checkingDependencies = false;
+		}
 	}
 
 	async function confirmDelete(id: string) {
+		if (checkingDependencies || dependencyError || dependencies.length) return;
 		try {
 			await deleteConnector(id);
 			deletingId = null;
@@ -498,14 +517,17 @@
 	}
 
 	function startAdd() {
-		view = 'add';
+		const type = connectorTypes.find(t => t.type === typeFilter);
+		if (type) selectType(type);
+		else view = 'add';
 	}
 
 	function selectType(type: ConnectorTypeInfo) {
 		selectedType = type;
-		formName = '';
+		formName = type.name;
 		formConfig = {};
 		formEvents = [];
+		showAdvanced = false;
 		formError = '';
 		resetDiscordState();
 		view = 'setup';
@@ -604,13 +626,13 @@
 			<!-- Header -->
 			<div class="flex items-center justify-between">
 				<div>
-					<h3 class="text-sm font-medium text-foreground">Connectors</h3>
+					<h3 class="text-sm font-medium text-foreground">Connections</h3>
 				</div>
 				<button
 					onclick={startAdd}
 					class="px-3 py-1.5 bg-primary hover:bg-primary/90 text-primary-foreground text-sm rounded-md transition-colors"
 				>
-					Add Connector
+					Connect account
 				</button>
 			</div>
 
@@ -630,8 +652,8 @@
 							d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"
 						/>
 					</svg>
-					<p class="text-sm font-medium mb-1">No connectors configured</p>
-					<p class="text-xs">Add a connector to integrate with external messaging platforms.</p>
+					<p class="text-sm font-medium mb-1">No accounts connected</p>
+					<p class="text-xs">Connect an account or device to use its tools and automation triggers.</p>
 				</div>
 			{:else}
 				<div class="space-y-2">
@@ -652,9 +674,16 @@
 											Delete <strong class="text-destructive">{connector.name}</strong>?
 											This cannot be undone.
 										</p>
+										{#if checkingDependencies}<p class="text-sm" role="status">Checking automations…</p>{/if}
+										{#if dependencyError}<p class="text-sm text-destructive" role="alert">{dependencyError}</p>{/if}
+										{#if dependencies.length}
+											<p class="text-sm">Update these automations before removing this connection:</p>
+											<ul class="text-sm list-disc pl-5">{#each dependencies as dep (dep.id)}<li>{dep.name} — {dep.uses.join(', ')}{dep.is_enabled ? '' : ' (paused)'}</li>{/each}</ul>
+										{/if}
 										<div class="flex items-center gap-2">
 											<button
 												onclick={() => confirmDelete(connector.id)}
+												disabled={checkingDependencies || !!dependencyError || dependencies.length > 0}
 												class="px-3 py-1.5 bg-destructive hover:bg-destructive/90 text-destructive-foreground text-sm rounded-md transition-colors"
 											>
 												Delete
@@ -1076,13 +1105,16 @@
 							id="connector-name"
 							type="text"
 							bind:value={formName}
-							placeholder="e.g., My Telegram Bot"
+							placeholder="e.g., Work account"
 							class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary transition-colors"
 						/>
 					</div>
 
+					<button class="text-sm text-primary" aria-expanded={showAdvanced} onclick={() => showAdvanced = !showAdvanced}>
+						{showAdvanced ? 'Hide advanced settings' : 'Advanced settings'}
+					</button>
 					<!-- API User -->
-					{#if view === 'setup'}
+					{#if view === 'setup' && showAdvanced}
 						<div>
 							<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-api-user">
 								API User
@@ -1106,9 +1138,13 @@
 						</div>
 					{/if}
 
+					{#if selectedType?.type === 'gmail'}
+						<GoogleConnection name={formName} config={formConfig} connectorId={editingConnector?.id} onConnected={() => { cancelForm(); void loadData(); onChanged?.(); }} />
+					{/if}
+
 					<!-- Dynamic Config Fields -->
 					{#if selectedType}
-						{#each selectedType.config_fields as field (field.key)}
+						{#each selectedType.config_fields.filter(f => showAdvanced || (selectedType?.type !== 'gmail' && !['poll_interval_seconds', 'max_results'].includes(f.key))) as field (field.key)}
 							{#if isDiscord && field.key === 'bot_token'}
 								<!-- Discord: bot token + Validate (guided discovery) -->
 								<div>
@@ -1325,13 +1361,14 @@
 						{/each}
 					{/if}
 
-					<!-- Event Selection -->
+					<!-- Session lifecycle notifications are separate from automation triggers. -->
+					{#if showAdvanced}
 					<div>
 						<span class="block text-xs font-medium text-muted-foreground mb-2">
-							Events <span class="text-destructive">*</span>
+							Session notifications
 						</span>
 						<p class="text-xs text-muted-foreground mb-2">
-							Select which events this connector should listen to
+							Optional session notifications. Automation triggers work independently of these selections.
 						</p>
 						<div class="space-y-2">
 							{#each availableEvents as event}
@@ -1351,6 +1388,7 @@
 						</div>
 					</div>
 
+					{/if}
 					<!-- Connector Capabilities (Triggers, Actions, Tools) -->
 					{#if selectedType && (selectedType.triggers?.length || selectedType.actions?.length || selectedType.tools?.length)}
 						<div class="capabilities-section">
@@ -1405,6 +1443,7 @@
 
 					<!-- Actions -->
 					<div class="flex items-center gap-2 pt-2">
+						{#if selectedType?.type !== 'gmail' || view === 'edit' || showAdvanced}
 						<button
 							onclick={view === 'edit' ? handleUpdate : handleCreate}
 							disabled={formSaving || (view === 'setup' && isDiscord && !manualMode && !discoverResult)}
@@ -1416,6 +1455,7 @@
 									? 'Update Connector'
 									: 'Create Connector'}
 						</button>
+						{/if}
 						<button
 							onclick={cancelForm}
 							class="px-4 py-2 bg-secondary hover:bg-secondary/80 text-foreground text-sm rounded-md transition-colors"
@@ -1430,6 +1470,12 @@
 </div>
 
 <style>
+	.switch { width: 32px; height: 18px; border-radius: 999px; background: var(--muted-foreground); border: 1px solid var(--border); padding: 2px; flex-shrink: 0; cursor: pointer; }
+	.switch i { display: block; width: 12px; height: 12px; border-radius: 50%; background: var(--background); transition: transform .15s; }
+	.switch[aria-checked='true'] { background: var(--primary); }
+	.switch[aria-checked='true'] i { transform: translateX(12px); }
+	.switch:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+	.switch:disabled { opacity: .5; cursor: not-allowed; }
 	/* .connector-manager inherits from parent layout */
 
 	/* ========================================

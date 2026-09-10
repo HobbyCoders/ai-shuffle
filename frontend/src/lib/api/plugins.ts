@@ -37,6 +37,7 @@ export interface PluginInfo {
 	has_skills: boolean;
 	has_hooks: boolean;
 	has_mcp: boolean;
+	connector_type?: string | null;
 }
 
 export interface PluginDetails extends PluginInfo {
@@ -60,6 +61,7 @@ export interface AvailablePlugin {
 	has_skills: boolean;
 	has_hooks: boolean;
 	has_mcp: boolean;
+	connector_type?: string | null;
 }
 
 export interface FileBasedAgent {

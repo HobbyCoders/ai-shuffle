@@ -5,7 +5,7 @@ Pydantic models for API requests and responses
 from datetime import datetime
 from enum import Enum
 from typing import Optional, List, Dict, Any, Union, Literal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, computed_field
 
 # Import-cycle safe: ``session_modes`` only imports ``tool_access``, which has
 # no app imports at all (the same discipline that lets the DB migrations use it).
@@ -1580,6 +1580,12 @@ class DiscordDiscoverRequest(BaseModel):
 
 class Connector(ConnectorBase):
     """Full connector response"""
+    @computed_field
+    @property
+    def plugin_id(self) -> str:
+        # Stable ownership for legacy rows without rewriting credentials or IDs.
+        return f"{self.type.value}@shuffle-connectors"
+
     id: str
     api_user_id: Optional[str] = None
     is_active: bool = False

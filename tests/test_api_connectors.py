@@ -3,6 +3,8 @@ Tests for connector API endpoints.
 """
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("bundled_connector_catalog")
 from unittest.mock import AsyncMock, patch, MagicMock
 
 

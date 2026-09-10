@@ -25,6 +25,8 @@ from app.db.async_database import run_sync
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/connectors", tags=["Connectors"])
+from app.api.connector_oauth import router as oauth_router
+router.include_router(oauth_router)
 
 
 # ---- Meta endpoints ----
@@ -160,6 +162,15 @@ async def discover_discord_resources(
         )
 
 
+@router.get("/{connector_id}/dependencies")
+async def get_connection_dependencies(connector_id: str, token: str = Depends(require_admin)):
+    """Automations that must be considered before removing a connection."""
+    from app.core.connection_dependencies import connection_dependencies
+    if not await run_sync(database.get_connector, connector_id):
+        raise HTTPException(status_code=404, detail="Connection not found")
+    return await run_sync(connection_dependencies, connector_id)
+
+
 @router.get("/{connector_id}", response_model=Connector)
 async def get_connector(connector_id: str, token: str = Depends(require_admin)):
     """Get a connector by ID."""
@@ -197,7 +208,11 @@ async def update_connector_endpoint(
 async def delete_connector_endpoint(connector_id: str, token: str = Depends(require_admin)):
     """Delete a connector and its dedicated API user."""
     from app.core.connector_service import delete_connector
-    if not await delete_connector(connector_id):
+    try:
+        deleted = await delete_connector(connector_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
 
 
@@ -300,6 +315,12 @@ async def deactivate_connector(connector_id: str, token: str = Depends(require_a
         connector = database.get_connector(connector_id)
         if not connector:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
+
+        from app.core.connection_dependencies import require_unreferenced_connection
+        try:
+            require_unreferenced_connection(connector_id, enabled_only=True)
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
 
         # Only stop the live client here if this install owns the connector. If it is
         # pinned to a DIFFERENT install we still persist is_active=False below; the

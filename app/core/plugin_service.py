@@ -425,6 +425,9 @@ class PluginService:
                     enabled=enabled_plugins.get(plugin_id, False)
                 ))
 
+        from app.core import connector_packages
+        if marketplace in (None, connector_packages.MARKETPLACE):
+            available.extend(connector_packages.available())
         return available
 
     # =========================================================================
@@ -522,10 +525,16 @@ class PluginService:
                 has_mcp=has_mcp
             ))
 
+        from app.core import connector_packages
+        plugins.extend(connector_packages.installed())
         return plugins
 
     def get_plugin_details(self, plugin_id: str) -> Optional[PluginDetails]:
         """Get detailed information about a specific plugin"""
+        from app.core import connector_packages
+        kind = connector_packages.kind_for(plugin_id)
+        if kind:
+            return connector_packages.details(kind)
         installed_data = self._read_json_file(self.INSTALLED_FILE, {"version": 2, "plugins": {}})
         settings = self._read_json_file(self.SETTINGS_FILE, {})
         enabled_plugins = settings.get("enabledPlugins", {})
@@ -757,6 +766,10 @@ class PluginService:
         Returns:
             PluginInfo for the installed plugin
         """
+        from app.core import connector_packages
+        kind = connector_packages.kind_for(plugin_id)
+        if kind:
+            return connector_packages.install(kind, scope)
         return _inst_mod.install_plugin(self, plugin_id, scope)
 
     def install_plugins_batch(self, plugin_ids: List[str], scope: str = "user") -> List[PluginInfo]:
@@ -770,7 +783,7 @@ class PluginService:
         Returns:
             List of installed plugin info
         """
-        return _inst_mod.install_plugins_batch(self, plugin_ids, scope)
+        return [self.install_plugin(plugin_id, scope) for plugin_id in plugin_ids]
 
     def uninstall_plugin(self, plugin_id: str) -> bool:
         """
@@ -782,6 +795,10 @@ class PluginService:
         Returns:
             True if successful
         """
+        from app.core import connector_packages
+        kind = connector_packages.kind_for(plugin_id)
+        if kind:
+            return connector_packages.uninstall(kind)
         return _inst_mod.uninstall_plugin(self, plugin_id)
 
     # =========================================================================
@@ -790,6 +807,10 @@ class PluginService:
 
     def enable_plugin(self, plugin_id: str) -> bool:
         """Enable a plugin globally"""
+        from app.core import connector_packages
+        kind = connector_packages.kind_for(plugin_id)
+        if kind:
+            return connector_packages.set_enabled(kind, True)
         settings = self._read_json_file(self.SETTINGS_FILE, {})
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
@@ -798,6 +819,10 @@ class PluginService:
 
     def disable_plugin(self, plugin_id: str) -> bool:
         """Disable a plugin globally"""
+        from app.core import connector_packages
+        kind = connector_packages.kind_for(plugin_id)
+        if kind:
+            return connector_packages.set_enabled(kind, False)
         settings = self._read_json_file(self.SETTINGS_FILE, {})
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
@@ -1070,6 +1095,10 @@ class PluginService:
         Returns:
             Updated PluginInfo
         """
+        from app.core import connector_packages
+        kind = connector_packages.kind_for(plugin_id)
+        if kind:
+            return connector_packages.install(kind)
         return _upd_mod.update_plugin(self, plugin_id)
 
     def update_all_plugins(self) -> List[PluginInfo]:

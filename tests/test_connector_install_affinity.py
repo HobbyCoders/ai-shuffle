@@ -10,6 +10,8 @@ bot token and double-handle every inbound message.
 """
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("bundled_connector_catalog")
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.core.connectors.manager import ConnectorManager

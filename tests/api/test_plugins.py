@@ -74,6 +74,7 @@ def sample_marketplace():
 def sample_plugin():
     """Sample installed plugin data."""
     plugin = MagicMock()
+    plugin.connector_type = None
     plugin.id = "test-plugin@test-marketplace"
     plugin.name = "test-plugin"
     plugin.marketplace = "test-marketplace"
@@ -94,6 +95,7 @@ def sample_plugin():
 def sample_plugin_details(sample_plugin):
     """Sample plugin details data."""
     details = MagicMock()
+    details.connector_type = None
     details.id = sample_plugin.id
     details.name = sample_plugin.name
     details.marketplace = sample_plugin.marketplace
@@ -118,6 +120,7 @@ def sample_plugin_details(sample_plugin):
 def sample_available_plugin():
     """Sample available plugin data."""
     plugin = MagicMock()
+    plugin.connector_type = None
     plugin.id = "available-plugin@test-marketplace"
     plugin.name = "available-plugin"
     plugin.marketplace = "test-marketplace"
@@ -643,6 +646,7 @@ class TestInstallPluginsBatch:
     def test_install_plugins_batch_success(self, app, mock_plugin_service, sample_plugin):
         """Should install plugins in batch."""
         plugin2 = MagicMock()
+        plugin2.connector_type = None
         plugin2.id = "plugin2@test-marketplace"
         plugin2.name = "plugin2"
         plugin2.marketplace = "test-marketplace"
@@ -1057,6 +1061,7 @@ class TestEdgeCases:
     def test_multiple_plugins_installed(self, app, mock_plugin_service, sample_plugin):
         """Should handle multiple installed plugins."""
         plugin2 = MagicMock()
+        plugin2.connector_type = None
         plugin2.id = "plugin2@mp"
         plugin2.name = "plugin2"
         plugin2.marketplace = "mp"

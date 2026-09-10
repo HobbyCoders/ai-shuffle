@@ -160,6 +160,9 @@ class ConnectorManager:
 
             # Look up the implementation class from the registry
             try:
+                if config.get("runtime_plugin_id"):
+                    from app.core.connector_packages import require_installed
+                    require_installed(connector_type)
                 cls = get_connector_class(connector_type)
             except ValueError as e:
                 logger.error(f"Cannot start connector {connector_id}: {e}")

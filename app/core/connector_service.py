@@ -229,7 +229,13 @@ async def create_connector(
             raise RuntimeError("Failed to create connector in database")
         return connector
 
-    connector = await run_sync(_create_blocking)
+    def _create_with_package():
+        from app.core.connector_packages import lifecycle_lock, require_installed
+        with lifecycle_lock():
+            config["runtime_plugin_id"] = require_installed(connector_type)
+            return _create_blocking()
+
+    connector = await run_sync(_create_with_package)
 
     # 6. Return with masked config
     connector["config"] = mask_config(connector.get("config", {}), connector_type)
@@ -262,6 +268,9 @@ async def update_connector(connector_id: str, **kwargs) -> Optional[Dict]:
             return None, False, False, None
 
         connector_type = existing["type"]
+        if kwargs.get("is_active") is False:
+            from app.core.connection_dependencies import require_unreferenced_connection
+            require_unreferenced_connection(connector_id, enabled_only=True)
 
         # Encrypt sensitive config fields if config is being updated.
         # Preserve existing encrypted values when the frontend sends masked
@@ -273,6 +282,14 @@ async def update_connector(connector_id: str, **kwargs) -> Optional[Dict]:
             kwargs["config"] = new_config
             existing_config = existing.get("config", {}) or {}
             sensitive = get_sensitive_fields(connector_type)
+            # Runtime ownership and managed OAuth credentials are not erased
+            # when a UI submits only the visible, non-secret account settings.
+            protected = ["runtime_plugin_id", "oauth_managed", "email_address"]
+            if existing_config.get("oauth_managed"):
+                protected += ["client_id", *sensitive]
+            for key in protected:
+                if key not in new_config and key in existing_config:
+                    new_config[key] = existing_config[key]
 
             for key in sensitive:
                 new_val = new_config.get(key, "")
@@ -335,6 +352,9 @@ async def delete_connector(connector_id: str) -> bool:
     connector = await run_sync(database.get_connector, connector_id)
     if not connector:
         return False
+
+    from app.core.connection_dependencies import require_unreferenced_connection
+    await run_sync(require_unreferenced_connection, connector_id)
 
     # Stop the connector if it is running
     try:
@@ -622,11 +642,19 @@ def get_connector_type_info() -> List[Dict]:
 
     # Enrich each type with capabilities from the registered connector class
     from dataclasses import asdict
-    from app.core.connectors.registry import get_connector_class
+    from app.core.connectors.registry import _CONNECTOR_CLASSES
+    from app.core import connector_packages
 
     for type_info in types:
+        state = connector_packages.record(type_info["type"])
+        type_info["plugin_id"] = connector_packages.package_id(type_info["type"])
+        type_info["plugin_installed"] = bool(state)
+        type_info["plugin_enabled"] = bool(state and state.get("enabled"))
+        type_info["plugin_version"] = (state or {}).get("release")
+        type_info["plugin_update_available"] = bool(state and state.get("release") != connector_packages.CATALOG["release"])
+        type_info["plugin_rollback_available"] = bool(state and state.get("previous"))
         try:
-            cls = get_connector_class(type_info["type"])
+            cls = _CONNECTOR_CLASSES[type_info["type"]]
             type_info["capabilities"] = asdict(cls.CAPABILITIES)
             type_info["max_message_length"] = cls.MAX_MESSAGE_LENGTH
             type_info["triggers"] = [asdict(t) for t in cls.TRIGGERS]

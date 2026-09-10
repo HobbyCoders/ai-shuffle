@@ -82,6 +82,12 @@ export interface ConnectorToolInfo {
 
 export interface ConnectorTypeInfo {
 	type: string;
+	plugin_id?: string;
+	plugin_installed?: boolean;
+	plugin_enabled?: boolean;
+	plugin_version?: string;
+	plugin_update_available?: boolean;
+	plugin_rollback_available?: boolean;
 	name: string;
 	description: string;
 	config_fields: Array<{
@@ -165,6 +171,17 @@ export async function updateConnector(id: string, data: ConnectorUpdate): Promis
 /**
  * Delete a connector
  */
+export interface ConnectionDependency {
+	id: string;
+	name: string;
+	is_enabled: boolean;
+	uses: Array<'trigger' | 'action' | 'output'>;
+}
+
+export async function getConnectionDependencies(id: string): Promise<ConnectionDependency[]> {
+	return api.get<ConnectionDependency[]>(`/connectors/${id}/dependencies`);
+}
+
 export async function deleteConnector(id: string): Promise<void> {
 	await api.delete(`/connectors/${id}`);
 }

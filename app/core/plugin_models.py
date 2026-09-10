@@ -106,6 +106,7 @@ class PluginInfo(DictMixin):
     has_skills: bool = False
     has_hooks: bool = False
     has_mcp: bool = False
+    connector_type: Optional[str] = None
 
 
 @dataclass
@@ -151,5 +152,6 @@ class AvailablePlugin(DictMixin):
     has_skills: bool = False
     has_hooks: bool = False
     has_mcp: bool = False
+    connector_type: Optional[str] = None
     installed: bool = False
     enabled: bool = False

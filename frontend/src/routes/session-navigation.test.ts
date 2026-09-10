@@ -69,8 +69,11 @@ describe('Swarm session navigation through the actual active-session store', () 
 				worker_session_id: 'worker-child', result: 'done',
 			}],
 		} }) });
+		const heading = screen.getByRole('button', { name: 'Swarm Navigation' });
+		if (heading.getAttribute('aria-expanded') === 'false') await fireEvent.click(heading);
 		await fireEvent.click(screen.getByText('Child task'));
-		const link = screen.getByRole('link', { name: 'Open Explore session' });
+		const link = screen.getByRole('link', { name: /^Open / });
+		expect(link.getAttribute('href')).toBe('/?session=worker-child');
 		const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
 		link.dispatchEvent(event);
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
