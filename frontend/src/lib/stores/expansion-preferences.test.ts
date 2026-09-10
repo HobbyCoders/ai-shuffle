@@ -16,6 +16,49 @@ function fixture() {
 }
 
 describe('account expansion preferences', () => {
+	it('syncs hide and restore edits between two account clients through the transport', async () => {
+		const server: Record<string, unknown> = {};
+		const transport = {
+			all: async () => structuredClone(server),
+			get: async (key: string) => key in server ? { value: structuredClone(server[key]) } : null,
+			put: vi.fn(async (key: string, value: unknown, onlyIfMissing?: boolean) => {
+				if (!onlyIfMissing || !(key in server)) server[key] = structuredClone(value);
+				return { value: structuredClone(server[key]) };
+			})
+		};
+		const syncA = new PreferenceSync(transport);
+		const syncB = new PreferenceSync(transport);
+		const a = createExpansionPreferences(syncA).hiddenProviders;
+		const b = createExpansionPreferences(syncB).hiddenProviders;
+		syncA.start(false, 'account:A');
+		syncB.start(false, 'account:A');
+		await syncA.reconnect();
+		await syncB.reconnect();
+		a.set({ plan: true, 'provider:api': true });
+		await vi.waitFor(() => expect(server.context_usage_hidden_providers).toEqual({ plan: true, 'provider:api': true }));
+		await syncB.refresh('context_usage_hidden_providers');
+		expect(b.current).toEqual(a.current);
+		b.set({ plan: true });
+		await vi.waitFor(() => expect(server.context_usage_hidden_providers).toEqual({ plan: true }));
+		await syncA.refresh('context_usage_hidden_providers');
+		expect(a.current).toEqual({ plan: true });
+		syncA.stop();
+		syncB.stop();
+	});
+	it('persists hidden providers separately from expansion and resets on account change', () => {
+		const { hiddenProviders, sections, adapters, save } = fixture();
+		hiddenProviders.set({ plan: true, 'provider:api': true });
+		expect(save).toHaveBeenLastCalledWith('context_usage_hidden_providers', { plan: true, 'provider:api': true });
+		expect(fixture().hiddenProviders.current).toEqual({ plan: true, 'provider:api': true });
+		expect(sections.current).toEqual({});
+		save.mockClear();
+		adapters.get('context_usage_hidden_providers')!.apply({ 'provider:other': true, invalid: 'true' });
+		expect(hiddenProviders.current).toEqual({ 'provider:other': true });
+		adapters.get('context_usage_hidden_providers')!.apply(undefined);
+		expect(hiddenProviders.current).toEqual({});
+		expect(JSON.parse(localStorage.getItem('ai-shuffle:context_usage_hidden_providers')!)).toEqual({});
+		expect(save).not.toHaveBeenCalled();
+	});
 	it('migrates all legacy sections before any component or provider catalog mounts', () => {
 		localStorage.setItem('aihub.contextBreakdownOpen', '0');
 		localStorage.setItem('aihub.usageSectionOpen:plan', '0');
@@ -25,7 +68,7 @@ describe('account expansion preferences', () => {
 		expect(breakdown.current).toBe(false);
 		expect(sections.current).toEqual({ plan: false, 'provider:not-loaded-yet': false });
 		expect(groups.current).toEqual({ active: true, settled: false });
-		expect([...adapters.keys()]).toEqual(['context_breakdown_open', 'context_usage_sections', 'sidebar_collapsed_groups']);
+		expect([...adapters.keys()]).toEqual(['context_breakdown_open', 'context_usage_sections', 'sidebar_collapsed_groups', 'context_usage_hidden_providers']);
 	});
 	it('applies remote state without echo, removes stale cache and resets for another account', () => {
 		const { breakdown, sections, groups, adapters, save } = fixture();
@@ -74,7 +117,7 @@ describe('account expansion preferences', () => {
 	it('ignores a previous account snapshot after resetting and hydrating the next account', async () => {
 		const old = deferred<Record<string, unknown>>();
 		const all = vi.fn().mockReturnValueOnce(old.promise).mockResolvedValue({
-			context_breakdown_open: true, context_usage_sections: { plan: true }, sidebar_collapsed_groups: { settled: false }
+			context_breakdown_open: true, context_usage_sections: { plan: true }, sidebar_collapsed_groups: { settled: false }, context_usage_hidden_providers: {}
 		});
 		const put = vi.fn();
 		const sync = new PreferenceSync({ all, get: async () => null, put });

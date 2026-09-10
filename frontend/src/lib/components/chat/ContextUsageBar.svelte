@@ -37,7 +37,8 @@
 	 * click and mobile tap (tap-away closes).
 	 */
 	import { onMount, tick } from 'svelte';
-	import { contextBreakdown, usageSections } from '$lib/stores/expansion-preferences';
+	import { contextBreakdown, usageSections, hiddenUsageProviders } from '$lib/stores/expansion-preferences';
+	import { EyeOff, Eye } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getContextMaxForModel } from '$lib/constants/chat';
 	import {
@@ -551,6 +552,21 @@
 		});
 	}
 
+	const providerRows = $derived(sortedProviderBuckets());
+	const hiddenRows = $derived([
+		...(hasClaude ? [{ id: 'plan', name: claudeDisplay.name }] : []),
+		...providerRows.map(pb => ({ id: `provider:${pb.providerId}`, name: providerDisplayFor(pb).name }))
+	].filter(row => $hiddenUsageProviders[row.id]));
+
+	function setProviderHidden(id: string, hidden: boolean) {
+		hiddenUsageProviders.update(current => {
+			const next = { ...current };
+			if (hidden) next[id] = true;
+			else delete next[id];
+			return next;
+		});
+	}
+
 	// Claude plan-usage collapse: the rows follow the 'plan' section toggle.
 	const planRowsVisible = $derived(isSectionOpen('plan'));
 	// The collapsed Claude summary surfaces the most constrained window: the
@@ -585,6 +601,18 @@
 		};
 	});
 </script>
+
+{#snippet hideProvider(id: string, name: string)}
+	<button
+		type="button"
+		class="provider-hide"
+		title="Hide {name} usage"
+		aria-label="Hide {name} usage"
+		onclick={() => setProviderHidden(id, true)}
+	>
+		<EyeOff size={13} aria-hidden="true" />
+	</button>
+{/snippet}
 
 <div class="usage-context-wrapper" bind:this={wrapperRef}>
 	<button
@@ -700,41 +728,44 @@
 			{/if}
 
 			<!-- ═══ Plan usage limits (Claude) ═══ -->
-			{#if hasClaude}
+			{#if hasClaude && !$hiddenUsageProviders.plan}
 				<!-- The configured account's header shows the "Claude" brand +
 				     its auth-kind subtext (plan / "API"), falling back to the resolved
 				     device name or "Other device". It is the collapse toggle for the window rows;
 				     collapsed shows the least quota remaining and hides the rows +
 				     "No usage data" line. No account naming, no "as of" staleness line. -->
 				<div class="popover-section">
-					<button
-						type="button"
-						class="sec-header"
-						aria-expanded={planRowsVisible}
-						aria-label="Plan usage limits — {planRowsVisible ? 'collapse' : 'expand'}"
-						onclick={() => toggleSection('plan')}
-					>
-						<span class="sec-head-labels">
-							<span class="section-device">{claudeDisplay.name}</span>
-							{#if claudeSubtext}
-								<span class="section-account">{claudeSubtext}</span>
-							{/if}
-						</span>
-						{#if !planRowsVisible && planMinRemaining != null}
-							<span class="row-pct {remainingSeverity(planMinRemaining)} sec-summary"
-								>{planMinRemaining}% left</span
-							>
-						{/if}
-						<svg
-							class="ctx-chevron {planRowsVisible ? '' : 'collapsed'}"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							aria-hidden="true"
+					<div class="provider-header">
+						<button
+							type="button"
+							class="sec-header"
+							aria-expanded={planRowsVisible}
+							aria-label="Plan usage limits — {planRowsVisible ? 'collapse' : 'expand'}"
+							onclick={() => toggleSection('plan')}
 						>
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-						</svg>
-					</button>
+							<span class="sec-head-labels">
+								<span class="section-device">{claudeDisplay.name}</span>
+								{#if claudeSubtext}
+									<span class="section-account">{claudeSubtext}</span>
+								{/if}
+							</span>
+							{#if !planRowsVisible && planMinRemaining != null}
+								<span class="row-pct {remainingSeverity(planMinRemaining)} sec-summary"
+									>{planMinRemaining}% left</span
+								>
+							{/if}
+							<svg
+								class="ctx-chevron {planRowsVisible ? '' : 'collapsed'}"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								aria-hidden="true"
+							>
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+							</svg>
+						</button>
+						{@render hideProvider('plan', claudeDisplay.name)}
+					</div>
 				</div>
 				{#if planRowsVisible}
 					{#if items.length > 0}
@@ -772,7 +803,7 @@
 			     their collapsed summary uses the least remaining window. xAI API-key,
 			     other API-key and credit windows keep used-of-100 and summarize the
 			     highest-utilization window. -->
-			{#each sortedProviderBuckets() as pb (pb.providerId)}
+			{#each providerRows.filter(pb => !$hiddenUsageProviders[`provider:${pb.providerId}`]) as pb (pb.providerId)}
 				{@const sectionId = `provider:${pb.providerId}`}
 				{@const pbDisplay = providerDisplayFor(pb)}
 				{@const pbOpen = isSectionOpen(sectionId)}
@@ -781,45 +812,48 @@
 				{@const pbSummary = providerWindowSummary(pbWindows, now, pbShowsRemaining)}
 				{@const pbStatus = providerStatusText(pb)}
 				<div class="popover-section">
-					<button
-						type="button"
-						class="sec-header"
-						aria-expanded={pbOpen}
-						aria-label="{pbDisplay.name} usage — {pbOpen ? 'collapse' : 'expand'}"
-						onclick={() => toggleSection(sectionId)}
-					>
-						<span class="sec-head-labels">
-							<span class="section-device">{pbDisplay.name}</span>
-							{#if pbStatus}<span class="section-account provider-status">{pbStatus}</span>{/if}
-							{#if pbDisplay.subtext}
-								<span class="section-account">{pbDisplay.subtext}</span>
-							{/if}
-						</span>
-						{#if !pbOpen}
-							{@const pbCreditsShort = creditsShort(pb.credits, pb.providerType)}
-							<!-- An account credit balance is the headline the user cares
-							     about, so it outranks the window pct (which an OpenRouter
-							     key-spend limit would otherwise produce). -->
-							{#if creditsNum(pb.credits, 'balance_remaining') != null && pbCreditsShort}
-								<span class="sec-summary sec-credits">{pbCreditsShort}</span>
-							{:else if pbSummary}
-								<span class="row-pct {pbSummary.severity} sec-summary"
-									>{pbSummary.pct}%{pbShowsRemaining ? ' left' : ''}</span
-								>
-							{:else if pbCreditsShort}
-								<span class="sec-summary sec-credits">{pbCreditsShort}</span>
-							{/if}
-						{/if}
-						<svg
-							class="ctx-chevron {pbOpen ? '' : 'collapsed'}"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							aria-hidden="true"
+					<div class="provider-header">
+						<button
+							type="button"
+							class="sec-header"
+							aria-expanded={pbOpen}
+							aria-label="{pbDisplay.name} usage — {pbOpen ? 'collapse' : 'expand'}"
+							onclick={() => toggleSection(sectionId)}
 						>
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-						</svg>
-					</button>
+							<span class="sec-head-labels">
+								<span class="section-device">{pbDisplay.name}</span>
+								{#if pbStatus}<span class="section-account provider-status">{pbStatus}</span>{/if}
+								{#if pbDisplay.subtext}
+									<span class="section-account">{pbDisplay.subtext}</span>
+								{/if}
+							</span>
+							{#if !pbOpen}
+								{@const pbCreditsShort = creditsShort(pb.credits, pb.providerType)}
+								<!-- An account credit balance is the headline the user cares
+								     about, so it outranks the window pct (which an OpenRouter
+								     key-spend limit would otherwise produce). -->
+								{#if creditsNum(pb.credits, 'balance_remaining') != null && pbCreditsShort}
+									<span class="sec-summary sec-credits">{pbCreditsShort}</span>
+								{:else if pbSummary}
+									<span class="row-pct {pbSummary.severity} sec-summary"
+										>{pbSummary.pct}%{pbShowsRemaining ? ' left' : ''}</span
+									>
+								{:else if pbCreditsShort}
+									<span class="sec-summary sec-credits">{pbCreditsShort}</span>
+								{/if}
+							{/if}
+							<svg
+								class="ctx-chevron {pbOpen ? '' : 'collapsed'}"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								aria-hidden="true"
+							>
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+							</svg>
+						</button>
+						{@render hideProvider(sectionId, pbDisplay.name)}
+					</div>
 					{#if pbStatus && pb.providerType?.toLowerCase() === 'openai' && pb.lastErrorKind === 'billing_access_denied'}
 						<a
 							class="provider-billing-link"
@@ -862,6 +896,18 @@
 					{/if}
 				{/if}
 			{/each}
+			{#if hiddenRows.length > 0}
+				<details class="hidden-providers">
+					<summary>Hidden providers ({hiddenRows.length})</summary>
+					{#each hiddenRows as row (row.id)}
+						<button type="button" class="provider-restore" onclick={() => setProviderHidden(row.id, false)}
+							aria-label="Show {row.name} usage" title="Show {row.name} usage">
+							<Eye size={13} aria-hidden="true" />
+							<span>{row.name}</span>
+						</button>
+					{/each}
+				</details>
+			{/if}
 		</div>
 	{/if}
 </div>
@@ -1179,6 +1225,44 @@
 		gap: 6px;
 		flex-wrap: wrap;
 	}
+
+	.provider-header {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.provider-header .sec-header {
+		flex: 1;
+		min-width: 0;
+	}
+	.provider-hide, .provider-restore {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		padding: 4px;
+		border: none;
+		border-radius: 4px;
+		background: none;
+		color: var(--muted-foreground);
+		font: inherit;
+		cursor: pointer;
+	}
+	.provider-hide { flex-shrink: 0; }
+	.provider-hide:hover, .provider-restore:hover {
+		background: var(--accent);
+		color: var(--foreground);
+	}
+	.provider-hide:focus-visible, .provider-restore:focus-visible, .hidden-providers summary:focus-visible {
+		outline: 2px solid var(--ring, var(--primary));
+		outline-offset: 2px;
+	}
+	.hidden-providers {
+		font-size: 10.5px;
+		color: var(--muted-foreground);
+	}
+	.hidden-providers summary { cursor: pointer; }
+	.provider-restore { display: flex; margin-top: 4px; }
 
 	/* Collapsible account/provider section header — a full-width button mirroring
 	   .ctx-header: label group left, optional max-pct summary + chevron right. */

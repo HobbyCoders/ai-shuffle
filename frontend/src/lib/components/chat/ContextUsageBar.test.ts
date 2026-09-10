@@ -13,7 +13,7 @@ import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ContextUsageBar from './ContextUsageBar.svelte';
 import { rateLimit } from '$lib/stores/rate-limit';
-import { contextBreakdown, usageSections } from '$lib/stores/expansion-preferences';
+import { contextBreakdown, usageSections, hiddenUsageProviders } from '$lib/stores/expansion-preferences';
 import type { PreferenceAdapter } from '$lib/services/preference-sync';
 
 // The breakdown now fetches on session load and the pill prefers the rich data, so
@@ -106,6 +106,7 @@ beforeEach(() => {
 	localStorage.clear();
 	mocks.adapters.get('context_breakdown_open')!.apply(undefined);
 	mocks.adapters.get('context_usage_sections')!.apply(undefined);
+	mocks.adapters.get('context_usage_hidden_providers')!.apply(undefined);
 	mocks.save.mockClear();
 	// Full reset: clears every bucket AND the per-install generation guard.
 	rateLimit.__resetForTests();
@@ -1033,6 +1034,51 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.querySelectorAll('.popover-row').length).toBe(1);
 		expect(secHeader.getAttribute('aria-expanded')).toBe('true');
 		expect(localStorage.getItem('aihub.usageSectionOpen:plan')).toBe('1');
+	});
+});
+
+describe('ContextUsageBar — provider visibility', () => {
+	it('hides and restores each provider independently without changing its expansion or usage data', async () => {
+		rateLimit.applySnapshot({ available: true, windows: [], providers: [
+			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', windows: [], credits: { balance_remaining: 12 } },
+			{ provider_id: 'other', provider_type: 'openai', provider_name: 'OpenAI', windows: [] }
+		] });
+		usageSections.set({ 'provider:api': false });
+		const { container, getByRole, getAllByRole } = render(ContextUsageBar);
+		await openPopover(container);
+		await fireEvent.click(getAllByRole('button', { name: 'Hide OpenAI usage' })[0]);
+		expect(container.querySelector('.usage-popover')).not.toBeNull();
+		expect(getAllByRole('button', { name: 'Hide OpenAI usage' })).toHaveLength(1);
+		expect(usageSections.current['provider:api']).toBe(false);
+		expect(hiddenUsageProviders.current).toEqual({ 'provider:api': true });
+		expect(mocks.save).toHaveBeenLastCalledWith('context_usage_hidden_providers', { 'provider:api': true });
+		await fireEvent.click(getByRole('button', { name: 'Hide Claude usage' }));
+		expect(container.querySelector('.hidden-providers summary')?.textContent).toBe('Hidden providers (2)');
+		await fireEvent.click(container.querySelector('.usage-indicator')!);
+		await openPopover(container);
+		expect(container.querySelectorAll('.provider-hide')).toHaveLength(1);
+		await fireEvent.click(container.querySelector('.hidden-providers summary')!);
+		await fireEvent.click(getByRole('button', { name: 'Show OpenAI usage' }));
+		expect(getByRole('button', { name: 'OpenAI usage — expand' }).getAttribute('aria-expanded')).toBe('false');
+		expect(container.textContent).toContain('$12.00');
+		await fireEvent.click(getByRole('button', { name: 'Show Claude usage' }));
+		expect(container.querySelector('.hidden-providers')).toBeNull();
+		expect(container.querySelectorAll('.provider-hide')).toHaveLength(3);
+	});
+
+	it('keeps context and restore controls available when every provider is hidden, and applies remote changes', async () => {
+		rateLimit.applySnapshot({ available: true, windows: [], providers: [
+			{ provider_id: 'api', provider_type: 'openai', windows: [] }
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		mocks.adapters.get('context_usage_hidden_providers')!.apply({ plan: true, 'provider:api': true });
+		await waitFor(() => expect(container.querySelectorAll('.popover-section')).toHaveLength(0));
+		expect(container.querySelector('.ctx-header')).not.toBeNull();
+		expect(container.querySelector('.hidden-providers summary')?.textContent).toBe('Hidden providers (2)');
+		expect(mocks.save).not.toHaveBeenCalled();
+		mocks.adapters.get('context_usage_hidden_providers')!.apply(undefined);
+		await waitFor(() => expect(container.querySelectorAll('.provider-hide')).toHaveLength(2));
 	});
 });
 

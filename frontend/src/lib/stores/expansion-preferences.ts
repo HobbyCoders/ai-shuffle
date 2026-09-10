@@ -45,10 +45,13 @@ export function createExpansionPreferences(sync: PersistedSync, storage?: Storag
 	const groups = createPersistedStore<Record<string, boolean>>({
 		key: 'sidebar_collapsed_groups', initial: {}, normalize: booleanRecord, storageKey: GROUPS_KEY
 	}, sync, storage);
-	return { breakdown, sections, groups };
+	const hiddenProviders = createPersistedStore<Record<string, boolean>>({
+		key: 'context_usage_hidden_providers', initial: {}, normalize: booleanRecord
+	}, sync, storage);
+	return { breakdown, sections, groups, hiddenProviders };
 }
 
 let storage: Storage | undefined;
 try { storage = globalThis.localStorage; } catch { /* SSR or blocked storage. */ }
-export const { breakdown: contextBreakdown, sections: usageSections, groups: sidebarGroups } =
+export const { breakdown: contextBreakdown, sections: usageSections, groups: sidebarGroups, hiddenProviders: hiddenUsageProviders } =
 	createExpansionPreferences(preferenceSync, storage);
