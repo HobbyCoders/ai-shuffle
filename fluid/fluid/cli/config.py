@@ -219,7 +219,7 @@ def wired_capabilities(
         wired.add("session_view")
     if background_host:
         wired.update({
-            "task_dispatch", "monitor_spawn", "agent_roster", "agent_message",
+            "task_dispatch", "swarm", "monitor_spawn", "agent_roster", "agent_message",
         })
     wired.update({"recall_store", "memory_store"})
     if config.continual:

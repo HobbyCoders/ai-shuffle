@@ -93,6 +93,10 @@ def test_gated_descriptions_never_leak_absent_tools() -> None:
         frozenset({"HistorySearch"}),
         frozenset({"SessionSearch"}),
         frozenset({"Monitor"}),
+        frozenset({"Task"}),
+        frozenset({"Swarm"}),
+        frozenset({"Task", "Swarm"}),
+        frozenset(BUILTIN_TOOL_NAMES) - {"Swarm"},
         frozenset(BUILTIN_TOOL_NAMES) - {"Read"},
         frozenset(BUILTIN_TOOL_NAMES) - {"Bash", "Monitor"},
         frozenset(BUILTIN_TOOL_NAMES),
@@ -109,6 +113,26 @@ def test_gated_descriptions_never_leak_absent_tools() -> None:
                 f"{spec.name} with surface {sorted(surface)} "
                 f"leaked {sorted(leaked)}"
             )
+
+
+def test_swarm_routing_is_gated_and_does_not_encourage_task_fanout():
+    from fluid.tools.builtins.task import describe
+    from fluid.tools.fragments import SWARM_ROUTING, SWARM_ROUTING_SUMMARY
+
+    for code_mode in (False, True):
+        for surface in (frozenset({"Task"}), frozenset({"Task", "Swarm"})):
+            prompt = compose_base_prompt(PromptProfile(tools=surface, code_mode=code_mode))
+            description = describe(surface)
+            if "Swarm" in surface:
+                assert SWARM_ROUTING_SUMMARY in prompt
+                assert SWARM_ROUTING in description
+                assert "three or more planned subagent tasks" in description
+                assert "Do not split batches into Task calls" in description
+                assert "adaptive follow-up" in description
+                assert "never override a restriction on delegation" in description
+                assert "send several Task calls" not in description
+            else:
+                assert "Swarm" not in prompt + description
 
 
 def test_refined_full_surface_matches_module_constants() -> None:
@@ -145,6 +169,7 @@ def test_shared_fragments_appear_verbatim() -> None:
             fr.END_TURN_ON_BACKGROUND,
             ("Task", "Monitor"),
         ),
+        "SWARM_ROUTING": (fr.SWARM_ROUTING, ("Task", "Swarm")),
         "WEB_UNTRUSTED": (fr.WEB_UNTRUSTED, ("WebFetch", "WebSearch")),
     }
     for label, (fragment, names) in carriers.items():
@@ -154,6 +179,7 @@ def test_shared_fragments_appear_verbatim() -> None:
     from fluid.tools.fragments import END_TURN_ON_BACKGROUND
 
     assert END_TURN_ON_BACKGROUND in DEFAULT_BASE_PROMPT
+    assert fr.SWARM_ROUTING_SUMMARY in DEFAULT_BASE_PROMPT
     # Bash and Monitor share one cwd parameter description.
     for name in ("Bash", "Monitor"):
         spec = registry.get(name)

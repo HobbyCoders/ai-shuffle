@@ -38,7 +38,7 @@ import asyncio
 import inspect
 from typing import Any
 
-from fluid.tools.fragments import DONT_PREDICT_PENDING, END_TURN_ON_BACKGROUND
+from fluid.tools.fragments import DONT_PREDICT_PENDING, END_TURN_ON_BACKGROUND, SWARM_ROUTING
 from fluid.tools.registry import (
     BackgroundTaskReceipt,
     ToolCtx,
@@ -73,8 +73,9 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "paragraph\n"
         "- Multi-file investigations whose intermediate reading you do not "
         "need to keep\n"
-        "- Independent work that can run in parallel: send several Task calls "
-        "together in ONE reply and they run concurrently\n"
+        + (f"- {SWARM_ROUTING}\n" if has("Swarm") else
+           "- Independent work that can run in parallel: send the Task calls "
+           "together rather than waiting between independent assignments\n") +
         "- Context-heavy work you want kept out of this conversation\n"
         "\n"
         "## When NOT to Use This Tool\n"

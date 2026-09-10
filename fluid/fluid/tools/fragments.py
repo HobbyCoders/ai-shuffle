@@ -43,6 +43,20 @@ CWD_PARAM = (
     "instead of prefixing the command with cd."
 )
 
+# Task/Swarm/base prompt — route planned batches through the coordinator.
+SWARM_ROUTING_SUMMARY = (
+    "Use Swarm, when available, for three or more planned subagent tasks or "
+    "known dependency chains. Do not split batches into Task calls; keep Task "
+    "for isolated or adaptive work."
+)
+SWARM_ROUTING = SWARM_ROUTING_SUMMARY + (
+    " Submit the planned workflow in one start call, not smaller waves. "
+    "Task also fits a pair of independent assignments or an adaptive follow-up "
+    "whose brief needs your judgment of earlier results. If Swarm is "
+    "unavailable or the user explicitly requests individual calls, use Task; "
+    "never override a restriction on delegation."
+)
+
 # Task/Monitor/base prompt — park instead of holding the turn open.
 END_TURN_ON_BACKGROUND = (
     "When background work is all that remains, end your turn — the "

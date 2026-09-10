@@ -146,6 +146,10 @@ def test_task_contract_is_roster_bound_and_has_no_model_override(mock_db):
     assert "# Subagent delegation" in guidance
     assert "current provider" in guidance
     assert "Never invent a subagent ID, model, or provider" in guidance
+    from fluid.tools.fragments import SWARM_ROUTING
+
+    assert SWARM_ROUTING in guidance
+    assert SWARM_ROUTING in contract.description
 
 
 def test_task_contract_includes_file_subagents_without_shadowing_db_agents(mock_db):

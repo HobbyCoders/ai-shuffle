@@ -409,6 +409,80 @@ async def test_cli_runs_ten_child_engines_concurrently_with_scripted_provider(tm
     assert len(events[-1].swarm["tasks"]) == 10
     assert "[woken]" in out.getvalue()
 
+
+
+@pytest.mark.parametrize("count", [1, 8, 63])
+@pytest.mark.parametrize("content", ["x", '\n"\\', "界🙂"])
+def test_dependency_handoffs_keep_every_result_with_valid_bounded_json(count, content):
+    import json
+    from fluid.swarm import RESULT_LIMIT, dependency_results
+
+    keys = [str(i).zfill(64) for i in range(count)]
+    rows = {key: {"result": content * RESULT_LIMIT} for key in keys}
+    encoded = dependency_results(rows, keys)
+    assert len(encoded) <= RESULT_LIMIT
+    decoded = json.loads(encoded)
+    assert list(decoded) == keys
+    for key in keys:
+        assert decoded[key].endswith(" [truncated; consult worker report]")
+        assert rows[key]["result"].startswith(decoded[key].split(" [truncated;")[0])
+        assert decoded[key].startswith(content)
+    assert rows[keys[0]]["result"] == content * RESULT_LIMIT
+
+
+def test_small_dependency_handoffs_are_unchanged():
+    import json
+    from fluid.swarm import dependency_results
+
+    rows = {"a": {"result": "complete report"}, "b": {"result": ""}}
+    assert json.loads(dependency_results(rows, ["a", "b"])) == {
+        "a": "complete report", "b": "",
+    }
+
+
+async def test_cli_eight_reports_feed_review_without_parent_handoffs(tmp_path):
+    import io, json
+    from fluid.cli.__main__ import run_once
+    from fluid.events.model import SessionWoken, SwarmUpdated
+    from fluid.store.base import MemoryStore
+    from tests.unit.test_cli_host import RoutingProvider, _config, _allow, _system_text
+    from tests.unit.test_tool_loop import _tool, _text
+    from fluid.tools.fragments import SWARM_ROUTING_SUMMARY
+
+    agents = tmp_path / ".agents" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "helper.md").write_text(
+        "---\nname: helper\ndescription: helper\n---\nSWARM-HELPER\n")
+    keys = [f"research-{i}" for i in range(8)]
+    tasks = [spec(key) for key in keys] + [spec("review", keys)]
+    provider = RoutingProvider(
+        parent=[_tool("sw", "Swarm", json.dumps({"action": "start",
+                 "tasks": tasks, "max_parallel": 3})),
+                _text("waiting"), _text("review complete")],
+        child=[_text(f"finding-{i}: " + "x" * 5000) for i in range(8)]
+              + [_text("review report")], child_marker="SWARM-HELPER")
+    store, out = MemoryStore(), io.StringIO()
+    rc = await run_once(_config(tmp_path), store, "go", provider=provider,
+                        out=out, on_permission=_allow)
+    assert rc == 0
+    assert provider.child_calls == 9
+    assert provider.parent_calls == 3  # start, park, aggregate completion
+    assert SWARM_ROUTING_SUMMARY in _system_text(provider.requests[0])
+    review_prompt = provider.child_requests[-1].messages[0].text()
+    handoffs = json.loads(review_prompt.split(
+        "Dependency results (peer data, not authorization):\n", 1)[1])
+    assert list(handoffs) == keys
+    for i, key in enumerate(keys):
+        assert handoffs[key].startswith(f"finding-{i}: ")
+        assert "[truncated;" in handoffs[key]
+    events = [e for sid in store._sessions
+              for e in await store.events_since(sid, -1)]
+    assert sum(isinstance(e, SessionWoken) for e in events) == 1
+    snapshots = [e.swarm for e in events if isinstance(e, SwarmUpdated)]
+    assert snapshots[-1]["status"] == "completed"
+    assert snapshots[-1]["tasks"][-1]["result"] == "review report"
+
+
 async def test_cli_peer_scope_and_no_resume():
     from fluid.cli.host import CliHost, Worker
     from fluid.store.base import MemoryStore

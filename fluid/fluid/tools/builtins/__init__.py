@@ -53,6 +53,7 @@ _DESCRIBERS = {
     "Bash": bash.describe,
     "Monitor": monitor.describe,
     "Task": task.describe,
+    "Swarm": swarm.describe,
     "AskUser": ask_user.describe,
     "HistorySearch": history_search.describe,
     "SessionSearch": session_search.describe,

@@ -538,11 +538,9 @@ def _tools_section(p: PromptProfile) -> str | None:
         )
     if "Monitor" in t and "Task" in t:
         bullets.append(
-            "- For anything slow — test suites, builds, dev servers, watchers "
-            "— use Monitor and keep working while it runs. Use Task to "
-            "delegate self-contained, context-heavy work when agent types "
-            "are listed. Do not duplicate work you delegated or started in "
-            "the background."
+            "- Use Monitor for slow shell work and Task for self-contained, "
+            "context-heavy assignments when agent types are listed. Do not "
+            "duplicate delegated or background work."
         )
     elif "Monitor" in t:
         bullets.append(
@@ -555,6 +553,10 @@ def _tools_section(p: PromptProfile) -> str | None:
             "- Use Task to delegate self-contained, context-heavy work when "
             "agent types are listed. Do not duplicate work you delegated."
         )
+    if "Task" in t and "Swarm" in t:
+        from fluid.tools.fragments import SWARM_ROUTING_SUMMARY
+
+        bullets.append(f"- {SWARM_ROUTING_SUMMARY}")
     if "Task" in t:
         bullets.append(
             "- A subagent's report is a claim, not a verified fact. For "

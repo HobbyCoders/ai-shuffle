@@ -407,6 +407,8 @@ def build_task_contract(
     additional_targets: Sequence[SubagentTarget] = (),
 ) -> TaskContract:
     """Build the provider-scoped model-facing Task contract."""
+    from fluid.tools.fragments import SWARM_ROUTING
+
     targets = list(available_subagents(caller_profile_id, provider_id))
 
     # File/plugin agents borrow the caller's provider and selected model. They
@@ -513,7 +515,7 @@ def build_task_contract(
         "subagent runs in an isolated session with its own prompt, memory, "
         "and tools; it does not see the parent conversation. Use delegation "
         "for independent or context-heavy work, not a quick lookup or single "
-        f"tool call. {mode_text}\n\n{sync_shape}\n\n" + availability
+        f"tool call. {SWARM_ROUTING}\n\n{mode_text}\n\n{sync_shape}\n\n" + availability
     )
 
     agent_property: dict[str, Any] = {
@@ -615,7 +617,7 @@ def parent_subagent_guidance(
     """Compact system-prompt guidance aligned with the dynamic Task schema."""
     # The park doctrine is fluid's canonical fragment (spliced verbatim into
     # Task's and Monitor's own descriptions) so the copies cannot drift.
-    from fluid.tools.fragments import END_TURN_ON_BACKGROUND
+    from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SWARM_ROUTING
 
     return (
         "# Subagent delegation\n"
@@ -628,6 +630,7 @@ def parent_subagent_guidance(
         "it a self-contained brief with relevant context and expected output. "
         "Delegate independent or context-heavy work; handle quick direct work "
         "yourself. Never invent a subagent ID, model, or provider.\n"
+        f"{SWARM_ROUTING}\n"
         "\n"
         # Background-work guidance applies regardless of which spawning tool produced the task. Do not hide that
         # rule under a description of a tool that the session may not have.
