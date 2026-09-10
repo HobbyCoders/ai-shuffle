@@ -10,10 +10,23 @@
  * git-state hiccup cannot lock the user out of their runners.
  */
 
-import type { Install } from '$lib/api/installs';
+import type { ClusterGitState, Install } from '$lib/api/installs';
 
 /** Per-install checkout eligibility. `null` = unknown (fail-open). */
 export type EligibilityMap = Record<string, boolean> | null;
+
+/** Only a successful worker read can establish that a checkout is missing. */
+export function checkoutEligibility(state: ClusterGitState | null): EligibilityMap {
+	if (!state?.project_v2_id) return null;
+	const map: Record<string, boolean> = {};
+	for (const row of state.installs) {
+		// Older servers report false for offline workers without an error field.
+		if ((row.is_self || row.online) && !row.availability_error) {
+			map[row.id] = row.eligible;
+		}
+	}
+	return map;
+}
 
 /** Other network workers, including offline. "This device" is Local, not a Cloud row. */
 export function peerRunners(installs: Install[]): Install[] {

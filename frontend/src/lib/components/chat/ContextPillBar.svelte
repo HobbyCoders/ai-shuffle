@@ -40,7 +40,7 @@
 	import { adoptSession, unpinSession, moveSession } from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
 	import { GitBranch, Monitor, MonitorOff, Check, Loader2 } from 'lucide-svelte';
-	import type { EligibilityMap } from '$lib/components/layout/execution-mode-eligibility';
+	import { checkoutEligibility, type EligibilityMap } from '$lib/components/layout/execution-mode-eligibility';
 
 	interface Props {
 		/** Render the selectors as stacked, full-width controls inside the mobile sheet. */
@@ -168,13 +168,7 @@
 			runnerInstalls = [];
 		}
 		const gitState = await gitStateReq;
-		if (!gitState || gitState.project_v2_id === null) {
-			runnerEligibility = null;
-		} else {
-			const map: Record<string, boolean> = {};
-			for (const row of gitState.installs) map[row.id] = row.eligible;
-			runnerEligibility = map;
-		}
+		runnerEligibility = checkoutEligibility(gitState);
 		runnerMenuLoading = false;
 	}
 

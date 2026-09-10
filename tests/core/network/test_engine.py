@@ -22,6 +22,44 @@ def workers(tmp_path):
     engine.reset_for_tests()
 
 
+def test_observed_docker_address_is_published_to_other_workers(workers, monkeypatch):
+    from fastapi import Request
+    from app.core import cluster
+    from app.core.config import settings
+    from app.network import runners, hub
+    a, b = workers("docker"), workers("desktop")
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(settings, "cluster_advertise_url", "")
+    monkeypatch.setattr(settings, "shuffle_local_access", True)
+    monkeypatch.setattr(cluster, "_build_capabilities", lambda source: {"os": "linux"})
+    monkeypatch.setattr(cluster, "register_self", lambda: True)
+    monkeypatch.setattr(hub, "kick", lambda: None)
+    request = Request({"type": "http", "scheme": "http", "path": "/api/v1/auth/status",
+                       "root_path": "", "query_string": b"", "method": "GET",
+                       "headers": [(b"host", b"10.0.0.200:18000")],
+                       "client": ("10.0.0.135", 12345), "server": ("172.17.0.11", 8000),
+                       "shuffle.ingress": "local"})
+    with a.active():
+        engine.create_network("LAN")
+    join(a, b)
+    with a.active():
+        assert cluster.observe_local_advertise_url(request)
+        assert engine.presence_of(a.device_id)["endpoints"] == ["http://10.0.0.200:18000"]
+        engine.scan_all()
+    exchange(a, b)
+    with b.active():
+        row = next(r for r in runners.directory()["runners"] if r["id"] == a.device_id)
+        assert row["base_url"] == "http://10.0.0.200:18000"
+        assert database.get_system_setting(cluster._observed_advertise_key()) is None
+    # Re-loading the network does not lose the persisted host/port.
+    with a.active():
+        engine.load_context()
+        assert cluster.advertise_url() == ("http://10.0.0.200:18000", "observed")
+        assert not cluster.observe_local_advertise_url(request)
+        cluster.set_advertise_url_override("http://10.0.0.200:19000")
+        assert engine.presence_of(a.device_id)["endpoints"] == ["http://10.0.0.200:19000"]
+
+
 def _set_pref(worker, key, value):
     with worker.active():
         from app.core import owner_auth
