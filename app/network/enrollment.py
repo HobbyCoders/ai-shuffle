@@ -35,6 +35,7 @@ import httpx
 from app.core import pairing as pairing_core
 from app.core.config import settings
 from app.db import network as store
+from app.db.async_database import run_sync
 from app.db import pairing as pairing_db
 from app.network import crypto, engine, identity as identity_mod, membership
 
@@ -250,8 +251,8 @@ async def start_enrollment(*, endpoint_url: str, code: str, inviter_fingerprint:
         raise EnrollmentError("The inviter's fingerprint is incomplete")
     device_identity = identity_mod.load()
     name = (device_name or "").strip() or engine._default_device_name()
-    for old in store.list_joins(role="joiner"):
-        store.delete_join(old["id"])
+    for old in await run_sync(store.list_joins, role="joiner"):
+        await run_sync(store.delete_join, old["id"])
     payload = {
         "code": pairing_core.normalize_pairing_code(code),
         "inviter_fingerprint": inviter_fingerprint,
@@ -284,8 +285,8 @@ async def start_enrollment(*, endpoint_url: str, code: str, inviter_fingerprint:
     join_id = data["join_id"]
     if engine.context() is not None:
         # The inviter admitted us: only now give up the network we had.
-        engine.leave_network()
-    store.create_join({
+        await run_sync(engine.leave_network)
+    await run_sync(store.create_join, {
         "id": join_id, "role": "joiner", "status": "pending", "device_id": device_identity.device_id, "name": name,
         "endpoint_url": endpoint, "inviter_fingerprint": _normalize_fp(inviter.get("fingerprint")),
         # The joiner keeps the raw poll secret (it needs it to resume after a restart).
@@ -317,11 +318,11 @@ async def _wait_for_approval(join_id: str, endpoint: str, poll_secret: str, devi
             try:
                 response = await client.get(endpoint + f"/api/v1/network/join/{join_id}", params={"secret": poll_secret})
                 if response.status_code >= 400:
-                    store.update_join(join_id, error=f"HTTP {response.status_code}")
+                    await run_sync(store.update_join, join_id, error=f"HTTP {response.status_code}")
                     continue
                 data = response.json()
             except (httpx.HTTPError, ValueError) as exc:
-                store.update_join(join_id, error=f"{type(exc).__name__}")
+                await run_sync(store.update_join, join_id, error=f"{type(exc).__name__}")
                 continue
             status = data.get("status")
             if status == "pending":
@@ -330,22 +331,22 @@ async def _wait_for_approval(join_id: str, endpoint: str, poll_secret: str, devi
                 try:
                     # Store the approved response before state installation so a
                     # snapshot interruption is retryable after a restart.
-                    store.update_join(join_id, status="syncing", response=data["response"], error=None)
+                    await run_sync(store.update_join, join_id, status="syncing", response=data["response"], error=None)
                     await _bootstrap_join(join_id, endpoint, device_name, legacy_instance_id)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("Enrollment failed")
-                    store.update_join(join_id, status="syncing", error=str(exc)[:200])
+                    await run_sync(store.update_join, join_id, status="syncing", error=str(exc)[:200])
                 return
-            store.update_join(join_id, status=status or "failed", error=data.get("error"))
+            await run_sync(store.update_join, join_id, status=status or "failed", error=data.get("error"))
             return
-    store.update_join(join_id, status="expired", error="Approval timed out")
+    await run_sync(store.update_join, join_id, status="expired", error="Approval timed out")
 
 
 async def _bootstrap_join(join_id: str, endpoint: str, device_name: str,
                           legacy_instance_id: Optional[str]) -> None:
     """Retry a persisted snapshot bootstrap without repeating enrollment."""
     for attempt in range(SNAPSHOT_RETRY_ATTEMPTS):
-        join = store.get_join(join_id) or {}
+        join = await run_sync(store.get_join, join_id) or {}
         response = join.get("response")
         if not response:
             raise EnrollmentError("Approved enrollment response is unavailable")
@@ -355,7 +356,7 @@ async def _bootstrap_join(join_id: str, endpoint: str, device_name: str,
                                     join_id=join_id)
             return
         except Exception as exc:  # noqa: BLE001
-            store.update_join(join_id, status="syncing", error=str(exc)[:200])
+            await run_sync(store.update_join, join_id, status="syncing", error=str(exc)[:200])
             if attempt + 1 == SNAPSHOT_RETRY_ATTEMPTS:
                 raise
             await asyncio.sleep(min(2 ** attempt, 4))

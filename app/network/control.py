@@ -24,6 +24,7 @@ import httpx
 from fastapi.encoders import jsonable_encoder
 
 from app.db import network as store
+from app.db.async_database import run_sync
 from app.network import engine, runners, transport
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = Non
     ctx = engine.require_context()
     link = transport._links.get(device_id)
     if link is None:
-        member = store.get_member(device_id)
+        member = await run_sync(store.get_member, device_id)
         if member is None:
             raise RunnerUnreachable("Unknown device")
         presence = engine.presence_of(device_id) or {}

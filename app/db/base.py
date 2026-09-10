@@ -113,7 +113,8 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         self._generation = 0
         self._pressure_lock = threading.Lock()
         self._pressure = dict.fromkeys((
-            "connections_opened", "connections_discarded", "acquisitions",
+            "connections_opened", "connections_discarded", "connections_stale",
+            "acquisitions",
             "acquisition_waits", "acquisition_timeouts", "waiting", "waiting_peak", "holds",
         ), 0)
         self._pressure.update(dict.fromkeys((
@@ -125,6 +126,10 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         # Only live physical connections and active checkouts; bounded by maxconn.
         self._physical = set()
         self._held_since = {}
+        # When each connection last became idle in the pool. Read on checkout to
+        # decide whether the socket is old enough to be worth probing; see
+        # _get_pg_connection. Entries are dropped when a connection is discarded.
+        self._last_returned = {}
         super().__init__(minconn, maxconn, *args, **kwargs)
         self.startup_minconn = self.minconn
         # psycopg2 also uses minconn as its idle-retention limit in _putconn.
@@ -219,6 +224,7 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         conn = super()._connect(key)
         with self._pressure_lock:
             self._physical.add(id(conn))
+            self._last_returned[id(conn)] = time.monotonic()
             self._pressure["connections_opened"] += 1
         return conn
 
@@ -228,6 +234,23 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             self._held_since.setdefault(id(conn), time.monotonic())
         return conn
 
+    def idle_seconds(self, conn) -> float:
+        """How long this connection sat unused before the current checkout.
+
+        Zero for a connection with no recorded return (freshly opened, or one
+        the driver handed out through a keyed path we do not track).
+        """
+        with self._pressure_lock:
+            since = self._last_returned.get(id(conn))
+        if since is None:
+            return 0.0
+        return max(0.0, time.monotonic() - since)
+
+    def stale_detected(self) -> None:
+        """Count a connection that failed its checkout health check."""
+        with self._pressure_lock:
+            self._pressure["connections_stale"] += 1
+
     def _returned(self, conn, discarded):
         # Called under the driver's lock, including the force-reclaim path.
         with self._pressure_lock:
@@ -235,9 +258,13 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             if started is not None:
                 self._pressure["holds"] += 1
                 self._duration("hold", time.monotonic() - started)
-            if discarded and id(conn) in self._physical:
-                self._physical.remove(id(conn))
-                self._pressure["connections_discarded"] += 1
+            if discarded:
+                self._last_returned.pop(id(conn), None)
+                if id(conn) in self._physical:
+                    self._physical.remove(id(conn))
+                    self._pressure["connections_discarded"] += 1
+            else:
+                self._last_returned[id(conn)] = time.monotonic()
 
     def _putconn(self, conn, key=None, close=False):
         try:
@@ -332,21 +359,103 @@ class _PgDictConnection:
 # Application callers wait in FIFO order, bounded by the existing deadline.
 _POOL_ACQUIRE_MAX_WAIT_SECONDS = 2.0
 
+# A connection that has sat in the pool longer than this is probed with
+# SELECT 1 before it is handed out. Below the threshold we rely on the two
+# free local checks only: pinging every checkout would double the round trips
+# on the hot path, and a connection returned seconds ago is almost certainly
+# still alive. Above it the socket has had time to be dropped by an idle NAT,
+# a Postgres restart or a failover, and one round trip is cheaper than
+# failing the caller's real query.
+_CONNECTION_PING_IDLE_SECONDS = 60.0
+
+
+def _connection_is_live(pool, conn) -> bool:
+    """Is this checked-out connection still usable?
+
+    Two local checks first — ``closed`` and the libpq transaction status are
+    both read from client-side state, so they cost nothing. ``UNKNOWN`` is
+    precisely what libpq reports once the server connection is gone.
+
+    Only a connection that has been idle past the ping threshold pays for a
+    round trip. A Postgres restart leaves every retained connection dead while
+    all of them still look fine locally, and without the probe the next N
+    requests each blow up inside the caller's own query.
+    """
+    try:
+        if conn.closed != 0:
+            return False
+        if conn.info.transaction_status == \
+                psycopg2.extensions.TRANSACTION_STATUS_UNKNOWN:
+            return False
+    except Exception:  # noqa: BLE001 — an introspection failure is a dead conn
+        return False
+
+    idle_seconds = 0.0
+    if isinstance(pool, _RetainingThreadedConnectionPool):
+        idle_seconds = pool.idle_seconds(conn)
+    if idle_seconds <= _CONNECTION_PING_IDLE_SECONDS:
+        return True
+
+    try:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT 1")
+            # The probe starts a transaction on an ordinary pooled connection.
+            # End it before checkout sets autocommit or the caller starts work.
+            conn.rollback()
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        return True
+    except (psycopg2.OperationalError, psycopg2.InterfaceError):
+        logger.debug(
+            "pooled connection failed its idle ping after %.1fs; discarding",
+            idle_seconds, exc_info=True,
+        )
+        return False
+
+
+def _discard_connection(pool, conn) -> None:
+    """Take a connection permanently out of service, freeing its slot."""
+    if isinstance(pool, _RetainingThreadedConnectionPool):
+        pool.stale_detected()
+    try:
+        pool.putconn(conn, close=True)
+    except Exception:  # noqa: BLE001 — fall back to the force-reclaim ladder
+        _close_connection(conn)
+
 
 def _get_pg_connection() -> "_PgDictConnection":
-    """Acquire with bounded FIFO backpressure and aggregate pressure metrics."""
+    """Acquire with bounded FIFO backpressure and aggregate pressure metrics.
+
+    A connection that fails its checkout health check is discarded and the
+    acquire is retried once, so a Postgres restart costs one extra round trip
+    rather than an error in the caller's query.
+    """
     pool = _pg_pool
     if pool is None:
         raise RuntimeError(
             "PostgreSQL connection pool not initialized. Call init_pool() first."
         )
-    with pool._acquire() as conn:
-        try:
-            conn.autocommit = False
-        except BaseException:
-            _close_connection(conn)
-            raise
-        return _PgDictConnection(conn)
+    attempts = 2
+    for attempt in range(attempts):
+        with pool._acquire() as conn:
+            if not _connection_is_live(pool, conn):
+                _discard_connection(pool, conn)
+                if attempt + 1 < attempts:
+                    continue
+                raise psycopg2.OperationalError(
+                    "could not obtain a live PostgreSQL connection: the pool "
+                    "returned a dead connection twice in a row"
+                )
+            try:
+                conn.autocommit = False
+            except BaseException:
+                _close_connection(conn)
+                raise
+            return _PgDictConnection(conn)
 
 
 def get_connection():
@@ -421,6 +530,9 @@ def pressure_stats() -> Optional[Dict[str, Any]]:
     """Per-pool aggregate counters and monotonic seconds; no connection labels.
 
     Discards include shutdown and broken connections removed from service.
+    ``connections_stale`` counts the subset that failed their checkout health
+    check — a rising count means the server is dropping idle connections
+    (restart, failover, an idle NAT timeout shorter than the keepalive).
     Hold durations include return/rollback cleanup, but not acquisition waits.
     Snapshots are copies; a new pool starts fresh and shutdown returns None.
     """
@@ -455,6 +567,28 @@ def pool_stats() -> Optional[Dict[str, int]]:
         return None
 
 
+def _rollback_quietly(conn) -> None:
+    """Roll back without letting the rollback replace the real error.
+
+    ``rollback()`` on a connection whose socket is already gone raises
+    ``InterfaceError``. Raised from inside an ``except`` block that was about
+    to re-raise, it becomes the exception the caller sees — so a Postgres
+    restart surfaced as "connection already closed" everywhere instead of the
+    query error that actually happened, and the traceback pointed at the
+    cleanup rather than at the failing statement. The failure is worth a debug
+    line and nothing more: ``_close_connection`` already discards a connection
+    whose return path breaks, so the slot is not leaked either way.
+    """
+    try:
+        conn.rollback()
+    except Exception:  # noqa: BLE001 — must not mask the original exception
+        logger.debug(
+            "rollback failed while handling an error; discarding the "
+            "connection and re-raising the original exception",
+            exc_info=True,
+        )
+
+
 @contextmanager
 def get_db():
     """Context manager for database connections.
@@ -467,7 +601,7 @@ def get_db():
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        _rollback_quietly(conn)
         raise
     finally:
         _close_connection(conn)
@@ -499,7 +633,7 @@ def transaction():
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        _rollback_quietly(conn)
         raise
     finally:
         _close_connection(conn)

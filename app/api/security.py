@@ -14,6 +14,7 @@ from app.core.models import (
 from app.core import audit_service
 from app.api.auth import require_admin
 from app.db import database as db
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +45,15 @@ async def get_audit_log(
     limit = min(limit, 500)
 
     # Get logs
-    entries = db.get_audit_logs(
+    entries = await run_sync(
+        db.get_audit_logs,
         event_type=event_type,
         limit=limit,
         offset=offset
     )
 
     # Get total count
-    total = db.get_audit_log_count(event_type=event_type)
+    total = await run_sync(db.get_audit_log_count, event_type=event_type)
 
     # Convert to response model
     audit_entries = [

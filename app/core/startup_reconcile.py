@@ -60,6 +60,7 @@ from typing import Any, Dict, Optional
 from app.core.config import settings
 from app.db.base import get_db
 from app.db.compat import ph
+from app.db.async_database import run_sync
 from app.db.error_logs import record_error
 
 logger = logging.getLogger(__name__)
@@ -163,7 +164,8 @@ async def _mark_stale_background_task_rows() -> int:
                 "Boot reconcile: emitting terminal frame for stale background "
                 "task %s/%s failed", session_id, task_id,
             )
-            record_error(
+            await run_sync(
+                record_error,
                 "backend",
                 f"Boot reconcile: failed to emit terminal frame for stale "
                 f"background task {task_id} (session {session_id}): {exc}",
@@ -173,7 +175,8 @@ async def _mark_stale_background_task_rows() -> int:
             )
 
     count = len(rows)
-    record_error(
+    await run_sync(
+        record_error,
         "backend",
         f"Boot reconcile: {count} durable background-task row(s) were "
         "still non-terminal when the server stopped; marked them killed "
@@ -414,7 +417,8 @@ async def sweep_stalled_parks(
                     "Park watchdog: session %s has been parked for %ss with no "
                     "wake (turn %s)", session_id, parked_seconds, turn_id,
                 )
-                record_error(
+                await run_sync(
+                    record_error,
                     "backend",
                     f"Session {session_id} has been parked on background work "
                     f"for {parked_seconds}s with no wake. Either the work is "
@@ -522,7 +526,8 @@ async def _force_stalled_park(
         "Park watchdog: forced %d task frame(s) for session %s parked %ss "
         "with no wake (turn %s)", len(rows), session_id, parked_seconds, turn_id,
     )
-    record_error(
+    await run_sync(
+        record_error,
         "backend",
         f"Session {session_id} was parked on background work for "
         f"{parked_seconds}s with no wake; the park watchdog settled "
@@ -560,7 +565,8 @@ async def _repair_orphaned_engine_pending() -> int:
             "Boot reconcile: repaired %d orphaned engine-pending task id(s)",
             repaired,
         )
-        record_error(
+        await run_sync(
+            record_error,
             "backend",
             f"Boot reconcile: {repaired} background task(s) were still listed "
             "as pending by their session's engine although the app had already "
@@ -752,7 +758,8 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
         counts["turns_reaped"] = await _boot_reap_and_kick_turns()
     except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
         logger.exception("Boot reconcile: reaping dead-lease turns failed")
-        record_error(
+        await run_sync(
+            record_error,
             "backend",
             f"Boot reconcile failed while reaping dead-lease turns: {exc}",
             detail=traceback.format_exc(),
@@ -765,7 +772,8 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
         )
     except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
         logger.exception("Boot reconcile: clearing stale parked markers failed")
-        record_error(
+        await run_sync(
+            record_error,
             "backend",
             f"Boot reconcile failed while clearing stale parked markers: {exc}",
             detail=traceback.format_exc(),
@@ -776,7 +784,8 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
         counts["background_task_rows_killed"] = await _mark_stale_background_task_rows()
     except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
         logger.exception("Boot reconcile: marking stale background-task rows failed")
-        record_error(
+        await run_sync(
+            record_error,
             "backend",
             f"Boot reconcile failed while marking stale background-task rows: {exc}",
             detail=traceback.format_exc(),
@@ -794,7 +803,8 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
         counts["engine_pending_repaired"] = await _repair_orphaned_engine_pending()
     except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
         logger.exception("Boot reconcile: engine pending-set repair failed")
-        record_error(
+        await run_sync(
+            record_error,
             "backend",
             f"Boot reconcile failed while repairing engine pending sets: {exc}",
             detail=traceback.format_exc(),
@@ -807,7 +817,8 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
         )
     except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
         logger.exception("Boot reconcile: resetting orphaned session statuses failed")
-        record_error(
+        await run_sync(
+            record_error,
             "backend",
             f"Boot reconcile failed while resetting orphaned session statuses: {exc}",
             detail=traceback.format_exc(),
@@ -823,7 +834,8 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
             )
         except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
             logger.exception("Boot reconcile: stray CLI sweep failed")
-            record_error(
+            await run_sync(
+                record_error,
                 "backend",
                 f"Boot reconcile failed while sweeping stray CLI processes: {exc}",
                 detail=traceback.format_exc(),

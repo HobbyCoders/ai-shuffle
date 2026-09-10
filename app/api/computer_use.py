@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.api.auth import require_admin, require_auth
+from app.db.async_database import run_sync
 from app.db.settings import get_system_setting, set_system_setting
 from app.mcp.computer_use import activity, abort, safety, overlay
 from app.mcp.computer_use.scaling import computer_use_available
@@ -94,7 +95,7 @@ async def get_status(token: str = Depends(require_auth)) -> StatusResponse:
     return StatusResponse(
         available=available,
         reason=reason,
-        enabled=get_computer_use_enabled(),
+        enabled=await run_sync(get_computer_use_enabled),
         active=bool(snap["active"]),
         display=snap["display"],
         display_label=label,
@@ -113,7 +114,7 @@ async def stop_computer_use(token: str = Depends(require_auth)) -> dict:
 @router.get("/enabled", response_model=EnabledStateResponse)
 async def get_enabled(token: str = Depends(require_auth)) -> EnabledStateResponse:
     """Report the global toggle."""
-    return EnabledStateResponse(enabled=get_computer_use_enabled())
+    return EnabledStateResponse(enabled=await run_sync(get_computer_use_enabled))
 
 
 @router.put("/enabled", response_model=EnabledStateResponse)
@@ -121,7 +122,9 @@ async def set_enabled(
     payload: SetEnabledRequest, token: str = Depends(require_admin)
 ) -> EnabledStateResponse:
     """Set the global computer-use toggle (admin — it grants host input access)."""
-    set_system_setting(ENABLED_SETTING_KEY, "true" if payload.enabled else "false")
+    await run_sync(
+        set_system_setting, ENABLED_SETTING_KEY, "true" if payload.enabled else "false"
+    )
     if not payload.enabled:
         abort.stop_active("disabled")
     logger.info("computer-use global toggle set to %s via API", payload.enabled)

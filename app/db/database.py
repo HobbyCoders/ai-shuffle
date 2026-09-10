@@ -11,6 +11,7 @@ Only schema initialisation and maintenance helpers live here directly.
 import json
 import logging
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
@@ -53,6 +54,41 @@ def _safe_json(value):
     if isinstance(value, str):
         return json.loads(value)
     return value
+
+
+@contextmanager
+def _savepoint(cursor, name: str):
+    """Fence a swallow-and-continue block inside the boot transaction.
+
+    The whole migration pass runs in ONE transaction. On real PostgreSQL the
+    first error aborts that transaction outright: every later statement fails
+    with ``InFailedSqlTransaction`` and the entire pass rolls back, so a boot
+    that swallows one harmless error loses all of its work and loops. (The
+    SQLite test shim keeps going after an error, which is why the bare
+    ``except ...: pass`` blocks survived this long.)
+
+    A savepoint makes the swallow real: on failure only the statements inside
+    the block are undone and the transaction stays usable.
+
+    Usage mirrors the hand-written fences in ``schema_postgres`` — the caller
+    still owns the ``except``, this only manages the savepoint::
+
+        try:
+            with _savepoint(cursor, "sp_thing"):
+                cursor.execute(...)
+        except _DB_ERRORS:
+            pass
+    """
+    _validate_identifier(name, "savepoint name")
+    cursor.execute(f"SAVEPOINT {name}")
+    try:
+        yield
+    except BaseException:
+        cursor.execute(f"ROLLBACK TO SAVEPOINT {name}")
+        cursor.execute(f"RELEASE SAVEPOINT {name}")
+        raise
+    else:
+        cursor.execute(f"RELEASE SAVEPOINT {name}")
 
 
 # ============================================================================
@@ -489,11 +525,11 @@ def _run_column_migrations(cursor):
 
     # Drop unique index that prevented multiple worktrees on same branch
     # (Users should be able to have multiple worktrees on the same branch)
-    try:
-        cursor.execute("DROP INDEX IF EXISTS idx_worktrees_active_branch")
-        migrations_applied.append("dropped idx_worktrees_active_branch")
-    except _DB_ERRORS:
-        pass  # Index doesn't exist, that's fine
+    # ``IF EXISTS`` already covers the only failure the old try/except caught,
+    # and a bare swallow here would abort the whole boot transaction on real
+    # Postgres for anything else.
+    cursor.execute("DROP INDEX IF EXISTS idx_worktrees_active_branch")
+    migrations_applied.append("dropped idx_worktrees_active_branch")
 
     # Migrate notes table to global (remove project_id and linked_sessions) (v31)
     if table_exists(cursor, "notes") and column_exists(cursor, "notes", "project_id"):
@@ -584,7 +620,11 @@ def _run_column_migrations(cursor):
             cursor.execute("ALTER TABLE sessions ADD COLUMN automation_id TEXT")
             migrations_applied.append("sessions.automation_id")
             # Backfill from run history for sessions created before the column.
-            try:
+            # Pre-checked rather than try/except: "automation_runs may not exist
+            # yet" was the only thing the old swallow covered, and a swallowed
+            # error inside this single boot transaction poisons every statement
+            # after it on real Postgres.
+            if table_exists(cursor, "automation_runs"):
                 cursor.execute("""
                     UPDATE sessions SET automation_id = (
                         SELECT ar.automation_id FROM automation_runs ar
@@ -599,8 +639,6 @@ def _run_column_migrations(cursor):
                     logger.info(
                         f"Backfilled automation_id for {cursor.rowcount} sessions"
                     )
-            except _DB_ERRORS:
-                pass  # automation_runs table may not exist yet
         # Durable parked marker (v51): non-NULL means the parent turn ended
         # while background work (a sub-agent, or an SDK-backgrounded shell) was
         # still running — the session is "parked" awaiting an unpark follow-up.
@@ -661,20 +699,21 @@ def _run_column_migrations(cursor):
         # mentioning information_schema.columns into a two-parameter pragma
         # query before it ever gets to skip it.
         try:
-            cursor.execute("""
-                DO $$ BEGIN
-                    IF EXISTS (
-                        SELECT 1 FROM pg_attribute a
-                        WHERE a.attrelid = 'sessions'::regclass
-                          AND a.attname IN ('total_tokens_in', 'total_tokens_out')
-                          AND a.atttypid <> 'bigint'::regtype
-                    ) THEN
-                        ALTER TABLE sessions
-                            ALTER COLUMN total_tokens_in TYPE BIGINT,
-                            ALTER COLUMN total_tokens_out TYPE BIGINT;
-                    END IF;
-                END $$
-            """)
+            with _savepoint(cursor, "sp_tokens_bigint"):
+                cursor.execute("""
+                    DO $$ BEGIN
+                        IF EXISTS (
+                            SELECT 1 FROM pg_attribute a
+                            WHERE a.attrelid = 'sessions'::regclass
+                              AND a.attname IN ('total_tokens_in', 'total_tokens_out')
+                              AND a.atttypid <> 'bigint'::regtype
+                        ) THEN
+                            ALTER TABLE sessions
+                                ALTER COLUMN total_tokens_in TYPE BIGINT,
+                                ALTER COLUMN total_tokens_out TYPE BIGINT;
+                        END IF;
+                    END $$
+                """)
         except _DB_ERRORS:
             pass  # a backend without DO blocks — the columns stay as they are
         # Legacy cloud offload removal (v48): the per-session proxy model
@@ -687,20 +726,22 @@ def _run_column_migrations(cursor):
         if column_exists(cursor, "sessions", "cloud_remote_session_id"):
             cursor.execute("ALTER TABLE sessions DROP COLUMN cloud_remote_session_id")
             migrations_applied.append("drop sessions.cloud_remote_session_id")
-        # Backfill for existing sessions with active worktrees
-        if "sessions.worktree_branch" in migrations_applied:
-            try:
-                cursor.execute("""
-                    UPDATE sessions SET
-                        worktree_branch = (SELECT w.branch_name FROM worktrees w WHERE w.id = sessions.worktree_id),
-                        worktree_path = (SELECT w.worktree_path FROM worktrees w WHERE w.id = sessions.worktree_id)
-                    WHERE worktree_id IS NOT NULL AND worktree_branch IS NULL
-                """)
-                backfilled = cursor.rowcount
-                if backfilled > 0:
-                    logger.info(f"Backfilled worktree_branch/worktree_path for {backfilled} sessions")
-            except _DB_ERRORS:
-                pass  # worktrees table may not exist yet
+        # Backfill for existing sessions with active worktrees. Pre-checked
+        # instead of swallowed: "worktrees may not exist yet" is the whole of
+        # what the old except covered, and a swallow inside the boot
+        # transaction takes every later statement down with it on Postgres.
+        if "sessions.worktree_branch" in migrations_applied and table_exists(
+            cursor, "worktrees"
+        ):
+            cursor.execute("""
+                UPDATE sessions SET
+                    worktree_branch = (SELECT w.branch_name FROM worktrees w WHERE w.id = sessions.worktree_id),
+                    worktree_path = (SELECT w.worktree_path FROM worktrees w WHERE w.id = sessions.worktree_id)
+                WHERE worktree_id IS NOT NULL AND worktree_branch IS NULL
+            """)
+            backfilled = cursor.rowcount
+            if backfilled > 0:
+                logger.info(f"Backfilled worktree_branch/worktree_path for {backfilled} sessions")
 
     # Per-turn cache usage on the usage log (audit P8). Without these a usage row
     # records only the fresh input tokens, so replaying the log can never
@@ -764,15 +805,17 @@ def _run_column_migrations(cursor):
             cursor.execute("ALTER TABLE sessions ADD COLUMN instance_id TEXT")
             # Backfill existing sessions from their project's instance_id so that
             # legacy sessions stay visible on the instance that owns the project.
-            try:
+            # Pre-checked (projects may not exist yet in pathological cases)
+            # rather than swallowed inside the boot transaction.
+            if table_exists(cursor, "projects") and column_exists(
+                cursor, "projects", "instance_id"
+            ):
                 cursor.execute("""
                     UPDATE sessions SET instance_id = (
                         SELECT p.instance_id FROM projects p WHERE p.id = sessions.project_id
                     )
                     WHERE instance_id IS NULL AND project_id IS NOT NULL
                 """)
-            except _DB_ERRORS:
-                pass  # projects table may not exist yet in pathological cases
             migrations_applied.append("sessions.instance_id")
         # Always ensure the index exists (idempotent for fresh installs + upgrades)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_instance ON sessions(instance_id)")
@@ -780,14 +823,15 @@ def _run_column_migrations(cursor):
         # sessions without a project_id that the original migration missed).
         # Assigns them to the current instance so they stop leaking across installs.
         try:
-            from app.core.config import settings
-            _ph = ph()
-            cursor.execute(
-                f"UPDATE sessions SET instance_id = {_ph} WHERE instance_id IS NULL",
-                (settings.effective_instance_id,)
-            )
-            if cursor.rowcount and cursor.rowcount > 0:
-                migrations_applied.append(f"sessions.instance_id_backfill({cursor.rowcount} rows)")
+            with _savepoint(cursor, "sp_instance_backfill"):
+                from app.core.config import settings
+                _ph = ph()
+                cursor.execute(
+                    f"UPDATE sessions SET instance_id = {_ph} WHERE instance_id IS NULL",
+                    (settings.effective_instance_id,)
+                )
+                if cursor.rowcount and cursor.rowcount > 0:
+                    migrations_applied.append(f"sessions.instance_id_backfill({cursor.rowcount} rows)")
         except _DB_ERRORS:
             pass
 
@@ -1054,6 +1098,13 @@ def _run_column_migrations(cursor):
     # to the owning device. Idempotent so upgrades from any older version land
     # the table without needing the SCHEMA_VERSION bump to fire the bootstrap
     # path (same defensive pattern as the SessionStore / error_log blocks above).
+    #
+    # approved_at / revoked_at are declared HERE as well as in the ADD COLUMN
+    # block further up. That block runs earlier in the pass and is guarded on
+    # ``table_exists(installs)``, so on a database whose version is current but
+    # whose ``installs`` table is missing (restore, hand edit) it is skipped and
+    # this CREATE is the only thing that lands the table — it used to land it
+    # without the approval columns, and nothing else ever added them.
     if not table_exists(cursor, "installs"):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS installs (
@@ -1063,6 +1114,8 @@ def _run_column_migrations(cursor):
                 platform TEXT,
                 version TEXT,
                 capabilities JSONB DEFAULT '{}',
+                approved_at TIMESTAMP WITH TIME ZONE,
+                revoked_at TIMESTAMP WITH TIME ZONE,
                 last_seen TIMESTAMP WITH TIME ZONE,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -1186,23 +1239,24 @@ def _run_column_migrations(cursor):
         # canonical normalizer; best-effort so a startup never fails on it.
         if table_exists(cursor, "git_repositories"):
             try:
-                from app.core.project_links import auto_link_group_id
-                cursor.execute(
-                    """
-                    SELECT p.id AS project_id, r.remote_url AS remote_url
-                    FROM projects p
-                    JOIN git_repositories r ON r.project_id = p.id
-                    WHERE r.remote_url IS NOT NULL AND r.remote_url <> ''
-                    """
-                )
-                backfill = [(row["project_id"], row["remote_url"]) for row in cursor.fetchall()]
-                for pid, remote_url in backfill:
-                    gid = auto_link_group_id(remote_url)
-                    if gid:
-                        cursor.execute(
-                            "UPDATE projects SET link_group_id = %s WHERE id = %s AND link_group_id IS NULL",
-                            (gid, pid),
-                        )
+                with _savepoint(cursor, "sp_link_group_backfill"):
+                    from app.core.project_links import auto_link_group_id
+                    cursor.execute(
+                        """
+                        SELECT p.id AS project_id, r.remote_url AS remote_url
+                        FROM projects p
+                        JOIN git_repositories r ON r.project_id = p.id
+                        WHERE r.remote_url IS NOT NULL AND r.remote_url <> ''
+                        """
+                    )
+                    backfill = [(row["project_id"], row["remote_url"]) for row in cursor.fetchall()]
+                    for pid, remote_url in backfill:
+                        gid = auto_link_group_id(remote_url)
+                        if gid:
+                            cursor.execute(
+                                "UPDATE projects SET link_group_id = %s WHERE id = %s AND link_group_id IS NULL",
+                                (gid, pid),
+                            )
             except Exception:  # noqa: BLE001 — backfill is best-effort
                 logger.warning("link_group_id backfill skipped", exc_info=True)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_projects_link_group ON projects(link_group_id)")
@@ -2339,10 +2393,11 @@ def _backfill_provider_media_models(cursor) -> Optional[Tuple[int, int]]:
     from app.core import model_modality
 
     try:
-        cursor.execute(
-            "SELECT id, models_json, default_model, small_fast_model FROM model_providers"
-        )
-        rows = cursor.fetchall()
+        with _savepoint(cursor, "sp_media_scrub_read"):
+            cursor.execute(
+                "SELECT id, models_json, default_model, small_fast_model FROM model_providers"
+            )
+            rows = cursor.fetchall()
     except Exception:  # noqa: BLE001 — table shape varies across old installs
         logger.warning("provider media scrub skipped", exc_info=True)
         return None
@@ -2352,35 +2407,39 @@ def _backfill_provider_media_models(cursor) -> Optional[Tuple[int, int]]:
 
     for row in rows:
         try:
-            raw = row["models_json"]
-            if isinstance(raw, str):
-                models = json.loads(raw) if raw.strip() else []
-            else:
-                models = raw or []
-            if not isinstance(models, list) or not models:
-                continue
+            # One savepoint per row: without it the first bad row aborts the
+            # boot transaction and "one bad row must not stop the rest" becomes
+            # "one bad row kills the whole migration pass" on real Postgres.
+            with _savepoint(cursor, "sp_media_scrub_row"):
+                raw = row["models_json"]
+                if isinstance(raw, str):
+                    models = json.loads(raw) if raw.strip() else []
+                else:
+                    models = raw or []
+                if not isinstance(models, list) or not models:
+                    continue
 
-            text, media = model_modality.split_media_models(models)
-            if not media:
-                continue
+                text, media = model_modality.split_media_models(models)
+                if not media:
+                    continue
 
-            media_ids = {
-                (m.get("id") if isinstance(m, dict) else m) for m in media
-            }
-            updates = ["models_json = %s"]
-            params: list = [json.dumps(text)]
+                media_ids = {
+                    (m.get("id") if isinstance(m, dict) else m) for m in media
+                }
+                updates = ["models_json = %s"]
+                params: list = [json.dumps(text)]
 
-            for column in ("default_model", "small_fast_model"):
-                if row[column] and row[column] in media_ids:
-                    updates.append(f"{column} = NULL")
+                for column in ("default_model", "small_fast_model"):
+                    if row[column] and row[column] in media_ids:
+                        updates.append(f"{column} = NULL")
 
-            params.append(row["id"])
-            cursor.execute(
-                f"UPDATE model_providers SET {', '.join(updates)} WHERE id = %s",
-                tuple(params),
-            )
-            removed_ids += len(media)
-            touched_rows += 1
+                params.append(row["id"])
+                cursor.execute(
+                    f"UPDATE model_providers SET {', '.join(updates)} WHERE id = %s",
+                    tuple(params),
+                )
+                removed_ids += len(media)
+                touched_rows += 1
         except Exception:  # noqa: BLE001 — one bad row must not stop the rest
             logger.warning(
                 "provider media scrub skipped for one row", exc_info=True
@@ -2556,7 +2615,8 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
 
         # 1. Update query planner statistics.
         try:
-            cursor.execute("ANALYZE")
+            with _savepoint(cursor, "sp_maint_analyze"):
+                cursor.execute("ANALYZE")
             results["analyze"] = "ok"
         except Exception as e:
             results["analyze"] = f"error: {e}"
@@ -2570,8 +2630,10 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
         }
         for table, ts_col in log_tables.items():
             try:
-                cursor.execute(f"DELETE FROM {table} WHERE {ts_col} < %s", (cutoff_7d,))
-                results[f"cleaned_{table}"] = cursor.rowcount
+                with _savepoint(cursor, "sp_maint_logs"):
+                    cursor.execute(f"DELETE FROM {table} WHERE {ts_col} < %s", (cutoff_7d,))
+                    cleaned = cursor.rowcount
+                results[f"cleaned_{table}"] = cleaned
             except Exception as e:
                 results[f"cleaned_{table}"] = f"error: {e}"
 
@@ -2581,17 +2643,21 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
         # 7-day cutoff bounds growth without touching in-flight work —
         # queued/running ops are never swept, only done/error rows.
         try:
-            cursor.execute(
-                "DELETE FROM git_ops WHERE status IN ('done', 'error') "
-                "AND updated_at < %s",
-                (cutoff_7d,),
-            )
-            results["cleaned_git_ops"] = cursor.rowcount
+            with _savepoint(cursor, "sp_maint_git_ops"):
+                cursor.execute(
+                    "DELETE FROM git_ops WHERE status IN ('done', 'error') "
+                    "AND updated_at < %s",
+                    (cutoff_7d,),
+                )
+                cleaned = cursor.rowcount
+            results["cleaned_git_ops"] = cleaned
         except Exception as e:
             results["cleaned_git_ops"] = f"error: {e}"
         try:
-            cursor.execute("DELETE FROM upload_blobs WHERE created_at < %s", (cutoff_7d,))
-            results["cleaned_upload_blobs"] = cursor.rowcount
+            with _savepoint(cursor, "sp_maint_upload_blobs"):
+                cursor.execute("DELETE FROM upload_blobs WHERE created_at < %s", (cutoff_7d,))
+                cleaned = cursor.rowcount
+            results["cleaned_upload_blobs"] = cleaned
         except Exception as e:
             results["cleaned_upload_blobs"] = f"error: {e}"
 
@@ -2601,18 +2667,20 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
         # especially (the accounting backfill has no other source). Bounded to
         # sessions idle past the window, so live replay is untouched.
         try:
-            from app.core.config import settings as _settings
-            from app.db.fluid_events import prune_fluid_delta_events
+            with _savepoint(cursor, "sp_maint_fluid_deltas"):
+                from app.core.config import settings as _settings
+                from app.db.fluid_events import prune_fluid_delta_events
 
-            _retention_days = int(
-                getattr(_settings, "fluid_event_retention_days", 7) or 0
-            )
-            if _retention_days > 0:
-                results["cleaned_fluid_delta_events"] = prune_fluid_delta_events(
-                    _retention_days, cursor=cursor
+                _retention_days = int(
+                    getattr(_settings, "fluid_event_retention_days", 7) or 0
                 )
-            else:
-                results["cleaned_fluid_delta_events"] = "disabled"
+                if _retention_days > 0:
+                    pruned = prune_fluid_delta_events(
+                        _retention_days, cursor=cursor
+                    )
+                else:
+                    pruned = "disabled"
+            results["cleaned_fluid_delta_events"] = pruned
         except Exception as e:
             results["cleaned_fluid_delta_events"] = f"error: {e}"
 
@@ -2624,38 +2692,42 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
         # inside, so a large install is covered across passes rather than in one
         # long transaction. Shares this maintenance transaction's cursor.
         try:
-            from app.db.session_events import compact_idle_session_deltas
+            with _savepoint(cursor, "sp_maint_compact_deltas"):
+                from app.db.session_events import compact_idle_session_deltas
 
-            results["compacted_session_event_deltas"] = compact_idle_session_deltas(
-                7, cursor=cursor
-            )["rows"]
+                compacted = compact_idle_session_deltas(7, cursor=cursor)["rows"]
+            results["compacted_session_event_deltas"] = compacted
         except Exception as e:
             results["compacted_session_event_deltas"] = f"error: {e}"
 
         # 2b. Notifications retention: drop anything older than 30 days, then cap
         # each user to the most recent N rows so the table can't grow unbounded.
         try:
-            cursor.execute("DELETE FROM notifications WHERE created_at < %s", (cutoff_30d,))
-            results["cleaned_notifications_age"] = cursor.rowcount
+            with _savepoint(cursor, "sp_maint_notif_age"):
+                cursor.execute("DELETE FROM notifications WHERE created_at < %s", (cutoff_30d,))
+                cleaned = cursor.rowcount
+            results["cleaned_notifications_age"] = cleaned
         except Exception as e:
             results["cleaned_notifications_age"] = f"error: {e}"
         try:
-            cursor.execute(
-                """
-                DELETE FROM notifications
-                WHERE id IN (
-                    SELECT id FROM (
-                        SELECT id, ROW_NUMBER() OVER (
-                            PARTITION BY user_id ORDER BY created_at DESC
-                        ) AS rn
-                        FROM notifications
-                    ) ranked
-                    WHERE rn > %s
+            with _savepoint(cursor, "sp_maint_notif_cap"):
+                cursor.execute(
+                    """
+                    DELETE FROM notifications
+                    WHERE id IN (
+                        SELECT id FROM (
+                            SELECT id, ROW_NUMBER() OVER (
+                                PARTITION BY user_id ORDER BY created_at DESC
+                            ) AS rn
+                            FROM notifications
+                        ) ranked
+                        WHERE rn > %s
+                    )
+                    """,
+                    (NOTIFICATIONS_PER_USER_CAP,),
                 )
-                """,
-                (NOTIFICATIONS_PER_USER_CAP,),
-            )
-            results["cleaned_notifications_cap"] = cursor.rowcount
+                cleaned = cursor.rowcount
+            results["cleaned_notifications_cap"] = cleaned
         except Exception as e:
             results["cleaned_notifications_cap"] = f"error: {e}"
 
@@ -2679,6 +2751,12 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
                 cursor.execute("VACUUM ANALYZE")
                 results["vacuum"] = "ok"
             finally:
+                # VACUUM uses a session setting; do not leak it to the next borrower.
+                try:
+                    conn.cursor().execute("RESET max_parallel_maintenance_workers")
+                except Exception:
+                    # A connection we cannot reset must not return to service.
+                    conn.close()
                 # Always reset autocommit before returning to pool,
                 # even if VACUUM raises — otherwise the pooled connection
                 # is left in autocommit mode, breaking transaction semantics

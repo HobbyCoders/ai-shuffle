@@ -41,6 +41,7 @@ from app.core import (
     xai_oauth,
 )
 from app.db import database as db
+from app.db.async_database import run_sync
 
 from app.api import openai_billing
 
@@ -733,7 +734,7 @@ def _row_with_token_flags(provider_id: str) -> Optional[Dict[str, Any]]:
 @router.get("/", response_model=ModelProviderListResponse)
 async def list_providers(token: str = Depends(require_admin)):
     """List all model providers (public/masked view — no tokens)."""
-    rows = db.get_all_model_providers(include_token=True)
+    rows = await run_sync(db.get_all_model_providers, include_token=True)
     providers = [_public_provider(_apply_token_flags(row)) for row in rows]
     return ModelProviderListResponse(providers=providers)
 
@@ -757,7 +758,8 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
 
     base_url = _normalize_base_url(body.provider_type, body.base_url)
 
-    row = db.create_model_provider(
+    row = await run_sync(
+        db.create_model_provider,
         provider_id=provider_id,
         name=body.name,
         provider_type=body.provider_type,
@@ -776,7 +778,7 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                             detail="Could not create model provider")
 
-    full_row = _row_with_token_flags(provider_id)
+    full_row = await run_sync(_row_with_token_flags, provider_id)
     return _public_provider(full_row)
 
 
@@ -785,7 +787,7 @@ async def update_provider(
     provider_id: str, body: ModelProviderUpdate, token: str = Depends(require_admin)
 ):
     """Partially update a model provider. Blank/omitted auth_token = unchanged."""
-    existing = db.get_model_provider(provider_id)
+    existing = await run_sync(db.get_model_provider, provider_id)
     if existing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
@@ -839,14 +841,14 @@ async def update_provider(
 
     if updates:
         async with openai_billing.openai_billing_browser.operation_lock(provider_id):
-            row = db.update_model_provider(provider_id, **updates)
+            row = await run_sync(db.update_model_provider, provider_id, **updates)
             if row is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                     detail="Model provider not found")
             if not row.get("enabled") or not openai_billing._is_openai_platform_row(row):
                 await openai_billing.close_provider_billing(provider_id)
 
-    full_row = _row_with_token_flags(provider_id)
+    full_row = await run_sync(_row_with_token_flags, provider_id)
     return _public_provider(full_row)
 
 
@@ -861,7 +863,7 @@ async def delete_provider(provider_id: str, token: str = Depends(require_admin))
     await _best_effort_revoke_codex(provider_id)
     async with openai_billing.openai_billing_browser.operation_lock(provider_id):
         await openai_billing.close_provider_billing(provider_id)
-        deleted = db.delete_model_provider(provider_id)
+        deleted = await run_sync(db.delete_model_provider, provider_id)
         if not deleted:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Model provider not found")
@@ -875,7 +877,7 @@ async def _best_effort_revoke_codex(provider_id: str) -> None:
     down, encryption locked, token already dead).
     """
     try:
-        stored = db.get_codex_tokens(provider_id)
+        stored = await run_sync(db.get_codex_tokens, provider_id)
         if not stored:
             return
         enc_refresh = stored.get("codex_refresh_token")
@@ -892,20 +894,22 @@ async def _best_effort_revoke_codex(provider_id: str) -> None:
 @router.post("/{provider_id}/toggle", response_model=ModelProviderResponse)
 async def toggle_provider(provider_id: str, token: str = Depends(require_admin)):
     """Flip a model provider's ``enabled`` flag."""
-    existing = db.get_model_provider(provider_id)
+    existing = await run_sync(db.get_model_provider, provider_id)
     if existing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
 
     async with openai_billing.openai_billing_browser.operation_lock(provider_id):
-        row = db.set_model_provider_enabled(provider_id, not bool(existing.get("enabled")))
+        row = await run_sync(
+            db.set_model_provider_enabled, provider_id, not bool(existing.get("enabled"))
+        )
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Model provider not found")
         if not row.get("enabled"):
             await openai_billing.close_provider_billing(provider_id)
 
-    full_row = _row_with_token_flags(provider_id)
+    full_row = await run_sync(_row_with_token_flags, provider_id)
     return _public_provider(full_row)
 
 
@@ -930,12 +934,12 @@ _capability_semaphore = asyncio.Semaphore(4)
 
 
 async def _refresh_provider_capabilities(provider_id: str) -> bool:
-    row = db.get_model_provider(provider_id)
+    row = await run_sync(db.get_model_provider, provider_id)
     if not row or not row.get("enabled"):
         return False
     lock = _capability_locks.setdefault(provider_id, asyncio.Lock())
     async with lock:
-        row = db.get_model_provider(provider_id)
+        row = await run_sync(db.get_model_provider, provider_id)
         if not row or not row.get("enabled"):
             return False
         generation = row.get("revision")
@@ -949,7 +953,7 @@ async def _refresh_provider_capabilities(provider_id: str) -> bool:
                 response = await asyncio.wait_for(fetch_models(provider_id, token=""), timeout=_FETCH_TIMEOUT + 5)
             fresh = {m["id"]: m for m in response.models}
             # Re-read after network I/O: preserve edits made while awaiting upstream.
-            current = db.get_model_provider(provider_id)
+            current = await run_sync(db.get_model_provider, provider_id)
             if not current or not current.get("enabled") or current.get("revision") != generation:
                 return False
             from app.core.model_effort import sanitize_effort_metadata
@@ -972,8 +976,9 @@ async def _refresh_provider_capabilities(provider_id: str) -> bool:
                 merged.append(updated)
             changed = merged != (current.get("models_json") or [])
             if changed:
-                saved = db.update_model_provider(provider_id, models_json=merged,
-                                                 expected_revision=generation)
+                saved = await run_sync(db.update_model_provider, provider_id,
+                                       models_json=merged,
+                                       expected_revision=generation)
                 if saved is None:
                     return False
                 generation = saved.get("revision")
@@ -1021,7 +1026,7 @@ async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
     curated subset through the existing ``PATCH /{id}`` update route. There is no
     second write path here.
     """
-    row = db.get_model_provider(provider_id, include_token=True)
+    row = await run_sync(db.get_model_provider, provider_id, include_token=True)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
@@ -1432,7 +1437,7 @@ async def codex_device_start(provider_id: str, token: str = Depends(require_admi
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=encryption.credential_storage_error(),
         )
-    if db.get_model_provider(provider_id) is None:
+    if await run_sync(db.get_model_provider, provider_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
 
@@ -1489,7 +1494,8 @@ async def codex_device_poll(provider_id: str, token: str = Depends(require_admin
     id_token_exp = exp_dt.isoformat() if exp_dt is not None else None
 
     from datetime import datetime, timezone
-    row = db.set_codex_token_bundle(
+    row = await run_sync(
+        db.set_codex_token_bundle,
         provider_id,
         access_token=enc_access,
         refresh_token=enc_refresh,
@@ -1503,7 +1509,7 @@ async def codex_device_poll(provider_id: str, token: str = Depends(require_admin
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
 
-    full_row = _row_with_token_flags(provider_id)
+    full_row = await run_sync(_row_with_token_flags, provider_id)
     return CodexDevicePollResponse(status="complete", provider=_public_provider(full_row))
 
 
@@ -1523,11 +1529,12 @@ async def codex_clear_reauth(provider_id: str, token: str = Depends(require_admi
     encrypted blobs); flips just the flag. Used to dismiss a stale reconnect
     prompt without re-enrolling.
     """
-    stored = db.get_codex_tokens(provider_id)
+    stored = await run_sync(db.get_codex_tokens, provider_id)
     if stored is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
-    row = db.set_codex_token_bundle(
+    row = await run_sync(
+        db.set_codex_token_bundle,
         provider_id,
         access_token=stored.get("codex_access_token"),
         refresh_token=stored.get("codex_refresh_token"),
@@ -1539,7 +1546,7 @@ async def codex_clear_reauth(provider_id: str, token: str = Depends(require_admi
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
-    full_row = _row_with_token_flags(provider_id)
+    full_row = await run_sync(_row_with_token_flags, provider_id)
     return _public_provider(full_row)
 
 
@@ -1597,7 +1604,7 @@ async def xai_device_start(provider_id: str, token: str = Depends(require_admin)
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=encryption.credential_storage_error(),
         )
-    if db.get_model_provider(provider_id) is None:
+    if await run_sync(db.get_model_provider, provider_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
 
@@ -1650,7 +1657,8 @@ async def xai_device_poll(provider_id: str, token: str = Depends(require_admin))
     id_token_exp = exp_dt.isoformat() if exp_dt is not None else None
 
     from datetime import datetime, timezone
-    row = db.set_codex_token_bundle(
+    row = await run_sync(
+        db.set_codex_token_bundle,
         provider_id,
         access_token=enc_access,
         refresh_token=enc_refresh,
@@ -1665,9 +1673,9 @@ async def xai_device_poll(provider_id: str, token: str = Depends(require_admin))
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
 
-    _seed_xai_preset_if_empty(provider_id)
+    await run_sync(_seed_xai_preset_if_empty, provider_id)
 
-    full_row = _row_with_token_flags(provider_id)
+    full_row = await run_sync(_row_with_token_flags, provider_id)
     return CodexDevicePollResponse(status="complete", provider=_public_provider(full_row))
 
 
@@ -1685,11 +1693,12 @@ async def xai_clear_reauth(provider_id: str, token: str = Depends(require_admin)
 
     Preserves the stored token bundle and ``auth_mode='grok'``.
     """
-    stored = db.get_codex_tokens(provider_id)
+    stored = await run_sync(db.get_codex_tokens, provider_id)
     if stored is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
-    row = db.set_codex_token_bundle(
+    row = await run_sync(
+        db.set_codex_token_bundle,
         provider_id,
         access_token=stored.get("codex_access_token"),
         refresh_token=stored.get("codex_refresh_token"),
@@ -1702,5 +1711,5 @@ async def xai_clear_reauth(provider_id: str, token: str = Depends(require_admin)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Model provider not found")
-    full_row = _row_with_token_flags(provider_id)
+    full_row = await run_sync(_row_with_token_flags, provider_id)
     return _public_provider(full_row)

@@ -75,7 +75,7 @@ async def list_accounts(token: str = Depends(require_admin)):
         accounts.seed_from_credentials_file()
 
     active_id = accounts.get_active_account_id()
-    rows = db.get_all_claude_accounts()
+    rows = await run_sync(db.get_all_claude_accounts)
     return {
         "accounts": [_public_account(r, active_id) for r in rows],
         "active_account_id": active_id,

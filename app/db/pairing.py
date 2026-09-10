@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list
@@ -421,12 +421,28 @@ def get_paired_client_by_session_hash(token_hash: str) -> Optional[PairedClientR
         return _client(cursor.fetchone())
 
 
+# A paired client's last_seen only needs to be accurate to the minute; writing
+# it on literally every authenticated request turns each read into a row update
+# (and a WAL write) for no extra information. Skip the write while the stored
+# value is still fresh.
+PAIRED_CLIENT_TOUCH_INTERVAL_SECONDS = 60
+
+
 def touch_paired_client(client_id: str) -> None:
+    # The staleness threshold is computed in Python rather than as
+    # ``NOW() - INTERVAL '60 seconds'`` so the statement also runs on the
+    # SQLite test shim, which has no INTERVAL literal rewrite.
+    threshold = datetime.now(timezone.utc) - timedelta(
+        seconds=PAIRED_CLIENT_TOUCH_INTERVAL_SECONDS
+    )
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE paired_clients SET last_seen = NOW(), updated_at = NOW() WHERE id = %s",
-            (client_id,),
+            """
+            UPDATE paired_clients SET last_seen = NOW(), updated_at = NOW()
+            WHERE id = %s AND (last_seen IS NULL OR last_seen < %s)
+            """,
+            (client_id, threshold),
         )
 
 

@@ -329,8 +329,9 @@ class PushNotificationService:
         # Default path: enumerate registered devices and dispatch per transport.
         try:
             from app.db import mobile as mobile_db
+            from app.db.async_database import run_sync
 
-            devices = mobile_db.get_all_mobile_devices()
+            devices = await run_sync(mobile_db.get_all_mobile_devices)
         except Exception as e:
             logger.warning(f"Could not enumerate mobile devices for broadcast: {e}")
             return []

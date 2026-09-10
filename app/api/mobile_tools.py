@@ -32,12 +32,23 @@ async def body(request, limit):
 def pending(device=Depends(device_auth)):
     from app.services.mobile_tools import authorized_devices
     commands = []
+    # authorized_devices() runs a per-device credential/ownership query set, so
+    # resolve each distinct session once per request instead of once per claimed
+    # command. This snapshot is discarded at the end of the request.
+    checked: dict[str, bool] = {}
+
+    def allowed(session_id: str) -> bool:
+        if session_id not in checked:
+            try:
+                checked[session_id] = any(
+                    d['device_id'] == device['device_id'] for d in authorized_devices(session_id))
+            except Exception:
+                checked[session_id] = False
+        return checked[session_id]
+
     for command in queue.claim(device['device_id']):
         session_id = command.pop('session_id')
-        try:
-            permitted = any(d['device_id'] == device['device_id'] for d in authorized_devices(session_id))
-        except Exception:
-            permitted = False
+        permitted = allowed(session_id)
         if permitted:
             commands.append(command)
         else:

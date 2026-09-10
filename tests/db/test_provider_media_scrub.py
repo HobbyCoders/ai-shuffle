@@ -15,15 +15,27 @@ from app.db.database import _backfill_provider_media_models
 
 
 class FakeCursor:
-    """Enough DB-API surface for the backfill: one SELECT, then UPDATEs."""
+    """Enough DB-API surface for the backfill: one SELECT, then UPDATEs.
+
+    Savepoint statements are recorded separately. The scrub fences its roster
+    read and every row it touches with a SAVEPOINT so one bad row cannot abort
+    the shared boot transaction on real Postgres; what these tests are about is
+    which UPDATEs get issued, so the fencing is bookkeeping, not an update.
+    """
+
+    _SAVEPOINT_PREFIXES = ("SAVEPOINT", "RELEASE SAVEPOINT", "ROLLBACK TO SAVEPOINT")
 
     def __init__(self, rows):
         self._rows = rows
         self.updates = []
+        self.savepoints = []
 
     def execute(self, sql, params=None):
         self._last = sql
-        if sql.strip().upper().startswith("SELECT"):
+        upper = sql.strip().upper()
+        if upper.startswith(self._SAVEPOINT_PREFIXES):
+            self.savepoints.append(sql.strip())
+        elif upper.startswith("SELECT"):
             self._pending = list(self._rows)
         else:
             self.updates.append((sql, params))

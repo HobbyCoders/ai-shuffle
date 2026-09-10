@@ -427,7 +427,7 @@ async def claude_auth_status():
     try:
         from app.core import claude_accounts as _accounts
         info["active_account"] = _accounts.get_active_account_summary()
-        info["accounts_count"] = db.count_claude_accounts()
+        info["accounts_count"] = await run_sync(db.count_claude_accounts)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Could not attach Claude account info to status: {e}")
         info.setdefault("active_account", None)

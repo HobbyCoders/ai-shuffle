@@ -3,6 +3,7 @@ import asyncio
 import json
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -44,6 +45,7 @@ def isolated(monkeypatch):
                 conn.rollback()
                 raise
     monkeypatch.setattr(queue, 'get_db', db)
+    queue._reset_purge_throttle()
     conn.execute('CREATE TABLE mobile_devices(device_id TEXT PRIMARY KEY)')
     conn.executemany('INSERT INTO mobile_devices VALUES (?)', [('a',), ('b',)])
     queue.init_schema()
@@ -77,6 +79,32 @@ def test_accessibility_requires_android_snapshot_reference(name, args):
         service.validate_arguments(name, {**args, 'node_id': 'untrusted'})
 
 
+def test_purge_retries_after_sql_failure():
+    queue._reset_purge_throttle()
+    class FailingCursor:
+        def execute(self, *args):
+            raise RuntimeError("failed sweep")
+    with pytest.raises(RuntimeError, match="failed sweep"):
+        queue._purge(FailingCursor(), queue.now())
+    assert queue._last_purge_monotonic is None
+
+
+def test_concurrent_purges_share_one_sweep():
+    from concurrent.futures import ThreadPoolExecutor
+    queue._reset_purge_throttle()
+    barrier = threading.Barrier(8)
+    statements = []
+    class Cursor:
+        def execute(self, sql, args):
+            statements.append(sql)
+    def purge():
+        barrier.wait(timeout=5)
+        queue._purge(Cursor(), queue.now())
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        list(workers.map(lambda _: purge(), range(8)))
+    assert len(statements) == 2
+
+
 def test_claim_target_and_replay(isolated):
     enable()
     enable('b')
@@ -101,6 +129,23 @@ def test_expiry_scrubs_payload(isolated, monkeypatch):
     assert queue.submit_result('a', cmd, '{}') == 'expired'
     row = isolated[0].execute('SELECT * FROM mobile_tool_commands WHERE id=?', (cmd,)).fetchone()
     assert row['arguments'] == '{}' and row['result'] is None
+
+
+def test_unswept_expired_commands_are_never_live(isolated, monkeypatch):
+    """The table-wide sweep is throttled, so expiry must come from expires_at."""
+    enable()
+    cmd = enqueue()
+    future = queue.now() + timedelta(seconds=21)
+    monkeypatch.setattr(queue, 'now', lambda: future)
+    queue._last_purge_monotonic = time.monotonic()  # sweep throttled off
+    assert queue.claim('a') == []
+    assert queue.outcome(cmd, 'sa') == {'status': 'expired', 'result': None}
+    assert isolated[0].execute('SELECT status FROM mobile_tool_commands WHERE id=?',
+                               (cmd,)).fetchone()['status'] == 'pending'
+    queue._reset_purge_throttle()
+    queue.claim('a')
+    row = isolated[0].execute('SELECT * FROM mobile_tool_commands WHERE id=?', (cmd,)).fetchone()
+    assert row['status'] == 'expired' and row['arguments'] == '{}'
 
 
 def test_disabled_stale_and_unsupported(isolated, monkeypatch):

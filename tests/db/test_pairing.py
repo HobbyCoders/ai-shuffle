@@ -130,3 +130,36 @@ def test_runner_grant_approves_only_the_pending_install():
         token_hash="runner-grant-hash",
         install_id="new-runner",
     ) is None
+
+
+def test_touch_paired_client_only_writes_when_last_seen_is_stale(test_db):
+    from app.db.base import get_db
+
+    _grant("touch-grant")
+    result = database.exchange_grant_for_client(
+        token_hash="touch-grant",
+        device_id="device-touch",
+        device_name="Touch Browser",
+        platform="linux-browser",
+        client_type="browser",
+        session_token_hash="touch-session",
+        session_expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+    )
+    client_id = result["client"]["id"]
+
+    database.touch_paired_client(client_id)
+    fresh = database.get_paired_client(client_id)["last_seen"]
+    assert fresh is not None
+
+    # A second request inside the interval must not rewrite the row.
+    database.touch_paired_client(client_id)
+    assert database.get_paired_client(client_id)["last_seen"] == fresh
+
+    # Once the stored value ages past the interval the write happens again.
+    stale = datetime.now(timezone.utc) - timedelta(hours=1)
+    with get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE paired_clients SET last_seen = %s WHERE id = %s", (stale, client_id)
+        )
+    database.touch_paired_client(client_id)
+    assert database.get_paired_client(client_id)["last_seen"] != fresh

@@ -453,7 +453,9 @@ class UserQuestionHandler:
             logger.warning(f"Question request not found: {request_id}")
             return False
         envelope = build_answer_envelope(answers, dismissed=dismissed, skipped=skipped)
-        answered = interactions.answer_interaction(row["id"], envelope, answered_by_device)
+        answered = await asyncio.to_thread(
+            interactions.answer_interaction, row["id"], envelope, answered_by_device
+        )
         if answered:
             interaction_wait.notify_changed(session_id)
             logger.debug(
@@ -521,7 +523,7 @@ class UserQuestionHandler:
         cancelled = 0
         cancelled_rows: List[tuple] = []
         for row in self._v2_pending_questions(session_id):
-            if interactions.cancel_interaction(row["id"]):
+            if await asyncio.to_thread(interactions.cancel_interaction, row["id"]):
                 cancelled += 1
                 cancelled_rows.append(
                     (row["id"], (row.get("payload") or {}).get("request_id"))

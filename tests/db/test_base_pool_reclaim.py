@@ -126,6 +126,19 @@ def test_close_connection_happy_path_returns_without_retry(monkeypatch):
     assert pool.calls == [False]
     assert conn.closed is False
 
+class _FakeCursor:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=None):
+        self._conn.executed.append(sql)
+        if self._conn.ping_error is not None:
+            raise self._conn.ping_error
+
+    def close(self):
+        self._conn.cursors_closed += 1
+
+
 class _PhysicalConn(_FakeConn):
     """Only the physical connection is fake; pool bookkeeping is psycopg2's."""
 
@@ -135,6 +148,12 @@ class _PhysicalConn(_FakeConn):
         self.transaction_status = psycopg2.extensions.TRANSACTION_STATUS_IDLE
         self.rollbacks = 0
         self.fail_rollback = False
+        self.executed = []
+        self.cursors_closed = 0
+        self.ping_error = None
+
+    def cursor(self, *args, **kwargs):
+        return _FakeCursor(self)
 
     def rollback(self):
         self.rollbacks += 1
@@ -645,3 +664,190 @@ def test_fifo_does_not_change_keyed_driver_calls(retaining_pool):
     pool.putconn(conn, "legacy")
     assert not pool._waiters
     assert not pool._used
+
+
+# =============================================================================
+# Dead-connection detection on checkout
+# =============================================================================
+# After a Postgres restart every retained connection is dead but still looks
+# fine locally. Without a checkout check the next N requests each blow up
+# inside the caller's own query, and get_db's rollback() on the dead socket
+# raises again and replaces the real error with an InterfaceError.
+
+
+@pytest.fixture
+def one_idle_connection(retaining_pool):
+    """Leave exactly one idle connection, so we know which one the next
+    checkout will hand out (psycopg2 pops from the end of ``_pool``)."""
+    pool, created = retaining_pool
+    # Grow to the retained maximum first, then hold all but one.
+    burst = [pool.getconn() for _ in range(pool.maxconn)]
+    for conn in burst:
+        pool.putconn(conn)
+    held = [pool.getconn() for _ in range(pool.maxconn - 1)]
+    assert len(pool._pool) == 1 and len(created) == pool.maxconn
+    idle = pool._pool[-1]
+    yield pool, created, idle, held
+    if not pool.closed:
+        checked_out = set(map(id, pool._used.values()))
+        for conn in held:
+            if id(conn) in checked_out:
+                pool.putconn(conn)
+
+
+@pytest.mark.parametrize("failure", ["closed", "unknown"])
+def test_checkout_discards_a_dead_connection_and_retries_once(
+    one_idle_connection, failure
+):
+    pool, created, idle, _held = one_idle_connection
+    if failure == "closed":
+        idle.closed = True
+    else:
+        idle.transaction_status = psycopg2.extensions.TRANSACTION_STATUS_UNKNOWN
+
+    conn = base._get_pg_connection()
+
+    # A fresh physical connection was opened for the retry.
+    assert conn._conn is not idle
+    assert conn._conn is created[-1]
+    assert len(created) == 9
+    # Neither local check costs a round trip.
+    assert idle.executed == []
+    stats = base.pressure_stats()
+    assert stats["connections_stale"] == 1
+    assert stats["connections_discarded"] == 1
+    assert idle not in pool._pool
+    base._close_connection(conn)
+
+
+def test_checkout_does_not_ping_a_recently_used_connection(one_idle_connection):
+    pool, created, idle, _held = one_idle_connection
+    conn = base._get_pg_connection()
+    assert conn._conn is idle
+    assert idle.executed == []  # no SELECT 1 on the hot path
+    assert base.pressure_stats()["connections_stale"] == 0
+    assert len(created) == 8
+    base._close_connection(conn)
+
+
+def test_checkout_pings_a_connection_that_sat_idle_too_long(
+    one_idle_connection, monkeypatch
+):
+    pool, created, idle, _held = one_idle_connection
+    monkeypatch.setattr(pool, "idle_seconds", lambda conn: 120.0)
+
+    conn = base._get_pg_connection()
+
+    assert conn._conn is idle
+    assert idle.executed == ["SELECT 1"]
+    assert idle.cursors_closed == 1
+    assert base.pressure_stats()["connections_stale"] == 0
+    assert len(created) == 8
+    base._close_connection(conn)
+
+
+@pytest.mark.parametrize("error", [
+    psycopg2.OperationalError("server closed the connection unexpectedly"),
+    psycopg2.InterfaceError("connection already closed"),
+])
+def test_checkout_discards_a_connection_that_fails_its_idle_ping(
+    one_idle_connection, monkeypatch, error
+):
+    pool, created, idle, _held = one_idle_connection
+    monkeypatch.setattr(pool, "idle_seconds", lambda conn: 120.0)
+    idle.ping_error = error
+
+    conn = base._get_pg_connection()
+
+    assert conn._conn is not idle
+    assert idle.executed == ["SELECT 1"]
+    assert idle.closed
+    assert idle not in pool._pool
+    stats = base.pressure_stats()
+    assert stats["connections_stale"] == 1
+    assert stats["connections_discarded"] == 1
+    assert len(created) == 9
+    base._close_connection(conn)
+
+
+def test_checkout_gives_up_after_one_retry(retaining_pool, monkeypatch):
+    # Every connection in the world is dead: report that honestly rather than
+    # handing the caller a connection that cannot run its query.
+    pool, created = retaining_pool
+    monkeypatch.setattr(base, "_connection_is_live", lambda pool, conn: False)
+
+    with pytest.raises(psycopg2.OperationalError, match="dead connection twice"):
+        base._get_pg_connection()
+
+    assert base.pressure_stats()["connections_stale"] == 2
+    assert not pool._used and not pool._rused
+
+
+def test_ping_threshold_is_measured_from_the_last_return(
+    retaining_pool, monkeypatch
+):
+    pool, _ = retaining_pool
+    conn = pool.getconn()
+    pool.putconn(conn)
+    returned_at = time.monotonic()
+    monkeypatch.setattr(base.time, "monotonic", lambda: returned_at + 300.0)
+    assert pool.idle_seconds(conn) == pytest.approx(300.0, abs=1.0)
+
+
+def test_a_discarded_connection_leaves_no_idle_bookkeeping(retaining_pool):
+    pool, _ = retaining_pool
+    conn = pool.getconn()
+    pool.putconn(conn, close=True)
+    assert id(conn) not in pool._last_returned
+    assert pool.idle_seconds(conn) == 0.0
+
+
+# =============================================================================
+# Guarded rollback in get_db()/transaction()
+# =============================================================================
+
+@pytest.fixture
+def unshimmed(monkeypatch):
+    """conftest's autouse shim points base.get_connection at SQLite; these
+    tests need the real pooled path."""
+    monkeypatch.setattr(base, "get_connection", base._get_pg_connection)
+
+
+@pytest.mark.parametrize("scope", ["get_db", "transaction"])
+def test_failed_rollback_does_not_replace_the_original_exception(
+    retaining_pool, unshimmed, scope
+):
+    pool, _ = retaining_pool
+    manager = base.get_db if scope == "get_db" else base.transaction
+
+    with pytest.raises(ValueError, match="the real failure"):
+        with manager() as conn:
+            conn._conn.transaction_status = \
+                psycopg2.extensions.TRANSACTION_STATUS_INTRANS
+            conn._conn.fail_rollback = True
+            raise ValueError("the real failure")
+
+    # The slot is still reclaimed even though both the rollback and the
+    # pool's own return-path rollback raised.
+    assert not pool._used and not pool._rused
+    assert base.pressure_stats()["connections_discarded"] == 1
+
+
+@pytest.mark.parametrize("scope", ["get_db", "transaction"])
+def test_successful_rollback_still_returns_the_connection(
+    retaining_pool, unshimmed, scope
+):
+    pool, created = retaining_pool
+    manager = base.get_db if scope == "get_db" else base.transaction
+
+    with pytest.raises(ValueError):
+        with manager() as conn:
+            physical = conn._conn
+            physical.transaction_status = \
+                psycopg2.extensions.TRANSACTION_STATUS_INTRANS
+            raise ValueError("boom")
+
+    assert physical.rollbacks == 1  # rolled back once, not once per layer
+    assert physical in pool._pool
+    assert not physical.closed
+    assert base.pressure_stats()["connections_discarded"] == 0

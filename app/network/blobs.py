@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from app.db import network as store
+from app.db.async_database import run_sync
 from app.db.base import get_db
 from app.network import engine, transport
 
@@ -120,7 +121,7 @@ async def fetch_missing(limit: int = 20) -> int:
     ctx = engine.context()
     if ctx is None:
         return 0
-    missing = store.missing_blobs(limit)
+    missing = await run_sync(store.missing_blobs, limit)
     if not missing:
         return 0
     fetched = 0
@@ -142,7 +143,7 @@ async def fetch_missing(limit: int = 20) -> int:
                     continue
                 if response.status_code != 200 or len(response.content) > MAX_BLOB_BYTES:
                     continue
-                if store_fetched(blob["hash"], response.content):
+                if await run_sync(store_fetched, blob["hash"], response.content):
                     fetched += 1
                     break
     return fetched
@@ -153,9 +154,9 @@ async def fetch_one(hash_value: str) -> bool:
     ctx = engine.context()
     if ctx is None:
         return False
-    if read_local(hash_value) is not None:
+    if await run_sync(read_local, hash_value) is not None:
         return True
-    existing = store.get_blob(hash_value)
+    existing = await run_sync(store.get_blob, hash_value)
     holders = list((existing or {}).get("holders") or [])
     online = transport.online_devices()
     candidates = [h for h in holders if h in online and h != ctx.device_id]
@@ -172,7 +173,7 @@ async def fetch_one(hash_value: str) -> bool:
             except (httpx.HTTPError, transport.PeerError):
                 continue
             if response.status_code == 200 and len(response.content) <= MAX_BLOB_BYTES:
-                if store_fetched(hash_value, response.content):
+                if await run_sync(store_fetched, hash_value, response.content):
                     return True
     return False
 

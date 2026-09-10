@@ -961,7 +961,9 @@ class WorktreeManager:
         try:
             project_id = (repo or {}).get("project_id") or (project or {}).get("id")
             if project_id:
-                checkouts_db.archive_checkout_by_path(project_id, worktree_abs_path)
+                await run_sync(
+                    checkouts_db.archive_checkout_by_path, project_id, worktree_abs_path
+                )
         except Exception:
             logger.debug(
                 "Could not archive checkout for worktree %s", worktree_id, exc_info=True

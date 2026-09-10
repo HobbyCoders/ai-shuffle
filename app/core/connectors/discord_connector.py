@@ -146,7 +146,10 @@ class DiscordConnector(BaseConnector):
                     # Persist connected status to DB
                     try:
                         from app.db import database as _db
-                        _db.update_connector_status(connector.connector_id, "connected")
+                        from app.db.async_database import run_sync
+                        await run_sync(
+                            _db.update_connector_status, connector.connector_id, "connected"
+                        )
                     except Exception:
                         logger.debug("Failed to update DB status after on_ready", exc_info=True)
 

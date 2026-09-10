@@ -113,6 +113,11 @@ jobs:
           pip install -r requirements.txt -r requirements-dev.txt
           pip install -e ./fluid
 
+      - name: Reject blocking database calls on the event loop
+        run: |
+          python -m pytest tests/test_scan_blocking_db.py -o addopts="" -q
+          python scripts/scan_blocking_db.py
+
       - name: Run fast test subset
         # Run the fast pytest subset with xdist for parallel execution.
         run: python -m pytest tests/api tests/core tests/db tests/middleware tests/contract tests/performance -o addopts="" -q -p no:cacheprovider --timeout=120 -n 4
@@ -131,7 +136,9 @@ jobs:
             -c "CREATE USER shuffle_mobile_test WITH PASSWORD 'mobile-test-only'" \
             -c "CREATE DATABASE shuffle_mobile_test OWNER shuffle_mobile_test" \
             -c "CREATE USER shuffle_network_test WITH PASSWORD 'network-test-only'" \
-            -c "CREATE DATABASE shuffle_network_test OWNER shuffle_network_test"
+            -c "CREATE DATABASE shuffle_network_test OWNER shuffle_network_test" \
+            -c "CREATE USER shuffle_safety_test WITH PASSWORD 'safety-test-only'" \
+            -c "CREATE DATABASE shuffle_safety_test OWNER shuffle_safety_test"
           pg_isready -h 127.0.0.1 -p 5432
 
       - name: Mobile PostgreSQL contracts
@@ -161,6 +168,18 @@ jobs:
           PYTHONPATH: .
         run: >-
           python -m pytest tests/integration/test_network_migration_postgres.py
+          --confcutdir=tests/integration -o addopts="" -p no:cacheprovider
+          --timeout=120 -v
+
+      - name: Verify PostgreSQL pool and transaction safety
+        env:
+          ALLOW_REAL_PG: '1'
+          PG_SAFETY_TEST: '1'
+          TESTING: '1'
+          AI_SHUFFLE_ENV_FILE: /dev/null
+          PYTHONPATH: .
+        run: >-
+          python -m pytest tests/integration/test_postgres_safety.py
           --confcutdir=tests/integration -o addopts="" -p no:cacheprovider
           --timeout=120 -v
 

@@ -26,6 +26,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 from app.db import database as db
+from app.db.async_database import run_sync
 from app.core import encryption
 from app.core.oauth import direct_oauth
 
@@ -584,7 +585,7 @@ async def ensure_subscription_type() -> None:
         _plan_refresh["account_id"] = account_id
         _plan_refresh["at"] = now
 
-        row = db.get_claude_account(account_id)
+        row = await run_sync(db.get_claude_account, account_id)
         if not row:
             return
 
@@ -594,7 +595,7 @@ async def ensure_subscription_type() -> None:
 
         plan = await direct_oauth.fetch_subscription_plan(token)
         if plan and plan != row.get("subscription_type"):
-            db.set_claude_account_subscription_type(account_id, plan)
+            await run_sync(db.set_claude_account_subscription_type, account_id, plan)
             logger.info("Claude account subscription type resolved as '%s'", plan)
     except Exception as e:  # noqa: BLE001 — advisory metadata, never fatal
         logger.debug(f"ensure_subscription_type skipped: {e}")
@@ -640,9 +641,13 @@ async def add_account(
     encrypted = encryption.encrypt_value(json.dumps(oauth_dict))
 
     account_id = uuid.uuid4().hex
-    account_name = name or tokens.account_email or f"Account {db.count_claude_accounts() + 1}"
+    account_name = name or tokens.account_email
+    if not account_name:
+        # Only counted when we actually need a fallback label, as before.
+        account_name = f"Account {await run_sync(db.count_claude_accounts) + 1}"
 
-    row = db.create_claude_account(
+    row = await run_sync(
+        db.create_claude_account,
         account_id=account_id,
         name=account_name,
         credentials=encrypted,

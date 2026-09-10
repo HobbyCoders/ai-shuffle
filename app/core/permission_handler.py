@@ -521,7 +521,8 @@ class PermissionHandler:
         # awaiting request_permission translates the answered-defer row to a
         # _DeferSentinel, exactly as the legacy in-memory defer did.
         if decision == "defer":
-            if not interactions.answer_interaction(
+            if not await run_sync(
+                interactions.answer_interaction,
                 row["id"], {"decision": "defer"}, answered_by_device
             ):
                 # A15: lost the TOCTOU — a concurrent responder already answered
@@ -564,7 +565,9 @@ class PermissionHandler:
         if remember == "session":
             answer["remember"] = "session"
             answer["pattern"] = pattern
-        if not interactions.answer_interaction(row["id"], answer, answered_by_device):
+        if not await run_sync(
+            interactions.answer_interaction, row["id"], answer, answered_by_device
+        ):
             # A15: lost the TOCTOU — a concurrent responder already answered this
             # row, or it expired between the pending read and here. Report the
             # not-resolved shape and leave NO side effects: no remember rule, no
@@ -725,14 +728,17 @@ class PermissionHandler:
         # so the durable interaction.requested events (#653) fire after the WS
         # re-broadcast below.
         requested_emits: List[tuple] = []
-        for r in interactions.get_answered_interactions(session_id, PERMISSION_KIND):
+        for r in await run_sync(
+            interactions.get_answered_interactions, session_id, PERMISSION_KIND
+        ):
             answer = r.get("answer") or {}
             if answer.get("decision") != "defer" or answer.get("requeued"):
                 continue
             payload = r.get("payload") or {}
-            interactions.mark_interaction_requeued(r["id"])
-            new_row = interactions.create_interaction(
-                session_id, PERMISSION_KIND, payload, PERMISSION_TTL_SECONDS
+            await run_sync(interactions.mark_interaction_requeued, r["id"])
+            new_row = await run_sync(
+                interactions.create_interaction,
+                session_id, PERMISSION_KIND, payload, PERMISSION_TTL_SECONDS,
             )
             rid = payload.get("request_id")
             if rid is not None:
@@ -1068,7 +1074,7 @@ class PermissionHandler:
         )
         if row is None:
             return False
-        cancelled = interactions.cancel_interaction(row["id"])
+        cancelled = await run_sync(interactions.cancel_interaction, row["id"])
         if cancelled:
             interaction_wait.notify_changed(session_id)
             # Durable lifecycle event (#653): guarded cancel won → emit
@@ -1089,7 +1095,7 @@ class PermissionHandler:
         count = 0
         cancelled_rows: List[tuple] = []
         for row in rows:
-            if interactions.cancel_interaction(row["id"]):
+            if await run_sync(interactions.cancel_interaction, row["id"]):
                 count += 1
                 cancelled_rows.append(
                     (row["id"], (row.get("payload") or {}).get("request_id"))
