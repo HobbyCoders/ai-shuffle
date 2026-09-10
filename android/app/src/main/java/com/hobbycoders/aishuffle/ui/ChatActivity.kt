@@ -113,6 +113,19 @@ class ChatActivity : NativeScreen() {
         if (!authorized()) { finish(); return }
         ServerStore.get(this).markUsed(server.id)
         web = WebView(this)
+        // getSettings starts Chromium synchronously. On a cold WebView 151,
+        // registering a document-start script before this throws
+        // "Must be started before we block!". Configure the view before any bridge
+        // is installed, without loading a document or weakening origin checks.
+        with(web.settings) {
+            javaScriptEnabled = true; domStorageEnabled = true
+            allowFileAccess = false; allowContentAccess = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            javaScriptCanOpenWindowsAutomatically = false; setSupportMultipleWindows(false)
+            mediaPlaybackRequiresUserGesture = true
+            // Diagnostics only: the shell is the bundle's, not chosen from the user agent.
+            userAgentString = WebUserAgent.decorate(userAgentString, appVersionName())
+        }
         chatLayout()
         // The bundled UI: assets/mobile-ui/ at https://appassets.androidplatform.net/assets/mobile-ui/.
         assetLoader = WebViewAssetLoader.Builder()
@@ -129,15 +142,6 @@ class ChatActivity : NativeScreen() {
                 .putExtra(VoiceCallService.EXTRA_SERVER_ID, server.id).putExtra(VoiceCallService.EXTRA_SESSION_ID, sessionId))
         }
         nativeVoice.install()
-        with(web.settings) {
-            javaScriptEnabled = true; domStorageEnabled = true
-            allowFileAccess = false; allowContentAccess = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            javaScriptCanOpenWindowsAutomatically = false; setSupportMultipleWindows(false)
-            mediaPlaybackRequiresUserGesture = true
-            // Diagnostics only: the shell is the bundle's, not chosen from the user agent.
-            userAgentString = WebUserAgent.decorate(userAgentString, appVersionName())
-        }
         // The page's own origin never gets a cookie. A Cloudflare Access worker is
         // the one exception: its CF cookie (installed below with SameSite=None) must
         // ride the page's cross-origin API calls, which the WebView counts as third-party.
