@@ -53,4 +53,3 @@ def test_docker_release_rebuild_keeps_container_verification_gate():
     assert steps["Verify actual container lifecycle and UI"]["if"] == gate
     assert steps["Upload container evidence"]["if"] == f"always() && ({gate})"
     assert steps["Checkout release source"]["with"]["ref"] == "refs/tags/${{ inputs.release_tag }}"
-
