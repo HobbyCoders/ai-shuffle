@@ -300,6 +300,13 @@ async def get_auth_status(request: Request, response: Response = None):
     if local:
         is_admin_authenticated = True
         username = 'Local owner'
+        # A direct LAN browser knows Docker's published host/port; the container
+        # cannot discover them from its own network namespace.
+        from app.core import cluster
+        try:
+            await run_sync(cluster.observe_local_advertise_url, request)
+        except Exception:
+            logger.warning("Could not learn the local worker address", exc_info=True)
         if token and not owner_auth.local_session(token) and response is not None:
             # Retired cookies must not strand the local browser's WebSocket.
             response.delete_cookie('session')

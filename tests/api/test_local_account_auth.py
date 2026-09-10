@@ -72,6 +72,69 @@ def client(app, ingress='local', peer='192.168.1.50', origin='http://192.168.1.2
     return TestClient(Surface(app, ingress), base_url=origin, client=(peer, 43210), headers={'Origin': origin})
 
 
+@pytest.mark.parametrize("origin", ["http://10.0.0.200:8000", "http://10.0.0.200:18000", "http://[fd00::251]:18000"])
+def test_docker_learns_published_address_from_owner_status(app, mock_db, monkeypatch, origin):
+    from app.core import cluster
+    from app.network import engine, policy
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(settings, "cluster_advertise_url", "")
+    monkeypatch.setattr(engine, "_context", None)
+    publish = Mock()
+    monkeypatch.setattr(cluster, "_publish_advertise_change", publish)
+    # Keep the test transport on IPv4: this Starlette TestClient cannot parse
+    # IPv6 base_url ports. The ASGI request still gets the real IPv6 Host/Origin.
+    c = client(app)
+    headers = {"Host": origin.removeprefix("http://"), "Origin": origin}
+    for _ in range(2):
+        assert c.get('/api/v1/auth/status', headers=headers).json()['local_access'] is True
+    assert cluster.advertise_url() == (origin, "observed")
+    assert engine._own_endpoints()[0] == origin
+    assert not policy.is_shared_setting_key(cluster._observed_advertise_key())
+    publish.assert_called_once()
+    # Native installs do not reuse a former container's observed address.
+    monkeypatch.setattr(settings, "local_mode", True)
+    monkeypatch.setattr(cluster, "_guess_advertise_url", lambda: "http://10.0.0.135:8000")
+    assert cluster.advertise_url() == ("http://10.0.0.135:8000", "guess")
+
+
+@pytest.mark.parametrize("origin,peer,ingress,headers", [
+    ("http://localhost:8000", "127.0.0.1", "local", {}),
+    ("http://127.0.0.1:8000", "127.0.0.1", "local", {}),
+    ("http://10.0.0.200:8000", "192.168.1.50", "managed", {}),
+    ("http://10.0.0.200:8000", "8.8.8.8", "local", {}),
+    ("http://10.0.0.200:8000", "192.168.1.50", "local", {"Authorization": "Bearer invalid"}),
+    ("http://10.0.0.200:8000", "192.168.1.50", "local", {"X-Forwarded-Host": "10.0.0.200:8000"}),
+    ("http://10.0.0.200:8000", "192.168.1.50", "local", {"Origin": "http://evil.example"}),
+    ("http://10.0.0.200:8000", "192.168.1.50", "local", {"Sec-Fetch-Site": "cross-site"}),
+])
+def test_docker_does_not_learn_untrusted_or_loopback_address(
+    app, mock_db, monkeypatch, origin, peer, ingress, headers
+):
+    from app.core import cluster
+    monkeypatch.setattr(settings, "local_mode", False)
+    monkeypatch.setattr(settings, "cluster_advertise_url", "")
+    publish = Mock()
+    monkeypatch.setattr(cluster, "_publish_advertise_change", publish)
+    response = client(app, origin=origin, peer=peer, ingress=ingress).get('/api/v1/auth/status', headers=headers)
+    assert response.status_code == 200
+    assert database.get_system_setting(cluster._observed_advertise_key()) is None
+    publish.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["env", "override", "native"])
+def test_observed_docker_address_never_replaces_explicit_or_native_config(app, mock_db, monkeypatch, kind):
+    from app.core import cluster
+    monkeypatch.setattr(settings, "local_mode", kind == "native")
+    monkeypatch.setattr(settings, "cluster_advertise_url", "http://10.0.0.2:9000" if kind == "env" else "")
+    if kind == "override":
+        database.set_system_setting(cluster._advertise_override_key(), "http://10.0.0.2:9000")
+    publish = Mock()
+    monkeypatch.setattr(cluster, "_publish_advertise_change", publish)
+    assert client(app).get('/api/v1/auth/status').json()['local_access']
+    assert database.get_system_setting(cluster._observed_advertise_key()) is None
+    publish.assert_not_called()
+
+
 def bind():
     mobile_hub.bind('https://hub.example.com', SERVER, encryption.encrypt_value('a' * 64),
                     'managed:' + settings.effective_instance_id)

@@ -329,6 +329,51 @@ def test_refresh_400_both_ids(client, project):
     assert "exactly one" in resp.json()["detail"]
 
 
+@pytest.mark.parametrize("peer_state", ["offline", "unavailable", "missing", "active"])
+def test_network_checkout_read_distinguishes_unavailable_from_missing(
+    client, project, monkeypatch, peer_state
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from app.network import engine, git as network_git
+
+    # The project fixture runs the production resolver to create the local base.
+    # Read it through the actual owner-side producer, not a hand-built git-state.
+    owned = network_git.local_state(project["pv2"]["id"], public=True)
+    assert owned["eligible"] is True
+    monkeypatch.setattr(engine, "context", lambda: SimpleNamespace(device_id=ME))
+    monkeypatch.setattr("app.api.cluster._self_install_id", lambda: ME)
+    monkeypatch.setattr(database, "get_installs", lambda: [
+        {"id": ME, "online": True},
+        {"id": PEER, "online": peer_state != "offline"},
+    ])
+
+    async def read_worker(runner_id, project_id):
+        assert project_id == project["pv2"]["id"]
+        if runner_id == ME:
+            return owned
+        if peer_state == "unavailable":
+            raise TimeoutError("peer did not answer")
+        return owned if peer_state == "active" else {
+            "eligible": False, "checkouts": [], "recent_ops": []
+        }
+
+    read = AsyncMock(side_effect=read_worker)
+    monkeypatch.setattr(network_git, "state", read)
+    response = _get(client)
+    assert response.status_code == 200
+    rows = {row["id"]: row for row in response.json()["installs"]}
+    assert rows[ME]["eligible"] is True
+    peer = rows[PEER]
+    assert peer["eligible"] is (peer_state == "active")
+    if peer_state in {"offline", "unavailable"}:
+        assert peer["availability_error"]
+        assert peer["checkouts"] == []
+    else:
+        assert "availability_error" not in peer
+    assert read.await_count == (1 if peer_state == "offline" else 2)
+
+
 def test_refresh_400_neither_id(client, project):
     resp = _refresh(client, runner_id=PEER)
 
