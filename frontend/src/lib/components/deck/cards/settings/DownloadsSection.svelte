@@ -1,9 +1,12 @@
 <script lang="ts">
 	import { Download, Smartphone, ExternalLink } from 'lucide-svelte';
+	import DesktopUpdatesSection from './DesktopUpdatesSection.svelte';
 
 	const androidRelease = 'https://github.com/HobbyCoders/ai-shuffle/releases/tag/android-latest';
 	const androidApk = 'https://github.com/HobbyCoders/ai-shuffle/releases/download/android-latest/AI-Shuffle-Android.apk';
 </script>
+
+<DesktopUpdatesSection />
 
 <section class="set-group" aria-labelledby="android-download-title">
 	<div class="set-grouphead">

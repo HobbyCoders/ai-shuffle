@@ -35,6 +35,9 @@ worker the app starts, so the two never drift apart.
 - Native menu with the usual accelerators, native notifications, window
   placement that survives restarts, and auto-update through electron-updater,
   fed by the GitHub release for the app's `v*` tag.
+- Settings → Downloads shows the installed desktop version and update status,
+  with Check for updates and Restart and update actions. Updates download in
+  the background; preview and development builds show that updates are disabled.
 
 Other workers (a homelab box, a remote managed worker) are managed inside the
 web UI under Devices, as on the web and on Android. The app itself only ever
@@ -146,6 +149,25 @@ Docker remains the headless option.
 Older releases may retain Windows ARM update files so the shared Windows
 update feed does not hand an ARM client an x64 installer. Windows ARM is no
 longer built or listed as a supported download.
+
+### Test desktop updates
+
+Use a packaged stable app on Windows with a lower version than the target
+release. To test the Settings controls, the starting build must already include
+them; an older installed UI cannot acquire the controls before updating.
+
+1. Publish the higher stable GitHub release with its Windows installer and
+   `latest.yml` metadata. Drafts and prereleases are not the stable update feed.
+2. In the older app, open Settings → Downloads and choose Check for updates.
+   Confirm that the new version and download progress appear.
+3. Choose Restart and update once the download is ready. Confirm that the app
+   reopens, the installed version changes, and existing data is still available.
+4. Check again and confirm that the UI says it is up to date.
+
+For an older starting build without the Settings controls, the automatic check
+runs about 15 seconds after launch, and the notification bell offers Restart
+and update when the download finishes. Preview builds and development runs
+cannot exercise the release update path.
 
 Code signing is not configured yet. Windows and Linux builds install and
 update unsigned (Windows shows a SmartScreen prompt on first install). macOS
