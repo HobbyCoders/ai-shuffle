@@ -274,7 +274,11 @@ async def test_admin_identity_fails_closed(mock_db, admin, attribution, expected
     sessions.create_session("s", "default")
     turn = _settled_turn("s", payload=attribution)
     settings.set_user_preference("admin", "alice", "chat_behavior", {"suggestNextResponse": True})
-    with patch("app.core.auth.auth_service.get_admin_username", return_value=admin):
+    with (
+        patch("app.core.auth.auth_service.get_admin_username", return_value=admin),
+        patch("app.core.owner_auth.preference_identity", return_value=admin),
+        patch("app.core.preference_identity.local_owner_account", return_value=None),
+    ):
         assert await cs._eligible("s", turn["id"]) is expected
 
 
@@ -487,6 +491,140 @@ async def test_nested_active_and_dual_marked_receipt_gates(mock_db, own_lane):
             scheduler.on_task_notification_delivered("s", ["nested"])
             assert await cs._eligible("s", turn["id"])
     finally:
+        registry.clear_session("s")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account", [None, "linked-owner"])
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_owner_uses_ui_preference_namespace(mock_db, account, enabled):
+    from fastapi import Request
+    from app.api.preferences import PreferenceValue, set_preference
+    from app.core import preference_identity
+    from app.db import sessions, settings
+
+    sessions.create_session("s", "default", mode="code")
+    turn = _settled_turn("s")
+    request = Request({"type": "http", "state": {"is_admin": True}})
+    with (
+        patch("app.core.auth.auth_service.get_admin_username", return_value="alice"),
+        patch("app.core.owner_auth.preference_identity", return_value="alice"),
+        patch.object(preference_identity, "local_owner_account", return_value=account),
+    ):
+        if account:
+            # A stale local setting must neither suppress an account opt-in
+            # nor override an account opt-out.
+            settings.set_user_preference("admin", "alice", "chat_behavior",
+                                         {"suggestNextResponse": not enabled})
+        await set_preference(request, "chat_behavior", PreferenceValue(
+            key="chat_behavior", value={"suggestNextResponse": enabled}))
+        assert await cs._eligible("s", turn["id"]) is enabled
+
+
+@pytest.mark.asyncio
+async def test_owner_identity_resolution_failure_does_not_fall_back(mock_db, caplog):
+    from app.core import preference_identity
+    from app.db import sessions, settings
+
+    sessions.create_session("s", "default", mode="code")
+    turn = _settled_turn("s")
+    settings.set_user_preference("admin", "alice", "chat_behavior", {"suggestNextResponse": True})
+    with (
+        patch("app.core.auth.auth_service.get_admin_username", return_value="alice"),
+        patch.object(preference_identity, "local_owner_account", side_effect=PermissionError("ambiguous")),
+        patch("app.api.generation.generate_with_claude", AsyncMock()) as generate,
+    ):
+        await cs._run("s", turn["id"])
+        generate.assert_not_awaited()
+    record, = caplog.records
+    assert (record.stage, record.reason, record.exception_type) == (
+        "eligibility", "internal_failure", "PermissionError",
+    )
+
+
+DIAGNOSED_HANDOFF = (
+    "It’s an AI Shuffle bug in the cross-worker session handoff, not a problem "
+    "with your branch name or the other worker being offline.\n\n"
+    "The backend log at 01:32:20 shows: TypeError: Object of type datetime "
+    "is not JSON serializable.\n\n"
+    "This device tries to send the new session record to the selected worker, "
+    "but its timestamps haven’t been converted into a format the request can "
+    "send. It crashes before requesting worktree creation, so the “Server "
+    "error creating worktree” message is misleading. The remote worker’s "
+    "Git-state check had already succeeded.\n\n"
+    "The fix is to serialize the session timestamps before sending them. "
+    "I haven’t changed any code yet."
+)
+
+
+def test_prompt_allows_fix_requests_without_blanket_approval_ban():
+    prompt = cs._prompt(DIAGNOSED_HANDOFF)
+    assert DIAGNOSED_HANDOFF in prompt
+    assert "Okay, fix it." in prompt
+    assert "An explicit question or offer from the assistant is not required" in prompt
+    assert "Ordinary requests to implement a described fix are allowed" in prompt
+    assert "permissions or approvals" not in prompt
+
+
+def test_prompt_preserves_review_and_safety_boundaries():
+    prompt = cs._prompt("The fix is ready. Deploy it and delete the old database.")
+    assert "not a sent message or authorization to act" in prompt
+    assert "Never suggest approval to deploy, delete, commit, push, merge, purchase" in prompt
+    assert "bypass safeguards" in prompt
+    assert "do not ask to fix something already fixed" in prompt
+    assert "If no useful safe reply is apparent, return nothing" in prompt
+    assert "untrusted data" in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", ["Okay, fix it.", "Please resolve it."])
+async def test_diagnosis_turn_produces_reviewable_fix_suggestion(mock_db, reply):
+    # Exercise the producer too: runtime -> recorder -> settlement -> generation
+    # -> broadcast, not a manually seeded assistant-answer field. The model is
+    # stubbed here; prompt compliance requires a separate live-provider check.
+    from app.core import session_runtime, turn_scheduler as scheduler
+    from app.core.sync_engine import sync_engine
+    from app.core.task_registry import task_registry as registry
+    from app.db import sessions, settings, turns
+
+    sessions.create_session("s", "default", api_user_id="owner", mode="code")
+    settings.set_user_preference("api_user", "owner", "chat_behavior", {"suggestNextResponse": True})
+    registry.clear_session("s")
+    previous_hook = session_runtime._on_turn_settled
+    previous_broadcaster = session_runtime._broadcaster
+    session_runtime.register_scheduler(scheduler.on_turn_settled)
+    session_runtime.register_broadcaster(AsyncMock())
+
+    async def pump(**kwargs):
+        yield {"type": "stream_delta", "delta_type": "text", "content": DIAGNOSED_HANDOFF}
+        yield {"type": "done", "metadata": {"stop_reason": "end_turn"}}
+
+    try:
+        with (
+            patch("app.api.generation.generate_with_claude", AsyncMock(return_value=reply)) as generate,
+            patch("app.core.query_engine._stream_to_websocket_impl", pump),
+            patch.object(sync_engine, "broadcast_event", AsyncMock()) as broadcast,
+        ):
+            turn = turns.enqueue_turn("s", "user", prompt="Why does creating the worktree fail?",
+                                      payload={"api_user_id": "owner"})
+            assert await session_runtime.SessionRuntime(turn).execute() == "completed"
+            await asyncio.gather(*cs._tasks.values())
+            assert cs._final_answer("s", turn["id"]) == DIAGNOSED_HANDOFF
+            generate.assert_awaited_once()
+            assert DIAGNOSED_HANDOFF in generate.call_args.args[0]
+            suggestions = [call.args[0].data for call in broadcast.await_args_list
+                           if call.args[0].data.get("type") == "composer_suggestion"]
+            assert suggestions == [{
+                "type": "composer_suggestion", "session_id": "s", "turn_id": turn["id"],
+                "suggestion": reply,
+            }]
+            assert not turns.get_queued_turns("s")
+            assert reply not in str(events.get_events("s"))
+    finally:
+        if cs._tasks:
+            await asyncio.gather(*cs._tasks.values())
+        session_runtime.register_scheduler(previous_hook)
+        session_runtime.register_broadcaster(previous_broadcaster)
         registry.clear_session("s")
 
 
