@@ -222,6 +222,13 @@ def create_schema(cursor) -> None:
         )
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS network_member_names (
+            device_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS network_presence (
             device_id TEXT PRIMARY KEY,
             endpoints JSONB NOT NULL DEFAULT '[]',
@@ -345,6 +352,9 @@ def _member_row(row) -> Optional[dict]:
     if not row:
         return None
     member = row_to_dict(row)
+    shared_name = member.pop("shared_name", None)
+    if shared_name is not None:
+        member["name"] = shared_name
     member["capabilities"] = _load(member.get("capabilities"), {}) or {}
     member["endpoints"] = _load(member.get("endpoints"), []) or []
     return member
@@ -379,7 +389,8 @@ def upsert_member(*, device_id: str, name: str, kind: str, signing_public: str, 
 
 
 def get_member(device_id: str, _conn=None) -> Optional[dict]:
-    sql = "SELECT * FROM network_members WHERE device_id = %s"
+    sql = ("SELECT m.*, n.name AS shared_name FROM network_members m "
+           "LEFT JOIN network_member_names n ON n.device_id = m.device_id WHERE m.device_id = %s")
     if _conn is not None:
         cursor = _conn.cursor()
         cursor.execute(sql, (device_id,))
@@ -391,7 +402,10 @@ def get_member(device_id: str, _conn=None) -> Optional[dict]:
 
 
 def list_members(_conn=None, *, include_revoked: bool = True) -> List[dict]:
-    sql = "SELECT * FROM network_members" + ("" if include_revoked else " WHERE status = 'active'") + " ORDER BY created_at, device_id"
+    sql = ("SELECT m.*, n.name AS shared_name FROM network_members m "
+           "LEFT JOIN network_member_names n ON n.device_id = m.device_id"
+           + ("" if include_revoked else " WHERE m.status = 'active'")
+           + " ORDER BY m.created_at, m.device_id")
     if _conn is not None:
         cursor = _conn.cursor()
         cursor.execute(sql)
@@ -436,9 +450,21 @@ def touch_member(device_id: str, *, capabilities: Optional[dict] = None, endpoin
 
 
 def rename_member(device_id: str, name: str) -> Optional[dict]:
+    """Persist a display-name edit and its signed sync operation together."""
+    from app.network import engine
+
     with get_db() as conn:
-        conn.cursor().execute("UPDATE network_members SET name = %s, updated_at = %s WHERE device_id = %s",
-                              (name, _now(), device_id))
+        cursor = conn.cursor()
+        cursor.execute("UPDATE network_members SET name = %s, updated_at = %s WHERE device_id = %s",
+                       (name, _now(), device_id))
+        if not cursor.rowcount:
+            return None
+        row = {"device_id": device_id, "name": name, "updated_at": _now()}
+        cursor.execute("""INSERT INTO network_member_names (device_id, name, updated_at) VALUES (%s, %s, %s)
+                          ON CONFLICT (device_id) DO UPDATE SET name = EXCLUDED.name, updated_at = EXCLUDED.updated_at""",
+                       (device_id, name, row["updated_at"]))
+        engine.record(cursor, "member_names", device_id, row)
+    engine.kick()
     return get_member(device_id)
 
 

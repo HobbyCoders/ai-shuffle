@@ -136,6 +136,20 @@ def test_fingerprint_is_stable_and_non_empty():
     assert fp == database.migrations_fingerprint()
 
 
+def test_fingerprint_includes_network_schema(monkeypatch):
+    from app.db import network
+
+    before = database.migrations_fingerprint()
+    original = database.Path.read_bytes
+
+    def changed(path):
+        content = original(path)
+        return content + b"\n# network schema change" if path == database.Path(network.__file__) else content
+
+    monkeypatch.setattr(database.Path, "read_bytes", changed)
+    assert database.migrations_fingerprint() != before
+
+
 def test_first_init_runs_the_pass_and_records_the_fingerprint(mock_db, monkeypatch):
     conn = mock_db
     calls = []

@@ -2419,14 +2419,14 @@ def migrations_fingerprint() -> str:
     """
     import hashlib
 
-    from app.db import schema_postgres, mobile_hub
+    from app.db import schema_postgres, mobile_hub, network
     from app.core import owner_auth
 
     h = hashlib.sha256()
     h.update(f"v{SCHEMA_VERSION}\n".encode())
     # The hub and owner helpers also define tables used during encryption init.
-    # Include their sources so an upgrade cannot skip newly imported DDL.
-    for module in (sys.modules[__name__], schema_postgres, mobile_hub, owner_auth):
+    # Include their sources and the network schema so upgrades cannot skip new DDL.
+    for module in (sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network):
         path = getattr(module, "__file__", None)
         if not path:
             return ""

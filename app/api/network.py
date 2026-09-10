@@ -224,8 +224,8 @@ async def rename_member(device_id: str, body: RenameMember, _: str = Depends(req
     ctx = await run_sync(engine.load_context)
     if device_id == ctx.device_id:
         await run_sync(engine.publish_presence, version=settings.version)
-        from app.network import hub
-        hub.kick()
+    from app.network import hub
+    hub.kick()
     return _member_view(row, ctx)
 
 

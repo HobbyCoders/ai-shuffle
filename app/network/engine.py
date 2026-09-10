@@ -272,7 +272,7 @@ def leave_network() -> dict:
         cursor = conn.cursor()
         for table in ("sync_pending", "sync_conflicts", "sync_watermarks", "sync_records", "sync_ops",
                       "sync_peers", "network_presence", "network_catalog_cursors", "network_membership_records",
-                      "network_joins", "network_members"):
+                      "network_joins", "network_member_names", "network_members"):
             cursor.execute(f"DELETE FROM {table}")
         cursor.execute("DELETE FROM sync_blobs WHERE present = FALSE")
         store.delete_state(_conn=conn)
@@ -933,7 +933,7 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *, ctx: Optional[Network
             result.lost += 1
     if result.touched:
         touched = list(result.touched)
-        if any(c == "membership" for c, _, _ in touched):
+        if any(c in ("membership", "member_names") for c, _, _ in touched):
             ctx = load_context()
             _ensure_safe_write_key(ctx)
         _notify(touched)
@@ -1064,7 +1064,7 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: Optional[NetworkConte
             applied += 1
             touched.append((coll.name, item["record_id"], OP_DELETE if item["deleted"] else OP_UPSERT))
     if touched:
-        if coll.name == "membership":
+        if coll.name in ("membership", "member_names"):
             load_context()
         _notify(touched)
     return applied
@@ -1332,6 +1332,15 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
             (row["device_id"], json.dumps(row["endpoints"]), json.dumps(row["capabilities"]), row["version"],
              row["platform"], row["incarnation"], row["updated_at"]))
         changed = record(cursor, "presence", ctx.device_id, row, ctx=ctx) is not None
+        # Upgrade old local-only renames without asking the user to rename again.
+        # Only seed our own name: a peer's cached hostname is not authoritative.
+        cursor.execute("""INSERT INTO network_member_names (device_id, name, updated_at)
+                          SELECT device_id, name, updated_at FROM network_members WHERE device_id = %s
+                          ON CONFLICT (device_id) DO NOTHING""", (ctx.device_id,))
+        cursor.execute("SELECT * FROM network_member_names WHERE device_id = %s", (ctx.device_id,))
+        name_row = cursor.fetchone()
+        if name_row is not None:
+            changed = record(cursor, "member_names", ctx.device_id, dict(name_row), ctx=ctx) is not None or changed
     if changed:
         kick()
     return changed

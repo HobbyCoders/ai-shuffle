@@ -158,6 +158,11 @@ _register(Collection(
     notes="Each device publishes its own reachability and capabilities; last writer wins per device."))
 
 _register(Collection(
+    name="member_names", table="network_member_names", keys=("device_id",),
+    fields=("device_id", "name", "updated_at"), resource="network", priority=2,
+    notes="Display names editable from any worker; last writer wins without changing membership certificates."))
+
+_register(Collection(
     name="user_preferences", table="user_preferences", keys=("user_type", "user_id", "key"),
     fields=("user_type", "user_id", "key", "value", "updated_at"), json_fields=("value",),
     resource="preferences", priority=10,
