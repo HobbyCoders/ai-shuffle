@@ -307,6 +307,44 @@ def _project_has_other_active_session(project_id: str, exclude_session_id: Optio
     return False
 
 
+def _checkout_has_other_active_session(
+    project_id: str, working_dir: str, exclude_session_id: Optional[str]
+) -> bool:
+    """Protect the linked checkout, not unrelated branches of its project.
+
+    Resolve each busy session using the same cwd authority as git actions.
+    Unknown cwd or lookup failure is not evidence that deletion is safe.
+    """
+    from app.core.project_resolver import resolve_existing_cwd
+    from app.db.checkouts import get_checkout_by_path
+    from app.db.sessions import list_sessions_for_cleanup
+    from app.db import database
+
+    try:
+        checkout = get_checkout_by_path(working_dir)
+        sessions = list_sessions_for_cleanup(
+            project_id, checkout["project_id"] if checkout else None
+        )
+        target = Path(working_dir).resolve()
+        for session in sessions:
+            sid = session.get("id")
+            if not sid or sid == exclude_session_id or not _session_is_busy(sid):
+                continue
+            if session.get("worktree_id"):
+                from app.core.project_utils import get_worktree_working_dir
+
+                worktree = database.get_worktree(session["worktree_id"])
+                cwd = get_worktree_working_dir(worktree) if worktree else None
+            else:
+                cwd = resolve_existing_cwd(session)
+            if not cwd or Path(cwd).resolve() == target:
+                return True
+    except Exception:
+        logger.exception("Failed to check active sessions for checkout %s", working_dir)
+        return True
+    return False
+
+
 def _is_linked_worktree(path: str) -> bool:
     """True when ``path`` is a git-linked worktree (``.git`` is a file)."""
     try:
@@ -431,10 +469,11 @@ async def _do_cleanup(
     """
     op.set_step("cleanup", STEP_RUNNING)
 
-    # Liveness guard: never remove a worktree / rewrite the main checkout while
-    # another session is busy (streaming or running background work). Applies to
-    # BOTH modes — the operation still counts as done (merge already landed).
-    # Both guards below fan out into synchronous DB queries — off the loop.
+    # Linked v2 checkouts have no legacy worktree_id. Identify them before
+    # choosing the guard, or unrelated project sessions block their cleanup.
+    linked_worktree = not worktree_id and _is_linked_worktree(working_dir)
+    # The guards query the DB off the event loop. A blocked cleanup does not
+    # undo the successful merge.
     if worktree_id:
         if await asyncio.to_thread(
             _worktree_has_other_active_session, worktree_id, session_id
@@ -443,6 +482,16 @@ async def _do_cleanup(
                 "cleanup",
                 STEP_WARNING,
                 detail="Skipped: another session is active in this worktree",
+            )
+            return
+    elif linked_worktree:
+        if await asyncio.to_thread(
+            _checkout_has_other_active_session, op.project_id, working_dir, session_id
+        ):
+            op.set_step(
+                "cleanup",
+                STEP_WARNING,
+                detail="Skipped: another session may be using this checkout",
             )
             return
     else:
@@ -464,7 +513,7 @@ async def _do_cleanup(
                 op.result["worktree_deleted"] = True
             else:
                 op.set_step("cleanup", STEP_WARNING, detail="Worktree cleanup failed")
-        elif _is_linked_worktree(working_dir):
+        elif linked_worktree:
             ok = await _cleanup_linked_worktree(
                 op, working_dir, feature_branch, default_branch, session_id
             )

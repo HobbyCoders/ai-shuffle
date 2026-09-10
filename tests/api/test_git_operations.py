@@ -441,6 +441,86 @@ class TestExecuteFinish:
         mock_git_service.checkout.assert_not_called()
         mock_worktree_manager.cleanup_worktree.assert_not_called()
 
+    @pytest.mark.parametrize("activity", ["turn", "background", "idle"])
+    @pytest.mark.parametrize("sibling_branch", ["feat/x", "feat/other", None])
+    @pytest.mark.parametrize("legacy_project_id", ["p1", None, "legacy-alias"])
+    async def test_linked_cleanup_scopes_busy_sessions_to_checkout(
+        self, mock_git_service, mock_github_service, mock_worktree_manager,
+        tmp_path, test_db, sibling_branch, activity, legacy_project_id,
+    ):
+        from app.core.config import settings
+        from app.db import checkouts, projects_v2, sessions
+
+        test_db.execute("PRAGMA foreign_keys = OFF")
+        project = projects_v2.upsert_project("local:cleanup-scope", "Cleanup scope")
+        main = tmp_path / "main"
+        wt = main / ".fluid" / "worktrees" / "feat-x"
+        other = main / ".fluid" / "worktrees" / "feat-other"
+        wt.mkdir(parents=True)
+        other.mkdir(parents=True)
+        (wt / ".git").write_text(
+            f"gitdir: {main / '.git' / 'worktrees' / 'feat-x'}\n", encoding="utf-8"
+        )
+        for branch, path in [(None, main), ("feat/x", wt), ("feat/other", other)]:
+            checkouts.upsert_checkout(
+                project["id"], settings.effective_instance_id, str(path), branch=branch
+            )
+        # Use the production creation and branch-binding writes, not a mocked
+        # resolver or a pre-seeded cwd. Hidden workers must remain in the sweep.
+        for sid, branch in [("me", "feat/x"), ("other", sibling_branch)]:
+            sessions.create_session(
+                sid, "profile", project_id=legacy_project_id,
+                project_v2_id=project["id"], hidden=True, is_worker=True,
+                derive_provider_from_profile=False,
+            )
+            sessions.set_session_branch(sid, branch, project["id"])
+
+        mock_git_service.remove_worktree.return_value = True
+        op = _finish_op(project_id="p1", session_id="me")
+        with patch.multiple(
+            gitops, git_service=mock_git_service,
+            github_service=mock_github_service, worktree_manager=mock_worktree_manager,
+        ), patch(
+            "app.core.streaming_status.has_active_run",
+            side_effect=lambda sid: sid == "me" or activity == "turn",
+        ), patch(
+            "app.core.task_registry.task_registry.has_active_background_work",
+            return_value=activity == "background",
+        ), patch.object(gitops, "_release_session_cwd", new_callable=AsyncMock):
+            await _execute_finish(
+                op, working_dir=str(wt), worktree_id=None, repo="o/r",
+                pr_number=7, pr_url="u", feature_branch="feat/x", default_branch="main",
+                merge_method="squash", cleanup=True, session_id="me", status={"ahead": 0},
+            )
+
+        blocked = sibling_branch == "feat/x" and activity != "idle"
+        assert op.status == "done"
+        assert _step_status(op, "cleanup") == ("warning" if blocked else "done")
+        assert mock_git_service.remove_worktree.called is not blocked
+        mock_git_service.checkout.assert_not_called()
+
+    @pytest.mark.parametrize("failure", ["query", "resolve", "missing"])
+    async def test_linked_cleanup_does_not_delete_when_safety_lookup_fails(
+        self, mock_git_service, failure, tmp_path,
+    ):
+        (tmp_path / ".git").write_text("gitdir: /repo/.git/worktrees/feature\n")
+        op = _finish_op()
+        with patch.object(gitops, "git_service", mock_git_service), patch(
+            "app.db.checkouts.get_checkout_by_path", return_value=None,
+        ), patch(
+            "app.db.sessions.list_sessions_for_cleanup",
+            side_effect=RuntimeError("lookup failed") if failure == "query" else None,
+            return_value=[{"id": "other"}],
+        ), patch.object(gitops, "_session_is_busy", return_value=True), patch(
+            "app.core.project_resolver.resolve_existing_cwd",
+            side_effect=RuntimeError("resolution failed") if failure == "resolve" else None,
+            return_value=None,
+        ):
+            await gitops._do_cleanup(op, str(tmp_path), None, "feat/x", "main", "me")
+        assert _step_status(op, "cleanup") == "warning"
+        mock_git_service.remove_worktree.assert_not_called()
+        mock_git_service.delete_branch.assert_not_called()
+
     async def test_linked_worktree_cleanup_stamps_head_sha(
         self, mock_git_service, mock_github_service, mock_worktree_manager, tmp_path
     ):

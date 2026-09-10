@@ -1313,6 +1313,22 @@ def list_sessions_by_pr_number(pr_number: int) -> list:
         return [row_to_dict(r) for r in cursor.fetchall()]
 
 
+def list_sessions_for_cleanup(project_id: str, project_v2_id: Optional[str] = None) -> list:
+    """All potential checkout users, including hidden workers and older sessions.
+
+    Unlike the sidebar list, this safety query has no page or install filter.
+    V2 sessions may have no legacy project_id, or a different legacy alias.
+    """
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT * FROM sessions WHERE project_id = {_ph} OR project_v2_id = {_ph}",
+            (project_id, project_v2_id or project_id),
+        )
+        return [row_to_dict(r) for r in cursor.fetchall()]
+
+
 def list_sessions_for_branch(project_id: str, branch: str) -> list:
     """Sessions on this project whose logical branch matches ``branch``."""
     _ph = ph()
