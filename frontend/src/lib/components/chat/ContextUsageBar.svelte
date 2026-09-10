@@ -39,6 +39,7 @@
 	import { onMount, tick } from 'svelte';
 	import { contextBreakdown, usageSections, hiddenUsageProviders } from '$lib/stores/expansion-preferences';
 	import { EyeOff, Eye } from 'lucide-svelte';
+	import { createUsageNumberAnimation } from './usage-number-animation';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getContextMaxForModel } from '$lib/constants/chat';
 	import {
@@ -80,6 +81,8 @@
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance } from '$lib/stores/usage-target';
 	import { claudeAuthenticated } from '$lib/stores/auth.svelte';
+
+	const usageNumber = createUsageNumberAnimation();
 
 	interface Props {
 		onOpenChange?: (open: boolean) => void;
@@ -751,7 +754,7 @@
 							</span>
 							{#if !planRowsVisible && planMinRemaining != null}
 								<span class="row-pct {remainingSeverity(planMinRemaining)} sec-summary"
-									>{planMinRemaining}% left</span
+									use:usageNumber={{ key: `plan:${resolvedKey}:summary`, text: `${planMinRemaining}% left` }}></span
 								>
 							{/if}
 							<svg
@@ -783,7 +786,7 @@
 												no reset window
 											{/if}
 										</span>
-										<span class="row-pct {item.severity}">{item.pct}% left</span>
+										<span class="row-pct {item.severity}" use:usageNumber={{ key: `plan:${resolvedKey}:${item.type}`, text: `${item.pct}% left` }}></span>
 									</span>
 								</div>
 								<div class="row-bar">
@@ -833,13 +836,13 @@
 								     about, so it outranks the window pct (which an OpenRouter
 								     key-spend limit would otherwise produce). -->
 								{#if creditsNum(pb.credits, 'balance_remaining') != null && pbCreditsShort}
-									<span class="sec-summary sec-credits">{pbCreditsShort}</span>
+									<span class="sec-summary sec-credits" use:usageNumber={{ key: `${sectionId}:credits-short`, text: pbCreditsShort }}></span>
 								{:else if pbSummary}
 									<span class="row-pct {pbSummary.severity} sec-summary"
-										>{pbSummary.pct}%{pbShowsRemaining ? ' left' : ''}</span
+										use:usageNumber={{ key: `${sectionId}:summary`, text: `${pbSummary.pct}%${pbShowsRemaining ? ' left' : ''}` }}></span
 									>
 								{:else if pbCreditsShort}
-									<span class="sec-summary sec-credits">{pbCreditsShort}</span>
+									<span class="sec-summary sec-credits" use:usageNumber={{ key: `${sectionId}:credits-short`, text: pbCreditsShort }}></span>
 								{/if}
 							{/if}
 							<svg
@@ -881,7 +884,7 @@
 										{/if}
 									</span>
 									<span class="row-pct {display.severity}"
-										>{display.pct}%{pbShowsRemaining ? ' left' : ''}</span
+										use:usageNumber={{ key: `${sectionId}:${w.type}`, text: `${display.pct}%${pbShowsRemaining ? ' left' : ''}` }}></span
 									>
 								</span>
 							</div>
@@ -892,7 +895,7 @@
 					{/each}
 					{@const credits = creditsSummary(pb.credits, pb.providerType)}
 					{#if credits}
-						<div class="row-reset">{credits}</div>
+						<div class="row-reset usage-credits" use:usageNumber={{ key: `${sectionId}:credits`, text: credits }}></div>
 					{/if}
 				{/if}
 			{/each}
@@ -1230,6 +1233,12 @@
 		display: flex;
 		align-items: center;
 		gap: 6px;
+		border-radius: 6px;
+		transition: background-color 160ms ease, box-shadow 160ms ease;
+	}
+	.provider-header:focus-within {
+		background: var(--accent);
+		box-shadow: 0 0 0 4px var(--accent);
 	}
 	.provider-header .sec-header {
 		flex: 1;
@@ -1248,7 +1257,29 @@
 		font: inherit;
 		cursor: pointer;
 	}
-	.provider-hide { flex-shrink: 0; }
+	.provider-hide {
+		flex-shrink: 0;
+		transition: opacity 160ms ease, background-color 160ms ease, color 160ms ease;
+	}
+	.provider-header .section-device { transition: transform 160ms ease; }
+	/* Opacity keeps the button's hit area, tab stop and layout slot intact. */
+	@media (min-width: 769px) and (hover: hover) and (pointer: fine) {
+		.provider-hide { opacity: 0; }
+		.provider-header:hover .provider-hide,
+		.provider-header:focus-within .provider-hide { opacity: 1; }
+		.provider-header:hover {
+			background: var(--accent);
+			box-shadow: 0 0 0 4px var(--accent);
+		}
+		.provider-header:hover .section-device { transform: translateX(2px); }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.provider-header, .provider-hide, .provider-header .section-device, .row-fill {
+			transition: none;
+		}
+		.provider-header:hover .section-device { transform: none; }
+	}
+	.usage-credits { font-variant-numeric: tabular-nums; }
 	.provider-hide:hover, .provider-restore:hover {
 		background: var(--accent);
 		color: var(--foreground);

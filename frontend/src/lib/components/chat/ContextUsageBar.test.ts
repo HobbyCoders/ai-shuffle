@@ -118,6 +118,60 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
+describe('ContextUsageBar — updates while closed', () => {
+	it.each([false, true])('animates snapshot balances and live quota on reopen (expanded=%s)', async (expanded) => {
+		let callbacks = new Map<number, FrameRequestCallback>();
+		let id = 0;
+		vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+			callbacks.set(++id, callback); return id;
+		});
+		vi.stubGlobal('cancelAnimationFrame', (key: number) => callbacks.delete(key));
+		vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+		const advance = (time: number) => {
+			const pending = [...callbacks.values()]; callbacks.clear();
+			pending.forEach(callback => callback(time));
+		};
+		try {
+			usageSections.set({ plan: expanded, 'provider:credits': expanded });
+			const snapshot = (balance: number) => rateLimit.applySnapshot({
+				available: true, windows: [{ type: 'five_hour', utilization: 24, resets_at: future() }],
+				providers: [{ provider_id: 'credits', provider_type: 'fal', provider_name: 'fal.ai',
+					credits: { balance_remaining: balance } }]
+			});
+			snapshot(22.91);
+			const { container } = render(ContextUsageBar);
+			await openPopover(container);
+			expect(container.textContent).toContain('24% left');
+			expect(container.textContent).toContain('$22.91 left');
+			await openPopover(container);
+			snapshot(21.50);
+			snapshot(20.44);
+			rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.82, resets_at: future() });
+			await openPopover(container);
+			expect(container.textContent).toContain('24% left');
+			expect(container.textContent).toContain('$22.91 left');
+			advance(0); advance(350);
+			expect(container.textContent).not.toContain('$22.91 left');
+			expect(container.textContent).not.toContain('$20.44 left');
+			advance(700);
+			expect(container.textContent).toContain('18% left');
+			expect(container.textContent).toContain('$20.44 left');
+			await openPopover(container); await openPopover(container);
+			expect(container.textContent).toContain('18% left');
+			expect(container.textContent).toContain('$20.44 left');
+			expect(callbacks.size).toBe(0);
+			// The refresh request started by opening can land after the labels mount.
+			snapshot(19.25);
+			await waitFor(() => expect(callbacks.size).toBeGreaterThan(0));
+			expect(container.textContent).toContain('$20.44 left');
+			advance(0); advance(700);
+			expect(container.textContent).toContain('$19.25 left');
+		} finally {
+			cleanup(); vi.unstubAllGlobals();
+		}
+	});
+});
+
 describe('ContextUsageBar — popover positioning', () => {
 	it('updates mounted expansion controls from remote preferences without closing the popover or echoing', async () => {
 		rateLimit.applySnapshot({ available: true, windows: [] });
