@@ -139,7 +139,7 @@ def load_context(_conn=None) -> Optional[NetworkContext]:
         with _lock:
             _context = None
         return None
-    device_identity = identity_mod.load()
+    device_identity = identity_mod.load(create=False)
     keyring = _unwrap_keyring(state.get("keyring") or {}, device_identity)
     members = {row["device_id"]: _member_from_row(row) for row in store.list_members(_conn)}
     ctx = NetworkContext(

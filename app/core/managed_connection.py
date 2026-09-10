@@ -254,6 +254,7 @@ async def _stop():
 
 async def supervise():
     global _process, _state, _error, _url
+    unreachable_since = None
     try:
         while True:
             delay = 3
@@ -263,6 +264,17 @@ async def supervise():
                     ready = await run_sync(_reachable, binding, _url)
                     _state, _error = ('connected' if ready else 'connecting'), None
                     delay = 30 if ready else 5
+                    if ready:
+                        unreachable_since = None
+                    elif unreachable_since is None:
+                        unreachable_since = time.monotonic()
+                    elif time.monotonic() - unreachable_since >= 60:
+                        # cloudflared can stay alive while its route is stuck.
+                        # Refresh the connector for the SAME saved binding.
+                        await _stop()
+                        unreachable_since = None
+                        _state, _error = 'reconnecting', 'The cloud route is not responding. Restarting the connection.'
+                        delay = 3
                 else:
                     generation = _generation
                     credentials = await run_sync(_credentials)
@@ -279,6 +291,7 @@ async def supervise():
                         if generation != _generation:
                             await _stop()
                             continue
+                        unreachable_since = time.monotonic()
                         _state, _error = 'connecting', None
                         delay = 3
             except asyncio.CancelledError:

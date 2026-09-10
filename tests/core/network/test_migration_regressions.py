@@ -112,7 +112,7 @@ def test_network_database_rejects_a_different_device_identity(workers, monkeypat
         engine.create_network("Private database")
         original = store.get_state()
         with monkeypatch.context() as wrong_identity:
-            wrong_identity.setattr(identity, "load", lambda: other.identity)
+            wrong_identity.setattr(identity, "load", lambda **kwargs: other.identity)
             with pytest.raises(RuntimeError, match="private database"):
                 startup.initialize()
         assert store.get_state() == original
