@@ -23,6 +23,7 @@ class FakeHub:
         self.recovery: Optional[dict] = None
         self.quota_ops = quota_ops
         self.calls: List[tuple] = []
+        self.combined_poll = True
         # Which server id is talking: tests set this before switching workers.
         self.current_server: str = "server-a"
 
@@ -125,6 +126,10 @@ class FakeHub:
         return {"ok": True}
 
     def push(self, server, body, params):
+        keys = {(env['origin_device_id'], env['origin_incarnation'], env['origin_seq']) for env in body.get('ops') or []}
+        if self.quota_ops is not None and len(self.feed) + len(keys - self.seen) > self.quota_ops:
+            return {"accepted": 0, "cursor": len(self.feed), "quota_exceeded": True,
+                    "quota_reason": "ops", "quota": self._quota()}
         accepted = 0
         for env in body.get("ops") or []:
             key = (env["origin_device_id"], env["origin_incarnation"], env["origin_seq"])
@@ -142,7 +147,10 @@ class FakeHub:
         limit = int(params.get("limit", 500))
         page = self.feed[cursor:cursor + limit]
         new_cursor = cursor + len(page)
-        return {"ops": page, "cursor": new_cursor, "more": new_cursor < len(self.feed)}
+        result = {"ops": page, "cursor": new_cursor, "more": new_cursor < len(self.feed)}
+        if self.combined_poll and params.get("include_pending") == "1":
+            result.update(pending_devices=self.pending(server, body, params)["devices"], quota=self._quota())
+        return result
 
     def set_recovery(self, server, body, params):
         self.recovery = body["recovery"]

@@ -133,3 +133,87 @@ def test_postgres_migration_preserves_bytea_and_resume_state(pg):
         assert bytes(cursor.fetchone()["data"]) == b"abc"
         cursor.execute("SELECT platform_chat_id FROM connector_sessions WHERE id='route'")
         assert cursor.fetchone()["platform_chat_id"] == "chat"
+
+
+def test_cloud_receipt_upgrade_atomicity_and_exact_sequence_scope(pg, monkeypatch):
+    from app.db import network as store
+
+    new_schema, connect, _ = pg
+    schema = new_schema()
+
+    def envelope(seq):
+        return {"origin_device_id": "origin", "origin_incarnation": 1, "origin_seq": seq,
+                "collection": "test", "record_id": str(seq), "op": "upsert", "clock": seq}
+
+    with connect(schema) as conn:
+        cursor = conn.cursor()
+        store.insert_op(cursor, envelope(1), "settings")
+        # Simulate an existing installation, then run the additive migration twice.
+        cursor.execute("DROP TABLE sync_hub_receipts")
+        store.create_schema(cursor)
+        store.create_schema(cursor)
+        cursor.execute("SELECT COUNT(*) AS n FROM sync_ops")
+        assert cursor.fetchone()["n"] == 1
+    with pytest.raises(RuntimeError, match="after receipt"), connect(schema) as conn:
+        cursor = conn.cursor()
+        store.insert_op(cursor, envelope(2), "settings")
+        store.record_hub_receipt(cursor, "hub-a", envelope(2))
+        raise RuntimeError("after receipt")
+    with connect(schema) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM sync_hub_receipts")
+        assert cursor.fetchone()["n"] == 0
+        cursor.execute("SELECT COUNT(*) AS n FROM sync_ops")
+        assert cursor.fetchone()["n"] == 1
+        # A downloaded successor can be pending before LAN supplies its prefix.
+        store.record_hub_receipt(cursor, "hub-a", envelope(5))
+    with connect(schema) as conn:
+        store.insert_op(conn.cursor(), envelope(5), "settings")
+
+    @contextmanager
+    def isolated_db():
+        conn = connect(schema)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(store, "get_db", isolated_db)
+    assert [env for _, env in store.hub_ops_after_ingest(0, "hub-a")] == [envelope(1), None]
+    assert [env for _, env in store.hub_ops_after_ingest(0, "hub-b")] == [envelope(1), envelope(5)]
+
+
+def test_concurrent_hub_state_updates_preserve_cursors_and_cooldown(pg, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.db import network as store
+    from app.network import hub
+
+    new_schema, connect, _ = pg
+    schema = new_schema()
+    with connect(schema) as conn:
+        store.create_state(network_id="test-network", name="Test", founder_device_id="origin", keyring={}, _conn=conn)
+
+    @contextmanager
+    def isolated_db():
+        conn = connect(schema)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(store, "get_db", isolated_db)
+    start = threading.Barrier(2)
+    blocked = {"reason": "daily_upload", "retry_at": 123456789}
+
+    def update(fields):
+        start.wait(timeout=5)
+        return hub._save_hub_state(**fields)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(update, [{"cursor": 2, "quota": {"ops": 2}},
+                                   {"cursor": 1, "upload_blocked": blocked, "pushed_ingest_id": 10}]))
+    assert hub._hub_state() == {"cursor": 2, "quota": {"ops": 2}, "upload_blocked": blocked, "pushed_ingest_id": 10}
