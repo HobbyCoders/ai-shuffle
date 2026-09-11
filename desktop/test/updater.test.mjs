@@ -4,13 +4,13 @@ import vm from 'node:vm';
 import path from 'node:path';
 import { test } from 'node:test';
 
-function fixture() {
+function fixture(env = {}) {
  const calls = []; const timers = [];
  const app = { relaunch: options => calls.push(options), quit: () => calls.push('quit') };
  const module = { exports: {} };
  vm.runInNewContext(readFileSync(new URL('../dist/main/updater.js', import.meta.url), 'utf8'), {
   exports: module.exports, module, require: id => id === 'electron' ? { app } : path,
-  process: { env: {} }, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},
+  process: { env }, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},
   setInterval: fn => { timers.push(fn); return timers.length; }, clearInterval() {}, Date
  });
  return { updater: new module.exports.Updater(), calls, timers, app };
@@ -69,6 +69,32 @@ test('shutdown failures retain staged updates for direct install retry without r
  assert.equal(updater.current.phase, 'ready'); assert.match(updater.current.error, /Database did not stop/); assert.equal(calls.length, 0);
  await updater.check(); await updater.download(); await updater.install();
  assert.equal(builds, 1); assert.equal(attempts, 2); assert.equal(calls.at(-1), 'quit'); assert.equal(updater.current.error, null);
+});
+
+test('installed restart drops the running revision so legacy launchers select the pending update', async () => {
+ const env = { SHUFFLE_SOURCE_ROOT: 'C:/isolated/source', SHUFFLE_SOURCE_REVISION: 'a'.repeat(40), SHUFFLE_SOURCE_NODE: 'C:/runtime/node.exe', PATH: 'keep-path' };
+ const { updater, app } = fixture(env);
+ let inherited;
+ app.relaunch = () => { inherited = { ...env }; };
+ updater.useApplications(source({ pendingVersion: 'b'.repeat(40) }), 'C:/Programs/AI Shuffle.exe');
+ await updater.install();
+ assert.deepEqual(inherited, { PATH: 'keep-path' });
+ assert.deepEqual(env, { PATH: 'keep-path' });
+});
+
+test('failed installed relaunch restores source context and remains retryable', async () => {
+ const original = { SHUFFLE_SOURCE_ROOT: 'C:/isolated/source', SHUFFLE_SOURCE_REVISION: 'a'.repeat(40), SHUFFLE_SOURCE_NODE: 'C:/runtime/node.exe' };
+ const env = { ...original };
+ const { updater, app } = fixture(env);
+ app.relaunch = () => { assert.deepEqual(env, {}); throw Error('Relaunch failed'); };
+ updater.useApplications(source({ pendingVersion: 'b'.repeat(40) }), 'C:/Programs/AI Shuffle.exe');
+ await updater.install();
+ assert.deepEqual(env, original);
+ assert.equal(updater.current.phase, 'ready');
+ assert.match(updater.current.error, /Relaunch failed/);
+ app.relaunch = () => assert.deepEqual(env, {});
+ await updater.install();
+ assert.equal(updater.current.error, null);
 });
 
 test('relaunch failure is retryable without downloading again', async () => {

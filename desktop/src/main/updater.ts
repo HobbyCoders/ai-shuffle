@@ -63,8 +63,19 @@ export class Updater {
     try {
       await this.beforeInstall();
       if (this.installedExecutable) {
-        app.relaunch({ execPath: this.installedExecutable, args: this.restartArgs });
-        app.quit();
+        // Electron's relaunch inherits this process's environment. An older
+        // installed launcher treats these variables as an instruction to attach
+        // to the running revision, bypassing selection of the pending update.
+        const launchKeys = ['SHUFFLE_SOURCE_ROOT', 'SHUFFLE_SOURCE_REVISION', 'SHUFFLE_SOURCE_NODE'] as const;
+        const saved = launchKeys.map(key => process.env[key]);
+        for (const key of launchKeys) delete process.env[key];
+        try {
+          app.relaunch({ execPath: this.installedExecutable, args: this.restartArgs });
+          app.quit();
+        } catch (error) {
+          launchKeys.forEach((key, index) => { if (saved[index] !== undefined) process.env[key] = saved[index]; });
+          throw error;
+        }
         return;
       }
       const current = this.applications.version ? await this.applications.application(this.applications.version) : null;

@@ -8,10 +8,15 @@ import { readProfile, localFeed } from './source-profile';
 import { readInstalledHostSync } from './installed-host';
 
 async function start(): Promise<void> {
+  // Packaged Windows launches must select pending updates even when restarted
+  // by an older source-managed app that passes its own revision in the environment.
+  if (app.isPackaged && process.platform === 'win32') {
+    await require('./installed-entry').startInstalled();
+    return;
+  }
   const root = process.env.SHUFFLE_SOURCE_ROOT;
   if (!root) {
-    if (app.isPackaged && process.platform === 'win32') await require('./installed-entry').startInstalled();
-    else require('./index');
+    require('./index');
     return;
   }
   const revision = process.env.SHUFFLE_SOURCE_REVISION ?? '';
