@@ -24,6 +24,7 @@ from app.core.plugin_models import _get_fluid_dir, AvailablePlugin, PluginInfo, 
 
 MARKETPLACE = "shuffle-connectors"
 CATALOG = json.loads((Path(__file__).parent / "connectors" / "catalog.json").read_text())
+_DISPLAY_NAMES = {"discord": "Discord Bot"}
 _LOCK = threading.RLock()
 
 
@@ -212,7 +213,7 @@ def require_installed(kind: str) -> str:
 
 def info(kind: str) -> PluginInfo:
     state = record(kind)
-    return PluginInfo(id=package_id(kind), name=kind, marketplace=MARKETPLACE,
+    return PluginInfo(id=package_id(kind), name=_DISPLAY_NAMES.get(kind, kind), marketplace=MARKETPLACE,
                       description=f"Official {kind} connector runtime", version=(state or {}).get("release", CATALOG["release"]),
                       scope="user", install_path=str(root() / kind), enabled=bool(state and state.get("enabled")),
                       installed_at=datetime.fromisoformat(state["installed_at"]) if state else None,
@@ -224,7 +225,7 @@ def installed() -> list[PluginInfo]:
 
 
 def available() -> list[AvailablePlugin]:
-    return [AvailablePlugin(id=package_id(kind), name=kind, marketplace=MARKETPLACE,
+    return [AvailablePlugin(id=package_id(kind), name=_DISPLAY_NAMES.get(kind, kind), marketplace=MARKETPLACE,
                             marketplace_path="", description=f"Official {kind} connector runtime",
                             installed=bool(record(kind)), enabled=info(kind).enabled, connector_type=kind)
             for kind in CATALOG["packages"]]

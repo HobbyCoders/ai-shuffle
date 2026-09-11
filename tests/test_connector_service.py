@@ -175,6 +175,15 @@ class TestGetListFields:
 
 
 class TestGetConnectorTypeInfo:
+    def test_discord_bot_display_name_preserves_connection_identity(self):
+        discord = next(t for t in get_connector_type_info() if t["type"] == "discord")
+        assert discord["name"] == "Discord Bot"
+        assert discord["plugin_id"] == "discord@shuffle-connectors"
+        assert any(
+            field["key"] == "bot_token" and field["required"]
+            for field in discord["config_fields"]
+        )
+
     def test_returns_14_types(self):
         types = get_connector_type_info()
         assert len(types) == 14

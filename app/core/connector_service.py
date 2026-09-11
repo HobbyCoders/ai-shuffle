@@ -458,7 +458,7 @@ def get_connector_type_info() -> List[Dict]:
         },
         {
             "type": "discord",
-            "name": "Discord",
+            "name": "Discord Bot",
             "description": "Discord bot via discord.py",
             "config_fields": [
                 {"key": "bot_token", "label": "Bot Token", "type": "password", "required": True},

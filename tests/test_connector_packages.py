@@ -25,6 +25,16 @@ def test_catalog_installs_verified_sources(local_package):
     with pytest.raises(ValueError): packages.install("../../evil")
     with pytest.raises(ValueError): packages.install("gmail", "project")
 
+def test_discord_bot_name_preserves_plugin_identity(local_package):
+    available = next(p for p in packages.available() if p.connector_type == "discord")
+    installed = packages.install("discord")
+    for plugin in (available, installed, packages.info("discord"), packages.details("discord")):
+        assert plugin.name == "Discord Bot"
+        assert plugin.id == "discord@shuffle-connectors"
+        assert plugin.connector_type == "discord"
+    assert packages.require_installed("discord") == installed.id
+
+
 def test_failed_download_is_not_published(local_package, monkeypatch):
     monkeypatch.setattr(packages, "_download", lambda _: b"not trusted code")
     with pytest.raises(ValueError, match="integrity"): packages.install("gmail")
