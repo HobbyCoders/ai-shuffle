@@ -320,15 +320,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			onPersistSession();
 		}
 
-		// Always clean up streamingSessions (cross-session/cross-device)
-		if (doneSessionId) {
-			streamingSessions.update(map => {
-				if (!map.has(doneSessionId)) return map;
-				const newMap = new Map(map);
-				newMap.delete(doneSessionId);
-				return newMap;
-			});
-		}
+		// A terminal frame describes one turn, not the session's current run.
+		// It can arrive after a successor's user_streaming_changed(true) on the
+		// other socket. Only the durable run-status channel may clear that map.
 
 		// A finished session can't be awaiting input. Clear any attention dot here
 		// too, in case the backend's count=0 broadcast was missed (dead socket).
@@ -366,16 +360,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			internal.pendingTools.clear();
 		}
 
-		// Clean up streamingSessions (cross-session/cross-device safe — keyed by
-		// the stopped session's id).
-		if (stoppedSessionId) {
-			streamingSessions.update(map => {
-				if (!map.has(stoppedSessionId)) return map;
-				const newMap = new Map(map);
-				newMap.delete(stoppedSessionId);
-				return newMap;
-			});
-		}
+		// As with done, a late stop/interrupt acknowledgement must not clear a
+		// newer run's user-wide streaming state.
 
 		// A stopped/interrupted session can't be awaiting input — clear any stale
 		// attention dot (mirrors handleDone; guards against a missed count=0).
@@ -869,16 +855,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const erroredSessionId = errSessionId || errState.sessionId;
 				const errMessage = data.message as string;
 
-				// Cross-session safe: drop the errored session's streaming pill
-				// regardless of which session is in view.
-				if (erroredSessionId) {
-					streamingSessions.update(map => {
-						if (!map.has(erroredSessionId)) return map;
-						const newMap = new Map(map);
-						newMap.delete(erroredSessionId);
-						return newMap;
-					});
-				}
+				// Error frames (including rejected commands) do not establish that
+				// the session has no live run. The run-status channel owns the map.
 
 				// Always log for observability (keyed to the session that errored).
 				reportClientError({

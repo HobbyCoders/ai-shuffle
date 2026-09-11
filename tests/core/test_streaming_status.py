@@ -415,6 +415,40 @@ def test_get_user_streaming_sessions_join(mock_db):
     assert streaming_status.get_user_streaming_sessions("nobody") == []
 
 
+@pytest.mark.parametrize("state", ["running", "interrupting", "draining"])
+@pytest.mark.parametrize("owner", [None, "u1"])
+def test_reconnect_snapshot_matches_live_turn_truth(mock_db, state, owner):
+    from app.db import turns
+
+    mock_db.execute(
+        "INSERT INTO api_users (id, name, api_key_hash) VALUES ('u1', 'U', 'x')"
+    )
+    mock_db.commit()
+    database.create_session(session_id="s-live", profile_id="default", api_user_id=owner)
+    run = runs.claim_run("s-live", "runner", 60)
+    turn = turns.enqueue_turn("s-live", "user", prompt="keep working")
+    assert turns.start_turn(turn["id"], run_id=run["id"])
+    if state in ("interrupting", "draining"):
+        assert turns.interrupt_turn("s-live", "stop")
+    if state == "draining":
+        assert turns.escalate_to_draining(turn["id"])
+
+    user_id = owner or "admin"
+    # A live run AND live turn must not duplicate the card.
+    snapshot = streaming_status.get_user_streaming_sessions(user_id)
+    assert [row["session_id"] for row in snapshot] == ["s-live"]
+    assert runs.release_run(run["id"], run["fence_token"])
+    # Production transitions, not hand-written rows: the lease is gone but
+    # the live turn has not settled. Reconnect must agree with busy guards.
+    assert streaming_status._has_active_run_db("s-live") is True
+    assert streaming_status.get_user_streaming_sessions(user_id) == snapshot
+    other_user = "admin" if owner else "u1"
+    assert streaming_status.get_user_streaming_sessions(other_user) == []
+    assert streaming_status.get_user_streaming_sessions("nobody") == []
+    assert turns.settle_turn(turn["id"], "completed")
+    assert streaming_status.get_user_streaming_sessions(user_id) == []
+
+
 def test_get_user_streaming_sessions_reports_v2_branch(mock_db):
     """A v2 branch-intake session has NO legacy worktree row — its logical
     branch lives in sessions.branch. The snapshot must surface it as

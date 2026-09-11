@@ -182,7 +182,7 @@ def has_any_active_run() -> bool:
 
 
 def get_user_streaming_sessions(user_id: str) -> List[Dict[str, Any]]:
-    """Lease-valid active runs joined to their owner's sessions (one query).
+    """Busy sessions owned by this user, matching the per-session busy read.
 
     Connect-time snapshot shape:
     ``[{"session_id", "project_id", "worktree_id", "worktree_branch"}, ...]``
@@ -193,13 +193,16 @@ def get_user_streaming_sessions(user_id: str) -> List[Dict[str, Any]]:
     ``"admin"`` user id; API-user sessions carry their ``api_user_id``.
     Fails open (empty list) on any DB error.
     """
-    # Same lease-validity predicate as _LIVE_RUN_WHERE, columns qualified for
-    # the join.
+    # Reconnect must use the same runs OR live-turn truth as
+    # _has_active_run_db. In particular, draining turns remain busy after their
+    # run lease is released. EXISTS also returns each session only once.
     base_sql = (
-        "SELECT r.session_id, s.project_id, s.worktree_id, "
-        "s.worktree_branch, s.branch "
-        "FROM runs r JOIN sessions s ON s.id = r.session_id "
-        "WHERE r.state='active' AND r.lease_expires_at >= NOW()"
+        "SELECT s.id AS session_id, s.project_id, s.worktree_id, "
+        "s.worktree_branch, s.branch FROM sessions s "
+        "WHERE (EXISTS (SELECT 1 FROM runs r WHERE r.session_id=s.id "
+        "AND r.state='active' AND r.lease_expires_at >= NOW()) "
+        "OR EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.id "
+        "AND t.state IN ('running','interrupting','draining')))"
     )
     try:
         with get_db() as conn:

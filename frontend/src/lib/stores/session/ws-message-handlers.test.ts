@@ -400,6 +400,35 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('authoritative user-wide streaming state', () => {
+		it.each(['done', 'stopped', 'interrupted', 'error'])(
+			'keeps a successor run busy after a delayed %s frame', (type) => {
+				// Use the real handlers to produce the map, not pre-seeded state.
+				let streaming = new Map();
+				deps = createMockDeps({
+					streamingSessions: {
+						update: (fn) => { streaming = fn(streaming); },
+						set: (value) => { streaming = value; },
+					},
+				});
+				handlers = createMessageHandlers(deps);
+				const busy = (session_id: string, is_streaming: boolean) =>
+					handlers.handleMessage({ type: 'user_streaming_changed', session_id, is_streaming });
+				busy('session-1', true);
+				busy('other-session', true);
+				busy('session-1', false); // previous run releases
+				busy('session-1', true); // next run claims before the old WS frame arrives
+				handlers.handleMessage({ type, session_id: 'session-1', message: 'old turn failed' });
+				expect([...streaming.keys()].sort()).toEqual(['other-session', 'session-1']);
+				busy('session-1', false);
+				expect([...streaming.keys()]).toEqual(['other-session']);
+				// Reconnect snapshots remain authoritative, including empty snapshots.
+				handlers.handleMessage({ type: 'user_streaming_sessions', sessions: [] });
+				expect(streaming.size).toBe(0);
+			},
+		);
+	});
+
 	describe('done handler', () => {
 		it('stays silent while parked and notifies when the resumed turn completes', () => {
 			const state = mockState();
@@ -890,8 +919,8 @@ describe('ws-message-handlers', () => {
 				message: 'background blew up',
 			});
 
-			// The errored (background) session's streaming pill is dropped — cross-session safe.
-			expect(deps.streamingSessions.update).toHaveBeenCalled();
+			// Only the run-status channel can clear the background session's pill.
+			expect(deps.streamingSessions.update).not.toHaveBeenCalled();
 			// The active session is untouched: no banner and no isStreaming reset
 			// (the whole active-only block is skipped).
 			expect(deps.update).not.toHaveBeenCalled();

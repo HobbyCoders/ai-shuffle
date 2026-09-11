@@ -559,8 +559,8 @@ class ChatWebSocketHandler:
         # reconcile stale entries from before a disconnect.  Previously this was
         # only sent when there *were* streaming sessions, which meant stale
         # entries from a missed `done` event would persist indefinitely.
-        # Sourced from the durable runs table (v2 core): one lease-valid-runs ⋈
-        # sessions query, same outgoing frame/shape as the legacy in-memory map.
+        # Use the same durable live-run OR live-turn truth as busy guards,
+        # including a draining turn whose run lease has already been released.
         from app.core import streaming_status
         user_streaming = await asyncio.to_thread(
             streaming_status.get_user_streaming_sessions, self.user_id
