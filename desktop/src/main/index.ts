@@ -60,7 +60,7 @@ async function main(): Promise<void> {
 	const managed = managedContext();
 	const applications = managed?.updates ?? installedContext()?.updates ?? null;
 	const installedExecutable = managed?.host?.executable ?? installedContext()?.executable;
-	if (applications) updater.useApplications(applications, installedExecutable, installedLaunchArgs(process.argv.slice(1)).filter(arg => arg.startsWith('--')));
+	if (applications) updater.useApplications(applications, installedExecutable, installedLaunchArgs(process.argv.slice(1), app.commandLine.getSwitchValue('remote-debugging-port')).filter(arg => arg.startsWith('--')));
 
 	app.on('second-instance', () => window.focus());
 	app.on('window-all-closed', () => {

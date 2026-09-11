@@ -7,7 +7,7 @@ const code=readFileSync(new URL('../dist/main/installed-entry.js',import.meta.ur
 function fixture({locked=true,source=false,broken=false}={}){
  const events=[];const module={exports:{}};let options;
  const app={requestSingleInstanceLock:()=>{events.push('lock');return locked;},quit:()=>events.push('quit'),
-  getPath:()=>path.resolve('existing-profile'),getName:()=> 'existing-name',getAppPath:()=>path.resolve('installed-app'),releaseSingleInstanceLock:()=>events.push('unlock')};
+  getPath:()=>path.resolve('existing-profile'),getName:()=> 'existing-name',getAppPath:()=>path.resolve('installed-app'),releaseSingleInstanceLock:()=>events.push('unlock'),commandLine:{getSwitchValue:()=>''}};
  class SourceUpdates{constructor(value){options=value;}hasSourceState=source;async load(){events.push('load');}async useNewerBaseline(){events.push('baseline');}async select(){events.push('select');if(broken)throw Error('No healthy source build');return {revision:'b'.repeat(40)};}}
  const host={saveInstalledHost:async(root,value)=>events.push({host:value,root}),installedLaunchArgs:args=>args.filter(x=>x.startsWith('aishuffle:')),launchInstalledSource:async()=>events.push('launch-source')};
  vm.runInNewContext(code,{module,exports:module.exports,process:{execPath:path.resolve('Programs/AI Shuffle.exe'),resourcesPath:path.resolve('resources'),argv:['AI Shuffle.exe','aishuffle://test']},require:id=>{

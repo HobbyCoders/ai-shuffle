@@ -27,7 +27,7 @@ export async function startInstalled(): Promise<void> {
     const selected = await updates.select();
     app.releaseSingleInstanceLock();
     // Launch Electron directly with hidden child consoles, never cmd/PowerShell.
-    await launchInstalledSource(selected, root, installedLaunchArgs(process.argv.slice(1)));
+    await launchInstalledSource(selected, root, installedLaunchArgs(process.argv.slice(1), app.commandLine.getSwitchValue('remote-debugging-port')));
     app.quit();
     return;
   }

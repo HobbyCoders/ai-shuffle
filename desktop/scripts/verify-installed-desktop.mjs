@@ -73,6 +73,9 @@ try{
  await launch();assert.equal(await page.evaluate(()=>window.shuffleDesktop.version),'main@'+staged.pending.slice(0,12));assert.deepEqual(await auth(),expected);await close();
  passed('Original installed EXE opens the updated revision on subsequent launches');report.success=true;
 }catch(error){report.error=String(error);console.error(error);process.exitCode=1;
+ try{report.sourceState=JSON.parse(await fs.readFile(path.join(sourceRoot,'state.json'),'utf8'));}catch{}
+ try{report.workerReady=(await fetch('http://127.0.0.1:8000/health/ready',{signal:AbortSignal.timeout(1000)})).status;}catch{}
+ try{const launchLog=await fs.readFile(path.join(sourceRoot,'launch.log'),'utf8');report.debuggerPorts=[...launchLog.matchAll(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)/g)].map(match=>Number(match[1]));}catch{}
  // Build children receive a credential-free environment. Retain only bounded
  // error diagnostics, never worker logs, browser state or the private profile.
  try{const buildLog=await fs.readFile(path.join(sourceRoot,'build.log'),'utf8');report.buildErrors=buildLog.split(/\r?\n/).filter(line=>/error|failed|traceback|cannot|no such|not found|not recognized/i.test(line)).slice(-25).map(line=>line.replace(/github_pat_[A-Za-z0-9_]+/g,'[redacted]').replace(/(token|password|authorization)\s*[:=]\s*\S+/gi,'$1=[redacted]').slice(0,1000));console.error(report.buildErrors.join('\n'));}catch{}

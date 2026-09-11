@@ -5,7 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 const require=createRequire(import.meta.url);
-const {readInstalledHost,saveInstalledHost,sourceLaunch}=require('../dist/main/installed-host.js');
+const {readInstalledHost,saveInstalledHost,sourceLaunch,installedLaunchArgs}=require('../dist/main/installed-host.js');
+test('an explicit Chromium debugging port survives even when Electron omits it from argv',()=>{
+ assert.deepEqual(installedLaunchArgs(['aishuffle://callback'],'19229'),['aishuffle://callback','--remote-debugging-port=19229']);
+ assert.deepEqual(installedLaunchArgs([]),[]);
+ assert.deepEqual(installedLaunchArgs(['--remote-debugging-port=19229'],'19229'),['--remote-debugging-port=19229']);
+});
 test('installed source versions preserve the original profile and EXE across restarts',async t=>{
  const userData=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-installed-test-'));t.after(()=>fs.rm(userData,{recursive:true,force:true}));
  const root=path.join(userData,'updates');await fs.mkdir(root);
