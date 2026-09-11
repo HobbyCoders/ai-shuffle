@@ -40,6 +40,8 @@ jobs:
       RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

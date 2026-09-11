@@ -90,16 +90,14 @@ Usage dashboard with token counts, cost breakdowns by model/profile/project, dai
 
 ## Quick Start
 
-### Android APK
+### Android
 
-**[Download latest Android APK](https://github.com/HobbyCoders/ai-shuffle/releases/download/android-latest/AI-Shuffle-Android.apk)** · [Version & release notes](https://github.com/HobbyCoders/ai-shuffle/releases/tag/android-latest)
+**[Get AI Shuffle on Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle)** · [Release notes](https://github.com/HobbyCoders/ai-shuffle/releases)
 
-This repository is private. Sign in to GitHub with repository access before
-downloading; otherwise GitHub may show a 404 page.
-
-Requires Android 8.0 or newer. Install over the existing app to keep your accounts
-and workers. You can also find the APK under **Settings → Downloads** in the web
-or desktop app. See [Android installation and builds](android/README.md).
+Requires Android 8.0 or newer. Install and update through Google Play; availability
+is subject to release-track access and Play review. Testing releases require tester
+enrollment with the Google account used in Play. Do not uninstall the existing app
+when updating. See [Android installation and builds](android/README.md).
 
 ### Local (Desktop)
 

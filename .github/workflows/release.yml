@@ -1,4 +1,4 @@
-name: Create Release Packages
+name: Release Docker and Android
 
 on:
   push:
@@ -10,21 +10,32 @@ on:
         description: 'Version to release (e.g., v0.8.5)'
         required: true
         type: string
+      build_desktop:
+        description: 'Also build a Windows installer (desktop normally updates in app)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
   actions: read
+  packages: write
 
 env:
   VERSION: ${{ github.event.inputs.version || github.ref_name }}
 
 jobs:
-  # Create the release before uploading desktop installers and update metadata.
+  # Create the release/tag before building its immutable source.
   create-release:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     timeout-minutes: 60
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      release_tag: ${{ steps.version.outputs.tag }}
     steps:
+      - uses: actions/checkout@v4
       - name: Normalise release version
+        id: version
         # Accept v0.8.5, V0.8.5 or 0.8.5 from the dispatch box; tags are already vX.Y.Z.
         shell: bash
         run: |
@@ -33,7 +44,8 @@ jobs:
           normalised="v${raw}"
           [[ "$normalised" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo "::error::Invalid release version '$VERSION' (expected vX.Y.Z)"; exit 1; }
           echo "VERSION=$normalised" >> "$GITHUB_ENV"
-          echo "DESKTOP_VERSION=$raw" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=$raw" >> "$GITHUB_ENV"
+          echo "tag=$normalised" >> "$GITHUB_OUTPUT"
           echo "Releasing $normalised"
 
       - name: Create GitHub Release
@@ -41,6 +53,7 @@ jobs:
         with:
           tag_name: ${{ env.VERSION }}
           name: AI Shuffle ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
           draft: false
           prerelease: ${{ contains(env.VERSION, '-') }}
           generate_release_notes: true
@@ -52,11 +65,12 @@ jobs:
             | Build | Platform | Download / install |
             |-------|----------|--------------------|
             | **Desktop** | Windows x64 (Intel / AMD) | [Windows installer (.exe)](https://hobbycoders.com/desktop) |
-            | **Mobile** | Android 8.0+ | [Signed Android APK](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Android.apk) |
-            | **Docker** | Linux amd64 | [Container image](https://github.com/${{ github.repository }}/pkgs/container/ai-shuffle) — `ghcr.io/hobbycoders/ai-shuffle:${{ env.DESKTOP_VERSION }}`; see install instructions below |
+            | **Mobile** | Android 8.0+ | [Get it on Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle) |
+            | **Docker** | Linux amd64 | [Container image](https://github.com/${{ github.repository }}/pkgs/container/ai-shuffle) — `ghcr.io/hobbycoders/ai-shuffle:${{ env.RELEASE_VERSION }}`; see install instructions below |
 
-            Downloads become available as their builds finish. Docker is pulled from
-            the container registry, not downloaded from the release assets.
+            Docker becomes available after its build and verification finish. Pull it
+            from the container registry, not the release assets. Android installs and
+            updates are delivered through Google Play, subject to track access and review.
 
             ### Desktop install
 
@@ -67,14 +81,18 @@ jobs:
             After that, use Download update and Update and restart inside AI Shuffle.
             The app fetches the latest code from main and prepares updates in the
             background. No command prompt, new installer, or tagged release is needed.
-            Stable milestone releases still include a Windows installer.
+            Desktop installers are opt-in for manually dispatched releases, not built
+            for every version. Existing desktop users should update inside the app.
             Other workers are managed inside the app under Devices.
 
             ### Mobile install
 
-            Install the Android APK over the existing app to keep your accounts and
-            workers. The APK appears after Android verification passes and the
-            compatible-worker rollout is approved (`ANDROID_WORKERS_READY=true`).
+            Install or update AI Shuffle through [Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle).
+            Do not uninstall your existing app when updating. Play updates require
+            verified signing continuity and compatible workers; no APK is attached
+            by this release workflow. Releases go to **internal testing**, not public
+            production. Join through the Play Console tester opt-in invitation using
+            the same Google account you use in Play before opening the store link.
 
             ### Docker install
 
@@ -83,7 +101,7 @@ jobs:
             a Bash-compatible terminal:
 
             ```bash
-            docker pull ghcr.io/hobbycoders/ai-shuffle:${{ env.DESKTOP_VERSION }}
+            docker pull ghcr.io/hobbycoders/ai-shuffle:${{ env.RELEASE_VERSION }}
             docker run -d --name ai-shuffle --restart unless-stopped \
               --stop-timeout 90 --shm-size 1g \
               -p 127.0.0.1:8000:8000 \
@@ -93,7 +111,7 @@ jobs:
               -v ai-shuffle-claude:/home/appuser/.claude \
               -v ai-shuffle-gh:/home/appuser/.config/gh \
               -v ai-shuffle-browser:/home/appuser/chrome-profile \
-              ghcr.io/hobbycoders/ai-shuffle:${{ env.DESKTOP_VERSION }}
+              ghcr.io/hobbycoders/ai-shuffle:${{ env.RELEASE_VERSION }}
             ```
 
             Open [http://localhost:8000](http://localhost:8000) on the Docker host
@@ -107,24 +125,34 @@ jobs:
 
             **Updating an existing install:** back up first and keep your existing
             mounts and configuration; do not substitute the new-install volume
-            names above. Change only the image tag to `${{ env.DESKTOP_VERSION }}`
+            names above. Change only the image tag to `${{ env.RELEASE_VERSION }}`
             and recreate the container with a 90-second shutdown timeout. Existing
             deployments using an external database must stay on their previous
             release until a separately tested migration is approved.
 
-  android:
-    name: Android APK
+  docker:
+    name: Docker image
     needs: create-release
-    uses: ./.github/workflows/android.yml
+    uses: ./.github/workflows/docker-publish.yml
     with:
-      release_tag: ${{ github.event.inputs.version || github.ref_name }}
-      publish_download: ${{ vars.ANDROID_WORKERS_READY == 'true' }}
+      release_tag: ${{ needs.create-release.outputs.release_tag }}
+    secrets: inherit
+
+  android:
+    name: Android Play internal release
+    needs: [create-release, docker]
+    uses: ./.github/workflows/android-play.yml
+    with:
+      release_tag: ${{ needs.create-release.outputs.release_tag }}
+      publish_to_play: true
+      workers_ready: ${{ vars.ANDROID_WORKERS_READY == 'true' }}
     secrets: inherit
 
   desktop:
-    name: Windows installer
+    name: Windows installer (opt-in)
+    if: github.event_name == 'workflow_dispatch' && inputs.build_desktop
     needs: create-release
     uses: ./.github/workflows/desktop-installer.yml
     with:
-      release_tag: ${{ github.event.inputs.version || github.ref_name }}
+      release_tag: ${{ needs.create-release.outputs.release_tag }}
     secrets: inherit

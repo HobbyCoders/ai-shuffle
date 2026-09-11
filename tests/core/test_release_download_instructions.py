@@ -2,6 +2,7 @@
 from pathlib import Path
 import re
 import shlex
+import subprocess
 
 import yaml
 
@@ -23,12 +24,15 @@ def test_release_downloads_include_desktop_mobile_and_docker():
     assert "run the installer" in body
     assert "latest code from main" in body
     assert "Start AI Shuffle.cmd" not in body
-    assert "releases/download/${{ env.VERSION }}/AI-Shuffle-Android.apk" in body
+    assert "https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle" in body
+    assert "releases/download/" not in body
+    assert "Signed Android APK" not in body
+    assert "Desktop installers are opt-in" in body
     assert "https://github.com/${{ github.repository }}/pkgs/container/ai-shuffle" in body
 
 
 def test_docker_commands_pin_release_and_preserve_runtime_data():
-    body = release_body().replace("${{ env.DESKTOP_VERSION }}", "0.8.12")
+    body = release_body().replace("${{ env.RELEASE_VERSION }}", "0.8.12")
     script = re.search(r"```bash\n(.*?)```", body, re.DOTALL).group(1)
     commands = script.replace("\\\n", "").strip().splitlines()
     image = "ghcr.io/hobbycoders/ai-shuffle:0.8.12"
@@ -47,6 +51,57 @@ def test_docker_commands_pin_release_and_preserve_runtime_data():
     assert ":latest" not in body
     assert "back up first" in body
     assert "external database must stay on their previous" in body
+
+
+def test_release_version_outputs_feed_play_and_docker(tmp_path):
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+    steps = workflow["jobs"]["create-release"]["steps"]
+    script = next(step["run"] for step in steps if step.get("id") == "version")
+    for raw in ("v1.2.3", "V1.2.3", " 1.2.3 ", "v1.2.3-rc.1"):
+        env_file, output = tmp_path / "env", tmp_path / "output"
+        env_file.write_text("")
+        output.write_text("")
+        result = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True,
+                                env={"VERSION": raw, "GITHUB_ENV": str(env_file),
+                                     "GITHUB_OUTPUT": str(output)})
+        assert result.returncode == 0, result.stderr
+        version = raw.strip().lstrip("vV")
+        assert output.read_text() == f"tag=v{version}\n"
+        assert f"RELEASE_VERSION={version}\n" in env_file.read_text()
+    for raw in ("main", "v1.2", "v1.2.3;exit 0", "../v1.2.3"):
+        result = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True,
+                                env={"VERSION": raw})
+        assert result.returncode != 0
+
+
+def test_release_orchestration_defaults_to_docker_and_play_only():
+    workflow = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+    desktop = workflow["jobs"]["desktop"]
+    assert workflow["on"]["workflow_dispatch"]["inputs"]["build_desktop"] == {
+        "description": "Also build a Windows installer (desktop normally updates in app)",
+        "required": "false", "type": "boolean", "default": "false",
+    }
+    assert desktop["if"] == "github.event_name == 'workflow_dispatch' && inputs.build_desktop"
+    assert desktop["uses"] == "./.github/workflows/desktop-installer.yml"
+    assert workflow["jobs"]["docker"]["uses"] == "./.github/workflows/docker-publish.yml"
+    assert workflow["permissions"]["packages"] == "write"
+    for name in ("desktop", "docker", "android"):
+        assert workflow["jobs"][name]["with"]["release_tag"] == "${{ needs.create-release.outputs.release_tag }}"
+    assert "./.github/workflows/android.yml" not in str(workflow)
+
+
+def test_docker_is_called_once_per_release_and_remains_manually_available():
+    workflow = yaml.load((ROOT / ".github/workflows/docker-publish.yml").read_text(), Loader=yaml.BaseLoader)
+    assert set(workflow["on"]) == {"workflow_dispatch", "workflow_call"}
+    assert workflow["on"]["workflow_call"]["inputs"]["release_tag"]["required"] == "true"
+    assert workflow["on"]["workflow_dispatch"]["inputs"]["no_cache"]["default"] == "false"
+
+
+def test_installation_pages_direct_android_users_to_play():
+    for path in ("README.md", "android/README.md"):
+        content = (ROOT / path).read_text()
+        assert "https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle" in content
+        assert "releases/download/android-latest/" not in content
 
 
 def test_docker_release_rebuild_keeps_container_verification_gate():

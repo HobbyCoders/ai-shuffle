@@ -4,20 +4,18 @@ The Android companion and account hub live in this repository alongside the serv
 
 ## Install or update
 
-**[Download latest Android APK](https://github.com/HobbyCoders/ai-shuffle/releases/download/android-latest/AI-Shuffle-Android.apk)** · [Version, build details and checksum](https://github.com/HobbyCoders/ai-shuffle/releases/tag/android-latest)
+**[Get AI Shuffle on Google Play](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle)** · [Release notes](https://github.com/HobbyCoders/ai-shuffle/releases)
 
-Requires Android 8.0 or newer. Open `AI-Shuffle-Android.apk` on your phone and allow installation from your browser if Android asks. The download link is also available on the account hub's home page. Release downloads do not require ZIP extraction.
-
-**GitHub access:** this repository is private, so sign in to GitHub in your browser with an account that has repository access before downloading. GitHub may show a 404 page when you are signed out or lack access. The APK release link is permanent; it does not bypass repository permissions.
+Requires Android 8.0 or newer. Install and update through Google Play instead of downloading an APK from GitHub. Availability is subject to release-track access and Play review; testing releases require tester enrollment with the Google account used in Play.
 
 The app keeps the same application ID and release signing key as the former standalone repository, so a signed update can preserve existing app data. Do not uninstall the app as an update step.
 
 ### Where builds go
 
-- Android changes on `main` run [Android CI](https://github.com/HobbyCoders/ai-shuffle/actions/workflows/android.yml). After unit tests, lint, hub tests and emulator checks pass, CI updates the **Android — latest verified APK** prerelease at `android-latest`. This is a rolling main build; its notes identify the exact source commit. It does not replace the latest stable desktop release.
-- Versioned project releases build and verify Android from the same checkout, then attach `AI-Shuffle-Android.apk`, its SHA-256 checksum and `android-build.json` to that release.
-- Pull requests run verification but never publish downloads. Fork pull requests skip release signing because repository secrets are unavailable.
-- CI also keeps the original `ai-shuffle-release-apk` workflow artifact for troubleshooting. Actions artifacts require sign-in and expire; release downloads remain available under the repository's access rules.
+- Versioned project releases publish a verified Docker image, then build a signed Android App Bundle (AAB) for Google Play **internal testing** (never production). Testers must join using the opt-in invitation from Play Console. Play distributes the installable APKs; the release workflow does not attach APK downloads to GitHub releases.
+- Desktop installers are disabled by default. Select `build_desktop` when manually running the release workflow to build one; existing desktop installations update inside the app.
+- Play publishing requires the existing signing key, verified Play signing enrollment, a Play publishing service account, and explicit compatible-worker readiness. Configure the `google-play-internal` GitHub environment to allow `main` and `v*` release tags, store `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` there, and set `PLAY_SIGNING_READY=true` only after verifying Play's app-signing certificate. Repository variable `ANDROID_WORKERS_READY=true` confirms compatible deployed workers; publishing also checks it in the Play environment. A successful bundle build alone does not mean the app is available on Play.
+- [Android CI](https://github.com/HobbyCoders/ai-shuffle/actions/workflows/android.yml) still verifies Android pull requests and supports manual APK builds for troubleshooting. Pull requests never publish downloads. Actions artifacts require repository access and expire.
 
 Locally, `./gradlew assembleRelease` produces `app/build/outputs/apk/release/app-release.apk` when signing is configured. Debug builds use `./gradlew assembleDebug` and produce `app/build/outputs/apk/debug/app-debug.apk`.
 

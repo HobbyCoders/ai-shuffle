@@ -8,7 +8,7 @@ name: Android Play internal release
 # downloadable. Never upload a keystore/private key as a workflow artifact.
 #
 # Then configure GitHub environment google-play-internal:
-# - restrict deployment branches to main; optionally require a reviewer
+# - allow main AND release tags v*; optionally require a reviewer
 # - secret GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: Google service-account JSON key
 # - variable PLAY_SIGNING_READY=true only after verifying the signing identity
 # Enable Android Publisher API in the service account's Cloud project. Invite
@@ -24,6 +24,10 @@ on:
   pull_request:
     paths:
       - '.github/workflows/android-play.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/docker-publish.yml'
+      - 'tests/core/test_release_download_instructions.py'
+      - 'tests/core/test_android_release_gate.py'
       - 'android/ci/test-play-workflow.py'
       - 'android/ci/verify-mobile-apk.py'
       - 'android/ci/test-mobile-apk.py'
@@ -31,6 +35,21 @@ on:
     inputs:
       publish_to_play:
         description: Upload to internal testing (off = build bundle for first manual upload)
+        type: boolean
+        default: false
+      workers_ready:
+        description: Compatible workers and account hub are deployed and verified
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Immutable version tag created by release.yml
+        type: string
+        required: true
+      publish_to_play:
+        description: Submit the verified bundle to internal testing
         type: boolean
         default: false
       workers_ready:
@@ -63,7 +82,9 @@ jobs:
   bundle:
     name: Build signed Play bundle
     needs: checks
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && inputs.release_tag != '')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -73,6 +94,15 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.sha }}
+      - name: Set release version name
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || exit 1
+          echo "ANDROID_VERSION_NAME=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
       - name: Require existing release signing secrets
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -157,8 +187,9 @@ jobs:
     name: Publish only to internal testing
     needs: bundle
     if: >-
-      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
-      inputs.publish_to_play
+      inputs.publish_to_play &&
+      ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && inputs.release_tag != ''))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: google-play-internal

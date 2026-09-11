@@ -17,15 +17,20 @@ class PlayWorkflowTests(unittest.TestCase):
         cls.workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
         cls.jobs = cls.workflow["jobs"]
 
-    def test_only_manual_dispatch_can_release(self):
-        self.assertEqual(set(self.workflow["on"]), {"pull_request", "workflow_dispatch"})
+    def test_only_manual_main_or_called_tag_can_release(self):
+        self.assertEqual(set(self.workflow["on"]), {"pull_request", "workflow_dispatch", "workflow_call"})
         for name in ("bundle", "publish"):
             condition = self.jobs[name]["if"]
             self.assertIn("github.event_name == 'workflow_dispatch'", condition)
             self.assertIn("github.ref == 'refs/heads/main'", condition)
-        inputs = self.workflow["on"]["workflow_dispatch"]["inputs"]
-        self.assertEqual(inputs["publish_to_play"]["default"], "false")
-        self.assertEqual(inputs["workers_ready"]["default"], "false")
+            self.assertIn("github.event_name == 'push'", condition)
+            self.assertIn("startsWith(github.ref, 'refs/tags/v')", condition)
+            self.assertIn("inputs.release_tag != ''", condition)
+        for event in ("workflow_dispatch", "workflow_call"):
+            inputs = self.workflow["on"][event]["inputs"]
+            self.assertEqual(inputs["publish_to_play"]["default"], "false")
+            self.assertEqual(inputs["workers_ready"]["default"], "false")
+        self.assertEqual(self.workflow["on"]["workflow_call"]["inputs"]["release_tag"]["required"], "true")
         self.assertIn("inputs.publish_to_play", self.jobs["publish"]["if"])
 
     def test_publish_has_no_production_or_track_input(self):
@@ -80,6 +85,15 @@ class PlayWorkflowTests(unittest.TestCase):
         self.assertIn('rm -f "$RUNNER_TEMP/play-release.jks"', cleanup["run"])
         self.assertEqual(self.jobs["bundle"]["needs"], "checks")
         self.assertEqual(self.jobs["publish"]["needs"], "bundle")
+
+    def test_release_bundle_uses_immutable_tag_and_matching_version(self):
+        steps = self.jobs["bundle"]["steps"]
+        checkout = next(step for step in steps if step.get("uses", "").startswith("actions/checkout@"))
+        self.assertEqual(checkout["with"]["ref"],
+                         "${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.sha }}")
+        version = next(step for step in steps if step.get("name") == "Set release version name")
+        self.assertEqual(version["env"]["RELEASE_TAG"], "${{ inputs.release_tag }}")
+        self.assertIn('ANDROID_VERSION_NAME=${RELEASE_TAG#v}', version["run"])
 
     def test_all_inline_shell_parses(self):
         for job in self.jobs.values():
