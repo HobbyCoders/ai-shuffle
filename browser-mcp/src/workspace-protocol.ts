@@ -1,6 +1,7 @@
 /** Wire protocol v2. No page-provided objects are forwarded as CDP commands. */
 export interface BrowserEditor {
   id: string; type: string; label: string; value: string;
+  accept?: string; multiple?: boolean; chooser?: boolean;
   x: number; y: number; width: number; height: number;
 }
 export interface BrowserWorkspaceState {
@@ -14,7 +15,7 @@ export interface BrowserWorkspaceState {
 }
 export interface BrowserCommand {
   id: string; runtime_id: string; tab_id: string | null; viewer_id: string;
-  op: "takeover" | "release" | "heartbeat" | "tabs" | "navigate" | "command" | "viewport" | "input" | "edit";
+  op: "takeover" | "release" | "heartbeat" | "tabs" | "navigate" | "command" | "viewport" | "input" | "edit" | "upload";
   args: Record<string, unknown>; expires_at: number;
 }
 export function object(v: unknown): v is Record<string, unknown> {
@@ -75,6 +76,10 @@ export function validateCommand(raw: unknown, runtimeId: string, now = Date.now(
     case "viewport":
       keys(a, ["mode", "width", "height"]);
       if (!["fit", "fixed"].includes(String(a.mode)) || !integer(a.width, 240, 3840) || !integer(a.height, 240, 2160)) fail();
+      break;
+    case "upload":
+      keys(a, ["field", "paths"]);
+      if (!str(a.field, 128) || !Array.isArray(a.paths) || !a.paths.length || a.paths.length > 10 || !a.paths.every(p => str(p, 4096))) fail();
       break;
     case "edit":
       keys(a, ["field", "action", "value", "start", "end"]);

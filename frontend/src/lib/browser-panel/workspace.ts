@@ -6,6 +6,7 @@ export interface BrowserViewport {
 
 export interface BrowserEditor {
   id: string; type: string; label: string; value: string;
+  accept?: string; multiple?: boolean; chooser?: boolean;
   x: number; y: number; width: number; height: number;
 }
 
@@ -86,8 +87,11 @@ export function isBrowserWorkspaceState(
 	}
 
 	if (value.editors !== undefined && (!Array.isArray(value.editors) || value.editors.length > 32 || !value.editors.every((field) =>
-		object(field) && id(field.id) && ['text', 'search', 'email', 'url', 'tel', 'password', 'textarea'].includes(String(field.type)) &&
+		object(field) && id(field.id) && ['text', 'search', 'email', 'url', 'tel', 'password', 'textarea', 'file'].includes(String(field.type)) &&
 		typeof field.label === 'string' && field.label.length <= 256 && typeof field.value === 'string' && field.value.length <= 16384 &&
+		(field.accept === undefined || (typeof field.accept === 'string' && field.accept.length <= 1024)) &&
+		(field.multiple === undefined || typeof field.multiple === 'boolean') &&
+		(field.chooser === undefined || typeof field.chooser === 'boolean') &&
 		(field.type !== 'password' || field.value === '') && ['x', 'y', 'width', 'height'].every(k => typeof field[k] === 'number' && Number.isFinite(field[k])) &&
 		(field.width as number) > 0 && (field.height as number) > 0))) return false;
 	const ids = new Set<string>();

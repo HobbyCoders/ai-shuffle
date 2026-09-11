@@ -133,6 +133,13 @@ try {
         await route.fulfill({ response });
         return;
       }
+      if (path.endsWith('/browser/panel/upload')) {
+        const incoming = new URL(route.request().url());
+        const response = await route.fetch({ url: config.api + path + incoming.search,
+          headers: { ...route.request().headers(), Authorization: `Bearer ${config.token}` }, timeout: 45_000 });
+        await route.fulfill({ response });
+        return;
+      }
       let body = {};
       if (path.endsWith('/preferences/all')) body = { preferences: {} };
       else if (path.includes('/preferences/')) {
@@ -317,6 +324,48 @@ try {
       await wait(primary, () => browserFixture.state.tabs.some(t => t.current && t.title.includes('pastecky')));
       assert.equal(await input.evaluate(el => el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))), true);
       await input.blur();
+    }
+    phase = `${name} native file upload`;
+    async function clickRemote(x, y) {
+      const point = await primary.locator('canvas').evaluate((canvas, {x, y}) => {
+        const box = canvas.getBoundingClientRect();
+        const viewport = window.browserFixture.state.viewport;
+        const scale = Math.min(box.width / viewport.width, box.height / viewport.height);
+        return { x: box.x + (box.width - viewport.width * scale) / 2 + x * scale,
+          y: box.y + (box.height - viewport.height * scale) / 2 + y * scale };
+      }, {x, y});
+      await primary.mouse.click(point.x, point.y);
+    }
+    const chooserEvent = primary.waitForEvent('filechooser');
+    await primary.getByLabel('Upload documents', { exact: true }).click();
+    const chooser = await chooserEvent;
+    const uploaded = primary.waitForResponse(r => new URL(r.url()).pathname.endsWith('/browser/panel/upload'));
+    await chooser.setFiles([
+      { name: `${name}-one.txt`, mimeType: 'text/plain', buffer: Buffer.from(`first ${name}`) },
+      { name: `${name}-two.txt`, mimeType: 'text/plain', buffer: Buffer.from(`second ${name}`) },
+    ]);
+    assert.equal((await uploaded).status(), 200);
+    await wait(primary, n => browserFixture.state.editors.some(f => f.type === 'file' && f.value.includes(`${n}-two.txt`)), name);
+    // Custom JS button -> remote filechooser -> visible local picker -> real file bytes.
+    await clickRemote(90, 280);
+    await wait(primary, () => browserFixture.state.editors.some(f => f.type === 'file' && f.chooser));
+    const customEvent = primary.waitForEvent('filechooser');
+    await primary.locator('input.file-picker.chooser').click();
+    const custom = await customEvent;
+    const customUploaded = primary.waitForResponse(r => new URL(r.url()).pathname.endsWith('/browser/panel/upload'));
+    await custom.setFiles({ name: `${name}-custom.txt`, mimeType: 'text/plain', buffer: Buffer.from(`custom ${name}`) });
+    assert.equal((await customUploaded).status(), 200);
+    await wait(primary, () => !browserFixture.state.editors.some(f => f.chooser));
+    assert.equal(await primary.locator('input.file-picker.chooser').count(), 0);
+    await clickRemote(90, 330);
+    const uploadDeadline = Date.now() + 10_000;
+    while (true) {
+      const files = await (await fetch(config.api + '/fixture-uploads')).json();
+      if (files.some(f => f.name === `${name}-custom.txt` && f.text === `custom ${name}`)
+          && files.some(f => f.name === `${name}-one.txt` && f.text === `first ${name}`)
+          && files.some(f => f.name === `${name}-two.txt` && f.text === `second ${name}`)) break;
+      assert.ok(Date.now() < uploadDeadline, 'The remote form must submit the original file bytes');
+      await primary.waitForTimeout(50);
     }
     const screenshot = join(tmpdir(), `browser-workspace-live-${name}.png`);
     await primary.screenshot({ path: screenshot });

@@ -17,7 +17,7 @@ import httpx
 import pytest
 import uvicorn
 import websockets
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 
 pytestmark = pytest.mark.skipif(
@@ -221,6 +221,8 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
 
     monkeypatch.setattr(browser_runtime, "resolve_config", runtime_config)
 
+    # The runtime and HTTP staging producer share this isolated upload root.
+    monkeypatch.setattr(type(mcp_config.settings), "effective_workspace_dir", property(lambda self: tmp_path / "workspace"))
     start_states = []
 
     @app.middleware("http")
@@ -248,7 +250,26 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
 <body style="margin:0"><input aria-label="Message" style="position:absolute;left:10px;top:10px;width:240px;height:40px"
  oninput="document.querySelector('output').textContent='Typed: '+this.value;document.title='Typed: '+this.value"><main style="padding-top:70px">
 <h1>Shared browser fixture</h1><output>Typed: </output><button onclick="this.textContent='Clicked'">Click me</button>
+<form style="position:absolute;left:10px;top:200px" action="/fixture-upload" method="post" enctype="multipart/form-data" target="upload-result">
+<label for="documents">Upload documents</label><input id="documents" name="files" type="file" accept=".txt" multiple>
+<input id="custom-file" name="custom" type="file" style="display:none">
+<button style="position:absolute;left:0;top:60px;width:160px;height:40px" type="button" onclick="document.getElementById('custom-file').click()">Custom upload</button>
+<button style="position:absolute;left:0;top:110px;width:160px;height:40px" type="submit">Submit files</button></form><iframe title="Upload result" name="upload-result"></iframe>
 </main></body></html>""")
+
+    received_uploads = []
+
+    @app.post("/fixture-upload")
+    async def fixture_upload(request: Request):
+        async with request.form() as form:
+            for name, file in form.multi_items():
+                if getattr(file, "filename", None):
+                    received_uploads.append({"field": name, "name": file.filename, "text": (await file.read()).decode()})
+        return HTMLResponse("Files received")
+
+    @app.get("/fixture-uploads")
+    async def fixture_uploads():
+        return received_uploads
 
     @app.get("/fixture-stream-state")
     async def fixture_stream_state():

@@ -40,7 +40,7 @@
 		Minimize2,
 	} from 'lucide-svelte';
 	import { untrack } from 'svelte';
-	import { startPanelBrowser } from '$lib/api/browser-panel';
+	import { startPanelBrowser, uploadPanelFiles } from '$lib/api/browser-panel';
 	import { PanelOperation } from '$lib/browser-panel/panel-operation';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
 	import { activeSession } from '$lib/stores/active-session';
@@ -314,6 +314,29 @@
 		if (operation !== scope) throw new Error('Browser panel changed. Try again.');
 		noteInteraction();
 	}
+	function pickFiles(field: { id: string }) {
+		// Capture before opening the OS picker, not after it returns. A reconnect,
+		// navigation or tab switch must never retarget the selected local files.
+		const scope = operation, identity = frameIdentity, sid = sessionId;
+		const runtime = workspace?.runtime_id, tab = workspace?.active_tab_id, viewer = viewerId;
+		commandError = '';
+		void ensureControl().catch(error => {
+			if (operation === scope) commandError = error instanceof Error ? error.message : 'Browser is unavailable';
+		});
+		return async (files: File[]) => {
+			try {
+				if (!scope || !sid || !runtime || !tab || !viewer || operation !== scope || frameIdentity !== identity)
+					throw new Error('Browser changed while choosing files. Choose them again.');
+				await ensureControl();
+				if (operation !== scope || frameIdentity !== identity || viewerId !== viewer)
+					throw new Error('Browser changed while choosing files. Choose them again.');
+				await uploadPanelFiles(sid, { runtime_id: runtime, tab_id: tab, viewer_id: viewer, field: field.id }, files, scope.controller.signal);
+			} catch (error) {
+				if (operation === scope) commandError = error instanceof Error ? error.message : 'File upload failed';
+			} finally { if (operation === scope) noteInteraction(); }
+		};
+	}
+
 	async function workspaceCommand(op: string, args: Record<string, unknown>) {
 		if (op === 'tabs' && args.action === 'create') { void browse(); return; }
 		const scope = operation;
@@ -818,6 +841,7 @@
 							interactive={isLive && frameMatchesWorkspace && (canInteract || inspectMode)}
 							editors={workspace?.editors ?? []}
 							onEdit={(args) => workspaceCommand('edit', args)}
+							onPickFiles={pickFiles}
 							viewport={workspace?.viewport}
 							inspecting={inspectMode && isLive && frameMatchesWorkspace}
 							{hoverRect}

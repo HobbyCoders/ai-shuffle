@@ -1,5 +1,6 @@
 <script lang="ts">
 	import BrowserNativeEditor from './BrowserNativeEditor.svelte';
+	import BrowserFileInput from './BrowserFileInput.svelte';
 	import type { BrowserEditor } from '$lib/browser-panel/workspace';
 	import { browserTextChunks } from '$lib/browser-panel/text-chunks';
 	/**
@@ -48,6 +49,7 @@
 		frame: FramePayload | null;
 		editors?: BrowserEditor[];
 		onEdit?: (args: Record<string, unknown>) => void;
+		onPickFiles?: (field: BrowserEditor) => (files: File[]) => Promise<void>;
 		/** Whether input is accepted (true only while the stream is live). */
 		interactive?: boolean;
 		/** Keyboard ownership is independent of the coordinate/frame gate. */
@@ -75,6 +77,7 @@
 		frame,
 		editors = [],
 		onEdit,
+		onPickFiles,
 		interactive: inputEnabled = true,
 		keyboardEnabled: keyboardAllowed = inputEnabled,
 		keyboardOpen = $bindable(false),
@@ -736,7 +739,13 @@
 	<canvas bind:this={canvasEl} class="live-canvas"></canvas>
 	{#if interactive && !inspecting && onEdit}
 		{#each editors as field (field.id)}
-			<BrowserNativeEditor {field} {viewWidth} {viewHeight} scale={editorScale} left={editorLeft} top={editorTop} {onEdit} onActive={(active) => keyboardOpen = active} onEnter={() => bridgeKeyPair('Enter', 'Enter', 13)} />
+			{#if field.type === 'file'}
+				{#if onPickFiles}
+					<BrowserFileInput {field} scale={editorScale} left={editorLeft} top={editorTop} onPick={onPickFiles} onActive={(active) => keyboardOpen = active} />
+				{/if}
+			{:else}
+				<BrowserNativeEditor {field} {viewWidth} {viewHeight} scale={editorScale} left={editorLeft} top={editorTop} {onEdit} onActive={(active) => keyboardOpen = active} onEnter={() => bridgeKeyPair('Enter', 'Enter', 13)} />
+			{/if}
 		{/each}
 	{/if}
 	<textarea

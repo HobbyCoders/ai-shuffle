@@ -284,6 +284,13 @@ export class Session {
       }
     });
     page.on("domcontentloaded", () => this.onWorkspaceChange?.());
+    page.on("filechooser", async chooser => {
+      try {
+        const { rememberFileChooser } = await import('./editors.js');
+        await rememberFileChooser(page, chooser.element());
+        this.onWorkspaceChange?.();
+      } catch { /* a closed/navigated target cannot accept the selected files */ }
+    });
     page.on("close", () => {
       this.pages.delete(id);
       this.onWorkspaceChange?.();

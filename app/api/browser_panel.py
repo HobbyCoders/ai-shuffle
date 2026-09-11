@@ -166,6 +166,16 @@ async def start_panel(
         ) from None
 
 
+@router.post("/api/v1/sessions/{session_id}/browser/panel/upload")
+async def upload_panel_files(
+    request: Request, session_id: str, viewer_id: str, runtime_id: str,
+    tab_id: str, field: str, token: str = Depends(require_auth),
+) -> dict:
+    await require_session(request, session_id)
+    from app.core import browser_uploads
+    return await browser_uploads.upload(request, session_id, viewer_id, runtime_id, tab_id, field)
+
+
 @router.post("/api/v1/browser/panel/rpc", include_in_schema=False)
 async def browser_rpc(request: Request):
     from app.core import browser_runtime

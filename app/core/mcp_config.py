@@ -171,6 +171,13 @@ def _build_browser_server_env(
         if value:
             env[key] = value
 
+    # Agent uploads stay confined to the workspace unless an operator provides
+    # a narrower/different allowlist. Panel files use a separate, app-owned root.
+    env.setdefault("BROWSER_UPLOAD_DIR", str(settings.effective_workspace_dir.resolve()))
+    env["AIS_BROWSER_PANEL_UPLOAD_DIR"] = str(
+        (settings.effective_workspace_dir / ".browser-uploads").resolve()
+    )
+
     # Loopback egress: injected only when nothing explicit was configured above.
     ssrf_allow = _browser_ssrf_allow(env.get("BROWSER_SSRF_ALLOW"))
     if ssrf_allow:

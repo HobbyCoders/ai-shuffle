@@ -24,6 +24,15 @@ def _clean_ssrf_env(monkeypatch):
     _set_local_mode(monkeypatch, False)
 
 
+def test_upload_roots_are_enabled_and_operator_override_is_preserved(monkeypatch, tmp_path):
+    monkeypatch.delenv("BROWSER_UPLOAD_DIR", raising=False)
+    monkeypatch.setattr(type(settings), "effective_workspace_dir", property(lambda self: tmp_path))
+    env = mcp_config._build_browser_server_env({})
+    assert env["BROWSER_UPLOAD_DIR"] == str(tmp_path.resolve())
+    assert env["AIS_BROWSER_PANEL_UPLOAD_DIR"] == str((tmp_path / ".browser-uploads").resolve())
+    assert mcp_config._build_browser_server_env({"BROWSER_UPLOAD_DIR": "/restricted"})["BROWSER_UPLOAD_DIR"] == "/restricted"
+
+
 def test_no_session_omits_panel_wiring():
     env = mcp_config._build_browser_server_env({}, session_id=None)
     assert "AIS_SESSION_ID" not in env

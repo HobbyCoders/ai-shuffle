@@ -106,13 +106,19 @@ def validate_state(state, runtime_id):
     if not isinstance(editors, list) or len(editors) > 32:
         raise ControlError("Invalid text fields")
     for field in editors:
-        if not isinstance(field, dict) or set(field) != {"id", "type", "label", "value", "x", "y", "width", "height"}:
+        if not isinstance(field, dict) or set(field) - {"accept", "multiple", "chooser"} != {"id", "type", "label", "value", "x", "y", "width", "height"}:
             raise ControlError("Invalid text field")
         identifier(field["id"])
-        if field["type"] not in ("text", "search", "email", "url", "tel", "password", "textarea"):
+        if field["type"] not in ("text", "search", "email", "url", "tel", "password", "textarea", "file"):
             raise ControlError("Invalid text field type")
         if not isinstance(field["value"], str) or not isinstance(field["label"], str) or len(field["label"]) > 256:
             raise ControlError("Invalid text field content")
+        if "accept" in field and (not isinstance(field["accept"], str) or len(field["accept"]) > 1024):
+            raise ControlError("Invalid file accept filter")
+        if "chooser" in field and type(field["chooser"]) is not bool:
+            raise ControlError("Invalid file chooser flag")
+        if "multiple" in field and type(field["multiple"]) is not bool:
+            raise ControlError("Invalid multiple-file flag")
         if field["type"] == "password" and field["value"]:
             raise ControlError("Password contents must not be broadcast")
         if any(type(field[k]) not in (int, float) for k in ("x", "y", "width", "height")) or field["width"] <= 0 or field["height"] <= 0:
@@ -186,6 +192,7 @@ class Broker:
         self.state = unavailable()
         self.seen = OrderedDict()
         self.pending = {}
+        self.result_waiters = {}
         self.queue = []
         self.viewers = {}
         self.event = asyncio.Event()
@@ -222,6 +229,9 @@ class Broker:
             message = {"type": "command-result", "id": command_id, "ok": ok}
             if error:
                 message["error"] = error[:2048]
+            waiter = self.result_waiters.get(command_id)
+            if waiter is not None and not waiter.done():
+                waiter.set_result(message)
             await self.send(command["viewer_id"], message)
 
     async def retire(self):
@@ -362,6 +372,7 @@ class Broker:
             "viewport": {"mode", "width", "height"},
             "input": {"method", "params"},
             "edit": {"field", "action", "value", "start", "end"},
+            "upload": {"field", "paths"},
         }
         if op not in allowed or set(args) - allowed[op]:
             raise ControlError("Unsupported operation or arguments")
@@ -396,6 +407,11 @@ class Broker:
                 if args["action"] != "create":
                     raise ControlError("URL only allowed for tab creation")
                 url(args["url"])
+        elif op == "upload" and internal:
+            identifier(args.get("field"))
+            paths = args.get("paths")
+            if not isinstance(paths, list) or not 1 <= len(paths) <= 10 or any(not isinstance(p, str) or not p for p in paths):
+                raise ControlError("Invalid upload files")
         elif op == "edit":
             identifier(args.get("field"))
             if args.get("action") not in ("focus", "blur", "replace"):
@@ -440,6 +456,19 @@ class Broker:
         self.queue.append(command)
         self.event.set()
 
+    async def submit_and_wait(self, viewer_id, data):
+        """HTTP-owned upload: keep staged files alive until the runtime settles."""
+        command_id = identifier(data.get("id"))
+        future = asyncio.get_running_loop().create_future()
+        if command_id in self.result_waiters:
+            raise ControlError("Command already waiting")
+        self.result_waiters[command_id] = future
+        try:
+            await self.submit(viewer_id, data, internal=True)
+            return await asyncio.wait_for(future, COMMAND_TTL + 5)
+        finally:
+            self.result_waiters.pop(command_id, None)
+
     async def internal(self, viewer_id, op):
         try:
             await self.submit(
@@ -460,7 +489,7 @@ class Broker:
         self.viewers.pop(viewer_id, None)
         for cid, command in list(self.pending.items()):
             if command["viewer_id"] == viewer_id:
-                self.pending.pop(cid, None)
+                await self.settle(cid, False, "Viewer disconnected; outcome unknown")
         self.queue = [c for c in self.queue if c["id"] in self.pending]
         await self.internal(viewer_id, "release")
 
