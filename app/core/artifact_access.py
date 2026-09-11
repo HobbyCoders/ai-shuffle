@@ -76,6 +76,10 @@ def authorize_session_artifact(request, row, digest, session_id=None):
             from app.core.preference_identity import local_owner_account
             allowed = provenance['account_id'] == local_owner_account()
         else:
-            allowed = session.get('instance_id') == settings.effective_instance_id
+            # Admins can view sessions across workers (check_session_access).
+            # instance_id is execution placement, not an access boundary, and
+            # is unset on network mirrors. Keep explicit account provenance
+            # above authoritative, but allow the same session's screenshots.
+            allowed = True
     if not allowed:
         raise HTTPException(404, 'Not found')

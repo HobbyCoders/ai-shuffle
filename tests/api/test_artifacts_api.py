@@ -3,6 +3,8 @@
 import hashlib
 import hmac
 import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -76,6 +78,83 @@ def test_download_returns_bytes_and_mime(mock_db, client):
     assert resp.status_code == 200
     assert resp.content == data
     assert resp.headers["content-type"].startswith("text/plain")
+
+
+@pytest.fixture
+def admin_client(artifacts_dir, mock_db):
+    app = FastAPI()
+    app.include_router(router)
+
+    def authenticate(request: Request):
+        request.state.is_admin = True
+        return 'test-token'
+
+    app.dependency_overrides[_require_auth_or_signed] = authenticate
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.mark.parametrize('instance_id', [None, 'other-worker'])
+@pytest.mark.parametrize('cached', [False, True])
+@pytest.mark.parametrize('provenance', [False, True])
+def test_admin_downloads_remote_session_screenshot(
+    mock_db, admin_client, monkeypatch, instance_id, cached, provenance,
+):
+    from app.db import sessions, mobile_tool_identity
+    from app.network import blobs, engine
+
+    sessions.create_session('remote-image', 'default')
+    # Network mirrors have no local instance_id; legacy sessions name the
+    # worker that ran them. Neither should prevent an admin viewing images.
+    with get_db() as conn:
+        conn.cursor().execute('UPDATE sessions SET instance_id=%s WHERE id=%s',
+                              (instance_id, 'remote-image'))
+    if provenance:
+        mobile_tool_identity.bind('remote-image', dict(owner='install-admin', kind='admin',
+            principal_id='install', account_id=None, credential_hash='fixture'), new=True)
+    data = b'remote screenshot'
+    digest = hashlib.sha256(data).hexdigest()
+    upsert_artifact(digest, len(data), 'image/png', 'screenshot.png', 'remote-image')
+    if cached:
+        artifact_store.store_bytes(data)
+
+    async def fetch(digest_to_fetch):
+        assert digest_to_fetch == digest
+        # Exercise the actual cache/store path after a peer returns the bytes.
+        return blobs.store_fetched(digest_to_fetch, data)
+
+    fetch_one = AsyncMock(side_effect=fetch)
+    monkeypatch.setattr(blobs, 'fetch_one', fetch_one)
+    # A lightweight network context also lets store_bytes register the cache.
+    monkeypatch.setattr(engine, 'context', lambda: SimpleNamespace(device_id='viewer'))
+    monkeypatch.setattr(engine, 'kick', lambda: None)
+    response = admin_client.get(f'/api/v1/artifacts/{digest}')
+    assert response.status_code == 200
+    assert response.content == data
+    assert response.headers['content-type'].startswith('image/png')
+    assert artifact_store.artifact_path(digest).read_bytes() == data
+    assert fetch_one.await_count == (0 if cached else 1)
+
+
+def test_admin_remote_screenshot_preserves_account_boundary(mock_db, admin_client, monkeypatch):
+    from app.core import preference_identity
+    from app.db import sessions, mobile_tool_identity
+    from app.network import blobs
+
+    sessions.create_session('account-image', 'default', target_instance_id='other-worker')
+    mobile_tool_identity.bind('account-image', dict(owner='account:account-A', kind='paired',
+        principal_id='phone-A', account_id='account-A', credential_hash='fixture'), new=True)
+    row = artifact_store.store_bytes(b'account screenshot', mime='image/png',
+                                     created_by_session='account-image')
+    fetch_one = AsyncMock()
+    monkeypatch.setattr(blobs, 'fetch_one', fetch_one)
+    url = f"/api/v1/artifacts/{row['hash']}"
+    for account in ('account-B', None):
+        monkeypatch.setattr(preference_identity, 'local_owner_account', lambda: account)
+        assert admin_client.get(url).status_code == 404
+    fetch_one.assert_not_awaited()
+    monkeypatch.setattr(preference_identity, 'local_owner_account', lambda: 'account-A')
+    assert admin_client.get(url).content == b'account screenshot'
 
 
 @pytest.mark.parametrize('reference_type', ['artifact.created', 'tool.use'])
