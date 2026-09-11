@@ -217,7 +217,7 @@
 	 * layout reads.
 	 */
 	function scrollToBottomUntilStable() {
-		if (!containerRef) return;
+		if (!containerRef || (!shouldAutoScroll && !pendingScrollToBottom)) return;
 		stopScrollSettle();
 		scrollToBottom();
 
@@ -1021,6 +1021,8 @@
 	}
 
 	function scrollToBottom() {
+		// Deferred mount/resize/settle callbacks may outlive the user's release.
+		if (!shouldAutoScroll && !pendingScrollToBottom) return;
 		if (containerRef) {
 			clearJumpRevealTimer();
 			showJumpToLatest = false;
@@ -1151,9 +1153,9 @@
 		if (isUserScrollUpGesture(e.deltaY, 0)) disengageAutoScroll();
 	}
 
-	// Touch: dragging the finger DOWN reveals earlier content (scroll-up). Track
-	// the finger delta between touchmove events to detect that direction. Wheel
-	// events don't fire on touch devices, so this is the mobile equivalent.
+	// Touch: accumulate downward travel from the gesture's lowest clientY.
+	// Comparing only adjacent events misses slow drags made of many <8px steps.
+	// Reset the baseline when direction reverses so a later scroll-up also releases.
 	let touchLastY = 0;
 	function handleTouchStart(e: TouchEvent) {
 		touchLastY = e.touches[0]?.clientY ?? 0;
@@ -1161,8 +1163,11 @@
 	function handleTouchMove(e: TouchEvent) {
 		const y = e.touches[0]?.clientY ?? touchLastY;
 		const touchDeltaY = y - touchLastY; // finger moved down (>0) ⇒ scrolling up
-		touchLastY = y;
-		if (isUserScrollUpGesture(0, touchDeltaY)) disengageAutoScroll();
+		touchLastY = Math.min(touchLastY, y);
+		if (isUserScrollUpGesture(0, touchDeltaY)) {
+			disengageAutoScroll();
+			touchLastY = y;
+		}
 	}
 
 	// Restore scroll position only on mount - not on every reactive update

@@ -85,6 +85,40 @@ describe('isNearBottom', () => {
 });
 
 describe('nextStickToBottom', () => {
+	it('releases on a single upward notch inside the near-bottom band', () => {
+		expect(nextStickToBottom(true, metrics(BOTTOM), metrics(BOTTOM - 40))).toBe(false);
+	});
+
+	it('does not undo wheel/touch release during tiny upward or stationary events', () => {
+		let prev = metrics(BOTTOM);
+		for (const distance of [0, 2, 4, 8, 16, 32, 64, 100]) {
+			const next = metrics(BOTTOM - distance);
+			expect(nextStickToBottom(false, prev, next)).toBe(false);
+			prev = next;
+		}
+	});
+
+	it('does not resume when content collapse brings a stationary reader near bottom', () => {
+		expect(nextStickToBottom(false, metrics(BOTTOM - 300), metrics(BOTTOM - 300, 1700))).toBe(false);
+	});
+
+	it('does not resume when scroll anchoring moves down without approaching the bottom', () => {
+		expect(nextStickToBottom(false, metrics(BOTTOM - 40), metrics(BOTTOM - 20, 2020))).toBe(false);
+	});
+
+	it('resumes on a downward return after content grew while the reader was paused', () => {
+		// No scroll event accompanies growth, so prev still has the old height.
+		expect(nextStickToBottom(false, metrics(BOTTOM - 20), metrics(BOTTOM + 35, 2035))).toBe(true);
+	});
+
+	it('resumes after the reader reverses direction and returns toward the bottom', () => {
+		const start = metrics(BOTTOM);
+		const reading = metrics(BOTTOM - 40);
+		const released = nextStickToBottom(true, start, reading);
+		expect(released).toBe(false);
+		expect(nextStickToBottom(released, reading, metrics(BOTTOM - 20))).toBe(true);
+	});
+
 	it('keeps sticking while the user stays at the bottom', () => {
 		const prev = metrics(BOTTOM);
 		const next = metrics(BOTTOM);
@@ -144,8 +178,8 @@ describe('nextStickToBottom', () => {
 	it('honours custom thresholds', () => {
 		const prev = metrics(BOTTOM);
 		const next = metrics(BOTTOM - 40);
-		// With a generous near-bottom threshold, 40px up is still "near bottom".
-		expect(nextStickToBottom(true, prev, next, { nearBottomThreshold: 80 })).toBe(true);
+		// Upward intent takes priority even with a generous near-bottom threshold.
+		expect(nextStickToBottom(true, prev, next, { nearBottomThreshold: 80 })).toBe(false);
 		// With a tight threshold + tiny min-delta, the same move releases.
 		expect(
 			nextStickToBottom(true, prev, next, { nearBottomThreshold: 10, userScrollUpMinDelta: 10 })

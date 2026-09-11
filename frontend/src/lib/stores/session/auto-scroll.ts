@@ -131,8 +131,8 @@ export function isUserScrollUpGesture(wheelDeltaY: number, touchDeltaY: number):
  * filtered out upstream by the component's programmatic-scroll guard.
  *
  * Rules (the canonical stick-to-bottom contract):
- *   - At/near the bottom              → enable  (re-stick when the user returns).
- *   - Deliberate scroll-up off bottom → disable (suspend until they come back).
+ *   - Deliberate scroll-up           → disable (even inside the near-bottom band).
+ *   - Downward return near bottom    → enable (not on stationary/layout events).
  *   - Anything else (content grew below the fold, sub-threshold jitter, a
  *     downward scroll that isn't yet near the bottom) → keep the current flag.
  *
@@ -150,13 +150,17 @@ export function nextStickToBottom(
 	const nearThreshold = opts.nearBottomThreshold ?? NEAR_BOTTOM_THRESHOLD;
 	const upDelta = opts.userScrollUpMinDelta ?? USER_SCROLL_UP_MIN_DELTA;
 
-	// Returning to the bottom always re-engages stick-to-bottom.
-	if (isNearBottom(next, nearThreshold)) return true;
-
-	// Not near the bottom: only disable on a deliberate upward movement. This
-	// guards against layout-reflow jitter that nudges scrollTop up by a few px.
+	// Direction takes priority over proximity: a small scroll-up must not be
+	// undone just because the reader is still inside the near-bottom band.
 	const scrolledUpBy = prev.scrollTop - next.scrollTop;
 	if (scrolledUpBy >= upDelta) return false;
+
+	// Once released (including by wheel/touch intent), only a downward return
+	// can resume following. Stationary/upward events and layout changes near
+	// the bottom are not permission to take the viewport back from the reader.
+	const returningDown = next.scrollTop > prev.scrollTop
+		&& distanceFromBottom(next) < distanceFromBottom(prev);
+	if (isNearBottom(next, nearThreshold) && (current || returningDown)) return true;
 
 	// Downward / sideways / sub-threshold movement away from the bottom: don't
 	// change the flag. (e.g. content streamed in below the viewport while the
