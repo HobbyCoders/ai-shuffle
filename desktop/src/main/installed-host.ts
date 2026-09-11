@@ -40,7 +40,9 @@ export function sourceLaunch(application: SourceApplication, root: string, args:
     executable: application.electron,
     args: [application.desktopDir, ...args],
     options: {
-      cwd: application.desktopDir, windowsHide: true, detached: true,
+      // Electron is a GUI executable. windowsHide also sets SW_HIDE for GUI
+      // windows, suppressing the splash until a later tray activation.
+      cwd: application.desktopDir, windowsHide: false, detached: true,
       env: { ...buildEnvironment(application.node, application.python),
         SHUFFLE_SOURCE_ROOT: root, SHUFFLE_SOURCE_REVISION: application.revision, SHUFFLE_SOURCE_NODE: application.node },
     },

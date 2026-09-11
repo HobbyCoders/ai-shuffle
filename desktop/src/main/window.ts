@@ -111,7 +111,7 @@ export class MainWindow {
 
 		win.once('ready-to-show', () => {
 			if (state.maximized) win.maximize();
-			if (this.activateOnShow) win.show();
+			if (this.activateOnShow) this.focus();
 			else win.showInactive();
 		});
 		win.on('close', (event) => this.onClose?.(event));
@@ -192,6 +192,12 @@ export class MainWindow {
 		if (!win) return;
 		if (win.isMinimized()) win.restore();
 		win.show();
+		// Older installed launchers pass SW_HIDE. Windows can suppress the first
+		// show even though Chromium marks it shown; reset that state and retry.
+		if (process.platform === 'win32' && !win.isVisible()) {
+			win.hide();
+			win.show();
+		}
 		win.focus();
 	}
 

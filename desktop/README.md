@@ -199,6 +199,13 @@ which is handy for a throwaway data directory while testing.
 
 Tests: `npm test` (settings store, runtime resolution, worker environment,
 the PostgreSQL supervisor against a fake runtime, the download helpers).
+
+On Windows, set `SHUFFLE_DESKTOP_WINDOW_TEST=1` and run
+`node --test test/window-launch.test.mjs` after building to verify splash
+visibility and focus across repeated launches with both current and older
+launchers using a temporary profile. This test opens real foreground windows
+without starting a worker or database.
+
 `npm run build:worker` assembles the runtime for this machine (downloads
 Python, Node, PostgreSQL and cloudflared, installs the Python dependencies; takes a few
 minutes). `--skip-postgres` leaves PostgreSQL out of a build.

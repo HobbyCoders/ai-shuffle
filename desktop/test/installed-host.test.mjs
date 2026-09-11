@@ -21,7 +21,7 @@ test('installed source versions preserve the original profile and EXE across res
  const app={electron:path.join(root,'electron.exe'),desktopDir:path.join(root,'desktop'),revision:'a'.repeat(40),node:path.join(root,'node.exe'),python:path.join(root,'python.exe')};
  const launch=sourceLaunch(app,root,['aishuffle://callback']);
  assert.equal(launch.executable,app.electron);assert.deepEqual(launch.args,[app.desktopDir,'aishuffle://callback']);
- assert.equal(launch.options.windowsHide,true);assert.equal(launch.options.detached,true);
+ assert.equal(launch.options.windowsHide,false,'Electron must be allowed to show its splash window');assert.equal(launch.options.detached,true);
  assert.equal(launch.options.env.SHUFFLE_SOURCE_ROOT,root);assert.equal(launch.options.env.SHUFFLE_SOURCE_REVISION,app.revision);
  assert(!launch.args.some(arg=>/bootstrap|\.cmd|powershell/.test(arg)));
 });

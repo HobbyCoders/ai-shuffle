@@ -27,9 +27,9 @@ if (options.isolated) {
 await mkdir(root, { recursive: true });
 const publicKey = profile?.publicKey ?? await readFile(path.join(desktop, 'build/application-update-key.pem'), 'utf8');
 async function exists(file) { try { await access(file); return true; } catch { return false; } }
-async function run(exe, args, cwd, env = process.env) {
+async function run(exe, args, cwd, env = process.env, windowsHide = true) {
   await new Promise((resolve, reject) => {
-    const child = spawn(exe, args, { cwd, env, stdio: 'inherit', windowsHide: true });
+    const child = spawn(exe, args, { cwd, env, stdio: 'inherit', windowsHide });
     child.once('error', reject);
     child.once('exit', (code, signal) => code === 0 ? resolve() : reject(new Error(`${path.basename(exe)} failed (${signal ?? code})`)));
   });
@@ -78,7 +78,8 @@ if (!(await free(profile?.port ?? 8000)) || !(await free(profile?.protectedPort 
 }
 console.log(`Starting AI Shuffle (${selected.revision.slice(0, 12)})`);
 const env = { ...buildEnvironment(selected.node, selected.python), SHUFFLE_SOURCE_ROOT: root, SHUFFLE_SOURCE_REVISION: selected.revision, SHUFFLE_SOURCE_NODE: selected.node };
-try { await run(selected.electron, [selected.desktopDir, ...(profile?.debugPort ? [`--remote-debugging-port=${profile.debugPort}`, '--remote-debugging-address=127.0.0.1'] : []), ...launchArgs], selected.desktopDir, env); }
+// Only build helpers use windowsHide; Electron must be allowed to show its GUI.
+try { await run(selected.electron, [selected.desktopDir, ...(profile?.debugPort ? [`--remote-debugging-port=${profile.debugPort}`, '--remote-debugging-address=127.0.0.1'] : []), ...launchArgs], selected.desktopDir, env, false); }
 catch (error) {
   // The Electron process owns health state. Its successful boot may already
   // have replaced this launcher's stale in-memory state; never overwrite it.
