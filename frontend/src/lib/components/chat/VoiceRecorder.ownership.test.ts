@@ -48,14 +48,42 @@ describe('rendered recorder with live editor ownership', () => {
 		handlers.onTranscript?.('private words');
 		await tick();
 	}
-	it.each(['button', 'Escape'])('Discard via %s removes only speech', async (action) => {
+	it('Escape discards only speech without a separate discard button', async () => {
 		await start();
 		editor.commands.insertContentAt(1, 'My ');
-		if (action === 'button') await fireEvent.click(screen.getByRole('button', { name: 'Discard voice input' }));
-		else await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(screen.queryByRole('button', { name: 'Discard voice input' })).toBeNull();
+		const stopButton = screen.getByRole('button', { name: 'Stop voice input' });
+		expect(stopButton.classList.contains('expanded')).toBe(true);
+		expect(stopButton.querySelectorAll('.waveform-bar')).toHaveLength(20);
+		await fireEvent.keyDown(window, { key: 'Escape' });
 		expect(editor.getText()).toBe('My Draft A');
 		handlers.onTranscript?.('late words');
 		expect(editor.getText()).toBe('My Draft A');
+	});
+	it('clicking the waveform finishes dictation and restores the idle button', async () => {
+		let finish!: (text: string) => void;
+		mocks.start.mockImplementationOnce(async (callbacks: SttStreamHandlers) => {
+			handlers = callbacks;
+			callbacks.onCapture?.();
+			return {
+				stop: () => new Promise<string>((resolve) => { finish = resolve; }),
+				abort: vi.fn(), getText: vi.fn()
+			};
+		});
+		await start();
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop voice input' }));
+		await vi.advanceTimersByTimeAsync(0);
+		const processingButton = screen.getByRole('button', { name: 'Start voice input' }) as HTMLButtonElement;
+		expect(processingButton.classList.contains('transcribing')).toBe(true);
+		expect(processingButton.disabled).toBe(true);
+		expect(screen.queryByRole('button', { name: 'Discard voice input' })).toBeNull();
+		finish('private words');
+		await vi.advanceTimersByTimeAsync(0);
+		const startButton = screen.getByRole('button', { name: 'Start voice input' });
+		expect(startButton.classList.contains('expanded')).toBe(false);
+		expect(startButton.querySelector('.voice-waveform')).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Discard voice input' })).toBeNull();
+		expect(editor.getText()).toBe('Draft A private words');
 	});
 	it('rejects a transcript immediately on owner change, even before navigation effects settle', async () => {
 		await start();

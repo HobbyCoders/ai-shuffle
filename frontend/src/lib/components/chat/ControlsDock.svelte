@@ -731,9 +731,9 @@
 		cursor: not-allowed;
 	}
 
-	/* The mic and voice-call buttons ChatInput passes in take the same 24px
-	   footprint as the row's own icon buttons. */
-	.dock-left :global(.voice-btn),
+	/* Only the idle mic shares the row's 24px footprint; active dictation
+	   needs the wider waveform defined by VoiceRecorder. */
+	.dock-left :global(.voice-btn:not(.expanded)),
 	.dock-left :global(.voice-call-btn) {
 		width: 24px;
 		height: 24px;

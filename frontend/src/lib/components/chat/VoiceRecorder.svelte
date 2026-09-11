@@ -62,9 +62,9 @@
 	const audioLevel = $derived($globalSttAudio.level);
 	const expanded = $derived(isRecording || isTranscribing || isPreparing);
 
-	// The meter publishes 28 bands; the button has room for far fewer, so take an
-	// even spread rather than the first N — otherwise it would show only bass.
-	const BAR_COUNT = 11;
+	// Spread the meter's 28 bands across the button rather than taking only
+	// the first N, which would show only bass.
+	const BAR_COUNT = 20;
 	const bars = $derived.by(() => {
 		const bands = $globalSttAudio.bands;
 		if (!bands.length) return new Array(BAR_COUNT).fill(0);
@@ -94,11 +94,6 @@
 		} : undefined);
 	}
 
-	function onCancel(event: MouseEvent) {
-		event.stopPropagation();
-		cancelVoiceInput();
-	}
-
 	// Escape discards. Bound on the window in the capture phase rather than
 	// through registerShortcut: that registry is keyed by combo, so claiming
 	// 'Escape' would evict the app's close-modal binding and unregistering would
@@ -117,7 +112,7 @@
 
 	// A recording left running when the composer goes away would hold the
 	// microphone open with nowhere to put its text. Navigation keeps words
-	// already visible in the draft; only the explicit Discard action removes them.
+	// already visible in the draft; only Escape discards them.
 	onDestroy(() => {
 		const state = $globalSttState;
 		if (state.source === 'composer' && (state.isRecording || state.isPreparing || state.isTranscribing)) {
@@ -149,7 +144,7 @@
 		title={isPreparing
 			? 'Starting…'
 			: isRecording
-				? 'Listening — click to finish dictation'
+				? 'Listening — click to finish dictation (Esc to discard)'
 				: isTranscribing
 					? 'Transcribing…'
 					: 'Voice input'}
@@ -185,23 +180,6 @@
 			{/if}
 		</div>
 	</button>
-
-	{#if isRecording || isTranscribing}
-		<!-- Discard. Stopping is the recording's own job, so this button is only
-		     ever the destructive one — which is why it is not the big target. -->
-		<button
-			type="button"
-			class="voice-cancel"
-			onclick={onCancel}
-			title="Discard (Esc)"
-			aria-label="Discard voice input"
-		>
-			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-				<line x1="18" y1="6" x2="6" y2="18" />
-				<line x1="6" y1="6" x2="18" y2="18" />
-			</svg>
-		</button>
-	{/if}
 </div>
 
 <style>
@@ -211,7 +189,6 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		gap: 2px;
 		border-radius: min(50%, calc(var(--radius, 0.75rem) * 2.67));
 	}
 
@@ -245,7 +222,7 @@
 	}
 
 	.voice-btn.expanded {
-		width: 96px;
+		width: 118px;
 		border-radius: 999px;
 	}
 
@@ -355,33 +332,6 @@
 	.processing-dot:nth-child(2) { animation-delay: 0.2s; }
 	.processing-dot:nth-child(3) { animation-delay: 0.4s; }
 
-	/* Discard */
-	.voice-cancel {
-		display: grid;
-		place-items: center;
-		width: 20px;
-		height: 20px;
-		flex-shrink: 0;
-		padding: 0;
-		background: transparent;
-		border: none;
-		border-radius: 50%;
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: color 150ms ease, background 150ms ease;
-		animation: cancel-in 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
-	}
-
-	.voice-cancel:hover {
-		color: var(--destructive);
-		background: var(--hover-overlay);
-	}
-
-	.voice-cancel svg {
-		width: 10px;
-		height: 10px;
-	}
-
 	.voice-btn:active:not(:disabled) {
 		transform: scale(0.95);
 	}
@@ -396,17 +346,11 @@
 		40% { transform: scale(1.2); opacity: 1; }
 	}
 
-	@keyframes cancel-in {
-		from { opacity: 0; transform: scale(0.6); }
-		to { opacity: 1; transform: scale(1); }
-	}
-
 	@media (prefers-reduced-motion: reduce) {
 		.voice-btn,
 		.waveform-bar {
 			transition: none;
 		}
-		.voice-cancel,
 		.processing-dot,
 		.voice-btn.preparing .voice-icon-preparing {
 			animation: none;
