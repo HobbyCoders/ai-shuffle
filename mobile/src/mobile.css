@@ -375,8 +375,10 @@ html:root[data-platform='mobile'] .project-name {
 /* The header is a horizontal scroll container on mobile, which would clip an
    absolutely-positioned dropdown. Pin it as a fixed panel just below the
    header so it escapes the rail's overflow while staying in the DOM tree
-   (so outside-click detection keeps working). */
-html:root[data-platform='mobile'] .branch-dropdown {
+   (so outside-click detection keeps working). Scope this to the Git header:
+   runner and branch menus reuse .branch-dropdown in the composer sheet, where
+   they must stay in normal flow beneath their triggers. */
+html:root[data-platform='mobile'] .git-actions .branch-dropdown {
 	position: fixed;
 	top: 100px;
 	left: 8px;
