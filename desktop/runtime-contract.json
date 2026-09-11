@@ -1,0 +1,7 @@
+{
+  "format": 1,
+  "python": "3.12",
+  "node": 22,
+  "electron": 44,
+  "postgres": 16
+}

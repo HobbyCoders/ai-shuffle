@@ -7,7 +7,7 @@ const code = readFileSync(new URL('../src/pages/worker.js', import.meta.url), 'u
 const html = readFileSync(new URL('../src/pages/worker.html', import.meta.url), 'utf8');
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-function page({ state = { phase: 'starting', postgres: { phase: 'starting' } }, getState, restart, search = '' } = {}) {
+function page({ state = { phase: 'starting', postgres: { phase: 'starting' } }, getState, restart, updates, search = '' } = {}) {
  const elements = new Map([...html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*>/g)].map(([tag, id]) => [id, {
   hidden: /\bhidden\b/.test(tag), disabled: false, open: false, textContent: '', dataset: {},
   scrollTop: 0, clientHeight: 100, scrollHeight: 100, listeners: {},
@@ -23,7 +23,7 @@ function page({ state = { phase: 'starting', postgres: { phase: 'starting' } }, 
   openLogs: () => { calls.openLogs++; }
  };
  vm.runInNewContext(code, {
-  window: { location: { search }, shuffleDesktop: { version: 'test' }, shuffleDesktopWorker: bridge },
+  window: { location: { search }, shuffleDesktop: { version: 'test', updates }, shuffleDesktopWorker: bridge },
   document: { getElementById: (id) => { assert.ok(elements.has(id), `unknown element ${id}`); return elements.get(id); } },
   URLSearchParams, Error,
   setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
@@ -31,6 +31,33 @@ function page({ state = { phase: 'starting', postgres: { phase: 'starting' } }, 
  });
  return { el: (id) => elements.get(id), calls, timers, emit: (state) => onState(state), log: () => onLog(), bridge };
 }
+
+test('startup failures still offer in-app update and restart with progress and retryable errors', async () => {
+ let listener; const calls = [];
+ const updates = {
+  getState: async () => ({ phase: 'idle' }), onState: cb => { listener = cb; },
+  check: () => calls.push('check'), download: () => calls.push('download'), install: () => calls.push('install')
+ };
+ const p = page({ state: { phase: 'failed', error: 'Application download interrupted' }, updates }); await tick();
+ assert.equal(p.el('updates').hidden, false);
+ p.el('update-check').listeners.click(); assert.deepEqual(calls, ['check']);
+ listener({ phase: 'available', version: '1.1.0' });
+ assert.equal(p.el('update-check').textContent, 'Download update'); assert.equal(p.el('update-install').hidden, true);
+ p.el('update-check').listeners.click(); assert.deepEqual(calls, ['check', 'download']);
+ listener({ phase: 'downloading', percent: 42 });
+ assert.match(p.el('update-status').textContent, /42%/); assert.equal(p.el('update-check').disabled, true);
+ listener({ phase: 'error', version: '1.1.0', error: 'Network unavailable' });
+ assert.equal(p.el('update-status').textContent, 'Network unavailable'); assert.equal(p.el('update-check').disabled, false);
+ assert.equal(p.el('update-check').textContent, 'Download update');
+ p.el('update-check').listeners.click();
+ listener({ phase: 'ready', version: '1.1.0' });
+ assert.equal(p.el('update-install').hidden, false);
+ p.el('update-install').listeners.click(); assert.deepEqual(calls, ['check', 'download', 'download', 'install']);
+ listener({ phase: 'ready', version: '1.1.0', error: 'Database did not stop' });
+ assert.match(p.el('update-status').textContent, /Database did not stop/); assert.equal(p.el('update-install').hidden, false);
+ p.el('update-install').listeners.click(); assert.equal(calls.at(-1), 'install');
+ listener({ phase: 'unsupported' }); assert.equal(p.el('updates').hidden, true);
+});
 
 test('ordinary startup is quiet, reflects readiness, and loads logs only when requested', async () => {
  const p = page(); await tick();

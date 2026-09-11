@@ -198,7 +198,8 @@
 	.sidebar-slot.floating {
 		position: absolute;
 		inset: 0 auto 0 0;
-		z-index: 40;
+		/* Above the top bar (40), below modal dialogs (50). */
+		z-index: 42;
 		max-width: min(100%, 100vw);
 		background: var(--sidebar);
 		box-shadow: 8px 0 32px color-mix(in oklch, black 45%, transparent);
@@ -207,7 +208,7 @@
 	.sidebar-scrim {
 		position: absolute;
 		inset: 0;
-		z-index: 39;
+		z-index: 41;
 		background: color-mix(in oklch, black 45%, transparent);
 	}
 

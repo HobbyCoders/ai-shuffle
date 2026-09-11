@@ -11,7 +11,7 @@
     "url": "https://github.com/HobbyCoders/ai-shuffle.git",
     "directory": "desktop"
   },
-  "main": "dist/main/index.js",
+  "main": "dist/main/managed-entry.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:worker": "node scripts/build-worker.mjs",
@@ -24,7 +24,7 @@
     "dist:preview:win": "npm run build && electron-builder --config electron-builder.preview.yml --win nsis --x64 --publish never"
   },
   "dependencies": {
-    "electron-updater": "^6.8.9"
+    "yauzl": "^3.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",

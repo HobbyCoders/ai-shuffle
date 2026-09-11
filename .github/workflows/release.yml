@@ -50,7 +50,7 @@ jobs:
 
             | Build | Platform | Download / install |
             |-------|----------|--------------------|
-            | **Desktop** | Windows x64 (Intel / AMD) | [Windows installer (.exe)](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Desktop-${{ env.DESKTOP_VERSION }}-win-x64.exe) |
+            | **Desktop** | Windows x64 (Intel / AMD) | [Windows source launcher (.zip)](https://hobbycoders.com/desktop) |
             | **Mobile** | Android 8.0+ | [Signed Android APK](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Android.apk) |
             | **Docker** | Linux amd64 | [Container image](https://github.com/${{ github.repository }}/pkgs/container/ai-shuffle) — `ghcr.io/hobbycoders/ai-shuffle:${{ env.DESKTOP_VERSION }}`; see install instructions below |
 
@@ -62,6 +62,10 @@ jobs:
             Run the Windows installer. The app runs an AI Shuffle worker on your
             computer and opens its web UI. It bundles Python, Node and its own
             persistent PostgreSQL database; no database configuration is needed.
+            On Windows, unzip the source download and double-click `Start AI Shuffle.cmd`.
+            It downloads the runtimes and builds the application on your computer.
+            After that, use Update and restart inside AI Shuffle. Main-branch updates
+            need no installer, application-package build, or tagged release.
             Other workers are managed inside the app under Devices.
 
             ### Mobile install
@@ -115,76 +119,4 @@ jobs:
       publish_download: ${{ vars.ANDROID_WORKERS_READY == 'true' }}
     secrets: inherit
 
-  # Default releases package Windows only to bound desktop build costs.
-  # Platform source/runtime support remains available for manual builds.
-  desktop:
-    name: Desktop (${{ matrix.target }})
-    timeout-minutes: 90
-    needs: create-release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: win-x64
-            os: blacksmith-4vcpu-windows-2025
-            arch: x64
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        working-directory: desktop
-    env:
-      # No signing certificates are configured.
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Normalise release version
-        # Accept v0.8.5, V0.8.5 or 0.8.5 from the dispatch box; tags are already vX.Y.Z.
-        shell: bash
-        run: |
-          raw="$(printf '%s' "$VERSION" | tr -d '[:space:]')"
-          raw="${raw#v}"; raw="${raw#V}"
-          normalised="v${raw}"
-          [[ "$normalised" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo "::error::Invalid release version '$VERSION' (expected vX.Y.Z)"; exit 1; }
-          echo "VERSION=$normalised" >> "$GITHUB_ENV"
-          echo "Releasing $normalised"
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: desktop/package-lock.json
-
-      - name: Build frontend
-        working-directory: frontend
-        shell: bash
-        run: npm ci && npm run build
-
-      - name: Install desktop dependencies
-        run: npm ci
-
-      - name: Stamp version from the release tag
-        shell: bash
-        # The package may already carry the release version; npm refuses a no-op
-        # without --allow-same-version.
-        run: npm version --no-git-tag-version --allow-same-version "${VERSION#v}"
-
-      - name: Assemble the worker runtime
-        shell: bash
-        run: npm run build:worker -- --arch ${{ matrix.arch }} --frontend-build ../frontend/build
-
-      - name: Build installers
-        shell: bash
-        run: npm run build && npx electron-builder --publish never --${{ matrix.arch }}
-
-      - name: Upload installers to the release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          shopt -s nullglob
-          files=(release/*.exe release/*.blockmap release/latest.yml)
-          ls -la release/
-          gh release upload "$VERSION" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+  # Windows uses the installer-free launcher and desktop-source.yml.

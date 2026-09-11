@@ -5,6 +5,72 @@ UI in a native window, for Windows x64, Apple Silicon macOS and Linux x64. It
 is the desktop counterpart of the Android app: the same UI, served by the
 worker the app starts, so the two never drift apart.
 
+## Windows distribution: no installer
+
+Download the Windows source ZIP at <https://hobbycoders.com/desktop>, unzip it,
+and double-click `Start AI Shuffle.cmd`. Sign in with your AI Shuffle account
+when the launcher opens the browser. It adds a Start menu shortcut, downloads
+Python, Node, PostgreSQL and Electron, and builds the frontend, tools and desktop
+JavaScript locally. The first launch can take several minutes and needs internet
+access. Runtime files and dependency caches live under
+`%LOCALAPPDATA%/AI Shuffle Source`; existing user data stays in its current locations.
+
+Updates follow `main`, not tagged releases. The small `desktop-source.yml` job
+mirrors GitHub's existing source ZIP into private R2 storage and signs a revision,
+checksum and size. It uses a standard GitHub-hosted runner, not Blacksmith, and
+performs no application or installer build. The account hub grants revocable,
+download-only device access. Credentials are protected with Windows DPAPI; clients
+never receive a GitHub credential. The Cloudflare deployment token needs R2 write
+access for the private `ai-shuffle-desktop-sources` bucket. Public bucket access
+must remain disabled. The signing key is the `DESKTOP_APPLICATION_SIGNING_KEY`
+GitHub secret; its public half ships with the launcher.
+
+The app checks for updates in the background without downloading them. When one
+is available, a small update button appears next to Search in the sidebar header.
+Click it to download and build the new revision alongside the running one; the
+button shows progress while dependencies are prepared. Dependencies are cached by
+their manifests. Once ready, click the same button again: **Update and restart**
+stops the worker and database, then switches to the new application and its matching
+native runtimes. Startup readiness confirms activation. Failed downloads/builds do
+not replace the running version. A failed first boot retains the previous files
+but does not automatically run old code over a potentially migrated database.
+PostgreSQL major-version upgrades still require a deliberate data migration; never
+change the pinned major version without adding and testing that migration.
+
+**Future distribution note:** the source repository may become public, or the files
+may move to another host. The goal is to let users update without an account.
+Authentication lives in `source-auth.ts`, separate from signature verification and
+local building, so that change can replace the download transport without changing
+the update format. Do not expose the private bucket or repository before that
+policy change is approved.
+
+The packaging commands below remain for legacy/manual development builds; normal
+Windows distribution no longer builds or publishes NSIS installers. Existing
+installer-based versions need to move to this launcher once, because those older
+binaries cannot discover the new source-update protocol themselves.
+
+## Testing without stopping the normal desktop
+
+The source launcher supports `--isolated --root <separate-folder> --port 18080
+--protected-port 18081`. The profile stores its port choices and keeps its own
+settings, browser session, provider credentials, workspace and PostgreSQL data.
+Later launches use `--root <same-folder>`; Update and restart preserves the profile.
+Isolated roots cannot overlap the normal application or its data, and neither
+listener can claim ports 8000/8001. The window is labelled **AI Shuffle Isolated**,
+does not take foreground focus, and does not register a tray icon or replace the
+normal URL handler.
+
+For Windows acceptance testing, install the desktop and browser-mcp Node
+dependencies, build the desktop TypeScript, then run
+`node desktop/scripts/verify-source-desktop.mjs <new-temporary-root>`.
+The test creates a signed local source feed, launches the actual Electron app,
+drives its real preload/IPC controls, and reconnects after its real Node/Electron
+restart. No worker source patches or replacement UI bridge are used. It checks
+that the original application's listener PIDs stay unchanged. The optional
+`--feed-directory` and `--public-key` switches are restricted to explicit isolated
+profiles; they never change the normal update feed. A local feed does not test
+hosted account sign-in or R2 permissions.
+
 ## What the app does
 
 - Starts its bundled PostgreSQL, then the worker (`python -m app.main` in

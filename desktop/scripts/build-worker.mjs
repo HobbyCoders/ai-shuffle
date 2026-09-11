@@ -25,7 +25,11 @@
  *   node scripts/build-worker.mjs [--out worker] [--platform win32|darwin|linux]
  *                                 [--arch x64|arm64] [--frontend-build <dir>]
  *                                 [--keep-python] [--stub] [--skip-postgres]
- *                                 [--postgres-out postgres]
+ *                                 [--postgres-out postgres] [--cache <dir>] [--runtime-only]
+ *
+ * --runtime-only downloads the native runtimes locally, keeps npm for source
+ * builds, and skips application/frontend/tool assembly. --cache reuses verified
+ * downloads across runtime versions. No Windows installer is produced.
  *
  * --stub writes only a manifest so electron-builder can package a shell without
  * a runtime (used by pull-request CI on platforms that do not build one).
@@ -41,6 +45,7 @@ import { Readable } from 'node:stream';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runtimeContract, pythonDependencies } from './runtime-contract.mjs';
 import {
 	POSTGRES_VERSION,
 	initdbRelativePath,
@@ -59,9 +64,8 @@ const NODE_VERSION = '22.23.2';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const desktopDir = path.resolve(here, '..');
 const repoDir = path.resolve(desktopDir, '..');
-const cacheDir = path.join(desktopDir, '.cache');
-
 const args = parseArgs(process.argv.slice(2));
+const cacheDir = path.resolve(args.cache ?? path.join(desktopDir, '.cache'));
 const platform = args.platform ?? process.platform;
 const arch = args.arch ?? process.arch;
 const outDir = path.resolve(desktopDir, args.out ?? 'worker');
@@ -234,7 +238,8 @@ async function installNode() {
 	await extract(archive, dir, 1);
 	const node = platform === 'win32' ? path.join(dir, 'node.exe') : path.join(dir, 'bin', 'node');
 	run(node, ['--version']);
-	// Nothing in the worker runs npm; drop it to keep the bundle small.
+	// Source-managed installations need npm for local updates.
+	if (args['runtime-only']) return { version: NODE_VERSION };
 	for (const extra of ['node_modules', 'npm', 'npm.cmd', 'npx', 'npx.cmd', 'corepack', 'corepack.cmd', 'include', 'share']) {
 		await rm(path.join(dir, extra), { recursive: true, force: true });
 	}
@@ -330,6 +335,9 @@ async function copyServer() {
 		throw new Error('Frontend build missing. Build the frontend separately and pass --frontend-build; runtime assembly never installs into the source checkout.');
 	}
 	await cp(frontendBuild, path.join(dest, 'app', 'static'), { recursive: true });
+	await cp(path.join(repoDir, 'fluid', 'fluid'), path.join(dest, 'fluid'), {
+		recursive: true, filter: src => !src.split(path.sep).includes('__pycache__') && !src.endsWith('.pyc')
+	});
 	for (const file of ['requirements.txt', 'requirements-native.txt', 'LICENSE']) {
 		await cp(path.join(repoDir, file), path.join(dest, file));
 	}
@@ -381,13 +389,17 @@ async function main() {
 	let postgres = null;
 	if (args['skip-postgres']) log('skipping PostgreSQL (--skip-postgres)');
 	else postgres = await installPostgres();
-	await copyServer();
-	const cloudflared = await installCloudflared();
-	await buildNodePackage('tools');
-	await buildNodePackage('browser-mcp');
+	if (!args['runtime-only']) await copyServer();
+	const cloudflared = args['runtime-only'] ? null : await installCloudflared();
+	if (!args['runtime-only']) {
+		await buildNodePackage('tools');
+		await buildNodePackage('browser-mcp');
+	}
 	const manifest = {
 		stub: false,
 		appVersion: pkg.version,
+		runtime: await runtimeContract(repoDir),
+		pythonDependencies: await pythonDependencies(repoDir),
 		platform,
 		arch,
 		python,

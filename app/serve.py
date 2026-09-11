@@ -11,7 +11,21 @@ import socket
 import sys
 from contextlib import ExitStack
 
-REMOTE_PORT = 8001
+
+def configured_remote_port(env):
+    """Only an explicit isolated desktop may move the protected listener."""
+    if env.get('SHUFFLE_DESKTOP_ISOLATED') != '1':
+        return 8001
+    try:
+        port = int(env['SHUFFLE_PROTECTED_PORT'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError('An isolated desktop requires a valid protected port') from exc
+    if not 1024 <= port <= 65535 or port in (8000, 8001):
+        raise ValueError('An isolated protected port cannot use the normal worker ports')
+    return port
+
+
+REMOTE_PORT = configured_remote_port(os.environ)
 
 
 class IngressApplication:

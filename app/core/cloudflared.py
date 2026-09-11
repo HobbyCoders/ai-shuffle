@@ -95,9 +95,15 @@ def install(*, force_local=False):
     return str(target)
 
 
-def bundle():
-    """Build-time entry point: verify the download and execute the bundled file."""
-    executable = install(force_local=True)
+def bundle(*, reuse_verified=False):
+    """Verify a pinned binary, downloading unless an allowed cache matches exactly."""
+    asset = _asset()
+    local = _local_path()
+    # Windows/Linux raw binaries can be checked against the pinned archive hash.
+    # macOS archives are compressed, so keep their existing download path.
+    cached = (reuse_verified and not asset.endswith('.tgz') and local.is_file()
+              and hashlib.sha256(local.read_bytes()).hexdigest() == _DIGESTS[asset])
+    executable = str(local) if cached else install(force_local=True)
     result = subprocess.run(
         [executable, '--version'], check=True, capture_output=True, text=True,
         timeout=15, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
@@ -118,5 +124,6 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bundle', action='store_true', help='Install and verify a package-local binary, returning its manifest entry')
+    parser.add_argument('--reuse-verified', action='store_true', help='Reuse a local binary only when its hash matches the pinned release')
     args = parser.parse_args()
-    print(json.dumps(bundle()) if args.bundle else install())
+    print(json.dumps(bundle(reuse_verified=args.reuse_verified)) if args.bundle else install())

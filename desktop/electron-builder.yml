@@ -3,8 +3,8 @@
 # Installers land in desktop/release/. The update metadata files
 # (latest.yml, latest-mac.yml, latest-linux.yml) are generated next to them
 # because a publish provider is configured, even when `--publish never` is
-# used; the release workflow uploads everything to the GitHub release for the
-# app's v* tag, which is where electron-updater looks for updates.
+# used. Windows runtime updates are published on desktop-runtime; signed
+# application packages are published separately on the app's v* release.
 appId: com.hobbycoders.aishuffle.desktop
 productName: AI Shuffle
 copyright: Copyright © 2026 HobbyCoders
@@ -19,6 +19,8 @@ files:
   - src/pages/**/*
   - package.json
   - build/icon.png
+  - build/application-update-key.pem
+  - scripts/source-profile.cjs
 
 # The worker runtime assembled by scripts/build-worker.mjs: Python with the
 # server's dependencies, Node, and the server itself, plus the PostgreSQL

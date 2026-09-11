@@ -68,7 +68,8 @@ const bridge = {
 		getState: () => ipcRenderer.invoke('desktop:update-state'),
 		onState: (listener: Listener<unknown>) => subscribe('desktop:update-state', listener),
 		check: () => ipcRenderer.invoke('desktop:update-check'),
-		install: () => void ipcRenderer.invoke('desktop:update-install')
+		download: () => ipcRenderer.invoke('desktop:update-download') as Promise<void>,
+		install: () => ipcRenderer.invoke('desktop:update-install') as Promise<void>
 	}
 };
 

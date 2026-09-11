@@ -58,6 +58,8 @@ export interface WorkerState {
 }
 
 export interface ResolveOptions {
+	/** Verified application package selected by the desktop launcher, never an environment override. */
+	applicationDir?: string;
 	packaged: boolean;
 	resourcesPath: string;
 	repoDir: string;
@@ -80,7 +82,7 @@ export function resolveRuntime(opts: ResolveOptions): WorkerRuntime | { error: s
 		if (manifest.stub) return { error: 'This build of the app was packaged without a worker runtime.' };
 		const python = platform === 'win32' ? path.join(bundledRoot, 'python', 'python.exe') : path.join(bundledRoot, 'python', 'bin', 'python3');
 		const nodeBinDir = platform === 'win32' ? path.join(bundledRoot, 'node') : path.join(bundledRoot, 'node', 'bin');
-		const serverDir = path.join(bundledRoot, 'server');
+		const serverDir = opts.applicationDir ?? path.join(bundledRoot, 'server');
 		if (!existsSync(python)) return { error: `The bundled Python is missing (${python}). Reinstall the app.` };
 		if (!existsSync(path.join(serverDir, 'app', 'main.py'))) return { error: `The bundled server is missing (${serverDir}). Reinstall the app.` };
 		return {
@@ -116,6 +118,8 @@ export function resolveRuntime(opts: ResolveOptions): WorkerRuntime | { error: s
 }
 
 export interface EnvOptions {
+	/** Explicit isolated source profile; never inferred from inherited environment. */
+	isolated?: boolean;
 	runtime: WorkerRuntime;
 	port: number;
 	protectedPort?: number;
@@ -138,7 +142,7 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 	if (opts.runtime.nodeBinDir) pathParts.push(opts.runtime.nodeBinDir);
 	if (base[pathKey]) pathParts.push(base[pathKey] as string);
 	for (const key of Object.keys(base)) {
-		if (/^(POSTGRES_|DATABASE_|PG|PYTHONHOME$|PYTHONPATH$|VIRTUAL_ENV$)/i.test(key)) delete base[key];
+		if (/^(POSTGRES_|DATABASE_|PG|PYTHONHOME$|PYTHONPATH$|VIRTUAL_ENV$|SHUFFLE_DESKTOP_ISOLATED$|SHUFFLE_PROTECTED_PORT$|SHUFFLE_DESKTOP_PROTECTED_PORT$)/i.test(key)) delete base[key];
 	}
 	let profile: NodeJS.ProcessEnv = {};
 	if (opts.profileDir) {
@@ -163,12 +167,14 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 		...base, ...profile,
 		[pathKey]: pathParts.join(sep),
 		LOCAL_MODE: 'true', HOST: '127.0.0.1', PORT: String(opts.port),
+		SHUFFLE_DESKTOP_ISOLATED: opts.isolated ? '1' : '0',
+		SHUFFLE_PROTECTED_PORT: String(opts.protectedPort ?? PROTECTED_PORT),
 		SHUFFLE_DESKTOP_PROTECTED_PORT: String(opts.protectedPort ?? PROTECTED_PORT),
 		DATA_DIR: opts.dataDir,
 		...(opts.workspaceDir ? { WORKSPACE_DIR: opts.workspaceDir } : {}),
 		AI_SHUFFLE_ENV_FILE: opts.envFile,
 		TOOLS_DIR: opts.runtime.toolsDir, BROWSER_MCP_ENTRY: opts.runtime.browserMcpEntry,
-		...(opts.runtime.mode === 'repo' ? { PYTHONPATH: path.join(opts.runtime.serverDir, 'fluid') } : {}),
+		PYTHONPATH: opts.runtime.mode === 'bundled' ? opts.runtime.serverDir : path.join(opts.runtime.serverDir, 'fluid'),
 		PYTHONNOUSERSITE: '1', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8', SHUFFLE_DESKTOP: '1'
 	};
 }
@@ -261,6 +267,7 @@ export function requestLifecycle(port: number, token: string, action: 'active-se
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export interface SupervisorOptions {
+	isolated?: boolean;
 	runtime: WorkerRuntime;
 	logDir: string;
 	envFile: string;

@@ -88,6 +88,7 @@
 	import { appMode, sessionMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
+	import DesktopUpdateButton from './sidebar/DesktopUpdateButton.svelte';
 	import SessionCard from './SessionCard.svelte';
 	import SessionModeSwitcher from './SessionModeSwitcher.svelte';
 	import WorkspaceNav from './sidebar/WorkspaceNav.svelte';
@@ -595,6 +596,7 @@
 				</span>
 				<span class="wordmark">AI Shuffle</span>
 			</div>
+			<DesktopUpdateButton />
 			{#if onOpenSpotlight}
 				<button class="iconbtn" onclick={onOpenSpotlight} title="Search (Cmd/Ctrl+K)" aria-label="Search">
 					<Search size={16} strokeWidth={1.85} />

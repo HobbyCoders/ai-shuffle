@@ -19,6 +19,8 @@ extraResources:
   - from: postgres
     to: postgres
 extraMetadata:
+  # Standalone previews do not load the source-managed bootstrap or its helpers.
+  main: dist/main/index.js
   name: ai-shuffle-preview
   productName: AI Shuffle Preview
   shuffleDesktopChannel: preview

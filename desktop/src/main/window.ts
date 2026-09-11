@@ -38,7 +38,7 @@ export class MainWindow {
 	private page: PageMode | null = null;
 	private readonly stateStore: WindowStateStore;
 
-	constructor(private readonly userData: string) {
+	constructor(private readonly userData: string, private readonly title = 'AI Shuffle', private readonly activateOnShow = true) {
 		this.stateStore = new WindowStateStore(path.join(userData, 'window-state.json'));
 	}
 
@@ -77,7 +77,7 @@ export class MainWindow {
 			minHeight: 560,
 			show: false,
 			backgroundColor: initialTheme.background,
-			title: 'AI Shuffle',
+			title: this.title,
 			titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
 			trafficLightPosition: isMac ? { x: 18, y: 18 } : undefined,
 			titleBarOverlay: {
@@ -105,7 +105,8 @@ export class MainWindow {
 
 		win.once('ready-to-show', () => {
 			if (state.maximized) win.maximize();
-			win.show();
+			if (this.activateOnShow) win.show();
+			else win.showInactive();
 		});
 		win.on('close', (event) => this.onClose?.(event));
 		win.on('closed', () => {
@@ -121,7 +122,7 @@ export class MainWindow {
 		win.webContents.on('page-title-updated', (event) => {
 			// The document title is the session title; keep the OS title short.
 			event.preventDefault();
-			win.setTitle('AI Shuffle');
+			win.setTitle(this.title);
 		});
 		return win;
 	}

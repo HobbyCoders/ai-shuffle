@@ -9,7 +9,7 @@ import pytest
 import uvicorn
 from websockets.sync.client import connect
 
-from app.serve import IngressApplication, bind_listener
+from app.serve import IngressApplication, bind_listener, configured_remote_port
 
 
 def test_two_sockets_preserve_tcp_identity_and_share_one_lifespan():
@@ -71,6 +71,15 @@ def test_unrecognized_socket_cannot_inherit_local_marker():
     for server in [None, ('127.0.0.1', 8001), ('127.0.0.1', 9999)]:
         asyncio.run(wrapper({'type': 'http', 'server': server, 'shuffle.ingress': 'local'}, None, None))
     assert received == ['remote', 'remote', 'remote']
+
+
+def test_isolated_remote_port_is_explicit_and_cannot_claim_normal_ports():
+    assert configured_remote_port({}) == 8001
+    assert configured_remote_port({'SHUFFLE_PROTECTED_PORT': '18081'}) == 8001
+    assert configured_remote_port({'SHUFFLE_DESKTOP_ISOLATED': '1', 'SHUFFLE_PROTECTED_PORT': '18081'}) == 18081
+    for value in ('8000', '8001', '80', '65536', 'invalid'):
+        with pytest.raises(ValueError):
+            configured_remote_port({'SHUFFLE_DESKTOP_ISOLATED': '1', 'SHUFFLE_PROTECTED_PORT': value})
 
 
 def test_same_listener_port_is_rejected():

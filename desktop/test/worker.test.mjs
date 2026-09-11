@@ -88,7 +88,16 @@ test('buildWorkerEnv preserves non-DB settings and drops ALL inherited DB settin
 		assert.equal(env.SECRET_KEY, 'retained-test-key');
 		assert.equal(env.CORS_ORIGINS, 'retained');
 		assert.equal(env.SHUFFLE_DESKTOP_PROTECTED_PORT, '8001');
-		assert.equal(env.PYTHONPATH, undefined);
+		assert.equal(env.SHUFFLE_DESKTOP_ISOLATED, '0');
+		assert.equal(env.SHUFFLE_PROTECTED_PORT, '8001');
+		const isolated = buildWorkerEnv({ runtime, port: 18080, protectedPort: 18081, isolated: true, baseEnv: { shuffle_desktop_isolated: '0', shuffle_protected_port: '8001' } });
+		assert.equal(isolated.SHUFFLE_DESKTOP_ISOLATED, '1');
+		assert.equal(isolated.SHUFFLE_PROTECTED_PORT, '18081');
+		assert.equal(isolated.shuffle_desktop_isolated, undefined);
+		assert.equal(env.PYTHONPATH, runtime.serverDir);
+		assert.equal(isolated.SHUFFLE_DESKTOP_PROTECTED_PORT, '18081');
+		const repo = buildWorkerEnv({ runtime: { ...runtime, mode: 'repo' }, port: 8000 });
+		assert.equal(repo.PYTHONPATH, path.join(runtime.serverDir, 'fluid'));
 		assert.equal(env.HOME, 'h');
 		assert.equal(env.TOOLS_DIR, runtime.toolsDir);
 		assert.equal(env.BROWSER_MCP_ENTRY, runtime.browserMcpEntry);

@@ -42,6 +42,8 @@ test('preview identity comes exclusively from packaged metadata and installer ne
 	assert.equal(config.appId, preview.appId); assert.equal(config.productName, preview.name);
 	assert.deepEqual(config.protocols.flatMap((p) => p.schemes), ['aishuffle-preview']);
 	assert.equal(config.publish, null); assert.equal(config.extraMetadata.shuffleDesktopChannel, 'preview');
+	// A standalone preview must not inherit package.json's source launcher entry.
+	assert.equal(config.extraMetadata.main, 'dist/main/index.js');
 	assert.equal(config.nsis.runAfterFinish, false); assert.equal(config.nsis.deleteAppDataOnUninstall, false);
 	assert.equal(config.nsis.shortcutName, preview.name); assert.equal(config.win.executableName, preview.name);
 	assert.match(config.artifactName, /^AI-Shuffle-Preview-/);
@@ -106,9 +108,28 @@ test('preview refuses an existing healthy worker without attaching or writing it
 test('preview updater cannot register, check, download, install, or schedule updates', async () => {
 	const calls = []; const autoUpdater = { on: () => calls.push('on'), checkForUpdates: () => calls.push('check'), quitAndInstall: () => calls.push('install') };
 	const { Updater } = loadMain('updater', { electron: { app: { isPackaged: true } }, 'electron-updater': { autoUpdater } }, { setTimeout: () => calls.push('timeout'), setInterval: () => calls.push('interval') });
-	const updater = new Updater(false); updater.start(); await updater.check(); updater.install(); updater.stop();
-	assert.equal(updater.current.phase, 'unsupported'); assert.equal(autoUpdater.autoDownload, false); assert.equal(autoUpdater.autoInstallOnAppQuit, false);
+	const updater = new Updater(false); updater.useApplications({ check: () => calls.push('source-check'), download: () => calls.push('source-download') }); updater.start(); await updater.check(); await updater.download(); await updater.install(); updater.stop();
+	assert.equal(updater.current.phase, 'unsupported'); assert.equal(autoUpdater.autoDownload, undefined); assert.equal(autoUpdater.autoInstallOnAppQuit, undefined);
 	assert.deepEqual(calls, []);
+});
+
+test('update preload commands return promises and IPC rejects senders outside the main window', async () => {
+ const handlers = new Map(); const calls = [];
+ const { registerIpc } = loadMain('ipc', { electron: { ipcMain: { handle: (name, handler) => handlers.set(name, handler), on() {} }, app: {} }, './window': { TITLE_BAR_HEIGHT: 52 } });
+ registerIpc({ window: { isOwnSender: id => id === 7 }, updater: {
+  check: async interactive => calls.push(['check', interactive]), download: async () => calls.push(['download']), install: async () => calls.push(['install'])
+ }, worker: {} });
+ const exposed = {}; let sender = 7;
+ vm.runInNewContext(readFileSync(new URL('../dist/preload/index.js', import.meta.url), 'utf8'), { exports: {}, process, window: { location: { protocol: 'https:' } }, require: () => ({
+  contextBridge: { exposeInMainWorld: (name, value) => { exposed[name] = value; } },
+  ipcRenderer: { sendSync: () => null, invoke: async channel => handlers.get(channel)({ sender: { id: sender } }) }
+ }) });
+ const updates = exposed.shuffleDesktop.updates;
+ for (const action of ['check', 'download', 'install']) { const result = updates[action](); assert.equal(typeof result.then, 'function'); await result; }
+ assert.deepEqual(calls, [['check', true], ['download'], ['install']]);
+ sender = 8;
+ for (const action of ['check', 'download', 'install']) await assert.rejects(updates[action](), /not allowed/);
+ assert.equal(calls.length, 3);
 });
 
 test('IPC and preload contain no external database actions, even on bundled pages', () => {

@@ -39,6 +39,7 @@ export interface DesktopUpdateState {
 	percent: number | null;
 	error: string | null;
 	checkedAt: string | null;
+	message?: string | null;
 }
 
 export interface DesktopWorkerState {
@@ -95,7 +96,8 @@ export interface ShuffleDesktopBridge {
 		getState(): Promise<DesktopUpdateState>;
 		onState(listener: (state: DesktopUpdateState) => void): () => void;
 		check(): Promise<void>;
-		install(): void;
+		download(): Promise<void>;
+		install(): Promise<void>;
 	};
 }
 

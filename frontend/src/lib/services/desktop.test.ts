@@ -43,6 +43,7 @@ function makeBridge() {
 				return () => updateListeners.delete(listener);
 			},
 			check: () => Promise.resolve(),
+			download: () => Promise.resolve(),
 			install
 		}
 	};

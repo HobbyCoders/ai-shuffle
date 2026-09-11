@@ -1,0 +1,27 @@
+/** Entry for locally built desktop code; development/legacy builds keep their old entry. */
+import { app, dialog } from 'electron';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { SourceUpdates } from './source-updates';
+import { setManagedContext } from './managed-context';
+import { readProfile, localFeed } from './source-profile';
+
+async function start(): Promise<void> {
+  const root = process.env.SHUFFLE_SOURCE_ROOT;
+  if (!root) { require('./index'); return; }
+  const revision = process.env.SHUFFLE_SOURCE_REVISION ?? '';
+  const bootstrapNode = process.env.SHUFFLE_SOURCE_NODE ?? '';
+  if (!/^[a-f0-9]{40}$/.test(revision) || !path.isAbsolute(root) || !path.isAbsolute(bootstrapNode)) throw new Error('Invalid source-managed launch');
+  const profile = readProfile(root);
+  const publicKey = profile?.publicKey ?? await fs.readFile(path.resolve(__dirname, '../../build/application-update-key.pem'), 'utf8');
+  const updates = new SourceUpdates({ root, publicKey, bootstrapNode, fetch: localFeed(profile) });
+  await updates.attach(revision);
+  const application = await updates.application(revision);
+  setManagedContext({ updates, application, root, profile });
+  require('./index');
+}
+void start().catch(async error => {
+  await app.whenReady();
+  dialog.showErrorBox('AI Shuffle could not start', String(error));
+  app.quit();
+});

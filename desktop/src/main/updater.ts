@@ -1,97 +1,69 @@
-/**
- * Auto-update through electron-updater.
- *
- * Updates are read from the GitHub release that matches the app's `v*`
- * tags: the release workflow uploads the installers and their `latest*.yml`
- * metadata to that release, and electron-updater downloads a new
- * shell quietly in the background. The page shows the "Update ready" state
- * through the bridge and asks the shell to restart when the person is ready;
- * otherwise the update installs on the next quit.
- */
+/** Source, dependencies and native runtimes share one in-app update/restart action. */
 import { app } from 'electron';
-import { autoUpdater, type UpdateInfo } from 'electron-updater';
+import path from 'node:path';
+import type { SourceUpdates } from './source-updates';
 
 export type UpdatePhase = 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'error' | 'unsupported';
-
 export interface UpdateState {
-	phase: UpdatePhase;
-	version: string | null;
-	percent: number | null;
-	error: string | null;
-	checkedAt: string | null;
+  phase: UpdatePhase; version: string | null; percent: number | null;
+  error: string | null; checkedAt: string | null; message?: string | null;
 }
-
-const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
-
 export class Updater {
-	private state: UpdateState = { phase: 'idle', version: null, percent: null, error: null, checkedAt: null };
-	private listeners = new Set<(state: UpdateState) => void>();
-	private timer: NodeJS.Timeout | null = null;
-	private readonly enabled: boolean;
-
-	constructor(updatesAllowed = true) {
-		// Development runs have no update feed; unsigned macOS builds cannot
-		// replace themselves either, so treat that as unsupported rather than
-		// as a repeating error.
-		this.enabled = updatesAllowed && app.isPackaged && !process.env.SHUFFLE_DESKTOP_NO_UPDATES;
-		if (!this.enabled) {
-			autoUpdater.autoDownload = false;
-			autoUpdater.autoInstallOnAppQuit = false;
-			this.state = { ...this.state, phase: 'unsupported' };
-			return;
-		}
-		autoUpdater.autoDownload = true;
-		autoUpdater.autoInstallOnAppQuit = true;
-		autoUpdater.allowPrerelease = false;
-		autoUpdater.logger = null;
-
-		autoUpdater.on('checking-for-update', () => this.set({ phase: 'checking', error: null }));
-		autoUpdater.on('update-available', (info: UpdateInfo) => this.set({ phase: 'available', version: info.version }));
-		autoUpdater.on('update-not-available', () => this.set({ phase: 'idle', version: null, percent: null, checkedAt: new Date().toISOString() }));
-		autoUpdater.on('download-progress', (progress) => this.set({ phase: 'downloading', percent: Math.round(progress.percent) }));
-		autoUpdater.on('update-downloaded', (info: UpdateInfo) => this.set({ phase: 'ready', version: info.version, percent: 100 }));
-		autoUpdater.on('error', (error) => {
-			this.set({ phase: 'error', error: error?.message ?? String(error), checkedAt: new Date().toISOString() });
-		});
-	}
-
-	get current(): UpdateState {
-		return { ...this.state };
-	}
-
-	subscribe(listener: (state: UpdateState) => void): () => void {
-		this.listeners.add(listener);
-		return () => this.listeners.delete(listener);
-	}
-
-	start(): void {
-		if (!this.enabled) return;
-		setTimeout(() => void this.check(), 15_000);
-		this.timer = setInterval(() => void this.check(), CHECK_INTERVAL_MS);
-	}
-
-	stop(): void {
-		if (this.timer) clearInterval(this.timer);
-		this.timer = null;
-	}
-
-	async check(): Promise<void> {
-		if (!this.enabled) return;
-		if (this.state.phase === 'downloading' || this.state.phase === 'ready') return;
-		try {
-			await autoUpdater.checkForUpdates();
-		} catch (error) {
-			this.set({ phase: 'error', error: error instanceof Error ? error.message : String(error) });
-		}
-	}
-
-	install(): void {
-		if (!this.enabled || this.state.phase !== 'ready') return;
-		setImmediate(() => autoUpdater.quitAndInstall(false, true));
-	}
-
-	private set(patch: Partial<UpdateState>): void {
-		this.state = { ...this.state, ...patch };
-		for (const listener of this.listeners) listener(this.current);
-	}
+  private state: UpdateState = { phase: 'unsupported', version: null, percent: null, error: null, checkedAt: null };
+  private listeners = new Set<(state: UpdateState) => void>();
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private initialCheck: ReturnType<typeof setTimeout> | null = null;
+  private applications: SourceUpdates | null = null;
+  private checking = false;
+  private downloading = false;
+  private installing = false;
+  private beforeInstall: () => Promise<void> = async () => {};
+  constructor(private readonly releaseUpdates = true) {}
+  onBeforeInstall(action: () => Promise<void>): void { this.beforeInstall = action; }
+  useApplications(applications: SourceUpdates): void {
+    if (!this.releaseUpdates || process.env.SHUFFLE_DESKTOP_NO_UPDATES === '1') return;
+    this.applications = applications;
+    const pending = applications.pendingVersion !== applications.version ? applications.pendingVersion : null;
+    this.set({ phase: pending ? 'ready' : 'idle', version: pending?.slice(0, 12) ?? null, error: null, message: null, percent: null });
+  }
+  get current(): UpdateState { return { ...this.state }; }
+  subscribe(fn: (state: UpdateState) => void): () => void { this.listeners.add(fn); return () => this.listeners.delete(fn); }
+  private set(patch: Partial<UpdateState>): void { this.state = { ...this.state, ...patch }; for (const fn of this.listeners) fn(this.current); }
+  start(): void {
+    if (!this.applications || this.timer) return;
+    this.initialCheck = setTimeout(() => { this.initialCheck = null; void this.check(); }, 15_000);
+    this.timer = setInterval(() => void this.check(), 10 * 60 * 1000);
+  }
+  stop(): void { if (this.initialCheck) clearTimeout(this.initialCheck); this.initialCheck = null; if (this.timer) clearInterval(this.timer); this.timer = null; }
+  async check(interactive = false): Promise<void> {
+    if (!this.applications || this.checking || this.downloading || this.installing || this.state.phase === 'ready') return;
+    this.checking = true; this.set({ phase: 'checking', error: null, percent: null, message: 'Checking main for updates…' });
+    try {
+      const result = await this.applications.check(undefined, interactive);
+      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null, checkedAt: new Date().toISOString() });
+    } catch (error) { this.set({ phase: 'error', error: String(error), message: null }); }
+    finally { this.checking = false; }
+  }
+  async download(): Promise<void> {
+    if (!this.applications || this.checking || this.downloading || this.installing || !['available', 'error'].includes(this.state.phase)) return;
+    this.downloading = true; this.set({ phase: 'downloading', error: null, percent: null, message: 'Preparing update…' });
+    try {
+      const result = await this.applications.download((percent, message) => this.set({ percent, message }), true);
+      this.set({ phase: result.kind === 'current' ? 'idle' : result.kind, version: result.version ?? null, percent: null, message: null });
+    } catch (error) { this.set({ phase: 'error', error: String(error), percent: null, message: null }); }
+    finally { this.downloading = false; }
+  }
+  async install(): Promise<void> {
+    if (!this.applications || this.state.phase !== 'ready' || this.checking || this.downloading || this.installing) return;
+    this.installing = true; this.set({ error: null, message: null });
+    try {
+      await this.beforeInstall();
+      const current = this.applications.version ? await this.applications.application(this.applications.version) : null;
+      if (!current) throw new Error('No running source-managed application');
+      // Relaunch through Node, not the currently running Electron executable.
+      // The bootstrap selects the staged source AND its matching native runtimes.
+      app.relaunch({ execPath: current.node, args: [path.join(current.desktopDir, 'scripts/bootstrap.mjs'), '--root', this.applications.options.root] });
+      app.quit();
+    } catch (error) { this.installing = false; this.set({ phase: 'ready', error: String(error), message: null }); }
+  }
 }

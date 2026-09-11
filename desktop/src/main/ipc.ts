@@ -8,6 +8,7 @@
 import { app, ipcMain, Notification, shell, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron';
 import type { PostgresPhase } from './postgres';
 import type { Updater } from './updater';
+import { managedContext } from './managed-context';
 import { MainWindow, TITLE_BAR_HEIGHT, type TitleBarTheme } from './window';
 import { type WorkerState, type WorkerSupervisor } from './worker';
 
@@ -67,7 +68,7 @@ export function registerIpc({ window, updater, worker }: Deps): void {
 		const state = worker.state();
 		event.returnValue = {
 			platform: process.platform,
-			version: app.getVersion(),
+			version: managedContext() ? `main@${managedContext()!.application.revision.slice(0, 12)}` : app.getVersion(),
 			titleBarHeight: TITLE_BAR_HEIGHT,
 			worker: { url: state.url, phase: state.phase, external: state.external },
 			windowState: window.windowState(),
@@ -133,7 +134,8 @@ export function registerIpc({ window, updater, worker }: Deps): void {
 
 	// Updates.
 	handle('desktop:update-state', fromMainWindow, () => updater.current);
-	handle('desktop:update-check', fromMainWindow, () => updater.check());
+	handle('desktop:update-check', fromMainWindow, () => updater.check(true));
+	handle('desktop:update-download', fromMainWindow, () => updater.download());
 	handle('desktop:update-install', fromMainWindow, () => updater.install());
 
 	// Bundled status page only: raw logs. No database configuration IPC exists.

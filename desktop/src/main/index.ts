@@ -9,7 +9,8 @@
 import { app, dialog, nativeTheme, safeStorage, session, shell } from 'electron';
 import { QuitGuard } from './quit';
 import { showCloseDialog } from './close-dialog';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
+import { managedContext } from './managed-context';
 import path from 'node:path';
 import { registerIpc, type DesktopState, type PostgresStatus, type WorkerControl } from './ipc';
 import { installMenu } from './menu';
@@ -22,17 +23,25 @@ import { Updater } from './updater';
 import { MainWindow, PARTITION } from './window';
 import { resolveRuntime, WorkerSupervisor, type WorkerState } from './worker';
 
-// Only the application's packaged metadata can select the isolated preview.
-const identity = desktopIdentity(app.isPackaged, require(path.join(app.getAppPath(), 'package.json')));
+// Packaged previews use metadata; source tests require an explicit isolated profile.
+const isolation = managedContext()?.profile;
+const baseIdentity = desktopIdentity(app.isPackaged, require(path.join(app.getAppPath(), 'package.json')));
+const identity = isolation ? { ...baseIdentity, preview: true, name: 'AI Shuffle Isolated', appId: 'com.hobbycoders.aishuffle.isolated', port: isolation.port, protectedPort: isolation.protectedPort, allowAttach: false, updates: true } : baseIdentity;
 app.setAppUserModelId(identity.appId);
-if (identity.preview) {
+if (isolation) {
+	const userData = path.join(managedContext()!.root, 'profile');
+	mkdirSync(path.join(userData, 'browser'), { recursive: true });
+	app.setName(identity.name);
+	app.setPath('userData', userData);
+	app.setPath('sessionData', path.join(userData, 'browser'));
+} else if (identity.preview) {
 	app.setName(identity.name);
 	app.setPath('userData', path.join(app.getPath('appData'), identity.name));
 }
 
 // Development helpers: an isolated profile and a headless screenshot, so the
 // shell can be exercised from a script or CI without a person at the screen.
-if (!app.isPackaged && process.env.SHUFFLE_DESKTOP_USER_DATA) {
+if (!app.isPackaged && !managedContext() && process.env.SHUFFLE_DESKTOP_USER_DATA) {
 	app.setPath('userData', process.env.SHUFFLE_DESKTOP_USER_DATA);
 }
 
@@ -44,14 +53,19 @@ if (!app.requestSingleInstanceLock()) {
 
 async function main(): Promise<void> {
 	const userData = app.getPath('userData');
-	const window = new MainWindow(userData);
+	const window = new MainWindow(userData, isolation ? identity.name : 'AI Shuffle', !isolation);
 	const updater = new Updater(identity.updates);
+	const managed = managedContext();
+	const applications = managed?.updates ?? null;
+	if (applications) updater.useApplications(applications);
 
 	app.on('second-instance', () => window.focus());
 	app.on('window-all-closed', () => {
 		if (process.platform !== 'darwin') app.quit();
 	});
-	if (app.isPackaged) app.setAsDefaultProtocolClient(identity.protocol);
+	if (isolation) { /* Isolated profiles never replace the normal app’s URL handler. */ }
+	else if (managed) app.setAsDefaultProtocolClient(identity.protocol, managed.application.node, [path.join(managed.application.desktopDir, 'scripts/bootstrap.mjs'), '--root', managed.root]);
+	else if (app.isPackaged) app.setAsDefaultProtocolClient(identity.protocol);
 
 	await app.whenReady();
 
@@ -62,7 +76,7 @@ async function main(): Promise<void> {
 	// The bundled PostgreSQL: under resources/postgres in a packaged app,
 	// SHUFFLE_DESKTOP_POSTGRES_DIR in development. Always app-managed.
 	const logDir = path.join(userData, 'logs');
-	const pgResolved = resolvePostgresBinaries({ packaged: app.isPackaged, resourcesPath: process.resourcesPath });
+	const pgResolved = resolvePostgresBinaries({ packaged: app.isPackaged || !!managed, resourcesPath: managed?.application.resources ?? process.resourcesPath });
 	const postgresError = 'error' in pgResolved ? pgResolved.error : null;
 	const postgres =
 		'error' in pgResolved
@@ -77,24 +91,40 @@ async function main(): Promise<void> {
 					}
 				});
 
-	// The worker runtime: bundled in a packaged app, the repository in development.
-	const repoDir = path.resolve(__dirname, '..', '..', '..');
-	const resolved = resolveRuntime({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, repoDir });
-	const runtimeError = 'error' in resolved ? resolved.error : null;
-	const supervisor =
-		'error' in resolved
-			? null
-			: new WorkerSupervisor({
-					runtime: resolved,
-					logDir,
-					envFile: path.join(userData, 'worker', '.env'),
-					dataDir: identity.preview ? path.join(userData, 'data') : stableDataDir(process.platform, process.env, app.getPath('home')),
-					...(identity.preview ? { workspaceDir: path.join(userData, 'workspace'), profileDir: path.join(userData, 'profile') } : {}),
-					port: identity.port,
-					protectedPort: identity.protectedPort,
-					allowAttach: identity.allowAttach,
-					postgres: () => postgres?.connection() ?? null
-				});
+	let supervisor: WorkerSupervisor | null = null;
+	let runtimeError: string | null = null;
+	let initialized = false;
+	let initializing = false;
+	let initialization: Promise<void> | null = null;
+	async function initializeRuntime(): Promise<void> {
+		const repoDir = path.resolve(__dirname, '..', '..', '..');
+		const selected = managed?.application;
+		const resolved = selected ? {
+			mode: 'bundled' as const, root: path.join(selected.resources, 'worker'),
+			python: selected.python, serverDir: selected.serverDir,
+			nodeBinDir: path.dirname(selected.node), toolsDir: path.join(selected.serverDir, 'tools'),
+			browserMcpEntry: path.join(selected.serverDir, 'browser-mcp/dist/index.js'), manifest: null
+		} : resolveRuntime({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, repoDir });
+		runtimeError = 'error' in resolved ? resolved.error : null;
+		supervisor =
+			'error' in resolved
+				? null
+				: new WorkerSupervisor({
+						runtime: resolved,
+						logDir,
+						envFile: path.join(userData, 'worker', '.env'),
+						dataDir: identity.preview ? path.join(userData, 'data') : stableDataDir(process.platform, process.env, app.getPath('home')),
+						...(identity.preview ? { workspaceDir: path.join(userData, 'workspace'), profileDir: path.join(userData, 'profile') } : {}),
+						port: identity.port,
+						protectedPort: identity.protectedPort,
+						isolated: !!isolation,
+						allowAttach: applications ? false : identity.allowAttach,
+						postgres: () => postgres?.connection() ?? null
+					});
+		worker.supervisor = supervisor;
+		worker.runtimeError = runtimeError;
+		observeWorker();
+	}
 	// Development: point the window at a frontend dev server instead of the worker UI.
 	const devUrl = !app.isPackaged ? process.env.SHUFFLE_DESKTOP_DEV_URL ?? null : null;
 
@@ -121,12 +151,20 @@ async function main(): Promise<void> {
 	};
 
 	const desktopState = (): DesktopState => ({
-		...(supervisor?.state ?? failedState(runtimeError ?? 'The worker runtime is missing.')),
+		...(supervisor?.state ?? { ...failedState(runtimeError ?? 'The worker runtime is missing.'), ...(!initialized ? { phase: 'starting' as const, error: null } : {}) }),
 		postgres: postgresStatus()
 	});
 
 	/** Bundled PostgreSQL first when it is wanted, then the worker. */
 	const startStack = async (): Promise<void> => {
+		if (quitting || applicationFailed || initializing) return;
+		if (!initialized) {
+			initializing = true;
+			try { initialization = initializeRuntime(); await initialization; }
+			catch (error) { runtimeError = String(error); }
+			finally { initializing = false; initialized = true; }
+			window.send('desktop:worker-state', desktopState());
+		}
 		if (quitting || !supervisor) return;
 		if (!postgres) {
 			window.send('desktop:worker-state', desktopState());
@@ -145,7 +183,7 @@ async function main(): Promise<void> {
 		tail: () => [...(postgres?.tail().map((line) => `[postgres] ${line}`) ?? []), ...(supervisor?.tail() ?? [])],
 		openStatus: () => window.showPage('status'),
 		restart: async () => {
-			if (!supervisor) return;
+			if (!supervisor) { app.relaunch(); app.quit(); return; }
 			if (window.currentPage !== 'status') await window.showPage('status');
 			await supervisor.stop();
 			await startStack();
@@ -157,11 +195,21 @@ async function main(): Promise<void> {
 	nativeTheme.on('updated', () => window.send('desktop:native-theme', { dark: nativeTheme.shouldUseDarkColors }));
 
 	let quitting = false;
+	let applicationFailed = false;
 	// A worker that has just answered /health/ready can still refuse its first
 	// page load for a moment; retry briefly before showing the failure.
 	let loadRetries = 0;
+	function observeWorker(): void {
 	supervisor?.on('state', (state: WorkerState) => {
 		if (quitting) return;
+		if (applications && state.phase === 'ready' && !state.external) {
+			// The initial timer may have fired while this revision was still booting.
+			void applications.healthy().then(() => updater.check()).catch(error => console.error('Could not record healthy application', error));
+		}
+		if (applications && state.phase === 'failed') {
+			applicationFailed = true;
+			void applications.failed().catch(error => console.error('Could not record failed application', error));
+		}
 		window.send('desktop:worker-state', desktopState());
 		// The status page hands over to the worker UI as soon as it answers;
 		// a worker that dies while its UI is showing brings the status page back.
@@ -174,6 +222,7 @@ async function main(): Promise<void> {
 	supervisor?.on('log', (line: string) => {
 		if (window.currentPage === 'status') window.send('desktop:worker-log', line);
 	});
+	}
 	postgres?.on('state', () => {
 		if (quitting) return;
 		window.send('desktop:worker-state', desktopState());
@@ -207,7 +256,7 @@ async function main(): Promise<void> {
 			const state = worker.state();
 			if (state.phase === 'ready') window.openExternal(state.url);
 		},
-		checkForUpdates: () => void updater.check(),
+		checkForUpdates: () => void updater.check(true),
 		reload: () => window.browserWindow?.webContents.reload(),
 		openDocs: () => {
 			if (window.currentWorkerUrl) window.send('desktop:command', 'open-docs');
@@ -219,7 +268,16 @@ async function main(): Promise<void> {
 		}
 	};
 	installMenu(actions);
-	installTray(actions);
+	if (!isolation) installTray(actions);
+
+	updater.onBeforeInstall(async () => {
+		await initialization;
+		if (supervisor && !supervisor.state.external) {
+			await supervisor.stop();
+			await supervisor.clearConnectionFile();
+		}
+		await postgres?.stop();
+	});
 
 	const quitGuard = new QuitGuard({
 		activeSessionCount: () => supervisor?.activeSessionCount() ?? Promise.resolve(0),
@@ -227,11 +285,13 @@ async function main(): Promise<void> {
 		stop: async () => {
 			quitting = true;
 			try {
+				await initialization?.catch(() => {});
 				// Do not stop the database if session cleanup failed. Keep the app
 				// open so the user can retry rather than stranding another session.
 				if (supervisor && !supervisor.state.external) await supervisor.stop();
 				if (postgres) await postgres.stop();
 				if (supervisor && !supervisor.state.external) await supervisor.clearConnectionFile();
+				updater.stop();
 			} catch (error) {
 				quitting = false;
 				throw error;

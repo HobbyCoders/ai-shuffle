@@ -98,6 +98,29 @@ def test_bundle_bad_download_fails_even_with_existing_clients(local, monkeypatch
     assert list(local.parent.iterdir()) == [local]
 
 
+def test_source_build_reuses_only_a_verified_cached_binary(local, monkeypatch):
+    binary = b'verified cached executable'
+    local.parent.mkdir()
+    local.write_bytes(binary)
+    monkeypatch.setattr(client, '_asset', lambda: 'test.exe')
+    monkeypatch.setitem(client._DIGESTS, 'test.exe', hashlib.sha256(binary).hexdigest())
+    monkeypatch.setattr(client.urllib.request, 'urlopen', lambda *a, **kw: pytest.fail('unexpected download'))
+    monkeypatch.setattr(client.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=f'cloudflared version {client.VERSION} (cached)'))
+    assert client.bundle(reuse_verified=True)['executable'] == str(local)
+
+
+def test_source_build_does_not_reuse_a_tampered_cache(local, monkeypatch):
+    local.parent.mkdir()
+    local.write_bytes(b'tampered')
+    verified = b'correct download'
+    monkeypatch.setattr(client, '_asset', lambda: 'test.exe')
+    monkeypatch.setitem(client._DIGESTS, 'test.exe', hashlib.sha256(verified).hexdigest())
+    monkeypatch.setattr(client.urllib.request, 'urlopen', lambda *a, **kw: io.BytesIO(verified))
+    monkeypatch.setattr(client.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=f'cloudflared version {client.VERSION} (fresh)'))
+    client.bundle(reuse_verified=True)
+    assert local.read_bytes() == verified
+
+
 def test_bundle_rejects_wrong_reported_version(local, monkeypatch):
     monkeypatch.setattr(client, 'install', lambda **kwargs: str(local))
     monkeypatch.setattr(client.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout='cloudflared version 2020.1.1 (built long ago)'))
