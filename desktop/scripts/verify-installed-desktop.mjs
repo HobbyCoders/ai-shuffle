@@ -40,7 +40,14 @@ async function close(){if(page&&!page.isClosed())await page.evaluate(()=>window.
  if(browser)await browser.close().catch(()=>{});browser=null;page=null;}
 async function auth(){return page.evaluate(async()=>{const r=await fetch('/api/v1/auth/status');const s=await r.json();return {setup:s.setup_required,onboarding:s.onboarding_complete};});}
 async function screenshot(name){await page.screenshot({path:path.join(output,name+'.png'),mask:[page.locator('code, textarea, input')]});}
-async function showSidebar(){const button=page.getByRole('button',{name:'Show sidebar',exact:true});if(await button.isVisible())await button.click();}
+async function showSidebar(){
+ await page.getByRole('button',{name:/^(Show|Hide) sidebar$/}).waitFor();
+ await until(async()=>{
+  if(await page.getByRole('button',{name:'Hide sidebar',exact:true}).isVisible())return true;
+  const button=page.getByRole('button',{name:'Show sidebar',exact:true});if(await button.isVisible())await button.click();
+  return false;
+ },'Sidebar did not finish loading',30000);
+}
 try{
  await installPreview(installer,install,()=>console.log('Installing verified Windows package…'));
  assert(await exists(exe));
@@ -83,6 +90,7 @@ try{
  await launch();assert.equal(await page.evaluate(()=>window.shuffleDesktop.version),'main@'+staged.pending.slice(0,12));assert.deepEqual(await auth(),expected);await close();
  passed('Original installed EXE opens the updated revision on subsequent launches');report.success=true;
 }catch(error){report.error=String(error);console.error(error);process.exitCode=1;
+ try{report.updateState=await page.evaluate(()=>window.shuffleDesktop.updates.getState());}catch{}
  try{report.sourceState=JSON.parse(await fs.readFile(path.join(sourceRoot,'state.json'),'utf8'));}catch{}
  try{report.workerReady=(await fetch('http://127.0.0.1:8000/health/ready',{signal:AbortSignal.timeout(1000)})).status;}catch{}
  try{const launchLog=await fs.readFile(path.join(sourceRoot,'launch.log'),'utf8');report.debuggerPorts=[...launchLog.matchAll(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)/g)].map(match=>Number(match[1]));}catch{}
