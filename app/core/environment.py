@@ -66,10 +66,7 @@ A warm sunset over the hills:
 For any other file the user may want to download or view — including 3D models (.glb from textTo3D / imageTo3D), which have no inline viewer — provide a download link built from the file's full path:
 
 📎[filename.ext](/api/files/by-path?path=/full/path/to/file.ext)
-"""
 
-
-HTML_PREVIEW_INSTRUCTIONS = """
 ### Interactive HTML previews
 When creating a website mockup, visualization, dashboard, or interactive demo for the user to view, create a self-contained .html file and include a Markdown link to it in your reply:
 
@@ -84,14 +81,9 @@ Previews run in an isolated sandbox. Embed CSS and JavaScript in the HTML; use i
 
 
 def get_security_instructions() -> str:
-    """Get admin/default instructions plus the built-in HTML preview contract.
-
-    Keep capability guidance current even when an admin has saved custom media
-    instructions. The saved setting itself is never rewritten.
-    """
+    """Get AI Shuffle's editable chat instructions (custom or default)."""
     custom_instructions = database.get_system_setting("security_instructions")
-    instructions = custom_instructions or DEFAULT_SECURITY_INSTRUCTIONS
-    return instructions + "\n" + HTML_PREVIEW_INSTRUCTIONS
+    return custom_instructions or DEFAULT_SECURITY_INSTRUCTIONS
 
 
 def _is_git_repo(working_dir: str) -> bool:
