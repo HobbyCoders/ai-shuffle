@@ -5,6 +5,7 @@
 	import '@fontsource/playfair-display/900.css';
 	import '../app.css';
 	import type { Snippet } from 'svelte';
+	import { page } from '$app/stores';
 	import { installMobileShell } from '../shell/register';
 	import RootLayout from '$lib/components/layout/RootLayout.svelte';
 
@@ -15,6 +16,11 @@
 	let { children }: { children: Snippet } = $props();
 </script>
 
-<RootLayout mobileApp>
+<!-- Public, explicit sample route: never bootstrap worker auth, sync, or API clients. -->
+{#if $page.url.pathname.replace(/\/$/, '').endsWith('/demo')}
 	{@render children()}
-</RootLayout>
+{:else}
+	<RootLayout mobileApp>
+		{@render children()}
+	</RootLayout>
+{/if}
