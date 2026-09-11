@@ -76,3 +76,10 @@ def test_cloud_fallback_fetches_attachment_with_original_worker_offline(workers,
         objects[2][manifest['parts'][0]] = b'corrupt'
         with pytest.raises(object_sync.ObjectError):
             cloud_blobs.open_file(hub, manifest, engine.require_context())
+
+
+@pytest.fixture(autouse=True)
+def explicit_cloud_backup(monkeypatch):
+    """These tests exercise the optional cloud transport."""
+    from app.network import backup
+    monkeypatch.setattr(backup, "enabled", lambda: True)

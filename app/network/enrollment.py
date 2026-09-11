@@ -396,7 +396,7 @@ def complete_enrollment(response: Dict[str, Any], *, client, endpoint: str, devi
         logger.warning("Enrollment completed but initial presence publication failed", exc_info=True)
 
 
-def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: Optional[str], endpoints: list) -> None:
+def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: str | None, endpoints: list) -> None:
     """Synchronous snapshot copy (runs in a worker thread)."""
     from app.network import tokens
     if not issuer_id:
@@ -416,6 +416,28 @@ def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: Optional[str], en
                 if token_response.status_code >= 400:
                     raise EnrollmentError(f"token HTTP {token_response.status_code}")
                 headers = {"Authorization": "Bearer " + token_response.json()["token"]}
+                state_response = client.post(base + "/api/v1/network/peer/state", headers=headers, json={})
+                if state_response.status_code != 404:
+                    import tempfile
+                    from pathlib import Path
+
+                    from app.network import peer_snapshot
+                    state_response.raise_for_status()
+                    state_manifest = state_response.json()
+                    peer_snapshot.verify_manifest(state_manifest, issuer_id)
+                    with tempfile.TemporaryDirectory(prefix="shuffle-peer-") as temporary:
+                        directory = Path(temporary)
+                        for index, expected in enumerate(state_manifest["pages"]):
+                            raw = bytearray()
+                            with client.stream("GET", base + f"/api/v1/network/peer/state/{state_manifest['transfer']}/{index}", headers=headers) as part:
+                                part.raise_for_status()
+                                for piece in part.iter_bytes():
+                                    raw.extend(piece)
+                                    if len(raw) > peer_snapshot.MAX_PAGE:
+                                        raise EnrollmentError("Peer state page exceeds transfer limit")
+                            (directory / f"{index}.json").write_bytes(raw)
+                        peer_snapshot.apply(state_manifest, directory, issuer_id)
+                    return
                 manifest = client.get(base + "/api/v1/network/peer/snapshot", headers=headers).json()
                 for collection in manifest["collections"]:
                     offset = 0

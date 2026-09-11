@@ -137,6 +137,8 @@ export interface AccountNetworkInfo {
 
 export interface HubStatus {
 	linked: boolean;
+	backup_enabled?: boolean;
+	sync_mode?: 'peers';
 	server_id?: string | null;
 	registered?: boolean;
 	status?: string | null;
@@ -177,6 +179,10 @@ export interface NetworkStatus {
 
 export async function getNetworkStatus(): Promise<NetworkStatus> {
 	return api.get<NetworkStatus>('/network/status', { cache: 'no-store' });
+}
+
+export async function setCloudBackup(enabled: boolean): Promise<HubStatus> {
+	return api.put<HubStatus>('/network/backup', { enabled });
 }
 
 // ─── Create / members ────────────────────────────────────────────────────────

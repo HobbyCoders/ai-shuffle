@@ -482,7 +482,8 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
         return {"ops": ops, "watermarks": store.local_watermarks(), "generation": ctx.generation,
                 "key_version": ctx.key_version, "incarnation": ctx.identity.incarnation,
                 "endpoints": engine._own_endpoints(), "capabilities": transport._capabilities(),
-                "version": settings.version, "snapshot_required": False}
+                "version": settings.version, "snapshot_required": store.requires_snapshot(body.watermarks, exclude_origin=device_id),
+                "peer_state": 1}
 
     return await run_sync(_work)
 
@@ -571,3 +572,49 @@ async def peer_snapshot(collection: Optional[str] = None, offset: int = 0,
     if collection not in policy.COLLECTIONS:
         raise HTTPException(404, "Unknown collection")
     return await run_sync(engine.snapshot_chunk, collection, max(0, offset))
+
+
+class BackupPreference(BaseModel):
+    enabled: bool
+
+
+@router.put("/backup")
+async def configure_backup(body: BackupPreference, _: str = Depends(require_admin)) -> dict:
+    from app.network import backup
+    try:
+        await run_sync(backup.configure, body.enabled)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return await run_sync(_hub_status)
+
+
+@router.post("/peer/state")
+async def peer_state(device_id: str = Depends(tokens.require_device)) -> dict:
+    from app.network import peer_snapshot
+    try:
+        return await run_sync(peer_snapshot.capture, device_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.get("/peer/state/{transfer}/{index}")
+async def peer_state_page(transfer: str, index: int, device_id: str = Depends(tokens.require_device)):
+    from app.network import peer_snapshot
+    try:
+        raw = await run_sync(peer_snapshot.page, device_id, transfer, index)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(409, "Peer transfer expired; start a new transfer") from exc
+    return Response(raw, media_type="application/json")
+
+
+@router.get("/peer/blob/{hash_value}/parts/{index}")
+async def peer_file_part(hash_value: str, index: int, device_id: str = Depends(tokens.require_device)) -> dict:
+    from app.network import peer_files
+    if len(hash_value) != 64 or any(c not in "0123456789abcdef" for c in hash_value):
+        raise HTTPException(400, "Invalid hash")
+    try:
+        return await run_sync(peer_files.part, hash_value, index, device_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "File not held here") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc

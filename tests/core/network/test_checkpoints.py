@@ -30,6 +30,32 @@ def checkpoint(a, fake):
         assert hub._hub_state()['checkpoint_id']
 
 
+def test_peer_state_changes_require_a_new_verified_backup(workers, fake, objects):
+    a = workers('a')
+    with a.active():
+        engine.create_network('Home')
+    checkpoint(a, fake)
+    with a.active():
+        old_root = hub._hub_state()['checkpoint_id']
+        assert hub.status()['remote_durability'] == 'committed'
+        # Peer state has no corresponding original operations to upload.
+        database.set_system_setting('tts_model', 'new-peer-state')
+        hub._save_hub_state(peer_state_revision=1)
+        assert hub.status()['remote_durability'] == 'pending'
+        # Scanner publishes local writes here; a real peer apply already has
+        # versioned records. Either way the changed state cannot be overlooked.
+        engine.scan_all()
+        while hub.push_once():
+            hub._save_hub_state(object_batch_due=0)
+        hub.pull_once()
+        for _ in range(100):
+            if not checkpoints.publish_once(hub, hub._ensure_hub_scope()):
+                break
+        assert hub._hub_state()['checkpoint_id'] != old_root
+        assert hub._hub_state()['backed_up_peer_revision'] == 1
+        assert hub.status()['remote_durability'] == 'committed'
+
+
 async def test_recovery_checkpoint_restores_new_device_with_all_originals_offline(workers, fake, objects):
     a, b = workers('a'), workers('b')
     with a.active():
@@ -131,3 +157,10 @@ async def test_rotation_replaces_stale_prepared_checkpoint_and_recovers_history(
         await hub.restore_with_recovery(key)
         assert database.get_system_setting('tts_model') == 'after-rotation'
         assert engine.context().member(revoked.device_id).status == 'revoked'
+
+
+@pytest.fixture(autouse=True)
+def explicit_cloud_backup(monkeypatch):
+    """These tests exercise the optional cloud transport."""
+    from app.network import backup
+    monkeypatch.setattr(backup, "enabled", lambda: True)

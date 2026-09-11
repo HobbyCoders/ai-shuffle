@@ -291,3 +291,129 @@ def test_checkpoint_pages_share_the_same_postgres_snapshot(pg):
     body = json.loads(crypto.decrypt_payload(ctx.network_key, second['ciphertext'], aad))
     assert first['more'] and not second['more']
     assert body['items'][0]['record']['name'] == 'Before'
+
+
+def test_peer_apply_rolls_back_records_and_frontier_together(pg, monkeypatch, tmp_path):
+    import copy
+    import json
+
+    from app.db import network as store
+    from app.network import engine, peer_snapshot
+    from tests.core.network.harness import Worker, join
+
+    # Real signed and encrypted input from two independent device identities.
+    a, b = Worker('source', tmp_path), Worker('receiver', tmp_path)
+    try:
+        with a.active():
+            engine.create_network('Test')
+        join(a, b)
+        with a.active():
+            from app.db import database
+            database.set_system_setting('tts_model', 'peer-value')
+            engine.scan_all()
+            manifest = peer_snapshot.capture(b.device_id)
+            directory = tmp_path / 'received'
+            directory.mkdir()
+            for index in range(len(manifest['pages'])):
+                (directory / f'{index}.json').write_bytes(peer_snapshot.page(b.device_id, manifest['transfer'], index))
+        receiver = copy.deepcopy(b.context)
+    finally:
+        a.close()
+        b.close()
+
+    new_schema, connect, _ = pg
+    schema = new_schema()
+    with connect(schema) as conn:
+        store.create_state(network_id=receiver.network_id, name='Test', founder_device_id=receiver.founder_device_id,
+                           keyring={}, _conn=conn)
+
+    @contextmanager
+    def get_db():
+        conn = connect(schema)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(store, 'get_db', get_db)
+    monkeypatch.setattr(engine, 'require_context', lambda: receiver)
+    monkeypatch.setattr(engine, 'load_context', lambda conn=None: receiver)
+    monkeypatch.setattr(engine, '_notify', lambda _: None)
+    original = engine.apply_snapshot_chunk
+
+    def interrupted(chunk, **kwargs):
+        count = original(chunk, **kwargs)
+        if chunk['collection'] == 'system_settings':
+            raise RuntimeError('lost receiver process')
+        return count
+
+    monkeypatch.setattr(engine, 'apply_snapshot_chunk', interrupted)
+    with pytest.raises(RuntimeError, match='lost receiver process'):
+        peer_snapshot.apply(manifest, directory, a.device_id)
+    with connect(schema) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM system_settings WHERE key='tts_model'")
+        assert cursor.fetchone()['n'] == 0
+        assert store.local_watermarks(conn) == {}
+
+
+def test_peer_capture_keeps_concurrent_changes_out_of_its_signed_frontier(pg, monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from app.core.config import settings
+    from app.db import network as store
+    from app.network import crypto, engine, peer_snapshot
+
+    new_schema, connect, _ = pg
+    schema = new_schema()
+    key = crypto.generate_network_key()
+    recipient_private = crypto.generate_encryption_key()
+    ctx = SimpleNamespace(network_id='peer-test', device_id='origin', generation=1, key_version=1,
+                          bootstrap_state=engine.BOOTSTRAP_READY, network_key=key, keyring={1: key},
+                          key_candidates={}, key_recipients={}, key_generations={},
+                          identity=SimpleNamespace(signing_private=crypto.generate_signing_key()),
+                          member=lambda _: SimpleNamespace(status='active', encryption_public=crypto.encryption_public_key(recipient_private)))
+    with connect(schema) as conn:
+        store.create_state(network_id=ctx.network_id, name='Peer test', founder_device_id='origin',
+                           keyring={}, _conn=conn)
+        for index in range(101):
+            name = f'tag-{index:03}'
+            conn.cursor().execute('INSERT INTO tags(id,name,color) VALUES(%s,%s,%s)', (name, 'Before', 'blue'))
+            store.put_record(conn.cursor(), 'tags', name, clock=1, origin_device_id='origin', content_hash='hash', deleted=False)
+
+    @contextmanager
+    def get_db():
+        conn = connect(schema)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(settings, 'data_dir', tmp_path)
+    monkeypatch.setattr(store, 'get_db', get_db)
+    monkeypatch.setattr(engine, 'require_context', lambda: ctx)
+    monkeypatch.setattr(engine, 'load_context', lambda conn: ctx)
+    monkeypatch.setattr(engine, 'scan_all', lambda: None)
+    original = engine.snapshot_chunk
+    changed = False
+
+    def snapshot_chunk(collection, offset, **kwargs):
+        nonlocal changed
+        result = original(collection, offset, **kwargs)
+        if collection == 'tags' and offset == 0:
+            with connect(schema) as writer:
+                writer.cursor().execute("UPDATE tags SET name='After' WHERE id='tag-100'")
+            changed = True
+        return result
+
+    monkeypatch.setattr(engine, 'snapshot_chunk', snapshot_chunk)
+    manifest = peer_snapshot.capture('recipient')
+    assert changed
+    index = next(i for i, page in enumerate(manifest['pages']) if page['collection'] == 'tags' and page['offset'] == 100)
+    chunk = json.loads(peer_snapshot.page('recipient', manifest['transfer'], index))
+    aad = crypto.canonical_json({'collection': 'tags', 'offset': 100, 'network_id': ctx.network_id})
+    body = json.loads(crypto.decrypt_payload(key, chunk['ciphertext'], aad))
+    assert body['items'][0]['record']['name'] == 'Before'

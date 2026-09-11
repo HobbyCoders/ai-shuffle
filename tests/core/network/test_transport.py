@@ -207,7 +207,7 @@ async def test_enrollment_over_http_then_sync(workers, monkeypatch):
         assert ctx.member(a.device_id).name == "A"
         assert [m["endpoints"][0] for m in store.list_members() if m["device_id"] == a.device_id] == ["http://a.local:8000"]
     paths = [p for _, p in served.requests]
-    assert "/api/v1/network/join" in paths and "/api/v1/network/peer/snapshot" in paths
+    assert "/api/v1/network/join" in paths and "/api/v1/network/peer/state" in paths
 
     # B now syncs to A over the transport loop's link.
     _set_pref(b, "from_b", 42)

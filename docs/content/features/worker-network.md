@@ -12,9 +12,11 @@ one app. Set a sidebar width once, add a provider key once, and every worker
 in the network has it. Every session shows up everywhere; it runs on the
 worker that owns it, and any worker can drive it.
 
-Everything the network shares is encrypted with one network key that only the
-member devices hold. The Shuffle account service keeps an encrypted copy so a
-new device can restore when every worker is off; it cannot read anything.
+Shared data is encrypted with keys held by member devices. Workers sync directly
+over your LAN or their managed remote connections. They keep changes locally
+while disconnected and catch up when another worker returns. Cloud backup is
+optional and off by default; enable it on a worker in Settings > Devices if you
+want an encrypted cloud copy, subject to the backup allowances.
 
 ## Three ways to start a worker
 
@@ -25,7 +27,8 @@ On first run a worker offers three choices:
 - **Sign in to your Shuffle account.** Sign the worker into the same account
   as your other workers. The first worker on an account founds its network;
   every later worker is admitted by whichever of your workers is online, with
-  nothing to approve. If none is online, enter the recovery key. Phones signed
+  nothing to approve. If none is online, it waits for one to return. An existing
+  cloud backup can instead be restored with its recovery key. Phones signed
   in to the account see and control every worker on it.
 - **Join with an invite.** On an existing worker open Settings > Devices >
   *Add device* > *Worker*. Scan the QR code or paste the link on the new

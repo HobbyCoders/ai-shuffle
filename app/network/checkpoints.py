@@ -122,6 +122,9 @@ def capture(hub, scope):
         for ordinal, (d, payload) in enumerate(parts):
             cursor.execute("""INSERT INTO sync_checkpoint_outbox(hub_scope,ordinal,descriptor,payload)
                 VALUES(%s,%s,%s,%s)""", (scope, ordinal, json.dumps(d), base64.b64encode(payload).decode()))
+        hub_state = dict(state.get("hub") or {})
+        hub_state["prepared_peer_revision"] = int(hub_state.get("peer_state_revision", 0))
+        store.update_state(_conn=conn, hub=hub_state)
     return True
 
 
@@ -130,6 +133,10 @@ def publish_once(hub, scope):
     state = hub._hub_state()
     ctx = engine.require_context()
     frontier = f"{ctx.generation}:{ctx.key_version}:{crypto.sha256_hex(ctx.network_key)}"
+    if int(state.get("prepared_peer_revision", 0)) != int(state.get("peer_state_revision", 0)):
+        with store.get_db() as conn:
+            conn.cursor().execute("DELETE FROM sync_checkpoint_outbox WHERE hub_scope=%s", (scope,))
+        rows = []
     if rows:
         root = store._load(_pending(scope, all_rows=True)[-1]["descriptor"])
         if (root.get("generation"), root.get("key_version"), root.get("key_digest")) != (
@@ -144,13 +151,15 @@ def publish_once(hub, scope):
             root = store._load(completed[-1]["descriptor"])
             committed_frontier = f"{root['generation']}:{root['key_version']}:{root['key_digest']}"
             hub._save_hub_state(_expected_scope=scope, checkpoint_id=root["object_id"], checkpoint_cursor=root["base_cursor"],
-                                checkpoint_last_at=time.time(), checkpoint_frontier=committed_frontier)
+                                checkpoint_last_at=time.time(), checkpoint_frontier=committed_frontier,
+                                backed_up_peer_revision=int(state.get("prepared_peer_revision", 0)))
             with store.get_db() as conn:
                 conn.cursor().execute("DELETE FROM sync_checkpoint_outbox WHERE hub_scope=%s", (scope,))
             return False
         delta = int(state.get("cursor") or 0) - int(state.get("checkpoint_cursor") or 0)
-        if state.get("checkpoint_id") and state.get("checkpoint_frontier") == frontier and (delta <= 0 or
-                (delta < CHECKPOINT_OP_INTERVAL and time.time() - state.get("checkpoint_last_at", 0) < CHECKPOINT_INTERVAL)):
+        if (int(state.get("backed_up_peer_revision", 0)) == int(state.get("peer_state_revision", 0))
+                and state.get("checkpoint_id") and state.get("checkpoint_frontier") == frontier and (delta <= 0 or
+                (delta < CHECKPOINT_OP_INTERVAL and time.time() - state.get("checkpoint_last_at", 0) < CHECKPOINT_INTERVAL))):
             return False
         if not capture(hub, scope):
             return False

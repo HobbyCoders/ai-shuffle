@@ -191,6 +191,9 @@ class _PinnedHTTPS(http.client.HTTPSConnection):
             raise
 
 
+_recent_authorization = {}
+
+
 def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384, timeout=None):
     """Bounded, nonredirecting request; never include hub bodies or secrets in errors.
 
@@ -211,6 +214,8 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
                               'Content-Type': 'application/json', 'Accept': 'application/json'})
         response = conn.getresponse()
         if response.status != 200:
+            if response.status in (401, 403):
+                _recent_authorization.pop(_authorization_key(binding), None)
             if suffix.startswith('browser-logins') and response.status in (401, 403):
                 raise HTTPException(response.status, 'Account sign-in expired or authorization was rejected.')
             if suffix.startswith('account/') and response.status in (401, 403, 404, 409):
@@ -236,6 +241,12 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
         result = json.loads(raw)
         if not isinstance(result, dict):
             raise ValueError('Invalid hub response')
+        if suffix == 'network/pending' or (suffix == 'status' and result.get('active') is True):
+            import time
+            # One worker binding, bounded cache, no identity/provider secrets.
+            if len(_recent_authorization) >= 16:
+                _recent_authorization.clear()
+            _recent_authorization[_authorization_key(binding)] = time.monotonic()
         return result
     except HTTPException:
         raise
@@ -383,3 +394,12 @@ def check_paired_client(client):
     return (binding['linked_by'] == 'managed:' + settings.effective_instance_id
             and 'controller' in (client.get('scopes') or [])
             and 'web:session' in (device.get('scopes') or []))
+
+
+def _authorization_key(binding):
+    return tuple(binding.get(key) for key in ('hub_url', 'server_id', 'encrypted_secret'))
+
+
+def recently_authorized(binding, *, max_age=300):
+    import time
+    return time.monotonic() - _recent_authorization.get(_authorization_key(binding), float('-inf')) < max_age

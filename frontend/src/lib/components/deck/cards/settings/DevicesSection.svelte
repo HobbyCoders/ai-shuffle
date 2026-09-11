@@ -21,7 +21,7 @@
 	import { accountRegistrations, type AccountDeviceRow } from './account-devices';
 	import { listInstalls, renameInstall, deleteInstall, setInstallApproval, type Install } from '$lib/api/installs';
 	import {
-		adoptAccountNetwork, createNetwork, getNetworkStatus, renameNetworkMember, revokeNetworkMember, unlockWithRecoveryKey,
+		adoptAccountNetwork, createNetwork, getNetworkStatus, renameNetworkMember, revokeNetworkMember, unlockWithRecoveryKey, setCloudBackup,
 		type NetworkMember, type NetworkStatus
 	} from '$lib/api/network';
 	import { NETWORK_STATE_HINTS, NETWORK_STATE_LABELS, deriveNetworkState, relativeTime } from '$lib/api/network-status';
@@ -35,6 +35,14 @@
 
 	// ── Data ────────────────────────────────────────────────────────────────
 	let status = $state<NetworkStatus | null>(null);
+	let savingBackup = $state(false);
+	async function toggleBackup() {
+		if (!status) return;
+		savingBackup = true;
+		try { status = { ...status, hub: await setCloudBackup(!status.hub?.backup_enabled) }; }
+		catch (e) { error = getErrorMessage(e, 'Could not change cloud backup'); }
+		finally { savingBackup = false; }
+	}
 	let accountProfile = $state<AccountProfile | null>(null);
 	let accountPanel: AccountPanel;
 	let accountInventoryReady = $state(false);
@@ -381,7 +389,11 @@
 	{#if stale && status}<p class="stale" role="status"><AlertTriangle size={13} /> The worker did not answer the last status check; showing saved data.</p>{/if}
 	{#if enrolled && status?.hub?.linked}
 		<div class="notice" role="status">
-			{#if status.hub.remote_durability === 'pending' || (status.hub.backlog ?? 0) > 0}
+			{#if status.hub.backup_enabled === false}
+				<h4>Sync directly between workers</h4>
+				<p>Your data stays on your workers. They catch up automatically when they can reach each other. If no other worker is online, this worker keeps your changes until one returns.</p>
+				<p>Cloud backup is off. Restoring after losing every worker requires a separate backup.</p>
+			{:else if status.hub.remote_durability === 'pending' || (status.hub.backlog ?? 0) > 0}
 				<h4>Saved on this worker · cloud backup pending</h4>
 				<p>{status.hub.backlog ?? 0} changes and {status.hub.files_pending_backup ?? 0} files are waiting for cloud backup. Keep this worker running until backup completes so offline devices can catch up.</p>
 			{:else if status.hub.remote_durability === 'committed'}
@@ -391,6 +403,10 @@
 			{/if}
 			{#if (status.hub.incoming_pending ?? 0) > 0}<p>{status.hub.incoming_pending} downloaded changes are waiting for missing updates from another worker.</p>{/if}
 			{#if status.hub.last_error}<p class="error">{status.hub.last_error}</p>{/if}
+			{#if $isAdmin && status.hub.backup_enabled !== undefined}
+				<p>Optional cloud backup uploads an encrypted copy from this worker and uses shared storage and transfer allowances. Turning it off keeps existing cloud copies.</p>
+				<button type="button" class="btn sm" disabled={savingBackup} onclick={toggleBackup}>{status.hub.backup_enabled ? 'Turn off cloud backup' : 'Enable cloud backup on this worker'}</button>
+			{/if}
 		</div>
 	{/if}
 	{#if revokedNotice}

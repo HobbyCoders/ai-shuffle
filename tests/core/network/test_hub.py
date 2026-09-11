@@ -594,3 +594,10 @@ def test_hub_device_routes_approve_and_reject_through_the_api(workers, fake):
         assert client.post("/api/v1/network/hub/devices/dev_nobody/reject", json={}).status_code == 200
         status = client.get("/api/v1/network/status").json()
         assert status["hub"]["linked"] and status["hub"]["registered"]
+
+
+@pytest.fixture(autouse=True)
+def explicit_cloud_backup(monkeypatch):
+    """These tests exercise the optional cloud transport."""
+    from app.network import backup
+    monkeypatch.setattr(backup, "enabled", lambda: True)

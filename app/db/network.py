@@ -838,7 +838,7 @@ def add_conflict(cursor, *, collection: str, record_id: str, losing_clock: int, 
 def list_conflicts(limit: int = 200) -> List[dict]:
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM sync_conflicts WHERE expires_at > %s ORDER BY created_at DESC LIMIT %s",
+        cursor.execute("SELECT * FROM sync_conflicts WHERE expires_at > %s ORDER BY created_at DESC, id DESC LIMIT %s",
                        (_now(), limit))
         rows = rows_to_list(cursor.fetchall())
     for row in rows:
@@ -1040,3 +1040,22 @@ def set_catalog_cursor(cursor, session_id: str, published_seq: int) -> None:
         """INSERT INTO network_catalog_cursors (session_id, published_seq, updated_at) VALUES (%s, %s, %s)
            ON CONFLICT (session_id) DO UPDATE SET published_seq = EXCLUDED.published_seq, updated_at = EXCLUDED.updated_at""",
         (session_id, published_seq, _now()))
+
+
+def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None) -> bool:
+    """A state-copy recipient can forward state even without original log rows."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for origin, streams in local_watermarks(conn).items():
+            if origin == exclude_origin:
+                continue
+            for incarnation, head in streams.items():
+                last = int((watermarks.get(origin) or {}).get(str(incarnation), 0))
+                if last >= head:
+                    continue
+                cursor.execute("""SELECT COUNT(*) AS n FROM sync_ops WHERE origin_device_id=%s
+                                  AND incarnation=%s AND seq>%s AND seq<=%s""",
+                               (origin, int(incarnation), last, head))
+                if int(cursor.fetchone()["n"]) != head - last:
+                    return True
+    return False

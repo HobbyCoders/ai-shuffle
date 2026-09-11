@@ -215,7 +215,7 @@ def _check_authorized():
     binding = mobile_hub.get_binding()
     if not binding or binding['linked_by'] != _owner() or not binding['active']:
         raise ValueError('Worker unlinked')
-    if account_hub.call(binding, 'GET', 'status').get('active') is not True:
+    if not account_hub.recently_authorized(binding) and account_hub.call(binding, 'GET', 'status').get('active') is not True:
         raise ValueError('Worker revoked')
     return binding
 

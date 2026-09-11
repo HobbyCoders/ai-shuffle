@@ -131,3 +131,10 @@ async def test_hub_does_not_complete_direct_invite_snapshot(workers, fake):
         assert store.get_join("direct-invite")["response"] == response
         assert store.get_join(hub._bootstrap_id()) is None
         assert not any("feed?" in call[2] for call in fake.calls[before:])
+
+
+@pytest.fixture(autouse=True)
+def explicit_cloud_backup(monkeypatch):
+    """These tests exercise the optional cloud transport."""
+    from app.network import backup
+    monkeypatch.setattr(backup, "enabled", lambda: True)

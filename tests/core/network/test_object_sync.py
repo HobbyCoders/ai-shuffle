@@ -290,3 +290,10 @@ def test_legacy_bridge_retains_unknown_members_until_later_membership_arrives(wo
         hub.pull_once()
         assert object_sync.inbox_count(hub._ensure_hub_scope()) == 0
         assert database.get_system_setting('tts_model') == 'late-membership'
+
+
+@pytest.fixture(autouse=True)
+def explicit_cloud_backup(monkeypatch):
+    """These tests exercise the optional cloud transport."""
+    from app.network import backup
+    monkeypatch.setattr(backup, "enabled", lambda: True)

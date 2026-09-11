@@ -1,5 +1,9 @@
 # Object sync protocol v2
 
+This is the optional cloud-backup transport. It defaults off; normal worker sync
+uses [direct peer exchange](peer-first.md). Enabling backup is a per-worker choice
+in Settings > Devices. Existing cloud copies remain readable after disabling it.
+
 The local PostgreSQL transaction remains the first durability boundary. Cloud
 durability is acknowledged only after an immutable private object is uploaded,
 verified, and its pointer is committed in D1. LAN and authenticated tunnel peer

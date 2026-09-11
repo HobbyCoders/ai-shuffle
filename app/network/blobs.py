@@ -154,14 +154,13 @@ async def fetch_missing(limit: int = 20) -> int:
                     continue
                 try:
                     await link.authenticate(client, ctx)
-                    response = await client.get(link.base_url + f"/api/v1/network/peer/blob/{blob['hash']}",
-                                                headers={"Authorization": "Bearer " + (link.token or "")},
-                                                timeout=120.0)
-                except (httpx.HTTPError, transport.PeerError):
+                    from app.network import peer_files
+                    data = await peer_files.fetch(client, link, blob['hash'])
+                except (httpx.HTTPError, transport.PeerError, ValueError):
                     continue
-                if response.status_code != 200 or len(response.content) > MAX_BLOB_BYTES:
+                if data is None:
                     continue
-                if await run_sync(store_fetched, blob["hash"], response.content):
+                if await run_sync(store_fetched, blob["hash"], data):
                     fetched += 1
                     break
             else:
@@ -189,18 +188,20 @@ async def fetch_one(hash_value: str) -> bool:
                 continue
             try:
                 await link.authenticate(client, ctx)
-                response = await client.get(link.base_url + f"/api/v1/network/peer/blob/{hash_value}",
-                                            headers={"Authorization": "Bearer " + (link.token or "")}, timeout=120.0)
-            except (httpx.HTTPError, transport.PeerError):
+                from app.network import peer_files
+                data = await peer_files.fetch(client, link, hash_value)
+            except (httpx.HTTPError, transport.PeerError, ValueError):
                 continue
-            if response.status_code == 200 and len(response.content) <= MAX_BLOB_BYTES:
-                if await run_sync(store_fetched, hash_value, response.content):
+            if data is not None:
+                if await run_sync(store_fetched, hash_value, data):
                     return True
     return await _fetch_cloud(hash_value)
 
 
 async def _fetch_cloud(hash_value: str) -> bool:
-    from app.network import cloud_blobs, hub
+    from app.network import backup, cloud_blobs, hub
+    if not await run_sync(backup.enabled):
+        return False
     try:
         state = await run_sync(hub._hub_state)
         if not (state.get("object_sync") or {}).get("direct_read"):

@@ -49,6 +49,17 @@ beforeEach(() => {
 	api.get.mockImplementation(async (path: string) => reads(path));
 });
 afterEach(() => { cleanup(); resourceSync.clear(); vi.useRealTimers(); });
+it('defaults to peer sync and only enables cloud backup on an explicit click', async () => {
+	status.hub = { linked: true, backup_enabled: false, sync_mode: 'peers', remote_durability: 'local_only' };
+	api.put.mockResolvedValue({ linked: true, backup_enabled: true, remote_durability: 'pending', backlog: 3 });
+	render(DevicesSection);
+	expect(await screen.findByText('Sync directly between workers')).toBeTruthy();
+	expect(screen.queryByText('Cloud backup up to date')).toBeNull();
+	expect(api.put).not.toHaveBeenCalled();
+	await fireEvent.click(screen.getByRole('button', { name: 'Enable cloud backup on this worker' }));
+	expect(api.put).toHaveBeenCalledWith('/network/backup', { enabled: true });
+	expect(await screen.findByText('Saved on this worker · cloud backup pending')).toBeTruthy();
+});
 it('distinguishes pending local changes and files from acknowledged cloud durability', async () => {
 	status.hub = { linked: true, remote_durability: 'pending', backlog: 3, files_pending_backup: 2 };
 	render(DevicesSection);

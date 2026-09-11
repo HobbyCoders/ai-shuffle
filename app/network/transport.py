@@ -21,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import tempfile
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -54,19 +56,19 @@ class PeerError(RuntimeError):
 class PeerLink:
     """One peer: endpoint candidates, a cached token, and an HTTP client."""
 
-    def __init__(self, device_id: str, endpoints: List[str]):
+    def __init__(self, device_id: str, endpoints: list[str]):
         self.device_id = device_id
         self.endpoints = list(endpoints)
-        self.base_url: Optional[str] = None
-        self.token: Optional[str] = None
+        self.base_url: str | None = None
+        self.token: str | None = None
         self.token_expires = 0.0
-        self.last_error: Optional[str] = None
+        self.last_error: str | None = None
         self.backoff_until = 0.0
         self.failures = 0
 
-    def update_endpoints(self, endpoints: List[str]) -> None:
+    def update_endpoints(self, endpoints: list[str]) -> None:
         """Learn endpoints without dropping the one that is answering right now."""
-        merged: List[str] = [self.base_url] if self.base_url else []
+        merged: list[str] = [self.base_url] if self.base_url else []
         for url in list(endpoints or []) + self.endpoints:
             url = (url or "").rstrip("/")
             if url and url not in merged:
@@ -81,7 +83,7 @@ class PeerLink:
         if auth:
             headers["Authorization"] = "Bearer " + (self.token or "")
         response = await client.request(method, self.base_url + path, json=json_body, params=params,
-                                        headers=headers, timeout=REQUEST_TIMEOUT)
+                                        headers=headers, timeout=120 if path == "/api/v1/network/peer/state" else REQUEST_TIMEOUT)
         if response.status_code == 401 and auth:
             self.token = None
             raise PeerError("token rejected")
@@ -99,7 +101,7 @@ class PeerLink:
             return
         candidates = [self.base_url] if self.base_url else []
         candidates += [e for e in self.endpoints if e != self.base_url]
-        last: Optional[str] = None
+        last: str | None = None
         for endpoint in candidates:
             self.base_url = endpoint.rstrip("/")
             try:
@@ -136,7 +138,10 @@ class PeerLink:
             "watermarks": marks, "limit": BATCH_LIMIT, "incarnation": ctx.identity.incarnation,
             "endpoints": engine._own_endpoints(), "capabilities": _capabilities(), "version": settings.version,
         })
-        summary: Dict[str, Any] = {"received": 0, "sent": 0}
+        summary: dict[str, Any] = {"received": 0, "sent": 0}
+        if exchange.get("snapshot_required"):
+            summary["received"] += await self.receive_state(client, ctx)
+            ctx = engine.require_context()
         ops = exchange.get("ops") or []
         if ops:
             result = await asyncio.to_thread(engine.apply_batch, ops)
@@ -152,6 +157,10 @@ class PeerLink:
             self.update_endpoints(their_endpoints)
         # Push what the peer lacks, in bounded batches.
         while True:
+            if await asyncio.to_thread(store.requires_snapshot, theirs, exclude_origin=self.device_id):
+                # The other worker's next pull requests our state. Do not send
+                # an incomplete log prefix and pretend it was acknowledged.
+                break
             outbound = await asyncio.to_thread(store.ops_since, theirs, limit=BATCH_LIMIT,
                                                exclude_origin=self.device_id)
             if not outbound:
@@ -169,6 +178,29 @@ class PeerLink:
         self.failures = 0
         self.last_error = None
         return summary
+
+    async def receive_state(self, client: httpx.AsyncClient, ctx: engine.NetworkContext) -> int:
+        from app.network import peer_snapshot
+        await self.authenticate(client, ctx)
+        manifest = await self._request(client, "POST", "/api/v1/network/peer/state", json_body={})
+        await asyncio.to_thread(peer_snapshot.verify_manifest, manifest, self.device_id)
+        with tempfile.TemporaryDirectory(prefix="shuffle-peer-") as temporary:
+            directory = Path(temporary)
+            for index, expected in enumerate(manifest["pages"]):
+                await self.authenticate(client, ctx)
+                raw = bytearray()
+                async with client.stream("GET", self.base_url + f"/api/v1/network/peer/state/{manifest['transfer']}/{index}",
+                                         headers={"Authorization": "Bearer " + self.token}, timeout=60) as response:
+                    if response.status_code != 200:
+                        raise PeerError("Peer transfer interrupted; retrying from a verified state")
+                    async for piece in response.aiter_bytes():
+                        raw.extend(piece)
+                        if len(raw) > peer_snapshot.MAX_PAGE:
+                            raise PeerError("Peer state page exceeds transfer limit")
+                if len(raw) != expected["bytes"]:
+                    raise PeerError("Peer state page was truncated")
+                await asyncio.to_thread((directory / f"{index}.json").write_bytes, raw)
+            return await asyncio.to_thread(peer_snapshot.apply, manifest, directory, self.device_id)
 
 
 def _capabilities() -> dict:
@@ -289,6 +321,11 @@ async def sync_loop() -> None:
                 logger.warning("Sync pass failed", exc_info=True)
                 results = {}
             busy = any((r.get("received") or r.get("sent")) for r in results.values())
+            try:
+                from app.network import blobs
+                busy = bool(await blobs.fetch_missing(limit=4)) or busy
+            except Exception:  # noqa: BLE001
+                logger.debug("Peer file catch-up will retry", exc_info=True)
             timeout = SYNC_ACTIVE_SECONDS if busy else SYNC_IDLE_SECONDS
             try:
                 await asyncio.wait_for(_wake.wait(), timeout=timeout)
@@ -365,20 +402,12 @@ async def presence_loop() -> None:
             await asyncio.to_thread(engine.publish_presence, capabilities=_capabilities(), version=settings.version)
             await asyncio.to_thread(store.expire_conflicts)
             await asyncio.to_thread(store.expire_joins)
+            from app.network import peer_snapshot
+            await asyncio.to_thread(peer_snapshot.cleanup)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
             logger.debug("Presence publish failed", exc_info=True)
-        # Blob hydration rides the same cadence, plus a short retry while bytes are missing.
-        try:
-            from app.network import blobs
-            fetched = await blobs.fetch_missing()
-            if fetched:
-                logger.info("Fetched %d blob(s) from peers", fetched)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001
-            logger.debug("Blob fetch failed", exc_info=True)
         await asyncio.sleep(PRESENCE_INTERVAL_SECONDS)
 
 

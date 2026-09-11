@@ -1036,18 +1036,38 @@ def open_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext) -> dic
         raise ApplyError("malformed snapshot chunk") from exc
 
 
-def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: Optional[NetworkContext] = None,
+def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None = None,
                          _conn=None, validated_membership: bool = False) -> int:
     """Apply a chunk: records newer than what we hold replace ours (LWW by clock)."""
     ctx = ctx or require_context()
     body = open_snapshot_chunk(chunk, ctx=ctx)
     coll = policy.collection(body["collection"])
     applied = 0
-    touched: List[Tuple[str, str, str]] = []
+    touched: list[tuple[str, str, str]] = []
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cursor = conn.cursor()
         for item in body["items"]:
             existing = store.get_record(cursor, coll.name, item["record_id"])
+            if existing is not None and existing["origin_device_id"] != item["origin_device_id"] and coll.name != "membership":
+                comparison = envelope_mod.compare(int(item["clock"]), item["origin_device_id"],
+                                                  int(existing["clock"]), existing["origin_device_id"])
+                incoming_hash = "" if item["deleted"] else content_hash(coll, item["record"])
+                if incoming_hash != existing["content_hash"]:
+                    loser, winner = (existing, item) if comparison > 0 else (item, existing)
+                    if loser["deleted"]:
+                        losing_record = {"_deleted": True}
+                    elif comparison > 0:
+                        local_row = _read_row(cursor, coll, item["record_id"])
+                        losing_record = serialize_row(coll, local_row) if local_row else {}
+                    else:
+                        losing_record = dict(item["record"] or {})
+                    if losing_record and losing_record.get("_enc"):
+                        losing_record = {k: ("<secret>" if k in losing_record["_enc"] else v)
+                                         for k, v in losing_record.items() if k != "_enc"}
+                    store.add_conflict(cursor, collection=coll.name, record_id=item["record_id"],
+                                       losing_clock=int(loser["clock"]), losing_device_id=loser["origin_device_id"],
+                                       losing_record=losing_record, winning_clock=int(winner["clock"]),
+                                       winning_device_id=winner["origin_device_id"])
             if existing is not None and envelope_mod.compare(
                     int(item["clock"]), item["origin_device_id"], int(existing["clock"]), existing["origin_device_id"]) <= 0:
                 continue
@@ -1087,7 +1107,7 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: Optional[NetworkConte
     return applied
 
 
-def adopt_watermarks(watermarks: Mapping[str, Mapping[str, int]], *, ctx: Optional[NetworkContext] = None, _conn=None) -> None:
+def adopt_watermarks(watermarks: Mapping[str, Mapping[str, int]], *, ctx: NetworkContext | None = None, _conn=None) -> None:
     """After a snapshot, start tailing from the sender's view of every stream."""
     ctx = ctx or require_context()
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
@@ -1099,6 +1119,8 @@ def adopt_watermarks(watermarks: Mapping[str, Mapping[str, int]], *, ctx: Option
                 current = store.get_watermark(cursor, origin, int(incarnation))
                 if int(last_seq) > current:
                     store.set_watermark(cursor, origin, int(incarnation), int(last_seq))
+                cursor.execute("DELETE FROM sync_pending WHERE origin_device_id=%s AND incarnation=%s AND seq<=%s",
+                               (origin, int(incarnation), int(last_seq)))
 
 
 def finish_bootstrap(*, ctx: Optional[NetworkContext] = None) -> NetworkContext:
