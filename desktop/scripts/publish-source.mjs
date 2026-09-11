@@ -41,9 +41,7 @@ for (let page = 1; ; page++) {
 }
 // Reuse an already-published ZIP on retries; never replace bytes behind an asset ID.
 const archive = path.join(process.env.RUNNER_TEMP, assetName);
-const sqlFile = path.join(process.env.RUNNER_TEMP, 'desktop-source.sql');
 const configFile = path.join(process.env.RUNNER_TEMP, 'desktop-source-d1.json');
-const readbackFile = path.join(process.env.RUNNER_TEMP, 'desktop-source-readback.sql');
 try {
  let size = 0;
  const hash = createHash('sha256');
@@ -76,14 +74,15 @@ try {
  else {
   await writeFile(configFile, JSON.stringify({ d1_databases: [{ binding: 'DB', database_name: 'shuffle-account-hub', database_id: databaseId }] }));
   const quote = value => `'${value.replaceAll("'", "''")}'`;
-  await writeFile(sqlFile, `INSERT INTO desktop_source_releases(revision,asset_id,size,manifest,sequence) VALUES(${quote(revision)},${asset.id},${size},${quote(signed)},${sequence}) ON CONFLICT(revision) DO UPDATE SET manifest=excluded.manifest,sequence=excluded.sequence WHERE asset_id=excluded.asset_id AND size=excluded.size;`);
+  const insert = `INSERT INTO desktop_source_releases(revision,asset_id,size,manifest,sequence) VALUES(${quote(revision)},${asset.id},${size},${quote(signed)},${sequence}) ON CONFLICT(revision) DO UPDATE SET manifest=excluded.manifest,sequence=excluded.sequence WHERE asset_id=excluded.asset_id AND size=excluded.size;`;
   const env = { ...process.env }; delete env.DESKTOP_APPLICATION_SIGNING_KEY; delete env.GH_TOKEN;
   const wrangler = (...args) => execFileSync(process.execPath, ['android/hub/node_modules/wrangler/bin/wrangler.js', 'd1', 'execute', 'DB', '--remote', '--config', configFile, ...args], { env, encoding: 'utf8' });
-  wrangler('--file', sqlFile);
-  await writeFile(readbackFile, `SELECT manifest,asset_id FROM desktop_source_releases WHERE revision=${quote(revision)};`);
-  const result = JSON.parse(wrangler('--file', readbackFile, '--json'));
+  // Small queries use the query API. --file invokes the bulk import path,
+  // which emits upload progress even with --json and can pause DB queries.
+  wrangler('--command', insert);
+  const result = JSON.parse(wrangler('--command', `SELECT manifest,asset_id FROM desktop_source_releases WHERE revision=${quote(revision)};`, '--json'));
   const row = result.flatMap(item => item.results ?? [])[0];
   if (row?.manifest !== signed || row?.asset_id !== asset.id) throw new Error('Source pointer read-back did not match');
   console.log(`Published ${revision}: ${size} source bytes in GitHub asset ${asset.id}; signed D1 manifest verified.`);
  }
-} finally { for (const file of [archive, sqlFile, configFile, readbackFile]) await unlink(file).catch(() => {}); }
+} finally { for (const file of [archive, configFile]) await unlink(file).catch(() => {}); }

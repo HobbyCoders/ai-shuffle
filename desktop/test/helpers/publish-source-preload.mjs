@@ -18,7 +18,9 @@ const asset={id:123,name:revision+'.zip',size:bytes.length,state:'uploaded',dige
 cp.execFileSync=(exe,args)=>{
  if(exe==='gh') { events.push('reuse');fs.writeFileSync(path.join(root,asset.name),bytes);return ''; }
  if(!args.includes('d1')||!args.includes('--remote'))throw Error('Unexpected external command');
- const sql=fs.readFileSync(args[args.indexOf('--file')+1],'utf8');
+ if(args.includes('--file'))throw Error('Bulk file imports emit progress outside JSON and must not be used for small publisher queries');
+ if(!args.includes('--command'))throw Error('Expected D1 query command');
+ const sql=args[args.indexOf('--command')+1];
  if(sql.startsWith('INSERT')) {
   events.push('publish');const match=sql.match(/VALUES\('([a-f0-9]{40})',(\d+),(\d+),'(.*?)',(\d+)\)/);
   if(!match)throw Error('Invalid publisher SQL');
