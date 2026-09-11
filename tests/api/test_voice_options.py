@@ -24,79 +24,32 @@ def save(client, **options):
     return r.json()
 
 
-def test_producing_path_pins_options_for_mint_remint_and_sideband(
-    authenticated_client, mock_db, monkeypatch
-):
+def test_producing_path_pins_live_prompts_and_restores_defaults(authenticated_client, mock_db):
+    from app.core.voice_prompts import LIVE_INSTRUCTIONS, DELEGATION_INSTRUCTIONS
     c = authenticated_client
     _make_provider()
     _enable_voice()
-    saved = save(
-        c,
-        transcription_model="gpt-realtime-whisper",
-        max_output_tokens=1024,
-        turn_detection="server_vad",
-        threshold=0.42,
-        prefix_padding_ms=250,
-        silence_duration_ms=400,
-        idle_timeout_ms=6000,
-        instructions="Speak clearly.",
-    )
+    saved = save(c, instructions="Speak clearly.", delegation_instructions="Keep tasks short.", opening="Hello there.")
     assert c.get(VOICE_SETTINGS).json() == saved
-    captured = {}
-    _install_mock_transport(monkeypatch, _secret_handler(captured))
-    r = c.post(f"{VOICE_ROOT}/sessions", json={})
+    r = c.post(f"{VOICE_ROOT}/sessions", json={"model":"sonnet", "effort":"high"})
     assert r.status_code == 200, r.text
     sid = r.json()["session_id"]
-    assert r.json()["options"] == saved["voice_options"]
-    expected = realtime_session_options(saved["voice_options"])
-
-    def check_mint():
-        payload = json.loads(captured["request"].content)["session"]
-        assert payload["max_output_tokens"] == 1024
-        assert payload["audio"]["input"] == expected["audio"]["input"]
-
-    check_mint()
     binding = json.loads(db.get_session(sid)["voice_config"])
     assert binding["options"] == saved["voice_options"]
-    save(c, turn_detection="semantic_vad", eagerness="high", max_output_tokens="inf")
+    assert live_session_config(binding, [])["instructions"] == "Speak clearly."
+    assert live_session_config(binding, [])["delegation"] == {"type":"client"}
+    restored = save(c, instructions="", delegation_instructions="", opening="")
+    prompts = restored["model_details"]["prompts"]
+    assert prompts[0]["text"] == prompts[0]["default_text"] == LIVE_INSTRUCTIONS
+    assert prompts[1]["text"] == prompts[1]["default_text"] == DELEGATION_INSTRUCTIONS
     assert c.get(f"{VOICE_ROOT}/sessions/{sid}/config").json() == binding
-    r = c.post(f"{VOICE_ROOT}/sessions/{sid}/secret")
-    assert r.status_code == 200, r.text
-    assert r.json()["options"] == saved["voice_options"]
-    check_mint()
-    attach = AsyncMock()
-    monkeypatch.setattr(voice_bridge.registry, "attach", attach)
-    r = c.post(f"{VOICE_ROOT}/sessions/{sid}/call", json={"call_id": "rtc_options"})
-    assert r.status_code == 200, r.text
-    assert attach.call_args.kwargs["voice_options"] == saved["voice_options"]
-    assert attach.call_args.kwargs["instructions_override"] == "Speak clearly."
+    assert c.post(f"{VOICE_ROOT}/sessions/{sid}/secret").json()["options"] == saved["voice_options"]
 
 
-def test_per_model_storage_and_mutually_exclusive_vad(authenticated_client, mock_db):
-    c = authenticated_client
-    original = save(
-        c, turn_detection="server_vad", threshold=0.75, idle_timeout_ms=6000
-    )
-    assert (
-        c.put(VOICE_SETTINGS, json={"voice_model": "gpt-realtime-2"}).status_code == 200
-    )
-    assert c.get(VOICE_SETTINGS).json()["voice_options"]["threshold"] == 0.5
-    save(c, transcription_model="gpt-transcribe", max_output_tokens=200)
-    c.put(VOICE_SETTINGS, json={"voice_model": "gpt-realtime-2.1"})
-    assert c.get(VOICE_SETTINGS).json()["voice_options"] == original["voice_options"]
-    current = save(c, turn_detection="semantic_vad", eagerness="low")
-    assert current["voice_options"]["idle_timeout_ms"] == 6000
-    vad = realtime_session_options(current["voice_options"])["audio"]["input"][
-        "turn_detection"
-    ]
-    assert vad == {
-        "type": "semantic_vad",
-        "eagerness": "low",
-        "interrupt_response": True,
-        "create_response": True,
-    }
-    assert save(c, turn_detection="server_vad")["voice_options"]["threshold"] == 0.75
-    assert save(c, idle_timeout_ms=None)["voice_options"]["idle_timeout_ms"] is None
+def test_legacy_realtime_vad_remains_mutually_exclusive():
+    assert realtime_session_options({"turn_detection":"server_vad", "threshold":.75})["audio"]["input"]["turn_detection"]["threshold"] == .75
+    vad = realtime_session_options({"turn_detection":"semantic_vad", "eagerness":"low", "threshold":.75})["audio"]["input"]["turn_detection"]
+    assert vad == {"type":"semantic_vad", "eagerness":"low", "interrupt_response":True, "create_response":True}
 
 
 @pytest.mark.parametrize(
@@ -114,7 +67,7 @@ def test_per_model_storage_and_mutually_exclusive_vad(authenticated_client, mock
         {"idle_timeout_ms": 30001},
         {"transcription_model": "gpt-live-1"},
         {"turn_detection": "manual"},
-        {"opening": "wrong model"},
+        {"opening": 42},
         {"instructions": None},
     ],
 )
@@ -122,7 +75,7 @@ def test_invalid_options_write_nothing(authenticated_client, mock_db, options):
     c = authenticated_client
     before = c.get(VOICE_SETTINGS).json()
     r = c.put(
-        VOICE_SETTINGS, json={"voice_model": "gpt-realtime-2", "voice_options": options}
+        VOICE_SETTINGS, json={"voice_options": options}
     )
     assert r.status_code == 400, r.text
     assert c.get(VOICE_SETTINGS).json() == before
@@ -133,7 +86,8 @@ def test_explicit_composer_model_does_not_inherit_another_models_effort(
 ):
     _make_provider()
     _enable_voice(voice_model="gpt-live-1")
-    save(authenticated_client, delegation_model="sonnet", delegation_effort="medium")
+    db.set_system_setting("voice_options:gpt-live-1", json.dumps({"delegation_type":"responses", "delegation_model":"sonnet", "delegation_effort":"medium", "instructions":"Keep me."}))
+    assert authenticated_client.get(VOICE_SETTINGS).json()["voice_options"]["instructions"] == "Keep me."
     response = authenticated_client.post(
         f"{VOICE_ROOT}/sessions", json={"model": "opus"}
     )
@@ -147,7 +101,7 @@ def test_stale_editor_is_rejected(authenticated_client, mock_db):
     r = authenticated_client.put(
         VOICE_SETTINGS,
         json={
-            "voice_options_model": "gpt-live-1",
+            "voice_options_model": "gpt-realtime-2.1",
             "voice_options": {"instructions": "stale"},
         },
     )
@@ -165,10 +119,9 @@ def test_live_defaults_and_prompts_drive_new_session(authenticated_client, mock_
         c,
         opening="Hello there.",
         instructions="Be concise.",
-        delegation_model=selected,
         delegation_instructions="Return short results.",
     )
-    r = c.post(f"{VOICE_ROOT}/sessions", json={})
+    r = c.post(f"{VOICE_ROOT}/sessions", json={"model":selected})
     assert r.status_code == 200, r.text
     row = db.get_session(r.json()["session_id"])
     assert row["model"] == selected
@@ -187,40 +140,12 @@ def test_live_defaults_and_prompts_drive_new_session(authenticated_client, mock_
     assert event["content"].endswith("Hello there.")
 
 
-def test_responses_delegation_is_provider_bound(authenticated_client, mock_db):
+@pytest.mark.parametrize("options", [{"delegation_type":"responses"}, {"delegation_model":"sonnet"}, {"delegation_effort":"high"}])
+def test_retired_delegation_controls_rejected_without_writes(authenticated_client, mock_db, options):
     c = authenticated_client
-    first = _make_provider("first")
-    second = _make_provider("second")
-    for pid in (first, second):
-        db.update_model_provider(
-            pid, models_json=[{"id": "gpt-5.1", "label": "Test reasoner"}]
-        )
-    r = c.put(
-        VOICE_SETTINGS, json={"voice_provider_id": first, "voice_model": "gpt-live-1"}
-    )
-    assert r.status_code == 200, r.text
-    saved = save(
-        c,
-        delegation_type="responses",
-        delegation_model=f"prov:{first}:gpt-5.1",
-        delegation_instructions="Be helpful.",
-    )
-    sent = live_session_config(
-        {"voice": "marin", "options": saved["voice_options"]}, []
-    )
-    assert sent["delegation"] == {
-        "type": "responses",
-        "responses": {"model": "gpt-5.1", "instructions": "Be helpful.", "tools": []},
-    }
-    assert c.put(VOICE_SETTINGS, json={"voice_provider_id": second}).status_code == 400
-    assert c.get(VOICE_SETTINGS).json()["voice_provider_id"] == first
-    assert (
-        c.put(
-            VOICE_SETTINGS,
-            json={"voice_options": {"delegation_model": f"prov:{second}:gpt-5.1"}},
-        ).status_code
-        == 400
-    )
+    before = c.get(VOICE_SETTINGS).json()
+    assert c.put(VOICE_SETTINGS, json={"voice_options":options}).status_code == 400
+    assert c.get(VOICE_SETTINGS).json() == before
 
 
 def test_legacy_pins_do_not_inherit_new_global_options():

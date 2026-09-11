@@ -18,11 +18,11 @@ describe('voice creation context', () => {
 		expect(mocks.lane).toHaveBeenCalledWith('voice');
 		expect(mocks.start).toHaveBeenCalledWith('new', { client_secret: 'test', model: 'realtime' });
 	});
-	it('uses saved client defaults outside the voice lane and forwards the pinned options', async () => {
+	it('inherits the composer outside the voice lane and ignores retired delegation defaults', async () => {
 		mocks.settings.mockResolvedValue({voice_model:'gpt-live-1',voice_options:{delegation_type:'client',delegation_model:'saved-model',delegation_effort:'low'}});
 		mocks.create.mockResolvedValue({session_id:'new',client_secret:'',model:'gpt-live-1',options:{delegation_type:'client'}});
 		expect(await startNewVoiceSession()).toBe(true);
-		expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({model:'saved-model',effort:'low'}));
+		expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({model:'model',effort:'high'}));
 		expect(mocks.start).toHaveBeenCalledWith('new',{client_secret:'',model:'gpt-live-1',options:{delegation_type:'client'}});
 	});
 	it('does not create a row after replacement is declined', async () => {

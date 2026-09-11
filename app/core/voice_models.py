@@ -34,20 +34,16 @@ def model_details(model: str, options: dict | None = None) -> dict:
     runtime = []
     if model == LIVE_MODEL:
         prompts = [
-            {"label": "Voice agent", "text": options["instructions"] or LIVE_INSTRUCTIONS},
-            {"label": "Delegated reasoning agent", "text": options["delegation_instructions"] or DELEGATION_INSTRUCTIONS},
+            {"label": "Voice conversation prompt", "key": "instructions", "text": options["instructions"] or LIVE_INSTRUCTIONS, "default_text": LIVE_INSTRUCTIONS},
+            {"label": "Chat agent prompt", "key": "delegation_instructions", "text": options["delegation_instructions"] or DELEGATION_INSTRUCTIONS, "default_text": DELEGATION_INSTRUCTIONS},
         ]
         runtime = [
             {"label": "Audio format", "value": "PCM16 · 24 kHz · mono"},
-            {"label": "Reasoning and tools", "value": "OpenAI Responses delegation · no connected app tools" if options["delegation_type"] == "responses" else "Client delegation — call composer selection overrides defaults"},
-            {"label": "Delegated model", "value": options["delegation_model"] or "Call composer"},
-            {"label": "Reasoning effort", "value": options["delegation_effort"] or "Model default / inherit"},
+            {"label": "Reasoning and tools", "value": "Uses the model, effort and permissions selected in the chat composer"},
             {"label": "Opening words", "value": options["opening"] or "Wait for caller"},
             {"label": "Turn detection", "value": "Managed by GPT Live; no VAD override is sent"},
         ]
-        note = ("OpenAI runs the Responses backend with the delegated-agent prompt and conversation. AI Shuffle tools and agent instructions are not attached."
-                if options["delegation_type"] == "responses" else
-                "The delegated worker also receives the selected agent's instructions, tool permissions and conversation at runtime.")
+        note = "Task requests run in the existing chat session with its selected agent instructions, conversation, tools and approval rules. The voice prompt controls direct replies and when to ask the chat agent for help."
     elif model == PERSONAPLEX_MODEL:
         prompts = [{"label": "Voice agent", "text": options["instructions"] or PERSONAPLEX_INSTRUCTIONS}]
         runtime = [
@@ -84,8 +80,8 @@ def model_details(model: str, options: dict | None = None) -> dict:
         "transcription_models": list(get_args(RealtimeOptions.model_fields["transcription_model"].annotation)) if transport_for(model) == "webrtc" else [],
         "prompts": prompts,
         "prompt_note": note,
-        # /audio/speech is a different model, not a faithful call preview.
-        "preview_note": "Voice previews use a separate speech model, not this call model. Start a call to hear the selected voice accurately.",
+        # Preview generation uses the same Live transport and voice as new calls.
+        "preview_note": "Previews use GPT Live with the selected voice. Generating a sample uses your OpenAI API account.",
     }
 
 

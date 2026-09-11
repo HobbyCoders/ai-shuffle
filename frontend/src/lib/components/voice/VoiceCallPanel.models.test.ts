@@ -13,7 +13,7 @@ import VoiceCallPanel from './VoiceCallPanel.svelte';
 beforeEach(() => { api.getVoiceCallState.mockReset(); });
 afterEach(cleanup);
 it.each([
- ['gpt-live-1', 'GPT Live 1', 'Selected-model delegation', false],
+ ['gpt-live-1', 'GPT Live 1', 'Conversation + your chat agent', false],
  ['gpt-realtime-2.1', 'GPT Realtime 2.1', 'Realtime agent tools', true],
  ['gpt-realtime-2.1-mini', 'GPT Realtime 2.1 Mini', 'Realtime agent tools', true],
  ['gpt-realtime', 'GPT Realtime (legacy)', 'Realtime agent tools', true],

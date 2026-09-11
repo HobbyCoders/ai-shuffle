@@ -14,7 +14,7 @@ import { appData } from '$lib/stores/app-data.svelte';
 import { layout } from '$lib/stores/layout.svelte';
 import { appMode } from '$lib/stores/sessionMode.svelte';
 import { notify } from '$lib/stores/notifications';
-import { createVoiceSession, loadVoiceSettings, usesDelegation } from '$lib/api/voice';
+import { createVoiceSession } from '$lib/api/voice';
 import { startCall, confirmCallReplacement } from '$lib/services/voiceCall';
 import { contextWindowForChoice } from '$lib/constants/model-context';
 import { getDefaultModel } from '$lib/constants/models';
@@ -32,13 +32,8 @@ export async function startNewVoiceSession(): Promise<boolean> {
 	const from = get(activeSession);
 	try {
 		if (!(await confirmCallReplacement(null))) return false;
-		const settings = await loadVoiceSettings();
-		// The voice lane seeds its own composer. Calls launched from a code/chat
-		// surface use voice defaults rather than inheriting an unrelated model.
-		const defaults = from.mode !== 'voice' && usesDelegation(settings.voice_model, settings.voice_options)
-			? settings.voice_options : undefined;
-		const model = defaults?.delegation_model || from.modelOverride || getDefaultModel();
-		const effort = defaults?.delegation_model ? defaults.delegation_effort || null : from.effortLevelOverride;
+		const model = from.modelOverride || getDefaultModel();
+		const effort = from.effortLevelOverride;
 		const created = await createVoiceSession({
 			profile_id: from.profile || null,
 			project_id: from.project || null,

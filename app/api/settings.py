@@ -517,9 +517,9 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
 # The realtime models a voice session may run on. Anything outside this
 # allowlist is rejected on write, so a typo can never reach OpenAI.
 from app.core.voice_models import (
-    VOICE_MODELS, FAL_PROVIDER_ID, PERSONAPLEX_MODEL, voices_for,
+    FAL_PROVIDER_ID, voices_for,
 )
-DEFAULT_VOICE_MODEL = "gpt-realtime-2.1"
+DEFAULT_VOICE_MODEL = "gpt-live-1"
 
 # The voices the realtime models can speak with (ruling VM21). Same allowlist
 # discipline as the models: rejected on write, defaulted on read, so an unknown
@@ -549,6 +549,8 @@ class VoiceSettingsResponse(BaseModel):
     voice_voice: str
     voice_provider_id: Optional[str] = None
     voice_max_call_minutes: int
+    voice_input_mode: str = "auto"
+    voice_input_silence_seconds: int = 5
     # Compatibility field for older clients; app tools are no longer a preference.
     voice_app_tools_enabled: bool = True
     model_details: dict = Field(default_factory=dict)
@@ -567,6 +569,8 @@ class VoiceSettingsUpdateRequest(BaseModel):
     voice_voice: Optional[str] = None
     voice_provider_id: Optional[str] = None
     voice_max_call_minutes: Optional[int] = None
+    voice_input_mode: Optional[str] = None
+    voice_input_silence_seconds: Optional[int] = Field(default=None, strict=True, ge=1, le=60)
     voice_options: Optional[dict] = None
     voice_options_model: Optional[str] = None
     # Deprecated compatibility input: accepted but ignored, including False/null.
@@ -580,12 +584,23 @@ def _truthy_setting(raw: Optional[str]) -> bool:
 def get_voice_options(model: str) -> dict:
     import json
     from app.core.voice_options import validate_options
+    retired = ("delegation_type", "delegation_model", "delegation_effort")
     try:
         value = json.loads(database.get_system_setting(f"voice_options:{model}") or "{}")
-        return validate_options(model, value)
+        if not isinstance(value, dict):
+            raise ValueError("Voice options must be an object")
+        if model == "gpt-live-1":
+            # Retire settings-level overrides without discarding saved prompts.
+            for key in retired:
+                value.pop(key, None)
+        options = validate_options(model, value)
     except (ValueError, TypeError):
         logger.warning("Invalid saved options for voice model %s; using defaults", model)
-        return validate_options(model, {})
+        options = validate_options(model, {})
+    if model == "gpt-live-1":
+        for key in retired:
+            options.pop(key, None)
+    return options
 
 
 def get_voice_settings() -> dict:
@@ -602,15 +617,26 @@ def get_voice_settings() -> dict:
     if max_minutes <= 0:
         max_minutes = DEFAULT_VOICE_MAX_CALL_MINUTES
 
-    model = (database.get_system_setting(VOICE_MODEL_KEY) or "").strip()
-    if model not in VOICE_MODELS:
-        model = DEFAULT_VOICE_MODEL
+    input_mode = database.get_system_setting("voice_input_mode")
+    if input_mode not in ("auto", "toggle"):
+        input_mode = "auto"
+    try:
+        silence_seconds = int(database.get_system_setting("voice_input_silence_seconds") or "5")
+    except (TypeError, ValueError):
+        silence_seconds = 5
+    if not 1 <= silence_seconds <= 60:
+        silence_seconds = 5
+
+    # New calls are always GPT Live. Pinned session bindings remain readable.
+    model = DEFAULT_VOICE_MODEL
 
     voice = (database.get_system_setting(VOICE_VOICE_KEY) or "").strip()
     if voice not in voices_for(model):
-        voice = "NATF2" if model == PERSONAPLEX_MODEL else DEFAULT_VOICE_VOICE
+        voice = DEFAULT_VOICE_VOICE
 
     provider_id = (database.get_system_setting(VOICE_PROVIDER_ID_KEY) or "").strip() or None
+    if provider_id == FAL_PROVIDER_ID:
+        provider_id = None
 
     return {
         "voice_mode_enabled": _truthy_setting(database.get_system_setting(VOICE_MODE_ENABLED_KEY)),
@@ -618,6 +644,8 @@ def get_voice_settings() -> dict:
         "voice_voice": voice,
         "voice_provider_id": provider_id,
         "voice_max_call_minutes": max_minutes,
+        "voice_input_mode": input_mode,
+        "voice_input_silence_seconds": silence_seconds,
         "voice_app_tools_enabled": True,
         "voice_options": get_voice_options(model),
     }
@@ -651,35 +679,25 @@ async def update_voice_settings(
     """
     def _apply() -> dict:
         """Validate the complete provider/model/voice combination before writing."""
-        from app.api.voice import list_eligible_voice_providers
 
         supplied = request.model_fields_set
         current = get_voice_settings()
+        if "voice_input_mode" in supplied and request.voice_input_mode not in ("auto", "toggle"):
+            raise HTTPException(400, "voice_input_mode must be auto or toggle")
+        if "voice_input_silence_seconds" in supplied and request.voice_input_silence_seconds is None:
+            raise HTTPException(400, "voice_input_silence_seconds must be an integer from 1 to 60")
         model = request.voice_model if "voice_model" in supplied else current["voice_model"]
         provider = request.voice_provider_id if "voice_provider_id" in supplied else current["voice_provider_id"]
         provider = (provider or "").strip() or None
-        if "voice_provider_id" in supplied and "voice_model" not in supplied:
-            if provider == FAL_PROVIDER_ID:
-                model = PERSONAPLEX_MODEL
-            elif current["voice_provider_id"] == FAL_PROVIDER_ID:
-                model = DEFAULT_VOICE_MODEL
-        if model not in VOICE_MODELS:
-            raise HTTPException(400, f"voice_model must be one of {list(VOICE_MODELS)}")
-        if "voice_model" in supplied and "voice_provider_id" not in supplied:
-            if model == PERSONAPLEX_MODEL:
-                provider = FAL_PROVIDER_ID
-            elif provider == FAL_PROVIDER_ID:
-                provider = None
-        if provider and ("voice_provider_id" in supplied or provider != current["voice_provider_id"]):
-            if provider not in {p["id"] for p in list_eligible_voice_providers()}:
-                raise HTTPException(400, "Pick a configured voice provider with an API key.")
-        if provider and ((provider == FAL_PROVIDER_ID) != (model == PERSONAPLEX_MODEL)):
-            raise HTTPException(400, "The voice model does not belong to the selected provider.")
+        if model != DEFAULT_VOICE_MODEL:
+            raise HTTPException(400, "Voice mode uses GPT Live 1.")
+        if "voice_provider_id" in supplied and provider:
+            raise HTTPException(400, "Voice providers are selected automatically from configured OpenAI API providers.")
         voice = request.voice_voice if "voice_voice" in supplied else current["voice_voice"]
         if voice not in voices_for(model):
             if "voice_voice" in supplied:
                 raise HTTPException(400, f"voice_voice must be one of {list(voices_for(model))}")
-            voice = "NATF2" if model == PERSONAPLEX_MODEL else DEFAULT_VOICE_VOICE
+            voice = DEFAULT_VOICE_VOICE
         minutes = request.voice_max_call_minutes if "voice_max_call_minutes" in supplied else current["voice_max_call_minutes"]
         if minutes is None or minutes <= 0:
             raise HTTPException(400, "voice_max_call_minutes must be a positive integer")
@@ -691,13 +709,12 @@ async def update_voice_settings(
             if request.voice_options is None:
                 raise HTTPException(400, "voice_options must be an object; use an empty string to reset a prompt.")
             from app.core.voice_options import validate_options
+            if request.voice_options.keys() & {"delegation_type", "delegation_model", "delegation_effort"}:
+                raise HTTPException(400, "Choose the model and effort in the chat composer, not voice settings.")
             try:
                 options = validate_options(model, {**options, **request.voice_options})
             except (ValueError, TypeError) as exc:
                 raise HTTPException(400, f"Invalid voice options: {exc}") from exc
-        if model == "gpt-live-1" and supplied & {"voice_options", "voice_model", "voice_provider_id"}:
-            from app.core.voice_stream import validate_delegation_options
-            validate_delegation_options(options, provider)
 
         if supplied & {"voice_model", "voice_provider_id", "voice_voice"}:
             database.set_system_setting(VOICE_MODEL_KEY, model)
@@ -708,11 +725,16 @@ async def update_voice_settings(
                 database.delete_system_setting(VOICE_PROVIDER_ID_KEY)
         if "voice_options" in supplied:
             import json
+            for key in ("delegation_type", "delegation_model", "delegation_effort"):
+                options.pop(key, None)
             database.set_system_setting(f"voice_options:{model}", json.dumps(options))
         if "voice_max_call_minutes" in supplied:
             database.set_system_setting(VOICE_MAX_CALL_MINUTES_KEY, str(minutes))
         if "voice_mode_enabled" in supplied:
             database.set_system_setting(VOICE_MODE_ENABLED_KEY, "true" if request.voice_mode_enabled else "false")
+        for key in ("voice_input_mode", "voice_input_silence_seconds"):
+            if key in supplied:
+                database.set_system_setting(key, str(getattr(request, key)))
         return get_voice_settings()
 
     return _voice_settings_response(await run_sync(_apply))

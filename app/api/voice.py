@@ -30,6 +30,7 @@ Deliberately small surface:
   with a voice assignment under Agents → Provider models → Voice).
 """
 
+import asyncio
 import logging
 import time
 import uuid
@@ -70,16 +71,6 @@ INPUT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 # Upstream mint is a single small request; fail fast rather than hanging the
 # user's "start call" click.
 MINT_TIMEOUT_SECONDS = 15.0
-
-# Voice-preview synthesis (ruling VM21). One short sample per click, generated
-# through OpenAI's speech endpoint with the same provider key that funds calls.
-# ``gpt-4o-mini-tts`` is the cheapest model that speaks the realtime voice set.
-OPENAI_SPEECH_URL = "https://api.openai.com/v1/audio/speech"
-PREVIEW_TTS_MODEL = "gpt-4o-mini-tts"
-PREVIEW_TIMEOUT_SECONDS = 20.0
-PREVIEW_SAMPLE_TEXT = (
-    "Hey! This is what your voice agent will sound like. Ready when you are."
-)
 
 # Most sessions that can have a live secret at once. A hard bound purely so a
 # long-lived process can never accumulate credentials for sessions that were
@@ -310,68 +301,52 @@ async def get_voice_agents(token: str = Depends(require_auth)):
 @router.post("/preview")
 async def preview_voice(
     request: VoicePreviewRequest,
+    http_request: Request,
     token: str = Depends(require_auth),
 ):
-    """Synthesise a short "this is what I sound like" sample for one voice.
-
-    Settings-surface helper (ruling VM21): the audio comes back directly as
-    ``audio/mpeg`` for the browser to play. Uses the same provider resolution
-    as a call (explicit > pinned > single eligible), and deliberately does NOT
-    require ``voice_mode_enabled`` — picking a voice is part of setting the
-    feature up before switching it on.
-    """
-    from app.api.settings import VOICE_VOICES
-    from app.core.http_client import get_http_client
+    """Generate a short sample on the same GPT Live model used by calls."""
+    from app.api.settings import get_voice_settings
+    from app.core.voice_models import LIVE_VOICES
+    from app.core.voice_preview import generate_live_preview
 
     voice = (request.voice or "").strip()
-    if voice not in VOICE_VOICES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"voice must be one of {list(VOICE_VOICES)}",
-        )
-
-    from app.api.settings import get_voice_settings
-
+    if voice not in LIVE_VOICES:
+        raise HTTPException(400, f"voice must be one of {list(LIVE_VOICES)}")
     voice_settings = await run_sync(get_voice_settings)
-    provider_row = await run_sync(
-        _resolve_provider_row, request.provider_id, voice_settings["voice_provider_id"]
-    )
+    provider_row = await run_sync(_resolve_provider_row, None, voice_settings["voice_provider_id"])
     api_key = await _provider_api_key(provider_row)
 
+    finished = asyncio.Event()
+
+    async def disconnected():
+        # Starlette's is_disconnected uses an AnyIO cancel scope. A task cancel
+        # racing that scope can be consumed; also use a completion flag so
+        # joining this watcher can never keep a finished preview open.
+        while not finished.is_set():
+            if await http_request.is_disconnected():
+                return
+            await asyncio.sleep(.2)
+
+    generation = asyncio.create_task(generate_live_preview(api_key, voice))
+    disconnect = asyncio.create_task(disconnected())
     try:
-        response = await get_http_client().post(
-            OPENAI_SPEECH_URL,
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": PREVIEW_TTS_MODEL,
-                "voice": voice,
-                "input": PREVIEW_SAMPLE_TEXT,
-                "response_format": "mp3",
-            },
-            timeout=PREVIEW_TIMEOUT_SECONDS,
-        )
-    except httpx.HTTPError as exc:
-        logger.warning("Voice: preview synthesis failed: %s", exc)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not reach OpenAI for the voice preview: {exc}",
-        ) from exc
-
-    if response.status_code >= 400:
-        body = (response.text or "").strip()
-        logger.warning(
-            "Voice: OpenAI rejected the voice preview (%s): %s",
-            response.status_code, body[:500],
-        )
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                f"OpenAI rejected the voice preview "
-                f"(HTTP {response.status_code}): {body[:300]}"
-            ),
-        )
-
-    return Response(content=response.content, media_type="audio/mpeg")
+        done, _ = await asyncio.wait({generation, disconnect}, return_when=asyncio.FIRST_COMPLETED)
+        if generation not in done:
+            raise HTTPException(499, "Voice preview cancelled.")
+        audio = await generation
+        return Response(content=audio, media_type="audio/wav", headers={"Cache-Control": "no-store"})
+    except HTTPException:
+        raise
+    except (ValueError, TimeoutError) as exc:
+        raise HTTPException(502, str(exc) or "GPT Live preview timed out. Try again.") from exc
+    except Exception as exc:
+        logger.warning("GPT Live preview connection failed: %s", type(exc).__name__)
+        raise HTTPException(502, "Could not connect to GPT Live for a voice preview. Check your OpenAI API provider.") from exc
+    finally:
+        finished.set()
+        generation.cancel()
+        disconnect.cancel()
+        await asyncio.gather(generation, disconnect, return_exceptions=True)
 
 
 def _resolve_provider_row(
@@ -399,16 +374,10 @@ def _resolve_provider_row(
     pinned = (settings_provider_id or "").strip()
     if pinned:
         row = _eligible_provider_row(pinned)
-        if row is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"The provider configured for voice ({pinned!r}) is no longer "
-                    "eligible. Check its API key or choose another voice provider "
-                    "in Settings."
-                ),
-            )
-        return row
+        if row is not None and row["id"] != FAL_PROVIDER_ID:
+            return row
+        # A stale/retired preference must not require a hidden selector to repair.
+
 
     eligible = [p for p in list_eligible_voice_providers() if p["id"] != FAL_PROVIDER_ID]
     if not eligible:
@@ -420,15 +389,7 @@ def _resolve_provider_row(
                 "(Realtime does not support ChatGPT-subscription logins)."
             ),
         )
-    if len(eligible) > 1:
-        names = ", ".join(f"{p['name']} ({p['id']})" for p in eligible)
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "More than one OpenAI provider can fund voice calls, so one must "
-                f"be chosen — either in the voice settings or per call: {names}"
-            ),
-        )
+    eligible.sort(key=lambda p: (p["name"].casefold(), p["id"]))
     row = _eligible_provider_row(eligible[0]["id"])
     if row is None:  # pragma: no cover — the row was eligible one statement ago
         raise HTTPException(
@@ -731,17 +692,8 @@ async def create_voice_session(
         raise HTTPException(400, "The voice model does not belong to the selected provider.")
     options = voice_settings.get("voice_options", {})
     selected_model, selected_effort = request.model, request.effort
-    if model == LIVE_MODEL:
-        from app.core.voice_stream import validate_delegation_options
-        await run_sync(validate_delegation_options, options, provider_row["id"])
-        if options.get("delegation_type") == "responses":
-            selected_model = options["delegation_model"]
-            selected_effort = options.get("delegation_effort") or None
-        elif not selected_model:
-            selected_model = options.get("delegation_model")
-            selected_effort = selected_effort or options.get("delegation_effort") or None
-        if not (selected_model or "").strip():
-            raise HTTPException(400, "Choose a delegation model before starting GPT Live 1.")
+    if model == LIVE_MODEL and not (selected_model or "").strip():
+        raise HTTPException(400, "Choose a chat model in the composer before starting GPT Live.")
     client_secret, expires_at = "", None
     if transport_for(model) == "webrtc":
         body = await _mint_client_secret(api_key, model, voice_settings["voice_voice"], options)

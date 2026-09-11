@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('$lib/api/voice', () => ({ loadVoiceSettings: vi.fn().mockResolvedValue({voice_input_mode:'auto', voice_input_silence_seconds:5}) }));
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { Editor } from '@tiptap/core';

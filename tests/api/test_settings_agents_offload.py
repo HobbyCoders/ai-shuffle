@@ -238,20 +238,22 @@ async def test_update_voice_settings_validates_and_writes_in_one_hop(
     with patch.object(settings_api.database, "set_system_setting", write), \
          patch.object(settings_api.database, "get_system_setting", read):
         response = await settings_api.update_voice_settings(
-            settings_api.VoiceSettingsUpdateRequest(voice_model="gpt-realtime"),
+            settings_api.VoiceSettingsUpdateRequest(voice_voice="quartz"),
             token=None,
         )
 
-    assert response.voice_model == "gpt-realtime"
+    assert response.voice_model == "gpt-live-1"
+    assert response.voice_voice == "quartz"
     _assert_one_worker_hop(loop_thread, write, read)
 
 
-async def test_update_voice_settings_rejects_a_bad_model_from_the_worker(mock_db):
+@pytest.mark.parametrize("model", ["not-a-model", "gpt-realtime"])
+async def test_update_voice_settings_rejects_a_bad_model_from_the_worker(mock_db, model):
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc:
         await settings_api.update_voice_settings(
-            settings_api.VoiceSettingsUpdateRequest(voice_model="not-a-model"),
+            settings_api.VoiceSettingsUpdateRequest(voice_model=model),
             token=None,
         )
     assert exc.value.status_code == 400

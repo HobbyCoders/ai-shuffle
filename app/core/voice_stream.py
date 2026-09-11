@@ -101,32 +101,80 @@ def live_opening_event(text: str) -> dict:
     }
 
 
+def _turn_reply(session_id: str, turn_id: str) -> str:
+    """Read only this handoff's public answer, never another turn or reasoning."""
+    from app.db import session_events
+    seq = 0
+    parts = []
+    while True:
+        batch = session_events.get_events(session_id, from_seq=seq, limit=500)
+        if not batch:
+            break
+        for event in batch:
+            seq = max(seq, event["seq"])
+            if event.get("turn_id") != turn_id:
+                continue
+            payload = event.get("payload") or {}
+            kind = event.get("event_type")
+            if kind == "tool.result":
+                parts = []
+            elif kind == "assistant.text_delta":
+                parts.append(payload.get("text") or "")
+            elif kind == "message.assistant" and payload.get("kind") in (None, "text"):
+                parts.append(payload.get("content") or "")
+    return "".join(parts).strip()
+
+
+def commentary_chunks(text: str):
+    """Stay below Live's 500-token append cap without silently losing a result."""
+    chunk = ""
+    for char in text:
+        if len((chunk + char).encode("utf-8")) > 400:
+            yield chunk
+            chunk = ""
+        chunk += char
+    if chunk:
+        yield chunk
+
+
 async def delegate_to_selected_model(session_id: str, transcript: str) -> str:
-    from app.core.provider_agent import dispatch_worker, validate_provider_model
+    from app.core import turn_manager
+    from app.core.provider_agent import validate_provider_model
     from app.core.query_options import decode_provider_model
 
     row = await run_sync(database.get_session, session_id)
     selected = (row or {}).get("model")
     if not selected:
-        return "No delegation model is selected. Ask the user to choose one."
+        return "No chat model is selected. Ask the user to choose one in the composer."
     decoded = decode_provider_model(selected)
     provider_id, model_id = decoded if decoded else (None, selected)
     if provider_id:
         validation = await run_sync(validate_provider_model, provider_id, model_id)
         if not validation.ok:
-            return "The selected delegation model is unavailable. Ask the user to choose another model."
+            return "The selected chat model is unavailable. Ask the user to choose another model."
     binding = row.get("voice_config") or {}
     if isinstance(binding, str):
         binding = json.loads(binding)
     options = validate_options(LIVE_MODEL, binding.get("options") or {})
-    outcome = await dispatch_worker(
-        parent_session_id=session_id, profile_id=row["profile_id"],
-        provider_id=provider_id, model_id=model_id, inherited_effort=row.get("effort"),
-        prompt=(options["delegation_instructions"] or DELEGATION_INSTRUCTIONS) + "\n\n" + transcript,
-        label="Voice delegation", background=False,
-        suppress_caller_wake=lambda *_: True,
+    # Submit to the SAME session: reuse its history/client and normal queue,
+    # approval, stop, placement and model-switch semantics. No worker creation.
+    overrides = {key: row.get(key) for key in ("effort", "permission_mode", "context_window", "fast")}
+    overrides.update(model=selected, provider=provider_id,
+                     system_prompt_append=options["delegation_instructions"] or DELEGATION_INSTRUCTIONS)
+    turn_id = await turn_manager.submit_async(
+        session_id, "user", prompt=transcript, profile_id=row["profile_id"],
+        project_id=row.get("project_id"), worktree_id=row.get("worktree_id"),
+        overrides=overrides,
+        # VoiceStream flushes the spoken exchange before handing off. Keep the
+        # context for the engine without adding a second giant user bubble.
+        payload={"user_message_already_recorded": True},
     )
-    return outcome.report if outcome.ok else (outcome.error or "The delegated task failed.")
+    settled = await turn_manager.wait_settled(turn_id, timeout=600)
+    if settled is None or settled["state"] == "parked":
+        return "Work is continuing in chat. No final result is available yet."
+    if settled["state"] != "completed":
+        return "The chat task was stopped or failed. Do not claim it succeeded. Check chat for details."
+    return await run_sync(_turn_reply, session_id, turn_id) or "The chat task finished without a spoken result."
 
 
 class VoiceStream:
@@ -142,6 +190,7 @@ class VoiceStream:
         self.closed = False
         self.upstream = None
         self.first_frame = None
+        self.opening_event_id: str | None = None
         self.transcript: deque[dict] = deque(maxlen=200)
         self.pending = {"user": "", "assistant": ""}
         self.last_caption_at = 0.0
@@ -198,17 +247,26 @@ class VoiceStream:
 
     async def run_delegation(self, delegation_id: str):
         try:
-            # Keep the read loop free. The worker gets accumulated context, not
-            # a fabricated task from the delegation event (which has no text).
-            context = "".join(f"{entry['role']}: {entry['text']}\n" for entry in self.transcript)
+            # Keep the read loop free. Group partial captions into readable
+            # turns; the Live delegation event itself carries no task text.
+            conversation = []
+            for entry in self.transcript:
+                if conversation and conversation[-1]["role"] == entry["role"]:
+                    conversation[-1]["text"] += entry["text"]
+                else:
+                    conversation.append({"role": entry["role"], "text": entry["text"]})
+            context = "Live conversation context (only the latest new request needs action):\n" + "".join(
+                f"{entry['role']}: {entry['text'].strip()}\n" for entry in conversation
+            )
             if not any(e["role"] == "user" and e["text"].strip() for e in self.transcript):
                 result = "The backend has not received your request. Please repeat it."
             else:
+                await self.flush()
                 result = await delegate_to_selected_model(self.session_id, context)
             # Live appends have a 500-token ceiling. <=400 UTF-8 bytes is a
             # conservative bound even without the provider's tokenizer.
-            content = (result or "The delegated task returned no result.").encode("utf-8")[:400].decode("utf-8", errors="ignore")
-            await self.send({"type": "session.commentary.append", "delegation_id": delegation_id, "content": content})
+            for content in commentary_chunks(result or "The chat task returned no result."):
+                await self.send({"type": "session.commentary.append", "delegation_id": delegation_id, "content": content})
         except Exception:
             logger.exception("Voice delegation failed for %s", self.session_id)
             await self.send({"type": "session.commentary.append", "delegation_id": delegation_id,
@@ -260,6 +318,10 @@ class VoiceStream:
                 elif kind in ("session.input_transcript.delta", "session.output_transcript.delta"):
                     role = "user" if kind == "session.input_transcript.delta" else "assistant"
                     await self.caption(role, event.get("delta") or "", event.get("end_ms") or 0)
+                elif kind == "session.instructions.appended" and self.opening_event_id and event.get("client_event_id") == self.opening_event_id:
+                    self.opening_event_id = None
+                    await self.send({"type": "session.commentary.append", "delegation_id": None,
+                                     "content": "Begin the conversation now, following the instructions provided."})
                 elif kind == "session.delegation.created":
                     if self.options["delegation_type"] == "responses":
                         continue  # Provider-owned: never also dispatch an app worker.
@@ -270,7 +332,7 @@ class VoiceStream:
                     self.delegations.add(did)
                     if len(self.delegations) > 200:
                         raise ValueError("Voice delegation limit reached; start a new call.")
-                    if (self.delegation_task and not self.delegation_task.done()) or len(_workers) >= 8:
+                    if len(_workers) >= 8:
                         await self.send({"type": "session.commentary.append", "delegation_id": did,
                                          "content": "The backend is busy with another task. Ask the user to repeat this new request after it finishes."})
                     else:
@@ -334,7 +396,9 @@ class VoiceStream:
         if self.options["opening"] and not history and self.config.get("greet", True):
             # Provider rejection is surfaced by receive_upstream, not silently
             # treated as spoken audio. Never greet again after conversation replay.
-            await self.send(live_opening_event(self.options["opening"]))
+            event = live_opening_event(self.options["opening"])
+            self.opening_event_id = event["event_id"]
+            await self.send(event)
 
     async def run(self):
         tasks = []

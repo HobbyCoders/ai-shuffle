@@ -15,6 +15,7 @@
 import { writable, get } from 'svelte/store';
 import { apiBase, authHeaders, requestCredentials } from '$lib/api/runtime';
 import { browser } from '$app/environment';
+import { loadVoiceSettings } from '$lib/api/voice';
 import { registerShortcut, type ShortcutRegistration } from './keyboard';
 import { hotkeyPreferences, type HotkeyConfig } from '$lib/stores/hotkeyPreferences.svelte';
 import { convertToWav } from '$lib/utils/audioConvert';
@@ -136,8 +137,10 @@ const MIN_RECORDING_DURATION = 500; // 500ms minimum
 //
 // Server VAD has already waited 700ms before reporting silence. Batch and
 // live models without VAD detect silence locally and need the full five seconds.
-const SILENCE_AUTO_STOP_BATCH_MS = 5000;
-const SILENCE_AUTO_STOP_LIVE_MS = SILENCE_AUTO_STOP_BATCH_MS - 700;
+// Snapshot preferences per recording. A settings refresh must not change a
+// countdown mid-utterance. Global hotkey dictation keeps its existing behavior.
+let inputMode: 'auto' | 'toggle' = 'auto';
+let silenceStopMs = 5000;
 
 // A session where nothing is ever said should not hold the microphone open
 // indefinitely either.
@@ -194,6 +197,7 @@ function autoStop(): void {
 
 /** Arm (or re-arm) the end-of-speech countdown. */
 function armSilenceStop(delayMs: number): void {
+	if (inputMode === 'toggle') return;
 	if (silenceTimer !== null) clearTimeout(silenceTimer);
 	silenceTimer = setTimeout(autoStop, delayMs);
 }
@@ -307,7 +311,7 @@ async function initAudioMonitoring(stream: MediaStream, myRun: number): Promise<
 			heardSpeech = true;
 			cancelSilenceStop();
 		} else if (heardSpeech && silenceTimer === null) {
-			armSilenceStop(SILENCE_AUTO_STOP_BATCH_MS);
+			armSilenceStop(silenceStopMs);
 		}
 	}
 
@@ -395,15 +399,15 @@ async function startLiveRecording(myRun: number): Promise<boolean> {
 		partialsSupported: capability.partials
 	}));
 
-	let silenceStopMs = SILENCE_AUTO_STOP_LIVE_MS;
+	let liveSilenceStopMs = Math.max(0, silenceStopMs - 700);
 	try {
 		const session = await startSttStream({
 			onReady: (info) => {
 				if (!isCurrentRun(myRun)) return;
 				// Use the accepted session, since a setting may change after the
 				// capability probe. Readiness alone does not start the microphone UI.
-				silenceStopMs = info.serverVad === false
-					? SILENCE_AUTO_STOP_BATCH_MS : SILENCE_AUTO_STOP_LIVE_MS;
+				liveSilenceStopMs = info.serverVad === false
+					? silenceStopMs : Math.max(0, silenceStopMs - 700);
 			},
 			onCapture: () => {
 				if (!isCurrentRun(myRun)) return;
@@ -414,7 +418,7 @@ async function startLiveRecording(myRun: number): Promise<boolean> {
 				}));
 				playEarcon('ready');
 				// Nothing said at all still ends the session eventually.
-				noSpeechTimer = setTimeout(autoStop, NO_SPEECH_AUTO_STOP_MS);
+				if (inputMode === 'auto') noSpeechTimer = setTimeout(autoStop, NO_SPEECH_AUTO_STOP_MS);
 			},
 			onClosed: () => {
 				if (!isCurrentRun(myRun)) return;
@@ -438,7 +442,7 @@ async function startLiveRecording(myRun: number): Promise<boolean> {
 				if (active) {
 					cancelSilenceStop();
 				} else {
-					armSilenceStop(silenceStopMs);
+					armSilenceStop(liveSilenceStopMs);
 				}
 			},
 			onAudio: (level, bands) => {
@@ -581,6 +585,22 @@ async function startRecording(source: GlobalSttState['source']): Promise<void> {
 	globalSttUpload.set(null);
 	recordingStartTime = Date.now();
 
+	inputMode = 'auto';
+	silenceStopMs = 5000;
+	if (source === 'composer') {
+		try {
+			const settings = await loadVoiceSettings();
+			if (!isCurrentRun(myRun)) return;
+			inputMode = settings.voice_input_mode === 'toggle' ? 'toggle' : 'auto';
+			const seconds = settings.voice_input_silence_seconds ?? 5;
+			silenceStopMs = (Number.isInteger(seconds) && seconds >= 1 && seconds <= 60 ? seconds : 5) * 1000;
+		} catch {
+			if (isCurrentRun(myRun)) globalSttState.update((s) => ({ ...s, isPreparing: false,
+				error: 'Could not load voice input settings. Try again.' }));
+			return;
+		}
+	}
+
 	// Live first; batch is the fallback for models that can't stream.
 	if (await startLiveRecording(myRun)) {
 		return;
@@ -643,7 +663,7 @@ async function startRecording(source: GlobalSttState['source']): Promise<void> {
 
 		// Start visualization loop
 		startVisualization();
-		noSpeechTimer = setTimeout(autoStop, NO_SPEECH_AUTO_STOP_MS);
+		if (inputMode === 'auto') noSpeechTimer = setTimeout(autoStop, NO_SPEECH_AUTO_STOP_MS);
 	} catch (error: unknown) {
 		if (!isCurrentRun(myRun)) return;
 		clearAutoStop();
@@ -1039,6 +1059,7 @@ export function initGlobalStt(): () => void {
 	// Warm the capability probe so the first press does not pay for it. Failure
 	// is expected and ignorable here — this can run before auth has settled.
 	void fetchSttCapability().catch(() => {});
+	void loadVoiceSettings().catch(() => {});
 
 	// Subscribe to preference changes
 	const unsubscribe = hotkeyPreferences.subscribe((prefs) => {

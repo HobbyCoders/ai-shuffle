@@ -146,38 +146,42 @@ class TestVoiceSettings:
         assert resp.status_code == 200, resp.text
         assert resp.json() == {
             "voice_mode_enabled": False,
-            "voice_model": "gpt-realtime-2.1",
+            "voice_model": "gpt-live-1",
             "voice_voice": "marin",
             "voice_provider_id": None,
             "voice_max_call_minutes": 240,
+            "voice_input_mode": "auto",
+            "voice_input_silence_seconds": 5,
             "voice_app_tools_enabled": True,
             "model_details": resp.json()["model_details"],
-            "voice_options": validate_options(resp.json()["voice_model"], {}),
+            "voice_options": {"instructions":"", "opening":"", "delegation_instructions":""},
         }
-        assert resp.json()["model_details"]["model"] == "gpt-realtime-2.1"
+        assert resp.json()["model_details"]["model"] == "gpt-live-1"
 
     def test_put_roundtrip(self, authenticated_client, mock_db):
         pid = _make_provider()
         resp = authenticated_client.put(VOICE_SETTINGS, json={
             "voice_mode_enabled": True,
-            "voice_model": "gpt-realtime-2.1-mini",
+            "voice_model": "gpt-live-1",
             "voice_voice": "cedar",
-            "voice_provider_id": pid,
+            "voice_provider_id": None,
             "voice_max_call_minutes": 30,
             "voice_app_tools_enabled": False,
         })
         assert resp.status_code == 200, resp.text
         assert resp.json() == {
             "voice_mode_enabled": True,
-            "voice_model": "gpt-realtime-2.1-mini",
+            "voice_model": "gpt-live-1",
             "voice_voice": "cedar",
-            "voice_provider_id": pid,
+            "voice_provider_id": None,
             "voice_max_call_minutes": 30,
+            "voice_input_mode": "auto",
+            "voice_input_silence_seconds": 5,
             "voice_app_tools_enabled": True,
             "model_details": resp.json()["model_details"],
-            "voice_options": validate_options(resp.json()["voice_model"], {}),
+            "voice_options": {"instructions":"", "opening":"", "delegation_instructions":""},
         }
-        assert resp.json()["model_details"]["model"] == "gpt-realtime-2.1-mini"
+        assert resp.json()["model_details"]["model"] == "gpt-live-1"
         # Persisted: a fresh GET returns the same values.
         assert authenticated_client.get(VOICE_SETTINGS).json() == resp.json()
 
@@ -225,13 +229,14 @@ class TestVoiceSettings:
         resp = authenticated_client.put(VOICE_SETTINGS, json={"voice_model": "gpt-4o-realtime"})
         assert resp.status_code == 400
         # Nothing was written.
-        assert authenticated_client.get(VOICE_SETTINGS).json()["voice_model"] == "gpt-realtime-2.1"
+        assert authenticated_client.get(VOICE_SETTINGS).json()["voice_model"] == "gpt-live-1"
 
     @pytest.mark.parametrize("model", ["gpt-live-1", "gpt-realtime-2.1", "gpt-realtime-2.1-mini", "gpt-realtime"])
     def test_model_allowlist_accepts_each(self, authenticated_client, mock_db, model):
         resp = authenticated_client.put(VOICE_SETTINGS, json={"voice_model": model})
-        assert resp.status_code == 200, resp.text
-        assert resp.json()["voice_model"] == model
+        assert resp.status_code == (200 if model == "gpt-live-1" else 400), resp.text
+        if model == "gpt-live-1":
+            assert resp.json()["voice_model"] == model
 
     def test_voice_allowlist_rejects_unknown(self, authenticated_client, mock_db):
         resp = authenticated_client.put(VOICE_SETTINGS, json={"voice_voice": "hal9000"})
@@ -360,52 +365,25 @@ class TestVoicePreview:
         assert resp.status_code == 400, resp.text
         assert "OpenAI provider" in resp.json()["detail"]
 
-    def test_happy_path_streams_audio(self, authenticated_client, mock_db, monkeypatch):
+    @pytest.mark.parametrize("voice", ["cedar", "quartz", "stone", "cinder"])
+    def test_happy_path_streams_live_audio_without_enable_flag(self, authenticated_client, mock_db, monkeypatch, voice):
+        from app.core import voice_preview
+        from unittest.mock import AsyncMock
         _unlock(mock_db)
         _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
-        captured = {}
-
-        def _handler(request: httpx.Request) -> httpx.Response:
-            captured["request"] = request
-            return httpx.Response(
-                200, content=b"\xff\xf3mp3-bytes", headers={"content-type": "audio/mpeg"}
-            )
-
-        _install_mock_transport(monkeypatch, _handler)
-        resp = authenticated_client.post(f"{VOICE_ROOT}/preview", json={"voice": "cedar"})
+        generate = AsyncMock(return_value=b"RIFF-live-wave")
+        monkeypatch.setattr(voice_preview, "generate_live_preview", generate)
+        resp = authenticated_client.post(f"{VOICE_ROOT}/preview", json={"voice": voice})
         assert resp.status_code == 200, resp.text
-        assert resp.headers["content-type"].startswith("audio/mpeg")
-        assert resp.content == b"\xff\xf3mp3-bytes"
-
-        request = captured["request"]
-        assert str(request.url) == "https://api.openai.com/v1/audio/speech"
-        assert request.headers["authorization"] == f"Bearer {RAW_KEY}"
-        sent = json.loads(request.content)
-        assert sent["voice"] == "cedar"
-        assert sent["model"] == "gpt-4o-mini-tts"
-        assert sent["input"]
-
-    def test_does_not_require_voice_mode_enabled(self, authenticated_client, mock_db, monkeypatch):
-        # Picking a voice is part of setting the feature up before enabling it.
-        _unlock(mock_db)
-        _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
-        _install_mock_transport(
-            monkeypatch,
-            lambda request: httpx.Response(
-                200, content=b"ok", headers={"content-type": "audio/mpeg"}
-            ),
-        )
-        assert db.get_system_setting("voice_mode_enabled") is None
-        resp = authenticated_client.post(f"{VOICE_ROOT}/preview", json={"voice": "marin"})
-        assert resp.status_code == 200, resp.text
+        assert resp.headers["content-type"].startswith("audio/wav")
+        assert resp.content == b"RIFF-live-wave"
+        generate.assert_awaited_once_with(RAW_KEY, voice)
 
     def test_upstream_rejection_surfaces_as_502(self, authenticated_client, mock_db, monkeypatch):
-        _unlock(mock_db)
-        _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
-        _install_mock_transport(
-            monkeypatch,
-            lambda request: httpx.Response(400, json={"error": {"message": "bad voice"}}),
-        )
+        from app.core import voice_preview
+        from unittest.mock import AsyncMock
+        _make_provider()
+        monkeypatch.setattr(voice_preview, "generate_live_preview", AsyncMock(side_effect=ValueError("bad voice")))
         resp = authenticated_client.post(f"{VOICE_ROOT}/preview", json={"voice": "verse"})
         assert resp.status_code == 502, resp.text
         assert "bad voice" in resp.json()["detail"]
@@ -414,23 +392,23 @@ class TestVoicePreview:
 class TestCreateVoiceSession:
     def test_disabled_flag_returns_403(self, authenticated_client, mock_db):
         _make_provider()
-        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={})
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet"})
         assert resp.status_code == 403, resp.text
 
     def test_no_eligible_provider_returns_400(self, authenticated_client, mock_db):
         _enable_voice()
         _make_provider("prov-chatgpt", provider_type="chatgpt")
-        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={})
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet"})
         assert resp.status_code == 400, resp.text
         assert "OpenAI provider" in resp.json()["detail"]
 
-    def test_ambiguous_providers_return_400(self, authenticated_client, mock_db):
+    def test_multiple_providers_choose_stable_automatic_default(self, authenticated_client, mock_db):
         _enable_voice()
         _make_provider("prov-a", name="A")
         _make_provider("prov-b", name="B")
-        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={})
-        assert resp.status_code == 400, resp.text
-        assert "more than one" in resp.json()["detail"].lower()
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet"})
+        assert resp.status_code == 200, resp.text
+        assert json.loads(db.get_session(resp.json()["session_id"])["voice_config"])["provider_id"] == "prov-a"
 
     def test_explicit_provider_disambiguates(self, authenticated_client, mock_db, monkeypatch):
         _enable_voice()
@@ -438,10 +416,10 @@ class TestCreateVoiceSession:
         _make_provider("prov-b", name="B")
         _install_mock_transport(monkeypatch, _secret_handler())
 
-        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"provider_id": "prov-b"})
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"provider_id": "prov-b", "model": "sonnet"})
         assert resp.status_code == 200, resp.text
         row = db.get_session(resp.json()["session_id"])
-        assert row["provider_id"] == "prov-b"
+        assert json.loads(row["voice_config"])["provider_id"] == "prov-b"
 
     def test_ineligible_explicit_provider_returns_400(self, authenticated_client, mock_db):
         _enable_voice()
@@ -460,54 +438,28 @@ class TestCreateVoiceSession:
         _make_provider("prov-b", name="B")
         _install_mock_transport(monkeypatch, _secret_handler())
 
-        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={})
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"model": "sonnet"})
         assert resp.status_code == 200, resp.text
-        assert db.get_session(resp.json()["session_id"])["provider_id"] == "prov-b"
+        assert json.loads(db.get_session(resp.json()["session_id"])["voice_config"])["provider_id"] == "prov-b"
 
-    @pytest.mark.parametrize("model", ["gpt-realtime-2.1-mini"])
-    def test_happy_path(self, authenticated_client, mock_db, monkeypatch, model):
-        _unlock(mock_db)
-        resp = authenticated_client.put(VOICE_SETTINGS, json={
-            "voice_mode_enabled": True, "voice_model": model, "voice_voice": "cedar",
-        })
-        assert resp.status_code == 200, resp.text
-        assert authenticated_client.get(VOICE_SETTINGS).json()["voice_model"] == model
-        # Store the key the way the provider API does — encrypted — to prove the
-        # shared fluid decryption path is what feeds the mint.
-        _make_provider(auth_token=encryption.encrypt_value(RAW_KEY))
-        captured = {}
-        _install_mock_transport(monkeypatch, _secret_handler(captured))
-
-        resp = authenticated_client.post(
-            f"{VOICE_ROOT}/sessions", json={"profile_id": "default"}
-        )
+    def test_happy_path_uses_live_and_keeps_composer_selection(self, authenticated_client, mock_db, monkeypatch):
+        from unittest.mock import AsyncMock
+        from app.api import voice
+        _enable_voice(voice_model="gpt-realtime-2.1-mini", voice_voice="cedar")
+        _make_provider()
+        mint = AsyncMock(side_effect=AssertionError("Live must not mint realtime credentials"))
+        monkeypatch.setattr(voice, "_mint_client_secret", mint)
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={"profile_id":"default", "model":"sonnet", "effort":"high"})
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert body["client_secret"] == "ek_test_secret"
-        assert body["expires_at"] == 1786000000
-        assert body["model"] == model
-
-        # Upstream request shape.
-        request = captured["request"]
-        assert str(request.url) == "https://api.openai.com/v1/realtime/client_secrets"
-        assert request.headers["authorization"] == f"Bearer {RAW_KEY}"
-        import json as _json
-        sent = _json.loads(request.content)
-        assert sent["session"]["type"] == "realtime"
-        assert sent["session"]["model"] == model
-        assert sent["session"]["audio"]["input"]["transcription"]["model"] == "gpt-4o-mini-transcribe"
-        # The configured voice rides on the mint (VM21) — it can only be set
-        # before the model first speaks.
-        assert sent["session"]["audio"]["output"]["voice"] == "cedar"
-        assert sent["expires_after"]["anchor"] == "created_at"
-
-        # The session row is real, badged voice, and bound to the provider.
+        assert body["model"] == "gpt-live-1" and body["client_secret"] == ""
         row = db.get_session(body["session_id"])
-        assert row is not None
-        assert row["mode"] == "voice"
-        assert row["provider_id"] == "prov-openai"
-        assert row["title"] == "Voice session"
-        assert row["is_active"] in (True, 1)
+        assert row["model"] == "sonnet" and row["effort"] == "high"
+        assert row["mode"] == "voice" and row["is_active"]
+        config = json.loads(row["voice_config"])
+        assert config["model"] == "gpt-live-1" and config["voice"] == "cedar"
+        assert config["provider_id"] == "prov-openai"
+        mint.assert_not_called()
 
     def test_creation_persists_normal_session_context(
         self, authenticated_client, mock_db, monkeypatch
@@ -597,7 +549,7 @@ class TestCreateVoiceSession:
             "project_v2_id": pv2["id"],
             "execution_mode": "worktree",
             "base_branch": "develop",
-            "target_instance_id": "runner-selected",
+            "target_instance_id": "runner-selected", "model": "sonnet",
         })
         assert resp.status_code == 200, resp.text
         assert resp.json()["session_id"] == "voice-auto"
@@ -609,7 +561,7 @@ class TestCreateVoiceSession:
         overrides = captured["kwargs"]["session_create_overrides"]
         assert overrides["mode"] == "voice"
         assert overrides["is_active"] is True
-        assert overrides["provider_id"] == "prov-openai"
+        assert overrides["voice_config"]["provider_id"] == "prov-openai"
 
     def test_command_mode_creates_a_hidden_session(
         self, authenticated_client, mock_db, monkeypatch
@@ -621,7 +573,7 @@ class TestCreateVoiceSession:
         _install_mock_transport(monkeypatch, _secret_handler())
 
         resp = authenticated_client.post(
-            f"{VOICE_ROOT}/sessions", json={"session_mode": "command"}
+            f"{VOICE_ROOT}/sessions", json={"session_mode": "command", "model": "sonnet"}
         )
         assert resp.status_code == 200, resp.text
         session_id = resp.json()["session_id"]
@@ -639,7 +591,7 @@ class TestCreateVoiceSession:
         _install_mock_transport(monkeypatch, _secret_handler())
 
         resp = authenticated_client.post(
-            f"{VOICE_ROOT}/sessions", json={"session_mode": "chat"}
+            f"{VOICE_ROOT}/sessions", json={"session_mode": "chat", "model": "sonnet"}
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["session_id"] in {s["id"] for s in db.get_sessions()}
@@ -653,33 +605,12 @@ class TestCreateVoiceSession:
         assert resp.status_code == 400, resp.text
         assert "session_mode" in resp.json()["detail"]
 
-    def test_openai_error_surfaces_as_502(self, authenticated_client, mock_db, monkeypatch):
+    def test_missing_composer_model_is_rejected(self, authenticated_client, mock_db):
         _enable_voice()
         _make_provider()
-        _install_mock_transport(
-            monkeypatch,
-            _secret_handler(status_code=500, body={"error": {"message": "upstream exploded"}}),
-        )
-
         resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={})
-        assert resp.status_code == 502, resp.text
-        detail = resp.json()["detail"]
-        assert "500" in detail
-        assert "upstream exploded" in detail
-        # No orphan session row was written.
+        assert resp.status_code == 400 and "composer" in resp.json()["detail"]
         assert db.get_sessions(limit=50) == []
-
-    def test_transport_failure_surfaces_as_502(self, authenticated_client, mock_db, monkeypatch):
-        _enable_voice()
-        _make_provider()
-
-        def _boom(request):
-            raise httpx.ConnectError("no route to host")
-
-        _install_mock_transport(monkeypatch, _boom)
-        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={})
-        assert resp.status_code == 502, resp.text
-
 
 # ============================================================================
 # VW3 — call surface (re-mint / attach / hangup / state)
@@ -718,6 +649,9 @@ def _mk_voice_session(session_id=SESSION_ID, *, provider_id="prov-openai", mode=
         title="Voice session",
         provider_id=provider_id,
         mode=mode,
+        # These tests exercise already-pinned legacy WebRTC sessions, not new calls.
+        voice_config={"model": db.get_system_setting("voice_model") or "gpt-realtime-2.1",
+                      "voice": "marin", "provider_id": provider_id},
     )
     return session_id
 
@@ -786,7 +720,7 @@ class TestVoiceSecretRemint:
             "client_secret": "ek_test_secret",
             "expires_at": 1786000000,
             "model": "gpt-realtime-2.1-mini",
-            "options": validate_options("gpt-realtime-2.1-mini", {}),
+            "options": {},
         }
         # Funded by the row the session was created on, not the ambiguous set.
         assert captured["request"].headers["authorization"] == "Bearer sk-other"
@@ -914,6 +848,7 @@ class TestVoiceCallAttach:
         db.create_session(
             session_id="voice-api-user", profile_id="default", title="Voice session",
             provider_id="prov-openai", mode="voice", api_user_id="api-1",
+            voice_config={"model":"gpt-realtime-2.1", "voice":"marin", "provider_id":"prov-openai"},
         )
         authenticated_client.post(
             f"{VOICE_ROOT}/sessions/voice-api-user/call", json={"call_id": "rtc_2"}
@@ -1344,35 +1279,22 @@ class TestCallLengthCapGrace:
         authenticated_client.post(f"{VOICE_ROOT}/sessions/{SESSION_ID}/hangup")
 
 class TestStreamingVoiceModels:
-    def test_fal_provider_and_model_are_bound_without_realtime_mint(self, authenticated_client, mock_db, monkeypatch):
+    def test_retired_fal_settings_migrate_new_calls_but_pinned_sessions_still_rejoin(self, authenticated_client, mock_db, monkeypatch):
         from app.api import voice
         from app.core.voice_models import FAL_PROVIDER_ID, PERSONAPLEX_MODEL
         from unittest.mock import AsyncMock
         _unlock(mock_db)
         db.set_system_setting("fal_api_key", encryption.encrypt_value("test-fal-key"))
-        providers = authenticated_client.get(f"{VOICE_ROOT}/providers").json()
-        assert {"id": FAL_PROVIDER_ID, "name": "fal.ai"} in providers
-        updated = authenticated_client.put(VOICE_SETTINGS, json={
-            "voice_mode_enabled": True, "voice_provider_id": FAL_PROVIDER_ID,
-        })
-        assert updated.status_code == 200, updated.text
-        assert updated.json()["voice_model"] == PERSONAPLEX_MODEL
-        assert updated.json()["voice_voice"] == "NATF2"
+        _enable_voice(voice_model=PERSONAPLEX_MODEL, voice_provider_id=FAL_PROVIDER_ID, voice_voice="NATF2")
+        current = authenticated_client.get(VOICE_SETTINGS).json()
+        assert current["voice_model"] == "gpt-live-1"
+        assert current["voice_voice"] == "marin" and current["voice_provider_id"] is None
+        assert authenticated_client.put(VOICE_SETTINGS, json={"voice_provider_id":FAL_PROVIDER_ID}).status_code == 400
+        db.create_session(session_id="legacy-fal", profile_id="default", mode="voice", provider_id=FAL_PROVIDER_ID,
+            voice_config={"model":PERSONAPLEX_MODEL,"voice":"NATF2","provider_id":FAL_PROVIDER_ID,"options":{}})
         mint = AsyncMock(side_effect=AssertionError("must not mint a Realtime credential"))
         monkeypatch.setattr(voice, "_mint_client_secret", mint)
-        created = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={})
-        assert created.status_code == 200, created.text
-        sid = created.json()["session_id"]
-        assert created.json()["client_secret"] == ""
-        assert json.loads(db.get_session(sid)["voice_config"]) == {
-            "model": PERSONAPLEX_MODEL, "voice": "NATF2", "provider_id": FAL_PROVIDER_ID,
-            "options": {"instructions": ""}, "greet": True,
-        }
-        _enable_voice(voice_model="gpt-realtime", voice_voice="marin")
-        config = authenticated_client.get(f"{VOICE_ROOT}/sessions/{sid}/config").json()
-        assert config["model"] == PERSONAPLEX_MODEL
-        assert authenticated_client.post(f"{VOICE_ROOT}/sessions/{sid}/secret").json()["model"] == PERSONAPLEX_MODEL
-        assert authenticated_client.post(f"{VOICE_ROOT}/sessions/{sid}/call", json={"call_id": "rtc_fake"}).status_code == 400
+        assert authenticated_client.post(f"{VOICE_ROOT}/sessions/legacy-fal/secret").json()["model"] == PERSONAPLEX_MODEL
         mint.assert_not_called()
 
     def test_live_uses_client_delegation_and_persists_selected_model(self, authenticated_client, mock_db, monkeypatch):

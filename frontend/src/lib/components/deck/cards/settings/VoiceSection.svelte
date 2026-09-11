@@ -22,24 +22,18 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
-	import { AudioLines } from 'lucide-svelte';
+	import { AudioLines, Play, Square, LoaderCircle } from 'lucide-svelte';
 	import VoiceModelOptions from './VoiceModelOptions.svelte';
 	import {
-		VOICE_MODELS,
-		FAL_VOICE_PROVIDER,
-		getVoiceProviders,
+		previewVoice,
 		loadVoiceSettings,
 		saveVoiceSettings,
-		type VoiceProvider,
 		type VoiceSettings,
 	} from '$lib/api/voice';
 
 	let settings = $state<VoiceSettings | null>(null);
-	let providers = $state<VoiceProvider[]>([]);
 	let loading = $state(true);
 	let saving = $state(false);
-	const falSelected = $derived(settings?.voice_provider_id === FAL_VOICE_PROVIDER);
-	const models = $derived(VOICE_MODELS.filter(m => (m.id === 'fal-ai/personaplex/realtime') === falSelected));
 	const details = $derived(settings?.model_details?.model === settings?.voice_model ? settings?.model_details : undefined);
 	const voices = $derived(details?.voices ?? []);
 
@@ -52,6 +46,7 @@
 
 	// Free-text guard: non-null means the user is mid-edit and owns the field.
 	let pendingMinutes = $state<string | null>(null);
+	let pendingSilence = $state<string | null>(null);
 	const minutesValue = $derived(
 		pendingMinutes ?? String(settings?.voice_max_call_minutes ?? '')
 	);
@@ -72,17 +67,46 @@
 		}
 	}
 	watchResources(['settings'], refreshSettings);
-	onMount(async () => {
-		await refreshSettings();
-		if (!current()) return;
-		// A failed provider read is non-fatal: keep the setup pointer visible.
+	onMount(() => { void refreshSettings(); });
+
+	let previewing = $state<string | null>(null);
+	let previewLoading = $state(false);
+	let previewError = $state('');
+	let previewAbort: AbortController | null = null;
+	let audio: HTMLAudioElement | null = null;
+	const samples = new Map<string, string>();
+	function stopPreview() {
+		previewAbort?.abort(); previewAbort = null;
+		audio?.pause(); audio = null;
+		previewing = null; previewLoading = false;
+	}
+	async function playPreview(voice: string) {
+		const stopping = previewing === voice;
+		stopPreview(); previewError = '';
+		if (stopping) return;
+		const controller = new AbortController(); previewAbort = controller;
+		previewing = voice;
+		// Create the player in the user gesture, and reuse each downloaded sample.
+		const player = new Audio(); audio = player;
 		try {
-			const providerList = await getVoiceProviders();
-			if (current()) providers = providerList;
-		} catch (e) {
-			if (current()) console.warn('[voice] could not list eligible providers', e);
+			let url = samples.get(voice);
+			if (!url) {
+				previewLoading = true;
+				const blob = await previewVoice(voice, controller.signal);
+				if (!current() || controller.signal.aborted) return;
+				url = URL.createObjectURL(blob); samples.set(voice, url);
+			}
+			if (!current() || controller.signal.aborted) return;
+			previewLoading = false;
+			player.src = url;
+			player.onended = () => { if (audio === player) stopPreview(); };
+			player.onerror = () => { if (audio === player) { stopPreview(); previewError = 'Could not play this sample. Try again.'; } };
+			await player.play();
+		} catch (e: any) {
+			if (controller.signal.aborted || !current()) return;
+			stopPreview(); previewError = e?.detail || e?.message || 'Voice preview failed. Try again.';
 		}
-	});
+	}
 
 	async function save(patch: Parameters<typeof saveVoiceSettings>[0]) {
 		if (!current()) return false;
@@ -108,6 +132,20 @@
 		}
 	}
 
+	function commitSilence() {
+		const raw = pendingSilence;
+		if (raw === null) return;
+		const seconds = Number(raw.trim());
+		if (!raw.trim() || !Number.isInteger(seconds) || seconds < 1 || seconds > 60) {
+			error = 'Silence timeout must be a whole number from 1 to 60 seconds.';
+			return;
+		}
+		pendingSilence = null;
+		if (seconds !== (settings?.voice_input_silence_seconds ?? 5)) {
+			void save({ voice_input_silence_seconds: seconds });
+		}
+	}
+
 	function commitMinutes() {
 		const raw = pendingMinutes;
 		pendingMinutes = null;
@@ -124,6 +162,9 @@
 	onDestroy(() => {
 		alive = false;
 		++request;
+		stopPreview();
+		for (const url of samples.values()) URL.revokeObjectURL(url);
+		samples.clear();
 	});
 </script>
 
@@ -137,6 +178,34 @@
 	{:else if !settings}
 		<div class="set-row"><div class="lab"><p class="msg err">{error || 'Voice settings unavailable.'}</p></div></div>
 	{:else}
+		<section class="transcription-settings" aria-labelledby="transcription-heading">
+			<div class="voice-intro">
+				<h3 id="transcription-heading">Voice transcription</h3>
+				<p>Choose how the microphone button in the chat composer finishes dictation. These settings do not change voice calls or the global voice-input shortcut.</p>
+			</div>
+			<div class="set-row">
+				<div class="lab"><h4>Composer microphone mode</h4><p>Auto finishes after silence. Toggle keeps recording until you press the microphone again.</p></div>
+				<div class="ctl">
+					<select class="sel" aria-label="Composer microphone mode" value={settings.voice_input_mode ?? 'auto'} disabled={saving}
+						onchange={(e) => save({ voice_input_mode: e.currentTarget.value as 'auto' | 'toggle' })}>
+						<option value="auto">Auto</option>
+						<option value="toggle">Toggle</option>
+					</select>
+				</div>
+			</div>
+			{#if (settings.voice_input_mode ?? 'auto') === 'auto'}
+				<div class="set-row">
+					<div class="lab"><h4>Silence timeout (seconds)</h4><p>Finish dictation after this much silence following speech (1–60 seconds). Live transcription can appear while you speak.</p></div>
+					<div class="ctl">
+						<input type="number" min="1" max="60" step="1" class="inp minutes" aria-label="Silence timeout (seconds)"
+							value={pendingSilence ?? String(settings.voice_input_silence_seconds ?? 5)} disabled={saving}
+							oninput={(e) => pendingSilence = e.currentTarget.value} onblur={commitSilence}
+							onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
+					</div>
+				</div>
+			{/if}
+		</section>
+		<div class="voice-intro"><h3>Voice conversation</h3></div>
 		<div class="set-row">
 			<div class="lab">
 				<h4>Enable voice mode</h4>
@@ -155,72 +224,25 @@
 			</div>
 		</div>
 
-		<div class="set-row">
-			<div class="lab">
-				<h4>Provider</h4>
-
-			</div>
-			<div class="ctl">
-				{#if providers.length === 0}
-					<p class="msg err">
-						Add an OpenAI provider or a fal.ai API key in Settings.
-					</p>
-				{:else}
-					<select
-						class="sel"
-						value={settings.voice_provider_id ?? ''}
-						disabled={saving}
-						aria-label="Voice provider"
-						onchange={(e) => save({ voice_provider_id: e.currentTarget.value || null })}
-					>
-						<option value="">Automatic{providers.length === 1 ? ` (${providers[0].name})` : ''}</option>
-						{#each providers as provider}
-							<option value={provider.id}>{provider.name}</option>
-						{/each}
-					</select>
-				{/if}
-			</div>
+		<div class="voice-intro">
+			<h4>GPT Live</h4>
+			<p>Natural conversation, with quick questions answered directly. Tasks use your chat composer's selected model. Your configured OpenAI API provider funds voice calls.</p>
 		</div>
-
-		<div class="set-row">
-			<div class="lab">
-				<h4>Model</h4>
+		<fieldset class="voice-picker" disabled={saving || !details}>
+			<legend>Choose a voice</legend>
+			<div class="voice-grid">
+				{#each voices as voice}
+					<div class="voice-choice" class:selected={settings.voice_voice === voice.id}>
+						<label><input type="radio" name="agent-voice" value={voice.id} checked={settings.voice_voice === voice.id} onchange={() => save({voice_voice: voice.id})} /><span>{voice.label}</span></label>
+						<button type="button" class="preview-btn" aria-label={previewing === voice.id ? `Stop preview of ${voice.label}` : `Play ${voice.label} voice preview`} aria-pressed={previewing === voice.id} onclick={() => playPreview(voice.id)}>
+							{#if previewing === voice.id && previewLoading}<LoaderCircle size={15} class="spin" />{:else if previewing === voice.id}<Square size={14} />{:else}<Play size={15} />{/if}
+						</button>
+					</div>
+				{/each}
 			</div>
-			<div class="ctl">
-				<select
-					class="sel"
-					value={settings.voice_model}
-					disabled={saving}
-					aria-label="Realtime model"
-					onchange={(e) => save({ voice_model: e.currentTarget.value })}
-				>
-					{#each models as model}
-						<option value={model.id}>{model.label}</option>
-					{/each}
-				</select>
-			</div>
-		</div>
-
-		<div class="set-row">
-			<div class="lab">
-				<h4>Voice</h4>
-			</div>
-			<div class="ctl">
-				<select
-					class="sel"
-					value={settings.voice_voice}
-					disabled={saving || !details}
-					aria-label="Agent voice"
-					onchange={(e) => save({ voice_voice: e.currentTarget.value })}
-				>
-					{#if !details}<option value={settings.voice_voice}>{settings.voice_voice} (saved)</option>{/if}
-					{#each voices as voice}
-						<option value={voice.id}>{voice.label}</option>
-					{/each}
-				</select>
-
-			</div>
-		</div>
+		</fieldset>
+		{#if previewError}<p class="msg err" role="alert">{previewError}</p>{/if}
+		<p class="preview-status" role="status">{previewLoading ? 'Generating a short GPT Live sample…' : previewing ? 'Playing voice preview' : ''}</p>
 
 		<div class="set-row">
 			<div class="lab">
@@ -255,7 +277,7 @@
 		{#if details}
 			{#if settings.voice_options}
 				{#key settings.voice_model}
-					<VoiceModelOptions model={settings.voice_model} providerId={settings.voice_provider_id} options={settings.voice_options} {details} {saving} onSave={patch => save({voice_options:patch, voice_options_model:settings!.voice_model})} />
+					<VoiceModelOptions options={settings.voice_options} {details} {saving} onSave={patch => save({voice_options:patch, voice_options_model:settings!.voice_model})} />
 				{/key}
 			{/if}
 			<div class="model-details" data-testid="voice-model-details">
@@ -266,14 +288,7 @@
 						<div><dt>{setting.label}</dt><dd>{setting.value}</dd></div>
 					{/each}
 				</dl>
-				<h4>Voice agent system prompts</h4>
-				<p>{details.prompt_note}</p>
-				{#each details.prompts as prompt}
-					<details class="prompt">
-						<summary>{prompt.label}</summary>
-						<pre>{prompt.text}</pre>
-					</details>
-				{/each}
+
 			</div>
 		{/if}
 
@@ -283,11 +298,27 @@
 </div>
 
 <style>
+	.voice-intro { padding: 16px 14px; }
+	.voice-intro h4, .voice-intro h3 { margin: 0 0 6px; }
+	.transcription-settings { border-bottom: 1px solid var(--border); }
+	.voice-intro p { margin: 0; color: var(--text-3); font-size: 13px; line-height: 1.6; }
+	.voice-picker { border: 0; padding: 0 14px; margin: 0; min-width: 0; }
+	.voice-picker legend { font-size: 13px; font-weight: 500; margin-bottom: 10px; }
+	.voice-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 8px; }
+	.voice-choice { display: flex; align-items: center; border: 1px solid var(--border); border-radius: 8px; min-width: 0; }
+	.voice-choice.selected { border-color: var(--accent); background: var(--surface-2); }
+	.voice-choice label { flex: 1; display: flex; align-items: center; gap: 8px; padding: 12px 8px; cursor: pointer; font-size: 13px; }
+	.voice-choice input { accent-color: var(--accent); }
+	.preview-btn { display: grid; place-items: center; width: 40px; min-height: 44px; border: 0; border-radius: 6px; background: transparent; color: var(--text-2); cursor: pointer; }
+	.preview-btn:hover { color: var(--accent); background: var(--surface-2); }
+	.preview-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+	.preview-status { min-height: 18px; color: var(--text-3); font-size: 12px; }
+	:global(.preview-btn .spin) { animation: voice-spin 1s linear infinite; }
+	@keyframes voice-spin { to { transform: rotate(360deg); } }
+	@media (prefers-reduced-motion: reduce) { :global(.preview-btn .spin) { animation: none; } }
+
 	.minutes {
 		width: 110px;
-	}
-	.set-row .ctl .sel {
-		max-width: 260px;
 	}
 
 	.model-details { padding: 16px; border-top: 1px solid var(--border); min-width: 0; }
@@ -297,11 +328,7 @@
 	dl div { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
 	dt { color: var(--muted-foreground); }
 	dd { margin: 0; overflow-wrap: anywhere; }
-	.prompt { border: 1px solid var(--border); border-radius: 8px; margin-top: 8px; }
-	summary { padding: 12px; cursor: pointer; font-size: 13px; }
-	pre { margin: 0; padding: 0 12px 12px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 var(--font-mono, monospace); }
 	@media (max-width: 480px) {
 		dl div { grid-template-columns: minmax(0, 1fr); gap: 4px; }
-		.set-row .ctl .sel { max-width: 100%; }
 	}
 </style>

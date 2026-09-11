@@ -60,45 +60,63 @@ async def test_live_delegation_is_correlated_and_uses_accumulated_user_context(m
     delegate = AsyncMock(return_value="The answer is forty-two.")
     monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
     call = stream()
+    call.flush = AsyncMock()
     did = "delegation-1"
     call.upstream = Upstream([json.dumps(e) for e in [
-        {"type": "session.input_transcript.delta", "delta": "What is six times seven?", "end_ms": 1500},
+        {"type": "session.input_transcript.delta", "delta": "What is six", "end_ms": 1000},
+        {"type": "session.input_transcript.delta", "delta": " times seven?", "end_ms": 1500},
         {"type": "session.delegation.created", "delegation": {"id": did, "offset_ms": 1600}},
         {"type": "session.delegation.created", "delegation": {"id": did, "offset_ms": 1600}},
     ]])
     await call.receive_upstream()
     await call.delegation_task
-    delegate.assert_awaited_once_with("s1", "user: What is six times seven?\n")
+    call.flush.assert_awaited_once()
+    delegate.assert_awaited_once_with("s1", "Live conversation context (only the latest new request needs action):\nuser: What is six times seven?\n")
     assert json.loads(call.upstream.sent[0]) == {
         "type": "session.commentary.append", "delegation_id": did, "content": "The answer is forty-two.",
     }
 
 
 @pytest.mark.asyncio
-async def test_selected_provider_model_is_the_worker_binding(monkeypatch):
-    from app.core import provider_agent
-    selected = "prov:chosen-provider:chosen-model"
-    monkeypatch.setattr(voice_stream.database, "get_session", lambda _: {"model": selected, "profile_id": "profile-1", "effort": "high"})
+@pytest.mark.parametrize("selected,provider", [("prov:chosen-provider:chosen-model", "chosen-provider"), ("haiku", None)])
+async def test_handoff_reuses_same_session_and_composer_binding(monkeypatch, selected, provider):
+    from app.core import provider_agent, turn_manager
+    monkeypatch.setattr(voice_stream.database, "get_session", lambda _: {
+        "model": selected, "profile_id": "profile-1", "effort": "high",
+        "provider_id": "voice-funding-provider", "permission_mode": "default", "fast": True,
+    })
     monkeypatch.setattr(provider_agent, "validate_provider_model", lambda *args: SimpleNamespace(ok=True))
-    dispatch = AsyncMock(return_value=SimpleNamespace(ok=True, report="Done"))
+    dispatch = AsyncMock()
     monkeypatch.setattr(provider_agent, "dispatch_worker", dispatch)
+    submit = AsyncMock(return_value="turn-1")
+    monkeypatch.setattr(turn_manager, "submit_async", submit)
+    monkeypatch.setattr(turn_manager, "wait_settled", AsyncMock(return_value={"state": "completed"}))
+    monkeypatch.setattr(voice_stream, "_turn_reply", lambda session, turn: "Done" if (session, turn) == ("s1", "turn-1") else "wrong turn")
     assert await voice_stream.delegate_to_selected_model("s1", "user: test") == "Done"
-    kwargs = dispatch.await_args.kwargs
-    assert (kwargs["provider_id"], kwargs["model_id"], kwargs["inherited_effort"]) == ("chosen-provider", "chosen-model", "high")
-    assert kwargs["suppress_caller_wake"]() is True
+    assert submit.await_args.args == ("s1", "user")
+    assert submit.await_args.kwargs["payload"] == {"user_message_already_recorded":True}
+    overrides = submit.await_args.kwargs["overrides"]
+    assert (overrides["provider"], overrides["model"], overrides["effort"]) == (provider, selected, "high")
+    assert overrides["permission_mode"] == "default" and overrides["fast"] is True
+    dispatch.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_native_delegation_does_not_use_the_voice_funding_provider(monkeypatch):
-    from app.core import provider_agent
-    monkeypatch.setattr(voice_stream.database, "get_session", lambda _: {
-        "model": "haiku", "profile_id": "profile-1", "provider_id": "voice-funding-provider",
-    })
-    dispatch = AsyncMock(return_value=SimpleNamespace(ok=True, report="Done"))
-    monkeypatch.setattr(provider_agent, "dispatch_worker", dispatch)
-    await voice_stream.delegate_to_selected_model("s1", "user: test")
-    assert dispatch.await_args.kwargs["provider_id"] is None
-    assert dispatch.await_args.kwargs["model_id"] == "haiku"
+@pytest.mark.parametrize("state", [None, "parked", "aborted"])
+async def test_handoff_never_reports_success_before_completion(monkeypatch, state):
+    from app.core import turn_manager
+    monkeypatch.setattr(voice_stream.database, "get_session", lambda _: {"model": "haiku", "profile_id": "p"})
+    monkeypatch.setattr(turn_manager, "submit_async", AsyncMock(return_value="turn"))
+    monkeypatch.setattr(turn_manager, "wait_settled", AsyncMock(return_value={"state": state} if state else None))
+    reply = await voice_stream.delegate_to_selected_model("s1", "test")
+    assert "No final result" in reply or "stopped or failed" in reply
+
+
+def test_commentary_chunks_preserve_complete_unicode_results():
+    text = "A verified result. " + "世界🌎" * 200
+    chunks = list(voice_stream.commentary_chunks(text))
+    assert "".join(chunks) == text
+    assert all(len(chunk.encode("utf-8")) <= 400 for chunk in chunks)
 
 
 @pytest.mark.asyncio
@@ -158,3 +176,22 @@ def test_live_session_uses_client_delegation_not_realtime_tools():
     assert config["delegation"] == {"type": "client"}
     assert config["audio"]["format"]["rate"] == 24000
     assert "tools" not in config
+
+def test_live_prompt_only_delegates_when_backend_help_is_needed():
+    from app.core.voice_prompts import LIVE_INSTRUCTIONS
+    assert "Answer directly" in LIVE_INSTRUCTIONS
+    assert "Stopping speech does not cancel an action" in LIVE_INSTRUCTIONS
+    assert "careful reasoning" in LIVE_INSTRUCTIONS
+
+
+def test_turn_reply_filters_other_turns_reasoning_and_pre_tool_commentary(monkeypatch):
+    from app.db import session_events
+    events = [
+        {"seq":1,"turn_id":"target","event_type":"assistant.text_delta","payload":{"text":"Checking…"}},
+        {"seq":2,"turn_id":"target","event_type":"tool.result","payload":{}},
+        {"seq":3,"turn_id":"target","event_type":"assistant.thinking_delta","payload":{"text":"private reasoning"}},
+        {"seq":4,"turn_id":"other","event_type":"assistant.text_delta","payload":{"text":"Other turn"}},
+        {"seq":5,"turn_id":"target","event_type":"assistant.text_delta","payload":{"text":"Verified result."}},
+    ]
+    monkeypatch.setattr(session_events, "get_events", lambda sid, from_seq, limit: [e for e in events if e["seq"] > from_seq])
+    assert voice_stream._turn_reply("session", "target") == "Verified result."

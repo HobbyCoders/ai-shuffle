@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import type { SttStreamHandlers } from './sttStream';
 
-const mocks = vi.hoisted(() => ({ start: vi.fn(), capability: vi.fn() }));
+const mocks = vi.hoisted(() => ({ start: vi.fn(), capability: vi.fn(), settings: vi.fn() }));
+vi.mock('$lib/api/voice', () => ({ loadVoiceSettings: mocks.settings }));
 vi.mock('$app/environment', () => ({ browser: true }));
 vi.mock('./keyboard', () => ({ registerShortcut: vi.fn() }));
 vi.mock('$lib/stores/hotkeyPreferences.svelte', () => ({ hotkeyPreferences: {} }));
@@ -16,6 +17,7 @@ describe('composer live transcription delivery', () => {
 	let session: { stop: ReturnType<typeof vi.fn>; abort: ReturnType<typeof vi.fn>; getText: ReturnType<typeof vi.fn> };
 	beforeEach(() => {
 		vi.useFakeTimers();
+		mocks.settings.mockResolvedValue({ voice_input_mode: 'auto', voice_input_silence_seconds: 5 });
 		mocks.capability.mockResolvedValue({ supported: true, model_name: 'GPT Live Transcribe', partials: true });
 		session = { stop: vi.fn().mockResolvedValue('Hello world.'), abort: vi.fn(), getText: vi.fn() };
 		mocks.start.mockImplementation(async (callbacks: SttStreamHandlers) => { handlers = callbacks; callbacks.onCapture?.(); return session; });
@@ -34,6 +36,55 @@ describe('composer live transcription delivery', () => {
 			expect(get(globalSttState)).toMatchObject({ mode: 'idle', isPreparing: false,
 				isRecording: false, error: 'Add an OpenAI API key in Providers.' });
 		} finally { vi.unstubAllGlobals(); }
+	});
+	it('toggle mode stays open through no speech and long pauses, then commits on a second press', async () => {
+		mocks.settings.mockResolvedValue({ voice_input_mode: 'toggle', voice_input_silence_seconds: 1 });
+		const onCommit = vi.fn();
+		toggleVoiceInput(vi.fn(), { onText: vi.fn(), onCommit });
+		await vi.advanceTimersByTimeAsync(15000);
+		expect(get(globalSttState).isRecording).toBe(true);
+		handlers.onSpeech?.(true);
+		handlers.onSpeech?.(false);
+		await vi.advanceTimersByTimeAsync(60000);
+		expect(session.stop).not.toHaveBeenCalled();
+		toggleVoiceInput(vi.fn());
+		await vi.advanceTimersByTimeAsync(0);
+		expect(session.stop).toHaveBeenCalledOnce();
+		expect(onCommit).toHaveBeenCalledOnce();
+	});
+	it.each([true, false])('uses the saved timeout and resets it when speech resumes (server VAD: %s)', async (serverVad) => {
+		mocks.settings.mockResolvedValue({ voice_input_mode: 'auto', voice_input_silence_seconds: 2 });
+		mocks.start.mockImplementation(async (callbacks: SttStreamHandlers) => {
+			handlers = callbacks;
+			callbacks.onReady?.({ model: 'test', modelName: 'Test', partials: true, serverVad });
+			callbacks.onCapture?.(); return session;
+		});
+		toggleVoiceInput(vi.fn());
+		await vi.advanceTimersByTimeAsync(0);
+		handlers.onSpeech?.(true); handlers.onSpeech?.(false);
+		await vi.advanceTimersByTimeAsync(1000);
+		handlers.onSpeech?.(true);
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(session.stop).not.toHaveBeenCalled();
+		handlers.onSpeech?.(false);
+		await vi.advanceTimersByTimeAsync((serverVad ? 1300 : 2000) - 1);
+		expect(session.stop).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
+		expect(session.stop).toHaveBeenCalledOnce();
+	});
+	it('does not capture when settings fail or resolve after cancellation', async () => {
+		mocks.settings.mockRejectedValueOnce(new Error('offline'));
+		toggleVoiceInput(vi.fn());
+		await vi.advanceTimersByTimeAsync(0);
+		expect(mocks.start).not.toHaveBeenCalled();
+		expect(get(globalSttState).error).toContain('settings');
+		let resolve!: (value: object) => void;
+		mocks.settings.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+		toggleVoiceInput(vi.fn());
+		cancelVoiceInput();
+		resolve({voice_input_mode: 'toggle'});
+		await vi.advanceTimersByTimeAsync(0);
+		expect(mocks.start).not.toHaveBeenCalled();
 	});
 	it('Discard invokes removal, never commits, and rejects late speech', async () => {
 		const onText = vi.fn(); const onCommit = vi.fn(); const onDiscard = vi.fn();

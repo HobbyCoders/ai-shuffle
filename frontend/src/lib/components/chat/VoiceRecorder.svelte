@@ -9,7 +9,8 @@
 	 *
 	 * For composer dictation, live text is written
 	 * straight into the composer through the `live` sink below, so the editor IS
-	 * the feedback, and the recording ends on its own when you stop speaking.
+	 * the feedback. Voice settings choose automatic silence detection or a second
+	 * button press to finish recording.
 	 */
 	import { onDestroy } from 'svelte';
 	import Banner from '$lib/components/Banner.svelte';
@@ -148,7 +149,7 @@
 		title={isPreparing
 			? 'Starting…'
 			: isRecording
-				? 'Listening — stops on its own when you finish'
+				? 'Listening — click to finish dictation'
 				: isTranscribing
 					? 'Transcribing…'
 					: 'Voice input'}

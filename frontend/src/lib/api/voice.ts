@@ -29,38 +29,18 @@ import { sessionOwnerBoundary, sessionOwnerEpoch } from '$lib/stores/session-own
 // Types
 // ============================================================================
 
-/** The realtime models a voice session may run on (backend allowlist). */
-export const VOICE_MODELS = [
-	{
-		id: 'gpt-live-1',
-		label: 'GPT Live 1',
-		hint: 'Voice with your selected delegation model',
-	},
-	{
-		id: 'gpt-realtime-2.1',
-		label: 'GPT Realtime 2.1',
-		hint: 'Best quality · about $0.05–0.45 per minute',
-	},
-	{
-		id: 'gpt-realtime-2.1-mini',
-		label: 'GPT Realtime 2.1 Mini',
-		hint: 'Cheapest · about $0.01–0.05 per minute',
-	},
-	{
-		id: 'gpt-realtime-2',
-		label: 'GPT Realtime 2',
-		hint: 'Realtime voice and tools',
-	},
-	{
-		id: 'gpt-realtime',
-		label: 'GPT Realtime (legacy)',
-		hint: 'Previous generation',
-	},
-	{ id: 'fal-ai/personaplex/realtime', label: 'PersonaPlex', hint: 'Full-duplex conversation · no connected tools' },
-] as const;
+/** Labels for current and already-pinned legacy calls, not model choices. */
+const voiceModelLabels: Record<string, string> = {
+ 'gpt-live-1': 'GPT Live 1',
+ 'gpt-realtime-2.1': 'GPT Realtime 2.1',
+ 'gpt-realtime-2.1-mini': 'GPT Realtime 2.1 Mini',
+ 'gpt-realtime-2': 'GPT Realtime 2',
+ 'gpt-realtime': 'GPT Realtime (legacy)',
+ 'fal-ai/personaplex/realtime': 'PersonaPlex',
+};
+export { usesDelegation, usesAudioStream } from '$lib/constants/voice-engines';
+export const voiceModelLabel = (model: string): string => voiceModelLabels[model] ?? model;
 
-export { FAL_VOICE_PROVIDER, usesDelegation, usesAudioStream } from '$lib/constants/voice-engines';
-export const voiceModelLabel = (model: string): string => VOICE_MODELS.find(m => m.id === model)?.label ?? model;
 export interface VoiceOptions {
  instructions?: string;
  transcription_model?: string;
@@ -72,6 +52,7 @@ export interface VoiceOptions {
  silence_duration_ms?: number;
  idle_timeout_ms?: number | null;
  opening?: string;
+ /** Read-only compatibility for already-pinned legacy calls. Not voice settings. */
  delegation_type?: 'client' | 'responses';
  delegation_model?: string;
  delegation_effort?: string;
@@ -88,7 +69,7 @@ export interface VoiceModelDetails {
 	transport: 'stream' | 'webrtc';
 	runtime_settings: { label: string; value: string }[];
 	transcription_models?: string[];
-	prompts: { label: string; text: string }[];
+	prompts: { label: string; text: string; key?: 'instructions' | 'delegation_instructions'; default_text?: string }[];
 	prompt_note: string;
 	preview_note: string;
 }
@@ -102,6 +83,8 @@ export interface VoiceSettings {
 	voice_voice: string;
 	voice_provider_id: string | null;
 	voice_max_call_minutes: number;
+	voice_input_mode?: 'auto' | 'toggle';
+	voice_input_silence_seconds?: number;
 	/** May the voice agent manage automations, hooks, agents, MCP servers and connectors directly? */
 	voice_app_tools_enabled: boolean;
 }
@@ -115,6 +98,8 @@ export interface VoiceSettingsUpdate {
 	voice_voice?: string;
 	voice_provider_id?: string | null;
 	voice_max_call_minutes?: number;
+	voice_input_mode?: 'auto' | 'toggle';
+	voice_input_silence_seconds?: number;
 	voice_app_tools_enabled?: boolean;
 }
 
@@ -290,11 +275,12 @@ export function getVoiceAgents(): Promise<VoiceAgent[]> {
  * Returns the raw audio as a Blob — the ApiClient only speaks JSON, so this
  * goes through fetch directly (same cookie auth, same error shape).
  */
-export async function previewVoice(voice: string): Promise<Blob> {
+export async function previewVoice(voice: string, signal?: AbortSignal): Promise<Blob> {
 	const response = await fetch(`${apiBase()}/voice/preview`, withAuth({
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ voice }),
+		signal,
 	}));
 	if (!response.ok) {
 		let detail = `Voice preview failed (HTTP ${response.status})`;

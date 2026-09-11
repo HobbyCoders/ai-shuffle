@@ -24,7 +24,7 @@
 	const delegated = $derived(mine && usesDelegation(call.model, call.options));
 	const realtime = $derived(mine && !!call.model && !usesAudioStream(call.model));
 	const engineLabel = $derived(mine && call.model ? voiceModelLabel(call.model) : 'Voice agent');
-	const modeLabel = $derived(delegated ? 'Selected-model delegation' : call.model === 'gpt-live-1' ? 'OpenAI Responses delegation' : realtime ? (call.options?.turn_detection === 'server_vad' ? 'Realtime agent tools · Normal VAD' : 'Realtime agent tools') : 'Full-duplex conversation');
+	const modeLabel = $derived(delegated ? 'Conversation + your chat agent' : call.model === 'gpt-live-1' ? 'OpenAI Responses delegation' : realtime ? (call.options?.turn_detection === 'server_vad' ? 'Realtime agent tools · Normal VAD' : 'Realtime agent tools') : 'Full-duplex conversation');
 
 	const statusLabel = $derived(
 		status === 'live'

@@ -202,7 +202,6 @@
 	const modelValue = $derived($activeSession.modelOverride ?? getDefaultModel());
 	let voiceEngine = $state<string | null>(null);
 	let voiceOptions = $state<VoiceOptions | undefined>(undefined);
-	let voiceDefaultsInitialized = false;
 	let voiceRevision = $state(0);
 	watchResources(['settings'], () => { voiceRevision++; });
 	const voiceLane = $derived($activeSession.mode === 'voice');
@@ -210,7 +209,6 @@
 	$effect(() => {
 		const id = $activeSession.sessionId;
 		const voice = voiceLane;
-		if (id || !voice) voiceDefaultsInitialized = false;
 		void voiceRevision;
 		let stale = false;
 		voiceEngine = null;
@@ -219,13 +217,7 @@
 			void request.then(config => {
 				if (stale) return;
 				voiceEngine = config.model; voiceOptions = config.options;
-				if (!id && !voiceDefaultsInitialized && usesDelegation(config.model, config.options)) {
-					voiceDefaultsInitialized = true;
-					if (config.options?.delegation_model) {
-						activeSession.setModelOverride(config.options.delegation_model);
-						activeSession.setEffortLevelOverride(config.options.delegation_effort || null);
-					}
-				}
+
 			}).catch(() => {});
 		}
 		return () => { stale = true; };
@@ -529,7 +521,7 @@
 				class:warn={rerouted && !voiceLane}
 				disabled={modelLocked}
 				onclick={() => { if (!modelLocked) togglePopover('model'); }}
-				title={modelLocked ? `Voice model: ${modelButtonLabel}` : modelWarnTitle ?? `Delegation model: ${modelButtonLabel}`}
+				title={modelLocked ? `Voice model: ${modelButtonLabel}` : modelWarnTitle ?? `Chat model: ${modelButtonLabel}`}
 				aria-haspopup="listbox"
 				aria-expanded={openPopover === 'model'}
 				aria-label="Model: {modelButtonLabel}"

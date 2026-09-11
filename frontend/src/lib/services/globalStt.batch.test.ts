@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 
+const settings = vi.hoisted(() => vi.fn());
+vi.mock('$lib/api/voice', () => ({ loadVoiceSettings: settings }));
 vi.mock('$app/environment', () => ({ browser: true }));
 vi.mock('./keyboard', () => ({ registerShortcut: vi.fn() }));
 vi.mock('$lib/stores/hotkeyPreferences.svelte', () => ({ hotkeyPreferences: {} }));
@@ -9,7 +11,7 @@ vi.mock('./sttStream', () => ({
 	fetchSttCapability: vi.fn().mockResolvedValue({ supported: false, accepts_compressed: true }),
 	startSttStream: vi.fn(), SttUnsupportedError: class extends Error {}
 }));
-import { cancelVoiceInput, globalSttState, triggerToggle } from './globalStt';
+import { cancelVoiceInput, globalSttState, triggerToggle, toggleVoiceInput } from './globalStt';
 import { playEarcon } from '$lib/utils/earcon';
 
 describe('batch voice input automatic finish', () => {
@@ -46,6 +48,7 @@ describe('batch voice input automatic finish', () => {
 
 	beforeEach(() => {
 		vi.useFakeTimers();
+		settings.mockResolvedValue({voice_input_mode:'auto', voice_input_silence_seconds:5});
 		volume = 0;
 		requests = [];
 		stopTrack = vi.fn();
@@ -79,6 +82,36 @@ describe('batch voice input automatic finish', () => {
 		vi.clearAllMocks();
 	});
 
+	it('composer toggle ignores silence until a second click and still uploads the recording', async () => {
+		settings.mockResolvedValue({voice_input_mode:'toggle'});
+		const sink = vi.fn();
+		toggleVoiceInput(sink);
+		await vi.advanceTimersByTimeAsync(13000);
+		expect(get(globalSttState).isRecording).toBe(true);
+		volume = 0.1;
+		await vi.advanceTimersByTimeAsync(600);
+		volume = 0;
+		await vi.advanceTimersByTimeAsync(10000);
+		expect(requests).toHaveLength(0);
+		toggleVoiceInput(sink);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(requests).toHaveLength(1);
+		requests[0].onload();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(sink).toHaveBeenCalledWith('Batch transcript.');
+	});
+	it('composer auto uses the saved silence timeout', async () => {
+		settings.mockResolvedValue({voice_input_mode:'auto', voice_input_silence_seconds:2});
+		toggleVoiceInput(vi.fn());
+		await vi.advanceTimersByTimeAsync(0);
+		volume = 0.1;
+		await vi.advanceTimersByTimeAsync(600);
+		volume = 0;
+		await vi.advanceTimersByTimeAsync(2049);
+		expect(get(globalSttState).isRecording).toBe(true);
+		await vi.advanceTimersByTimeAsync(2);
+		expect(requests).toHaveLength(1);
+	});
 	it('resumes the audio context and automatically transcribes after quiet without animation frames', async () => {
 		triggerToggle();
 		await vi.advanceTimersByTimeAsync(0);
