@@ -21,6 +21,9 @@ class SettingsActivity : NativeScreen() {
         row("Phone tools", "App control, timers and permissions", R.drawable.ic_phone) {
             startActivity(Intent(this, ToolSettingsActivity::class.java))
         }
+        row("Explore offline demo", "Try sample conversations without an account or worker", R.drawable.ic_shuffle) {
+            startActivity(Intent(this, OfflineDemoActivity::class.java))
+        }
         link("Version and release notes") {
             openReleaseNotes("https://github.com/HobbyCoders/ai-shuffle/releases/tag/android-latest")
         }

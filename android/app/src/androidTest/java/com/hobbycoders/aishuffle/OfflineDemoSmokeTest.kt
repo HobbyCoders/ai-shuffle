@@ -9,11 +9,17 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.click
+import androidx.test.espresso.action.ViewActions.scrollTo
+import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
+import androidx.test.espresso.assertion.ViewAssertions.matches
+import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
+import androidx.test.espresso.matcher.ViewMatchers.withContentDescription
 import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.hobbycoders.aishuffle.account.AccountStore
 import com.hobbycoders.aishuffle.data.ServerStore
+import com.hobbycoders.aishuffle.model.Server
 import com.hobbycoders.aishuffle.tools.DeviceToolsRuntime
 import com.hobbycoders.aishuffle.tools.ToolsPreferences
 import com.hobbycoders.aishuffle.ui.OfflineDemoActivity
@@ -47,20 +53,56 @@ class OfflineDemoSmokeTest {
             while (evaluate(scenario, code) != "true") kotlinx.coroutines.delay(100)
         }
     }
-    @Test fun publicEntryNeedsNoAccountAndReturnsToWelcome() {
+    @Test fun settingsEntryNeedsNoAccountAndReturnsToSettings() {
         instrumentation.runOnMainSync {
             DeviceToolsRuntime.stop(); ToolsPreferences(context).setEnabled(false)
             AccountStore(context).clear()
             ServerStore.get(context).apply { getAll().forEach { remove(it.id) } }
         }
         ActivityScenario.launch<ServerListActivity>(Intent(context, ServerListActivity::class.java)).use {
-            onView(withText("Explore offline demo")).perform(click())
-            onView(withText("Exit offline demo")).perform(click())
-            onView(withText("Explore offline demo")).perform(click())
-            onView(withText("Exit offline demo")).perform(click())
+            onView(withText("Explore offline demo")).check(doesNotExist())
+            onView(withContentDescription("Settings")).perform(click())
+            repeat(2) {
+                onView(withText("Explore offline demo")).perform(scrollTo(), click())
+                onView(withText("Exit offline demo")).perform(click())
+                onView(withText("Settings")).check(matches(isDisplayed()))
+            }
+            onView(withContentDescription("Back")).perform(click())
+            onView(withText("Welcome to Shuffle")).check(matches(isDisplayed()))
+            onView(withText("Explore offline demo")).check(doesNotExist())
         }
         assertNull(AccountStore(context).session())
         assertTrue(ServerStore.get(context).getAll().isEmpty())
+    }
+    @Test fun workerListOpensDemoOnlyThroughSettings() {
+        val server = Server("demo-navigation", "Demo navigation worker", "https://worker.invalid", "test-key", "test-device")
+        instrumentation.runOnMainSync {
+            DeviceToolsRuntime.stop(); ToolsPreferences(context).setEnabled(false)
+            AccountStore(context).clear()
+            ServerStore.get(context).apply {
+                getAll().forEach { remove(it.id) }
+                add(server)
+            }
+        }
+        try {
+            PresenceFixture().use {
+                ActivityScenario.launch<ServerListActivity>(Intent(context, ServerListActivity::class.java)).use {
+                    onView(withText("Workers")).check(matches(isDisplayed()))
+                    onView(withText("Explore offline demo")).check(doesNotExist())
+                    onView(withContentDescription("Settings")).perform(click())
+                    onView(withText("Explore offline demo")).perform(scrollTo(), click())
+                    onView(withText("Exit offline demo")).perform(click())
+                    onView(withText("Settings")).check(matches(isDisplayed()))
+                    onView(withContentDescription("Back")).perform(click())
+                    onView(withText("Workers")).check(matches(isDisplayed()))
+                    onView(withText("Explore offline demo")).check(doesNotExist())
+                }
+            }
+            assertEquals(listOf(server), ServerStore.get(context).getAll())
+            assertNull(AccountStore(context).session())
+        } finally {
+            instrumentation.runOnMainSync { ServerStore.get(context).remove(server.id) }
+        }
     }
     @Test fun realBundleComposesResetsAndBlocksNetworkAcrossRotation() {
         val servers = ServerStore.get(context).getAll()

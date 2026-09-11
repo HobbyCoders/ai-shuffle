@@ -94,7 +94,6 @@ class ServerListActivity : NativeScreen() {
             button("Sign in", primary = true) { openAccount("login") }
             button("Create account") { openAccount("create") }
             link("Use another device") { openAccount("pair") }
-            button("Explore offline demo") { startActivity(Intent(this, OfflineDemoActivity::class.java)) }
             gap(24)
             row("Connect a worker", "Use a URL and pairing code, or scan a QR code.", R.drawable.ic_worker) { addWorker() }
             text("You can connect directly without an account.", 13f).apply {
@@ -113,7 +112,6 @@ class ServerListActivity : NativeScreen() {
         }
         navigationAction(R.drawable.ic_add, "Add worker") { addWorker() }
         content.removeAllViews(); status.text = ""
-        button("Explore offline demo") { startActivity(Intent(this, OfflineDemoActivity::class.java)) }
         text(if (account != null) "Signed in as ${account.username}" else "Connected to this phone", 14f).setTextColor(color(R.color.slate))
         gap(12)
         if (account != null && account.profileComplete != true) {
