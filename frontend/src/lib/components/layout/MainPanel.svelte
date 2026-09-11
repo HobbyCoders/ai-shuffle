@@ -45,6 +45,8 @@
 	import { notify } from '$lib/stores/notifications';
 	import { Download } from 'lucide-svelte';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
+	import { sidePanel, sessionPanelKey, type SidePanelView } from '$lib/stores/side-panel.svelte';
+	import SessionSidePanel from './SessionSidePanel.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { gitOperations, gitOperationRunning } from '$lib/stores/gitOperations.svelte';
 	import GitProgressPopover from '$lib/components/git/GitProgressPopover.svelte';
@@ -80,7 +82,6 @@
 		IDLE_PRELOAD_ORDER,
 		BrowserSidePanel,
 		ChangedFilesPanelLazy,
-		DiffViewerLazy,
 		CreateBranchModalLazy,
 		InitRepoModalLazy,
 		type FeaturePanelKey
@@ -209,16 +210,7 @@
 		};
 	});
 
-	// The live-browser panel only mounts once the user has actually opened it;
-	// hovering the toggle prefetches the chunk so the first open is instant.
-	let browserPanelEverOpened = $state(false);
-	$effect(() => {
-		if (sessionBrowser.open) browserPanelEverOpened = true;
-	});
-
-	// Same treatment for the git review surfaces: they are modal, so they mount
-	// on first use and stay mounted afterwards (open/close is a prop).
-	let changedFilesEverOpened = $state(false);
+	// Git dialogs mount on first use.
 	let createBranchEverOpened = $state(false);
 	let initRepoEverOpened = $state(false);
 
@@ -284,19 +276,19 @@
 	// Init repo modal state
 	let showInitRepoModal = $state(false);
 
-	// Changed files panel state
-	let showChangedFilesPanel = $state(false);
-	let reviewMode = $state(false);
-	let selectedDiffFile = $state<import('$lib/api/git').FileChangeInfo | null>(null);
-
-	function handleViewDiff(file: import('$lib/api/git').FileChangeInfo) {
-		selectedDiffFile = file;
+	// Visibility is scoped, so switching sessions cannot show another checkout's diff.
+	const panelScope = $derived(activeTab?.sessionId ? sessionPanelKey(activeTab.sessionId) : null);
+	const activeSidePanel = $derived(sidePanel.forScope(panelScope));
+	function selectSidePanel(view: SidePanelView) {
+		if (view === 'browser') browserPanel.openPanel(activeTab?.sessionId ?? null);
+		else {
+			sidePanel.open(panelScope, 'changes');
+			git.refreshChangedFiles();
+		}
 	}
-
-	function closeChangedFilesPanel() {
-		showChangedFilesPanel = false;
-		reviewMode = false;
-		selectedDiffFile = null;
+	function closeSidePanel() {
+		if (activeSidePanel.active === 'browser') browserPanel.closePanel(activeTab?.sessionId ?? null);
+		else sidePanel.close(panelScope);
 	}
 
 	function handleRepoInitialized() {
@@ -911,7 +903,7 @@
 				onClickPull={handlePull}
 				onClickInitRepo={() => { initRepoEverOpened = true; showInitRepoModal = true; }}
 				onClickShipIt={handleShipIt}
-				onOpenDiffReview={() => { changedFilesEverOpened = true; showChangedFilesPanel = true; reviewMode = true; git.refreshChangedFiles(); }}
+				onOpenDiffReview={() => selectSidePanel('changes')}
 			/>
 			<GitProgressPopover />
 		</div>
@@ -950,74 +942,88 @@
 		</StudioTopBar>
 	{/if}
 
-	{#if $activeView}
-		{#if showChatSurface}
-			<div class="chat-row">
-				<div class="chat-browser-underlay" inert={sessionBrowser.open && sessionBrowser.expanded}>
-				<ChatView
-					onBrowserToggle={$activeView?.type === 'session' && activeTab?.sessionId
-						? () => browserPanel.toggle(activeTab?.sessionId ?? null)
-						: undefined}
-					onBrowserPreload={() => BrowserSidePanel.preload()}
-					browserOpen={sessionBrowser.open}
-				/>
-				</div>
-				{#if activeTab?.sessionId && browserPanelEverOpened}
-					<LazyPanel
-						handle={BrowserSidePanel}
-						props={{ sessionId: activeTab.sessionId }}
-						label="the live browser"
-						bare
+	<div class="main-content">
+		<div class="main-surface" inert={!!activeSidePanel.active && (activeSidePanel.expanded || isMobile)}>
+		{#if $activeView}
+			{#if showChatSurface}
+				<div class="chat-row">
+					<div class="chat-browser-underlay">
+					<ChatView
+						onBrowserToggle={$activeView?.type === 'session' && activeTab?.sessionId
+							? () => browserPanel.toggle(activeTab?.sessionId ?? null)
+							: undefined}
+						onBrowserPreload={() => BrowserSidePanel.preload()}
+						browserOpen={sessionBrowser.open}
 					/>
-				{/if}
+					</div>
+				</div>
+			{/if}
+			<!--
+				Feature panels are lazily imported AND kept alive: the active one plus
+				the previous one stay mounted, the inactive one hidden. Revisiting a
+				panel is then a same-frame render with no refetch (R14).
+			-->
+			{#each mountedPanels as key (key)}
+				<div class="feature-panel" class:is-inactive={key !== featureKey} inert={key !== featureKey}>
+					<FeaturePanelHost active={key === featureKey}>
+					{#if key === 'build'}
+						<LazyPanel
+							handle={panelForKey('build')}
+							props={{ requestedSub: buildRequestedSub, requestedItemId: buildRequestedItemId }}
+							label="Build"
+						/>
+					{:else if key === 'project'}
+						<LazyPanel handle={panelForKey('project')} label="Projects" />
+					{:else if key === 'settings'}
+						<LazyPanel handle={panelForKey('settings')} label="Settings" />
+					{:else if key === 'file-browser'}
+						<LazyPanel handle={panelForKey('file-browser')} label="Files" />
+					{:else if key === 'notes'}
+						<LazyPanel handle={panelForKey('notes')} label="Notes" />
+					{:else if key === 'automations'}
+						<LazyPanel handle={panelForKey('automations')} label="Automations" />
+					{:else if key === 'stats'}
+						<LazyPanel
+							handle={panelForKey('stats')}
+							props={{ onSessionClick: onOpenSession || (() => {}) }}
+							label="Stats"
+						/>
+					{:else if key === 'docs'}
+						<LazyPanel
+							handle={panelForKey('docs')}
+							props={{ mobile: isMobile }}
+							label="Documentation"
+						/>
+					{/if}
+					</FeaturePanelHost>
+				</div>
+			{/each}
+		{:else}
+			<!-- Default landing: a fresh chat (the Sessions board is retired) -->
+			<div class="chat-row">
+				<ChatView />
 			</div>
 		{/if}
-		<!--
-			Feature panels are lazily imported AND kept alive: the active one plus
-			the previous one stay mounted, the inactive one hidden. Revisiting a
-			panel is then a same-frame render with no refetch (R14).
-		-->
-		{#each mountedPanels as key (key)}
-			<div class="feature-panel" class:is-inactive={key !== featureKey} inert={key !== featureKey}>
-				<FeaturePanelHost active={key === featureKey}>
-				{#if key === 'build'}
-					<LazyPanel
-						handle={panelForKey('build')}
-						props={{ requestedSub: buildRequestedSub, requestedItemId: buildRequestedItemId }}
-						label="Build"
-					/>
-				{:else if key === 'project'}
-					<LazyPanel handle={panelForKey('project')} label="Projects" />
-				{:else if key === 'settings'}
-					<LazyPanel handle={panelForKey('settings')} label="Settings" />
-				{:else if key === 'file-browser'}
-					<LazyPanel handle={panelForKey('file-browser')} label="Files" />
-				{:else if key === 'notes'}
-					<LazyPanel handle={panelForKey('notes')} label="Notes" />
-				{:else if key === 'automations'}
-					<LazyPanel handle={panelForKey('automations')} label="Automations" />
-				{:else if key === 'stats'}
-					<LazyPanel
-						handle={panelForKey('stats')}
-						props={{ onSessionClick: onOpenSession || (() => {}) }}
-						label="Stats"
-					/>
-				{:else if key === 'docs'}
-					<LazyPanel
-						handle={panelForKey('docs')}
-						props={{ mobile: isMobile }}
-						label="Documentation"
-					/>
-				{/if}
-				</FeaturePanelHost>
-			</div>
-		{/each}
-	{:else}
-		<!-- Default landing: a fresh chat (the Sessions board is retired) -->
-		<div class="chat-row">
-			<ChatView />
 		</div>
-	{/if}
+		{#if activeSidePanel.active}
+			<SessionSidePanel active={activeSidePanel.active} expanded={activeSidePanel.expanded}
+				width={browserPanel.current.width} mobile={isMobile}
+				browserAvailable={!!activeTab?.sessionId} changesAvailable={!!activeProject}
+				onSelect={selectSidePanel} onClose={closeSidePanel}
+				onResize={(width) => browserPanel.setWidth(width)}
+				onExpand={() => sidePanel.setExpanded(panelScope, !activeSidePanel.expanded)}>
+				{#key panelScope}
+					{#if activeSidePanel.active === 'browser' && activeTab?.sessionId}
+						<LazyPanel handle={BrowserSidePanel} props={{ sessionId: activeTab.sessionId, embedded: true }} label="the live browser" bare />
+					{:else if activeSidePanel.active === 'changes' && activeProject}
+						<LazyPanel handle={ChangedFilesPanelLazy} label="changed files" bare
+							props={{ projectId: activeProject, open: true, reviewMode: true, embedded: true,
+								onClose: closeSidePanel, onViewDiff: () => {} }} />
+					{/if}
+				{/key}
+			</SessionSidePanel>
+		{/if}
+	</div>
 </div>
 
 <!-- Git modals (rendered outside main-panel for proper z-index stacking) -->
@@ -1056,37 +1062,11 @@
 			}}
 		/>
 	{/if}
-
-	{#if changedFilesEverOpened}
-		<LazyPanel
-			handle={ChangedFilesPanelLazy}
-			label="changed files"
-			bare
-			props={{
-				projectId: activeProject,
-				open: showChangedFilesPanel,
-				reviewMode,
-				onClose: closeChangedFilesPanel,
-				onViewDiff: handleViewDiff
-			}}
-		/>
-	{/if}
-
-	{#if selectedDiffFile && !reviewMode}
-		<LazyPanel
-			handle={DiffViewerLazy}
-			label="the diff viewer"
-			bare
-			props={{
-				projectId: activeProject,
-				file: selectedDiffFile,
-				onClose: () => (selectedDiffFile = null)
-			}}
-		/>
-	{/if}
 {/if}
 
 <style>
+	.main-content { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+	.main-surface { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 	.chat-browser-underlay { display: flex; flex: 1; min-width: 0; min-height: 0; }
 	.chat-browser-underlay > :global(.chat-view) { flex: 1; min-width: 0; }
 	.main-panel {

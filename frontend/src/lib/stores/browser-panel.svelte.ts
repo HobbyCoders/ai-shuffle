@@ -14,6 +14,7 @@ import { preferenceSync } from '$lib/services/preferences';
 import { browser } from '$app/environment';
 import { untrack } from 'svelte';
 import { createSubscribers } from './store-utils';
+import { sidePanel, sessionPanelKey } from './side-panel.svelte';
 import type { SelectedElement } from '$lib/browser-panel/inspect';
 
 // ============================================
@@ -258,12 +259,16 @@ export const browserPanel = {
 	},
 
 	forSession(sessionId: string | null): BrowserPanelState {
-		return { ..._state, ...(sessionId ? runtime[sessionId] : undefined) };
+		const panel = sidePanel.forScope(sessionId ? sessionPanelKey(sessionId) : null);
+		return { ..._state, ...(sessionId ? runtime[sessionId] : undefined),
+			open: panel.active === 'browser', expanded: panel.expanded };
 	},
 	openPanel(sessionId: string | null) {
+		sidePanel.open(sessionId ? sessionPanelKey(sessionId) : null, 'browser');
 		updateSession(sessionId, s => ({ ...s, open: true, userClosedForSession: null }));
 	},
 	closePanel(sessionId: string | null) {
+		sidePanel.close(sessionId ? sessionPanelKey(sessionId) : null, 'browser');
 		updateSession(sessionId, s => ({ ...s, open: false, expanded: false,
 			userClosedForSession: sessionId, inspectMode: false, selectedElement: null }));
 	},
@@ -272,6 +277,7 @@ export const browserPanel = {
 		else this.openPanel(sessionId);
 	},
 	setExpanded(sessionId: string, expanded: boolean) {
+		sidePanel.setExpanded(sessionPanelKey(sessionId), expanded);
 		updateSession(sessionId, s => ({ ...s, expanded }));
 	},
 	setInspectMode(on: boolean, sessionId: string) {
@@ -331,7 +337,8 @@ export const browserPanel = {
 		updateSession(sessionId, (s) => {
 			if (s.open || !s.autoOpen) return s;
 			if (sessionId !== null && s.userClosedForSession === sessionId) return s;
-			return { ...s, open: true };
+			sidePanel.autoOpenBrowser(sessionId ? sessionPanelKey(sessionId) : null);
+			return { ...s, open: this.forSession(sessionId).open };
 		});
 	},
 

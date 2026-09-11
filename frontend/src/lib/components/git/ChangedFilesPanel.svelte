@@ -27,9 +27,10 @@
 		onViewDiff: (file: FileChangeInfo) => void;
 		/** When true, shows the full review layout with inline side-by-side diff */
 		reviewMode?: boolean;
+		embedded?: boolean;
 	}
 
-	let { projectId, open, onClose, onViewDiff, reviewMode = false }: Props = $props();
+	let { projectId, open, onClose, onViewDiff, reviewMode = false, embedded = false }: Props = $props();
 
 	// ── Grouped file lists ──────────────────────────────────────────────
 	const conflicts = $derived(($changedFiles ?? []).filter(f => f.category === 'conflict'));
@@ -296,7 +297,11 @@
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
-		if (!open) return;
+		if (!open || e.defaultPrevented) return;
+		const target = e.target instanceof HTMLElement ? e.target : null;
+		// This is non-modal when docked: never consume chat typing or arrow keys.
+		if (embedded && e.key !== 'Escape' && (!target || !panelElement?.contains(target)
+			|| target.closest('input, textarea, select, [contenteditable="true"]'))) return;
 		if (e.key === 'Escape') {
 			e.preventDefault();
 			// Modal layering: Escape dismisses an open confirm dialog first,
@@ -665,23 +670,24 @@
 
 {#if open}
 	<!-- Backdrop (no click-to-close — panel is persistent) -->
-	<div class="panel-backdrop" class:review-backdrop={reviewMode} transition:fade={{ duration: 150 }}></div>
+	{#if !embedded}<div class="panel-backdrop" class:review-backdrop={reviewMode} transition:fade={{ duration: 150 }}></div>{/if}
 
 	<!-- Panel -->
 	<div
 		bind:this={panelElement}
 		class="panel"
+		class:embedded
 		class:panel-review={reviewMode}
 		class:panel-mobile={isMobile}
 		class:panel-resizing={isResizing}
 		role="dialog"
-		aria-modal="true"
+		aria-modal={embedded ? undefined : true}
 		aria-label={reviewMode ? 'Review changes' : 'Changed files'}
-		style={reviewMode && !isMobile ? `width: ${panelWidth}px` : ''}
+		style={!embedded && reviewMode && !isMobile ? `width: ${panelWidth}px` : ''}
 		transition:slideIn={{ duration: 200 }}
 	>
 		<!-- Resize handle (desktop review mode only) -->
-		{#if reviewMode && !isMobile}
+		{#if !embedded && reviewMode && !isMobile}
 			<div
 				class="resize-handle"
 				onpointerdown={startResize}
@@ -700,13 +706,13 @@
 					<span class="total-badge">{totalCount}</span>
 				{/if}
 			</div>
-			<button
+			{#if !embedded}<button
 				class="close-btn"
 				onclick={onClose}
 				aria-label="Close"
 			>
 				<X size={16} strokeWidth={1.5} />
-			</button>
+			</button>{/if}
 		</div>
 
 		{#if reviewMode}
@@ -840,6 +846,8 @@
 			-2px 0 8px rgb(0 0 0 / 0.15);
 		overflow: hidden;
 	}
+
+	.panel.embedded { container-type: inline-size; position: relative; inset: auto; width: 100%; height: 100%; min-height: 0; border: 0; box-shadow: none; backdrop-filter: none; }
 
 	/* Review mode: width controlled by JS via style attribute */
 	.panel-review {
@@ -1002,6 +1010,12 @@
 			border-bottom: 1px solid color-mix(in oklch, var(--border) 30%, transparent);
 			flex-shrink: 0;
 		}
+	}
+
+	@container (max-width: 599px) {
+		.review-body { flex-direction: column; }
+		.review-sidebar { width: 100%; min-width: 0; max-height: 30%; border-right: none; border-bottom: 1px solid var(--border); }
+		.review-footer { flex-wrap: wrap; }
 	}
 
 	/* ─── Review file item (clickable row in sidebar) ──────────────── */

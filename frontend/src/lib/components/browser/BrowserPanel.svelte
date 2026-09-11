@@ -66,9 +66,10 @@
 	interface Props {
 		/** Session whose browser page is streamed. */
 		sessionId: string;
+		embedded?: boolean;
 	}
 
-	let { sessionId: requestedSessionId }: Props = $props();
+	let { sessionId: requestedSessionId, embedded = false }: Props = $props();
 	// LazyPanel spreads a fresh props object on chat updates. Compare the ID
 	// value before effects read it so typing/streaming cannot reconnect the feed.
 	const sessionId = $derived(requestedSessionId);
@@ -698,13 +699,14 @@
 	<aside
 		bind:this={panelEl}
 		class="browser-panel"
-		class:fullscreen={isFullscreen}
+		class:embedded
+		class:fullscreen={isFullscreen && !embedded}
 		class:resizing={isResizing}
-		class:expanded={panel.expanded}
-		style={isFullscreen || panel.expanded ? '' : `width: ${width}px`}
+		class:expanded={panel.expanded && !embedded}
+		style={embedded || isFullscreen || panel.expanded ? '' : `width: ${width}px`}
 		aria-label="Live browser view"
 	>
-		{#if !isFullscreen && !panel.expanded}
+		{#if !embedded && !isFullscreen && !panel.expanded}
 			<div
 				class="resize-handle"
 				onpointerdown={startResize}
@@ -718,12 +720,12 @@
 
 		<div class="tab-row">
 			<BrowserWorkspaceToolbar mode="tabs" starting={submitting} {workspace} {viewerId} connected={streamOpen} onCommand={workspaceCommand} />
-			<div class="window-actions">
+			{#if !embedded}<div class="window-actions">
 				<button class="tool-btn" aria-label={panel.expanded ? 'Restore browser panel' : 'Expand browser panel'} onclick={() => browserPanel.setExpanded(sessionId, !panel.expanded)}>
 					{#if panel.expanded}<Minimize2 size={15} />{:else}<Maximize2 size={15} />{/if}
 				</button>
 				<button class="tool-btn" onclick={close} aria-label="Close browser panel"><X size={16} /></button>
-			</div>
+			</div>{/if}
 		</div>
 		<header class="panel-header">
 			<div class="nav-buttons">
@@ -1010,6 +1012,8 @@
 		/* Fill at most the chat inner panel (`.chat-row`), which ends at the sidebar. */
 		max-width: 100%;
 	}
+
+	.browser-panel.embedded { position: relative; inset: auto; width: 100%; height: 100%; border: 0; padding: 0; }
 
 	.browser-panel.resizing {
 		user-select: none;
