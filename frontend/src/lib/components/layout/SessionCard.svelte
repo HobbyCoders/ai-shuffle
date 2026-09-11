@@ -87,7 +87,7 @@
 		/** Notifies the parent that this card opened (its id) or closed (null). */
 		onActionsOpenChange?: (sessionId: string | null) => void;
 		onOpen: (sessionId: string) => void;
-		/** Fired after this card is settled while it is the open session, so the shell can move to a fresh chat. */
+		/** Desktop only: after settling the open session, let the shell move to a fresh chat. */
 		onSettled?: () => void;
 	}
 
@@ -253,9 +253,9 @@
 		const settling = session.is_active;
 		try {
 			await appData.setSessionActive(session.id, !settling);
-			// Settling the session that is on screen leaves the main panel pointing
-			// at a settled chat — hand the shell a fresh composer instead.
-			if (settling && active) onSettled?.();
+			// Desktop moves to a fresh composer. On mobile, keep the current
+			// session and drawer open so settling does not navigate the user away.
+			if (settling && active && !platform.isMobile) onSettled?.();
 		} catch {
 			notify('Failed to update session', { severity: 'error' });
 		}

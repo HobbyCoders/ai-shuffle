@@ -240,6 +240,30 @@ describe('SessionCard actions', () => {
 		expect(onSettled).toHaveBeenCalledOnce();
 	});
 
+	it.each([true, false])('keeps the mobile session and drawer open when settling (open=%s)', async (active) => {
+		platform.set('mobile');
+		const { onSettled, onOpen } = renderCard({ is_active: true }, { active });
+
+		await fireEvent.click(screen.getByTitle('Settle session'));
+
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+		// The mobile shell's onSettled callback creates a new chat AND closes
+		// the drawer. Neither navigation callback should run for this action.
+		expect(onSettled).not.toHaveBeenCalled();
+		expect(onOpen).not.toHaveBeenCalled();
+	});
+
+	it('does not navigate after a failed settle', async () => {
+		mocks.setSessionActive.mockRejectedValueOnce(new Error('offline'));
+		const { onSettled, onOpen } = renderCard({ is_active: true }, { active: true });
+
+		await fireEvent.click(screen.getByTitle('Settle session'));
+
+		expect(onSettled).not.toHaveBeenCalled();
+		expect(onOpen).not.toHaveBeenCalled();
+		expect(mocks.toastPush).toHaveBeenCalledWith('Failed to update session', { severity: 'error' });
+	});
+
 	it("doesn't fire onSettled when a background session is settled", async () => {
 		const { onSettled } = renderCard({ is_active: true }, { active: false });
 
