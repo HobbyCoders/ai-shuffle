@@ -33,7 +33,7 @@ export class WorkspaceBridge {
     if (this.started || this.abort.signal.aborted) return;
     this.started = true;
     disableLegacyReports();
-    this.refreshTimer = setInterval(() => void this.refresh(), 2000);
+    this.refreshTimer = setInterval(() => void this.refresh(), 500);
     this.refreshTimer.unref();
     void this.pollLoop();
   }

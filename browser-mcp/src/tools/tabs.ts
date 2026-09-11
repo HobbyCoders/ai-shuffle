@@ -36,7 +36,7 @@ export async function runTabs(session: Session, input: TabsInput): Promise<McpTo
     case "select": {
       if (!input.tab_id) return errorResult("op=select requires tab_id");
       try {
-        session.selectTab(input.tab_id);
+        await session.selectTab(input.tab_id);
       } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
       }

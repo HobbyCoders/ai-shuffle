@@ -464,6 +464,7 @@ class BrowserStreamHub:
         self._pending_inspects: Dict[int, Tuple["_Viewer", str, dict]] = {}
         self.page_url: Optional[str] = None
         self.page_loading: bool = False
+        self._loading_frames: set[str] = set()
         # Monotonic time the current/last upstream attach opened, for the
         # healthy-attach check in the reattach backoff. None = never opened.
         self._attach_opened_at: Optional[float] = None
@@ -556,11 +557,16 @@ class BrowserStreamHub:
         method = msg.get("method")
         params = msg.get("params", {})
         if method == "Page.frameStartedLoading":
-            # Subframe loads count too — while any frame loads, show busy.
+            self._loading_frames.add(params.get("frameId", ""))
             self.page_loading = True
             return True
         if method == "Page.frameStoppedLoading":
-            self.page_loading = False
+            self._loading_frames.discard(params.get("frameId", ""))
+            self.page_loading = bool(self._loading_frames)
+            return True
+        if method == "Page.frameDetached":
+            self._loading_frames.discard(params.get("frameId", ""))
+            self.page_loading = bool(self._loading_frames)
             return True
         if method == "Page.frameNavigated":
             frame = params.get("frame", {})
@@ -570,10 +576,6 @@ class BrowserStreamHub:
             url = frame.get("url")
             if url is not None and url != self.page_url:
                 self.page_url = url
-                self.page_loading = False
-                return True
-            if self.page_loading:
-                self.page_loading = False
                 return True
         if method == "Page.navigatedWithinDocument":
             url = params.get("url")
@@ -833,6 +835,7 @@ class BrowserStreamHub:
         self._pending_inspects.clear()
         self.page_url = target.url
         self.page_loading = False
+        self._loading_frames.clear()
         change_task: Optional[asyncio.Task] = None
         recv_task: Optional[asyncio.Task] = None
         try:
@@ -893,6 +896,7 @@ class BrowserStreamHub:
                     if method in (
                         "Page.frameStartedLoading",
                         "Page.frameStoppedLoading",
+                        "Page.frameDetached",
                         "Page.frameNavigated",
                         "Page.navigatedWithinDocument",
                     ):

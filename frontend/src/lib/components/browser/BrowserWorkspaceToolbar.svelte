@@ -83,14 +83,14 @@
 					class="tab-select"
 					aria-label={`Select ${tab.title || tab.url || 'New tab'}`}
 					aria-current={tab.current ? 'page' : undefined}
-					disabled={!owner}
+					disabled={!connected || !workspace?.available || other}
 					onclick={() =>
 						onCommand('tabs', { action: 'select', tab_id: tab.id })}
-					title={tab.url}>{tab.title || tab.url || 'New tab'}</button
+					title={tab.title || tab.url}><span class="tab-title">{tab.title || tab.url || 'New tab'}</span></button
 				>
 				{#if (workspace?.tabs.length ?? 0) > 1}<button
 					class="icon"
-					disabled={!owner || (workspace?.tabs.length ?? 0) <= 1}
+					disabled={!connected || other || (workspace?.tabs.length ?? 0) <= 1}
 					aria-label={`Close ${tab.title || 'tab'}`}
 					onclick={() => onCommand('tabs', { action: 'close', tab_id: tab.id })}
 					><X size={12} /></button
@@ -124,14 +124,7 @@
 				? ' · waiting for current action'
 				: ''}</span
 		>
-		{#if owner || pending}<button
-				onclick={() => onCommand('release', {})}
-				disabled={!connected}>Return control</button
-			>
-		{:else}<button
-				disabled={!connected || !workspace?.available || other}
-				onclick={() => onCommand('takeover', {})}>Take control</button
-			>{/if}
+
 	</div>
 	<details class="viewport" bind:this={settingsEl}>
 		<summary aria-label="Browser settings" title="Viewport and browser settings"><Settings2 size={15} /></summary>
@@ -139,7 +132,7 @@
 			<label
 				>Size <select
 					aria-label="Viewport preset"
-					disabled={!owner}
+					disabled={!connected || !workspace?.available || other}
 					value=""
 					onchange={(e) => preset(e.currentTarget.value)}
 					><option value="" disabled>Choose viewport</option><option value="fit"
@@ -163,7 +156,7 @@
 						max="3840"
 						step="1"
 						bind:value={customWidth}
-						disabled={!owner}
+						disabled={!connected || !workspace?.available || other}
 					/></label
 				><span>×</span><label
 					>Height<input
@@ -173,12 +166,12 @@
 						max="2160"
 						step="1"
 						bind:value={customHeight}
-						disabled={!owner}
+						disabled={!connected || !workspace?.available || other}
 					/></label
 				>
-				<button disabled={!owner}>Apply</button><button
+				<button disabled={!connected || !workspace?.available || other}>Apply</button><button
 					type="button"
-					disabled={!owner}
+					disabled={!connected || !workspace?.available || other}
 					aria-label="Rotate viewport"
 					onclick={() =>
 						apply({ mode: 'fixed', width: customHeight, height: customWidth })}
@@ -188,7 +181,7 @@
 			{#if error}<p role="alert">{error}</p>{/if}
 			<div class="defaults">
 				<button
-					disabled={!owner}
+					disabled={!connected || !workspace?.available || other}
 					onclick={() => apply(browserPanel.current.defaultViewport)}
 					>Apply saved default</button
 				><button
@@ -262,8 +255,10 @@
 	.tab {
 		display: flex;
 		align-items: center;
-		min-width: 95px;
+		flex: 0 1 180px;
+		min-width: 100px;
 		max-width: 180px;
+		position: relative;
 		border-radius: 7px 7px 0 0;
 		border: 1px solid transparent;
 	}
@@ -272,14 +267,24 @@
 		border-color: var(--border);
 	}
 	.tab-select {
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding-inline: 24px;
+		min-height: 32px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		border: 0;
 		background: transparent;
 		flex: 1;
-		text-align: left;
+		text-align: center;
 	}
+	.tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 	.icon {
+		position: absolute;
+		right: 0;
+		flex-shrink: 0;
 		display: flex;
 		border: 0;
 		background: transparent;
@@ -301,9 +306,6 @@
 	}
 	.ownership > span {
 		color: var(--muted-foreground);
-	}
-	.ownership > button {
-		font-weight: 600;
 	}
 	summary {
 		display: flex;

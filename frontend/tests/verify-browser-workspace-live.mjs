@@ -39,6 +39,9 @@ async function painted(page, width, height) {
     const canvas = document.querySelector('canvas');
     if (!fixture.frames || !canvas || !canvas.width || !canvas.height) return false;
     if (fixture.frameMetadata?.tab_id !== fixture.state.active_tab_id) return false;
+    if (fixture.frameMetadata?.runtime_id !== fixture.state.runtime_id) return false;
+    if (fixture.frameMetadata?.deviceWidth !== fixture.state.viewport.width ||
+        fixture.frameMetadata?.deviceHeight !== fixture.state.viewport.height) return false;
     // Canvas backing pixels are viewer-scaled: compare CSS-page metadata, not
     // canvas.width, which can legitimately be a thumbnail-sized projection.
     if (width && (canvas.dataset.viewportWidth !== String(width) ||
@@ -167,7 +170,7 @@ try {
   await painted(primary);
   assert.equal(starts, 1);
   assert.equal((await state(primary)).control.owner, 'human');
-  await button(primary, 'Return control').click();
+  await wait(primary, () => window.browserFixture.state.control.owner === 'agent');
   await wait(primary, () => window.browserFixture.state.control.owner === 'agent');
   const initial = await state(primary);
   assert.equal(initial.tabs.length, 1);
@@ -220,7 +223,7 @@ try {
   await navigate(primary, firstUrl);
   await wait(primary, u => window.browserFixture.state.tabs.some(t => t.current && t.url === u), firstUrl);
   await painted(primary);
-  await button(primary, 'Return control').click();
+  await wait(primary, () => window.browserFixture.state.control.owner === 'agent');
   await wait(primary, () => window.browserFixture.state.control.owner === 'agent');
   secondary = await viewer({ width: 900, height: 700 });
   await mirrored(() => window.browserFixture.state.control.owner === 'agent');
@@ -236,12 +239,13 @@ try {
     phase = `${name} ownership`;
     await primary.setViewportSize(viewport);
     assert.equal(await button(primary, 'New tab').isDisabled(), false);
-    await button(primary, 'Take control').click();
+    await primary.getByRole('textbox', { name: 'Message', exact: true }).click();
+    await primary.getByRole('textbox', { name: 'Message', exact: true }).blur();
     const ownerId = await primary.evaluate(() => window.browserFixture.viewerId);
     await mirrored(() => window.browserFixture.state.control.owner === 'human');
     assert.equal((await state(secondary)).control.viewer_id, ownerId);
     assert.match(await secondary.getByRole('status', { includeHidden: true }).filter({ hasText: 'Another viewer controls' }).textContent(), /Another viewer controls/);
-    assert.equal(await button(secondary, 'Take control').isDisabled(), true);
+    assert.equal(await button(secondary, 'Take control').count(), 0);
     assert.equal(await button(secondary, 'New tab').isDisabled(), true);
 
     phase = `${name} tabs and navigation`;
@@ -299,16 +303,20 @@ try {
     if (name === 'mobile') {
       phase = 'mobile real keyboard';
       await painted(primary, 390, 844);
-      const canvas = await primary.locator('canvas').boundingBox();
-      await primary.mouse.click(canvas.x + canvas.width * 80 / 390, canvas.y + canvas.height * 30 / 844);
-      await button(primary, 'Show keyboard').click();
-      await wait(primary, () => document.activeElement?.tagName === 'TEXTAREA');
+      const input = primary.getByRole('textbox', { name: 'Message', exact: true });
+      await input.click();
+      assert.equal(await primary.evaluate(() => document.activeElement?.tagName), 'INPUT');
       const frameCount = await primary.evaluate(() => browserFixture.frames);
-      await primary.keyboard.type('sticky');
+      await input.fill('sticky');
       await wait(primary, () => browserFixture.state.tabs.some(t => t.current && t.title.includes('sticky')));
       await wait(primary, count => browserFixture.frames > count, frameCount);
-      assert.equal(await primary.evaluate(() => document.activeElement?.tagName), 'TEXTAREA');
-      await button(primary, 'Hide keyboard').click();
+      assert.equal(await input.inputValue(), 'sticky');
+      // Native selection/replacement uses the real remote value, not an empty IME buffer.
+      await input.evaluate(el => el.setSelectionRange(0, 3));
+      await primary.keyboard.insertText('paste');
+      await wait(primary, () => browserFixture.state.tabs.some(t => t.current && t.title.includes('pastecky')));
+      assert.equal(await input.evaluate(el => el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))), true);
+      await input.blur();
     }
     const screenshot = join(tmpdir(), `browser-workspace-live-${name}.png`);
     await primary.screenshot({ path: screenshot });
@@ -317,7 +325,7 @@ try {
     phase = `${name} restore tabs and agent control`;
     await closeExtraTabs();
     await mirrored(id => window.browserFixture.state.active_tab_id === id, originalId);
-    await button(primary, 'Return control').click();
+    await wait(primary, () => window.browserFixture.state.control.owner === 'agent');
     await mirrored(() => window.browserFixture.state.control.owner === 'agent' && !window.browserFixture.state.control.viewer_id);
     assert.equal(await button(primary, 'New tab').isDisabled(), false);
     assert.equal(await button(secondary, 'New tab').isDisabled(), false);
@@ -353,7 +361,7 @@ try {
       const ownId = await primary.evaluate(() => window.browserFixture.viewerId);
       if (current.control.viewer_id === ownId) {
         await closeExtraTabs();
-        await button(primary, 'Return control').click();
+        await wait(primary, () => window.browserFixture.state.control.owner === 'agent');
         await mirrored(() => window.browserFixture.state.control.owner === 'agent');
       }
     }

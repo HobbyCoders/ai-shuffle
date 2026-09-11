@@ -47,6 +47,29 @@ def command(cid="cmd", op="takeover", args=None, **extra):
 
 
 @pytest.mark.asyncio
+async def test_native_edit_requires_owner_and_valid_utf16_selection(broker):
+    args = {"field": "field", "action": "replace", "value": "😀", "start": 2, "end": 2}
+    with pytest.raises(control.ControlError, match="Take control"):
+        await broker.submit("viewer", command("unowned", "edit", args))
+    await broker.report("runtime", state(revision=1, viewer="viewer"), [])
+    await broker.submit("viewer", command("valid", "edit", args))
+    assert (await broker.poll("runtime"))[0]["args"] == args
+    for index, bad in enumerate(({**args, "end": 3}, {**args, "start": -1}, {**args, "script": "evil"})):
+        with pytest.raises(control.ControlError):
+            await broker.submit("viewer", command(f"bad{index}", "edit", bad))
+
+
+def test_native_edit_state_rejects_password_disclosure():
+    value = state()
+    field = dict(id="field", type="password", label="Password", value="", x=0, y=0, width=100, height=30)
+    value["editors"] = [field]
+    control.validate_state(value, "runtime")
+    field["value"] = "must-not-broadcast"
+    with pytest.raises(control.ControlError, match="Password"):
+        control.validate_state(value, "runtime")
+
+
+@pytest.mark.asyncio
 async def test_no_redelivery_immediate_results_and_stale_revision(broker):
     received = []
 

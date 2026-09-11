@@ -248,7 +248,7 @@ def _page_event(method, **params):
 
 
 class TestPageEventTracking:
-    def test_main_frame_navigation_updates_url_and_clears_loading(self):
+    def test_main_frame_commit_updates_url_without_ending_loading(self):
         hub = browser_stream.BrowserStreamHub("x")
         hub.page_loading = True
         assert hub._handle_page_event(
@@ -258,7 +258,7 @@ class TestPageEventTracking:
             )
         )
         assert hub.page_url == "https://a/"
-        assert not hub.page_loading
+        assert hub.page_loading
         # Unchanged URL is a no-op.
         assert not hub._handle_page_event(
             _page_event(
@@ -290,6 +290,18 @@ class TestPageEventTracking:
         assert hub._handle_page_event(
             _page_event("Page.frameStoppedLoading", frameId="f1")
         )
+        assert not hub.page_loading
+
+    def test_loading_waits_for_all_frames_and_clears_detached_frames(self):
+        hub = browser_stream.BrowserStreamHub("x")
+        for frame in ("main", "child"):
+            hub._handle_page_event(_page_event("Page.frameStartedLoading", frameId=frame))
+        hub._handle_page_event(_page_event("Page.frameStoppedLoading", frameId="child"))
+        assert hub.page_loading
+        hub._handle_page_event(_page_event("Page.frameStoppedLoading", frameId="main"))
+        assert not hub.page_loading
+        hub._handle_page_event(_page_event("Page.frameStartedLoading", frameId="detached"))
+        hub._handle_page_event(_page_event("Page.frameDetached", frameId="detached"))
         assert not hub.page_loading
 
     def test_navigated_within_document_updates_url_only(self):

@@ -35,7 +35,7 @@ export async function verifyColdStart(browser, base, viewport) {
   assert.equal(await fixture(() => browserFixture.messages.some(m => m.op === 'navigate')), false);
   await fixture(() => browserFixture.grantControl(false));
   // Authoritative ownership alone is not the explicit takeover acknowledgement.
-  await page.getByRole('button', { name: 'Return control', exact: true }).waitFor();
+  await page.waitForFunction(() => browserFixture.state.control.owner === 'human');
   assert.equal(await fixture(() => browserFixture.messages.some(m => m.op === 'navigate')), false);
   await fixture(() => browserFixture.grantControl(true));
   await page.waitForFunction(() => browserFixture.messages.some(m => m.op === 'navigate'));
@@ -104,7 +104,7 @@ export async function verifyColdStart(browser, base, viewport) {
    assert.equal(await fixture(() => browserFixture.messages.some(m => m.op === 'navigate' || m.op === 'takeover')), false, `${action}: no late commands`);
   }
   await page.goto(cold); await page.getByRole('button', { name: 'New tab', exact: true }).click();
-  await page.getByRole('button', { name: 'Return control', exact: true }).waitFor();
+  await page.waitForFunction(() => browserFixture.state.control.owner === 'human');
   assert.equal(await fixture(() => browserFixture.starts.length), 1);
   assert.equal(await fixture(() => browserFixture.state.tabs.length), 1);
   assert.equal(await fixture(() => browserFixture.messages.some(m => m.op === 'tabs')), false, 'cold + uses bootstrap tab');

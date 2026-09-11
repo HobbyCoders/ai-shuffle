@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { editField } from "./editors.js";
 import { Session, raceWithTimeout } from "./session.js";
 import { object, validateCommand, type BrowserCommand, type BrowserWorkspaceState } from "./workspace-protocol.js";
 
@@ -144,7 +145,7 @@ export class BrowserWorkspace {
       if (a.action === "create") {
         await this.session.createTab();
         if (a.url) await (await this.session.ensurePage()).goto(a.url as string, { waitUntil: "domcontentloaded", timeout: 15000 });
-      } else if (a.action === "select") this.session.selectTab(a.tab_id as string);
+      } else if (a.action === "select") await this.session.selectTab(a.tab_id as string);
       else await this.session.closeTab(a.tab_id as string);
       return;
     }
@@ -154,6 +155,8 @@ export class BrowserWorkspace {
     else if (c.op === "viewport") {
       await this.session.setViewport(a.width as number, a.height as number);
       this.session.viewportMode = a.mode as "fit" | "fixed";
+    } else if (c.op === "edit") {
+      await editField(page, a);
     } else if (c.op === "input") {
       const cdp = await this.session.currentCDP();
       await raceWithTimeout(cdp.send(a.method as "Input.insertText", a.params as { text: string }), 5000, "input timed out; outcome unknown, do not replay");

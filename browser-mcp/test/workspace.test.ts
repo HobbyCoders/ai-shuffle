@@ -92,7 +92,7 @@ describe("shared control queue", () => {
     const {session, ws} = make(); await ws.receive(command(ws));
     let tab = "tab1";
     vi.spyOn(session,"currentTabId").mockImplementation(()=>tab);
-    vi.spyOn(session,"selectTab").mockImplementation(id=>{tab=id;});
+    vi.spyOn(session,"selectTab").mockImplementation(async id=>{tab=id;});
     const select = ws.receive(command(ws,"tabs",{action:"select",tab_id:"tab2"},{tab_id:"tab1"}));
     const stale = ws.receive(command(ws,"navigate",{url:"https://example.com"},{tab_id:"tab1"}));
     expect((await select).ok).toBe(true); expect((await stale).error).toContain("stale tab");

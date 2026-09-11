@@ -1,4 +1,6 @@
 <script lang="ts">
+	import BrowserNativeEditor from './BrowserNativeEditor.svelte';
+	import type { BrowserEditor } from '$lib/browser-panel/workspace';
 	import { browserTextChunks } from '$lib/browser-panel/text-chunks';
 	/**
 	 * BrowserLiveView — draws the screencast frames into a letterboxed,
@@ -44,6 +46,8 @@
 	interface Props {
 		/** Latest decoded-and-ready frame, or null before the first frame. */
 		frame: FramePayload | null;
+		editors?: BrowserEditor[];
+		onEdit?: (args: Record<string, unknown>) => void;
 		/** Whether input is accepted (true only while the stream is live). */
 		interactive?: boolean;
 		/** Keyboard ownership is independent of the coordinate/frame gate. */
@@ -69,6 +73,8 @@
 
 	let {
 		frame,
+		editors = [],
+		onEdit,
 		interactive: inputEnabled = true,
 		keyboardEnabled: keyboardAllowed = inputEnabled,
 		keyboardOpen = $bindable(false),
@@ -85,6 +91,11 @@
 	let wrapperEl: HTMLDivElement | undefined = $state();
 	let canvasEl: HTMLCanvasElement | undefined = $state();
 	let focused = $state(false);
+	let viewWidth = $state(0);
+	let viewHeight = $state(0);
+	const editorScale = $derived(viewport ? Math.min(viewWidth / viewport.width, viewHeight / viewport.height) : 1);
+	const editorLeft = $derived(viewport ? (viewWidth - viewport.width * editorScale) / 2 : 0);
+	const editorTop = $derived(viewport ? (viewHeight - viewport.height * editorScale) / 2 : 0);
 
 	let currentBitmap: ImageBitmap | null = null;
 	let currentMeta = $state.raw<FramePayload['metadata'] | null>(null);
@@ -255,7 +266,11 @@
 	let resizeObserver: ResizeObserver | null = null;
 	$effect(() => {
 		if (!wrapperEl || typeof ResizeObserver === 'undefined') return;
-		resizeObserver = new ResizeObserver(() => paint());
+		resizeObserver = new ResizeObserver(() => {
+			viewWidth = wrapperEl?.clientWidth ?? 0;
+			viewHeight = wrapperEl?.clientHeight ?? 0;
+			paint();
+		});
 		resizeObserver.observe(wrapperEl);
 		return () => {
 			resizeObserver?.disconnect();
@@ -599,8 +614,11 @@
 
 	function onPointerDown(e: PointerEvent) {
 		if (e.target !== wrapperEl && e.target !== canvasEl) return;
-		// Cancel native focus transfer even while a resize blocks coordinates.
-		// Never refocus here: native IME Hide may leave this textarea focused.
+		// Tapping outside a native field dismisses its keyboard/selection normally.
+		const active = document.activeElement;
+		if (active !== keyboardEl && (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) && wrapperEl?.contains(active)) active.blur();
+		// Keep the legacy provider-login IME buffer focused across remote clicks.
+		// Never refocus here: native IME Hide may leave that textarea focused.
 		if (keyboardOpen && document.activeElement === keyboardEl) e.preventDefault();
 		else if (interactive && e.pointerType !== 'touch') wrapperEl?.focus();
 		if (!interactive || disposed) return;
@@ -639,6 +657,7 @@
 	}
 
 	function onWheel(e: WheelEvent) {
+		if (e.target !== wrapperEl && e.target !== canvasEl) return;
 		if (!interactive || disposed) return;
 		e.preventDefault();
 		// Inspect mode still scrolls — deeper content must stay reachable.
@@ -715,6 +734,11 @@
 	oncontextmenu={(e) => e.preventDefault()}
 >
 	<canvas bind:this={canvasEl} class="live-canvas"></canvas>
+	{#if interactive && !inspecting && onEdit}
+		{#each editors as field (field.id)}
+			<BrowserNativeEditor {field} {viewWidth} {viewHeight} scale={editorScale} left={editorLeft} top={editorTop} {onEdit} onActive={(active) => keyboardOpen = active} onEnter={() => bridgeKeyPair('Enter', 'Enter', 13)} />
+		{/each}
+	{/if}
 	<textarea
 		bind:this={keyboardEl}
 		class="keyboard-bridge"
@@ -772,7 +796,7 @@
 		display: flex;
 		outline: none;
 		background: var(--muted);
-		touch-action: none;
+		touch-action: auto;
 		cursor: default;
 		overflow: hidden;
 	}
@@ -789,6 +813,7 @@
 	   never influence the wrapper's layout, so resizing it can't retrigger the
 	   ResizeObserver. */
 	.live-canvas {
+		touch-action: none;
 		position: absolute;
 		inset: 0;
 		width: 100%;

@@ -1,5 +1,10 @@
 /** Wire protocol v2. No page-provided objects are forwarded as CDP commands. */
+export interface BrowserEditor {
+  id: string; type: string; label: string; value: string;
+  x: number; y: number; width: number; height: number;
+}
 export interface BrowserWorkspaceState {
+  editors?: BrowserEditor[];
   runtime_id: string; revision: number; available: boolean;
   target_id: string | null; active_tab_id: string | null;
   tabs: { id: string; url: string; title: string; current: boolean }[];
@@ -9,7 +14,7 @@ export interface BrowserWorkspaceState {
 }
 export interface BrowserCommand {
   id: string; runtime_id: string; tab_id: string | null; viewer_id: string;
-  op: "takeover" | "release" | "heartbeat" | "tabs" | "navigate" | "command" | "viewport" | "input";
+  op: "takeover" | "release" | "heartbeat" | "tabs" | "navigate" | "command" | "viewport" | "input" | "edit";
   args: Record<string, unknown>; expires_at: number;
 }
 export function object(v: unknown): v is Record<string, unknown> {
@@ -70,6 +75,11 @@ export function validateCommand(raw: unknown, runtimeId: string, now = Date.now(
     case "viewport":
       keys(a, ["mode", "width", "height"]);
       if (!["fit", "fixed"].includes(String(a.mode)) || !integer(a.width, 240, 3840) || !integer(a.height, 240, 2160)) fail();
+      break;
+    case "edit":
+      keys(a, ["field", "action", "value", "start", "end"]);
+      if (!str(a.field, 128) || !['focus', 'blur', 'replace'].includes(String(a.action))) fail();
+      if (a.action === 'replace' && (typeof a.value !== 'string' || a.value.length > 16384 || !integer(a.start, 0, a.value.length) || !integer(a.end, a.start as number, a.value.length))) fail();
       break;
     case "input": keys(a, ["method", "params"]); validateInputCommand(a.method, a.params); break;
     default: fail();

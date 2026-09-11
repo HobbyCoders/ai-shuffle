@@ -27,9 +27,8 @@ try {
 		const errors = [];
 		page.on('pageerror', (e) => errors.push(e.message));
 		await page.goto(url);
-		await page
-			.getByRole('button', { name: 'Take control', exact: true })
-			.waitFor();
+		await page.getByRole('button', { name: 'New tab', exact: true }).waitFor();
+		assert.equal(await page.getByRole('button', { name: /Take control|Show keyboard|Hide keyboard/ }).count(), 0);
 		assert.equal(
 			await page
 				.getByRole('button', { name: 'New tab', exact: true })
@@ -40,9 +39,7 @@ try {
 			await page.evaluate(() => window.browserFixture.messages),
 			[],
 		);
-		await page
-			.getByRole('button', { name: 'Take control', exact: true })
-			.click();
+
 		await page.getByRole('button', { name: 'New tab', exact: true }).click();
 		await page.locator('canvas').waitFor();
 		await page.evaluate(() => { window.originalCanvas = document.querySelector('canvas'); });
@@ -85,8 +82,8 @@ try {
 		await page.getByLabel('Viewport preset', { exact: true }).selectOption('fit');
 		await page.waitForTimeout(500);
 		await page.locator('summary').click();
-		await page.getByRole('button', { name: 'Show keyboard', exact: true }).click();
-		await page.waitForFunction(() => document.activeElement?.tagName === 'TEXTAREA');
+		await page.getByRole('textbox', { name: 'Message', exact: true }).click();
+		await page.waitForFunction(() => document.activeElement?.tagName === 'INPUT');
 		await page.evaluate(() => {
 			window.sampledCanvas = document.querySelector('canvas');
 			window.frameSample = { clears: 0, draws: 0, removals: 0 };
@@ -98,11 +95,11 @@ try {
 			window.canvasObserver.observe(document.querySelector('.panel-body'), { childList: true, subtree: true });
 		});
 		for (let i = 0; i < 4; i++) { await page.evaluate(i => window.browserFixture.churn(i), i); await page.waitForTimeout(60); }
-		assert.equal(await page.evaluate(() => document.activeElement?.tagName), 'TEXTAREA', 'same-target updates retain keyboard focus');
+		assert.equal(await page.evaluate(() => document.activeElement?.tagName), 'INPUT', 'same-target updates retain keyboard focus');
 		assert.equal(await page.evaluate(() => document.querySelector('canvas') === window.sampledCanvas), true);
 		const sample = await page.evaluate(() => { window.canvasObserver.disconnect(); return window.frameSample; });
 		assert.equal(sample.removals, 0); assert.ok(sample.draws > 0); assert.equal(sample.clears, sample.draws, 'every clear is paired with a paint');
-		await page.getByRole('button', { name: 'Hide keyboard', exact: true }).click();
+		await page.getByRole('textbox', { name: 'Message', exact: true }).blur();
 		// Chat updates must not reset page loading, even transiently. Watch the
 		// actual toolbar attribute so a flip back before the assertion cannot hide.
 		for (const loading of [true, false]) {
@@ -157,9 +154,7 @@ try {
 		await page.screenshot({
 			path: join(tmpdir(), `browser-workspace-${viewport.width}.png`),
 		});
-		await page
-			.getByRole('button', { name: 'Return control', exact: true })
-			.click();
+		await page.waitForFunction(() => window.browserFixture.state.control.owner === 'agent', null, { timeout: 20000 });
 		assert.equal(
 			await page
 				.getByRole('button', { name: 'New tab', exact: true })

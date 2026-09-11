@@ -78,7 +78,7 @@ def validate_state(state, runtime_id):
     if not isinstance(state, dict):
         raise ControlError("Invalid workspace")
     finite(state)
-    if set(state) != {
+    if set(state) - {"editors"} != {
         "runtime_id",
         "revision",
         "available",
@@ -102,6 +102,21 @@ def validate_state(state, runtime_id):
     for key in ("target_id", "active_tab_id"):
         if state.get(key) is not None:
             identifier(state[key])
+    editors = state.get("editors", [])
+    if not isinstance(editors, list) or len(editors) > 32:
+        raise ControlError("Invalid text fields")
+    for field in editors:
+        if not isinstance(field, dict) or set(field) != {"id", "type", "label", "value", "x", "y", "width", "height"}:
+            raise ControlError("Invalid text field")
+        identifier(field["id"])
+        if field["type"] not in ("text", "search", "email", "url", "tel", "password", "textarea"):
+            raise ControlError("Invalid text field type")
+        if not isinstance(field["value"], str) or not isinstance(field["label"], str) or len(field["label"]) > 256:
+            raise ControlError("Invalid text field content")
+        if field["type"] == "password" and field["value"]:
+            raise ControlError("Password contents must not be broadcast")
+        if any(type(field[k]) not in (int, float) for k in ("x", "y", "width", "height")) or field["width"] <= 0 or field["height"] <= 0:
+            raise ControlError("Invalid text field bounds")
     tabs = state.get("tabs")
     if not isinstance(tabs, list) or len(tabs) > 128:
         raise ControlError("Invalid tabs")
@@ -346,6 +361,7 @@ class Broker:
             "tabs": {"action", "tab_id", "url"},
             "viewport": {"mode", "width", "height"},
             "input": {"method", "params"},
+            "edit": {"field", "action", "value", "start", "end"},
         }
         if op not in allowed or set(args) - allowed[op]:
             raise ControlError("Unsupported operation or arguments")
@@ -380,6 +396,14 @@ class Broker:
                 if args["action"] != "create":
                     raise ControlError("URL only allowed for tab creation")
                 url(args["url"])
+        elif op == "edit":
+            identifier(args.get("field"))
+            if args.get("action") not in ("focus", "blur", "replace"):
+                raise ControlError("Invalid text edit")
+            if args["action"] == "replace":
+                value = args.get("value")
+                if not isinstance(value, str) or any(type(args.get(k)) is not int for k in ("start", "end")) or not 0 <= args["start"] <= args["end"] <= len(value.encode('utf-16-le')) // 2:
+                    raise ControlError("Invalid text selection")
         elif op == "input" and internal:
             if args.get("method") not in (
                 "Input.dispatchMouseEvent",

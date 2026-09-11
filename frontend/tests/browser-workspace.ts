@@ -79,6 +79,7 @@ let state: BrowserWorkspaceState = {
 	viewport: { mode: 'fixed', width: 1280, height: 800 },
 	control: { owner: 'agent', viewer_id: null, pending_viewer_id: null },
 	busy: false,
+	editors: [{ id: 'fixture-editor', type: 'text', label: 'Message', value: 'Existing text', x: 10, y: 10, width: 240, height: 40 }],
 };
 class FixtureSocket {
 	static OPEN = 1;

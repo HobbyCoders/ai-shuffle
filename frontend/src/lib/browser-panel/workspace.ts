@@ -4,7 +4,13 @@ export interface BrowserViewport {
 	height: number;
 }
 
+export interface BrowserEditor {
+  id: string; type: string; label: string; value: string;
+  x: number; y: number; width: number; height: number;
+}
+
 export interface BrowserWorkspaceState {
+	editors?: BrowserEditor[];
 	runtime_id: string;
 	revision: number;
 	available: boolean;
@@ -79,6 +85,11 @@ export function isBrowserWorkspaceState(
 		return false;
 	}
 
+	if (value.editors !== undefined && (!Array.isArray(value.editors) || value.editors.length > 32 || !value.editors.every((field) =>
+		object(field) && id(field.id) && ['text', 'search', 'email', 'url', 'tel', 'password', 'textarea'].includes(String(field.type)) &&
+		typeof field.label === 'string' && field.label.length <= 256 && typeof field.value === 'string' && field.value.length <= 16384 &&
+		(field.type !== 'password' || field.value === '') && ['x', 'y', 'width', 'height'].every(k => typeof field[k] === 'number' && Number.isFinite(field[k])) &&
+		(field.width as number) > 0 && (field.height as number) > 0))) return false;
 	const ids = new Set<string>();
 	for (const tab of value.tabs) {
 		if (

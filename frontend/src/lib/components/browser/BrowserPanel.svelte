@@ -36,7 +36,6 @@
 		Send,
 		Check,
 		MessageSquare,
-		Keyboard,
 		Maximize2,
 		Minimize2,
 	} from 'lucide-svelte';
@@ -128,7 +127,6 @@
 	let commandError = $state('');
 	const humanControl = $derived(streamOpen && ownsControl(workspace, viewerId));
 	let frameIdentity = $state<string | null>(null);
-	let liveView: BrowserLiveView | undefined = $state();
 	let keyboardOpen = $state(false);
 	// CSS viewport metadata, not JPEG dimensions (the stream may be downscaled).
 	const frameMatchesWorkspace = $derived(
@@ -250,6 +248,8 @@
 
 		return () => {
 			active = false;
+			clearTimeout(releaseTimer);
+			controlRequest = null;
 			scope.close();
 			if (operation === scope) operation = null;
 			submitting = false;
@@ -288,21 +288,53 @@
 			tab_id: workspace.active_tab_id,
 		});
 	}
-	function workspaceCommand(op: string, args: Record<string, unknown>) {
-		if (op === 'tabs' && args.action === 'create') { void browse(); return; }
-		if (!['takeover', 'release'].includes(op) && !humanControl) {
-			commandError = 'Take control before changing the browser.';
-			return;
+	let controlRequest: Promise<void> | null = null;
+	let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+	function noteInteraction() {
+		clearTimeout(releaseTimer);
+		releaseTimer = setTimeout(() => {
+			if (humanControl && !keyboardOpen && !navigationPending) sendIdentified({ type: 'workspace-command', op: 'release', args: {} });
+			else if (humanControl) noteInteraction();
+		}, 15000);
+	}
+	async function ensureControl() {
+		const scope = operation;
+		if (!scope || !streamOpen) throw new Error('Browser is reconnecting. Try again.');
+		checkOwner();
+		if (!humanControl) {
+			if (!controlRequest) {
+				const request = (async () => {
+					await acknowledged(scope, 'takeover', {});
+					await scope.wait(() => { checkOwner(); return humanControl; }, 'Browser is busy. Try again.');
+				})().finally(() => { if (controlRequest === request) controlRequest = null; });
+				controlRequest = request;
+			}
+			await controlRequest;
 		}
+		if (operation !== scope) throw new Error('Browser panel changed. Try again.');
+		noteInteraction();
+	}
+	async function workspaceCommand(op: string, args: Record<string, unknown>) {
+		if (op === 'tabs' && args.action === 'create') { void browse(); return; }
+		const scope = operation;
+		const identity = frameIdentity;
 		commandError = '';
-		if (!sendIdentified({ type: 'workspace-command', op, args }))
-			commandError = 'Command not sent. Check the connection and try again.';
+		try {
+			await ensureControl();
+			if (operation !== scope || frameIdentity !== identity) return;
+			if (!sendIdentified({ type: 'workspace-command', op, args })) throw new Error('Command not sent. Check the connection and try again.');
+		} catch (error) { if (operation === scope) commandError = error instanceof Error ? error.message : 'Browser command failed.'; }
 	}
 
-	function sendInput(payload: Record<string, unknown>) {
-		if (!humanControl || !(payload.kind === 'text' || payload.kind === 'key'
-			? keyboardEnabled && frameMatchesWorkspace : frameMatchesWorkspace)) return;
-		sendIdentified(payload);
+	async function sendInput(payload: Record<string, unknown>) {
+		if (!frameMatchesWorkspace || (payload.kind === 'mouse' && payload.event === 'move' && !humanControl)) return;
+		// Capture identity before awaiting admission: never replay a gesture on a new tab.
+		const identity = frameIdentity;
+		const scope = operation;
+		try {
+			await ensureControl();
+			if (identity === frameIdentity && frameMatchesWorkspace) sendIdentified(payload);
+		} catch (error) { if (operation === scope) commandError = error instanceof Error ? error.message : 'Browser input failed.'; }
 	}
 
 	function sendInspect(x: number, y: number, mode: 'hover' | 'select') {
@@ -543,6 +575,7 @@
 					'Control was not granted. Try again when the browser is free.');
 			}
 			assertCurrent();
+			noteInteraction();
 			if (workspace?.runtime_id !== runtimeId || !ownsControl(workspace, viewerId))
 				throw new Error('Browser control changed. Try again.');
 			if (address) {
@@ -568,7 +601,7 @@
 	}
 
 	async function sendCommand(command: string) {
-		if (!client?.isConnected() || !humanControl) return;
+		if (!client?.isConnected() || !canNavigate) return;
 		if (command === 'stop') {
 			// Interrupts navigation even while its acknowledgement is outstanding.
 			workspaceCommand('command', { command });
@@ -578,7 +611,7 @@
 		if (!scope || navigationPending || submitting) return;
 		navigationPending = true;
 		commandError = '';
-		try { await acknowledged(scope, 'command', { command }); }
+		try { await ensureControl(); await acknowledged(scope, 'command', { command }); }
 		catch (error) {
 			if (operation === scope) commandError = error instanceof Error ? error.message : 'Navigation failed. Try again.';
 		} finally { if (operation === scope) navigationPending = false; }
@@ -588,7 +621,8 @@
 	// Gating on `live` left back/forward/reload/address disabled for a visible
 	// page whenever status lagged on connecting/no_page (isConnected() also
 	// wasn't reactive, so a connecting→connecting handshake never re-enabled).
-	const canNavigate = $derived(humanControl && !!workspace?.active_tab_id);
+	const canInteract = $derived(streamOpen && !!workspace?.available && (!workspace.control.viewer_id || workspace.control.viewer_id === viewerId) && (!workspace.control.pending_viewer_id || workspace.control.pending_viewer_id === viewerId));
+	const canNavigate = $derived(canInteract && !!workspace?.active_tab_id);
 
 	const displayUrl = $derived(url || 'No page open');
 	/** Address text with the scheme trimmed, like a real browser's omnibox. */
@@ -603,7 +637,7 @@
 			!!workspace.active_tab_id &&
 			status === 'live',
 	);
-	const keyboardEnabled = $derived(isLive && humanControl && !!latestFrame && latestFrame.metadata.runtime_id === workspace?.runtime_id && latestFrame.metadata.tab_id === workspace?.active_tab_id);
+	const keyboardEnabled = $derived(isLive && canInteract && !!latestFrame && latestFrame.metadata.runtime_id === workspace?.runtime_id && latestFrame.metadata.tab_id === workspace?.active_tab_id);
 	/** A frame is on the canvas — keep showing it, whatever the socket is doing. */
 	const hasFrame = $derived(latestFrame !== null);
 	/** Short overlay text shown over a stale frame while the stream isn't live. */
@@ -744,21 +778,6 @@
 			<BrowserWorkspaceToolbar mode="controls" {workspace} {viewerId} connected={streamOpen} onCommand={workspaceCommand} />
 			<div class="header-actions">
 				<button
-					class="tool-btn keyboard-toggle"
-					class:active={keyboardOpen}
-					disabled={!keyboardOpen && (!keyboardEnabled || inspectMode || !liveView)}
-					aria-label={keyboardOpen ? 'Hide keyboard' : 'Show keyboard'}
-					aria-pressed={keyboardOpen}
-					title={keyboardOpen ? 'Hide keyboard' : 'Show keyboard'}
-					onpointerdown={(e) => e.preventDefault()}
-					onclick={() => {
-						if (keyboardOpen) liveView?.dismissKeyboard();
-						else liveView?.openKeyboard();
-					}}
-				>
-					<Keyboard size={16} strokeWidth={1.75} />
-				</button>
-				<button
 					class="tool-btn inspect-toggle"
 					class:active={inspectMode}
 					onclick={toggleInspect}
@@ -793,11 +812,12 @@
 				<div class="live-holder">
 					{#key sessionId}
 						<BrowserLiveView
-							bind:this={liveView}
 							bind:keyboardOpen
 							{keyboardEnabled}
 							frame={latestFrame}
-							interactive={isLive && frameMatchesWorkspace && (humanControl || inspectMode)}
+							interactive={isLive && frameMatchesWorkspace && (canInteract || inspectMode)}
+							editors={workspace?.editors ?? []}
+							onEdit={(args) => workspaceCommand('edit', args)}
 							viewport={workspace?.viewport}
 							inspecting={inspectMode && isLive && frameMatchesWorkspace}
 							{hoverRect}
@@ -927,8 +947,8 @@
 				<MousePointer2 size={12} strokeWidth={1.5} />
 				<span
 					>{humanControl
-						? 'You control this page. Return control when you are done.'
-						: 'View only. Take control to interact with the page.'}</span
+						? 'Click or tap to browse. Control returns automatically when idle.'
+						: canInteract ? 'Click or tap the page to interact.' : 'Browser is busy or reconnecting.'}</span
 				>
 			</footer>
 		{/if}

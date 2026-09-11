@@ -161,7 +161,9 @@ export class Session {
         target = result.targetInfo.targetId;
       } catch { /* disconnected */ }
     }
-    return { active_tab_id: id ?? null, target_id: target,
+    const { readEditors } = await import('./editors.js');
+    const editors = page ? await readEditors(page).catch(() => []) : [];
+    return { active_tab_id: id ?? null, target_id: target, editors,
       tabs: tabs.slice(0, 128).map(t => ({ ...t, url: t.url.slice(0, 1024), title: t.title.slice(0, 256) })),
       viewport: { mode: this.viewportMode, ...(page?.viewportSize() ?? this.desiredViewport) } };
   }
@@ -306,6 +308,7 @@ export class Session {
     const page = await this.manager.newPage();
     const fresh = await this.trackPage(page);
     this.currentId = fresh.id;
+    await this.bringToFront();
     // A freshly acquired page (first use, or after a disconnect/crash) is a
     // blank document: refs handed out against a previous page must not resolve
     // against it. Drop them.
@@ -411,6 +414,19 @@ export class Session {
     if (!entry) return false;
     try {
       await raceWithTimeout(entry.page.bringToFront(), BRING_TO_FRONT_TIMEOUT_MS, "bringToFront timed out");
+      // Chromium 149 can keep the emulated DOM viewport but reset screencast
+      // frames to the native window's content size after navigation. Keep the
+      // foreground window in sync too; changing metadata would only hide the
+      // mismatch and make pointer/editor coordinates unsafe. Reapply on tab
+      // activation because differently sized tabs can share one native window.
+      const viewport = entry.page.viewportSize();
+      if (viewport && this.currentEntry() === entry) {
+        const cdp = await this.currentCDP();
+        const { windowId } = await raceWithTimeout(cdp.send("Browser.getWindowForTarget"), BRING_TO_FRONT_TIMEOUT_MS, "window lookup timed out");
+        if (this.currentEntry() === entry) {
+          await raceWithTimeout(cdp.send("Browser.setContentsSize", { windowId, ...viewport }), BRING_TO_FRONT_TIMEOUT_MS, "window resize timed out");
+        }
+      }
       return true;
     } catch {
       return false;
@@ -430,6 +446,7 @@ export class Session {
     this.desiredViewport = { width, height };
     this.viewportMode = "fixed";
     if (pinned) this.pinnedViewport = { width, height };
+    await this.bringToFront();
     this.notifyNavigation();
     return this.appliedViewport();
   }
@@ -468,6 +485,7 @@ export class Session {
       await raceWithTimeout(entry.page.setViewportSize(pin), 5000, "viewport timed out");
       this.desiredViewport = { ...pin };
       this.viewportMode = "fixed";
+      await this.bringToFront();
       this.onWorkspaceChange?.();
     } catch {
       /* no page yet, or a target that went away: the next call re-tries */
@@ -576,18 +594,20 @@ export class Session {
     const page = await this.manager.newPage();
     const entry = await this.trackPage(page);
     this.currentId = entry.id;
+    await this.bringToFront();
     this.notifyNavigation();
     return entry.id;
   }
 
   /** Switch the current page. Refs from the previous page become void. */
-  selectTab(id: string): void {
+  async selectTab(id: string): Promise<void> {
     const entry = this.pages.get(id);
     if (!entry || entry.page.isClosed()) {
       throw new Error(`no such tab: ${id}`);
     }
     if (id !== this.currentId) {
       this.currentId = id;
+      await this.bringToFront();
       this.notifyNavigation();
       reportCurrentTarget(entry.page, id);
     }
@@ -605,6 +625,7 @@ export class Session {
     }
     // The page's own close handler removes it from the map and re-points current.
     await entry.page.close();
+    await this.bringToFront();
   }
 
   // ---- screenshot coordinate mapping ---------------------------------------

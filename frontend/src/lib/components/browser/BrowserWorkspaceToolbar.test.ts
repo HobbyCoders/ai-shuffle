@@ -51,7 +51,7 @@ describe('shared workspace toolbar', () => {
 		expect(view.getByText('Another viewer controls')).toBeTruthy();
 		expect(onCommand).not.toHaveBeenCalled();
 	});
-	it('reserves pending control and exposes release', () => {
+	it('shows pending control without manual ownership buttons', () => {
 		const view = render(BrowserWorkspaceToolbar, {
 			workspace: {
 				...state,
@@ -63,6 +63,7 @@ describe('shared workspace toolbar', () => {
 			onCommand: vi.fn(),
 		});
 		expect(view.getByText(/Requesting control/)).toBeTruthy();
-		expect(view.getByText('Return control')).toBeTruthy();
+		expect(view.queryByText('Return control')).toBeNull();
+		expect(view.queryByText('Take control')).toBeNull();
 	});
 });

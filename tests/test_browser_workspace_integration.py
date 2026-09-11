@@ -258,6 +258,9 @@ async def test_real_mcp_and_two_viewers_share_tabs_control_and_viewport(
         broker = browser_control._brokers.get(session_id)
         return {
             "fixture_loads": fixture_loads,
+            "runtime_viewport": await browser_runtime.call(session_id, "browser_eval", {
+                "code": "return {width: innerWidth, height: innerHeight, dpr: devicePixelRatio}"
+            }) if browser_runtime._runtimes.get(session_id) else None,
             "last_metadata": hub._last_metadata if hub else None,
             "attached_target": hub._attached_target_id if hub else None,
             "frame_identity": hub._frame_identity if hub else None,
