@@ -72,5 +72,9 @@ try{
  await screenshot('updated-same-app');await close();passed('Real signed main code builds through in-app IPC and restarts with existing database and setup');
  await launch();assert.equal(await page.evaluate(()=>window.shuffleDesktop.version),'main@'+staged.pending.slice(0,12));assert.deepEqual(await auth(),expected);await close();
  passed('Original installed EXE opens the updated revision on subsequent launches');report.success=true;
-}catch(error){report.error=String(error);console.error(error);process.exitCode=1;if(page&&!page.isClosed())await screenshot('failure').catch(()=>{});}
+}catch(error){report.error=String(error);console.error(error);process.exitCode=1;
+ // Build children receive a credential-free environment. Retain only bounded
+ // error diagnostics, never worker logs, browser state or the private profile.
+ try{const buildLog=await fs.readFile(path.join(sourceRoot,'build.log'),'utf8');report.buildErrors=buildLog.split(/\r?\n/).filter(line=>/error|failed|traceback|cannot|no such|not found|not recognized/i.test(line)).slice(-25).map(line=>line.replace(/github_pat_[A-Za-z0-9_]+/g,'[redacted]').replace(/(token|password|authorization)\s*[:=]\s*\S+/gi,'$1=[redacted]').slice(0,1000));console.error(report.buildErrors.join('\n'));}catch{}
+ if(page&&!page.isClosed())await screenshot('failure').catch(()=>{});}
 finally{if(page)await close().catch(()=>{});await log.close();await fs.writeFile(path.join(output,'acceptance.json'),JSON.stringify(report,null,2));}
