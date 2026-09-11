@@ -110,6 +110,50 @@ def test_base_missing_dir_returns_none_no_recreation(project, mock_db, tmp_path,
 # Branch checkout materialization
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("stale_status", ["active", "archived"])
+def test_branch_creation_skips_missing_older_base(
+    project, tmp_path, workspace_root, test_db, stale_status
+):
+    gone = tmp_path / "removed-base"
+    stale = checkouts_db.upsert_checkout(
+        project["id"], RUNNER, str(gone), status=stale_status
+    )
+    # Order explicitly even when the shim gives both rows the same timestamp.
+    test_db.execute(
+        "UPDATE checkouts SET created_at = '2000-01-01' WHERE id = ?", (stale["id"],)
+    )
+    repo = _make_base_repo(tmp_path)
+    checkouts_db.upsert_checkout(project["id"], RUNNER, str(repo))
+    assert checkouts_db.get_checkout(project["id"], RUNNER)["id"] == stale["id"]
+
+    assert checkout_manager.ensure_checkout(project, runner_id=RUNNER) == str(repo)
+    path = checkout_manager.ensure_checkout(
+        project, branch="fix/new-session", runner_id=RUNNER, create_new_branch=True
+    )
+
+    assert path == str(checkout_manager._branch_checkout_path(str(repo), "fix/new-session"))
+    assert (Path(path) / ".git").is_file()
+    assert not gone.exists()
+    assert checkouts_db.get_checkout(project["id"], RUNNER)["status"] == stale_status
+
+
+def test_missing_runner_base_does_not_adopt_other_runners(
+    project, tmp_path, workspace_root, monkeypatch
+):
+    gone = tmp_path / "removed-base"
+    checkouts_db.upsert_checkout(project["id"], RUNNER, str(gone))
+    repo = _make_base_repo(tmp_path)
+    for runner in ("", "other-runner"):
+        checkouts_db.upsert_checkout(project["id"], runner, str(repo))
+    monkeypatch.setattr(
+        checkout_manager, "_seed_base_checkout",
+        lambda *args: pytest.fail("Existing missing rows must not trigger cloning"),
+    )
+
+    assert checkout_manager.ensure_checkout(project, runner_id=RUNNER) is None
+    assert not gone.exists()
+
+
 def test_branch_lazy_create_deterministic_path(project, base_checkout, workspace_root):
     path = checkout_manager.ensure_checkout(
         project, branch="feature-x", runner_id=RUNNER, create_new_branch=True

@@ -272,6 +272,23 @@ def _checkouts_for_branch(
     return _rows(cursor.fetchall())
 
 
+def list_checkouts_with_legacy_fallback(
+    project_id: str, runner_id: str, branch: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """All candidates, oldest first, preserving exact-runner precedence.
+
+    A missing directory must not hide another checkout on the same runner.
+    Legacy unowned rows are considered only when the runner has no rows for
+    this branch, matching ``get_checkout_with_legacy_fallback``.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        rows = _checkouts_for_branch(cursor, project_id, runner_id, branch)
+        if not rows and runner_id != "":
+            rows = _checkouts_for_branch(cursor, project_id, "", branch)
+    return rows
+
+
 def list_active_checkouts(
     project_id: str, runner_id: str, branch: Optional[str] = None
 ) -> List[Dict[str, Any]]:

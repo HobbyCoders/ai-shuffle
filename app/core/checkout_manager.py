@@ -388,24 +388,23 @@ def _ensure_base_checkout(
     """
     # branch=None → base checkout; legacy fallback resolves the runner_id=''
     # rows the v60 collapse seeded for pre-instance_id legacy projects.
-    row = checkouts_db.get_checkout_with_legacy_fallback(project_id, runner_id)
-    if not row:
+    rows = checkouts_db.list_checkouts_with_legacy_fallback(project_id, runner_id)
+    if not rows:
         return _seed_base_checkout(project_v2_row, project_id, runner_id)
-    path = row.get("path")
-    if not path:
-        return None
-    # Normalize a workspace-relative legacy path (#654) before the on-disk check
-    # and the return; the raw DB value is left untouched (read-only normalization).
-    resolved = _resolve_checkout_path(path)
-    if not os.path.isdir(resolved):
-        # Row survives but the dir was removed on this device — do NOT recreate.
-        return None
-    # Status-refresh reuses the row's ORIGINAL path (its uniqueness key) so it
-    # updates in place — but only when that path is absolute, so a legacy relative
-    # row (repaired out-of-band) never trips upsert_checkout's relative-path guard.
-    if row.get("status") != "active" and os.path.isabs(path):
-        checkouts_db.upsert_checkout(project_id, runner_id, path, status="active")
-    return resolved
+    for row in rows:
+        path = row.get("path")
+        if not path:
+            continue
+        # A removed checkout must not mask a later, usable checkout on this runner.
+        # Normalize legacy relative paths without rewriting their uniqueness key.
+        resolved = _resolve_checkout_path(path)
+        if not os.path.isdir(resolved):
+            continue
+        if row.get("status") != "active" and os.path.isabs(path):
+            checkouts_db.upsert_checkout(project_id, runner_id, path, status="active")
+        return resolved
+    # Rows survive but every directory is gone — do not recreate them in place.
+    return None
 
 
 def _adopt_legacy_worktree(
