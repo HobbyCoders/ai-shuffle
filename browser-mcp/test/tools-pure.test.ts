@@ -24,6 +24,11 @@ describe("act.validateTarget", () => {
     expect(validateTarget({ ...base, ref: "e1" })).toBeNull();
     expect(validateTarget({ ...base, coordinate: [1, 2] })).toBeNull();
   });
+  it("allows targetless keys only, retaining explicit-target validation", () => {
+    expect(validateTarget({ kind: "key", key: "Escape" })).toBeNull();
+    expect(validateTarget({ kind: "key", key: "Escape", ref: "e1", coordinate: [1, 2] })).toMatch(/exactly one/);
+    expect(validateTarget({ kind: "key", key: "Escape", coordinate: [1] })).toMatch(/\[x, y\]/);
+  });
   it("rejects malformed coordinates", () => {
     expect(validateTarget({ ...base, coordinate: [1] })).toMatch(/\[x, y\]/);
   });
@@ -119,14 +124,14 @@ const RICH_SNAPSHOT = 'button "Save" [ref=e1]\nlink "Docs" [ref=e2]\nheading "Da
 const RENDERED = { title: "Dashboard", textChars: 400 };
 
 describe("content warning via browser_snapshot", () => {
-  it("warns loudly when the page rendered nothing", async () => {
+  it("reports missing refs without declaring the app failed", async () => {
     const res = await runSnapshot(snapshotSession("", 0), {});
     const body = bodyOf(res);
     expect(body.ok).toBe(true); // ok semantics unchanged
     expect(body.ref_count).toBe(0);
-    expect(String(body.warning)).toMatch(/rendered no content/);
-    expect(String(body.warning)).toMatch(/blank\/errored app/);
-    expect(String(body.warning)).toMatch(/browser_console/);
+    expect(String(body.warning)).toMatch(/no actionable refs yet/);
+    expect(String(body.warning)).not.toMatch(/likely a blank/);
+    expect(String(body.warning)).toMatch(/browser_wait/);
     // The warning is also visible in the trailing block, not just the JSON.
     expect(trailingOf(res)).toContain("[warning]");
   });
@@ -135,13 +140,13 @@ describe("content warning via browser_snapshot", () => {
     const body = bodyOf(
       await runSnapshot(snapshotSession("   \n\n  ", 0, { title: "  ", textChars: 0 }), {}),
     );
-    expect(String(body.warning)).toMatch(/rendered no content/);
+    expect(String(body.warning)).toMatch(/no actionable refs yet/);
   });
 
   it("flags a rendered page with no act-able elements more gently", async () => {
     const body = bodyOf(await runSnapshot(snapshotSession("", 0, RENDERED), {}));
     expect(body.ok).toBe(true);
-    expect(String(body.warning)).toMatch(/no interactive elements/);
+    expect(String(body.warning)).toMatch(/no actionable refs yet/);
     expect(String(body.warning)).not.toMatch(/rendered no content/);
   });
 
@@ -171,9 +176,11 @@ describe("content warning via browser_navigate", () => {
       goForward: async () => {},
       url: () => landing,
       title: async () => page.title,
+      locator: () => ({ first: () => ({ isVisible: async () => true }) }),
     };
     return {
       ensurePage: async () => handle,
+      currentTabId: () => "tab1",
       notifyNavigation: () => {},
       pageContent: async () => page,
       snapshot: async () => ({
@@ -189,7 +196,7 @@ describe("content warning via browser_navigate", () => {
     const body = bodyOf(await runNavigate(navSession("", 0), { url: "http://127.0.0.1:5173/" }));
     expect(body.ok).toBe(true);
     expect(body.ref_count).toBe(0);
-    expect(String(body.warning)).toMatch(/rendered no content/);
+    expect(String(body.warning)).toMatch(/no actionable refs yet/);
   });
 
   it("stays silent when the landing page has content", async () => {

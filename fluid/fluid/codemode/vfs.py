@@ -50,7 +50,7 @@ DEFAULT_ALLOWLIST = frozenset({
     # Pure text/data helpers models reach for constantly; none touch the
     # filesystem, network, or process state.
     "shlex", "fnmatch", "difflib", "copy", "pprint", "unicodedata", "html",
-    "ipaddress", "struct", "zlib", "time",
+    "ipaddress", "struct", "zlib", "time", "ast",
 })
 
 
@@ -120,6 +120,10 @@ def missing_leaf_message(pkg: str, name: str) -> str:
 
 class ToolError(RuntimeError):
     """Raised inside the kernel when a host tool call returns an error result."""
+
+
+class MissingPathError(ToolError):
+    """Missing Read/Grep/Glob target; catch only for independent discovery."""
 
 
 class HostCallDenied(PermissionError):
@@ -501,6 +505,7 @@ def make_namespace(
         "__host_call__": host_call,
         "ResultRef": ResultRef,
         "ToolError": ToolError,
+        "MissingPathError": MissingPathError,
         "HostCallDenied": HostCallDenied,
         "_refs": refs if refs is not None else RefRegistry(),
         "_": None,

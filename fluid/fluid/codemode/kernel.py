@@ -55,6 +55,8 @@ class HostReply:
     images: tuple[ToolImage, ...] = ()
     content_id: str | None = None
     window_of: ContentWindow | None = None
+    error_code: str | None = None
+    shell_exit_code: int | None = None
 
 
 @dataclass(frozen=True)

@@ -99,6 +99,33 @@ def test_durable_agent_arm_ignores_shells(mock_db):
     assert pending_reconcile.nonterminal_agent_task_ids("s-arm") == ["agent-1"]
 
 
+@pytest.mark.parametrize("status", ["completed", "error", "killed"])
+def test_durable_agent_arm_ignores_unflushed_local_completion(mock_db, monkeypatch, status):
+    from app.core import task_persistence, task_registry as registry_module
+
+    registry = registry_module.TaskRegistry()
+    monkeypatch.setattr(registry_module, "task_registry", registry)
+    with patch.object(task_persistence, "enqueue_task_snapshot") as enqueue:
+        registry.start_task("s-lag", "finished", "agent", "worker")
+        # Persist the real producer's running snapshot, but hold its later
+        # terminal snapshot in the queue so the database deliberately lags.
+        background_tasks_db.upsert_background_task(enqueue.call_args.args[2])
+        registry.complete_task("s-lag", "finished", status, notify=False)
+        assert enqueue.call_args.args[2]["status"] == status
+        registry.start_task("s-lag", "live", "agent", "still working")
+        background_tasks_db.upsert_background_task(enqueue.call_args.args[2])
+        _task_row("s-lag", "durable-only", "running")
+        registry.start_task("other-session", "durable-only", "agent", "other")
+        registry.complete_task("other-session", "durable-only", status, notify=False)
+
+        assert pending_reconcile.durable_task_statuses("s-lag", ["finished"]) == {
+            "finished": "running",
+        }
+        assert set(pending_reconcile.nonterminal_agent_task_ids("s-lag")) == {
+            "live", "durable-only",
+        }
+
+
 # ---------------------------------------------------------------------------
 # Live-engine reconcile (resume / turn end)
 # ---------------------------------------------------------------------------
@@ -255,3 +282,23 @@ def test_boot_sweep_only_visits_this_installs_open_sessions(mock_db, test_db):
     assert pending_reconcile.list_sessions_for_pending_repair() == [
         ("open", "ses_open")
     ]
+
+async def test_terminal_evidence_survives_registry_restart(mock_db):
+    from app.core.task_registry import task_registry, TaskRegistry
+    from app.core import task_persistence
+
+    sid, tid = "reconcile-evidence", "report-task"
+    task_registry.start_task(sid, tid, "agent", "run checks")
+    task_registry.complete_task(
+        sid, tid, "error", summary="FAILED test_checkout: retained traceback",
+        reason="worker_error", report_path="/tmp/task-report.txt", report_chars=321,
+    )
+    await task_persistence.flush()
+    # A fresh registry exercises the durable producer/consumer path, not seeded metadata.
+    with patch("app.core.task_registry.task_registry", TaskRegistry()):
+        (frame,) = pending_reconcile.terminal_frames_for(sid, [tid])
+    assert frame["summary"] == "FAILED test_checkout: retained traceback"
+    assert frame["report_path"] == "/tmp/task-report.txt"
+    assert frame["report_chars"] == 321
+    assert frame["reason"] == "worker_error"
+    assert frame["status"] == "error"

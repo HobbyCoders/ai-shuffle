@@ -85,11 +85,8 @@ _COMPLETED_VISIBLE_WINDOW_SECONDS = 15.0
 # "completed" is retained only for the short hand-off window.
 _FAILURE_STATUSES = frozenset({"error", "killed"})
 
-# Terminal statuses that mean a task was STOPPED rather than that it failed on
-# its own. ``killed`` is in both sets on purpose: it is a failure as far as
-# RETENTION is concerned (the user must see the row) and a cancellation as far
-# as WAKES are concerned (see ``is_unattributed_cancellation``). The fluid
-# adapter's wire vocabulary adds "cancelled"/"stopped" for the same state.
+# Terminal cancellation vocabulary. Intent needs separate reason/suppression
+# evidence: an unattributed kill can be a crash and must still reach the model.
 _CANCELLATION_STATUSES = frozenset({"killed", "cancelled", "stopped"})
 
 # Kill attribution for shutdown-origin reaps (lifecycle batch, item 4a): a
@@ -785,22 +782,10 @@ class TaskRegistry:
         return True
 
     def is_unattributed_cancellation(self, session_id: str, task_id: str) -> bool:
-        """True iff this task was STOPPED and nobody claimed the stop.
+        """True when a cancellation has no recorded cause.
 
-        The discriminator every kill site already writes: a stop with an outside
-        cause stamps a ``reason`` on the record — ``user_stopped``,
-        ``server_shutdown``, ``monitor_timeout``, ``parent_turn_ended``,
-        ``provider_rate_limited`` — and a stop with none is the one the SESSION
-        ITSELF asked for, the ``TaskStop`` a model fires at its own stale
-        watcher. (``monitor_spawn._cause_line`` draws the same line from the same
-        field, which is where "Stopped deliberately by the app or by an agent,
-        not by a crash" comes from.)
-
-        The scheduler uses it to retire such a terminal without waking a turn:
-        the model stopped the thing on purpose seconds ago, and a whole wake turn
-        whose only output is "noted" is pure churn. An ATTRIBUTED stop keeps its
-        wake — a task killed by a shutdown, a timeout or a rate limit is news the
-        parent did not already have.
+        Missing attribution does not prove an intentional Stop; callers must not
+        suppress delivery on this predicate. Explicit Stop uses suppress_wake.
         """
         record = self.get_task(session_id, task_id)
         if record is None:
@@ -1249,6 +1234,10 @@ class TaskRegistry:
                     in self._terminal_notified.get(session_id, set()),
                     "started_at": record.get("started_at"),
                     "updated_at": record.get("updated_at"),
+                    "summary": record.get("summary"),
+                    "reason": record.get("reason"),
+                    "report_path": record.get("report_path"),
+                    "report_chars": record.get("report_chars"),
                 },
             )
         except Exception:
@@ -1538,10 +1527,8 @@ class TaskRegistry:
         The last resort behind ``get_task``: a restart, an eviction, or simply a
         retention window that finally expired leaves nothing in memory, and the
         row is then the only surviving record that the task existed and how it
-        ended. It carries less than a live record (the table stores identity and
-        lifecycle, not the summary or the report handles), which is exactly why
-        it is last — but "completed, kind=agent" is enough for ``TaskGet`` to
-        reach the report through the worker's own event log.
+        ended. The row retains a bounded terminal summary and report handles;
+        it does not imply the original process can be resumed.
 
         Never raises: any failure is an unknown task, as before.
         """
@@ -1572,6 +1559,10 @@ class TaskRegistry:
             "tool_use_id": row.get("tool_use_id"),
             "started_at": _stamp(row.get("started_at")),
             "updated_at": _stamp(row.get("updated_at")),
+            "summary": row.get("summary"),
+            "reason": row.get("reason"),
+            "report_path": row.get("report_path"),
+            "report_chars": row.get("report_chars"),
         })
 
     def get_task_tool_use_id(self, session_id: str, task_id: str) -> Optional[str]:

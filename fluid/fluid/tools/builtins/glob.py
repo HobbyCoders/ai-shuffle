@@ -49,6 +49,10 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "(node_modules, .git, build output, virtualenvs) are pruned from "
         "the walk.\n"
         "\n"
+        "This is a recursive file search, not a directory listing: a pattern "
+        "without `/` matches basenames at any depth; `src/*.py` is rooted "
+        "under `path`, while `src/**/*.py` also includes descendants. "
+        "Directories themselves are not returned. "
         "Patterns accept `**`, `?`, character classes and `{a,b}` alternation, "
         "and a leading `!` inverts the pattern into an exclusion (e.g. "
         "!{vendor/**,dist/**}). A pattern that cannot be honoured comes back as "
@@ -108,7 +112,9 @@ def _glob(pattern: str, root: Path, limit: int = MAX_RESULTS) -> ToolOutcome:
     """Bounded glob walk. Runs on a thread — the walk can touch many paths."""
     head = f"globbed under {root}"
     if not root.exists():
-        return ToolOutcome(text=f"path not found: {root}", is_error=True)
+        return ToolOutcome(
+            text=f"path not found: {root}", is_error=True, error_code="missing_path",
+        )
     # A pattern this compiler cannot honour is an error, not an empty listing:
     # "(no matches)" reads as a fact about the tree and gets acted on as one.
     try:

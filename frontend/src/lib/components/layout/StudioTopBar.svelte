@@ -18,7 +18,7 @@
 	import type { Snippet } from 'svelte';
 	import { PanelLeft, ChevronRight } from 'lucide-svelte';
 	import { isAdmin, username } from '$lib/stores/auth.svelte';
-	import { ACCOUNT_CHANGED_EVENT, getAccountConnection, getAccountProfile } from '$lib/api/account';
+	import { ACCOUNT_CHANGED_EVENT, getAccountConnection, getAccountDisplay } from '$lib/api/account';
 	import SessionTitleMenu from './SessionTitleMenu.svelte';
 
 	interface Props {
@@ -54,34 +54,60 @@
 		if (!$isAdmin) { shuffleName = ''; return; }
 		let stopped = false;
 		let version = 0;
-		let timer: ReturnType<typeof setTimeout>;
-		async function refresh() {
+		let pending = false;
+		let again = false;
+		let delay = 30_000;
+		let nextRefresh = 0;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		function schedule() {
 			clearTimeout(timer);
-			const request = ++version;
+			if (!stopped && !document.hidden) timer = setTimeout(refresh, Math.max(0, nextRefresh - Date.now()));
+		}
+		async function refresh() {
+			if (stopped || document.hidden || pending) return;
+			if (Date.now() < nextRefresh) { schedule(); return; }
+			clearTimeout(timer);
+			pending = true;
+			const request = version;
 			try {
 				const connection = await getAccountConnection();
 				if (stopped || request !== version) return;
 				const profile = connection.signed_in && connection.profile_ready !== false
-					? await getAccountProfile() : null;
+					? await getAccountDisplay() : null;
 				if (!stopped && request === version) shuffleName = profile?.account.username.trim() ?? '';
+				delay = 30_000;
 			} catch {
 				if (!stopped && request === version) shuffleName = '';
+				delay = Math.min(delay * 2, 300_000);
 			} finally {
-				if (!stopped && request === version) timer = setTimeout(refresh, 30_000);
+				pending = false;
+				nextRefresh = Date.now() + delay;
+				if (again) { again = false; nextRefresh = 0; }
+				schedule();
 			}
 		}
 		function accountChanged() {
+			version++;
 			shuffleName = '';
-			void refresh();
+			nextRefresh = 0;
+			delay = 30_000;
+			if (pending) again = true;
+			else void refresh();
+		}
+		function visibilityChanged() {
+			if (document.hidden) clearTimeout(timer);
+			else void refresh();
 		}
 		void refresh();
 		window.addEventListener(ACCOUNT_CHANGED_EVENT, accountChanged);
 		window.addEventListener('focus', refresh);
+		document.addEventListener('visibilitychange', visibilityChanged);
 		return () => {
 			stopped = true;
 			clearTimeout(timer);
 			window.removeEventListener(ACCOUNT_CHANGED_EVENT, accountChanged);
 			window.removeEventListener('focus', refresh);
+			document.removeEventListener('visibilitychange', visibilityChanged);
 		};
 	});
 

@@ -79,6 +79,123 @@ def _texts(messages: list[Message]) -> list[str]:
     ]
 
 
+def _growing_turn(calls: int, *, metadata: bool = True) -> list[SessionNode]:
+    nodes = [_node("start", "user", [Text("Never change production credentials.")])]
+    for i in range(calls):
+        nodes.extend([
+            _node(f"a{i}", "assistant", [ToolUseBlock(id=f"c{i}", name="Edit", input={"text": "a" * 18_000})]),
+            _node(f"r{i}", "user", [ToolResultBlock(
+                tool_use_id=f"c{i}", content=[Text("r" * 2_200)],
+                delivery_metadata_version=int(metadata),
+            )]),
+        ])
+    return nodes
+
+
+def test_growing_protected_turn_has_no_tiny_optional_rewrites() -> None:
+    # Replay the observed 50-call argument-heavy turn, including legacy data
+    # whose lack of typed delivery metadata rules out within-turn digestion.
+    c = Compactor()
+    batches = []
+    for count in range(1, 51):
+        _, promotions = c.apply(_growing_turn(count, metadata=False), turn_boundary=False)
+        if promotions:
+            first = promotions[0]
+            assert first.before_tokens - first.after_tokens >= int(first.before_tokens * 0.05)
+            assert first.first_changed_message is not None
+            batches.append(promotions)
+    assert batches
+    assert len(batches) < 19
+    assert not c._digested  # No unsafe fallback to parsing tool text.
+
+
+def test_optional_rejection_rolls_back_and_overflow_bypasses_watermark() -> None:
+    from fluid.context.trim import estimate_tokens_of_messages
+
+    nodes = _growing_turn(50, metadata=False)
+    c = Compactor(config=CompactionConfig(trim=TrimConfig(keep_recent_tool_results=49)))
+    original = c.view(nodes)
+    before = estimate_tokens_of_messages(original)
+    rendered, promotions = c.apply(nodes, turn_boundary=False)
+    assert not promotions and rendered == original
+    assert c.last_decision["reason"] == "insufficient_reclaim"
+    assert not c.trimmer._trimmed
+    c.apply(nodes, turn_boundary=False)
+    assert c.last_decision["reason"] == "awaiting_reclaimable_growth"
+    rendered, promotions = c.apply(
+        nodes, turn_boundary=False,
+        context_window=before + c.config.headroom_tokens + 4_000 - 1,
+        output_reserve_tokens=4_000,
+    )
+    assert promotions
+    assert 0 < before - estimate_tokens_of_messages(rendered) < before * 0.05
+    assert promotions[0].decision_reason == "window_protection"
+
+
+def test_rejected_optional_image_candidate_restores_consumed_state() -> None:
+    c = Compactor(config=_armed())
+    nodes = _image_history()
+    original = c.view(nodes)
+    rendered, promotions = c.apply(nodes, overhead_tokens=100_000)
+    assert rendered == original and not promotions
+    assert not c.trimmer._image_consumed
+    assert not c.trimmer._trimmed
+
+
+def test_digest_expansion_is_rejected_using_actual_rendered_view() -> None:
+    c = Compactor(config=_cfg(keep_recent_turns=0, trim=TrimConfig(enabled=False)))
+    nodes = [_node("u", "user", [Text("hi")])]
+    assert c._digest_until(nodes, overhead_tokens=0, target=0) == []
+    assert not c._digested
+    assert c.view(nodes) == [nodes[0].message]
+
+
+def test_long_turn_segments_preserve_pairing_steers_and_replay() -> None:
+    from fluid.context.compaction import render_epoch_stub
+    from fluid.messages.content import SteerDelivery
+
+    nodes = _growing_turn(50)
+    steer = SteerDelivery(text="Do not deploy.\n" + "retain this constraint " * 100, id="real-user")
+    block = nodes[2].message.content[0]
+    block.delivered_steers = [steer]
+    block.content.append(Text(steer.render()))
+    original = [n.message.to_dict() for n in nodes]
+    c = Compactor()
+    rendered, promotions = c.apply(nodes, turn_boundary=False)
+    assert any(p.tier == 2 for p in promotions)
+    assert rendered[0] == nodes[0].message
+    assert steer.render() in "\n".join(_texts(rendered))
+    assert repair_dangling_tool_calls(rendered) is rendered
+    assert [n.message.to_dict() for n in nodes] == original
+    replayed_nodes = [SessionNode(node_id=n.node_id, parent_id=n.parent_id,
+                                 message=Message.from_dict(n.message.to_dict())) for n in nodes]
+    resumed = Compactor()
+    resumed.rehydrate(promotions)
+    assert resumed.view(replayed_nodes) == rendered
+    # A fork before the promoted end cannot inherit an off-path segment.
+    fork = replayed_nodes[:10]
+    fork_trims = Compactor()
+    fork_trims.rehydrate([p for p in promotions if p.tier == 1])
+    assert resumed.view(fork) == fork_trims.view(fork)
+    assert "compacted turn" not in "\n".join(_texts(resumed.view(fork)))
+    assert steer.render() in "\n".join(_texts([render_epoch_stub([nodes], c.config)]))
+    assert nodes[-2].message in rendered and nodes[-1].message in rendered
+
+
+def test_segments_do_not_cross_errors_unpaired_calls_or_untyped_results() -> None:
+    from fluid.context.compaction import completed_segments
+
+    assert not completed_segments(_growing_turn(16, metadata=False))
+    nodes = _growing_turn(16)
+    nodes[2].message.content[0].is_error = True
+    segments = completed_segments(nodes)
+    assert len(segments) == 1
+    assert nodes[2] not in segments[0]
+    nodes = _growing_turn(16)
+    nodes.pop(2)  # First call remains unresolved; no later group may hide it.
+    assert not completed_segments(nodes)
+
+
 # ─── Span derivation ─────────────────────────────────────────────────────────
 
 
@@ -366,7 +483,7 @@ def test_threshold_uses_window_headroom() -> None:
 
 
 def test_overhead_counts_toward_trigger() -> None:
-    nodes = _history(6)
+    nodes = _history(6, result_chars=8_000)
     cfg = _cfg(trigger_tokens=100_000,
                trim=TrimConfig(trigger_tokens=100_000,
                                keep_recent_tool_results=2, min_result_chars=500))
@@ -464,6 +581,69 @@ def _request_texts(request: ProviderRequest) -> str:
                 if isinstance(getattr(c, "text", None), str):
                     out.append(c.text)
     return "\n".join(out)
+
+
+async def test_long_turn_engine_persists_delivery_segments_and_replays(tmp_path) -> None:
+    import json
+    from fluid.events.ops import Steer
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins import register_builtins
+    from fluid.tools.inproc import create_inproc_server, tool
+    from fluid.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    calls = 0
+    steer = "Do not deploy; preserve production credentials."
+
+    @tool("work", "Work", {"type": "object", "properties": {"text": {"type": "string"}}})
+    async def work(args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await loop.submit(Steer(text=steer, id="steer-1"))
+        return {"content": [{"type": "text", "text": "r" * 2_200}]}
+
+    registry.register_inproc(create_inproc_server("long", [work]))
+    scripts = []
+    for i in range(50):
+        scripts.append([
+            StreamChunk("message_start", {"usage": {"input_tokens": 10}}),
+            StreamChunk("block_start", {"index": 0, "block_type": "tool_use",
+                                        "tool_use_id": f"c{i}", "tool_name": "mcp__long__work"}),
+            StreamChunk("tool_args_delta", {"index": 0, "partial_json": json.dumps({"text": f"{i:02d}" + "a" * 17_998})}),
+            StreamChunk("block_stop", {"index": 0}),
+            StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": "tool_use"}),
+            StreamChunk("message_stop", {}),
+        ])
+    scripts.append(_text_script("done"))
+    provider = _ScriptedProvider(scripts)
+    store = JsonlStore(tmp_path)
+    loop = NativeLoop(provider=provider, store=store, model="m", registry=registry,
+                      permissions=PermissionEngine("never_ask"))
+    await loop.submit(UserTurn(content="Keep every production credential unchanged."))
+    await asyncio.wait_for(loop.wait_turn(), 15)
+    assert calls == 50
+    sid = loop.session_id
+    events = await store.events_since(sid, 0)
+    promotions = [e for e in events if isinstance(e, ContextCompaction)]
+    assert any(e.tier == 2 for e in promotions)
+    assert all(e.before_tokens > e.after_tokens > 0 for e in promotions)
+    assert all(e.first_changed_message is not None for e in promotions)
+    assert all(steer in _request_texts(r) for r in provider.requests[1:])
+    assert all(repair_dangling_tool_calls(r.messages) is r.messages for r in provider.requests)
+    await loop.aclose()
+    fresh_store = JsonlStore(tmp_path)
+    fresh = NativeLoop(provider=_ScriptedProvider([_text_script("done")]), store=fresh_store,
+                       model="m", session_id=sid, registry=registry)
+    await fresh._rehydrate_compaction(sid)
+    nodes = await fresh_store.load_path(sid)
+    assert fresh._compactor.view(nodes) == loop._compactor.view(nodes)
+    first_result = next(b for n in nodes for b in n.message.content if isinstance(b, ToolResultBlock))
+    assert first_result.delivered_steers[0].id == "steer-1"
+    assert first_result.delivered_steers[0].text == steer
+    assert len(next(b.input["text"] for n in nodes for b in n.message.content if isinstance(b, ToolUseBlock))) == 18_000
+    await fresh.aclose()
 
 
 async def test_engine_compacts_emits_event_and_rehydrates(tmp_path) -> None:

@@ -4,6 +4,7 @@ MOBILE_ACCOUNT_HUB_URL may override the product default. No caller-selected
 origin is trusted, no proxy environment is inherited, and DNS is resolved once
 per connection with every address checked before connecting to a pinned IP.
 """
+from concurrent.futures import Future, TimeoutError
 import http.client
 import ipaddress
 import json
@@ -45,6 +46,68 @@ ACCOUNT_PROFILE_ERRORS = {
 _VERDICT_LOCK = threading.Lock()
 _verdicts: dict = {}
 _VERDICT_CAP = 2048
+
+# Badge metadata only: never consulted by authorization or revocation checks.
+_DISPLAY_LOCK = threading.Lock()
+_display_entry = None
+_DISPLAY_TTL = 60.0
+_DISPLAY_RETRY = 10.0
+
+
+def reset_display_cache():
+    global _display_entry
+    with _DISPLAY_LOCK:
+        _display_entry = None
+
+
+def _display_identity(binding):
+    if not binding or not binding.get('active'):
+        return None
+    return tuple(binding.get(k) for k in (
+        'hub_url', 'server_id', 'linked_by', 'encrypted_secret', 'instance_id'))
+
+
+def account_display(binding):
+    """Single-flight, bounded display cache for the current worker binding.
+
+    A rename/sign-out invalidates even in-flight results. Read the local binding
+    again before returning: an old account's response must not cross a relink.
+    Failures briefly back off; expired names are never served on hub failure.
+    """
+    global _display_entry
+    key = _display_identity(binding)
+    if key is None:
+        raise HTTPException(409, 'Sign in to a Shuffle account first')
+    with _DISPLAY_LOCK:
+        entry = _display_entry
+        leader = entry is None or entry['key'] != key or entry['expires'] <= time.monotonic()
+        if leader:
+            entry = {'key': key, 'future': Future(), 'expires': time.monotonic() + 5.0}
+            _display_entry = entry
+    if leader:
+        ttl = _DISPLAY_TTL
+        try:
+            account = call(binding, 'GET', 'account').get('account')
+            if not isinstance(account, dict) or not isinstance(account.get('username'), str):
+                raise HTTPException(503, 'Account profile unavailable')
+            # Do not retain the account's worker/device inventory or credentials.
+            value = {'account': {k: account.get(k) for k in ('id', 'username', 'profile_complete')}}
+            entry['future'].set_result(value)
+        except Exception as exc:
+            ttl = _DISPLAY_RETRY
+            entry['future'].set_exception(exc)
+        finally:
+            with _DISPLAY_LOCK:
+                entry['expires'] = time.monotonic() + ttl
+    try:
+        value = entry['future'].result(timeout=5)
+    except TimeoutError:
+        raise HTTPException(503, 'Account profile unavailable') from None
+    current_key = _display_identity(store.get_binding())
+    with _DISPLAY_LOCK:
+        if current_key != key or _display_entry is not entry:
+            raise HTTPException(409, 'Account connection changed. Try again.')
+    return value
 
 
 def _verdict_key(owner):
@@ -156,7 +219,10 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
                 raise HTTPException(response.status, messages[response.status])
             if suffix == 'account' and response.status in ACCOUNT_PROFILE_ERRORS:
                 # Fixed messages: the hub body is never echoed.
-                raise HTTPException(response.status, ACCOUNT_PROFILE_ERRORS[response.status])
+                message = ACCOUNT_PROFILE_ERRORS[response.status]
+                if method == 'GET' and response.status == 429:
+                    message = 'Account hub is rate limiting this worker. Try again shortly.'
+                raise HTTPException(response.status, message)
             if response.status == 429:
                 detail = 'Account hub is rate limiting this worker'
             raise ValueError(f'hub answered HTTP {response.status}')

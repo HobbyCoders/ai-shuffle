@@ -750,12 +750,18 @@ def _installed_tree_verdict(source_modules: Path, dest_package: Path) -> Tuple[s
     ``"unknown"`` means there is nothing to compare — which links, keeping the
     behaviour provisioning has always had.
     """
+    if not source_modules.is_dir() or next(source_modules.iterdir(), None) is None:
+        return "stale", "source node_modules is missing or empty"
     dest_lock = _read_json_file(dest_package / _LOCKFILE_NAME)
     if dest_lock is None:
         return "unknown", "worktree has no readable lockfile"
     required = _required_packages(dest_lock)
     if not required:
         return "unknown", "worktree lockfile names no packages"
+    missing = [key for key in required
+               if not (source_modules / key[len("node_modules/"):]).is_dir()]
+    if missing:
+        return "stale", f"{len(missing)} required package directory(s) missing ({', '.join(missing[:3])})"
 
     installed_record = _read_json_file(source_modules / _INSTALLED_TREE_RECORD)
     if installed_record is None:
@@ -820,10 +826,13 @@ def _run_npm_install(package_dir: Path) -> Tuple[bool, str]:
 
 
 def _run_svelte_kit_sync(package_dir: Path) -> bool:
-    """Best-effort ``npx svelte-kit sync``. Returns whether it succeeded."""
+    """Run only the installed local CLI; never let npx download a missing one."""
+    cli = package_dir / "node_modules" / "@sveltejs" / "kit" / "svelte-kit.js"
+    if not cli.is_file():
+        return False
     try:
         result = subprocess.run(
-            ["npx", "svelte-kit", "sync"],
+            ["node", str(cli), "sync"],
             cwd=str(package_dir),
             capture_output=True,
             text=True,
@@ -851,15 +860,18 @@ def _run_svelte_kit_sync(package_dir: Path) -> bool:
     return True
 
 
-def provision_node_modules(source_root: str, dest_root: str) -> Dict[str, List[str]]:
+def provision_node_modules(
+    source_root: str, dest_root: str, *, allow_install: bool = False
+) -> Dict[str, List[str]]:
     """Give a fresh worktree the source checkout's installed node packages.
 
     For each package directory the two checkouts share, either links the
     source's ``node_modules`` into the worktree (when the source's installed
-    tree satisfies the WORKTREE's lockfile) or installs the worktree's own
-    dependencies in place (when it does not — see the note above
-    ``_SVELTE_CONFIG_NAMES``). Then runs ``svelte-kit sync`` where a svelte
-    config says it is a SvelteKit app.
+    tree satisfies the WORKTREE's lockfile). Stale or empty dependencies are
+    reported as setup-required; checkout creation never silently installs them.
+    A caller that obtained explicit setup approval may pass allow_install=True.
+    Then runs the installed local ``svelte-kit sync`` where configured; no npx
+    fallback may download missing tools.
 
     Entirely best-effort and never raises: a worktree without node_modules is
     degraded, not broken, and it must not cost anyone a checkout. Returns a
@@ -894,9 +906,15 @@ def provision_node_modules(source_root: str, dest_root: str) -> Dict[str, List[s
                 summary["skipped"].append(f"{label}: already present")
             elif not source_modules.is_dir():
                 summary["skipped"].append(f"{label}: source has no node_modules")
+                continue
             else:
                 verdict, reason = _installed_tree_verdict(source_modules, package)
                 if verdict == "stale":
+                    if not allow_install:
+                        summary["skipped"].append(
+                            f"{label}: setup required ({reason}); install not authorized"
+                        )
+                        continue
                     logger.info(
                         "checkout_manager: not linking node_modules for %s into %s "
                         "(%s) — installing the worktree's own dependencies",
@@ -1058,6 +1076,11 @@ def provision_worktree_runtime(
                 "checkout_manager: could not link %s in %s: %s", rel, dest_root, e
             )
 
+    # Keep a bounded, credential-free receipt where subsequent session turns
+    # can find it. Current filesystem presence is probed separately.
+    from fluid.context.runtime_facts import record_provisioning
+
+    record_provisioning(dest_root, summary)
     return summary
 
 

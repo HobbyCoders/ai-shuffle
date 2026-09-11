@@ -48,6 +48,14 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
     """Persist a coalesced batch in one transaction."""
     if not snapshots:
         return
+    def bounded_summary(snapshot: Dict[str, Any]) -> Optional[str]:
+        text = snapshot.get("summary") or ""
+        if len(text) <= 20_000:
+            return text or None
+        marker = "\n… [middle of terminal summary clipped] …\n"
+        keep = 20_000 - len(marker)
+        return text[:keep // 2] + marker + text[-(keep - keep // 2):]
+
     _ph = ph()
     with get_db() as conn:
         cursor = conn.cursor()
@@ -55,8 +63,8 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
             f"""INSERT INTO background_tasks (
                     task_id, session_id, instance_id, kind, is_sdk_background,
                     tool_use_id, title, status, terminal_notified,
-                    started_at, updated_at
-                ) VALUES ({_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph}, {_ph})
+                    started_at, updated_at, summary, reason, report_path, report_chars
+                ) VALUES ({", ".join([_ph] * 15)})
                 ON CONFLICT (task_id, session_id) DO UPDATE SET
                     instance_id = EXCLUDED.instance_id,
                     kind = EXCLUDED.kind,
@@ -66,7 +74,11 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                     status = EXCLUDED.status,
                     terminal_notified = EXCLUDED.terminal_notified,
                     started_at = EXCLUDED.started_at,
-                    updated_at = EXCLUDED.updated_at""",
+                    updated_at = EXCLUDED.updated_at,
+                    summary = EXCLUDED.summary,
+                    reason = EXCLUDED.reason,
+                    report_path = EXCLUDED.report_path,
+                    report_chars = EXCLUDED.report_chars""",
             [(
                 snapshot.get("task_id"),
                 snapshot.get("session_id"),
@@ -79,6 +91,10 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                 bool(snapshot.get("terminal_notified")),
                 snapshot.get("started_at"),
                 snapshot.get("updated_at"),
+                bounded_summary(snapshot),
+                (snapshot.get("reason") or "")[:256] or None,
+                (snapshot.get("report_path") or "")[:4096] or None,
+                snapshot.get("report_chars"),
             ) for snapshot in snapshots],
         )
 
@@ -215,7 +231,7 @@ def get_background_task(task_id: str, session_id: str) -> Optional[Dict[str, Any
         cursor = conn.cursor()
         cursor.execute(
             f"""SELECT task_id, session_id, kind, tool_use_id, title, status,
-                       started_at, updated_at
+                       started_at, updated_at, summary, reason, report_path, report_chars
                   FROM background_tasks
                  WHERE task_id = {_ph} AND session_id = {_ph}""",
             (task_id, session_id),

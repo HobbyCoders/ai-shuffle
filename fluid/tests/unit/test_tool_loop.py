@@ -346,6 +346,109 @@ async def test_interrupted_stream_closes_request_and_keeps_request_id_usage() ->
     assert any(isinstance(event, Interrupted) for event in events)
 
 
+async def test_direct_close_settles_observed_stream_usage_once() -> None:
+    started = asyncio.Event()
+    closed = asyncio.Event()
+
+    class HangingProvider:
+        name = "openrouter"
+        caps = ProviderCaps()
+
+        async def stream(self, request):
+            try:
+                yield StreamChunk("message_start", {"usage": {"input_tokens": 123}})
+                yield StreamChunk("usage", {"usage": {"output_tokens": 7}})
+                started.set()
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+    store = MemoryStore()
+    loop = NativeLoop(provider=HangingProvider(), store=store, model="m")
+    await loop.submit(UserTurn(content="hello"))
+    await asyncio.wait_for(started.wait(), 5)
+    await asyncio.wait_for(loop.aclose(), 5)
+    await loop.aclose()
+    events = await store.events_since(loop.session_id, 0)
+    terminals = [e for e in events if isinstance(e, (Interrupted, TurnComplete, ErrorEvent))]
+    assert len(terminals) == 1
+    assert terminals[0].message == "engine closed"
+    assert terminals[0].usage["input_tokens"] == 123
+    assert terminals[0].usage["output_tokens"] == 7
+    assert terminals[0].num_model_calls == 1
+    assert len([e for e in events if isinstance(e, Usage)]) == 1
+    assert closed.is_set()
+    assert loop._turn_task.cancelled()
+
+
+async def test_direct_close_during_tool_cancels_dispatch_and_preserves_usage() -> None:
+    started, closed = asyncio.Event(), asyncio.Event()
+
+    @tool("hang", "Wait", {"type": "object"})
+    async def hang(args):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("test", [hang]))
+    store = MemoryStore()
+    loop = NativeLoop(
+        provider=ScriptedProvider([_tool("c1", "mcp__test__hang", "{}")]),
+        store=store, model="m", registry=registry,
+        permissions=PermissionEngine("never_ask"),
+    )
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(started.wait(), 5)
+    await asyncio.wait_for(asyncio.gather(loop.aclose(), loop.aclose()), 5)
+    events = await store.events_since(loop.session_id, 0)
+    terminals = [e for e in events if isinstance(e, (Interrupted, TurnComplete, ErrorEvent))]
+    assert len(terminals) == 1
+    assert terminals[0].usage["input_tokens"] == 10
+    assert terminals[0].usage["output_tokens"] == 5
+    assert terminals[0].num_model_calls == 1
+    assert len([e for e in events if isinstance(e, Usage)]) == 1
+    assert len([e for e in events if isinstance(e, ToolResult)]) == 1
+    assert closed.is_set()
+
+
+async def test_close_during_terminal_persistence_does_not_duplicate_terminal() -> None:
+    writing, release = asyncio.Event(), asyncio.Event()
+
+    class SlowStore(MemoryStore):
+        async def append_event(self, sid, event):
+            if isinstance(event, TurnComplete):
+                writing.set()
+                await release.wait()
+            await super().append_event(sid, event)
+
+    store = SlowStore()
+    loop = NativeLoop(provider=ScriptedProvider([_text("done")]), store=store, model="m")
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(writing.wait(), 5)
+    close_started = asyncio.Event()
+    original_close = loop._close_background_lifecycle
+
+    async def observe_close():
+        close_started.set()
+        await original_close()
+
+    loop._close_background_lifecycle = observe_close
+    # Race a task cancellation with close while durable publication holds the
+    # lifecycle lock. Closing alone waits on that lock before cancelling.
+    loop._turn_task.cancel()
+    closing = asyncio.create_task(loop.aclose())
+    await asyncio.wait_for(close_started.wait(), 5)
+    assert loop._turn_task.cancelling()
+    release.set()
+    await asyncio.wait_for(closing, 5)
+    events = await store.events_since(loop.session_id, 0)
+    assert len([e for e in events if isinstance(e, (Interrupted, TurnComplete, ErrorEvent))]) == 1
+    assert len([e for e in events if isinstance(e, Usage)]) == 1
+
+
 async def test_shell_file_write_is_not_blocked_by_model_prose_heuristics(tmp_path) -> None:
     from fluid.tools.builtins import register_builtins
 

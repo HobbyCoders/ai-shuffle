@@ -139,11 +139,7 @@ _DRAIN_GRACE_SECONDS = 2.0
 # turn that asked for it, not a wake-turn preamble.
 _INLINE_OUTPUT_MAX_CHARS = 30_000
 
-# How long a ``serves`` process must stay up before its exit reads as "the
-# service stopped" rather than "the service never came up". Under it, a
-# non-zero exit is still a failure with its output attached — a port clash or
-# an import error is exactly what the model needs to see.
-_SERVING_STARTUP_GRACE_SECONDS = 30.0
+
 
 # Bound the stopped-service output tail. The completion notification needs the service verdict, not an unbounded
 # access log.
@@ -176,9 +172,6 @@ SERVING_IDLE_REASON = "monitor_serving_idle"
 # leaves no code at all).
 _DELIBERATE_STATUSES = frozenset({"killed", "stopped", "cancelled"})
 
-# POSIX signal exit codes that mean "something stopped this", not "this failed".
-_SIGNAL_EXIT_CODES = frozenset({-2, -9, -15})
-
 # Evidence that the command carries its OWN time budget or iteration cap, in
 # which case the default deadline below stays out of its way. Mirrors the
 # vocabulary of fluid's Monitor spawn-time lint; kept local so the bound does
@@ -207,24 +200,12 @@ _NULL_SINKS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr", "nul", "NUL"
 
 
 def monitor_receipt_text(task_id: str) -> str:
-    """The receipt every Monitor spawn hands back to the model.
-
-    Fluid's default is the bare fact ("Monitoring started (task X)."), and
-    audited sessions read that as an invitation to sleep-poll in foreground
-    Bash for a notification already queued for them — 9 of 10 spawns in the
-    worst session, 24 minutes of polling. The receipt has to give the
-    instruction, mirroring the TaskList nudge that stopped the same loop there.
-    Shared with the MCP ``Monitor`` tool so both legs say the same thing.
-
-    The final clause is fluid's, restored: the app's copy had dropped "Do not
-    sleep, poll, or check on it yourself", and the same sessions went on to
-    sleep-poll with `wait`+`curl` after every spawn.
+    """Use the harness's receipt on both app legs: disjoint work is allowed,
+    but polling is not, and dependent work waits for completion.
     """
-    return (
-        f"Monitoring started (task {task_id}). End the turn now — you will be "
-        "woken when it comes to rest. Do not sleep, poll, or check on it "
-        "yourself."
-    )
+    from fluid.tools.builtins.monitor import started_text
+
+    return started_text(task_id)
 
 
 def monitor_serving_receipt_text(task_id: str) -> str:
@@ -286,6 +267,9 @@ def monitor_inline_receipt_text(
         if failed
         else ""
     )
+    from fluid.tools.hardening import fence_shell_output
+
+    output = fence_shell_output(output or "(no output)", "Monitor", exit_code=exit_code)
     return (
         f"The command {verdict} while you waited (task {task_id}, exit code "
         f"{code}). Nothing is running and nothing will wake you — this is the "
@@ -589,25 +573,6 @@ def _cause_line(reason: str, recorded_summary: str, *, serves: bool) -> str:
     return who + what
 
 
-def _served_before_exiting(
-    exit_code: Optional[int], ran_seconds: Optional[float]
-) -> bool:
-    """Whether a ``serves`` process actually came up before it went away.
-
-    A clean exit always counts. A non-zero one counts only when the process
-    stayed up past the startup grace: a uvicorn that dies two seconds in
-    because the port is taken never served anything, and reporting THAT as
-    "the service stopped" would bury the one failure the model must see.
-    Unknown runtime is treated as "never came up", i.e. the pre-existing
-    failure path.
-    """
-    if exit_code == 0:
-        return True
-    if ran_seconds is None:
-        return False
-    return ran_seconds >= _SERVING_STARTUP_GRACE_SECONDS
-
-
 def not_executable_hint(exit_code: Optional[int], summary: str) -> str:
     """The one line a "Permission denied" launch failure is missing.
 
@@ -645,22 +610,14 @@ def settle_monitor_task(
     settles as ``killed`` (which the fluid adapter maps to ``cancelled``) with
     a cause line INSTEAD of an output tail.
 
-    ``ran_seconds`` — how long the process was up — is what separates a SERVICE
-    that stopped from one that never started; see
-    :func:`_served_before_exiting`. The watcher knows it; callers that do not
-    may omit it and get the pre-existing "non-zero is a failure" reading.
+    Only recorded stop attribution establishes intent. Missing observations
+    are unknown, signals alone are failures, and elapsed runtime does not
+    establish service health. ``ran_seconds`` is retained for caller compatibility.
     """
     recorded, reason, recorded_summary = _recorded_status(session_id, task_id)
-    deliberate = recorded in _DELIBERATE_STATUSES or (
-        exit_code is not None and exit_code in _SIGNAL_EXIT_CODES
-    )
+    deliberate = recorded in _DELIBERATE_STATUSES and bool(reason)
     if deliberate:
         return "killed", _cause_line(reason, recorded_summary, serves=serves)
-    if exit_code is None:
-        # No recorded stop and no exit code: the process was reaped out from
-        # under the watcher. Still a stop, not a failure.
-        return "killed", _cause_line("", "", serves=serves)
-
     summary = _summarize(lines)
     if not summary:
         # Empty buffer usually means the command redirected into a log file;
@@ -670,13 +627,14 @@ def settle_monitor_task(
         except Exception:  # noqa: BLE001 — best-effort nicety
             logger.debug("monitor_spawn: log-tail read failed", exc_info=True)
             summary = ""
-    if serves and _served_before_exiting(exit_code, ran_seconds):
-        # A SERVICE that went away is a stop, not a failure — whatever its exit
-        # code. The audited case settled as `failed` with an access log for a
-        # summary, while its sibling (stopped on purpose) got the correct
-        # cancellation wording; the two read as different kinds of event when
-        # they are the same one. Its log is never the news either: what the
-        # parent needs is "it is gone", so the tail is capped hard.
+    if exit_code is None:
+        return "error", (
+            "Exit status unknown; process observation was incomplete."
+            + (f"\n\nAvailable output:\n{summary}" if summary else "")
+        )
+    if serves and exit_code == 0 and last_exit_marker(summary) in (None, 0):
+        # Clean service exit: report that it is gone, with a bounded log tail.
+        # Nonzero exits keep the failure path regardless of how long it ran.
         tail = _summarize(lines, budget=_SERVING_EXIT_SUMMARY_MAX_CHARS)
         code = "cleanly on its own (exit code 0)" if exit_code == 0 else (
             f"on its own (exit code {exit_code})"
@@ -696,6 +654,8 @@ def settle_monitor_task(
     # that said the run had failed.
     marker = last_exit_marker(summary)
     failed = exit_code != 0 or (marker is not None and marker != 0)
+    if serves and failed:
+        summary = f"The service is no longer running (exit code {exit_code}).\n\n" + summary
     return ("error" if failed else "completed"), summary
 
 
@@ -728,7 +688,7 @@ def record_settled_status(
 
         record = task_registry.get_task(session_id, task_id) or {}
         recorded = str(record.get("status") or "")
-        if recorded in _DELIBERATE_STATUSES and status != "killed":
+        if recorded in _DELIBERATE_STATUSES and record.get("reason") and status != "killed":
             # The stop landed after the settle read the registry. The row is
             # the honest one; rebuild the summary from its attribution.
             return "killed", _cause_line(
@@ -784,13 +744,34 @@ async def wait_for_inline_settle(task: Any, wait_seconds: int) -> bool:
         if time.monotonic() >= deadline:
             return False
         await asyncio.sleep(_INLINE_POLL_SECONDS)
-    # The process is gone, but the reader drains stdout on its own task and
-    # only then records the exit code. Give it a bounded moment so the receipt
-    # quotes the whole buffer instead of a prefix.
-    drain_deadline = time.monotonic() + _DRAIN_GRACE_SECONDS
-    while task.exit_code is None and time.monotonic() < drain_deadline:
-        await asyncio.sleep(_INLINE_POLL_SECONDS)
+    await drain_monitor_output(task)
     return True
+
+
+async def drain_monitor_output(task: Any) -> None:
+    """Bound stdout drainage, then use the subprocess's authoritative status.
+
+    A descendant can inherit stdout after the shell exits. Do not wait for EOF
+    forever or mistake a lagging/failed reader for a deliberate stop.
+    """
+    import asyncio
+
+    reader = getattr(task, "_reader_task", None)
+    if reader is not None:
+        try:
+            await asyncio.wait_for(asyncio.shield(reader), _DRAIN_GRACE_SECONDS)
+        except asyncio.TimeoutError:
+            task.lines.append("[Output incomplete: stdout did not close before the drain deadline.]")
+        except asyncio.CancelledError:
+            if not reader.cancelled():
+                raise
+            task.lines.append("[Output incomplete: output reader was cancelled.]")
+        except Exception:
+            task.lines.append("[Output incomplete: output reader failed.]")
+            logger.warning("monitor_spawn: output reader failed", exc_info=True)
+    process = getattr(task, "process", None)
+    if process is not None and process.returncode is not None:
+        task.exit_code = process.returncode
 
 
 async def _enforce_deadline(
@@ -1043,13 +1024,6 @@ def make_fluid_monitor_spawner(
             command, cwd, caller_session_id, tool_use_id=launch_tool_use_id,
         )
 
-        if caller_session_id:
-            from app.core.task_registry import task_registry
-            # OWN-lane admission: without this the watcher's terminal frame is
-            # dropped by on_task_terminal's ownership gate as not-own work and a
-            # parked parent never wakes.
-            task_registry.mark_monitor_shell_task(caller_session_id, task.task_id, serves=serves)
-
         # INLINE WAIT: block here for the window the model asked for. A command
         # that settles inside it costs no park, no wake, no fresh turn and no
         # prompt re-send — its output comes back in this very receipt. Only
@@ -1078,7 +1052,17 @@ def make_fluid_monitor_spawner(
                         task.task_id, exit_code, output, failed=failed
                     ),
                     is_error=False,
+                    ui={
+                        "task_id": task.task_id, "exit_code": exit_code,
+                        "status": status, "failed": failed, "output": output,
+                    },
                 )
+
+        if caller_session_id:
+            from app.core.task_registry import task_registry
+
+            # Inline results must never trigger a background wake.
+            task_registry.mark_monitor_shell_task(caller_session_id, task.task_id, serves=serves)
 
         # Completion watcher: fold the output tail into the registry record and
         # fire the scheduler's terminal seam so a parked parent wakes with the
@@ -1117,6 +1101,7 @@ def make_fluid_monitor_spawner(
                             )
                             break
                     await asyncio.sleep(_WATCH_POLL_SECONDS)
+                await drain_monitor_output(task)
                 exit_code = task.exit_code
                 status, summary = settle_monitor_task(
                     exit_code=exit_code,
@@ -1188,6 +1173,10 @@ def make_fluid_monitor_spawner(
                 f" It carries a {budget}s time budget: if it is still running "
                 "then, it is stopped and you are woken with a timeout."
             )
-        return ToolOutcome(text=text, background_task=receipt)
+        return ToolOutcome(text=text, background_task=receipt, ui={
+            "task_id": task.task_id,
+            "pid": task.process.pid if getattr(task, "process", None) else None,
+            "started_at": getattr(task, "started_at", None),
+        })
 
     return _spawn

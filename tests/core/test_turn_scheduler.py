@@ -1992,6 +1992,28 @@ async def test_a_steer_the_turn_never_delivered_re_enqueues_the_wake(mock_db):
     assert wake["profile_id"] == "p5"
     execute.assert_awaited_once()
 
+@pytest.mark.parametrize("failure", ["prompt", "enqueue"])
+async def test_failed_delivery_can_retry_and_concurrent_terminals_consume_once(mock_db, monkeypatch, failure):
+    sid = "retry-delivery-" + failure
+    _settled_turn(sid)
+    _own_agent_task(sid, "retry-task")
+    frame = _terminal_frame("retry-task", "the actual report")
+    monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", lambda sid: None)
+    target = "_build_task_notification_prompt" if failure == "prompt" else "_enqueue_context_wake"
+    replacement = MagicMock(side_effect=RuntimeError("delivery unavailable")) if failure == "prompt" else AsyncMock(side_effect=RuntimeError("delivery unavailable"))
+    with patch.object(turn_scheduler, target, replacement):
+        await turn_scheduler.on_task_terminal(sid, frame)
+    assert not task_registry.is_woken(sid, "retry-task")
+    assert _by_source(sid, "unpark") == []
+    await asyncio.gather(*[turn_scheduler.on_task_terminal(sid, frame) for _ in range(3)])
+    (wake,) = _by_source(sid, "unpark")
+    assert wake["payload"]["task_ids"] == ["retry-task"]
+    assert "the actual report" in wake["prompt"]
+    assert task_registry.is_woken(sid, "retry-task")
+
+
+
+
 
 async def test_a_cli_owned_wake_is_never_steered(mock_db):
     """A-1 keeps precedence: a top-level backgrounded agent completing while the

@@ -25,7 +25,7 @@ import { isManagedConnection, type PostgresConfig } from './settings';
 import { writePrivateFile } from './private-file';
 
 export const DEFAULT_PORT = 8000;
-/** Fixed by app/serve.py; the worker refuses to start without it. */
+/** Default protected listener; isolated previews may choose another loopback port. */
 export const PROTECTED_PORT = 8001;
 
 export interface WorkerRuntime {
@@ -122,7 +122,7 @@ export interface EnvOptions {
 	envFile: string;
 	dataDir: string;
 	workspaceDir?: string;
-	/** Only set for a packaged preview; isolates inherited CLI credential/config paths. */
+	/** Only set for an isolated preview; isolates inherited CLI credential/config paths. */
 	profileDir?: string;
 	baseEnv?: NodeJS.ProcessEnv;
 	platform?: NodeJS.Platform;
@@ -163,10 +163,12 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 		...base, ...profile,
 		[pathKey]: pathParts.join(sep),
 		LOCAL_MODE: 'true', HOST: '127.0.0.1', PORT: String(opts.port),
+		SHUFFLE_DESKTOP_PROTECTED_PORT: String(opts.protectedPort ?? PROTECTED_PORT),
 		DATA_DIR: opts.dataDir,
 		...(opts.workspaceDir ? { WORKSPACE_DIR: opts.workspaceDir } : {}),
 		AI_SHUFFLE_ENV_FILE: opts.envFile,
 		TOOLS_DIR: opts.runtime.toolsDir, BROWSER_MCP_ENTRY: opts.runtime.browserMcpEntry,
+		...(opts.runtime.mode === 'repo' ? { PYTHONPATH: path.join(opts.runtime.serverDir, 'fluid') } : {}),
 		PYTHONNOUSERSITE: '1', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8', SHUFFLE_DESKTOP: '1'
 	};
 }
@@ -268,6 +270,7 @@ export interface SupervisorOptions {
 	port?: number;
 	protectedPort?: number;
 	allowAttach?: boolean;
+	baseEnv?: NodeJS.ProcessEnv;
 	postgres: () => PostgresConfig | null;
 	readyTimeoutMs?: number;
 }

@@ -1,77 +1,9 @@
-"""Prompt-cache miss instrumentation — naming the block that broke the prefix.
+"""Versioned request-prefix fingerprints and estimated cache-reuse shortfall.
 
-A provider prompt cache hits only while the request prefix is byte-identical to
-the previous one. When it isn't, the bill jumps (fresh input instead of cached
-read) and the transcript gives no clue *which* part of the prompt moved: a
-mutated system section, a tool schema that appeared or vanished, or some
-rewritten message deep in history all look the same from the outside.
-
-This module fingerprints the prefix of every request with a handful of short
-hashes and, when a call reports a large uncached prompt, bisects the previous
-call's fingerprint against this one to name the segment that changed.
-
-Two properties make the fingerprints comparable across calls:
-
-* **Absolute checkpoints, not fractions.** ``m8`` always means "the first 8
-  messages", so it stays byte-stable as history grows. Checkpoints at powers of
-  two (plus the full prefix) give O(log n) entries and localize a mutation to
-  the half-open message range ``(prev_checkpoint, checkpoint]``.
-* **Cumulative.** Each ``mK`` folds in everything before it, so the FIRST
-  differing checkpoint is the mutation, and every later difference is its echo.
-
-Cost: one pass over the text already in memory, hashed with blake2b at 8 bytes
-per digest (~16 hex chars). Nothing is re-serialized that the provider
-serializer would not serialize anyway, and the whole payload attached to a
-``Usage`` event is a dozen short strings.
-
-What ``prefix_grew_only`` turned out to mean
---------------------------------------------
-
-A production day across 24 sessions on one ``openai_responses`` gateway
-(gpt-6-astra, 353 calls billing over 10k fresh input tokens, 164 of them with
-``cache_read == 0``) was measured against this diagnostic. The verdict on the
-unexplained misses is **provider-side**, and the evidence rules out the
-harness-side theories one at a time. Read this before spending another day on
-prefix discipline.
-
-* **The cached prefix demonstrably existed while it was being ignored.** In one
-  turn: call 3 read 49,536 cached tokens; call 4, five seconds later, on a
-  byte-identical superset of that prefix (checkpoints matched through m41),
-  read **0**; calls 5-9 also read 0; call 10, 90 seconds later and longer
-  still, read **49,536** again — the same entry. An append-only request cannot
-  invalidate a prefix and then re-validate it. Nothing fluid renders explains
-  that shape.
-* **Misses correlate across unrelated sessions.** Conditioned on another
-  session being active within 90 s, 81% of full misses coincided with a full
-  miss in a *different* session (different affinity key, different prefix,
-  different system prompt) against 37% for hits. Whole minutes went by where
-  every concurrent session missed and none hit.
-* **It is not the affinity key.** ``_sticky_poisoned`` never fired — zero
-  ``ProviderRetry`` events in the entire corpus — so every request carried
-  ``prompt_cache_key``. A session resumed onto a NEW fluid session id (hence a
-  new key) still read the cache on its very first call, so a new key does not
-  by itself partition anything; a stable host key (``NativeLoop(cache_key=…)``)
-  is worth having, but it is not the cure.
-* **It is not images.** The miss rate with a live image in context was *lower*
-  (40.5%) than without (56.4%), and the longest miss run in the corpus ran for
-  four calls before that session's first screenshot existed.
-* **It is not the first two calls being special.** Call 1 is unavoidable
-  (nothing to hit). Of the 16 sessions that started cold, call 2 missed in 9
-  and hit in 7 on the same request shape, with overlapping call-1-to-call-2
-  gaps in both groups (a hit at 5.1 s, a miss at 23.4 s).
-* **A rewrite costs one call, and the provider often takes two.** After a
-  ``trigger`` compaction the next call is degraded in 83 of 87 cases — expected,
-  the prefix moved — but the call after it, which should read what the previous
-  one just wrote, is degraded again in 52 of those. That second one is on the
-  provider: fluid rewrote nothing between them.
-* **There is no breakpoint to place.** ``openai_responses`` reports
-  ``explicit_cache_breakpoints=False`` and its serializer has no field for one,
-  so :func:`diagnose_cache_miss` stops naming that suspect there.
-
-The one lever the harness does own is how often it rewrites an already-sent
-prefix. That is why image consumption is now gated on pressure and a turn
-boundary (see :mod:`fluid.context.trim`) — not because it caused the misses
-above, but because every avoidable rewrite pays the provider's warm-up twice.
+Hashes contain no request payloads. Normalized checkpoints cover every content
+field; a provider serializer may replace them with serialized checkpoints.
+Neither matching normalized hashes nor a shortfall proves provider fault:
+cache lifetime, routing and provider tokenization remain outside this probe.
 """
 
 from __future__ import annotations
@@ -79,14 +11,16 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
-from fluid.messages import Message, ToolResultBlock
+from fluid.context.trim import estimate_tokens_of_messages
+from fluid.messages import Message
 
 __all__ = [
     "CacheProbeConfig",
     "fingerprint_prefix",
+    "fingerprint_responses_request",
     "diagnose_cache_miss",
     "is_unexplained_miss",
     "checkpoint_positions",
@@ -101,20 +35,17 @@ TOOLS_SEGMENT = "tools"
 
 @dataclass(frozen=True, kw_only=True)
 class CacheProbeConfig:
-    """Knobs for the miss diagnostic. Defaults match the audit heuristic:
-    a prompt over 10k fresh input tokens that read (almost) nothing from cache
-    is a real miss worth naming; anything smaller is noise."""
+    """Thresholds for fresh input and estimated reusable-prefix shortfall."""
 
     enabled: bool = True
     # Minimum fresh (uncached) input tokens before a miss is worth reporting.
     min_input_tokens: int = 10_000
-    # Treat a small structural cache read as no effective cache reuse; providers can return such a read even on
-    # a full resend.
+    # Legacy fingerprints lack token estimates and retain the near-zero gate.
+    # Versioned fingerprints instead measure the shared-prefix shortfall.
     max_cache_read_tokens: int = 1_024
-    # Consecutive UNEXPLAINED misses (verified-identical prefix, zero cache
-    # read, no compaction in between) inside one turn before the engine raises
-    # a CacheMissAlert. One is indistinguishable from a TTL expiry; two in a
-    # row is a pattern. 0 disables the alert.
+    # Consecutive shortfalls with a matching shared fingerprint and no local
+    # rewrite before a CacheMissAlert. At most one alert per turn; 0 disables it.
+    # Cache lifetime and routing remain possible causes, not proven diagnoses.
     alert_after_misses: int = 2
 
 
@@ -176,44 +107,26 @@ def message_count(fingerprint: Mapping[str, str] | None) -> int:
     return best
 
 
-def _feed_block(h: Any, block: Any) -> None:
-    """Fold one content block's cache-relevant bytes into ``h``.
+def _canonical(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
-    Streaming rather than concatenating: the text is already in memory and
-    blake2b is far cheaper than building a joined string per call.
-    """
-    h.update(type(block).__name__.encode())
-    text = getattr(block, "text", None)
-    if isinstance(text, str):
-        h.update(text.encode("utf-8", "replace"))
-    input_ = getattr(block, "input", None)
-    if isinstance(input_, dict) and input_:
-        try:
-            h.update(json.dumps(input_, default=str, sort_keys=True).encode())
-        except (TypeError, ValueError):  # pragma: no cover — defensive
-            h.update(b"<unserializable>")
-    for attr in ("id", "tool_use_id", "media_type", "signature",
-                 "encrypted_content", "origin"):
-        value = getattr(block, attr, None)
-        if isinstance(value, str):
-            h.update(value.encode())
-    data = getattr(block, "data", None)
-    if isinstance(data, str):
-        # Image payloads are large and immutable; their length plus a short
-        # digest of the head is enough to notice a swap without hashing MBs.
-        h.update(f"img:{len(data)}:{data[:64]}".encode())
-    if isinstance(block, ToolResultBlock):
-        h.update(b"err" if block.is_error else b"ok")
-        for inner in block.content or ():
-            _feed_block(h, inner)
+
+def _feed_block(h: Any, block: Any) -> None:
+    # Field names and delimiters avoid ambiguous concatenations. Include full
+    # image data, tool names and opaque reasoning, not length/head heuristics.
+    data = asdict(block)
+    data.pop("delivered_steers", None)  # persistence metadata, not provider content
+    data.pop("delivery_metadata_version", None)
+    h.update(_canonical({"kind": type(block).__name__, "value": data}).encode())
 
 
 def fingerprint_prefix(
     *,
-    system: str | None,
+    system: Any,
     tools: Sequence[dict[str, Any]] | None,
     messages: Sequence[Message],
     extra_checkpoints: Sequence[int] = (),
+    request_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     """Short stable hashes of the request prefix, in prefix order.
 
@@ -224,7 +137,7 @@ def fingerprint_prefix(
     interleaves with the powers of two.
     """
     out: dict[str, str] = {
-        SYSTEM_SEGMENT: _hash_text(system or ""),
+        SYSTEM_SEGMENT: _hash_text(_canonical(system or "")),
     }
     try:
         tools_text = json.dumps(list(tools or ()), default=str, sort_keys=True)
@@ -232,17 +145,56 @@ def fingerprint_prefix(
         tools_text = "<unserializable>"
     out[TOOLS_SEGMENT] = _hash_text(tools_text)
 
+    out["request"] = _hash_text(_canonical(request_identity or {}))
+    out["_version"] = "normalized-v2"
+    static_tokens = (len(_canonical(system or "")) + len(tools_text)) // 4
+    out["_tokens_system"] = str(len(_canonical(system or "")) // 4)
+    out["_tokens_tools"] = str(static_tokens)
     wanted = set(checkpoint_positions(len(messages), extra_checkpoints))
-    if not wanted:
-        return out
     running = _hasher()
+    tokens = static_tokens
     for index, message in enumerate(messages, start=1):
-        running.update(message.role.encode())
+        running.update(_canonical({"role": message.role, "meta": message.provider_meta}).encode())
+        tokens += estimate_tokens_of_messages([message])
         for block in message.content:
             _feed_block(running, block)
         if index in wanted:
             out[f"m{index}"] = running.hexdigest()
+            out[f"_tokens_m{index}"] = str(tokens)
     return out
+
+
+def fingerprint_responses_request(
+    request: Any, fingerprint: dict[str, str], *, previous_count: int, endpoint: Any = None
+) -> None:
+    """Replace normalized checkpoints with the Responses serializer's items.
+
+    Serialization is O(n): absolute power-of-two checkpoints plus at most one
+    prior-length checkpoint visit fewer than four full histories in total.
+    """
+    from dataclasses import replace
+    from fluid.providers.openai_responses.serialize import build_request_body
+
+    def digest(value: Any) -> str:
+        return _hash_text(_canonical(value))
+
+    body = build_request_body(request)
+    fingerprint["_version"] = "responses-wire-v2"
+    fingerprint["_wire_hash"] = digest(body)
+    fingerprint["system"] = digest(body.get("instructions"))
+    fingerprint["tools"] = digest(body.get("tools"))
+    fingerprint["request"] = digest({
+        "provider": "openai_responses", "endpoint": endpoint,
+        **{k: v for k, v in body.items() if k not in {"input", "instructions", "tools"}},
+    })
+    for count in checkpoint_positions(len(request.messages), (previous_count,)):
+        prefix = build_request_body(replace(request, messages=request.messages[:count]))
+        fingerprint[f"m{count}"] = digest(prefix.get("input"))
+    if "input" in request.extra:
+        # An explicit input override severs the normalized-history denominator.
+        for key in fingerprint:
+            if key.startswith("_tokens_"):
+                fingerprint[key] = "0"
 
 
 def _segment_span(
@@ -315,7 +267,8 @@ def diagnose_cache_miss(
         return None
     if input_tokens < config.min_input_tokens:
         return None
-    if cache_read_tokens > config.max_cache_read_tokens:
+    legacy = not current.get("_version")
+    if legacy and cache_read_tokens > config.max_cache_read_tokens:
         return None
     rewrites = [dict(r) for r in history_rewrites or ()]
     if previous is None:
@@ -328,7 +281,15 @@ def diagnose_cache_miss(
             first["history_rewritten"] = rewrites
         return first
 
-    shared = [k for k in current if k in previous]
+    if previous.get("_version") != current.get("_version"):
+        return {"reason": "fingerprint_version_changed", "input_tokens": input_tokens,
+                "cache_read_tokens": cache_read_tokens}
+    shared = [k for k in current if k in previous and not k.startswith("_")]
+    # Request identity is an eligibility boundary, even if text stayed equal.
+    if previous.get("request") != current.get("request"):
+        return {"reason": "request_settings_changed", "input_tokens": input_tokens,
+                "cache_read_tokens": cache_read_tokens}
+    shared = [k for k in shared if k != "request"]
     changed: str | None = None
     stable_through: str | None = None
     for key in shared:
@@ -351,11 +312,21 @@ def diagnose_cache_miss(
         except ValueError:  # pragma: no cover — defensive
             verified_messages = 0
     full_coverage = shared_messages > 0 and verified_messages >= shared_messages
+    eligible = int(current.get(f"_tokens_{stable_through}", "0"))
+    # Conservative allowance for tokenization, cache block rounding and images.
+    uncertainty = max(1_024, int(eligible * 0.2))
+    shortfall = max(0, eligible - cache_read_tokens - uncertainty)
+    telemetry = {"shared_prefix_tokens_estimated": eligible,
+                 "estimate_uncertainty_tokens": uncertainty,
+                 "reuse_shortfall_tokens_estimated": shortfall,
+                 "fingerprint_version": current.get("_version", "legacy")}
+    if not legacy and changed is None and not rewrites and shortfall < config.min_input_tokens:
+        return None  # A large new suffix is not lost reuse.
 
     if changed is None:
-        # Prefix is byte-identical as far as both fingerprints reach. Either
-        # history only grew (append-only, cache SHOULD have hit) or the miss is
-        # provider-side: expiry, a different upstream replica, no breakpoint.
+        # The fingerprinted representation matches through the common prefix.
+        # Normalized checkpoints are not a claim about exact serialized bytes;
+        # even wire checkpoints cannot establish provider cache eligibility.
         grew = message_count(current) > shared_messages
         out = {
             "reason": "prefix_grew_only" if grew else "prefix_unchanged",
@@ -363,6 +334,7 @@ def diagnose_cache_miss(
             "shared_messages": shared_messages,
             "verified_messages": verified_messages,
             "full_coverage": full_coverage,
+            **telemetry,
             "input_tokens": input_tokens,
             "cache_read_tokens": cache_read_tokens,
         }
@@ -404,11 +376,17 @@ def diagnose_cache_miss(
                     f"rewrite may sit past the last shared checkpoint)"
                 )
             out["history_rewritten"] = rewrites
+        if not legacy:
+            note += (
+                f"; scope={current.get('_version')}, reuse and token counts are "
+                "estimated, not proof of provider fault"
+            )
         out["note"] = note
         return out
 
     out = {
         "reason": "prefix_changed",
+        **telemetry,
         "changed": changed,
         "stable_through": stable_through,
         "shared_messages": shared_messages,
@@ -431,21 +409,17 @@ def diagnose_cache_miss(
     return out
 
 
-# Verdicts where fluid has verified it did NOT move the prompt: the whole
-# shared prefix hashed identical, no compaction ran between the two requests,
-# and the provider still billed everything fresh. The other verdicts name a
-# local cause (``prefix_changed``, ``history_rewritten``) or an unavoidable
-# one (``no_previous_request``) and are not worth alerting on.
+# Matching shared fingerprints with an estimated reuse shortfall. These are
+# alert candidates, not evidence that the provider violated a cache guarantee.
 _UNEXPLAINED_REASONS = frozenset({"prefix_grew_only", "prefix_unchanged"})
 
 
 def is_unexplained_miss(diagnosis: Mapping[str, Any] | None) -> bool:
-    """True when a miss survives every explanation fluid can offer itself.
+    """True for a reuse shortfall without a detected local prefix rewrite.
 
-    The bar is deliberately high: the checkpoints must cover the WHOLE shared
-    prefix (a partial verification cannot rule out a rewrite past the last
-    shared checkpoint), the provider must have read literally nothing, and no
-    compaction rung may have run since the previous request.
+    Checkpoints must cover the whole shared prefix. Partial cache reads can
+    qualify; a large appended suffix alone cannot. Versionless historical
+    diagnostics retain their original near-zero-read interpretation.
     """
     if not diagnosis:
         return False
@@ -453,5 +427,7 @@ def is_unexplained_miss(diagnosis: Mapping[str, Any] | None) -> bool:
         diagnosis.get("reason") in _UNEXPLAINED_REASONS
         and bool(diagnosis.get("full_coverage"))
         and not diagnosis.get("history_rewritten")
-        and int(diagnosis.get("cache_read_tokens") or 0) == 0
+        and (int(diagnosis.get("reuse_shortfall_tokens_estimated") or 0) > 0
+             or (diagnosis.get("fingerprint_version", "legacy") == "legacy"
+                 and int(diagnosis.get("cache_read_tokens") or 0) == 0))
     )

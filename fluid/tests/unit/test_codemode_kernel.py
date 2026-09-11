@@ -17,6 +17,38 @@ async def _no_tools(name: str, kwargs: dict) -> HostReply:
     return HostReply(error=f"no tools available in this kernel: {name}")
 
 
+async def test_ast_parsing_and_compiled_code_keep_sandbox_boundary(tmp_path) -> None:
+    target = tmp_path / "must-not-exist.txt"
+    kernel = SubprocessKernel()
+    await kernel.start()
+    try:
+        parsed = await kernel.exec(
+            "import ast\n"
+            "tree = ast.parse('value = 7')\n"
+            "(tree.body[0].targets[0].id, ast.literal_eval('[1, 2]'))",
+            timeout=5, on_host_call=_no_tools,
+        )
+        assert parsed.error is None, parsed.error
+        assert parsed.value_repr == "('value', [1, 2])"
+        # ast exposes ordinary stdlib globals; even using their real importer
+        # and compiling a fresh AST must not bypass the interpreter audit hook.
+        for source, blocked in (
+            (f"os = ast.__builtins__['__import__']('os'); "
+             f"os.open({str(target)!r}, os.O_CREAT | os.O_WRONLY)", "open"),
+            ("ast.__builtins__['__import__']('_socket').socket()", "socket.__new__"),
+            ("ast.__builtins__['__import__']('subprocess').Popen(['echo', 'bad'])", "subprocess.Popen"),
+        ):
+            result = await kernel.exec(
+                f"exec(compile(ast.parse({source!r}), '<ast-probe>', 'exec'))",
+                timeout=5, on_host_call=_no_tools,
+            )
+            assert result.error is not None
+            assert f"{blocked} is blocked in the code-mode kernel" in result.error, result.error
+        assert not target.exists()
+    finally:
+        await kernel.stop()
+
+
 async def test_namespace_persists_across_exec() -> None:
     k = SubprocessKernel()
     await k.start()

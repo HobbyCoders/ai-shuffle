@@ -161,7 +161,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     path: Path = resolve(input["file_path"], ctx)
     if not path.exists() or not path.is_file():
         note = missing_path_note(str(input["file_path"]), path)
-        return ToolOutcome(text=f"file not found: {path}{note}", is_error=True)
+        return ToolOutcome(
+            text=f"file not found: {path}{note}", is_error=True,
+            error_code="missing_path" if not path.exists() else None,
+        )
 
     media_type = IMAGE_MEDIA_TYPES.get(path.suffix.lower())
     if media_type is not None:

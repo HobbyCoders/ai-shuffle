@@ -76,3 +76,45 @@ def test_unrecognized_socket_cannot_inherit_local_marker():
 def test_same_listener_port_is_rejected():
     with pytest.raises(ValueError):
         IngressApplication(None, 8001)
+
+
+@pytest.mark.parametrize("override,expected", [(None, 8001), ("18001", 18001)])
+def test_supervisor_selects_protected_port_without_changing_trust(monkeypatch, override, expected):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from app import serve
+
+    if override is None:
+        monkeypatch.delenv("SHUFFLE_DESKTOP_PROTECTED_PORT", raising=False)
+    else:
+        monkeypatch.setenv("SHUFFLE_DESKTOP_PROTECTED_PORT", override)
+    binds = []
+
+    def bind(host, port):
+        binds.append((host, port))
+        sock = MagicMock()
+        sock.__enter__.return_value = sock
+        sock.getsockname.return_value = (host, port)
+        return sock
+
+    monkeypatch.setattr(serve, "bind_listener", bind)
+    server = MagicMock()
+    monkeypatch.setattr(uvicorn, "Server", server)
+    serve.run(None, SimpleNamespace(host="127.0.0.1", port=18000, log_level="error"))
+    assert binds == [("127.0.0.1", 18000), ("127.0.0.1", expected)]
+    config = server.call_args.args[0]
+    assert config.proxy_headers is False
+    assert config.app.local_port == 18000
+    assert config.app.remote_port == expected
+    server.return_value.run.assert_called_once()
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "18000", "not-a-port"])
+def test_invalid_protected_port_fails_before_binding(monkeypatch, port):
+    from types import SimpleNamespace
+    from app import serve
+
+    monkeypatch.setenv("SHUFFLE_DESKTOP_PROTECTED_PORT", port)
+    monkeypatch.setattr(serve, "bind_listener", lambda *args: pytest.fail("must validate before binding"))
+    with pytest.raises(ValueError):
+        serve.run(None, SimpleNamespace(host="127.0.0.1", port=18000, log_level="error"))

@@ -503,7 +503,9 @@ async def test_context_overflow_recovers_an_oversize_current_turn() -> None:
     loop = NativeLoop(
         provider=provider, store=MemoryStore(), model="m",
         registry=registry, permissions=PermissionEngine("never_ask"),
-        context_window=limit, compaction=CompactionConfig(),
+        # Reported windows and local token estimates can be wrong. Keep this
+        # provider-rejection regression distinct from proactive protection.
+        context_window=limit * 10, compaction=CompactionConfig(),
     )
     await loop.submit(UserTurn(content="go"))
     await asyncio.wait_for(loop.wait_turn(), timeout=5)

@@ -780,9 +780,11 @@ def _node(nid: str, role: str, blocks: list) -> SessionNode:
 def _history(turns: int) -> list[SessionNode]:
     nodes: list[SessionNode] = []
     for t in range(turns):
+        # Make the full batch worthwhile under the optional 5% reclaim floor;
+        # these cases isolate whether each epoch fold itself frees tokens.
         nodes.extend([
-            _node(f"u{t}", "user", [Text(f"topic-{t} " + "pad " * 100)]),
-            _node(f"a{t}", "assistant", [Text(f"answer-{t} " + "pad " * 100)]),
+            _node(f"u{t}", "user", [Text(f"topic-{t} " + "pad " * 500)]),
+            _node(f"a{t}", "assistant", [Text(f"answer-{t} " + "pad " * 500)]),
         ])
     return nodes
 

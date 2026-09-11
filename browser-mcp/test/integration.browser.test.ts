@@ -50,6 +50,30 @@ console.log("http-fixture-log hi");
 fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").textContent=JSON.stringify(d);});
 </script></body></html>`;
   const server = createHttpServer((req, res) => {
+    if (req.url === "/delayed-hydration") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end('<title>Loading app</title><main id="app">Loading...</main><script>fetch("/hydrate").then(r=>r.text()).then(html=>document.getElementById("app").innerHTML=html)</script>');
+      return;
+    }
+    if (req.url === "/hydrate") {
+      setTimeout(() => { res.writeHead(200, { "content-type": "text/html" }); res.end('<button>Hydrated control</button>'); }, 350);
+      return;
+    }
+    if (req.url === "/blank-app" || req.url === "/canvas-app" || req.url === "/prose-app") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end('<title>App</title><body>' + (req.url === "/blank-app" ? '<script>throw new Error("mount failed")</script>' : req.url === "/canvas-app" ? '<canvas width="100" height="100"></canvas>' : '<p>This page contains plain prose without any actionable controls.</p>') + '</body>');
+      return;
+    }
+    if (req.url === "/auth-redirect") {
+      res.writeHead(302, { location: `http://localhost:${req.headers.host!.split(":").pop()}/login` });
+      res.end();
+      return;
+    }
+    if (req.url === "/login") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end('<title>Sign in</title><button>Sign in</button>');
+      return;
+    }
     if (req.url === "/api/data") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ marker: NET_BODY_MARKER }));
@@ -251,6 +275,48 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await viewportManager.cleanup();
     }
   }, 30000);
+
+  it("waits for delayed HTTP hydration before returning navigation refs", async () => {
+    const started = Date.now();
+    const result = await runNavigate(session, { url: httpUrl + "delayed-hydration" });
+    expect(JSON.parse(firstText(result)).ref_count).toBeGreaterThan(0);
+    expect(result.content[1]).toMatchObject({ text: expect.stringContaining("Hydrated control") });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(300);
+  });
+
+  it.each(["blank", "canvas", "prose"])("bounds readiness and describes a %s page without inventing failure", async kind => {
+    const started = Date.now();
+    const body = JSON.parse(firstText(await runNavigate(session, { url: httpUrl + kind + "-app" })));
+    expect(Date.now() - started).toBeLessThan(4500);
+    expect(body.ref_count).toBe(0);
+    expect(body.warning).toContain("no actionable refs yet");
+    expect(body.warning).not.toContain("likely a blank/errored app");
+    if (kind === "blank") expect(body.warning).toContain("No body text or visible media was observed");
+    else expect(body.warning).not.toContain("No body text or visible media was observed");
+  });
+
+  it("reports a real cross-origin auth redirect without treating it as a blank app", async () => {
+    const body = JSON.parse(firstText(await runNavigate(session, { url: httpUrl + "auth-redirect" })));
+    expect(body.redirected_to_origin).toBe(new URL(httpUrl.replace("127.0.0.1", "localhost")).origin);
+    expect(body.ref_count).toBeGreaterThan(0);
+    expect(body.warning).toBeUndefined();
+  });
+
+  it("sends consecutive targetless keys without a screenshot but still rejects stale coordinates", async () => {
+    const page = await session.ensurePage();
+    await page.setContent('<input id="keys">');
+    await page.locator("#keys").focus();
+    session.invalidateScreenshot();
+    for (const key of ["a", "b"]) {
+      const result = await session.runAgentExclusive(() => runAct(session, { kind: "key", key }));
+      expect(JSON.parse(firstText(result)).ok).toBe(true);
+    }
+    expect(await page.locator("#keys").inputValue()).toBe("ab");
+    const stale = await runAct(session, { kind: "key", key: "c", coordinate: [10, 10] });
+    expect(stale.isError).toBe(true);
+    expect(firstText(stale)).toContain("stale_screenshot");
+    expect(await page.locator("#keys").inputValue()).toBe("ab");
+  });
 
   it("navigate returns url/title and an interactive snapshot with refs", async () => {
     const res = await runNavigate(session, { url: fixtureUrl });
@@ -758,6 +824,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     try {
       expect((await send("takeover", {}, null)).ok).toBe(true);
       await expect(session.runAgentExclusive(() => runTabs(session,{op:"create"}))).rejects.toThrow("human_control");
+      await expect(session.runAgentExclusive(() => runAct(session, {kind:"key",key:"Escape"}))).rejects.toThrow("human_control");
       expect((await send("tabs",{action:"create",url:httpUrl},null)).ok).toBe(true);
       const created = session.currentTabId()!;
       expect((await send("viewport",{mode:"fit",width:375,height:812})).ok).toBe(true);

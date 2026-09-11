@@ -252,3 +252,45 @@ def test_description_warns_about_the_empty_device_list(mock_db):
     description = _builtin_handlers()["NotifyDevices"].description
     assert "no registered devices" in description.lower()
     assert "chat" in description.lower()
+
+def test_stored_error_trace_preserves_final_exception_and_bounded_detail(mock_db):
+    from app.db import error_logs
+    detail = "Traceback root cause\n" + "middle frame\n" * 700 + "RuntimeError: final cause"
+    error_id = error_logs.record_error("backend", "round8 trace", detail=detail, session_id="trace-session")
+    assert error_id
+    tool = _builtin_handlers(session_id="trace-session")["GetAppErrors"]
+    body = _body(asyncio.run(tool.handler({"this_session_only": True})))
+    trace = body["errors"][0]["detail"]
+    assert trace.startswith("Traceback root cause")
+    assert trace.endswith("RuntimeError: final cause")
+    assert len(trace) <= bt._APP_ERRORS_MAX_DETAIL_CHARS
+    page = _body(asyncio.run(tool.handler({"error_id": error_id, "offset": 2100, "max_chars": 1200})))
+    assert page["detail"] == detail[2100:3300]
+    assert page["next_offset"] == 3300
+    other = _builtin_handlers(session_id="other")["GetAppErrors"]
+    denied = _body(asyncio.run(other.handler({"error_id": error_id, "this_session_only": True})))
+    assert denied["success"] is False
+
+
+def test_logger_to_error_store_keeps_final_exception_beyond_store_cap(mock_db):
+    import logging
+    import sys
+    from app.core.error_log_handler import ErrorLogDBHandler
+    try:
+        try:
+            raise ValueError("original cause")
+        except ValueError as cause:
+            raise RuntimeError("long frame " * 5000 + "FINAL EXCEPTION") from cause
+    except RuntimeError:
+        record = logging.LogRecord("round8.logger", logging.ERROR, __file__, 1, "long error", (), sys.exc_info())
+    record.session_id = "logger-trace"
+    ErrorLogDBHandler().emit(record)
+    tool = _builtin_handlers(session_id="logger-trace")["GetAppErrors"]
+    body = _body(asyncio.run(tool.handler({"this_session_only": True})))
+    trace = body["errors"][0]["detail"]
+    assert "original cause" in trace
+    assert trace.endswith("FINAL EXCEPTION")
+    error_id = body["errors"][0]["id"]
+    page = _body(asyncio.run(tool.handler({"error_id": error_id, "offset": 19000, "max_chars": 12000})))
+    assert page["detail"].endswith("FINAL EXCEPTION")
+    assert page["total_chars"] == 20000

@@ -229,6 +229,39 @@ class _ScriptedProvider:
             yield chunk
 
 
+async def test_nested_tool_delivery_metadata_accumulates_each_steer() -> None:
+    from fluid.engine.native import NativeLoop
+    from fluid.messages import ToolResultBlock
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.store.base import MemoryStore
+    from fluid.tools.inproc import create_inproc_server, tool
+    from fluid.tools.registry import ToolOutcome, ToolRegistry
+
+    @tool("outer", "nested work", {"type": "object"})
+    async def outer(args):
+        for index, text in enumerate(["Do not deploy.", "Preserve credentials."]):
+            await loop.submit(Steer(text=text, id=f"nested-{index}"))
+            # The code-mode bridge can complete several nested calls before
+            # the outer result is persisted; none may replace earlier metadata.
+            await loop._finish_tool(loop.session_id, loop._active_turn_id,
+                                    "inner", f"inner-{index}", ToolOutcome(text="done"))
+        return {"content": [{"type": "text", "text": "outer complete"}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("test", [outer]))
+    loop = NativeLoop(provider=_ScriptedProvider([
+        _tool_script("c1", "mcp__test__outer"), _text_script("done"),
+    ]), store=MemoryStore(), registry=registry, model="m",
+        permissions=PermissionEngine("never_ask"))
+    await loop.submit(UserTurn(content="go"))
+    await loop.wait_turn()
+    nodes = await loop.store.load_path(loop.session_id)
+    result = next(b for n in nodes for b in n.message.content if isinstance(b, ToolResultBlock))
+    assert [s.id for s in result.delivered_steers] == ["nested-0", "nested-1"]
+    assert [s.text for s in result.delivered_steers] == ["Do not deploy.", "Preserve credentials."]
+    await loop.aclose()
+
+
 async def test_steer_with_id_is_receipted_after_the_tool_result() -> None:
     from fluid.engine.native import NativeLoop
     from fluid.events.model import SteerDelivered, ToolResult
@@ -266,6 +299,22 @@ async def test_steer_with_id_is_receipted_after_the_tool_result() -> None:
     assert receipt.steers == [{"id": "q1", "text": "use the staging config"}]
     # The model really sees it: the marker is inside the tool result text.
     assert STEER_OPEN in result.output and "use the staging config" in result.output
+    from fluid.context.compaction import Compactor, CompactionConfig, render_span_digest
+    from fluid.context.trim import TrimConfig
+    from fluid.messages import Message, ToolResultBlock
+
+    nodes = await loop.store.load_path(loop.session_id)
+    result_node = next(n for n in nodes if any(isinstance(b, ToolResultBlock) for b in n.message.content))
+    restored = Message.from_dict(result_node.message.to_dict())
+    delivered = restored.content[0].delivered_steers
+    assert restored.content[0].delivery_metadata_version == 1
+    assert [(s.id, s.text, s.origin) for s in delivered] == [("q1", "use the staging config", "user")]
+    compactor = Compactor(config=CompactionConfig(
+        enabled=False, trim=TrimConfig(keep_recent_tool_results=0, min_result_chars=0),
+    ))
+    compactor.trimmer.trim_batch([result_node])
+    assert delivered[0].render() in compactor.view([result_node])[0].content[0].content[-1].text
+    assert delivered[0].render() in render_span_digest([result_node], CompactionConfig()).text()
 
 
 async def test_two_steers_are_receipted_together_in_submission_order(tmp_path) -> None:

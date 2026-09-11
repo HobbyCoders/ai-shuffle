@@ -135,6 +135,11 @@ def test_lint_flags_unbounded_commands(command):
     # Its own blocking wait — the recommended shape.
     "gh pr checks 12 --watch --fail-fast",
     "npm run build",
+    "vite build",
+    "npx vite build --mode production",
+    "pnpm exec vite optimize",
+    "vite --help",
+    "vite --version",
     "pytest -q",
     # Loop-shaped but bounded, each by a different kind of budget.
     "timeout 900 bash -c 'while true; do sleep 30; done'",
@@ -164,6 +169,9 @@ def test_lint_flags_the_match_all_glob():
 
 @pytest.mark.parametrize("command", [
     "npm run dev",
+    "vite",
+    "npx vite --host 0.0.0.0",
+    "vite preview",
     "pnpm dev -- --port 8010",
     "uvicorn app.main:app --port 8010",
     "python manage.py runserver 0.0.0.0:8000",

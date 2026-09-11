@@ -309,6 +309,8 @@ def _seed_pair(tmp_path, *, source_lock=None, installed=None, dest_lock=None):
         )
     if dest_lock is not None:
         _write_json(dest / "frontend" / "package-lock.json", dest_lock)
+    for key, version in (cm._required_packages(installed or source_lock or {}) or {}).items():
+        _write_json(source / "frontend" / key / "package.json", {"version": version})
     return source, dest
 
 
@@ -336,7 +338,7 @@ def test_installs_when_the_branch_wants_another_version(tmp_path, no_real_npm):
         dest_lock=_lockfile(tailwindcss="4.0.0"),
     )
 
-    summary = cm.provision_node_modules(str(source), str(dest))
+    summary = cm.provision_node_modules(str(source), str(dest), allow_install=True)
 
     assert summary["linked"] == []
     assert no_real_npm == [str(dest / "frontend")]
@@ -358,7 +360,7 @@ def test_installs_when_the_branch_adds_a_package_the_source_lacks(
         dest_lock=_lockfile(tailwindcss="4.0.0", vite_plugin="4.0.0"),
     )
 
-    summary = cm.provision_node_modules(str(source), str(dest))
+    summary = cm.provision_node_modules(str(source), str(dest), allow_install=True)
 
     assert summary["linked"] == []
     assert no_real_npm == [str(dest / "frontend")]
@@ -383,7 +385,7 @@ def test_falls_back_to_comparing_lockfiles_without_an_install_record(
         source_lock=_lockfile(tailwindcss="4.0.0"),
         dest_lock=_lockfile(tailwindcss="4.0.0"),
     )
-    assert cm.provision_node_modules(str(source), str(dest))["linked"] == ["frontend"]
+    assert cm.provision_node_modules(str(source), str(dest), allow_install=True)["linked"] == ["frontend"]
     assert no_real_npm == []
 
     source2, dest2 = _seed_pair(
@@ -391,7 +393,7 @@ def test_falls_back_to_comparing_lockfiles_without_an_install_record(
         source_lock=_lockfile(tailwindcss="3.4.1"),
         dest_lock=_lockfile(tailwindcss="4.0.0"),
     )
-    summary = cm.provision_node_modules(str(source2), str(dest2))
+    summary = cm.provision_node_modules(str(source2), str(dest2), allow_install=True)
     assert summary["linked"] == []
     assert no_real_npm == [str(dest2 / "frontend")]
 
@@ -435,7 +437,7 @@ def test_a_failed_install_is_recorded_and_stops_sync(tmp_path, monkeypatch):
         cm, "_run_svelte_kit_sync", lambda d: sync_calls.append(str(d)) or True
     )
 
-    summary = cm.provision_node_modules(str(source), str(dest))
+    summary = cm.provision_node_modules(str(source), str(dest), allow_install=True)
 
     assert summary["linked"] == []
     assert summary["installed"] == []
@@ -454,10 +456,45 @@ def test_svelte_sync_still_runs_after_an_install(tmp_path, no_real_npm, no_real_
         "export default {};", encoding="utf-8"
     )
 
-    summary = cm.provision_node_modules(str(source), str(dest))
+    summary = cm.provision_node_modules(str(source), str(dest), allow_install=True)
 
     assert summary["synced"] == ["frontend"]
     assert no_real_npx == [str(dest / "frontend")]
+
+
+
+
+def test_default_stale_tree_requires_setup_without_install(tmp_path, no_real_npm, no_real_npx):
+    source, dest = _seed_pair(tmp_path, installed=_lockfile(tailwindcss="3"), dest_lock=_lockfile(tailwindcss="4"))
+    summary = cm.provision_node_modules(str(source), str(dest))
+    assert not summary["linked"] and not summary["installed"]
+    assert any("install not authorized" in s for s in summary["skipped"])
+    assert no_real_npm == [] and no_real_npx == []
+
+
+def test_empty_tree_is_not_linked_despite_matching_lockfiles(tmp_path, no_real_npm):
+    source, dest = _seed_pair(tmp_path)
+    _write_json(source / "frontend/package-lock.json", _lockfile(vite="7"))
+    _write_json(dest / "frontend/package-lock.json", _lockfile(vite="7"))
+    (source / "frontend/node_modules/marker.txt").unlink()
+    summary = cm.provision_node_modules(str(source), str(dest))
+    assert not summary["linked"] and not summary["installed"]
+    assert any("empty" in s for s in summary["skipped"])
+    assert no_real_npm == []
+
+
+def test_missing_modules_cannot_trigger_sync_download(tmp_path, no_real_npx):
+    source = tmp_path / "src"
+    dest = tmp_path / "dest"
+    _mk_package(source, ".")
+    _mk_package(dest, ".", svelte=True)
+    cm.provision_node_modules(str(source), str(dest))
+    assert no_real_npx == []
+
+
+def test_real_sync_never_downloads_missing_cli(tmp_path, monkeypatch):
+    monkeypatch.setattr(cm.subprocess, "run", lambda *a, **k: pytest.fail("must not spawn npx"))
+    assert not _REAL_SYNC(tmp_path)
 
 
 # --- the installer itself ---------------------------------------------------

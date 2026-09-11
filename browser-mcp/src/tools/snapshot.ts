@@ -17,7 +17,7 @@ export async function runSnapshot(
     scopeRef: input.scope_ref,
     maxChars: input.max_chars,
   });
-  // Refs are proof the page rendered; only an empty tree needs the page asked.
+  // Add content context for zero refs without inferring app readiness.
   const warning =
     snap.refs.length === 0 ? contentWarning(await session.pageContent(), 0) : undefined;
   return jsonResult(

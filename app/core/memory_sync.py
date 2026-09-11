@@ -29,9 +29,9 @@ first reconcile does behind the user's back.
 Two operations drive the native leg from the session lifecycle (see
 app/core/query_engine.py):
 
-* **reconcile** — runs before a session starts. Brings the local memory dir up
-  to date with the DB (and pushes any local-only files up), so the agent reads
-  the latest shared memory.
+* **reconcile** — runs before a session starts. Brings the legacy local memory
+  directory up to date with the DB and pushes local-only files. It does not
+  populate the continual learner's per-turn `# Memory` snapshot.
 * **push** — runs after each turn, once memory has been flushed to disk.
   Upserts changed/new local files and tombstones files *genuinely* deleted
   locally — those that were in this process's reconcile baseline and have since

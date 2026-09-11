@@ -110,6 +110,34 @@ def admin_client():
     return TestClient(app)
 
 
+def test_badge_display_uses_real_binding_and_rename_invalidation(setup, monkeypatch):
+    account_hub.reset_display_cache()
+    assert setup.get('/api/v1/mobile/hub/account/display').status_code == 403
+    client = admin_client()
+    assert client.get('/api/v1/mobile/hub/account/display').status_code == 409
+    bind()
+    name = ['first']
+    def upstream(binding, method, suffix, body=None):
+        if method == 'PATCH':
+            name[0] = body['username']
+        return {'account': {'id': ACCOUNT, 'username': name[0], 'profile_complete': True},
+                'servers': [{'id': SERVER, 'name': 'worker'}]}
+    hub = Mock(side_effect=upstream)
+    monkeypatch.setattr(account_hub, 'call', hub)
+    for _ in range(3):
+        response = client.get('/api/v1/mobile/hub/account/display')
+        assert response.status_code == 200
+        assert response.json() == {'account': {'id': ACCOUNT, 'username': 'first', 'profile_complete': True}}
+        assert response.headers['Cache-Control'] == 'no-store'
+    assert hub.call_count == 1
+    assert client.patch('/api/v1/mobile/hub/account', json={'username': 'renamed'}).status_code == 200
+    assert client.get('/api/v1/mobile/hub/account/display').json()['account']['username'] == 'renamed'
+    assert hub.call_count == 3
+    store.disconnect()
+    assert client.get('/api/v1/mobile/hub/account/display').status_code == 409
+    account_hub.reset_display_cache()
+
+
 def test_account_profile_proxies_only_owning_account_inventory_metadata(setup, monkeypatch):
     assert setup.get('/api/v1/mobile/hub/account').status_code == 403  # owner access only
     setup = admin_client()

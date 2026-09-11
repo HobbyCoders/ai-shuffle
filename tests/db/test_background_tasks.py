@@ -140,3 +140,22 @@ def test_has_subagent_started_matches_payload_task_id(mock_db):
     assert se.has_subagent_started("se-1", "nope") is False
     # Scoped per session.
     assert se.has_subagent_started("other-session", "sub-a") is False
+
+def test_terminal_evidence_migration_is_idempotent_and_preserves_rows(mock_db):
+    from app.db import database
+    conn = mock_db
+    for column in ("summary", "reason", "report_path", "report_chars"):
+        conn.execute(f"ALTER TABLE background_tasks DROP COLUMN {column}")
+    conn.execute("INSERT INTO background_tasks (task_id, session_id, status) VALUES ('old', 'old-session', 'completed')")
+    conn.commit()
+    with get_db() as shim:
+        database._run_column_migrations(shim.cursor())
+        database._run_column_migrations(shim.cursor())
+    row = get_background_task("old", "old-session")
+    assert row["status"] == "completed"
+    assert row["summary"] is None
+    assert row["report_path"] is None
+    upsert_background_task({"task_id": "old", "session_id": "old-session", "status": "error", "summary": "saved output", "report_path": "/tmp/report.txt", "report_chars": 123})
+    row = get_background_task("old", "old-session")
+    assert row["summary"] == "saved output"
+    assert row["report_chars"] == 123

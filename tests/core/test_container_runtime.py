@@ -1,4 +1,5 @@
 """Container lifecycle guards. No application startup or real configured database."""
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -6,7 +7,16 @@ from unittest.mock import Mock
 
 import pytest
 
-from docker import container_runtime as runtime
+pytest.importorskip("fcntl", reason="The Linux container supervisor requires POSIX file locking")
+
+# The installed Docker SDK is also named docker; load our standalone supervisor
+# by its source path rather than depending on namespace-package resolution.
+_spec = importlib.util.spec_from_file_location(
+    "shuffle_container_runtime", Path(__file__).resolve().parents[2] / "docker" / "container_runtime.py",
+)
+assert _spec is not None and _spec.loader is not None
+runtime = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(runtime)
 from app.core.config import Settings
 
 

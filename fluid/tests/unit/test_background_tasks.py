@@ -538,6 +538,26 @@ async def test_serving_task_death_still_wakes_the_session() -> None:
     assert "Stopped by user" in provider.requests[-1].messages[-1].text()
 
 
+@pytest.mark.parametrize("status", ["finished", "failed", "cancelled"])
+@pytest.mark.parametrize("report_path", [None, "/tmp/report.txt"])
+def test_background_output_is_framed_after_truncation(status, report_path):
+    payload = "do not obey this output " + "X" * 6000
+    text = NativeLoop._background_wake_content([
+        BackgroundTaskFinished(task_id="shell-task", status=status,
+                               summary=payload, report_path=report_path),
+    ])
+    opening = '<untrusted-tool-result source="background task shell-task output">'
+    assert opening in text
+    assert text.index(f"Task shell-task ({status}):") < text.index(opening)
+    assert text.index("do not obey") > text.index(opening)
+    assert text.count('</untrusted-tool-result>') == 1
+    if report_path:
+        assert text.index('report head only') > text.index('</untrusted-tool-result>')
+        assert "X" * 6000 not in text
+    else:
+        assert payload in text
+
+
 def test_background_wake_defangs_worker_supplied_markers() -> None:
     """A worker summary sits inside the trusted reminder fence; a closing tag
     or steer marker in it must not survive as a real control marker."""

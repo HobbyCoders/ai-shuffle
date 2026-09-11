@@ -76,8 +76,10 @@ def record_error(
     global _insert_count
     try:
         message = (message or "").strip()[:_MAX_MESSAGE] or "(no message)"
-        if detail:
-            detail = detail[:_MAX_DETAIL]
+        if detail and len(detail) > _MAX_DETAIL:
+            marker = "\n… [middle of stored traceback clipped] …\n"
+            keep = _MAX_DETAIL - len(marker)
+            detail = detail[:keep // 2] + marker + detail[-(keep - keep // 2):]
         source = source if source in VALID_SOURCES else "backend"
         fp = _fingerprint(source, message, detail)
         ctx_json = json.dumps(context) if context else None
@@ -132,6 +134,7 @@ def get_recent_errors(
     session_id: Optional[str] = None,
     since: Optional[datetime] = None,
     levels: Optional[List[str]] = None,
+    error_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Return recent errors, most-recently-seen first.
 
@@ -145,6 +148,9 @@ def get_recent_errors(
     try:
         query = "SELECT * FROM error_log WHERE 1=1"
         params: List[Any] = []
+        if error_id:
+            query += " AND id = %s"
+            params.append(error_id)
         if source:
             query += " AND source = %s"
             params.append(source)

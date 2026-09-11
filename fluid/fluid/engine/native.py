@@ -286,14 +286,9 @@ def _render_interjection(text: str, sender: str | None, origin: str) -> str:
     user's own authority, and a <task-notification> whose summary a sub-agent
     wrote plainly does not.
     """
-    from fluid.context.peer import format_peer_message
-    from fluid.context.steering import format_steer, format_system_notice
+    from fluid.messages.content import SteerDelivery
 
-    if origin == "system":
-        return format_system_notice(text)
-    if sender is not None:
-        return format_peer_message(sender, text)
-    return format_steer(text)
+    return SteerDelivery(text=text, sender=sender, origin=origin).render()
 
 
 def _steer_receipt(
@@ -901,6 +896,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         # loop still bills what it spent. Four crashed turns in one audited day
         # carried ``cost_usd: null`` and lost real spend.
         self._turn_usage: dict[str, Any] = {}
+        self._tool_deliveries = []  # Includes nested code-mode tool completions.
         # Streaming deltas the store refused (see _emit / _note_dropped_event).
         # Cumulative for the engine; the per-turn count drives the log's
         # once-per-turn rate limit and hosts can read the total as a metric.
@@ -1586,6 +1582,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         return True
 
     async def aclose(self) -> None:
+        close_task = getattr(self, "_close_task", None)
+        if close_task is None:
+            close_task = self._close_task = asyncio.create_task(self._aclose_inner())
+        await asyncio.shield(close_task)
+
+    async def _aclose_inner(self) -> None:
         await self._close_background_lifecycle()
         self._interrupted.set()
         if self._turn_task and not self._turn_task.done():
@@ -1779,11 +1781,28 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Keep background park/wake serialization and completion delivery in
         # the shared lifecycle. A subsequent explicit or wake turn reopens
         # peer admission normally.
-        return await super()._emit_terminal_with_park(event)
+        publication = asyncio.create_task(super()._emit_terminal_with_park(event))
+        try:
+            return await asyncio.shield(publication)
+        except asyncio.CancelledError:
+            # Cancellation between bus publication and durable append must not
+            # publish a second terminal or close the bus before persistence.
+            await publication
+            raise
 
     async def _run_turn(self, op: UserTurn | Resume) -> None:
         try:
             await self._run_turn_inner(op)
+        except asyncio.CancelledError:
+            if self._active_turn_id and not self._background_turn_terminal:
+                partial, cost = self._partial_usage(self._turn_usage)
+                await self._emit_terminal_with_park(Interrupted(
+                    session_id=self.session_id, turn_id=self._active_turn_id,
+                    message="engine closed" if self._background_closed else "turn cancelled",
+                    usage=partial, cost_usd=cost,
+                    num_model_calls=self._turn_model_calls,
+                ))
+            raise
         finally:
             # Covers early hook/Resume exits and cancellation before the
             # agent loop starts, as well as its normal terminal paths. Stop
@@ -1939,7 +1958,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     await self._emit_turn_end_hook(sid, turn_id, text="", stop_reason=reason)
                 except Exception:  # noqa: BLE001 — never mask the turn's own outcome
                     log.warning("TurnEnd hooks failed", exc_info=True)
-            self._active_turn_id = None
+            # _run_turn owns the active id through cancellation settlement.
             # Interrupted turns discard their pending interjections. Other
             # terminal paths have already retained accepted peers in history;
             # nothing queued should leak into a later, unrelated user request.
@@ -2156,6 +2175,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             trimmed=[list(p) for p in promo.trimmed],
             spans=[list(s) for s in promo.spans],
             reclaimed_chars=promo.reclaimed_chars,
+            before_tokens=promo.before_tokens, after_tokens=promo.after_tokens,
+            decision_reason=promo.decision_reason,
+            first_changed_message=promo.first_changed_message,
         ))
 
     def _context_overhead_tokens(self) -> int:
@@ -2251,11 +2273,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                 await self._emit_compaction(sid, turn_id, promo)
             projected_prompt = self._estimate_request_input_tokens(history)
             call_was_sticky = not self._sticky_poisoned and empty_retries == 0
+            num_calls += 1
+            self._turn_model_calls = num_calls
             result = await self._stream_once(
                 sid, turn_id, history, sticky=call_was_sticky
             )
-            num_calls += 1
-            self._turn_model_calls = num_calls
             if not _is_empty_completion(result):
                 empty_retries = 0
             elif empty_retries < EMPTY_COMPLETION_MAX_RETRIES:
@@ -2958,6 +2980,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                 system=request.system,
                 tools=request.tools,
                 messages=request.messages,
+                request_identity={
+                    "provider": self.provider.name, "model": request.model,
+                    "max_tokens": request.max_tokens, "effort": request.effort,
+                    "thinking": request.thinking, "extra": request.extra,
+                    "cache_breakpoints": request.cache_breakpoints,
+                    "endpoint": getattr(self.provider, "_base_url", None),
+                },
                 # Snapshot the end of the previous request's history too, so
                 # the two fingerprints share a checkpoint at the end of their
                 # common prefix. Powers of two alone leave everything between
@@ -2965,6 +2994,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # messages that is 33..63, a third of the history.
                 extra_checkpoints=(message_count(self._prev_prefix_fingerprint),),
             )
+            if self.provider.name == "openai_responses":
+                from fluid.context.cache_probe import fingerprint_responses_request
+                fingerprint_responses_request(
+                    request, self._prefix_fingerprint,
+                    previous_count=message_count(self._prev_prefix_fingerprint),
+                    endpoint=getattr(self.provider, "_base_url", None),
+                )
+            self._prefix_fingerprint["_requested_at"] = str(time.time())
         except Exception:  # noqa: BLE001 — instrumentation is never fatal
             log.debug("prefix fingerprint failed", exc_info=True)
             self._prefix_fingerprint = None
@@ -2980,10 +3017,19 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Consumed either way: these rungs belong to the request just sent, and
         # must not be blamed for the miss after next.
         self._history_rewrites = []
+        out: dict[str, Any] = {"compaction_decision": dict(self._compactor.last_decision)}
         if fingerprint is None:
-            return {}
+            return out
         self._prefix_fingerprint = None
-        out: dict[str, Any] = {"prefix_hashes": fingerprint}
+        out["prefix_hashes"] = fingerprint
+        previous_time = (self._prev_prefix_fingerprint or {}).get("_requested_at")
+        try:
+            if previous_time and fingerprint.get("_requested_at"):
+                out["request_interval_seconds"] = max(
+                    0.0, float(fingerprint["_requested_at"]) - float(previous_time)
+                )
+        except (TypeError, ValueError):
+            pass  # Old or malformed diagnostic metadata is not a turn failure.
         try:
             diagnosis = diagnose_cache_miss(
                 previous=self._prev_prefix_fingerprint,
@@ -3002,13 +3048,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._prev_prefix_fingerprint = fingerprint
         if diagnosis is None:
             self._unexplained_misses = 0
-            self._cache_miss_alerted = False
             return out
         out["cache_miss"] = diagnosis
         if not is_unexplained_miss(diagnosis):
             self._unexplained_misses = 0
-            self._cache_miss_alerted = False
-            log.warning(
+            log.debug(
                 "prompt cache miss: %s (%s); fresh=%s cache_read=%s",
                 diagnosis.get("reason"),
                 diagnosis.get("note", ""),
@@ -3016,15 +3060,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                 diagnosis.get("cache_read_tokens"),
             )
             return out
-        # A verified-identical prefix that read nothing. Fluid did not move the
-        # prompt, so what is left is on the provider — and what separates its
-        # routing from its partitioning is the usage block it returned plus the
-        # affinity key the request carried. Logging the diagnosis alone left
-        # every audit guessing between them.
+        # A shortfall against the fingerprinted reusable prefix. Keep every
+        # call's evidence, but alert at most once per turn. This is not proof
+        # of a provider fault or an account's cache capabilities.
         self._unexplained_misses += 1
         diagnosis["consecutive_unexplained"] = self._unexplained_misses
         key = self._affinity_key()
-        log.warning(
+        log.debug(
             "prompt cache miss: %s (%s); fresh=%s cache_read=%s; "
             "provider=%s model=%s cache_key=%s provider_usage=%s",
             diagnosis.get("reason"),
@@ -3094,13 +3136,40 @@ class NativeLoop(BackgroundLifecycleMixin):
     async def _stream_once(
         self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True
     ) -> _CallResult:
+        self._stream_usage: dict[str, Any] = {}
+        try:
+            return await self._stream_once_inner(sid, turn_id, history, sticky=sticky)
+        except asyncio.CancelledError:
+            # Only provider-observed counts: cancellation is not evidence of
+            # unreported generation. Fold this logical call exactly once.
+            usage = self._stream_usage
+            self._fold_call_usage(self._turn_usage, usage)
+            raw = dict(usage)
+            raw.update(self._cache_probe_fields(usage))
+            raw["model_call_index"] = self._turn_model_calls
+            raw["cancelled"] = True
+            await self._emit(Usage(
+                session_id=sid, turn_id=turn_id,
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                cache_read_tokens=usage.get("cache_read_input_tokens", 0),
+                cache_creation_tokens=usage.get("cache_creation_input_tokens", 0),
+                raw=raw,
+            ))
+            raise
+        finally:
+            self._stream_usage = {}
+
+    async def _stream_once_inner(
+        self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True
+    ) -> _CallResult:
         request = self._build_request(
             history, sticky=sticky
         )
         self._fingerprint_request(request)
 
         blocks: dict[int, dict[str, Any]] = {}
-        usage_totals: dict[str, Any] = {}
+        usage_totals = self._stream_usage
         tool_uses: list[dict[str, Any]] = []
         stop_reason = "end_turn"
         native_stop_reason: str | None = None
@@ -3446,7 +3515,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                         return
                     yield chunk
                 finally:
+                    # Direct aclose cancels this reader rather than winning
+                    # the Interrupt race. Settle __anext__ before aclose.
+                    next_chunk.cancel()
                     interrupted.cancel()
+                    with suppress(asyncio.CancelledError, StopAsyncIteration):
+                        await next_chunk
                     with suppress(asyncio.CancelledError):
                         await interrupted
         finally:
@@ -3478,8 +3552,19 @@ class NativeLoop(BackgroundLifecycleMixin):
                 done, _ = await asyncio.wait(
                     {dispatch, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED
                 )
+            except asyncio.CancelledError:
+                dispatch.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await dispatch
+                await self._emit(ToolResult(
+                    session_id=sid, turn_id=turn_id, tool_use_id=tu["tool_use_id"],
+                    name=tu["name"], output="Tool cancelled: engine closed.", is_error=True,
+                ))
+                raise
             finally:
                 interrupt_wait.cancel()
+                with suppress(asyncio.CancelledError):
+                    await interrupt_wait
             # Prefer the finished dispatch even when the interrupt landed in the
             # same tick — a real result beats a synthesized cancellation.
             if dispatch in done:
@@ -3543,6 +3628,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         # (the Task dispatcher) need it to correlate their cards with this
         # tool_use block.
         self.ctx.extra["tool_use_id"] = tool_use_id
+        self._tool_deliveries = []
         try:
             outcome = await self._gated_call(sid, turn_id, tu["name"], tool_use_id, tu["input"])
         finally:
@@ -3584,6 +3670,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             tool_use_id=tool_use_id,
             content=content,
             is_error=outcome.is_error,
+            delivered_steers=self._tool_deliveries,
+            delivery_metadata_version=1,
         )
 
     # ── end-of-turn reflection nudge ─────────────────────────────────────
@@ -4016,6 +4104,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._pending_steers:
             delivered = [_steer_parts(pending) for pending in self._pending_steers]
             self._pending_steers.clear()
+            from fluid.messages.content import SteerDelivery
+            self._tool_deliveries.extend(
+                SteerDelivery(id=steer_id, text=text, sender=sender, origin=origin)
+                for steer_id, text, sender, origin in delivered
+            )
             steers = "".join(
                 _render_interjection(text, sender, origin)
                 for _, text, sender, origin in delivered

@@ -97,12 +97,12 @@ export const actSchema: JsonSchema = {
     },
     ref: {
       type: "string",
-      description: "Target element ref (e.g. e12). Provide exactly one of ref or coordinate.",
+      description: "Target element ref (e.g. e12). Provide exactly one of ref or coordinate; key may omit both to use active focus.",
     },
     coordinate: {
       type: "array",
       items: { type: "number" },
-      description: "Target [x,y] in the last screenshot's pixel space. Exactly one of ref or coordinate.",
+      description: "Target [x,y] in the last screenshot's pixel space. Exactly one of ref or coordinate; key may omit both.",
     },
     value: {
       type: "string",

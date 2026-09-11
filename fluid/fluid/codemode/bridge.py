@@ -176,7 +176,9 @@ class HostBridge:
             if not await self._on_permission(spec, tool_input):
                 return HostReply(denied=True, message=PROMPT_DENIAL)
 
-        outcome = await self._registry.dispatch(tool_name, tool_input, self._ctx)
+        outcome = await self._registry.dispatch(
+            tool_name, tool_input, self._ctx, raw_shell_output=True,
+        )
 
         # MRTR: the tool paused to ask the user something (AskUser,
         # an elicitating MCP server). Its first leg is an EMPTY
@@ -230,10 +232,18 @@ class HostBridge:
                 )
 
         if outcome.is_error and not outcome.soft_error:
-            return HostReply(error=outcome.text)
+            return HostReply(
+                error=outcome.text,
+                error_code=(
+                    outcome.error_code
+                    if tool_name in {"Read", "Grep", "Glob"} and spec.source == "builtin"
+                    and spec.effective_risk(tool_input) == "safe" else None
+                ),
+            )
         return HostReply(
             result=outcome.text,
             images=outcome.images,
             content_id=outcome.content_id,
             window_of=outcome.window_of,
+            shell_exit_code=outcome.shell_result[1] if outcome.shell_result is not None else None,
         )

@@ -6,6 +6,7 @@ listening socket address, and proxy-header rewriting is disabled.
 """
 from __future__ import annotations
 
+import os
 import socket
 import sys
 from contextlib import ExitStack
@@ -51,15 +52,16 @@ def bind_listener(host: str, port: int) -> socket.socket:
 def run(app, settings) -> None:
     import uvicorn
 
-    if not 1 <= settings.port <= 65535 or settings.port == REMOTE_PORT:
-        raise ValueError("The local port must be valid and different from protected remote port 8001")
+    remote_port = int(os.environ.get("SHUFFLE_DESKTOP_PROTECTED_PORT", str(REMOTE_PORT)))
+    if not 1 <= settings.port <= 65535 or not 1 <= remote_port <= 65535 or settings.port == remote_port:
+        raise ValueError("Local and protected listener ports must be valid and different")
     # Bind both sockets before starting services. A collision cannot leave a
     # half-started worker exposing just one of the required ingress boundaries.
     with ExitStack() as stack:
         local = stack.enter_context(bind_listener(settings.host, settings.port))
-        remote = stack.enter_context(bind_listener("127.0.0.1", REMOTE_PORT))
+        remote = stack.enter_context(bind_listener("127.0.0.1", remote_port))
         config = uvicorn.Config(
-            IngressApplication(app, local.getsockname()[1]),
+            IngressApplication(app, local.getsockname()[1], remote.getsockname()[1]),
             host=settings.host,
             port=settings.port,
             proxy_headers=False,

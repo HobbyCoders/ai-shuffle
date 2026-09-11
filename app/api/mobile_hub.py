@@ -76,6 +76,12 @@ def account_profile(_admin=Depends(require_admin)):
     return JSONResponse(_profile(account_hub.call(binding, 'GET', 'account'), binding['server_id']), headers={'Cache-Control': 'no-store'})
 
 
+@router.get('/account/display')
+def account_display(_admin=Depends(require_admin)):
+    return JSONResponse(account_hub.account_display(_active_binding()),
+                        headers={'Cache-Control': 'no-store'})
+
+
 @router.delete('/account/{kind}/{registration_id}')
 def revoke_account_registration(kind: str, registration_id: str, _admin=Depends(require_admin)):
     if kind not in ('servers', 'devices'):
@@ -111,8 +117,12 @@ def update_account_username(body: UsernameUpdate, _admin=Depends(require_admin))
     if not account_hub.USERNAME_PATTERN.fullmatch(username):
         raise HTTPException(400, account_hub.USERNAME_HINT)
     binding = _active_binding()
-    return JSONResponse(_profile(account_hub.call(binding, 'PATCH', 'account', {'username': username}), binding['server_id']),
-                        headers={'Cache-Control': 'no-store'})
+    try:
+        result = account_hub.call(binding, 'PATCH', 'account', {'username': username})
+    finally:
+        # A timeout may still have applied the rename at the hub.
+        account_hub.reset_display_cache()
+    return JSONResponse(_profile(result, binding['server_id']), headers={'Cache-Control': 'no-store'})
 
 
 def _profile(result, server_id=None):
@@ -183,7 +193,10 @@ def connect_account(body: ManagedLinkRequest, _admin=Depends(require_admin)):
 @router.delete('/connection')
 async def disconnect_account(_admin=Depends(require_admin)):
     from app.core import managed_connection
-    return _connection_response(await managed_connection.disconnect())
+    try:
+        return _connection_response(await managed_connection.disconnect())
+    finally:
+        account_hub.reset_display_cache()
 
 
 class LinkRequest(BaseModel):

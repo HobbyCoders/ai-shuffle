@@ -616,4 +616,6 @@ async def test_bash_strips_ansi(tmp_path) -> None:
     )
     assert not out.is_error, out.text
     assert "\x1b" not in out.text
-    assert out.text.strip() == "red plain"
+    assert "red plain" in out.text.splitlines()
+    assert out.text.startswith('<untrusted-tool-result source="Bash stdout/stderr">')
+    assert out.text.endswith('</untrusted-tool-result>\n[exit code 0]')

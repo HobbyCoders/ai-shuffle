@@ -20,7 +20,7 @@ from fluid.events.model import (
 )
 from fluid.events.ops import BackgroundTaskFinished, UserTurn
 from fluid.engine.questions import QuestionLifecycleMixin
-from fluid.tools.hardening import defang_harness_markers
+from fluid.tools.hardening import defang_harness_markers, fence_shell_output
 from fluid.tools.registry import BackgroundTaskReceipt
 
 _TERMINAL_EVENTS = (TurnComplete, Interrupted, ErrorEvent)
@@ -417,10 +417,13 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
             if not path:
                 # Nothing to point at, so nothing may be dropped: an elided
                 # summary with no recovery handle is the failure being fixed.
-                sections.append(summary)
+                sections.append(fence_shell_output(summary, f"background task {task_id} output"))
                 continue
             if len(summary) > _REPORT_HEAD_CHARS:
-                sections.append(summary[:_REPORT_HEAD_CHARS].rstrip() + "…")
+                sections.append(fence_shell_output(
+                    summary[:_REPORT_HEAD_CHARS].rstrip() + "…",
+                    f"background task {task_id} output",
+                ))
                 sections.append(
                     f"[report head only — {len(summary)} chars in full. The "
                     f"complete report is at {path}: Read it. HistoryExpand "
@@ -429,7 +432,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                     f"recovery.]"
                 )
             else:
-                sections.append(summary)
+                sections.append(fence_shell_output(summary, f"background task {task_id} output"))
                 sections.append(f"[full report: {path} — Read it for detail.]")
         sections.append("</system-reminder>")
         return "\n".join(sections)

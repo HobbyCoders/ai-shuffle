@@ -69,6 +69,18 @@ async def test_bounded_output_is_untouched(tmp_path) -> None:
     assert "dropped" not in out.text
 
 
+async def test_timeout_points_to_monitor_not_detached_polling(tmp_path) -> None:
+    out = await bash_handler(
+        {"command": _py("import time; time.sleep(10)"), "timeout": 1},
+        ToolCtx(cwd=str(tmp_path)),
+    )
+    assert out.is_error and not out.soft_error
+    assert "was killed" in out.text
+    assert "use Monitor" in out.text
+    assert "Do not append & or poll" in out.text
+    assert "Inspect any partial effects" in out.text
+
+
 def test_timeout_is_clamped_in_both_directions() -> None:
     assert clamp_timeout(0) == MIN_TIMEOUT_S
     assert clamp_timeout(-5) == MIN_TIMEOUT_S

@@ -103,6 +103,24 @@ def test_provisioning_survives_a_link_failure(tmp_path, monkeypatch):
     assert any("link failed" in e for e in summary["errors"])
 
 
+
+
+def test_provisioner_publishes_receipt_for_session_runtime_facts(tmp_path):
+    import subprocess
+    from fluid.context.runtime_facts import runtime_facts
+
+    source = tmp_path / "source"
+    source.mkdir()
+    dest = tmp_path / "checkout"
+    subprocess.run(["git", "init", "-q", str(dest)], check=True)
+    summary = cm.provision_worktree_runtime(str(source), str(dest))
+    facts = runtime_facts(str(dest))
+    assert "Last provisioning outcome:" in facts
+    assert f"skipped={len(summary['skipped'])}" in facts
+    assert "Project Python candidates: none" in facts
+    assert not (dest / ".env").exists()
+
+
 # ─── the denylist ────────────────────────────────────────────────────────────
 
 

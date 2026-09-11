@@ -63,6 +63,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from weakref import WeakValueDictionary
 from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
 
@@ -1301,7 +1302,17 @@ async def _retire_without_wake(
     )
 
 
+_terminal_delivery_locks: WeakValueDictionary = WeakValueDictionary()
+
+
 async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[str]:
+    """Serialize delivery without spending the delivered latch on failed enqueue."""
+    lock = _terminal_delivery_locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        return await _on_task_terminal_locked(session_id, frame)
+
+
+async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> Optional[str]:
     """Idle-reader hook: a background task reached a terminal state between
     turns. Fold the terminal task into ONE consolidated ``source=unpark`` wake.
 
@@ -1388,24 +1399,7 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
             )
             return
         if task_registry.is_own_background_task(session_id, task_id):
-            # ── Deliberate, unattributed cancellation → retire, never wake ──
-            # The model stops its own stale watcher with ``TaskStop``; the
-            # resulting ``cancelled`` terminal used to wake a whole turn whose
-            # entire output was "noted". Nothing in it is news — the summary the
-            # wake would carry literally reads "Stopped deliberately by the app
-            # or by an agent... not a failure". So retire it and stop there: the
-            # ENGINE is still told (or fluid keeps the id in its pending set and
-            # lists it on every later park), and a turn that happens to be
-            # running still gets the line as a steer, but nothing is scheduled.
-            # An ATTRIBUTED kill — shutdown, timeout, rate limit, turn-end reap —
-            # is real news and keeps its wake.
-            if (
-                task_id
-                and str(frame.get("status") or "") in _CANCELLATION_FRAME_STATUSES
-                and task_registry.is_unattributed_cancellation(session_id, task_id)
-            ):
-                await _retire_without_wake(session_id, frame, task_id)
-                return
+            # Explicit Stop is suppressed above; an unattributed kill is news.
             # ── OWN lane — rich consolidated source=unpark wake ──
             # A-1 (bug 1): if the CLI owns this completion's at-rest wake (a
             # top-level backgrounded agent resting while the parent is parked),
@@ -1519,7 +1513,7 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
             # that has since left the queue — a late/duplicate frame that must not
             # spawn a second wake. Guarded on a truthy task_id: a task_id-less frame
             # never latches (it also can't be deduped), so it enqueues as before.
-            if task_id and not task_registry.mark_woken(session_id, task_id):
+            if task_id and task_registry.is_woken(session_id, task_id):
                 logger.info(
                     "turn_scheduler: unpark for %s — task %s late frame; wake "
                     "already produced, no re-enqueue",
@@ -1533,12 +1527,12 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
             # the completion an hour of silence. Steer it into the live turn
             # instead — it lands at the next cell boundary. False whenever the
             # session is genuinely at rest (or unsteerable), which falls through
-            # to the queued wake below exactly as before. The ``mark_woken``
-            # latch above is already spent, so the later park/idle wake cannot
-            # deliver this task a second time.
+            # to the queued wake below. Latch only after acceptance; the
+            # session delivery lock prevents concurrent duplicate submissions.
             if await _try_steer_terminal_notification(
                 session_id, prompt, [frame], wake_task_ids
             ):
+                task_registry.mark_woken(session_id, task_id)
                 logger.info(
                     "turn_scheduler: unpark for %s — task %s terminal (%s) "
                     "steered into the live turn",
@@ -1548,6 +1542,7 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> Optional[s
             turn = await _enqueue_context_wake(
                 session_id, "unpark", [frame], wake_task_ids, prompt
             )
+            task_registry.mark_woken(session_id, task_id)
             logger.info(
                 "turn_scheduler: unpark for %s — task %s terminal (%s), wake turn %s",
                 session_id, task_id, frame.get("status"), turn["id"],
@@ -1600,7 +1595,8 @@ def install() -> None:
 # on" rationalization.
 _TASK_NOTIFICATION_NOTE = (
     "Background work has come to rest. This is an automatic, one-time summary of "
-    "its result(s) for your awareness — you are NOT being asked to do anything. If "
+    "its result(s). Inspect failures or truncated output and finish outstanding "
+    "work the user requested; do not invent unrelated work. If "
     "the outcome is already reflected in your earlier work, or needs no follow-up, "
     "stop after a brief acknowledgement; do not invent next steps or re-explain "
     "what already finished."
@@ -1795,12 +1791,19 @@ def _build_task_notification_prompt(pending: list, kind: str = "own") -> str:
             if value is not None and _esc(value) != ""
         )
         usage_xml = f"  <usage>\n{usage_fields}  </usage>\n" if usage_fields else ""
+        def framed(text: str) -> str:
+            if is_monitor:
+                from fluid.tools.hardening import fence_shell_output
+
+                return fence_shell_output(text, "Monitor")
+            return text
+
         if result_is_summary:
-            summary_xml = f"  <summary>{_payload(summary_text)}</summary>\n"
+            summary_xml = f"  <summary>{framed(_payload(summary_text))}</summary>\n"
             result_xml = ""
         else:
-            summary_xml = f"  <summary>{_label(summary_text)}</summary>\n"
-            result_xml = f"  <result>{_payload(result_text)}</result>\n"
+            summary_xml = f"  <summary>{framed(_label(summary_text))}</summary>\n"
+            result_xml = f"  <result>{framed(_payload(result_text))}</result>\n"
         # Empty identity elements are omitted, not emitted blank. A shell
         # monitor has neither a tool-use id nor an output file, and
         # `<tool-use-id></tool-use-id>` told the model nothing while reading

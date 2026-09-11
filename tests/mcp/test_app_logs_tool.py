@@ -199,3 +199,33 @@ def test_an_empty_answer_says_the_buffer_is_not_history(mock_db, buffered):
 
     assert body["lines"] == []
     assert "empty after a restart" in body["note"]
+
+def test_logger_long_chained_exception_preserves_tail_and_detail_pages(mock_db, monkeypatch):
+    import logging
+    from app.api import logs
+    handler = logs._RingBufferHandler()
+    try:
+        try:
+            raise ValueError("root cause")
+        except ValueError as cause:
+            raise RuntimeError("padding " * 1000 + "FINAL EXCEPTION") from cause
+    except RuntimeError:
+        record = logging.LogRecord("test.round8", logging.ERROR, __file__, 1, "failed", (), __import__("sys").exc_info())
+    handler.emit(record)
+    monkeypatch.setattr(logs.ring_handler, "buffer", handler.buffer)
+    # Other suites enable root logging, so MCP registration can add records.
+    body = _get(search="FINAL EXCEPTION")
+    (line,) = body["lines"]
+    assert "root cause" in line["message"]
+    assert line["message"].endswith("FINAL EXCEPTION")
+    assert len(line["message"]) <= 2000
+    pieces, offset = [], 0
+    while True:
+        page = _get(record_id=line["record_id"], offset=offset, max_chars=1000)
+        pieces.append(page["detail"])
+        if page["next_offset"] is None:
+            break
+        offset = page["next_offset"]
+    assert "".join(pieces) == handler.buffer[0].message
+    handler.buffer.clear()
+    assert "unavailable" in _get(record_id=line["record_id"])["error"]

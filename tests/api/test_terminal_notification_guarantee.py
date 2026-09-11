@@ -67,7 +67,11 @@ def _own_task(task_id="t-1", tool_use_id="tu-1", kind="agent"):
 
 
 @pytest.fixture(autouse=True)
-async def _isolate():
+async def _isolate(monkeypatch):
+    from app.core import turn_scheduler
+
+    # These tests inspect queued delivery; do not launch a live engine turn.
+    monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", lambda sid: None)
     startup.is_shutting_down = False
     task_registry.reset_all()
     # ROOT-CAUSE ISOLATION (cross-test flake): every ``start_task`` /
@@ -515,3 +519,26 @@ async def test_stop_session_task_live_agent_calls_terminal_callback_once():
     assert wire["id"] == "t-cb"
     assert wire["status"] == "killed"
     assert wire.get("reason") == USER_STOP_REASON
+
+async def test_unexpected_kill_without_reader_queues_once_but_stop_never_wakes(monkeypatch):
+    from app.core import turn_scheduler
+    from app.db import turns
+
+    _make_db_session()
+    monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", lambda sid: None)
+    monkeypatch.setattr(turn_scheduler, "_try_steer_terminal_notification", AsyncMock(return_value=False))
+    cwh.register_terminal_notification_callback()
+    _own_task("unexpected", "tu-unexpected")
+    task_registry.complete_task(SESSION, "unexpected", "killed", summary="Process disappeared")
+    await _drain_terminal_surface()
+    (wake,) = [t for t in turns.get_queued_turns(SESSION) if t["source"] == "unpark"]
+    assert wake["payload"]["task_ids"] == ["unexpected"]
+    assert "Process disappeared" in wake["prompt"]
+    # A reader arriving later cannot consume the same terminal twice.
+    await turn_scheduler.on_task_terminal(SESSION, {"task_id": "unexpected", "status": "killed", "summary": "Process disappeared"})
+    assert len([t for t in turns.get_queued_turns(SESSION) if t["source"] == "unpark"]) == 1
+    _own_task("explicit-stop", "tu-stop")
+    task_registry.suppress_wake(SESSION, "explicit-stop")
+    task_registry.complete_task(SESSION, "explicit-stop", "killed", reason="user_stopped")
+    await _drain_terminal_surface()
+    assert len([t for t in turns.get_queued_turns(SESSION) if t["source"] == "unpark"]) == 1

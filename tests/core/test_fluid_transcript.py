@@ -83,6 +83,8 @@ def _seed(session_id="ses_fixture"):
             "kind": "toolresultblock", "tool_use_id": "t1",
             "content": [{"kind": "text", "text": "file body"}],
             "is_error": False,
+            "delivered_steers": [],
+            "delivery_metadata_version": 0,
         }])),
         ("n5", "n4", _assistant("after tool")),
         ("n6", "n5", _user("second prompt")),
@@ -111,6 +113,8 @@ def test_fixture_matches_real_fluid_serialization():
         "kind": "toolresultblock", "tool_use_id": "t1",
         "content": [{"kind": "text", "text": "file body"}],
         "is_error": False,
+        "delivered_steers": [],
+        "delivery_metadata_version": 0,
     }])
 
 

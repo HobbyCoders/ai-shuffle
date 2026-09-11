@@ -7,7 +7,7 @@ describe('voice composer parity', () => {
 		const view = source('components/layout/ChatView.svelte');
 		expect(view.match(/<ChatInput /g)).toHaveLength(1);
 		expect(view).toContain('const showComposer = true;');
-		expect(view).toMatch(/<VoiceCallPanel[^>]+compact \/>\s*\{\/if\}\s*\{#key \$sessionOwnerBoundary\}\s*<ChatInput/);
+		expect(view).toMatch(/<VoiceCallPanel[^>]+compact \/>\s*\{\/if\}\s*\{#key \$sessionOwnerBoundary\}\s*<QuestionTray[^>]+\/>\s*<ChatInput/);
 	});
 	it('uses code context and permission controls for voice on desktop and mobile', () => {
 		expect(source('components/chat/ChatInput.svelte')).toContain("{#if composerMode !== 'chat'}");

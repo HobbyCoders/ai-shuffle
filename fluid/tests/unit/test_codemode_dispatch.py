@@ -7,6 +7,8 @@ case, the ``code_mode_allowed=False`` escape hatch, the ``ask`` permission
 round-trip (allow + deny), and large-result truncation via ResultRef.
 """
 
+import pytest
+
 from fluid.codemode import HostBridge, Projection, SubprocessKernel
 from fluid.permissions.engine import PermissionEngine
 from fluid.tools.inproc import create_inproc_server, tool
@@ -37,6 +39,99 @@ async def _run(registry, bridge, code, *, timeout=8):
         return await kernel.exec(code, timeout=timeout, on_host_call=bridge.on_host_call)
     finally:
         await kernel.stop()
+
+
+@pytest.mark.parametrize("tool_name,args", [
+    ("Read", {"file_path": "absent.txt"}),
+    ("Grep", {"pattern": "needle", "path": "absent"}),
+    ("Glob", {"pattern": "*.py", "path": "absent"}),
+])
+async def test_missing_discovery_requires_explicit_recovery(tmp_path, tool_name, args):
+    from fluid.tools.builtins import read, grep, glob, edit
+    from fluid.tools.registry import ToolCtx
+
+    registry = ToolRegistry()
+    for module in (read, grep, glob, edit):
+        registry.register_builtin(module.SPEC, module.handler)
+    present = tmp_path / "present.txt"
+    present.write_text("needle", encoding="utf-8")
+    ctx = ToolCtx(cwd=str(tmp_path))
+    bridge = HostBridge(registry, PermissionEngine("never_ask"), ctx=ctx)
+    call = f"{tool_name}(**{args!r})"
+    prefix = f"from tools import {tool_name}, Read, Edit\n"
+    result = await _run(registry, bridge, prefix + call + "\nprint('unreachable')")
+    assert "MissingPathError" in result.error
+    assert "unreachable" not in result.stdout
+    assert not ctx.read_files
+
+    code = prefix + (
+        "try:\n"
+        f"    missing = {call}\n"
+        "except MissingPathError:\n"
+        "    print('missing target')\n"
+        "else:\n"
+        "    raise AssertionError('failure became successful data')\n"
+        "print(Read(file_path='present.txt'))\n"
+    )
+    result = await _run(registry, bridge, code)
+    assert result.error is None, result.error
+    assert "missing target" in result.stdout and "needle" in result.stdout
+    assert str(present) in ctx.read_files
+    assert not any("absent" in path for path in ctx.read_files)
+
+
+@pytest.mark.parametrize("kind", ["mutation", "denial", "invalid_glob"])
+async def test_missing_path_recovery_does_not_swallow_other_failures(tmp_path, kind):
+    from fluid.tools.builtins import glob, read, edit
+    from fluid.tools.registry import ToolCtx
+
+    registry = ToolRegistry()
+    for module in (glob, read, edit):
+        registry.register_builtin(module.SPEC, module.handler)
+    target = tmp_path / "unread.txt"
+    target.write_text("old", encoding="utf-8")
+    bridge = HostBridge(registry, PermissionEngine("never_ask"), ctx=ToolCtx(cwd=str(tmp_path)))
+    call = "Edit(file_path='unread.txt', old_string='old', new_string='new')"
+    if kind == "denial":
+        bridge = HostBridge(registry, PermissionEngine("always_ask"), ctx=ToolCtx(cwd=str(tmp_path)))
+        call = "Read(file_path='absent.txt')"
+    elif kind == "invalid_glob":
+        call = "Glob(pattern='[', path='.')"
+    result = await _run(registry, bridge,
+        "from tools import Read, Edit, Glob\n"
+        "try:\n"
+        f"    {call}\n"
+        "except MissingPathError:\n"
+        "    print('recovered')\n"
+        "print('unreachable')\n")
+    assert result.error is not None
+    assert "recovered" not in result.stdout and "unreachable" not in result.stdout
+    assert target.read_text(encoding="utf-8") == "old"
+
+
+async def test_read_directory_is_not_a_recoverable_missing_path(tmp_path):
+    from fluid.tools.builtins import read
+    from fluid.tools.registry import ToolCtx
+
+    registry = ToolRegistry()
+    registry.register_builtin(read.SPEC, read.handler)
+    bridge = HostBridge(registry, PermissionEngine("never_ask"), ctx=ToolCtx(cwd=str(tmp_path)))
+    reply = await bridge.on_host_call("Read", {"file_path": "."})
+    assert reply.error is not None and reply.error_code is None
+
+
+async def test_discovery_cancellation_propagates():
+    import asyncio
+    from fluid.tools.builtins import read
+
+    async def cancelled(_input, _ctx):
+        raise asyncio.CancelledError
+
+    registry = ToolRegistry()
+    registry.register_builtin(read.SPEC, cancelled)
+    bridge = HostBridge(registry, PermissionEngine("never_ask"))
+    with pytest.raises(asyncio.CancelledError):
+        await bridge.on_host_call("Read", {"file_path": "absent"})
 
 
 async def test_two_tools_combined_in_one_cell() -> None:

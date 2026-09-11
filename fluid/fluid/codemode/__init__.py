@@ -33,6 +33,7 @@ from fluid.codemode.verify import verify_sources, verify_store
 from fluid.codemode.vfs import (
     DEFAULT_ALLOWLIST,
     HostCallDenied,
+    MissingPathError,
     ResultRef,
     ToolError,
     make_guarded_import,
@@ -45,6 +46,7 @@ __all__ = [
     "HostBridge",
     "HostCall",
     "HostCallDenied",
+    "MissingPathError",
     "HostReply",
     "Kernel",
     "KernelConfig",

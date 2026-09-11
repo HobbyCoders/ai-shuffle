@@ -150,6 +150,8 @@ def _host_call(tool_name: str, kwargs: dict):
     if reply.get("denied"):
         raise vfs.HostCallDenied(reply.get("message") or "permission denied")
     if reply.get("error") is not None:
+        if reply.get("error_code") == "missing_path":
+            raise vfs.MissingPathError(reply["error"])
         raise vfs.ToolError(reply["error"])
     result = reply.get("result")
     if result is None:
@@ -843,7 +845,7 @@ def _run_cell(code: str):
 # data (strings, numbers, containers, ResultRefs) survives.
 
 _CKPT_SKIP = (
-    "ResultRef", "ToolError", "HostCallDenied", "Path",
+    "ResultRef", "ToolError", "MissingPathError", "HostCallDenied", "Path",
     # The registry itself is runner state, not cell data: a fresh kernel builds
     # its own and re-adopts every ResultRef the restore brings back (see
     # ``_restore``), so ``_refs[7]`` keeps resolving for refs a variable still

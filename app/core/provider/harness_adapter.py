@@ -3942,9 +3942,10 @@ not failed — check `gh pr view <n> --json state` before you re-run the merge \
 or park a watcher on it — and delete the remote branch separately with `git \
 push origin --delete <branch>`.
 
-Your worktree is provisioned for you: node_modules, the virtualenv and the \
-built assets are linked in, and configuration reaches anything you start \
-through the environment it inherits. Never copy a `.env` (or any other \
+Worktree provisioning is best-effort. Check the current runtime and \
+provisioning facts; do not assume dependencies or built assets are available. \
+Configuration reaches child processes through their inherited environment. \
+Never copy a `.env` (or any other \
 credential file) into a worktree — the copy puts a plaintext database \
 password on disk, silently points your branch at the real database, and \
 outlives the worktree. If something genuinely cannot start without a config \

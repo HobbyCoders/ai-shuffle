@@ -95,9 +95,9 @@ def _monitor_description() -> str:
         "result with failed: true and exit_code — a failing test run is an "
         "answer, not a tool error, and nothing is raised.\n"
         "\n"
-        "The shell survives the user pressing Stop — a server started here "
-        "keeps running until TaskStop, the task's x button, or the session "
-        "ending."
+        "Use serves for a process meant to stay up; the session does not park "
+        "on it and you are notified if it exits. User Stop ends the session's "
+        "background work, including serving tasks. TaskStop ends one task."
     )
 
 
@@ -188,8 +188,30 @@ def _clip(text: Any, limit: int) -> Any:
     else through untouched."""
     if not isinstance(text, str) or len(text) <= limit:
         return text
-    dropped = len(text) - limit
-    return f"{text[:limit]}\n… [{dropped} more characters clipped]"
+    marker = "\n… [middle characters clipped] …\n"
+    if limit <= len(marker):
+        return text[-limit:] if limit > 0 else ""
+    available = limit - len(marker)
+    head = available // 2
+    return text[:head] + marker + text[-(available - head):]
+
+
+def _detail_page(text: str, args: dict) -> Dict[str, Any]:
+    """A bounded slice of one identified record, never an unbounded log dump."""
+    offset = max(0, int(args.get("offset") or 0))
+    size = max(1, min(int(args.get("max_chars") or 4000), 12_000))
+    end = min(len(text), offset + size)
+    return {
+        "detail": text[offset:end], "offset": offset, "total_chars": len(text),
+        "next_offset": end if end < len(text) else None,
+    }
+
+
+def _log_record_id(record: Any) -> str:
+    import hashlib
+
+    value = "\x1f".join((record.timestamp, record.level, record.logger_name, record.message))
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
 
 
 def _cap_app_errors(rows: List[Dict[str, Any]]) -> tuple:
@@ -1006,7 +1028,11 @@ async def _spawn_background(
                 if existing in _SETTLED_STATUSES:
                     settled["status"] = existing
                     return
-                task_registry.complete_task(session_id, task_id, status)
+                from app.core.monitor_spawn import _summarize
+
+                task_registry.complete_task(
+                    session_id, task_id, status, summary=_summarize(task.lines),
+                )
                 settled["status"] = status
 
             _registry_safe(_finish)
@@ -1724,6 +1750,7 @@ def create_builtin_tools_server(
                         "prefixing the command with cd."
                     ),
                 },
+                "serves": {"type": "boolean", "description": "A process meant to stay up; no command deadline or park."},
                 "wait_seconds": {
                     "type": "integer",
                     "minimum": 0,
@@ -1735,75 +1762,22 @@ def create_builtin_tools_server(
         },
     )
     async def monitor(args: dict) -> dict:
-        from app.core.monitor_spawn import (
-            clamp_wait_seconds,
-            monitor_inline_receipt_text,
-            monitor_receipt_text,
-            monitor_still_running_note,
-            settle_inline_monitor_task,
-            wait_for_inline_settle,
-        )
+        from types import SimpleNamespace
+        from app.core.monitor_spawn import make_fluid_monitor_spawner
+        from fluid.tools.hardening import fence_shell_output
 
-        command = (args.get("command") or "").strip()
-        if not command:
-            return _err("command is required.")
-        wait_seconds = clamp_wait_seconds(args.get("wait_seconds"))
         try:
-            # Fall back to the SESSION's working directory, the way fluid's
-            # Bash does. Without it the shell inherited the server's cwd and
-            # every git/gh command in an audited worktree session died with
-            # "fatal: not a git repository".
-            task = await _spawn_background(
-                command, args.get("cwd") or cwd, session_id
+            outcome = await make_fluid_monitor_spawner(session_id)(
+                args, SimpleNamespace(cwd=cwd, extra={}),
             )
-            if session_id:
-                from app.core.task_registry import task_registry
-                # OWN-lane admission: without this the shell's terminal frame is
-                # dropped as not-own work and a parked parent never wakes.
-                task_registry.mark_monitor_shell_task(session_id, task.task_id)
-
-            # A command that settles inside the requested wait comes back HERE,
-            # with its exit code and output: no park, no wake, no fresh turn.
-            if wait_seconds and await wait_for_inline_settle(task, wait_seconds):
-                status, output = settle_inline_monitor_task(
-                    task, command=command, cwd=task.cwd, session_id=session_id
+            if outcome.is_error:
+                return _err(outcome.text)
+            payload = dict(outcome.ui or {})
+            if "output" in payload:
+                payload["output"] = fence_shell_output(
+                    payload["output"], "Monitor", exit_code=payload.get("exit_code"),
                 )
-                failed = status != "completed"
-                message = monitor_inline_receipt_text(
-                    task.task_id, task.exit_code, output, failed=failed
-                )
-                # A non-zero exit is the command's RESULT, not a tool failure.
-                # It used to come back through _err, and an is_error result is
-                # raised by the code-execution runner: a red TDD baseline —
-                # the expected outcome of what the model asked for — killed the
-                # whole cell and every call queued behind it (five Edits lost
-                # in one audited session; another wrapped every later Monitor
-                # in try/except, which would swallow real harness failures
-                # too). _err is now reserved for spawn/infra faults. The task
-                # ROW still settles as "error" so the chip and the wake
-                # notification stay honest about a command that failed.
-                return _ok({
-                    "message": message,
-                    "task_id": task.task_id,
-                    "exit_code": task.exit_code,
-                    "status": status,
-                    "failed": failed,
-                    "output": output,
-                })
-
-            # The receipt COMMANDS the park (same wording as the native leg's
-            # spawner and the TaskList nudge). Audited sessions read a bare
-            # "started, here's your id" as licence to sleep-poll in foreground
-            # Bash for a notification already queued for them.
-            message = monitor_receipt_text(task.task_id)
-            if wait_seconds:
-                message += monitor_still_running_note(wait_seconds)
-            return _ok({
-                "message": message,
-                "task_id": task.task_id,
-                "pid": task.process.pid if task.process else None,
-                "started_at": task.started_at,
-            })
+            return _ok({**payload, "message": outcome.text})
         except Exception as e:
             logger.exception("Monitor spawn failed")
             return _err(f"spawn failed: {e}")
@@ -2194,10 +2168,14 @@ def create_builtin_tools_server(
         "Output is capped server-side: stack traces are clipped and the entry "
         "list is cut off once the payload gets large. A `truncated` field says "
         "so — narrow with source / since_minutes / this_session_only rather "
-        "than raising limit.",
+        "than raising limit. For a clipped trace, pass its error_id with offset "
+        "and max_chars to retrieve a bounded detail page.",
         {
             "type": "object",
             "properties": {
+                "error_id": {"type": "string", "description": "Return detail for this exact error id."},
+                "offset": {"type": "integer", "description": "Detail character offset (default 0)."},
+                "max_chars": {"type": "integer", "description": "Detail page size (default 4000, max 12000)."},
                 "limit": {"type": "integer", "description": "Max errors to return (default 10, max 50)."},
                 "min_level": {
                     "type": "string",
@@ -2236,6 +2214,16 @@ def create_builtin_tools_server(
                 except (TypeError, ValueError):
                     since = None
             sess = session_id if args.get("this_session_only") else None
+
+            error_id = (args.get("error_id") or "").strip()
+            if error_id:
+                errors = await asyncio.to_thread(
+                    error_logs.get_recent_errors, limit=1, error_id=error_id,
+                    session_id=sess,
+                )
+                if not errors:
+                    return _err("Error record not found in the requested scope.")
+                return _ok({"error_id": error_id, **_detail_page(errors[0].get("detail") or "", args)})
 
             errors = await asyncio.to_thread(
                 error_logs.get_recent_errors,
@@ -2288,7 +2276,9 @@ def create_builtin_tools_server(
         "\n"
         "Filter before you read: `search` is a case-insensitive substring "
         "(a session id, a task id, a function name) and is by far the best "
-        "way to make the answer small. Output is capped server-side.",
+        "way to make the answer small. Output is capped server-side. Pass a "
+        "record_id with offset and max_chars to read a clipped line in bounded "
+        "pages; an evicted record is reported as unavailable.",
         {
             "type": "object",
             "properties": {
@@ -2300,6 +2290,9 @@ def create_builtin_tools_server(
                         f"{_APP_LOGS_MAX_LIMIT})."
                     ),
                 },
+                "record_id": {"type": "string", "description": "Read detail for this exact buffered record."},
+                "offset": {"type": "integer", "description": "Detail character offset (default 0)."},
+                "max_chars": {"type": "integer", "description": "Detail page size (default 4000, max 12000)."},
                 "level": {
                     "type": "string",
                     "description": (
@@ -2349,6 +2342,12 @@ def create_builtin_tools_server(
                     cutoff = None
 
             buffer = list(ring_handler.buffer)
+            record_id = (args.get("record_id") or "").strip()
+            if record_id:
+                record = next((r for r in buffer if _log_record_id(r) == record_id), None)
+                if record is None:
+                    return _err("Log record unavailable: it was evicted or this process restarted.")
+                return _ok({"record_id": record_id, **_detail_page(record.message, args)})
             lines, matched, used = [], 0, 0
             for record in reversed(buffer):  # newest first
                 if level and record.level != level:
@@ -2363,6 +2362,7 @@ def create_builtin_tools_server(
                 message = _clip(record.message, _APP_LOGS_MAX_LINE_CHARS)
                 used += len(message)
                 lines.append({
+                    "record_id": _log_record_id(record),
                     "timestamp": record.timestamp,
                     "level": record.level,
                     "logger": record.logger_name,

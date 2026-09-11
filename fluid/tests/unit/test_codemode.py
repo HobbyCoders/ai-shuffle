@@ -342,6 +342,34 @@ class _CtxProbeLoop:
         return "allow", None, None
 
 
+async def test_shell_data_stays_framed_across_slices_errors_and_later_cells(tmp_path):
+    import sys
+    from fluid.tools.builtins import bash
+
+    registry = ToolRegistry()
+    registry.register_builtin(bash.SPEC, bash.handler)
+    session = CodeModeSession(registry, config=KernelConfig(stdout_cap=300))
+    loop = _CtxProbeLoop(registry, ToolCtx(cwd=str(tmp_path)))
+    command = f'"{sys.executable}" -c "print(123)"'
+    try:
+        first = await session.run_python(sid="s", turn_id="t", loop=loop, input={"code":
+            f"from tools import Bash\nraw = Bash(command={command!r})\n"
+            "parsed = json.loads(raw)\nprint(parsed)"})
+        assert not first.is_error, first.text
+        assert '123' in first.text
+        assert first.text.endswith('</untrusted-tool-result>\nShell call Bash: [exit code 0]')
+        for code in ("print(raw[:3])", "print(raw * 1000)", "raise ValueError(raw)"):
+            result = await session.run_python(
+                sid="s", turn_id="t", loop=loop, input={"code": code},
+            )
+            assert result.text.startswith('<untrusted-tool-result source="code-mode output')
+            assert '</untrusted-tool-result>' in result.text
+            assert '123' in result.text
+        assert len(result.text) < 2000
+    finally:
+        await session.aclose()
+
+
 async def test_inner_host_call_uses_its_own_tool_use_id_and_restores() -> None:
     seen: dict = {}
 

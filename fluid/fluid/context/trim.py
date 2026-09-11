@@ -346,6 +346,8 @@ class ToolResultTrimmer:
             tool_use_id=block.tool_use_id,
             content=content,
             is_error=block.is_error,
+            delivered_steers=block.delivered_steers,
+            delivery_metadata_version=block.delivery_metadata_version,
         )
 
     def _render(
@@ -388,8 +390,10 @@ class ToolResultTrimmer:
                                     node.node_id, block_chars(block), block_head(block),
                                     recall=self.config.recall_tools,
                                 )
-                            ],
+                            ] + [Text(s.render()) for s in block.delivered_steers],
                             is_error=block.is_error,
+                            delivered_steers=block.delivered_steers,
+                            delivery_metadata_version=block.delivery_metadata_version,
                         )
                     )
                     changed = True

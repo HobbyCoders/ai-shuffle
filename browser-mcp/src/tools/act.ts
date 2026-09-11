@@ -46,10 +46,11 @@ export interface ActInput {
 
 const DEFAULT_SCROLL = 400;
 
-/** Server-side "exactly one of ref | coordinate" check. */
+/** Keys may use the active focus; other actions require one explicit target. */
 export function validateTarget(input: ActInput): string | null {
   const hasRef = input.ref !== undefined;
   const hasCoord = input.coordinate !== undefined;
+  if (input.kind === "key" && !hasRef && !hasCoord) return null;
   if (hasRef === hasCoord) {
     return "provide exactly one of `ref` or `coordinate`";
   }

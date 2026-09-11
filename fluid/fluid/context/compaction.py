@@ -181,6 +181,11 @@ class Promotion:
     trimmed: tuple[tuple[str, str], ...] = ()  # (node_id, tool_use_id)
     spans: tuple[tuple[str, str, str], ...] = ()  # (start, end, kind)
     reclaimed_chars: int = 0
+    # Batch estimates (all rungs in one transaction share these boundaries).
+    before_tokens: int = 0
+    after_tokens: int = 0
+    decision_reason: str = ""
+    first_changed_message: int | None = None
 
 
 def describe_promotions(
@@ -243,6 +248,41 @@ def split_spans(nodes: list[SessionNode]) -> list[list[SessionNode]]:
     return spans
 
 
+def completed_segments(span: list[SessionNode], calls_per_segment: int = 8) -> list[list[SessionNode]]:
+    """Bound long turns at completed call/result groups, not at textual markers.
+
+    Only new results with complete typed delivery metadata qualify. Legacy
+    tool text may contain a real steer whose provenance cannot be recovered.
+    """
+    segments: list[list[SessionNode]] = []
+    batch: list[SessionNode] = []
+    pending: set[str] = set()
+    calls = 0
+    safe = True
+    for node in span:
+        if is_turn_start(node):
+            continue  # Never digest the long turn's original user constraints.
+        batch.append(node)
+        for block in node.message.content:
+            if isinstance(block, ToolUseBlock):
+                if block.id in pending:
+                    safe = False
+                pending.add(block.id)
+            elif isinstance(block, ToolResultBlock):
+                if block.tool_use_id not in pending:
+                    safe = False
+                pending.discard(block.tool_use_id)
+                if block.is_error or block.delivery_metadata_version != 1:
+                    safe = False
+        if node.message.role == "assistant":
+            calls += 1
+        if not pending and calls >= calls_per_segment:
+            if safe:
+                segments.append(batch)
+            batch, calls, safe = [], 0, True
+    return segments
+
+
 def strip_system_reminders(text: str) -> str:
     """Drop <system-reminder> blocks from digested user text: they are harness
     plumbing (deferred-tool catalogs, ledger recitations) that is re-derivable
@@ -294,6 +334,7 @@ def render_span_digest(
                 b for b in message.content if isinstance(b, ToolResultBlock)
             ]
             for block in results:
+                lines.extend(s.render() for s in block.delivered_steers)
                 size = _result_size(block)
                 if block.is_error:
                     error_text = " ".join(
@@ -370,7 +411,10 @@ def render_epoch_stub(
             f"[epoch {start}..{end} — {len(spans)} older turns folded; their "
             f"content is not recoverable in this session{hint}]"
         )
-    return Message(role="user", content=[Text(text)])
+    deliveries = [Text(s.render()) for span in spans for node in span
+                  for block in node.message.content if isinstance(block, ToolResultBlock)
+                  for s in block.delivered_steers]
+    return Message(role="user", content=[Text(text), *deliveries])
 
 
 def _intake_stub(node_id: str, text: str, config: CompactionConfig) -> Text:
@@ -409,6 +453,8 @@ class Compactor:
     _digested: dict = field(default_factory=dict)
     _epoch_by_start: dict = field(default_factory=dict)
     _digest_by_start: dict = field(default_factory=dict)
+    _optional_retry: tuple[int, int] | None = None
+    last_decision: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.trimmer is None:
@@ -519,8 +565,10 @@ class Compactor:
                             and len(b.text) > self.config.tool_result_stub_chars
                             else b
                             for b in block.content
-                        ],
+                        ] + [Text(s.render()) for s in block.delivered_steers],
                         is_error=block.is_error,
+                        delivered_steers=block.delivered_steers,
+                        delivery_metadata_version=block.delivery_metadata_version,
                     )
                 )
                 changed = True
@@ -535,6 +583,72 @@ class Compactor:
     # ── Promotion (batched, sticky) ──────────────────────────────────────
 
     def apply(
+        self,
+        nodes: list[SessionNode],
+        *,
+        overhead_tokens: int = 0,
+        context_window: int | None = None,
+        output_reserve_tokens: int = 0,
+        turn_boundary: bool = True,
+    ) -> tuple[list[Message], list[Promotion]]:
+        """Commit an optional batch only when its complete view saves enough.
+
+        The 5% floor amortizes prefix rewrites; it is not a savings estimate.
+        Window protection bypasses both that floor and the retry watermark.
+        """
+        before_view = self.view(nodes)
+        before = overhead_tokens + estimate_tokens_of_messages(before_view)
+        mandatory = context_window is not None and before >= max(
+            1, context_window - self.config.headroom_tokens - output_reserve_tokens
+        )
+        minimum = max(1, int(before * 0.05))
+        eligible_chars = _chars_of(nodes, self.trimmer._eligible(nodes))
+        if self.config.enabled:
+            eligible_chars += sum(
+                block_chars(b) for span in self._eligible_spans(nodes)
+                for node in span for b in node.message.content
+            )
+        retry = self._optional_retry
+        if not mandatory and retry is not None and not turn_boundary:
+            last_chars, growth = retry
+            if eligible_chars < last_chars + growth:
+                self.last_decision = {"reason": "awaiting_reclaimable_growth",
+                                      "before_tokens": before, "after_tokens": before}
+                return before_view, []
+        restore = self._tier_snapshot()
+        rendered, promotions = self._apply_candidate(
+            nodes, overhead_tokens=overhead_tokens, context_window=context_window,
+            output_reserve_tokens=output_reserve_tokens, turn_boundary=turn_boundary,
+        )
+        if mandatory and self._estimate(nodes, overhead_tokens) >= max(
+            1, context_window - self.config.headroom_tokens - output_reserve_tokens
+        ):
+            promotions.extend(self.escalate(
+                nodes, overhead_tokens=overhead_tokens, context_window=context_window,
+                output_reserve_tokens=output_reserve_tokens,
+            ))
+            rendered = self.view(nodes)
+        after = overhead_tokens + estimate_tokens_of_messages(rendered)
+        reason = "window_protection" if mandatory else "meaningful_reclaim"
+        if before - after < (1 if mandatory else minimum):
+            restore()
+            self._optional_retry = (eligible_chars, minimum * 4)
+            self.last_decision = {"reason": "insufficient_reclaim",
+                                  "before_tokens": before, "after_tokens": before,
+                                  "candidate_after_tokens": after}
+            return before_view, []
+        self._optional_retry = None
+        first_changed = next((i for i, (a, b) in enumerate(zip(before_view, rendered))
+                              if a != b), min(len(before_view), len(rendered)))
+        self.last_decision = {"reason": reason, "before_tokens": before,
+                              "after_tokens": after,
+                              "first_changed_message": first_changed}
+        return rendered, [replace(p, before_tokens=before, after_tokens=after,
+                                  decision_reason=reason,
+                                  first_changed_message=first_changed)
+                          for p in promotions]
+
+    def _apply_candidate(
         self,
         nodes: list[SessionNode],
         *,
@@ -848,6 +962,7 @@ class Compactor:
         )
         promotions: list[Promotion] = []
         for rung in rungs:
+            before_view = self.view(nodes)
             before = self._estimate(nodes, overhead_tokens)
             restore = self._tier_snapshot()
             promo = rung()
@@ -862,7 +977,13 @@ class Compactor:
                 # have; undo it and let the next rung try.
                 restore()
                 continue
-            promotions.append(replace(promo, reclaimed_chars=reclaimed))
+            after_view = self.view(nodes)
+            first_changed = next((i for i, (a, b) in enumerate(zip(before_view, after_view))
+                                  if a != b), min(len(before_view), len(after_view)))
+            promotions.append(replace(
+                promo, reclaimed_chars=reclaimed, before_tokens=before, after_tokens=after,
+                decision_reason="provider_overflow", first_changed_message=first_changed,
+            ))
             if target is None or after <= target:
                 break
         return promotions
@@ -902,6 +1023,7 @@ class Compactor:
         epochs = dict(self._epoch_by_start)
         digests = dict(self._digest_by_start)
         trimmed = set(self.trimmer._trimmed)
+        consumed = set(self.trimmer._image_consumed)
 
         def restore() -> None:
             self._digested.clear()
@@ -912,6 +1034,8 @@ class Compactor:
             self._digest_by_start.update(digests)
             self.trimmer._trimmed.clear()
             self.trimmer._trimmed.update(trimmed)
+            self.trimmer._image_consumed.clear()
+            self.trimmer._image_consumed.update(consumed)
 
         return restore
 
@@ -931,6 +1055,10 @@ class Compactor:
         spans = split_spans(nodes)
         keep = self.config.keep_recent_turns if keep_recent is None else keep_recent
         old = spans[:-keep] if keep else spans
+        if keep and self.config.recall_tools:
+            # Protect three completed segments plus the still-open tail.
+            for span in spans[-keep:]:
+                old.extend(completed_segments(span)[:-3])
         covered: set[str] = set()  # node ids inside existing promotions
         index = {n.node_id: i for i, n in enumerate(nodes)}
         for (start, end), _kind in self._digested.items():
@@ -960,19 +1088,23 @@ class Compactor:
         for span in eligible:
             if target and current <= target:
                 break
-            span_chars = sum(
-                block_chars(b)
-                for m in self.trimmer.view(span)
-                for b in m.content
-            )
-            digest_chars = sum(
-                block_chars(b)
-                for b in render_span_digest(span, self.config).content
-            )
             key = (span[0].node_id, span[-1].node_id)
+            restore = self._tier_snapshot()
+            # A complete old turn can supersede its earlier within-turn
+            # segments. Retire those contained decisions before promoting it.
+            span_ids = {n.node_id for n in span}
+            for start, end in list(self._digested):
+                if start in span_ids and end in span_ids:
+                    self._digested.pop((start, end))
+                    self._digest_by_start.pop(start, None)
+                    self._epoch_by_start.pop(start, None)
             self._mark_span(*key, SPAN_DIGEST)
+            after = self._estimate(nodes, overhead_tokens)
+            if after >= current:
+                restore()
+                continue
             promoted.append(key)
-            current -= max(0, (span_chars - digest_chars) // 4)
+            current = after
         return promoted
 
     def _fold_epochs(
@@ -987,6 +1119,12 @@ class Compactor:
                 (index[start], start, end)
                 for (start, end), kind in self._digested.items()
                 if kind == SPAN_DIGEST and start in index and end in index
+                and not any(
+                    other_start in index and other_end in index
+                    and (other_start, other_end) != (start, end)
+                    and index[other_start] <= index[start] <= index[end] <= index[other_end]
+                    for other_start, other_end in self._digested
+                )
             ),
         )
         folded: list[tuple[str, str]] = []
@@ -996,6 +1134,8 @@ class Compactor:
             and len(resident) >= (1 if force else fold_n)
         ):
             chunk = resident[:fold_n]
+            if any(index[a[2]] + 1 != b[0] for a, b in zip(chunk, chunk[1:])):
+                break  # A live gap must never be swallowed by an epoch range.
             resident = resident[fold_n:]
             start = chunk[0][1]
             end = chunk[-1][2]

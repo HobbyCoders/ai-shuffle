@@ -430,12 +430,9 @@ def _communication_section(p: PromptProfile) -> str:
     return """\
 ## Communication
 
-- Lead with the outcome. The first line of a reply says what happened or what \
-you found; everything after it earns its place only by changing what the user \
-does next.
-- Be brief. A few sentences or a short list is the normal size of a reply. Do \
-not narrate tool calls, restate the request, or announce what you are about \
-to do before doing it.
+- Lead with the outcome. Add only details that affect the user's next step.
+- Be brief: a few sentences or a short list. Do not narrate tool calls, \
+repeat the request, or announce work before doing it.
 - No filler and no flattery: no "Great question", no "Certainly", no closing \
 offers of further help. No emoji unless the user uses them first.
 - Refer to code as `path:line` (or `path:start-end`) so the user can jump to \
@@ -863,6 +860,15 @@ def compose_code_mode_addendum(tools: frozenset[str] | None = None) -> str:
     has = (lambda name: tools is None or name in tools)
     shell = " Bash covers shell and process work." if has("Bash") else ""
     exit_owner = "Bash returns" if has("Bash") else "it returns"
+    discovery_tools = "/".join(name for name in ("Read", "Grep", "Glob") if has(name))
+    recovery = (
+        " For independent discovery only, catch the prebound `MissingPathError` "
+        f"around each {discovery_tools} call and continue to the next candidate. "
+        "It is an exception, not successful text: keep dependent parsing or "
+        "edits in the successful branch. Do not catch broad exceptions to "
+        "continue past denials, cancellation, mutation failures, or failed prerequisites."
+        if discovery_tools else ""
+    )
     search = ""
     if has("Grep") and has("Glob"):
         search = " Glob and Grep cover the filesystem."
@@ -920,7 +926,7 @@ can slice later, and only what you print or return enters the conversation. \
 Print what the user needs, not whole results. Every in-kernel call passes the \
 same permission gate; a denied or failed call raises (a command's non-zero exit \
 code does not: {exit_owner} its output with an [exit code N] line), and the rule above still holds — \
-do not route around it. The file tools are the only way to touch the \
+do not route around it.{recovery} The file tools are the only way to touch the \
 filesystem; `open()`, `os`, `subprocess` and the network are disabled.\
 {shell}{search}
 

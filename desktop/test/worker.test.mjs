@@ -87,7 +87,7 @@ test('buildWorkerEnv preserves non-DB settings and drops ALL inherited DB settin
 		assert.equal(env.WORKSPACE_DIR, 'retained-workspace');
 		assert.equal(env.SECRET_KEY, 'retained-test-key');
 		assert.equal(env.CORS_ORIGINS, 'retained');
-		assert.equal(env.SHUFFLE_DESKTOP_PROTECTED_PORT, undefined);
+		assert.equal(env.SHUFFLE_DESKTOP_PROTECTED_PORT, '8001');
 		assert.equal(env.PYTHONPATH, undefined);
 		assert.equal(env.HOME, 'h');
 		assert.equal(env.TOOLS_DIR, runtime.toolsDir);

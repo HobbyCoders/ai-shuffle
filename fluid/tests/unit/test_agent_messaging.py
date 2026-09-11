@@ -297,9 +297,8 @@ async def test_provider_failure_retains_accepted_peer_without_resuming(failure, 
         receipts = [e for e in events if isinstance(e, SteerDelivered)]
         assert len(terminals) == len(receipts) == 1
         assert "offline provider failure" in terminals[0].message
-        # Preserve the existing accounting: an exception before a complete
-        # stream returns has not yet incremented the logical call counter.
-        assert terminals[0].num_model_calls == (1 if failure == "frame" else 0)
+        # Issued calls count even if streaming raises before its final frame.
+        assert terminals[0].num_model_calls == 1
         assert terminals[0].node_id == path[-1].node_id
         assert receipts[0].steers[0]["id"] == "p1"
         assert receipts[0].seq < terminals[0].seq
@@ -1084,7 +1083,16 @@ async def test_messaging_a_finished_subagent_resumes_it_over_its_transcript(
     """The resume path end to end: the worker finishes, the parent messages it
     anyway, and it comes back on its own session — its first report still in
     context — as a fresh background task the parent parks and wakes on."""
-    provider = RoutingProvider(
+    class FinishedFirstProvider(RoutingProvider):
+        async def stream(self, request):
+            if self.marker not in _system_text(request) and self.parent_calls == 1:
+                # Exercise the finished-worker path, not a scheduler-dependent
+                # race where SendMessage still reaches a running child.
+                await asyncio.wait_for(host.wait_idle(), 5)
+            async for chunk in super().stream(request):
+                yield chunk
+
+    provider = FinishedFirstProvider(
         parent=[_task_call(), _send_call("research"), _text("thanks")],
         child=[_text("The answer is 42."), _text("Roughly 40, then.")],
     )

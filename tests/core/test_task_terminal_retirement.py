@@ -551,7 +551,7 @@ class TestCancellationsDoNotWake:
         assert reg.is_unattributed_cancellation("s1", "sh-1") is False
 
     @pytest.mark.asyncio
-    async def test_the_agents_own_taskstop_queues_no_wake(self, mock_db):
+    async def test_an_unattributed_kill_queues_a_wake(self, mock_db):
         _user_turn("sess-1")
         _seed_own_background_task("sess-1", "sh-1")
         task_registry.complete_task("sess-1", "sh-1", "killed")
@@ -560,7 +560,7 @@ class TestCancellationsDoNotWake:
         with _pool_with(adapter), patch.object(
             turn_scheduler, "_try_steer_terminal_notification",
             new=AsyncMock(return_value=False),
-        ):
+        ), patch.object(turn_scheduler, "kick"):
             await turn_scheduler.on_task_terminal("sess-1", {
                 "task_id": "sh-1",
                 "status": "cancelled",
@@ -571,10 +571,9 @@ class TestCancellationsDoNotWake:
             await _drain_kicks()
 
         assert [t for t in turns_db.get_queued_turns("sess-1")
-                if t["source"] == "unpark"] == []
-        # Retired in the engine all the same — that is the half that must not
-        # be skipped, or fluid parks on the id forever.
-        assert adapter.submitted and adapter.submitted[0][0]["task_id"] == "sh-1"
+                if t["source"] == "unpark"]
+        # Retirement happens when the queued notification is consumed.
+        assert not adapter.submitted
         assert task_registry.is_woken("sess-1", "sh-1") is True
 
     @pytest.mark.asyncio
@@ -623,9 +622,8 @@ class TestCancellationsDoNotWake:
             await _drain_kicks()
 
         steer.assert_awaited_once()
-        # Frames deliberately withheld: an undelivered steer must strand into
-        # nothing, never into the wake this path exists to avoid.
-        assert steer.await_args.args[2] == []
+        # Unexpected cancellation must be recoverable if the steer is stranded.
+        assert steer.await_args.args[2][0]["task_id"] == "sh-1"
 
 
 # ===========================================================================

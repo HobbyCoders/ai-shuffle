@@ -206,7 +206,7 @@ def project_facts(cwd: str) -> str | None:
         lines.append(line)
     if verify:
         deduped = list(dict.fromkeys(verify))[:_MAX_VERIFY_COMMANDS]
-        lines.append(f"Verify commands: {'; '.join(deduped)}")
+        lines.append(f"Verify commands (discovered, not executed): {'; '.join(deduped)}")
     return "\n".join(lines) if lines else None
 
 
@@ -274,6 +274,9 @@ def environment_note(cwd: str | os.PathLike[str] = ".") -> str:
     git = git_context(cwd_str)
     if git is not None:
         lines.append(git)
+    from fluid.context.runtime_facts import runtime_facts
+
+    lines.append(runtime_facts(cwd_str))
     body = "\n".join(lines)
     return (
         "<system-reminder>\n"

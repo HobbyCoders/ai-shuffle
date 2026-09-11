@@ -1469,6 +1469,10 @@ def _run_column_migrations(cursor):
                 title TEXT,
                 status TEXT,
                 terminal_notified BOOLEAN DEFAULT FALSE,
+                summary TEXT,
+                reason TEXT,
+                report_path TEXT,
+                report_chars BIGINT,
                 started_at TIMESTAMP WITH TIME ZONE,
                 updated_at TIMESTAMP WITH TIME ZONE,
                 PRIMARY KEY (task_id, session_id)
@@ -1479,6 +1483,15 @@ def _run_column_migrations(cursor):
         "CREATE INDEX IF NOT EXISTS idx_background_tasks_instance_status "
         "ON background_tasks(instance_id, status)"
     )
+    # Preserve bounded terminal evidence across restart, not just its status.
+    for name, sql_type in (
+        ("summary", "TEXT"), ("reason", "TEXT"),
+        ("report_path", "TEXT"), ("report_chars", "BIGINT"),
+    ):
+        if not column_exists(cursor, "background_tasks", name):
+            cursor.execute(f"ALTER TABLE background_tasks ADD COLUMN {name} {sql_type}")
+            migrations_applied.append(f"background_tasks_{name}")
+
     # Retire background_tasks.unparked. No SCHEMA_VERSION bump: editing this
     # file changes migrations_fingerprint(), which re-runs the column pass once
     # on the next boot, which is all a drop needs. The unpark latch it mirrored was

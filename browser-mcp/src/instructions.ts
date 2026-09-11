@@ -19,7 +19,7 @@ REFS AND SNAPSHOTS
 - Snapshots can be large. Use filter=interactive to see only controls plus headings/landmarks, and scope_ref=eN to re-snapshot just one subtree. Long lists of similar rows are collapsed with a "... and N more (scope_ref=eX to expand)" marker. Output is truncated at max_chars (default 40000) with a note telling you how to see more.
 
 ACTING
-- browser_act takes one kind: click, dblclick, type, fill, key, hover, scroll, select, drag. Target with exactly one of ref or coordinate.
+- browser_act takes one kind: click, dblclick, type, fill, key, hover, scroll, select, drag. Target with exactly one of ref or coordinate. For key, omit both to press on the active page/focused element without a screenshot. Explicit coordinates still require a fresh screenshot.
 - fill sets an input's value directly; type sends real keystrokes; select picks an option by value; key presses a named key with optional modifiers; scroll takes direction and amount.
 - The result is deliberately terse: { ok, url_changed, dom_mutated: none|minor|major, snapshot_stale }. A fresh interactive snapshot is attached only when the page changed a lot or navigated. If snapshot_stale is false, your existing refs still work — do not re-snapshot needlessly.
 

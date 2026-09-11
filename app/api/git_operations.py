@@ -383,22 +383,45 @@ def _main_dir_for_linked_worktree(working_dir: str) -> Optional[str]:
     return str(gitdir_path.parent.parent.parent)
 
 
-async def _release_session_cwd(session_id: Optional[str]) -> None:
-    """Drop the SDK subprocess (and its Monitor shells) so Windows will unlock CWD."""
+async def _release_session_cwd(session_id: Optional[str]) -> bool:
+    """Settle the requesting turn before releasing its engine and checkout."""
     if not session_id:
-        return
+        return True
     try:
+        from app.core import session_runtime
         from app.core.session_pool import get_session_pool
+        from app.db import turns
 
+        runtime = session_runtime.get_live_runtime(session_id)
+        executions = [
+            task for task, sid in session_runtime.active_executions().items()
+            if sid == session_id
+        ]
+        if runtime is not None:
+            # Fail closed if cleanup was called by the execution it would wait on.
+            if asyncio.current_task() in executions:
+                return False
+            await asyncio.to_thread(
+                turns.interrupt_turn, session_id, "stop", turn_id=runtime.turn_id,
+            )
+            await asyncio.wait_for(runtime.interrupt("stop", escalation_timeout=1.0), 10)
+        if executions:
+            await asyncio.wait_for(
+                asyncio.shield(asyncio.gather(*executions, return_exceptions=True)), 10,
+            )
+        logger.info("cleanup: releasing settled requesting session %s", session_id)
         await get_session_pool().remove(session_id)
     except Exception:
-        logger.debug("cleanup: session pool remove failed for %s", session_id, exc_info=True)
+        logger.warning("cleanup: session %s did not release; retaining checkout", session_id, exc_info=True)
+        return False
     try:
         from app.mcp.builtin_tools import reap_session_background_shells
 
         reap_session_background_shells(session_id)
     except Exception:
         logger.debug("cleanup: shell reap failed for %s", session_id, exc_info=True)
+        return False
+    return True
 
 
 async def _cleanup_linked_worktree(
@@ -434,7 +457,8 @@ async def _cleanup_linked_worktree(
     except Exception:
         logger.debug("cleanup: could not stamp head_sha for %s", working_dir, exc_info=True)
 
-    await _release_session_cwd(session_id)
+    if await _release_session_cwd(session_id) is False:
+        return False
 
     ok = await run_git(git_service.remove_worktree, main_dir, working_dir, True)
     if not ok:

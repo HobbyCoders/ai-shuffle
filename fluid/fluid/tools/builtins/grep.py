@@ -146,7 +146,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if not root.exists():
         note = missing_path_note(str(input.get("path") or ""), root)
         return ToolOutcome(
-            text=f"path does not exist: {root}{note}", is_error=True
+            text=f"path does not exist: {root}{note}", is_error=True,
+            error_code="missing_path",
         )
 
     rg = shutil.which("rg")

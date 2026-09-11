@@ -83,9 +83,11 @@ describe("browser_navigate loopback retry", () => {
         visited.push(url);
       },
       title: async () => "Dev server",
+      locator: () => ({ first: () => ({ isVisible: async () => true }) }),
     };
     return {
       ensurePage: async () => page,
+      currentTabId: () => "tab1",
       notifyNavigation: () => {},
       pageContent: async () => ({ title: "Dev server", textChars: 200 }),
       ssrfBlockReason: () => undefined,

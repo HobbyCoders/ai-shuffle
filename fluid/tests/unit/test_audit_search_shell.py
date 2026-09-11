@@ -255,6 +255,34 @@ async def test_no_result_sentinels_are_truthy_so_docs_teach_the_membership_test(
     assert "`(no matches)`" in glob_mod.describe()
 
 
+async def test_glob_recursive_file_semantics_match_description(tmp_path) -> None:
+    from fluid.tools.builtins import glob
+
+    (tmp_path / "src" / "nested").mkdir(parents=True)
+    (tmp_path / "src" / "a.py").write_text("a")
+    (tmp_path / "src" / "nested" / "b.py").write_text("b")
+    expected = {
+        "*.py": {"src/a.py", "src/nested/b.py"},
+        "src/*.py": {"src/a.py"},
+        "src/**/*.py": {"src/a.py", "src/nested/b.py"},
+    }
+    for pattern, paths in expected.items():
+        result = await glob.handler({"pattern": pattern}, ToolCtx(cwd=str(tmp_path)))
+        assert not result.is_error
+        assert set(result.text.splitlines()[1:]) == paths
+    assert "recursive file search, not a directory listing" in glob.describe()
+    assert "Directories themselves are not returned" in glob.describe()
+
+
+def test_ask_user_description_requires_a_blocking_decision_round_trip():
+    from fluid.tools.builtins.ask_user import describe
+
+    text = describe()
+    assert "reversible default" in text
+    assert "call AskUser and wait for the answer before dependent work" in text
+    assert "does not grant permission" in text
+
+
 async def test_glob_description_states_the_string_return_shape(tmp_path) -> None:
     """The old wording ("returns matching paths ... sorted") read as a list, so
     `len(paths)` counted characters and `paths[:300]` cut mid-path."""
@@ -319,11 +347,12 @@ async def test_bash_silent_failure_still_states_exit_code(tmp_path) -> None:
     assert out.text == "(no output) [exit code 4]"
 
 
-async def test_bash_nonempty_success_gains_no_status_noise(tmp_path) -> None:
+async def test_bash_nonempty_success_separates_output_from_status(tmp_path) -> None:
     out = await _bash(tmp_path, "print('ok')")
     assert not out.is_error
-    assert out.text.strip() == "ok"
-    assert "exit code" not in out.text
+    assert out.text.startswith('<untrusted-tool-result source="Bash stdout/stderr">')
+    assert "ok" in out.text.split('</untrusted-tool-result>')[0].splitlines()
+    assert out.text.endswith('</untrusted-tool-result>\n[exit code 0]')
 
 
 # ── session search: say what is on screen ────────────────────────────────────

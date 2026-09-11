@@ -5,6 +5,7 @@
  */
 
 import type { Session } from "../session.js";
+import { runWait } from "./wait.js";
 import { contentWarning, jsonResult, type McpToolResult } from "./result.js";
 import {
   RETRYABLE_NET_ERRORS,
@@ -110,12 +111,21 @@ export async function runNavigate(
     }
   }
 
+  // DOMContentLoaded can precede hydration. A landmark can have a ref before
+  // controls exist, so ref_count alone is not a readiness check. Bound this
+  // wait, never wait for network idle, and keep human takeover interruptible.
+  await runWait(session, {
+    condition: "element",
+    selector: 'button:visible, a[href]:visible, input:visible, select:visible, textarea:visible, [role="button"]:visible, [role="link"]:visible, [role="textbox"]:visible, [tabindex]:visible, [contenteditable="true"]:visible',
+    timeout_ms: 1500,
+  });
+  session.agentAdmission?.();
   const snap = await session.snapshot({ filter: "interactive" });
   // Emptiness is judged from the page, never from this interactive-filtered
   // snapshot: a login form, a canvas fixture and a prose page all have few or
   // no refs while being perfectly rendered.
-  // A snapshot with refs is proof the page rendered, so only an empty one is
-  // worth a round-trip to ask the page what it painted.
+  // Only zero-ref snapshots need the extra content diagnostic. Refs are not
+  // proof that hydration finished or that the requested app view succeeded.
   const content = snap.refs.length === 0 ? await session.pageContent() : undefined;
   // The title comes from Playwright, which does not depend on a page eval
   // succeeding; only the body measurement does.

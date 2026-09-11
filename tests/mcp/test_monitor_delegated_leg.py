@@ -88,7 +88,8 @@ def test_the_description_says_park_not_poll(mock_db):
 def test_the_description_still_explains_the_surviving_shell(mock_db):
     description = _builtin_tools()["Monitor"].description
 
-    assert "survives the user pressing Stop" in description
+    assert "User Stop ends" in description
+    assert "including serving tasks" in description
 
 
 def test_the_park_doctrine_is_fluids_own_wording(mock_db):
@@ -191,4 +192,5 @@ def test_no_wait_means_the_old_behaviour_exactly(mock_db, fake_shell):
 
     body = _body(asyncio.run(monitor.handler({"command": "npm run build"})))
 
-    assert body["message"] == monitor_receipt_text(fake_shell.task_id)
+    assert body["message"].startswith(monitor_receipt_text(fake_shell.task_id))
+    assert "time budget" in body["message"]

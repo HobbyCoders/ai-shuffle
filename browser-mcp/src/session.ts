@@ -530,6 +530,12 @@ export class Session {
         () => ({
           title: document.title || "",
           textChars: ((document.body && document.body.innerText) || "").replace(/\s+/g, "").length,
+          visibleMedia: Array.from(document.querySelectorAll("canvas, img, svg, video, iframe"))
+            .some(element => {
+              const box = element.getBoundingClientRect();
+              const style = getComputedStyle(element);
+              return box.width > 0 && box.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+            }),
         }),
         "",
         PAGE_CONTENT_TIMEOUT_MS,

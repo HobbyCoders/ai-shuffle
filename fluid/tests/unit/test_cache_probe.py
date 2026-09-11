@@ -191,7 +191,7 @@ def test_checkpoint_positions_are_absolute_powers_of_two() -> None:
 def _messages(n: int, *, mutate_at: int | None = None) -> list[Message]:
     out = []
     for i in range(n):
-        text = f"message {i}" + ("!" if i == mutate_at else "")
+        text = f"message {i} " + "payload " * 3_000 + ("!" if i == mutate_at else "")
         out.append(Message(role="user" if i % 2 == 0 else "assistant",
                            content=[Text(text)]))
     return out
@@ -205,10 +205,12 @@ def test_fingerprint_shape_is_small_and_ordered() -> None:
     )
     keys = list(fp)
     assert keys[:2] == ["system", "tools"]
-    assert keys[2:] == ["m1", "m2", "m4", "m8", "m16", "m20"]
-    assert all(len(v) == 16 for v in fp.values())
-    # A handful of short hashes: cheap enough to persist on every Usage event.
-    assert len(fp) <= 16
+    assert [k for k in keys if k.startswith("m")] == ["m1", "m2", "m4", "m8", "m16", "m20"]
+    assert all(len(v) == 16 for k, v in fp.items() if not k.startswith("_"))
+    assert fp["_version"] == "normalized-v2"
+    assert int(fp["_tokens_m20"]) > 0
+    # Hashes plus token estimates remain logarithmic in message count.
+    assert len(fp) <= 20
 
 
 def test_fingerprint_prefix_is_stable_as_history_grows() -> None:
@@ -256,6 +258,84 @@ def test_fingerprint_sees_tool_result_text() -> None:
     a = fingerprint_prefix(system=None, tools=[], messages=msgs("original"))
     b = fingerprint_prefix(system=None, tools=[], messages=msgs("trimmed"))
     assert a["m1"] != b["m1"]
+
+
+def test_partial_miss_uses_shared_prefix_not_the_new_suffix() -> None:
+    previous = fingerprint_prefix(system="s", tools=[], messages=[Message("user", [Text("p" * 680_000)])])
+    current = fingerprint_prefix(system="s", tools=[], messages=[
+        Message("user", [Text("p" * 680_000)]), Message("assistant", [Text("new")]),
+    ], extra_checkpoints=(1,))
+    diagnosis = diagnose_cache_miss(previous=previous, current=current,
+                                    input_tokens=150_000, cache_read_tokens=20_000)
+    assert diagnosis is not None
+    assert diagnosis["reuse_shortfall_tokens_estimated"] > 100_000
+    assert diagnosis["shared_prefix_tokens_estimated"] >= 170_000
+    assert is_unexplained_miss(diagnosis)
+
+    prefix = Message("user", [Text("p" * 80_000)])
+    previous = fingerprint_prefix(system="s", tools=[], messages=[prefix])
+    current = fingerprint_prefix(system="s", tools=[], messages=[prefix, Message("user", [Text("new" * 200_000)])])
+    assert diagnose_cache_miss(previous=previous, current=current,
+                               input_tokens=150_000, cache_read_tokens=20_000) is None
+
+
+def test_complete_fingerprints_notice_tool_names_raw_reasoning_and_image_tail() -> None:
+    from fluid.messages import Image, Reasoning
+    from fluid.providers.openai_responses.serialize import build_request_body
+
+    variants = [
+        (ToolUseBlock("c", "Read", {}), ToolUseBlock("c", "Write", {})),
+        (Reasoning(origin="openai_responses", raw={"type": "reasoning", "id": "r", "encrypted_content": "one"}),
+         Reasoning(origin="openai_responses", raw={"type": "reasoning", "id": "r", "encrypted_content": "two"})),
+        (Image("image/png", "a" * 64 + "b"), Image("image/png", "a" * 64 + "c")),
+    ]
+    loop = NativeLoop(provider=_MissProvider(0), store=MemoryStore(), model="m")
+    for before, after in variants:
+        role = "user" if isinstance(before, Image) else "assistant"
+        first = ProviderRequest(model="m", messages=[Message(role, [before])])
+        second = ProviderRequest(model="m", messages=[Message(role, [after])])
+        assert build_request_body(first) != build_request_body(second)
+        a = fingerprint_prefix(system=None, tools=[], messages=first.messages)
+        b = fingerprint_prefix(system=None, tools=[], messages=second.messages)
+        assert a["m1"] != b["m1"]
+        loop._fingerprint_request(first)
+        a = loop._prefix_fingerprint
+        loop._fingerprint_request(second)
+        b = loop._prefix_fingerprint
+        assert a["_version"] == "responses-wire-v2"
+        assert a["_wire_hash"] != b["_wire_hash"]
+        assert a["m1"] != b["m1"]
+
+
+def test_version_and_request_settings_changes_are_not_unexplained_misses() -> None:
+    messages = _messages(4)
+    first = fingerprint_prefix(system="s", tools=[], messages=messages,
+                               request_identity={"provider": "p", "model": "m", "effort": "low"})
+    second = fingerprint_prefix(system="s", tools=[], messages=messages,
+                                request_identity={"provider": "p", "model": "m", "effort": "high"})
+    diagnosis = diagnose_cache_miss(previous=first, current=second,
+                                    input_tokens=150_000, cache_read_tokens=20_000)
+    assert diagnosis["reason"] == "request_settings_changed"
+    assert not is_unexplained_miss(diagnosis)
+    diagnosis = diagnose_cache_miss(previous=_fp(), current=second,
+                                    input_tokens=150_000, cache_read_tokens=20_000)
+    assert diagnosis["reason"] == "fingerprint_version_changed"
+    assert not is_unexplained_miss(diagnosis)
+
+
+async def test_partial_miss_alert_is_once_per_turn_even_after_healthy_call() -> None:
+    class IntermittentProvider(_MissProvider):
+        async def stream(self, request):
+            self.cache_read = 90_000 if self.calls == 3 else 20_000
+            async for chunk in super().stream(request):
+                yield chunk
+
+    loop = await _run_misses(7, provider=IntermittentProvider(7))
+    events = loop.bus.log(loop.session_id)
+    assert len([e for e in events if isinstance(e, CacheMissAlert)]) == 1
+    usages = [e for e in events if isinstance(e, Usage)]
+    assert usages[-1].raw["cache_miss"]["reuse_shortfall_tokens_estimated"] > 0
+    assert usages[-1].raw["request_interval_seconds"] >= 0
 
 
 # ─── Miss diagnostic ─────────────────────────────────────────────────────────
@@ -415,7 +495,7 @@ async def test_usage_events_carry_prefix_hashes_and_a_miss_diagnostic() -> None:
         ]
     )
     loop = NativeLoop(
-        provider=provider, store=MemoryStore(), model="m", system="sys"
+        provider=provider, store=MemoryStore(), model="m", system="sys " * 50_000
     )
     for i in range(2):
         await loop.submit(UserTurn(content=f"turn {i}"))
@@ -426,7 +506,8 @@ async def test_usage_events_carry_prefix_hashes_and_a_miss_diagnostic() -> None:
     for event in usages:
         hashes = event.raw["prefix_hashes"]
         assert list(hashes)[:2] == ["system", "tools"]
-        assert all(len(v) == 16 for v in hashes.values())
+        assert all(len(v) == 16 for k, v in hashes.items() if not k.startswith("_"))
+        assert hashes["_version"] == "normalized-v2"
 
     assert usages[0].raw["cache_miss"]["reason"] == "no_previous_request"
     second = usages[1].raw["cache_miss"]
@@ -440,7 +521,7 @@ async def test_no_miss_diagnostic_when_the_cache_is_working() -> None:
         [{"input_tokens": 200, "cache_read_input_tokens": 90_000}]
     )
     loop = NativeLoop(
-        provider=provider, store=MemoryStore(), model="m", system="sys"
+        provider=provider, store=MemoryStore(), model="m", system="sys " * 50_000
     )
     await loop.submit(UserTurn(content="hello"))
     await asyncio.wait_for(loop.wait_turn(), timeout=5)
@@ -630,7 +711,7 @@ async def test_fingerprint_is_recovered_from_the_persisted_usage_events() -> Non
         provider=_ScriptedProvider(
             [{"input_tokens": 50_000, "cache_read_input_tokens": 0}]
         ),
-        store=store, model="m", system="sys",
+        store=store, model="m", system="sys " * 50_000,
     )
     await first.submit(UserTurn(content="turn one"))
     await asyncio.wait_for(first.wait_turn(), timeout=5)
@@ -661,7 +742,7 @@ async def test_the_very_first_call_of_a_session_still_says_so() -> None:
         provider=_ScriptedProvider(
             [{"input_tokens": 50_000, "cache_read_input_tokens": 0}]
         ),
-        store=MemoryStore(), model="m", system="sys",
+        store=MemoryStore(), model="m", system="sys " * 50_000,
     )
     await loop.submit(UserTurn(content="hello"))
     await asyncio.wait_for(loop.wait_turn(), timeout=5)
@@ -770,7 +851,7 @@ def _ping_registry() -> ToolRegistry:
 async def _run_misses(tool_calls: int, **kwargs) -> NativeLoop:
     loop = NativeLoop(
         provider=kwargs.pop("provider", _MissProvider(tool_calls)),
-        store=MemoryStore(), model="m", system="sys",
+        store=MemoryStore(), model="m", system="sys " * 50_000,
         registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
         **kwargs,
     )
@@ -854,8 +935,9 @@ async def test_an_unexplained_miss_logs_the_usage_block_and_the_cache_key(
     which affinity key the request carried."""
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="fluid.engine.native"):
+    with caplog.at_level(logging.DEBUG, logger="fluid.engine.native"):
         loop = await _run_misses(1)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING and "cache miss" in r.getMessage()]
 
     lines = [r.getMessage() for r in caplog.records if "cache miss" in r.getMessage()]
     assert lines, "an unexplained miss must be logged"
@@ -911,7 +993,7 @@ async def test_the_streak_does_not_carry_across_turns() -> None:
     only counted inside one turn."""
     provider = _MissProvider(0)
     loop = NativeLoop(
-        provider=provider, store=MemoryStore(), model="m", system="sys",
+        provider=provider, store=MemoryStore(), model="m", system="sys " * 50_000,
         registry=_ping_registry(), permissions=PermissionEngine("never_ask"),
     )
     for i in range(4):

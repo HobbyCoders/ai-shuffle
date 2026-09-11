@@ -878,3 +878,43 @@ class TestConcurrentGuardRace:
         assert codes == [200, 409]
         # Exactly one op registered for the project.
         assert sum(1 for o in gitops._operations.values() if o.project_id == "pracey") == 1
+
+async def test_release_requesting_session_waits_for_execution_finally(monkeypatch):
+    import asyncio
+    from app.core import session_runtime, session_pool
+    from app.mcp import builtin_tools
+    from app.db import turns
+
+    stopped = asyncio.Event()
+    events = []
+    async def execution():
+        await stopped.wait()
+        events.append("terminal persisted and lease released")
+    task = asyncio.create_task(execution())
+    async def interrupt(*args, **kwargs):
+        events.append("interrupt")
+        stopped.set()
+    async def remove(sid):
+        assert task.done()
+        events.append("remove")
+    runtime = SimpleNamespace(turn_id="requesting-turn", interrupt=interrupt)
+    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: runtime)
+    monkeypatch.setattr(session_runtime, "active_executions", lambda: {task: "requesting"})
+    monkeypatch.setattr(turns, "interrupt_turn", lambda *a, **kw: events.append("durable interrupt"))
+    monkeypatch.setattr(session_pool, "get_session_pool", lambda: SimpleNamespace(remove=remove))
+    monkeypatch.setattr(builtin_tools, "reap_session_background_shells", lambda sid: events.append("reap"))
+    assert await gitops._release_session_cwd("requesting") is True
+    assert events == ["durable interrupt", "interrupt", "terminal persisted and lease released", "remove", "reap"]
+
+
+async def test_cleanup_retains_checkout_when_requesting_interrupt_fails(monkeypatch):
+    from app.core import session_runtime, session_pool
+    from app.db import turns
+    runtime = SimpleNamespace(turn_id="t", interrupt=AsyncMock(side_effect=TimeoutError()))
+    remove = AsyncMock()
+    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: runtime)
+    monkeypatch.setattr(session_runtime, "active_executions", lambda: {})
+    monkeypatch.setattr(turns, "interrupt_turn", lambda *a, **kw: None)
+    monkeypatch.setattr(session_pool, "get_session_pool", lambda: SimpleNamespace(remove=remove))
+    assert await gitops._release_session_cwd("requesting") is False
+    remove.assert_not_awaited()

@@ -264,7 +264,8 @@ def started_text(task_id: str) -> str:
         "work to do first: the completion wakes the session when the command "
         "exits. Do not sleep or poll waiting for it — but once its completion "
         "notification arrives, reading the full output is expected, not "
-        "polling."
+        "polling. Inspect failed or truncated output and finish outstanding "
+        "requested work before the final report."
     )
 
 
@@ -351,7 +352,8 @@ _MATCH_ALL_GLOB = re.compile(r"\*(?:\"\"|'')\*")
 # Command shapes that are servers, not jobs — the case `serves` exists for.
 _SERVICE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|watch)\b"),
-    re.compile(r"\b(?:vite|nodemon|http-server|live-server|serve)\b"),
+    re.compile(r"\b(?:nodemon|http-server|live-server|serve)\b"),
+    re.compile(r"\bvite\b(?![^;|&\n]*(?:\b(?:build|optimize)\b|--(?:help|version)\b))"),
     re.compile(r"\bnext\s+(?:dev|start)\b"),
     re.compile(r"\b(?:uvicorn|gunicorn|hypercorn|daphne|waitress-serve)\b"),
     re.compile(r"\bflask\s+run\b|\bpython\s+-m\s+http\.server\b|\bmanage\.py\s+runserver\b"),

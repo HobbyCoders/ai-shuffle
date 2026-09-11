@@ -164,6 +164,10 @@ def nonterminal_agent_task_ids(session_id: str) -> List[str]:
         kind = row.get("kind") if isinstance(row, dict) else row[5]
         task_id = row.get("task_id") if isinstance(row, dict) else row[0]
         if task_id and (kind or "") == "agent":
+            # The coalesced mirror can lag a local completion. Do not park on
+            # an older running snapshot when the producer already settled it.
+            if _task_status(session_id, str(task_id)) in _FLUID_TERMINAL_KIND:
+                continue
             out.append(str(task_id))
     return out
 
@@ -203,15 +207,24 @@ def terminal_frames_for(
         status = _task_status(session_id, task_id) or durable.get(task_id) or ""
         if not status or status == RUNNING_STATUS:
             continue
-        frames.append({
+        from app.core.task_registry import task_registry
+
+        record = task_registry.get_task(session_id, task_id, durable=True) or {}
+        frame = {
             "task_id": task_id,
             "status": status,
-            "summary": (
-                "The app recorded this task as finished; its completion never "
-                "reached the engine, so the session was still listed as parked "
-                "on it."
+            "summary": record.get("summary") or (
+                "Reconciliation: the app recorded this task as terminal "
+                f"({status}); no saved output summary is available."
             ),
-        })
+        }
+        for key, wire_key in (
+            ("reason", "reason"), ("report_path", "reportPath"),
+            ("report_chars", "reportChars"), ("kind", "kind"),
+        ):
+            if record.get(wire_key) is not None:
+                frame[key] = record[wire_key]
+        frames.append(frame)
     return frames
 
 

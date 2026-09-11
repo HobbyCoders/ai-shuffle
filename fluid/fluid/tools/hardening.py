@@ -53,16 +53,31 @@ _FENCE_NOTE = (
 _TAG_RE = re.compile(r"untrusted[-_]tool[-_]result", re.IGNORECASE)
 
 
-def fence_untrusted(text: str, source: str) -> str:
+def fence_untrusted(text: str, source: str, *, force: bool = False) -> str:
     """Wrap ``text`` from ``source`` in the untrusted-data fence."""
-    if len(text) < FENCE_MIN_CHARS:
+    if not force and len(text) < FENCE_MIN_CHARS:
         return text
+    from html import escape
+
+    source = escape(source, quote=True)
     defanged = _TAG_RE.sub("untrusted•tool•result", text)
     return (
         f'<{UNTRUSTED_TAG} source="{source}">\n'
         f"{_FENCE_NOTE}\n\n{defanged}\n"
         f"</{UNTRUSTED_TAG}>"
     )
+
+
+def fence_shell_output(text: str, source: str, *, exit_code: int | None = None) -> str:
+    """Frame shell data after truncation; only the caller supplies exit status.
+
+    Never infer status or trusted instructions from the command's own text.
+    Short output and failures need the same protection as a long success.
+    """
+    framed = fence_untrusted(defang_harness_markers(text), source, force=True)
+    if exit_code is not None:
+        framed += f"\n[exit code {exit_code}]"
+    return framed
 
 
 # ─── harness-marker defanging ────────────────────────────────────────────────
@@ -77,6 +92,7 @@ def fence_untrusted(text: str, source: str) -> str:
 _SYSTEM_REMINDER_RE = re.compile(r"<(\s*/?\s*)system-reminder(\s*)>", re.IGNORECASE)
 _STEER_MARKER_RE = re.compile(r"\[(/?)user interjection", re.IGNORECASE)
 _PEER_MARKER_RE = re.compile(r"\[(/?)agent message", re.IGNORECASE)
+_HARNESS_MARKER_RE = re.compile(r"\[(/?)harness notice", re.IGNORECASE)
 
 
 def defang_harness_markers(text: str) -> str:
@@ -90,6 +106,8 @@ def defang_harness_markers(text: str) -> str:
         text = _STEER_MARKER_RE.sub(r"[\1user•interjection", text)
     if "agent message" in lowered:
         text = _PEER_MARKER_RE.sub(r"[\1agent•message", text)
+    if "harness notice" in lowered:
+        text = _HARNESS_MARKER_RE.sub(r"[\1harness•notice", text)
     return text
 
 

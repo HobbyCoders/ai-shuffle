@@ -49,6 +49,7 @@ from fluid.codemode.verify import verify_sources, verify_store
 from fluid.events.model import ToolResult, ToolUse
 from fluid.permissions.engine import PermissionEngine
 from fluid.store.base import new_id
+from fluid.tools.hardening import fence_shell_output
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
 CODE_MODE_SOURCE = "codemode"
@@ -66,7 +67,10 @@ _RUN_PYTHON_DESC = (
     "kernel; from inside a cell, `dir(tools)` lists what is mounted. Then "
     "`from tools import Read, Edit` and call them as plain synchronous "
     "functions (`import tools; tools.Read(...)` also works) — each call is "
-    "permission-gated on the host. Saved skills (reusable helpers that persist "
+    "permission-gated on the host. For independent discovery, catch the "
+    "prebound MissingPathError around each missing Read/Grep/Glob candidate; "
+    "keep dependent parsing and edits in the successful branch. Never "
+    "continue past permission denials, cancellation or failed mutations. Saved skills (reusable helpers that persist "
     "across sessions) import via `from skills import <name>`; persist a new one "
     "with the save_skill tool when you notice a reusable pattern. The kernel "
     "refuses sockets, direct file and directory access, subprocesses and "
@@ -504,6 +508,7 @@ class CodeModeSession:
                         extra.pop("tool_use_id", None)
             collected_images.extend(reply.images)
             record["ok"] = reply.result is not None
+            record["shell_exit_code"] = reply.shell_exit_code
             if reply.result is not None:
                 out, is_error = reply.result, False
             elif reply.denied:
@@ -538,12 +543,18 @@ class CodeModeSession:
         if result.value_repr:
             parts.append(f"=> {result.value_repr}")
         text = "\n".join(parts) if parts else "(no output)"
-        # Kernel-lifecycle news leads: it reframes everything under it, and a
-        # NameError read without it looks like the model's own mistake.
+        if result.error:
+            text = (text + "\n" if parts else "") + f"Error: {result.error}"
+        # Every cell can print sliced or persisted shell data, even without a
+        # host call this time. Frame at the model boundary, not in Python strings.
+        text = fence_shell_output(text, "code-mode output (may include shell stdout/stderr)")
+        # Lifecycle/status are host-authored, separate from the cell's data.
+        for call in called_tools:
+            if call.get("shell_exit_code") is not None:
+                text += f"\nShell call {call['name']}: [exit code {call['shell_exit_code']}]"
         if result.notes:
             text = f"{result.notes}\n{text}"
         if result.error:
-            text = (text + "\n" if parts else "") + f"Error: {result.error}"
             # A cell aborts at the first ToolError, so the mutations that
             # already applied are invisible in the traceback. Name them.
             manifest = _committed_manifest(called_tools)

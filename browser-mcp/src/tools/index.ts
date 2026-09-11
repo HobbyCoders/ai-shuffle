@@ -55,7 +55,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "browser_navigate",
     description:
-      "Open a URL (bare domains get https://) or go back/forward. Acquires the page on first use and returns the landing page's interactive snapshot. " +
+      "Open a URL (bare domains get https://) or go back/forward. Acquires the page, waits up to 1.5s for visible controls, and returns a snapshot; this is not proof of app readiness. " +
       "The browser holds NO session cookies for the user's own apps: a landing on another origin (reported as redirected_to_origin) is a sign-in demand it cannot satisfy itself.",
     inputSchema: navigateSchema,
     run: (session, input) => runNavigate(session, input as { url: string }),
@@ -74,7 +74,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "browser_act",
     description:
-      "Perform one action (click/type/fill/key/hover/scroll/select/drag/dblclick) on a ref or coordinate. Returns a terse change summary.",
+      "Perform one action (click/type/fill/key/hover/scroll/select/drag/dblclick) on a ref or coordinate. Key may omit a target to use active focus. Returns a terse change summary.",
     inputSchema: actSchema,
     run: (session, input) => runAct(session, input as unknown as ActInput),
   },

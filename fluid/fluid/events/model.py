@@ -300,6 +300,8 @@ class ContextCompaction(Event):
     # including on every event persisted before these fields existed.
     before_tokens: int = 0
     after_tokens: int = 0
+    decision_reason: str = ""
+    first_changed_message: int | None = None
 
 
 # ─── Accounting / signals ────────────────────────────────────────────────────

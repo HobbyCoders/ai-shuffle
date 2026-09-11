@@ -436,7 +436,16 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
                 request.client.host if request.client else "-",
                 request.method, path, status_code, duration_ms,
             )
-        elif duration_ms >= self.SLOW_REQUEST_THRESHOLD_MS:
+        elif (
+            duration_ms >= self.SLOW_REQUEST_THRESHOLD_MS
+            and not (
+                request.method == "POST"
+                and path == "/api/v1/browser/panel/control/poll"
+                and 200 <= status_code < 300
+            )
+        ):
+            # A successful panel poll deliberately waits for commands (20s).
+            # Failures above and slow requests on other routes stay visible.
             logger.warning(
                 'SLOW %s - "%s %s" %d (%.0fms)',
                 request.client.host if request.client else "-",
@@ -541,9 +550,12 @@ app.include_router(voice_context.router)
 app.include_router(events_api.router)
 app.include_router(artifacts_api.router)
 
-# Serve static files (Svelte build) if they exist
+# Preview is opt-in and authenticates branch-specific assets on this listener.
+from app.preview import install_preview
+
+# Serve packaged assets only when the branch preview has not claimed the UI.
 static_dir = Path(__file__).parent / "static"
-if static_dir.exists():
+if not install_preview(app) and static_dir.exists():
     # Mount static assets (js, css, etc.) at /_app
     app_assets = static_dir / "_app"
     if app_assets.exists():

@@ -324,17 +324,20 @@ async def _surface_terminal_notification(session_id: str, task: Dict[str, Any]) 
             session_id, task_id, exc_info=True,
         )
 
-    # NOTE (V2 A7, B5): the legacy step 3 — the ``HeadlessChatHandler`` unpark
-    # handoff via ``_deliver_unpark_impl`` — has been REMOVED. The v2 scheduler
-    # (idle_reader -> turn_scheduler.on_task_terminal) is now the sole unpark
-    # producer for background-task completions/errors/kills, so firing a second
-    # unpark from here would double-wake the parent. Steps 1 (live chip) and 2
-    # (durable row) stay: they are the guaranteed terminal SURFACE for a
-    # force-eviction/ghost-reap/pool-teardown kill that never flows a frame
-    # through the reader. The remaining accepted regression is that an explicit
-    # user-stop of a LIVE background sub-agent (which emits no CLI frame) no
-    # longer auto-wakes the parent with a <task-notification>; the durable chip
-    # still records it. Rollback is a git revert, not a flag flip.
+    # A reap may have no reader left to report its terminal. Use the same
+    # idempotent scheduler seam as the reader; explicit Stop stays suppressed.
+    from app.core import turn_scheduler
+
+    await turn_scheduler.on_task_terminal(session_id, {
+        "task_id": task_id,
+        "status": status,
+        "summary": summary,
+        "reason": reason,
+        "kind": task.get("kind"),
+        "tool_use_id": tool_use_id,
+        "report_path": task.get("reportPath"),
+        "report_chars": task.get("reportChars"),
+    })
 
 
 class WebSocketRateLimiter:

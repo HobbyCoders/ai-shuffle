@@ -624,7 +624,7 @@ def _reply_frame(reply: HostReply) -> dict:
     if reply.denied:
         return {"kind": "host_reply", "denied": True, "message": reply.message}
     if reply.error is not None:
-        return {"kind": "host_reply", "error": reply.error}
+        return {"kind": "host_reply", "error": reply.error, "error_code": reply.error_code}
     frame = {"kind": "host_reply", "result": reply.result}
     if reply.content_id:
         # Only the success path carries it, and only when the tool claimed one —

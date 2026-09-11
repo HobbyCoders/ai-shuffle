@@ -964,6 +964,10 @@ def create_postgres_schema(cursor) -> None:
             title TEXT,
             status TEXT,
             terminal_notified BOOLEAN DEFAULT FALSE,
+            summary TEXT,
+            reason TEXT,
+            report_path TEXT,
+            report_chars BIGINT,
             started_at TIMESTAMP WITH TIME ZONE,
             updated_at TIMESTAMP WITH TIME ZONE,
             PRIMARY KEY (task_id, session_id)

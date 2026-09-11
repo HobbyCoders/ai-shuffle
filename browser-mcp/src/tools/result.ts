@@ -75,14 +75,16 @@ export const BLANK_PAGE_WARNING =
   "this as success";
 
 export const NO_REFS_NOTE =
-  "no interactive elements found (ref_count 0) — the page has content but nothing " +
-  "the snapshot can act on (a canvas, an image, plain prose). Use browser_read_text " +
-  "or browser_screenshot to read it, or browser_act with coordinates.";
+  "no actionable refs yet (ref_count 0) — this snapshot alone does not establish " +
+  "whether the app is ready or failed. It may still be loading, or show prose, " +
+  "an image or canvas. Use browser_wait for a known readiness condition, " +
+  "browser_read_text or browser_screenshot to inspect it; coordinates require a fresh screenshot.";
 
 /** What the page says about itself; `textChars` < 0 means we could not measure. */
 export interface PageContent {
   title: string;
   textChars: number;
+  visibleMedia?: boolean;
 }
 
 /**
@@ -91,8 +93,8 @@ export interface PageContent {
  * The old heuristic measured the interactive-filtered snapshot, so any page
  * whose content is not clickable — a canvas fixture, a rendered login form, a
  * prose page — was announced as "rendered no content" while it was plainly
- * fine. Four sessions in one day chased that warning. A page with a title or a
- * body is not blank; a ref_count of 0 is a routing hint, not an alarm.
+ * fine. A title alone also does not prove the app mounted. Zero refs are a
+ * routing hint; describe observed content without diagnosing app failure.
  */
 export function contentWarning(
   page: PageContent,
@@ -100,8 +102,12 @@ export function contentWarning(
 ): string | undefined {
   const measured = page.textChars >= 0;
   const blank = page.title.trim() === "" && page.textChars < MEANINGFUL_CONTENT_CHARS;
+  if (refCount === 0) {
+    return NO_REFS_NOTE + (measured && page.textChars === 0 && page.visibleMedia === false
+      ? " No body text or visible media was observed; check browser_console and browser_network if content was expected."
+      : "");
+  }
   if (measured && blank) return BLANK_PAGE_WARNING;
-  if (refCount === 0) return NO_REFS_NOTE;
   return undefined;
 }
 

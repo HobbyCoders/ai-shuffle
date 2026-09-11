@@ -245,6 +245,10 @@ class ToolOutcome:
     # notices; code mode returns the text instead of raising, so a cell that
     # probes exit codes (git merge-base, grep -q, test) keeps running.
     soft_error: bool = False
+    # Only missing read-only discovery targets are explicitly recoverable.
+    error_code: str | None = None
+    # Raw shell stdout/stderr and the actual process exit status.
+    shell_result: tuple[str, int] | None = None
     input_required: InputRequired | None = None
     images: tuple[ToolImage, ...] = ()
     background_task: BackgroundTaskReceipt | None = None
@@ -478,15 +482,20 @@ class ToolRegistry:
         *,
         input_responses: Any = None,
         request_state: str | None = None,
+        raw_shell_output: bool = False,
     ) -> ToolOutcome:
         """``input_responses``/``request_state`` are the MRTR retry leg: echo a
         prior ``input_required`` outcome's ``request_state`` together with the
         collected answers and the MCP server resumes the paused call. Only
-        meaningful for MCP-sourced tools; ignored for in-proc handlers."""
+        meaningful for MCP-sourced tools; ignored for in-proc handlers.
+        ``raw_shell_output`` is only for code mode, which frames its complete
+        model-facing output after Python has parsed/sliced the raw strings.
+        """
         from fluid.tools.hardening import (
             coerce_args,
             elision_notice,
             fence_untrusted,
+            fence_shell_output,
             scrub_error_text,
         )
 
@@ -526,8 +535,21 @@ class ToolRegistry:
                     call_input = {**input, "__input_responses__": dict(input_responses)}
                 outcome = _normalize(await entry.handler(call_input, ctx))
         except Exception as exc:  # keep tool errors in-context, never crash the loop
-            return ToolOutcome(
-                text=scrub_error_text(f"{type(exc).__name__}: {exc}"), is_error=True
+            text = scrub_error_text(f"{type(exc).__name__}: {exc}")
+            if name in {"Bash", "Monitor"} and not raw_shell_output:
+                text = fence_shell_output(text, f"{name} execution error")
+            return ToolOutcome(text=text, is_error=True)
+        # Code mode keeps raw shell text for parsing; its enclosing cell is
+        # fenced after truncation, including output from later persistent cells.
+        if (
+            outcome.shell_result is not None and outcome.shell_result[0].strip()
+            and not raw_shell_output
+        ):
+            output, code = outcome.shell_result
+            outcome = replace(
+                outcome,
+                text=fence_shell_output(output, f"{name} stdout/stderr", exit_code=code),
+                content_id=None, window_of=None,
             )
         # External-source hardening: MCP results are authored by whatever the
         # server fetched, so their text is fenced as data (with any embedded

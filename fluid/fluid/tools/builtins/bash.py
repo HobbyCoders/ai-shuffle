@@ -304,8 +304,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             text=(
                 f"command timed out after {timeout:g}s and was killed. Raise "
                 "the timeout parameter for a genuinely long command, narrow "
-                "the command's scope, or run it detached (append ' &' and "
-                "poll its log) if it is meant to keep running."
+                "the command's scope, or use Monitor for a long-running job "
+                "(serves=true only for a service meant to stay up). Do not "
+                "append & or poll for completion. Inspect any partial effects "
+                "before retrying a command that may have changed state."
             ),
             is_error=True,
         )
@@ -336,11 +338,13 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             text=f"(no output) [exit code {code}]{note}",
             is_error=bool(code),
             soft_error=bool(code),
+            shell_result=(text, code),
         )
     if code:
         return ToolOutcome(
             text=f"{text.rstrip()}\n[exit code {code}]",
             is_error=True,
             soft_error=True,
+            shell_result=(text, code),
         )
-    return ToolOutcome(text=text)
+    return ToolOutcome(text=text, shell_result=(text, code))
