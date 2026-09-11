@@ -63,7 +63,7 @@ def store_bytes(
                     os.remove(tmp)
                 except OSError:
                     pass
-    return upsert_artifact(
+    row = upsert_artifact(
         hash=digest,
         size=len(data),
         mime=mime,
@@ -71,6 +71,11 @@ def store_bytes(
         created_by_session=created_by_session,
         runner_id=runner_id,
     )
+    from app.network import blobs, engine
+    if engine.context() is not None:
+        blobs.register_present(digest, len(data))
+        engine.kick()
+    return row
 
 
 def artifact_path(hash: str) -> Optional[Path]:

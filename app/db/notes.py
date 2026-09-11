@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -332,10 +333,14 @@ def create_note_attachment(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO note_attachments
-                   (id, note_id, filename, file_path, content_type, size_bytes, data, created_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-            (attachment_id, note_id, filename, file_path, content_type, size_bytes, data, now),
+                   (id, note_id, filename, file_path, content_type, size_bytes, data, created_at, blob_hash)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (attachment_id, note_id, filename, file_path, content_type, size_bytes, data, now,
+             hashlib.sha256(data).hexdigest() if data is not None else None),
         )
+        if data is not None:
+            from app.db import network as network_store
+            network_store.upsert_blob(hashlib.sha256(data).hexdigest(), size=len(data), present=True, _conn=conn)
     return get_note_attachment(attachment_id)
 
 

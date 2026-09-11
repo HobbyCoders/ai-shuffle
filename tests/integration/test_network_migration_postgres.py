@@ -217,3 +217,77 @@ def test_concurrent_hub_state_updates_preserve_cursors_and_cooldown(pg, monkeypa
         list(executor.map(update, [{"cursor": 2, "quota": {"ops": 2}},
                                    {"cursor": 1, "upload_blocked": blocked, "pushed_ingest_id": 10}]))
     assert hub._hub_state() == {"cursor": 2, "quota": {"ops": 2}, "upload_blocked": blocked, "pushed_ingest_id": 10}
+
+
+def test_object_acknowledgement_and_outbox_removal_are_atomic(pg, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from app.db import network as store
+    from app.network import engine, object_sync
+
+    new_schema, connect, _ = pg
+    schema = new_schema()
+    descriptor = {'object_id': 'test', 'op_count': 1}
+    with connect(schema) as conn:
+        store.create_state(network_id='test', name='Test', founder_device_id='origin', keyring={}, _conn=conn)
+        store.update_state(_conn=conn, hub={'binding_scope': 'scope', 'pushed_ingest_id': 0})
+        store.create_schema(conn.cursor())  # Upgrade remains repeatable with queued work.
+        conn.cursor().execute('INSERT INTO sync_object_outbox(hub_scope,object_id,descriptor,payload,last_ingest_id) VALUES(%s,%s,%s,%s,%s)',
+                              ('scope', 'test', json.dumps(descriptor), 'dGVzdA==', 7))
+        store.create_schema(conn.cursor())
+
+    @contextmanager
+    def isolated_db():
+        conn = connect(schema)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(store, 'get_db', isolated_db)
+    monkeypatch.setattr(engine, 'require_context', lambda: None)
+    client = SimpleNamespace(_call=lambda *args, **kw: {'committed': True, 'descriptor': descriptor})
+    real_update = store.update_state
+
+    def interrupted(**kwargs):
+        real_update(**kwargs)
+        raise RuntimeError('process interrupted after cursor update')
+
+    monkeypatch.setattr(store, 'update_state', interrupted)
+    with pytest.raises(RuntimeError, match='process interrupted'):
+        object_sync.push(client, 'scope', {'object_sync': {'writes': True}})
+    assert object_sync._outbox('scope')
+    assert store.get_state()['hub']['pushed_ingest_id'] == 0
+    monkeypatch.setattr(store, 'update_state', real_update)
+    assert object_sync.push(client, 'scope', {'object_sync': {'writes': True}}) == 1
+    assert object_sync._outbox('scope') is None
+    assert store.get_state()['hub']['pushed_ingest_id'] == 7
+
+
+def test_checkpoint_pages_share_the_same_postgres_snapshot(pg):
+    import json
+    from types import SimpleNamespace
+
+    from app.db import network as store
+    from app.network import crypto, engine
+
+    new_schema, connect, _ = pg
+    schema = new_schema()
+    with connect(schema) as conn:
+        for key in ('a', 'b'):
+            conn.cursor().execute('INSERT INTO tags(id,name,color) VALUES(%s,%s,%s)', (key, 'Before', 'blue'))
+            store.put_record(conn.cursor(), 'tags', key, clock=1, origin_device_id='origin', content_hash='hash', deleted=False)
+    ctx = SimpleNamespace(network_id='test', device_id='origin', generation=1, key_version=1,
+                          network_key=crypto.generate_network_key(), identity=SimpleNamespace(signing_private=crypto.generate_signing_key()))
+    with connect(schema) as reader:
+        reader.cursor().execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
+        first = engine.snapshot_chunk('tags', 0, ctx=ctx, limit=1, _conn=reader)
+        with connect(schema) as writer:
+            writer.cursor().execute("UPDATE tags SET name='After' WHERE id='b'")
+        second = engine.snapshot_chunk('tags', 1, ctx=ctx, limit=1, _conn=reader)
+    aad = crypto.canonical_json({'collection': 'tags', 'offset': 1, 'network_id': 'test'})
+    body = json.loads(crypto.decrypt_payload(ctx.network_key, second['ciphertext'], aad))
+    assert first['more'] and not second['more']
+    assert body['items'][0]['record']['name'] == 'Before'

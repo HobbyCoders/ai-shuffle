@@ -359,7 +359,7 @@ def collections_for_resource(resource: str) -> List[Collection]:
 # machinery (milestone 4) runs: they are published by explicit calls.
 SCANNED_COLLECTIONS: Tuple[str, ...] = tuple(
     c.name for c in ordered_collections()
-    if c.mode == MODE_SHARED and c.name not in ("membership", "plugins_desired", "memory", "artifacts"))
+    if c.mode == MODE_SHARED and c.name not in ("membership", "plugins_desired", "memory"))
 
 
 def settings_policy_table() -> List[Dict[str, Any]]:

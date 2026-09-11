@@ -49,6 +49,16 @@ beforeEach(() => {
 	api.get.mockImplementation(async (path: string) => reads(path));
 });
 afterEach(() => { cleanup(); resourceSync.clear(); vi.useRealTimers(); });
+it('distinguishes pending local changes and files from acknowledged cloud durability', async () => {
+	status.hub = { linked: true, remote_durability: 'pending', backlog: 3, files_pending_backup: 2 };
+	render(DevicesSection);
+	expect(await screen.findByText('Saved on this worker · cloud backup pending')).toBeTruthy();
+	expect(screen.getByText(/3 changes and 2 files/)).toBeTruthy();
+	expect(screen.queryByText('Cloud backup up to date')).toBeNull();
+	status = { ...status, hub: { linked: true, remote_durability: 'committed', backlog: 0, files_pending_backup: 0 } };
+	resourceSync.invalidate(['network']);
+	expect(await screen.findByText('Cloud backup up to date')).toBeTruthy();
+});
 function row(key: string): HTMLElement {
 	const el = document.querySelector(`[data-device-key="${key}"]`);
 	expect(el).not.toBeNull();

@@ -124,6 +124,61 @@ def create_schema(cursor) -> None:
         )
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_object_outbox (
+            hub_scope TEXT PRIMARY KEY,
+            object_id TEXT NOT NULL,
+            descriptor JSONB NOT NULL,
+            payload TEXT NOT NULL,
+            last_ingest_id BIGINT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_cloud_inbox (
+            hub_scope TEXT NOT NULL,
+            entry_id TEXT NOT NULL,
+            ops JSONB NOT NULL,
+            PRIMARY KEY(hub_scope,entry_id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_cloud_blobs (
+            hub_scope TEXT NOT NULL,
+            hash TEXT NOT NULL,
+            descriptor JSONB NOT NULL,
+            PRIMARY KEY(hub_scope,hash)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_blob_outbox (
+            hub_scope TEXT NOT NULL,
+            hash TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            descriptor JSONB NOT NULL,
+            payload TEXT NOT NULL,
+            committed BOOLEAN NOT NULL DEFAULT FALSE,
+            PRIMARY KEY(hub_scope,hash,ordinal)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_archive_outbox (
+            hub_scope TEXT PRIMARY KEY,
+            descriptor JSONB NOT NULL,
+            payload TEXT NOT NULL,
+            cursor_end BIGINT NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_checkpoint_outbox (
+            hub_scope TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            descriptor JSONB NOT NULL,
+            payload TEXT NOT NULL,
+            committed BOOLEAN NOT NULL DEFAULT FALSE,
+            PRIMARY KEY(hub_scope,ordinal)
+        )
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS sync_records (
             collection TEXT NOT NULL,
             record_id TEXT NOT NULL,
@@ -924,7 +979,7 @@ def expire_joins() -> int:
 # ---------------------------------------------------------------------------
 
 def upsert_blob(hash_value: str, *, size: int, present: Optional[bool] = None, holder: Optional[str] = None,
-                _conn=None) -> None:
+                _conn=None, _cursor=None) -> None:
     def _apply(cursor):
         cursor.execute("SELECT holders, present FROM sync_blobs WHERE hash = %s", (hash_value,))
         row = cursor.fetchone()
@@ -937,6 +992,9 @@ def upsert_blob(hash_value: str, *, size: int, present: Optional[bool] = None, h
                ON CONFLICT (hash) DO UPDATE SET size = EXCLUDED.size, present = EXCLUDED.present,
                    holders = EXCLUDED.holders, updated_at = EXCLUDED.updated_at""",
             (hash_value, size, is_present, _json(holders), _now()))
+    if _cursor is not None:
+        _apply(_cursor)
+        return
     if _conn is not None:
         _apply(_conn.cursor())
         return

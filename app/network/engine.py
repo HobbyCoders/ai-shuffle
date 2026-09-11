@@ -31,6 +31,7 @@ import json
 import logging
 import secrets
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -272,7 +273,7 @@ def leave_network() -> dict:
         cursor = conn.cursor()
         store.lock_state(cursor)  # Same lock order as in-flight hub receipt transactions.
         for table in ("sync_hub_receipts", "sync_pending", "sync_conflicts", "sync_watermarks", "sync_records", "sync_ops",
-                      "sync_peers", "network_presence", "network_catalog_cursors", "network_membership_records",
+                      "sync_peers", "network_presence", "network_catalog_cursors", "network_membership_records", "sync_object_outbox", "sync_checkpoint_outbox", "sync_archive_outbox", "sync_cloud_blobs", "sync_blob_outbox", "sync_cloud_inbox",
                       "network_joins", "network_member_names", "network_members"):
             cursor.execute(f"DELETE FROM {table}")
         cursor.execute("DELETE FROM sync_blobs WHERE present = FALSE")
@@ -670,6 +671,8 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
     if env.network_id != ctx.network_id:
         raise ApplyError("wrong network")
     if env.origin_device_id == ctx.device_id:
+        if not env.verify_signature(ctx.identity.signing_public):
+            raise ApplyError("bad signature")
         return "duplicate"  # our own op coming back
     member = _origin_allowed(ctx, env)
     if member is None:
@@ -810,7 +813,7 @@ def _after_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any])
         holder = plaintext.get("owner_device_id")
         if isinstance(digest, str) and digest:
             try:
-                blobs.note_missing(digest, int(size or 0), holder)
+                blobs.note_missing(digest, int(size or 0), holder, _cursor=cursor)
             except Exception:  # noqa: BLE001
                 logger.debug("Blob bookkeeping failed for %s", digest[:12], exc_info=True)
 
@@ -976,11 +979,11 @@ def snapshot_manifest(*, ctx: Optional[NetworkContext] = None) -> dict:
 
 
 def snapshot_chunk(collection: str, offset: int = 0, *, ctx: Optional[NetworkContext] = None,
-                   limit: int = SNAPSHOT_CHUNK) -> dict:
+                   limit: int = SNAPSHOT_CHUNK, _conn=None) -> dict:
     """One signed, encrypted page of a collection's current records."""
     ctx = ctx or require_context()
     coll = policy.collection(collection)
-    with get_db() as conn:
+    with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM sync_records WHERE collection = %s ORDER BY record_id LIMIT %s OFFSET %s",
                        (collection, limit + 1, offset))
@@ -1033,14 +1036,15 @@ def open_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext) -> dic
         raise ApplyError("malformed snapshot chunk") from exc
 
 
-def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: Optional[NetworkContext] = None) -> int:
+def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: Optional[NetworkContext] = None,
+                         _conn=None, validated_membership: bool = False) -> int:
     """Apply a chunk: records newer than what we hold replace ours (LWW by clock)."""
     ctx = ctx or require_context()
     body = open_snapshot_chunk(chunk, ctx=ctx)
     coll = policy.collection(body["collection"])
     applied = 0
     touched: List[Tuple[str, str, str]] = []
-    with get_db() as conn:
+    with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cursor = conn.cursor()
         for item in body["items"]:
             existing = store.get_record(cursor, coll.name, item["record_id"])
@@ -1048,7 +1052,7 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: Optional[NetworkConte
                     int(item["clock"]), item["origin_device_id"], int(existing["clock"]), existing["origin_device_id"]) <= 0:
                 continue
             store.observe_clock(cursor, int(item["clock"]))
-            if coll.name == "membership" and not item["deleted"]:
+            if coll.name == "membership" and not item["deleted"] and not validated_membership:
                 record_data = _parse_json((item["record"] or {}).get("record"))
                 if isinstance(record_data, dict):
                     try:
@@ -1076,17 +1080,17 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: Optional[NetworkConte
                              deleted=bool(item["deleted"]), order_seq=item.get("order_seq"))
             applied += 1
             touched.append((coll.name, item["record_id"], OP_DELETE if item["deleted"] else OP_UPSERT))
-    if touched:
+    if touched and _conn is None:
         if coll.name in ("membership", "member_names"):
             load_context()
         _notify(touched)
     return applied
 
 
-def adopt_watermarks(watermarks: Mapping[str, Mapping[str, int]], *, ctx: Optional[NetworkContext] = None) -> None:
+def adopt_watermarks(watermarks: Mapping[str, Mapping[str, int]], *, ctx: Optional[NetworkContext] = None, _conn=None) -> None:
     """After a snapshot, start tailing from the sender's view of every stream."""
     ctx = ctx or require_context()
-    with get_db() as conn:
+    with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cursor = conn.cursor()
         for origin, streams in (watermarks or {}).items():
             if origin == ctx.device_id:

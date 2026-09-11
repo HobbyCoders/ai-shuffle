@@ -33,6 +33,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import sys
 import time
 from typing import Any, Dict, List, Optional
 
@@ -43,7 +44,7 @@ from app.core.config import settings
 from app.db import mobile_hub as binding_store
 from app.db import network as store
 from app.db.async_database import run_sync
-from app.network import crypto, engine, identity as identity_mod, membership
+from app.network import checkpoints, cloud_blobs, crypto, engine, identity as identity_mod, membership, object_sync
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,8 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 _state: Dict[str, Any] = {"linked": False}
 _recovery_upload_due = False
 _bootstrap_lock: Optional[asyncio.Lock] = None
+_object_poll_at: dict[str, float] = {}
+_object_work_at: dict[str, float] = {}
 
 
 class HubError(RuntimeError):
@@ -126,7 +129,7 @@ def _save_hub_state(*, _expected_scope: str | None = None, **fields) -> dict:
             return {}
         current = dict(state.get("hub") or {})
         for key, value in fields.items():
-            current[key] = max(int(current.get(key) or 0), int(value)) if key in ("cursor", "pushed_ingest_id") else value
+            current[key] = max(int(current.get(key) or 0), int(value)) if key in ("cursor", "pushed_ingest_id", "archive_cursor") else value
         store.update_state(_conn=conn, hub=current)
         return current
 
@@ -147,7 +150,8 @@ def _ensure_hub_scope() -> str:
         if previous != scope:
             if previous is not None:
                 current.update(cursor=0, pushed_ingest_id=0, upload_blocked=None, quota=None,
-                               registered=False, registered_name=None)
+                               registered=False, registered_name=None, object_sync=None, object_batch_due=None,
+                               checkpoint_id=None, checkpoint_cursor=0, checkpoint_last_at=0, archive_cursor=0, restored_checkpoint=None)
             current["binding_scope"] = scope
             store.update_state(_conn=conn, hub=current)
     return scope
@@ -156,6 +160,9 @@ def _ensure_hub_scope() -> str:
 def status() -> dict:
     binding = _binding()
     hub_state = _hub_state() if store.get_state() else {}
+    backlog = _backlog(hub_state)
+    file_backlog = cloud_blobs.pending_count(hub_state.get("binding_scope", "")) if hub_state else 0
+    incoming = object_sync.inbox_count(hub_state.get("binding_scope", "")) if hub_state.get("object_sync") else 0
     return {
         "linked": binding is not None,
         "server_id": binding.get("server_id") if binding else None,
@@ -163,12 +170,19 @@ def status() -> dict:
         "status": hub_state.get("status") or _state.get("status"),
         "cursor": hub_state.get("cursor", 0),
         "pushed_ingest_id": hub_state.get("pushed_ingest_id", 0),
-        "backlog": _backlog(hub_state),
+        "backlog": backlog,
+        "files_pending_backup": file_backlog,
+        "incoming_pending": incoming,
         "last_push_at": hub_state.get("last_push_at"),
         "last_pull_at": hub_state.get("last_pull_at"),
         "last_error": _state.get("last_error") or ("Account upload quota exceeded; cloud backlog kept" if hub_state.get("upload_blocked") else None),
         "quota": _current_quota(hub_state.get("quota")),
         "upload_blocked": hub_state.get("upload_blocked"),
+        "cloud_storage": "objects" if (hub_state.get("object_sync") or {}).get("writes") else "feed",
+        "remote_durability": "local_only" if binding is None else "pending" if not hub_state.get("registered") or backlog or file_backlog or incoming else "committed",
+        "batch_due_at": hub_state.get("object_batch_due"),
+        "recovery_checkpoint": hub_state.get("checkpoint_id"),
+        "recovery_checkpoint_at": hub_state.get("checkpoint_last_at"),
         "pending_devices": _state.get("pending_devices") or [],
         "account_network": _state.get("account_network"),
     }
@@ -335,6 +349,7 @@ def _upload_recovery() -> None:
         _recovery_upload_due = False
         return
     _call("POST", "recovery", {"recovery": wrap})
+    _save_hub_state(checkpoint_last_at=0)
     _recovery_upload_due = False
 
 
@@ -439,6 +454,10 @@ async def _bootstrap_from_hub(response: Optional[dict] = None, *, device_name: O
         if ctx.network_id != admission.get("network_id") or ctx.device_id != marker["device_id"]:
             raise HubError("Settings sync does not match this worker's network")
         if ctx.bootstrap_state == engine.BOOTSTRAP_SYNCING:
+            await asyncio.to_thread(register)
+            probe = await asyncio.to_thread(_call, "GET", "feed?cursor=0&limit=1&protocol=2", max_bytes=FEED_MAX_BYTES)
+            if (probe.get("object_sync") or {}).get("direct_read") and not (await asyncio.to_thread(_hub_state)).get("restored_checkpoint"):
+                await asyncio.to_thread(checkpoints.restore, sys.modules[__name__], await asyncio.to_thread(_ensure_hub_scope))
             await asyncio.to_thread(_replay_feed_from_start)
             await asyncio.to_thread(engine.finish_bootstrap)
         elif ctx.bootstrap_state != engine.BOOTSTRAP_READY:
@@ -451,18 +470,15 @@ async def _bootstrap_from_hub(response: Optional[dict] = None, *, device_name: O
 
 
 def _replay_feed_from_start() -> None:
-    cursor = 0
-    ctx = engine.require_context()
     scope = _ensure_hub_scope()
     while True:
-        page = _call("GET", f"feed?cursor={cursor}&limit={PULL_BATCH}", max_bytes=FEED_MAX_BYTES, timeout=60)
-        ops = page.get("ops") or []
-        if ops:
-            engine.apply_batch(ops, ctx=ctx, hub_scope=scope)
-        cursor = int(page.get("cursor", cursor))
-        if not page.get("more"):
+        poll = {}
+        pull_once(poll)
+        if not poll.get("more"):
             break
-    _save_hub_state(_expected_scope=scope, cursor=cursor, registered=True, status="active")
+    if object_sync.inbox_count(scope) or store.pending_holes():
+        raise HubError("Cloud restoration is waiting for missing signed operations or network keys")
+    _save_hub_state(_expected_scope=scope, registered=True, status="active")
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +533,14 @@ def push_once() -> int:
     """Send the next batch of our log to the hub. Returns how many went."""
     scope = _ensure_hub_scope()
     hub_state = _hub_state()
+    blocked = hub_state.get("upload_blocked")
+    if (hub_state.get("object_sync") or {}).get("writes") or object_sync._outbox(scope):
+        if blocked and time.time() < blocked["retry_at"]:
+            raise UploadBlocked("Account upload quota exceeded; cloud backlog kept")
+        try:
+            return object_sync.push(sys.modules[__name__], scope, hub_state)
+        except object_sync.ObjectError as exc:
+            raise HubError(str(exc)) from exc
     pushed = int(hub_state.get("pushed_ingest_id", 0) or 0)
     batch = store.hub_ops_after_ingest(pushed, scope, limit=PUSH_BATCH)
     if not batch:
@@ -540,8 +564,14 @@ def pull_once(poll: dict | None = None) -> int:
     scope = _ensure_hub_scope()
     hub_state = _hub_state()
     cursor = int(hub_state.get("cursor", 0) or 0)
-    suffix = f"feed?cursor={cursor}&limit={PULL_BATCH}" + ("&include_pending=1" if poll is not None else "")
+    suffix = f"feed?cursor={cursor}&limit={PULL_BATCH}&protocol=2" + ("&include_pending=1" if poll is not None else "")
     page = _call("GET", suffix, max_bytes=FEED_MAX_BYTES, timeout=60)
+    if poll is not None:
+        poll["more"] = bool(page.get("more"))
+    if isinstance(page.get("object_sync"), dict):
+        _state["object_mode"] = True
+        if page["object_sync"] != hub_state.get("object_sync"):
+            _save_hub_state(_expected_scope=scope, object_sync=page["object_sync"])
     if poll is not None and isinstance(page.get("pending_devices"), list):
         poll["devices"] = page["pending_devices"]
         _state["pending_devices"] = page["pending_devices"]
@@ -549,7 +579,22 @@ def pull_once(poll: dict | None = None) -> int:
         _save_quota(page["quota"], scope)
     ops = page.get("ops") or []
     applied = 0
-    if ops:
+    if "entries" in page:
+        try:
+            for entry in page["entries"]:
+                applied += object_sync.pull_entry(sys.modules[__name__], scope, entry)
+                _save_hub_state(_expected_scope=scope, cursor=int(entry["cursor"]), last_pull_at=time.time())
+            applied += object_sync.drain_inbox(scope)
+        except Exception as exc:
+            raise HubError("Could not verify or persist cloud bundle; cursor retained") from exc
+    elif ops and isinstance(page.get("object_sync"), dict):
+        # The compatibility bridge still needs durable dependency staging when
+        # direct signing is temporarily unavailable during a rollout/rollback.
+        try:
+            applied += object_sync.pull_entry(sys.modules[__name__], scope, {"cursor": page["cursor"], "ops": ops})
+        except Exception as exc:
+            raise HubError("Could not persist cloud operations; feed cursor kept") from exc
+    elif ops:
         try:
             result = engine.apply_batch(ops, hub_scope=scope)
         except Exception as exc:
@@ -626,6 +671,7 @@ async def _loop_body() -> bool:
             await asyncio.to_thread(_upload_recovery)
         if ctx.bootstrap_state == engine.BOOTSTRAP_READY:
             sent = received = 0
+            checkpoint_work = False
             errors = []
             poll = {}
             try:
@@ -633,7 +679,12 @@ async def _loop_body() -> bool:
             except HubError as exc:
                 errors.append(str(exc))
             try:
-                received = await asyncio.to_thread(pull_once, poll)
+                scope = hub_state.get("binding_scope", "")
+                if hub_state.get("object_sync") and time.monotonic() < _object_poll_at.get(scope, 0):
+                    poll["devices"] = []
+                else:
+                    received = await asyncio.to_thread(pull_once, poll)
+                    _object_poll_at[scope] = time.monotonic() + (0 if poll.get("more") else 60)
             except HubError as exc:
                 errors.append(str(exc))
             try:
@@ -643,8 +694,26 @@ async def _loop_body() -> bool:
                     sent += await asyncio.to_thread(push_once)
             except HubError as exc:
                 errors.append(str(exc))
+            current = await asyncio.to_thread(_hub_state)
+            scope = current.get("binding_scope", "")
+            if ((current.get("object_sync") or {}).get("writes") and not current.get("upload_blocked")
+                    and time.monotonic() >= _object_work_at.get(scope, 0)):
+                _object_work_at[scope] = time.monotonic() + 60
+                try:
+                    checkpoint_work = await asyncio.to_thread(cloud_blobs.publish_once, sys.modules[__name__],
+                                                              await asyncio.to_thread(_ensure_hub_scope))
+                    if not checkpoint_work:
+                        checkpoint_work = await asyncio.to_thread(checkpoints.publish_once, sys.modules[__name__],
+                                                                  await asyncio.to_thread(_ensure_hub_scope))
+                    if not checkpoint_work and current.get("checkpoint_id"):
+                        checkpoint_work = await asyncio.to_thread(object_sync.archive_once, sys.modules[__name__],
+                                                                  await asyncio.to_thread(_ensure_hub_scope))
+                    if checkpoint_work:
+                        _object_work_at[scope] = time.monotonic() + 5
+                except (HubError, object_sync.ObjectError) as exc:
+                    errors.append(str(exc))
             _state["last_error"] = "; ".join(dict.fromkeys(errors))[:200] or None
-            return sent >= PUSH_BATCH or received >= PULL_BATCH
+            return checkpoint_work or sent >= PUSH_BATCH or received >= PULL_BATCH
     except HubError as exc:
         _state["last_error"] = str(exc)[:200]
         logger.debug("Hub sync: %s", exc)
@@ -664,7 +733,8 @@ async def loop() -> None:
             raise
         busy = busy or False
         try:
-            await asyncio.wait_for(_wake.wait(), timeout=LOOP_ACTIVE_SECONDS if busy else LOOP_IDLE_SECONDS)
+            active_wait = 5.0 if _state.get("object_mode") else LOOP_ACTIVE_SECONDS
+            await asyncio.wait_for(_wake.wait(), timeout=active_wait if busy else LOOP_IDLE_SECONDS)
         except asyncio.TimeoutError:
             pass
         _wake.clear()
@@ -706,3 +776,5 @@ def reset_for_tests() -> None:
     _state["linked"] = False
     _recovery_upload_due = False
     _bootstrap_lock = None
+    _object_poll_at.clear()
+    _object_work_at.clear()

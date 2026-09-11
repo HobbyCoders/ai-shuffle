@@ -143,6 +143,13 @@ export interface HubStatus {
 	cursor?: number;
 	pushed_ingest_id?: number;
 	backlog?: number;
+	files_pending_backup?: number;
+	incoming_pending?: number;
+	remote_durability?: 'local_only' | 'pending' | 'committed';
+	cloud_storage?: 'objects' | 'feed';
+	batch_due_at?: number | null;
+	recovery_checkpoint?: string | null;
+	recovery_checkpoint_at?: number | null;
 	last_push_at?: string | null;
 	last_pull_at?: string | null;
 	last_error?: string | null;

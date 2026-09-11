@@ -155,6 +155,8 @@ def test_blob_hashes_and_missing_bytes_bookkeeping(workers):
         database.create_note(note_id="n1", title="Note", content="body")
         database.create_note_attachment(attachment_id="att1", note_id="n1", filename="x.txt",
                                         file_path="/tmp/x.txt", content_type="text/plain", size_bytes=5, data=b"hello")
+        with store.get_db() as conn:
+            conn.cursor().execute("UPDATE note_attachments SET blob_hash=NULL WHERE id='att1'")
         assert blobs.backfill_attachment_hashes() == 1
         digest = blobs.sha256(b"hello")
         assert a.sql("SELECT blob_hash FROM note_attachments WHERE id='att1'")[0]["blob_hash"] == digest

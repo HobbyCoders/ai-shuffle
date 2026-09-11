@@ -379,6 +379,20 @@
 		</div>
 	{/if}
 	{#if stale && status}<p class="stale" role="status"><AlertTriangle size={13} /> The worker did not answer the last status check; showing saved data.</p>{/if}
+	{#if enrolled && status?.hub?.linked}
+		<div class="notice" role="status">
+			{#if status.hub.remote_durability === 'pending' || (status.hub.backlog ?? 0) > 0}
+				<h4>Saved on this worker · cloud backup pending</h4>
+				<p>{status.hub.backlog ?? 0} changes and {status.hub.files_pending_backup ?? 0} files are waiting for cloud backup. Keep this worker running until backup completes so offline devices can catch up.</p>
+			{:else if status.hub.remote_durability === 'committed'}
+				<h4>Cloud backup up to date</h4>
+			{:else}
+				<h4>Checking cloud backup</h4>
+			{/if}
+			{#if (status.hub.incoming_pending ?? 0) > 0}<p>{status.hub.incoming_pending} downloaded changes are waiting for missing updates from another worker.</p>{/if}
+			{#if status.hub.last_error}<p class="error">{status.hub.last_error}</p>{/if}
+		</div>
+	{/if}
 	{#if revokedNotice}
 		<div class="notice warn" role="alert">
 			<p><strong>{revokedNotice}</strong> was removed. Its copies of your provider API keys are assumed compromised; rotate those keys with each provider.</p>
