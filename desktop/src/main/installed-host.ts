@@ -11,7 +11,7 @@ export function installedLaunchArgs(args: string[], debuggingPort = ''): string[
   // Chromium consumes some switches before process.argv reaches the app.
   // The caller reads its explicit debugging port from app.commandLine.
   const candidates = [...args, ...(debuggingPort ? [`--remote-debugging-port=${debuggingPort}`] : [])];
-  return [...new Set(candidates.filter(arg => arg.startsWith('aishuffle:') || /^--remote-debugging-port=[1-9]\d{0,4}$/.test(arg)))];
+  return [...new Set(candidates.filter(arg => arg.startsWith('aishuffle:') || /^--remote-debugging-port=(?:0|[1-9]\d{0,4})$/.test(arg)))];
 }
 export function validateInstalledHost(root: string, host: InstalledHost): InstalledHost {
   if (!host || !path.isAbsolute(host.executable ?? '') || !path.isAbsolute(host.userData ?? '') ||

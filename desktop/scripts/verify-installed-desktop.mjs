@@ -21,10 +21,20 @@ const passed=message=>{report.checks.push(message);console.log('PASS: '+message)
 const log=await fs.open(path.join(temporary,'installed-desktop.log'),'a');
 let chromium,browser,page;
 async function until(fn,message,timeout=120000){const end=Date.now()+timeout;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,500));}throw Error(message);}
-async function connect(){await until(async()=>{try{browser=await chromium.connectOverCDP('http://127.0.0.1:19229',{timeout:1500});return true;}catch{return false;}},'Desktop debugger did not start');
- await until(async()=>{page=browser.contexts().flatMap(c=>c.pages()).find(p=>p.url().startsWith('http://127.0.0.1:8000/'));return !!page;},'Installed worker did not become ready',180000);
- await page.waitForFunction(()=>!!window.shuffleDesktop);}
-async function launch(){const child=spawn(exe,['--remote-debugging-port=19229'],{windowsHide:true,stdio:['ignore',log.fd,log.fd]});child.on('error',e=>console.error(e));await connect();}
+// The installed launcher and updated Electron overlap briefly during handoff.
+// Let Chromium allocate a port for each process instead of racing for one port.
+async function connect(){await until(async()=>{
+ let candidate;
+ try{
+  const port=(await fs.readFile(path.join(profile,'DevToolsActivePort'),'utf8')).split(/\r?\n/)[0];assert.match(port,/^[1-9]\d{0,4}$/);
+  candidate=await chromium.connectOverCDP('http://127.0.0.1:'+port,{timeout:1500});
+  const target=candidate.contexts().flatMap(c=>c.pages()).find(p=>p.url().startsWith('http://127.0.0.1:8000/'));
+  if(target&&await target.evaluate(()=>!!window.shuffleDesktop)){browser=candidate;page=target;return true;}
+ }catch{}
+ if(candidate)await candidate.close().catch(()=>{});
+ return false;
+},'Installed desktop debugger and worker did not become ready',180000);}
+async function launch(){const child=spawn(exe,['--remote-debugging-port=0'],{windowsHide:true,stdio:['ignore',log.fd,log.fd]});child.on('error',e=>console.error(e));await connect();}
 async function close(){if(page&&!page.isClosed())await page.evaluate(()=>window.shuffleDesktop.window.close()).catch(()=>{});
  await until(async()=>{try{await fetch('http://127.0.0.1:8000/health/ready',{signal:AbortSignal.timeout(500)});return false;}catch{return true;}},'Worker did not stop',90000);
  if(browser)await browser.close().catch(()=>{});browser=null;page=null;}
