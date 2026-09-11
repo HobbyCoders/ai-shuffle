@@ -6,7 +6,7 @@ The Android companion and account hub live in this repository alongside the serv
 
 **[Download latest Android APK](https://github.com/HobbyCoders/ai-shuffle/releases/download/android-latest/AI-Shuffle-Android.apk)** · [Version, build details and checksum](https://github.com/HobbyCoders/ai-shuffle/releases/tag/android-latest)
 
-Requires Android 8.0 or newer. Open `AI-Shuffle-Android.apk` on your phone and allow installation from your browser if Android asks. The same link is available in the worker's **Settings → Downloads**, the Android app's **Settings → Android APK**, and in the account hub's home-page source. Release downloads do not require ZIP extraction.
+Requires Android 8.0 or newer. Open `AI-Shuffle-Android.apk` on your phone and allow installation from your browser if Android asks. The download link is also available on the account hub's home page. Release downloads do not require ZIP extraction.
 
 **GitHub access:** this repository is private, so sign in to GitHub in your browser with an account that has repository access before downloading. GitHub may show a 404 page when you are signed out or lack access. The APK release link is permanent; it does not bypass repository permissions.
 

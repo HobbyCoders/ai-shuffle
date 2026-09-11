@@ -7,6 +7,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.*
+import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.ViewMatchers.*
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -118,6 +119,17 @@ class NativeSmokeTest {
         return ActivityScenario.launch<AccountActivity>(Intent(context, AccountActivity::class.java).putExtra("mode", mode)).also {
         awaitFocused(it)
         instrumentation.uiAutomation.waitForIdle(500, 5_000)
+        }
+    }
+
+    @Test fun settingsOmitsApkDownloadAndKeepsAccountPhoneToolsAndReleaseNotes() {
+        ActivityScenario.launch(SettingsActivity::class.java).use { scenario ->
+            awaitFocused(scenario)
+            onView(withText("ANDROID APK")).check(doesNotExist())
+            onView(withText("Download latest APK")).check(doesNotExist())
+            onView(withText("Sign in")).check(matches(isDisplayed()))
+            onView(withText("Phone tools")).perform(scrollTo()).check(matches(isDisplayed()))
+            onView(withText("Version and release notes")).perform(scrollTo()).check(matches(isDisplayed()))
         }
     }
 

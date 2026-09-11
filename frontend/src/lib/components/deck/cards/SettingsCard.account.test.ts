@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const transport = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), post: vi.fn(), delete: vi.fn() }));
@@ -33,8 +33,6 @@ vi.mock('$lib/stores/timezonePreference.svelte', async () => {
 });
 // Keep Account's real shell, GeneralSection, and (before the fix) SecuritySection.
 // Other tabs are outside this regression and must not initialize their stores.
-vi.mock('$lib/components/ConnectorManager.svelte', () => ({ default: () => {} }));
-vi.mock('./settings/DownloadsSection.svelte', () => ({ default: () => {} }));
 vi.mock('./settings/providers/ProvidersSection.svelte', () => ({ default: () => {} }));
 vi.mock('./settings/DevicesSection.svelte', () => ({ default: () => {} }));
 vi.mock('./settings/ChatBehaviorSection.svelte', () => ({ default: () => {} }));
@@ -67,6 +65,17 @@ async function mountAccount() {
 }
 
 describe('Account settings', () => {
+ it.each([false, true])('omits Downloads and Plugins from settings (mobile=%s)', async (mobile) => {
+  render(SettingsCard, { props: { mobile } });
+  await screen.findByDisplayValue('/workspace/projects');
+  expect(screen.queryByRole('button', { name: 'Downloads' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Plugins' })).toBeNull();
+  expect(screen.queryByText('Open Plugins')).toBeNull();
+  for (const name of ['Account', 'Chat & Input', 'Voice', 'Providers', 'API', 'System', 'Logs']) {
+   expect(within(screen.getByRole('navigation', { name: 'Settings sections' })).getByRole('button', { name })).toBeTruthy();
+  }
+ });
+
  it('omits the entire account and remote access group while keeping appearance and workspace controls', async () => {
   await mountAccount();
   expect(screen.queryByText('Account and remote access')).toBeNull();

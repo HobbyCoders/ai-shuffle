@@ -20,18 +20,16 @@
 	import {
 		getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig
 	} from '$lib/api/auth';
-	import { layout } from '$lib/stores/layout.svelte';
 	import Banner from '$lib/components/Banner.svelte';
 	import { slide, fade } from 'svelte/transition';
 	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import { User, MessageSquare, KeyRound, Plug, SlidersHorizontal, ScrollText, Code2, AudioLines, Download } from 'lucide-svelte';
+	import { User, MessageSquare, KeyRound, SlidersHorizontal, ScrollText, Code2, AudioLines } from 'lucide-svelte';
 
 	// Sub-components
 	import GeneralSection from './settings/GeneralSection.svelte';
-	import DownloadsSection from './settings/DownloadsSection.svelte';
 	import ProvidersSection from './settings/providers/ProvidersSection.svelte';
 	import DevicesSection from './settings/DevicesSection.svelte';
 	import ChatBehaviorSection from './settings/ChatBehaviorSection.svelte';
@@ -50,7 +48,7 @@
 	}: Props = $props();
 
 	// Navigation — rail mirrors the mockup's information architecture.
-	type Tab = 'account' | 'chat' | 'voice' | 'providers' | 'downloads' | 'connectors' | 'api' | 'system' | 'logs';
+	type Tab = 'account' | 'chat' | 'voice' | 'providers' | 'api' | 'system' | 'logs';
 	let activeTab: Tab = $state('account');
 
 	interface RailItem {
@@ -66,11 +64,9 @@
 		{ id: 'chat', label: 'Chat & Input', icon: MessageSquare },
 		{ id: 'voice', label: 'Voice', icon: AudioLines },
 		{ id: 'providers', label: 'Providers', icon: KeyRound },
-		{ id: 'downloads', label: 'Downloads', icon: Download },
 		...($isAdmin
 			? [
 					{ id: 'admin-divider', label: 'Admin', heading: true } as RailItem,
-					{ id: 'connectors', label: 'Plugins', icon: Plug },
 					{ id: 'api', label: 'API', icon: Code2 },
 					{ id: 'system', label: 'System', icon: SlidersHorizontal },
 					{ id: 'logs', label: 'Logs', icon: ScrollText }
@@ -301,13 +297,6 @@
 					</div>
 				{/if}
 
-				<!-- DOWNLOADS -->
-				{#if activeTab === 'downloads'}
-					<div class="tab-content" transition:fade={{ duration: 150 }}>
-						<DownloadsSection />
-					</div>
-				{/if}
-
 				<!-- CHAT & INPUT -->
 				{#if activeTab === 'chat'}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
@@ -332,15 +321,6 @@
 						{#if $isAdmin}
 							<DevicesSection />
 						{/if}
-					</div>
-				{/if}
-
-				<!-- CONNECTORS -->
-				{#if activeTab === 'connectors' && $isAdmin}
-					<div class="tab-content" transition:fade={{ duration: 150 }}>
-						<h3 class="text-base font-medium mb-2">Connections now live in Plugins</h3>
-						<p class="text-sm text-muted-foreground mb-4">Find apps, connect accounts, and manage agent plugins in one place. Your existing connections and automations are unchanged.</p>
-						<button class="px-3 py-2 rounded-md bg-primary text-primary-foreground text-sm" onclick={() => layout.openFeaturePage('plugins')}>Open Plugins</button>
 					</div>
 				{/if}
 

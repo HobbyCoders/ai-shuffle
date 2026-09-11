@@ -15,7 +15,6 @@ vi.mock('$lib/services/desktop', () => ({
 	}
 }));
 import DesktopUpdateButton from './DesktopUpdateButton.svelte';
-import DownloadsSection from '../../deck/cards/settings/DownloadsSection.svelte';
 
 const idle: DesktopUpdateState = { phase: 'idle', version: null, percent: null, error: null, checkedAt: null };
 const available: DesktopUpdateState = { ...idle, phase: 'available', version: 'abc123' };
@@ -99,11 +98,5 @@ it('does not overwrite an event with a stale initial snapshot', async () => {
 
 it('stays hidden in an ordinary browser', () => {
 	shell.available = false; render(DesktopUpdateButton);
-	expect(screen.queryByRole('button')).toBeNull(); expect(shell.getState).not.toHaveBeenCalled();
-});
-
-it('keeps Android downloads in Settings without a second desktop update control', () => {
-	render(DownloadsSection);
-	expect(screen.getByRole('link', { name: 'Download latest APK' })).toBeTruthy();
 	expect(screen.queryByRole('button')).toBeNull(); expect(shell.getState).not.toHaveBeenCalled();
 });
