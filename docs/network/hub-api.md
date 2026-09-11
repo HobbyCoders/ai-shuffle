@@ -25,8 +25,9 @@ approval pickup are available to the linked server for bootstrap; pending-list,
 admission, recovery writes, feed push, and feed pull additionally require that
 server's network device to be `active`.
 
-Responses are JSON objects. Errors use HTTP status codes; bodies are never
-echoed back by the worker.
+Responses are JSON objects. Errors use HTTP status codes, except upload quota
+responses, which retain HTTP 200 with `quota_exceeded: true` for older clients.
+Bodies are never echoed back by the worker.
 
 ## Data model (D1)
 
@@ -117,12 +118,27 @@ response is returned once and deleted; the device becomes `active`.
 Body `{"ops": [envelope, …]}` (at most 200 per call, 8 MiB). Reply
 `{"accepted": n, "cursor": head, "quota": {…}}`, or `{"quota_exceeded": true, …}`
 when storage or the daily upload limit is exhausted. Duplicates are skipped
-silently. Ops are appended in the order received; a worker pushes in its own
-ingest order, so the feed is causally ordered per origin.
+silently, including repeats within a request. A duplicate-aware read preflight
+rejects batches that cannot fit before attempting inserts. The existing quota
+trigger remains the atomic guard against concurrent uploads. A successful
+response acknowledges the whole submitted batch (including existing tuples),
+while a quota response acknowledges none of it; there is no partial-prefix
+protocol. Ops are appended in arrival order. Receivers still enforce each
+origin's sequence because relays may upload successors before predecessors.
+
+Quota responses add `quota_reason`: `ops`, `stored_bytes`, or `daily_upload`.
+`concurrent_upload` is a retryable fallback if a raced batch aborts but fresh
+counters no longer identify a blocking quota. Quota objects include
+`daily_upload_reset_at` as Unix milliseconds at the next UTC midnight, and report
+zero daily bytes when the stored counter belongs to a previous UTC day.
 
 ### `GET .../network/feed?cursor=N&limit=500` — pull envelopes
 
 `{"ops": [envelope, …], "cursor": N', "more": bool, "snapshot_required": bool}`.
+The response also includes current `quota`. Adding `&include_pending=1` includes
+`pending_devices` under the same active-device authorization as `/pending`.
+Clients use this list for the current loop pass; an older hub omits the field,
+so clients fall back to `/pending`. The existing 15-second idle cadence is unchanged.
 Replaying from cursor 0 rebuilds a network: the founder's self-signed
 certificate is the first membership operation, so a device that unlocked with
 the recovery key can verify the whole chain from nothing.
@@ -148,7 +164,43 @@ Per network: 200,000 stored envelopes, 512 MiB stored ciphertext JSON, and
 checks an upload atomically: if any new envelope would exceed a quota, it rolls
 back the whole batch and the hub answers `quota_exceeded` with `accepted: 0`.
 Duplicates do not consume quota. Workers keep syncing with each other and show
-the cloud backlog in Settings > Devices.
+the cloud backlog in Settings > Devices. Upload failures no longer skip cloud
+downloads or device admissions. Daily upload cooldowns persist until the UTC
+reset across restarts and wake events. Storage/operation and unclassified legacy
+quota responses re-probe at most hourly; fresh feed quota information can resume
+uploads sooner if capacity increases. No quotas are raised or removed.
+
+Downloaded operations are recorded in the local PostgreSQL `sync_hub_receipts`
+table in the same transaction as their application or pending-sequence storage.
+Receipts name exact origin/incarnation/sequence tuples and are scoped to the
+hub URL, linked server and network. They never acknowledge gaps. The uploader
+walks bounded local log pages, skips receipts and still relays unacknowledged
+LAN operations while the origin is offline. Successful upload cursors remain
+durable and monotonic; timeout-after-commit retries remain idempotent. Persistence
+failures keep the feed cursor so replay can complete after restart.
+
+## Rollout and local measurements
+
+Apply `0010_network_feed_index.sql` and deploy the hub before distributing the
+client update. The migration only drops `network_feed_page`: the primary-key
+autoindex covers the identical `(network_hub_id, cursor)` ordering. Existing
+clients keep their all-or-nothing upload contract and existing endpoints. New
+clients fall back to separate pending polling and conservative cooldowns against
+older hubs. Local receipt DDL is additive and runs through the existing migration
+fingerprint gate; downgrading a client leaves the unused table harmlessly intact.
+Main-branch pushes publish desktop source updates automatically, so the hub rollout
+must be reviewed before merging the client changes. Preserve the current desktop
+delivery code, encrypted GitHub token and Worker variables during that later
+deployment. This optimization does not introduce R2 or another metered service.
+
+Local D1 regression fixtures measure 100 reported row writes for 20 new feed
+operations with the old index, and 80 after removing it. Duplicate retries and
+ten preflight-blocked retries issue zero feed INSERT statements and zero feed
+row writes; authentication and preflight reads still run. The concurrent upload
+test retains quota enforcement. Query-plan checks confirm indexed pagination
+without a temporary sort. These synthetic measurements are not a production
+billing forecast; compare deployed calls and rows per acknowledged operation
+after rollout. Current Paid billing exposure and provider settings are unchanged.
 
 ## Failure cases the worker handles
 
@@ -156,7 +208,7 @@ the cloud backlog in Settings > Devices.
 |---|---|
 | Hub unreachable | Retries on the loop cadence; LAN sync unaffected; `last_error` shown. |
 | 401/403 | Binding treated as revoked by the existing account code; loop idles. |
-| Quota exceeded | Backlog counted from `pushed_ingest_id`; nothing is dropped. |
+| Quota exceeded | Persist upload cooldown; backlog excludes exact cloud receipts; downloads and admission continue; nothing is dropped. |
 | `snapshot_required` | Reserved for a future retention migration; the current D1 feed always returns `false`. |
 | Approval response for another device id | Rejected by `enroll_from_response` (the certificate must admit this device). |
 | Feed envelope that fails verification | Rejected and counted; never advances the origin's watermark past it. |

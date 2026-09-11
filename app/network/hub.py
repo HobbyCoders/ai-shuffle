@@ -1,7 +1,7 @@
 """Account sync: this worker's side of the hub's per-network feed.
 
-The account hub (a Cloudflare Worker with D1, a Durable Object per network
-and R2; see docs/network/hub-api.md) stores ciphertext and cursors only. A
+The account hub (a Cloudflare Worker with D1; see docs/network/hub-api.md)
+stores ciphertext and cursors only. A
 worker signed into the account:
 
 - registers its device in the account's network (``register``); the first
@@ -30,6 +30,8 @@ in the status and retried.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -62,6 +64,10 @@ _bootstrap_lock: Optional[asyncio.Lock] = None
 
 class HubError(RuntimeError):
     pass
+
+
+class UploadBlocked(HubError):
+    """Durable upload cooldown; reading and admitting devices may continue."""
 
 
 # ---------------------------------------------------------------------------
@@ -111,13 +117,40 @@ def _hub_state() -> dict:
     return dict((state or {}).get("hub") or {})
 
 
-def _save_hub_state(**fields) -> dict:
-    if store.get_state() is None:
-        return {}
-    current = _hub_state()
-    current.update(fields)
-    store.update_state(hub=current)
-    return current
+def _save_hub_state(*, _expected_scope: str | None = None, **fields) -> dict:
+    with store.get_db() as conn:
+        state = store.lock_state(conn.cursor())
+        if _expected_scope is not None and ((state or {}).get("hub") or {}).get("binding_scope") != _expected_scope:
+            raise HubError("Account network changed during sync")
+        if state is None:
+            return {}
+        current = dict(state.get("hub") or {})
+        for key, value in fields.items():
+            current[key] = max(int(current.get(key) or 0), int(value)) if key in ("cursor", "pushed_ingest_id") else value
+        store.update_state(_conn=conn, hub=current)
+        return current
+
+
+def _ensure_hub_scope() -> str:
+    """Receipts belong to this binding and network, never a different account."""
+    binding = _binding()
+    if binding is None:
+        raise HubError("This worker is not signed in to a Shuffle account")
+    ctx = engine.require_context()
+    scope = hashlib.sha256(json.dumps([binding.get("hub_url"), binding.get("server_id"), ctx.network_id]).encode()).hexdigest()
+    with store.get_db() as conn:
+        state = store.lock_state(conn.cursor())
+        if state is None or state["network_id"] != ctx.network_id:
+            raise HubError("Account network changed during sync")
+        current = dict((state or {}).get("hub") or {})
+        previous = current.get("binding_scope")
+        if previous != scope:
+            if previous is not None:
+                current.update(cursor=0, pushed_ingest_id=0, upload_blocked=None, quota=None,
+                               registered=False, registered_name=None)
+            current["binding_scope"] = scope
+            store.update_state(_conn=conn, hub=current)
+    return scope
 
 
 def status() -> dict:
@@ -133,8 +166,9 @@ def status() -> dict:
         "backlog": _backlog(hub_state),
         "last_push_at": hub_state.get("last_push_at"),
         "last_pull_at": hub_state.get("last_pull_at"),
-        "last_error": _state.get("last_error"),
-        "quota": hub_state.get("quota"),
+        "last_error": _state.get("last_error") or ("Account upload quota exceeded; cloud backlog kept" if hub_state.get("upload_blocked") else None),
+        "quota": _current_quota(hub_state.get("quota")),
+        "upload_blocked": hub_state.get("upload_blocked"),
         "pending_devices": _state.get("pending_devices") or [],
         "account_network": _state.get("account_network"),
     }
@@ -150,8 +184,10 @@ def _backlog(hub_state: dict) -> int:
     try:
         with store.get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) AS n FROM sync_ops WHERE ingest_id > %s",
-                           (int(hub_state.get("pushed_ingest_id", 0) or 0),))
+            cursor.execute("""SELECT COUNT(*) AS n FROM sync_ops o WHERE ingest_id > %s
+                              AND NOT EXISTS (SELECT 1 FROM sync_hub_receipts r WHERE r.hub_scope=%s
+                                AND r.origin_device_id=o.origin_device_id AND r.incarnation=o.incarnation AND r.seq=o.seq)""",
+                           (int(hub_state.get("pushed_ingest_id", 0) or 0), hub_state.get("binding_scope", "")))
             return int(cursor.fetchone()["n"])
     except Exception:  # noqa: BLE001
         return 0
@@ -165,6 +201,8 @@ def register() -> dict:
     """Tell the hub about this device and learn where the network stands."""
     ident = identity_mod.load()
     ctx = engine.context()
+    if ctx is not None:
+        _ensure_hub_scope()
     member = store.get_member(ctx.device_id) if ctx else None
     body = {"device": _device_description(ident, member["name"] if member else None)}
     if ctx is not None:
@@ -243,10 +281,10 @@ def _admit(device: dict) -> dict:
     return {"device_id": device_id, "status": "approved"}
 
 
-def admit_pending_devices() -> int:
+def admit_pending_devices(devices: list[dict] | None = None) -> int:
     """Admit every device waiting through the account. Returns how many were admitted."""
     admitted = []
-    for device in pending_devices():
+    for device in pending_devices() if devices is None else devices:
         try:
             _admit(device)
             admitted.append(device.get("device_id"))
@@ -415,50 +453,113 @@ async def _bootstrap_from_hub(response: Optional[dict] = None, *, device_name: O
 def _replay_feed_from_start() -> None:
     cursor = 0
     ctx = engine.require_context()
+    scope = _ensure_hub_scope()
     while True:
         page = _call("GET", f"feed?cursor={cursor}&limit={PULL_BATCH}", max_bytes=FEED_MAX_BYTES, timeout=60)
         ops = page.get("ops") or []
         if ops:
-            engine.apply_batch(ops, ctx=ctx)
+            engine.apply_batch(ops, ctx=ctx, hub_scope=scope)
         cursor = int(page.get("cursor", cursor))
         if not page.get("more"):
             break
-    _save_hub_state(cursor=cursor, registered=True, status="active")
+    _save_hub_state(_expected_scope=scope, cursor=cursor, registered=True, status="active")
 
 
 # ---------------------------------------------------------------------------
 # Push and pull
 # ---------------------------------------------------------------------------
 
+def _current_quota(value: dict | None) -> dict | None:
+    if value is None:
+        return None
+    quota = dict(value)
+    reset = quota.get("daily_upload_reset_at")
+    if reset and time.time() * 1000 >= reset:
+        quota["daily_upload_bytes"] = 0
+    return quota
+
+
+def _save_quota(quota: dict, scope: str) -> None:
+    blocked = _hub_state().get("upload_blocked")
+    fields = {"quota": quota}
+    if blocked:
+        previous = blocked.get("quota") or {}
+        used, limit = {"ops": ("ops", "limit"), "stored_bytes": ("bytes", "bytes_limit"),
+                       "daily_upload": ("daily_upload_bytes", "daily_upload_limit")}.get(blocked["reason"], (None, None))
+        if (used and quota.get(limit) is not None and previous.get(limit) is not None
+                and quota[limit] - quota.get(used, 0) > previous[limit] - previous.get(used, 0)):
+            fields["upload_blocked"] = None
+    _save_hub_state(_expected_scope=scope, **fields)
+
+
+def _block_upload(result: dict, scope: str) -> None:
+    quota = result.get("quota") or {}
+    reason = result.get("quota_reason")
+    if not reason:
+        # Older hubs return only quota_exceeded. Retry conservatively without
+        # assuming a failed response acknowledged any prefix of the batch.
+        reason = "ops" if quota.get("limit") is not None and quota.get("ops", 0) >= quota["limit"] else "quota"
+        if reason == "quota" and quota.get("bytes_limit") and quota.get("bytes", 0) >= quota["bytes_limit"]:
+            reason = "stored_bytes"
+        if reason == "quota" and quota.get("daily_upload_limit") and quota.get("daily_upload_bytes", 0) >= quota["daily_upload_limit"]:
+            reason = "daily_upload"
+    now = time.time()
+    retry_at = now + 3600  # Re-probe permanent/legacy limits hourly, never every wake.
+    if reason == "daily_upload":
+        retry_at = (quota.get("daily_upload_reset_at") or (int(now // 86400) + 1) * 86400000) / 1000
+    if reason == "concurrent_upload":
+        retry_at = now + LOOP_IDLE_SECONDS
+    _save_hub_state(_expected_scope=scope, quota=quota, upload_blocked={"reason": reason, "retry_at": retry_at, "quota": quota})
+    raise UploadBlocked("Account upload quota exceeded; cloud backlog kept")
+
+
 def push_once() -> int:
     """Send the next batch of our log to the hub. Returns how many went."""
+    scope = _ensure_hub_scope()
     hub_state = _hub_state()
     pushed = int(hub_state.get("pushed_ingest_id", 0) or 0)
-    batch = store.ops_after_ingest(pushed, limit=PUSH_BATCH)
+    batch = store.hub_ops_after_ingest(pushed, scope, limit=PUSH_BATCH)
     if not batch:
+        if hub_state.get("upload_blocked"):
+            _save_hub_state(_expected_scope=scope, upload_blocked=None)
         return 0
-    result = _call("POST", "ops", {"ops": [env for _, env in batch]}, max_bytes=65536, timeout=30)
-    if result.get("quota_exceeded"):
-        _save_hub_state(quota=result.get("quota"))
-        raise HubError("Account storage quota exceeded; cloud backlog kept")
-    _save_hub_state(pushed_ingest_id=batch[-1][0], last_push_at=time.time(), quota=result.get("quota"))
+    ops = [env for _, env in batch if env is not None]
+    if ops:
+        blocked = hub_state.get("upload_blocked")
+        if blocked and time.time() < blocked["retry_at"]:
+            raise UploadBlocked("Account upload quota exceeded; cloud backlog kept")
+        result = _call("POST", "ops", {"ops": ops}, max_bytes=65536, timeout=30)
+        if result.get("quota_exceeded"):
+            _block_upload(result, scope)
+        _save_hub_state(_expected_scope=scope, last_push_at=time.time(), quota=result.get("quota"), upload_blocked=None)
+    _save_hub_state(_expected_scope=scope, pushed_ingest_id=batch[-1][0])
     return len(batch)
 
 
-def pull_once() -> int:
+def pull_once(poll: dict | None = None) -> int:
+    scope = _ensure_hub_scope()
     hub_state = _hub_state()
     cursor = int(hub_state.get("cursor", 0) or 0)
-    page = _call("GET", f"feed?cursor={cursor}&limit={PULL_BATCH}", max_bytes=FEED_MAX_BYTES, timeout=60)
+    suffix = f"feed?cursor={cursor}&limit={PULL_BATCH}" + ("&include_pending=1" if poll is not None else "")
+    page = _call("GET", suffix, max_bytes=FEED_MAX_BYTES, timeout=60)
+    if poll is not None and isinstance(page.get("pending_devices"), list):
+        poll["devices"] = page["pending_devices"]
+        _state["pending_devices"] = page["pending_devices"]
+    if isinstance(page.get("quota"), dict):
+        _save_quota(page["quota"], scope)
     ops = page.get("ops") or []
     applied = 0
     if ops:
-        result = engine.apply_batch(ops)
+        try:
+            result = engine.apply_batch(ops, hub_scope=scope)
+        except Exception as exc:
+            raise HubError("Could not persist cloud operations; feed cursor kept") from exc
         applied = result.applied
         if applied:
             engine.kick()
     new_cursor = int(page.get("cursor", cursor))
     if new_cursor != cursor or ops:
-        _save_hub_state(cursor=new_cursor, last_pull_at=time.time())
+        _save_hub_state(_expected_scope=scope, cursor=new_cursor, last_pull_at=time.time())
     return applied
 
 
@@ -474,8 +575,10 @@ async def _loop_body() -> bool:
         return False
     _state["linked"] = True
     ctx = engine.context()
-    hub_state = _hub_state() if ctx else {}
     try:
+        if ctx is not None:
+            await asyncio.to_thread(_ensure_hub_scope)
+        hub_state = await asyncio.to_thread(_hub_state) if ctx else {}
         if await asyncio.to_thread(store.get_join, _bootstrap_id()):
             resumed = await _bootstrap_from_hub()
             _state["last_error"] = None
@@ -522,16 +625,25 @@ async def _loop_body() -> bool:
         if _recovery_upload_due or (recovery_wrap.get("stale") and not recovery_wrap.get("hub_tombstoned")):
             await asyncio.to_thread(_upload_recovery)
         if ctx.bootstrap_state == engine.BOOTSTRAP_READY:
-            sent = await asyncio.to_thread(push_once)
-            received = await asyncio.to_thread(pull_once)
+            sent = received = 0
+            errors = []
+            poll = {}
+            try:
+                sent = await asyncio.to_thread(push_once)
+            except HubError as exc:
+                errors.append(str(exc))
+            try:
+                received = await asyncio.to_thread(pull_once, poll)
+            except HubError as exc:
+                errors.append(str(exc))
             try:
                 # Devices that signed in to this account are admitted here.
-                admitted = await asyncio.to_thread(admit_pending_devices)
+                admitted = await asyncio.to_thread(admit_pending_devices, poll.get("devices"))
                 if admitted:
                     sent += await asyncio.to_thread(push_once)
-            except HubError:
-                pass
-            _state["last_error"] = None
+            except HubError as exc:
+                errors.append(str(exc))
+            _state["last_error"] = "; ".join(dict.fromkeys(errors))[:200] or None
             return sent >= PUSH_BATCH or received >= PULL_BATCH
     except HubError as exc:
         _state["last_error"] = str(exc)[:200]

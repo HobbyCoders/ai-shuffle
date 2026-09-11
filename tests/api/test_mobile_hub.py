@@ -573,6 +573,62 @@ def test_binding_deactivation_bypasses_cache(setup, monkeypatch):
     assert failure.value.status_code == 401
 
 
+def test_concurrent_authorization_checks_share_refresh_without_extending_ttl(setup, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    binding = store.get_binding()
+    _verdict_settings(monkeypatch, ttl=20, grace=1800)
+    clock = [100.0]
+    monkeypatch.setattr(account_hub, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    start = threading.Barrier(8)
+    lock = threading.Lock()
+    reads = 0
+
+    def read_binding():
+        nonlocal reads
+        with lock:
+            reads += 1
+            first_wave = reads <= 8
+        if first_wave:
+            start.wait(timeout=5)
+        return binding
+
+    monkeypatch.setattr(store, 'get_binding', read_binding)
+    verify = Mock(side_effect=active)
+    monkeypatch.setattr(account_hub, 'call', verify)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        answers = list(pool.map(lambda _: account_hub.require_active(owner), range(8)))
+    assert all(answer['server_id'] == SERVER for answer in answers)
+    assert verify.call_count == 1
+    clock[0] = 119.0
+    account_hub.require_active(owner)
+    assert verify.call_count == 1
+    assert account_hub._verdicts[account_hub._verdict_key(owner)] == 100.0
+    clock[0] = 120.0
+    account_hub.require_active(owner)
+    assert verify.call_count == 2
+
+
+def test_inflight_verification_cannot_repopulate_cache_after_signout(setup, monkeypatch):
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+
+    def reset_while_inflight(*args, **kwargs):
+        account_hub.reset_verification_cache()
+        return active(*args, **kwargs)
+
+    monkeypatch.setattr(account_hub, 'call', reset_while_inflight)
+    with pytest.raises(HTTPException) as failure:
+        account_hub.require_active(owner)
+    assert failure.value.status_code == 401
+    assert not account_hub._verdicts
+
+
 @pytest.mark.asyncio
 async def test_websocket_handshake_survives_hub_outage(setup, monkeypatch):
     from app.api.ws_auth import authenticate_websocket

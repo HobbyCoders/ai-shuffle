@@ -248,6 +248,281 @@ async def test_quota_exceeded_keeps_lan_sync_and_shows_backlog(workers, fake):
         assert "quota" in (hub._state.get("last_error") or "")
 
 
+@pytest.mark.parametrize("combined", [True, False])
+async def test_idle_poll_combines_admissions_with_legacy_fallback(workers, fake, combined):
+    fake.combined_poll = combined
+    a = workers("a")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        _signed_in(fake, a)
+        hub.register()
+        hub.push_once()
+        hub.pull_once()
+        hub.push_once()
+        fake.calls.clear()
+        await hub._loop_body()
+        routes = [suffix for _, _, suffix in fake.calls]
+        assert len(routes) == (1 if combined else 2)
+        assert routes[0].endswith("&include_pending=1")
+        assert ("network/pending" in routes) is not combined
+
+
+async def test_quota_cooldown_survives_wakes_restart_and_keeps_admitting(workers, fake, monkeypatch):
+    a, b = workers("a"), workers("b")
+    now = [172800.0 + 30]
+    monkeypatch.setattr(hub.time, "time", lambda: now[0])
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        _signed_in(fake, a)
+        hub.register()
+        original_push = fake.push
+        attempts = []
+
+        def blocked(*args):
+            attempts.append(now[0])
+            return {"quota_exceeded": True, "quota_reason": "daily_upload", "quota": {
+                "daily_upload_bytes": 99, "daily_upload_limit": 100, "daily_upload_reset_at": 259200000}}
+
+        monkeypatch.setattr(fake, "push", blocked)
+        monkeypatch.setattr(fake, "_quota", lambda: {"daily_upload_bytes": 99, "daily_upload_limit": 100,
+                                                   "daily_upload_reset_at": 259200000})
+        with pytest.raises(hub.UploadBlocked):
+            hub.push_once()
+    with b.active():
+        _signed_in(fake, b)
+        hub.register()
+    with a.active():
+        _signed_in(fake, a)
+        # 60 wake-triggered passes plus a process restart do not retry uploads.
+        for _ in range(60):
+            hub.kick()
+            await hub._loop_body()
+        hub.reset_for_tests()
+        engine.load_context()
+        await hub._loop_body()
+        assert len(attempts) == 1
+        assert fake.devices[b.device_id]["status"] == "approved"
+        assert len([c for c in fake.calls if "network/feed?" in c[2]]) == 61
+        assert hub.status()["backlog"] > 0
+        now[0] = 259200
+        assert hub.status()["quota"]["daily_upload_bytes"] == 0
+        monkeypatch.setattr(fake, "push", original_push)
+        await hub._loop_body()
+        assert hub._hub_state()["upload_blocked"] is None
+        assert hub.status()["backlog"] == 0
+
+
+async def test_commit_timeout_retries_without_loss_or_duplicates(workers, fake, monkeypatch):
+    from fastapi import HTTPException
+    a = workers("a")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        _signed_in(fake, a)
+        hub.register()
+        original = fake.push
+
+        def commit_then_timeout(*args):
+            original(*args)
+            raise HTTPException(503, "response lost after commit")
+
+        monkeypatch.setattr(fake, "push", commit_then_timeout)
+        with pytest.raises(hub.HubError):
+            hub.push_once()
+        count = len(fake.feed)
+        assert count > 0 and hub.status()["backlog"] == count
+        hub.reset_for_tests()
+        monkeypatch.setattr(fake, "push", original)
+        assert hub.push_once() == count
+        assert len(fake.feed) == count and hub.status()["backlog"] == 0
+
+
+def test_hub_receipts_preserve_lan_relay_and_pending_sequence_holes(workers, fake):
+    from tests.core.network.harness import join
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    with a.active():
+        _signed_in(fake, a)
+        hub.register()
+        hub.push_once()
+    with b.active():
+        _signed_in(fake, b)
+        hub.register()
+        hub.pull_once()
+        hub.push_once()
+    # The origin is offline from the hub; B still relays newly received LAN ops.
+    _set_pref(a, "relay", 1)
+    exchange(a, b)
+    with b.active():
+        _signed_in(fake, b)
+        assert hub.push_once() > 0
+    with a.active():
+        _signed_in(fake, a)
+        hub.pull_once()
+        before = len(fake.calls)
+        hub.push_once()
+        assert len(fake.calls) == before  # A learned B already relayed these.
+        last_ingest = a.sql("SELECT MAX(ingest_id) AS n FROM sync_ops")[0]["n"]
+    _set_pref(a, "gap1", 1)
+    _set_pref(a, "gap2", 2)
+    with a.active():
+        ops = [env for _, env in store.ops_after_ingest(last_ingest)]
+    assert len(ops) >= 2
+    # Cloud can contain a later sequence before its predecessor. Receipt of it
+    # must never acknowledge the missing prefix, even after restart/draining.
+    fake.feed.append(ops[-1])
+    fake.seen.add((ops[-1]["origin_device_id"], ops[-1]["origin_incarnation"], ops[-1]["origin_seq"]))
+    with b.active():
+        _signed_in(fake, b)
+        hub.pull_once()
+        hub.reset_for_tests()
+        engine.apply_batch(ops[:-1])  # LAN delivery drains the pending cloud op.
+        page = store.hub_ops_after_ingest(hub._hub_state()["pushed_ingest_id"], hub._ensure_hub_scope())
+        assert ops[-1] not in [env for _, env in page]
+        assert ops[0] in [env for _, env in page]
+        hub.push_once()
+        assert all(op in fake.feed for op in ops)
+
+
+def test_receipt_and_apply_roll_back_together(workers, fake, monkeypatch):
+    from tests.core.network.harness import join
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    with a.active():
+        database.set_system_setting("tts_model", "atomic-receipt")
+        engine.scan_all()
+        ops = [env for _, env in store.ops_after_ingest(0) if env["collection"] == "system_settings"]
+    with b.active():
+        previous = database.get_system_setting("tts_model")
+        hub._save_hub_state(binding_scope="test-hub")
+        original = store.record_hub_receipt
+
+        def fail_after_receipt(cursor, scope, env):
+            original(cursor, scope, env)
+            raise RuntimeError("simulated storage failure")
+
+        monkeypatch.setattr(store, "record_hub_receipt", fail_after_receipt)
+        with pytest.raises(RuntimeError, match="simulated storage failure"):
+            engine.apply_batch(ops, hub_scope="test-hub")
+        assert b.sql("SELECT * FROM sync_hub_receipts") == []
+        assert database.get_system_setting("tts_model") == previous
+        monkeypatch.setattr(store, "record_hub_receipt", original)
+        engine.load_context()
+        engine.apply_batch(ops, hub_scope="test-hub")
+        assert database.get_system_setting("tts_model") == "atomic-receipt"
+
+
+async def test_upload_quota_does_not_prevent_applying_remote_edits(workers, fake):
+    from tests.core.network.harness import join
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    with a.active():
+        _signed_in(fake, a)
+        hub.register()
+        hub.push_once()
+    with b.active():
+        _signed_in(fake, b)
+        hub.register()
+        hub.pull_once()
+        hub.push_once()
+    _set_pref(b, "remote_while_blocked", 4)
+    with b.active():
+        _signed_in(fake, b)
+        hub.push_once()
+    fake.quota_ops = len(fake.feed)
+    _set_pref(a, "local_backlog", 5)
+    with a.active():
+        _signed_in(fake, a)
+        await hub._loop_body()
+        assert hub.status()["upload_blocked"]["reason"] == "ops"
+        assert hub.status()["backlog"] > 0
+        assert _pref(a, "remote_while_blocked") == 4
+
+
+def test_feed_cursor_is_retained_when_receipt_persistence_fails(workers, fake, monkeypatch):
+    a = workers("a")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        _signed_in(fake, a)
+        hub.register()
+        hub.push_once()
+        original = store.record_hub_receipt
+
+        def fail(*args):
+            raise RuntimeError("disk failure")
+
+        monkeypatch.setattr(store, "record_hub_receipt", fail)
+        with pytest.raises(hub.HubError, match="feed cursor kept"):
+            hub.pull_once()
+        assert hub._hub_state().get("cursor", 0) == 0
+        hub.reset_for_tests()
+        monkeypatch.setattr(store, "record_hub_receipt", original)
+        hub.pull_once()
+        assert hub._hub_state()["cursor"] == len(fake.feed)
+
+
+def test_legacy_quota_response_uses_persistent_bounded_reprobe(workers, fake, monkeypatch):
+    a = workers("a")
+    now = [100.0]
+    monkeypatch.setattr(hub.time, "time", lambda: now[0])
+    fake.quota_ops = 1
+    original = fake.push
+
+    def legacy(*args):
+        result = original(*args)
+        result.pop("quota_reason", None)
+        return result
+
+    monkeypatch.setattr(fake, "push", legacy)
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        database.set_system_setting("tts_model", "legacy-quota")
+        engine.scan_all()
+        _signed_in(fake, a)
+        hub.register()
+        with pytest.raises(hub.UploadBlocked):
+            hub.push_once()
+        assert hub.status()["upload_blocked"]["retry_at"] == 3700
+        hub.reset_for_tests()
+        calls = len(fake.calls)
+        now[0] = 3699
+        with pytest.raises(hub.UploadBlocked):
+            hub.push_once()
+        assert len(fake.calls) == calls
+        fake.quota_ops = 1000
+        now[0] = 3700
+        assert hub.push_once() > 0
+        assert hub.status()["upload_blocked"] is None
+
+
+def test_response_from_previous_binding_cannot_acknowledge_new_network(workers, fake, monkeypatch):
+    a = workers("a")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        _signed_in(fake, a)
+        hub.register()
+        original = fake.push
+
+        def change_binding_after_commit(*args):
+            result = original(*args)
+            fake.servers["current"] = "another-server"
+            hub._ensure_hub_scope()
+            return result
+
+        monkeypatch.setattr(fake, "push", change_binding_after_commit)
+        with pytest.raises(hub.HubError, match="changed during sync"):
+            hub.push_once()
+        assert hub._hub_state()["pushed_ingest_id"] == 0
+        assert hub._hub_state()["registered"] is False
+        with pytest.raises(RuntimeError, match="changed during feed"):
+            engine.apply_batch(fake.feed, hub_scope="old-scope")
+
+
 async def test_recovery_key_restores_a_clean_device_with_every_worker_off(workers, fake):
     a, d = workers("a"), workers("d")
     with a.active():

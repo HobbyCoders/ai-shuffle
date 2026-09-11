@@ -45,6 +45,8 @@ ACCOUNT_PROFILE_ERRORS = {
 # key expiry) still run on every request.
 _VERDICT_LOCK = threading.Lock()
 _verdicts: dict = {}
+_verification_flights: dict = {}
+_verification_generation = 0
 _VERDICT_CAP = 2048
 
 # Badge metadata only: never consulted by authorization or revocation checks.
@@ -136,8 +138,10 @@ def _forget_verdict(key):
 
 def reset_verification_cache():
     """Drop every remembered hub verdict (sign-out, tests)."""
+    global _verification_generation
     with _VERDICT_LOCK:
         _verdicts.clear()
+        _verification_generation += 1
 
 
 def configured_origin():
@@ -291,19 +295,55 @@ def require_active(owner):
     age = _verdict_age(key)
     if age is not None and age < settings.mobile_account_hub_verify_ttl_seconds:
         return binding
-    try:
-        result = call(binding, 'GET', suffix)
-    except HTTPException as exc:
-        if exc.status_code >= 500 and age is not None and age < settings.mobile_account_hub_grace_seconds:
-            logger.warning('%s; keeping device %s authorized on a verdict %.0fs old',
-                           exc.detail, owner['hub_device_id'], age)
+    with _VERDICT_LOCK:
+        confirmed_at = _verdicts.get(key)
+        if confirmed_at is not None and time.monotonic() - confirmed_at < settings.mobile_account_hub_verify_ttl_seconds:
             return binding
-        raise
-    if (result.get('active') is not True or result.get('account_id') != owner['account_id']
-            or result.get('device_id') != owner['hub_device_id']):
-        _forget_verdict(key)
+        generation = _verification_generation
+        flight_key = (generation, _display_identity(binding), key)
+        future = _verification_flights.get(flight_key)
+        leader = future is None
+        if leader:
+            future = Future()
+            _verification_flights[flight_key] = future
+    try:
+        if leader:
+            try:
+                result = call(binding, 'GET', suffix)
+                if (result.get('active') is not True or result.get('account_id') != owner['account_id']
+                        or result.get('device_id') != owner['hub_device_id']):
+                    _forget_verdict(key)
+                    raise HTTPException(status_code=401, detail='Account authorization revoked')
+                if _display_identity(store.get_binding()) != _display_identity(binding):
+                    raise HTTPException(status_code=401, detail='Account authorization revoked')
+                with _VERDICT_LOCK:
+                    if generation != _verification_generation:
+                        raise HTTPException(status_code=401, detail='Account authorization revoked')
+                    # One timestamp for the entire flight; waiters never extend
+                    # the existing verification TTL or outage grace window.
+                    _verdicts[key] = time.monotonic()
+                    if len(_verdicts) > _VERDICT_CAP:
+                        oldest = min(_verdicts, key=_verdicts.get)
+                        _verdicts.pop(oldest, None)
+                future.set_result(None)
+            except BaseException as exc:  # noqa: BLE001 - release waiters even if the leader is interrupted
+                future.set_exception(exc)
+            finally:
+                with _VERDICT_LOCK:
+                    _verification_flights.pop(flight_key, None)
+        future.result(timeout=30)
+    except (HTTPException, TimeoutError) as exc:
+        failure = exc if isinstance(exc, HTTPException) else HTTPException(status_code=503, detail='Account authorization unavailable')
+        if generation != _verification_generation or _display_identity(store.get_binding()) != _display_identity(binding):
+            raise HTTPException(status_code=401, detail='Account authorization revoked') from exc
+        age = _verdict_age(key)
+        if failure.status_code >= 500 and age is not None and age < settings.mobile_account_hub_grace_seconds:
+            logger.warning('%s; keeping device %s authorized on a verdict %.0fs old',
+                           failure.detail, owner['hub_device_id'], age)
+            return binding
+        raise failure
+    if generation != _verification_generation or _display_identity(store.get_binding()) != _display_identity(binding):
         raise HTTPException(status_code=401, detail='Account authorization revoked')
-    _record_verdict(key)
     return binding
 
 
