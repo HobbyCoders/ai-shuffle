@@ -20,7 +20,9 @@ def test_release_downloads_include_desktop_mobile_and_docker():
     assert "| **Mobile** |" in body
     assert "| **Docker** |" in body
     assert "https://hobbycoders.com/desktop" in body
-    assert "Start AI Shuffle.cmd" in body
+    assert "run the installer" in body
+    assert "latest code from main" in body
+    assert "Start AI Shuffle.cmd" not in body
     assert "releases/download/${{ env.VERSION }}/AI-Shuffle-Android.apk" in body
     assert "https://github.com/${{ github.repository }}/pkgs/container/ai-shuffle" in body
 

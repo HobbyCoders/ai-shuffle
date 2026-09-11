@@ -14,15 +14,19 @@ export class Updater {
   private timer: ReturnType<typeof setInterval> | null = null;
   private initialCheck: ReturnType<typeof setTimeout> | null = null;
   private applications: SourceUpdates | null = null;
+  private installedExecutable: string | undefined;
+  private restartArgs: string[] = [];
   private checking = false;
   private downloading = false;
   private installing = false;
   private beforeInstall: () => Promise<void> = async () => {};
   constructor(private readonly releaseUpdates = true) {}
   onBeforeInstall(action: () => Promise<void>): void { this.beforeInstall = action; }
-  useApplications(applications: SourceUpdates): void {
+  useApplications(applications: SourceUpdates, installedExecutable?: string, restartArgs: string[] = []): void {
     if (!this.releaseUpdates || process.env.SHUFFLE_DESKTOP_NO_UPDATES === '1') return;
     this.applications = applications;
+    this.installedExecutable = installedExecutable;
+    this.restartArgs = restartArgs;
     const pending = applications.pendingVersion !== applications.version ? applications.pendingVersion : null;
     this.set({ phase: pending ? 'ready' : 'idle', version: pending?.slice(0, 12) ?? null, error: null, message: null, percent: null });
   }
@@ -58,6 +62,11 @@ export class Updater {
     this.installing = true; this.set({ error: null, message: null });
     try {
       await this.beforeInstall();
+      if (this.installedExecutable) {
+        app.relaunch({ execPath: this.installedExecutable, args: this.restartArgs });
+        app.quit();
+        return;
+      }
       const current = this.applications.version ? await this.applications.application(this.applications.version) : null;
       if (!current) throw new Error('No running source-managed application');
       // Relaunch through Node, not the currently running Electron executable.

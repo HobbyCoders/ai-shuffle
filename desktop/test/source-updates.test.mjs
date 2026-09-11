@@ -132,6 +132,36 @@ test('automatic checks and downloads use the public source transport without acc
  await u.download();assert.equal(requests.length,3);assert(requests.every(args=>args.length===1));await u.select();await u.healthy();await f.release(B);
  await u.check();assert.equal(requests.length,4);assert.equal(f.builds,1);
 });
+
+test('installer baseline checks main without a source directory and transitions to a signed source update',async t=>{
+ const f=await fixture(t);const baseline={revision:A,sequence:99};
+ let u=new SourceUpdates({...f.options,baseline});await u.load();
+ assert.equal(u.version,A);assert.equal(u.hasSourceState,false);
+ await f.release(A);assert.equal((await u.check()).kind,'current');assert.equal(f.builds,0);
+ await f.release(B);assert.equal((await u.check()).kind,'available');await u.download();
+ assert.equal(u.version,A);assert.equal(u.hasSourceState,true);
+ u=new SourceUpdates({...f.options,baseline});await u.load();assert.equal((await u.select()).revision,B);await u.healthy();
+ assert.equal(u.version,B);assert.equal(u.pendingVersion,null);
+ const old=await f.release(A);f.signed=old.signed;
+ // The baseline cannot be activated by the launcher after a failed source boot.
+ await f.release(C);await u.download();await u.select();
+ u=new SourceUpdates({...f.options,baseline});await u.load();assert.equal(u.hasSourceState,true);await assert.rejects(u.select(),/No healthy/);
+});
+
+test('installer baseline rejects source metadata older than its bundled build',async t=>{
+ const f=await fixture(t);await f.release(B);
+ const u=new SourceUpdates({...f.options,baseline:{revision:A,sequence:200}});await u.load();
+ assert.equal((await u.check()).kind,'current');assert.equal(f.builds,0);
+});
+
+test('a newer milestone installer supersedes older healthy source code but never rolls back failed boot state',async t=>{
+ const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();
+ u=new SourceUpdates({...f.options,baseline:{revision:B,sequence:200}});await u.load();await u.useNewerBaseline();
+ assert.equal(u.version,B);assert.equal(u.hasSourceState,false);assert(await fs.stat(path.join(f.root,'versions',A)));
+ await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({active:A,blocked:true}));
+ u=new SourceUpdates({...f.options,baseline:{revision:B,sequence:200}});await u.load();await u.useNewerBaseline();
+ assert.equal(u.hasSourceState,true);await assert.rejects(u.select(),/No healthy/);
+});
 test('public source requests omit credentials and reject off-origin URLs and redirects',async()=>{
  const module={exports:{}};const requests=[];
  vm.runInNewContext(await fs.readFile(new URL('../dist/main/source-auth.js',import.meta.url),'utf8'),{

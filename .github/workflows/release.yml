@@ -50,7 +50,7 @@ jobs:
 
             | Build | Platform | Download / install |
             |-------|----------|--------------------|
-            | **Desktop** | Windows x64 (Intel / AMD) | [Windows source launcher (.zip)](https://hobbycoders.com/desktop) |
+            | **Desktop** | Windows x64 (Intel / AMD) | [Windows installer (.exe)](https://hobbycoders.com/desktop) |
             | **Mobile** | Android 8.0+ | [Signed Android APK](https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/AI-Shuffle-Android.apk) |
             | **Docker** | Linux amd64 | [Container image](https://github.com/${{ github.repository }}/pkgs/container/ai-shuffle) — `ghcr.io/hobbycoders/ai-shuffle:${{ env.DESKTOP_VERSION }}`; see install instructions below |
 
@@ -59,12 +59,14 @@ jobs:
 
             ### Desktop install
 
-            On Windows, unzip the source download and double-click `Start AI Shuffle.cmd`.
-            It downloads the runtimes and builds the application on your computer.
+            On Windows, run the installer. To upgrade an existing copy, keep the same
+            installation location, then use your usual AI Shuffle shortcut.
             No account is required for desktop downloads or updates. The app runs
             its own worker and persistent PostgreSQL database.
-            After that, use Update and restart inside AI Shuffle. Main-branch updates
-            need no installer, application-package build, or tagged release.
+            After that, use Download update and Update and restart inside AI Shuffle.
+            The app fetches the latest code from main and prepares updates in the
+            background. No command prompt, new installer, or tagged release is needed.
+            Stable milestone releases still include a Windows installer.
             Other workers are managed inside the app under Devices.
 
             ### Mobile install
@@ -118,4 +120,10 @@ jobs:
       publish_download: ${{ vars.ANDROID_WORKERS_READY == 'true' }}
     secrets: inherit
 
-  # Windows uses the installer-free launcher and desktop-source.yml.
+  desktop:
+    name: Windows installer
+    needs: create-release
+    uses: ./.github/workflows/desktop-installer.yml
+    with:
+      release_tag: ${{ github.event.inputs.version || github.ref_name }}
+    secrets: inherit

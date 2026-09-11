@@ -17,6 +17,7 @@ import { app, BrowserWindow, nativeTheme, shell } from 'electron';
 import path from 'node:path';
 import { attachNavigationPolicy } from './navigation';
 import { WindowStateStore } from './state';
+import { managedContext } from './managed-context';
 
 export const PARTITION = 'persist:shuffle';
 export const TITLE_BAR_HEIGHT = 52;
@@ -96,6 +97,11 @@ export class MainWindow {
 			}
 		});
 		this.win = win;
+		const installedHost = managedContext()?.host;
+		if (process.platform === 'win32' && installedHost) win.setAppDetails({
+			appId: 'com.hobbycoders.aishuffle.desktop', relaunchCommand: `"${installedHost.executable}"`,
+			relaunchDisplayName: 'AI Shuffle', appIconPath: installedHost.executable,
+		});
 		this.stateStore.track(win);
 		attachNavigationPolicy(
 			win,

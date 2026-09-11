@@ -3,8 +3,8 @@
 # Installers land in desktop/release/. The update metadata files
 # (latest.yml, latest-mac.yml, latest-linux.yml) are generated next to them
 # because a publish provider is configured, even when `--publish never` is
-# used. Windows runtime updates are published on desktop-runtime; signed
-# application packages are published separately on the app's v* release.
+# used. Stable Windows installers ship on v* releases; the installed app
+# independently consumes signed main-branch source updates from the hub.
 appId: com.hobbycoders.aishuffle.desktop
 productName: AI Shuffle
 copyright: Copyright © 2026 HobbyCoders

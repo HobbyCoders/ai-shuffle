@@ -50,6 +50,17 @@ test('build errors retain the available version and retry without another check'
  await updater.download(); assert.equal(updater.current.phase, 'ready'); assert.equal(updater.current.error, null); assert.equal(attempts, 2);
 });
 
+test('installed app updates restart the existing EXE without a console launcher or baseline source directory', async () => {
+ const { updater, calls } = fixture();
+ updater.useApplications(source({ application: async () => assert.fail('Installer baseline is not a source directory') }), 'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ updater.onBeforeInstall(async () => calls.push('stopped'));
+ await updater.check(); await updater.download(); await updater.install();
+ assert.equal(calls[0], 'stopped');
+ assert.equal(calls[1].execPath, 'C:/Programs/AI Shuffle/AI Shuffle.exe');
+ assert.deepEqual(Array.from(calls[1].args), []);
+ assert.equal(calls[2], 'quit');
+});
+
 test('shutdown failures retain staged updates for direct install retry without rebuilding', async () => {
  const { updater, calls } = fixture(); let builds = 0; let attempts = 0;
  updater.useApplications(source({ download: async () => { builds++; return ready; } }));

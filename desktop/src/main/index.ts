@@ -11,6 +11,8 @@ import { QuitGuard } from './quit';
 import { showCloseDialog } from './close-dialog';
 import { existsSync, mkdirSync } from 'node:fs';
 import { managedContext } from './managed-context';
+import { installedContext } from './installed-entry';
+import { installedLaunchArgs } from './installed-host';
 import path from 'node:path';
 import { registerIpc, type DesktopState, type PostgresStatus, type WorkerControl } from './ipc';
 import { installMenu } from './menu';
@@ -56,14 +58,16 @@ async function main(): Promise<void> {
 	const window = new MainWindow(userData, isolation ? identity.name : 'AI Shuffle', !isolation);
 	const updater = new Updater(identity.updates);
 	const managed = managedContext();
-	const applications = managed?.updates ?? null;
-	if (applications) updater.useApplications(applications);
+	const applications = managed?.updates ?? installedContext()?.updates ?? null;
+	const installedExecutable = managed?.host?.executable ?? installedContext()?.executable;
+	if (applications) updater.useApplications(applications, installedExecutable, installedLaunchArgs(process.argv.slice(1)).filter(arg => arg.startsWith('--')));
 
 	app.on('second-instance', () => window.focus());
 	app.on('window-all-closed', () => {
 		if (process.platform !== 'darwin') app.quit();
 	});
 	if (isolation) { /* Isolated profiles never replace the normal app’s URL handler. */ }
+	else if (installedExecutable) app.setAsDefaultProtocolClient(identity.protocol, installedExecutable);
 	else if (managed) app.setAsDefaultProtocolClient(identity.protocol, managed.application.node, [path.join(managed.application.desktopDir, 'scripts/bootstrap.mjs'), '--root', managed.root]);
 	else if (app.isPackaged) app.setAsDefaultProtocolClient(identity.protocol);
 

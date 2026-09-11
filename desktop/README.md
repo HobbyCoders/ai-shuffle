@@ -5,15 +5,22 @@ UI in a native window, for Windows x64, Apple Silicon macOS and Linux x64. It
 is the desktop counterpart of the Android app: the same UI, served by the
 worker the app starts, so the two never drift apart.
 
-## Windows distribution: no installer
+## Windows installation and updates
 
-Download the Windows source ZIP at <https://hobbycoders.com/desktop>, unzip it,
-and double-click `Start AI Shuffle.cmd`. No account is needed.
-The launcher adds a Start menu shortcut, downloads
-Python, Node, PostgreSQL and Electron, and builds the frontend, tools and desktop
-JavaScript locally. The first launch can take several minutes and needs internet
-access. Runtime files and dependency caches live under
-`%LOCALAPPDATA%/AI Shuffle Source`; existing user data stays in its current locations.
+Download the Windows installer at <https://hobbycoders.com/desktop> and run it.
+For an existing installation, keep the same installation location. Continue using
+your normal AI Shuffle shortcut. The installer includes a ready-to-run app,
+Python, Node and PostgreSQL; startup does not need to build or download code.
+No account is needed for downloads or updates.
+
+Stable milestones include an NSIS installer, built by `desktop-installer.yml`.
+Between releases, the installed app downloads and builds signed code from `main`
+through its in-app update controls. No new tag or installer build is required.
+Build processes run with hidden consoles and show progress inside the app.
+The installed EXE remains the shortcut and restart target. It selects the updated
+code and matching runtimes while preserving the original Electron profile,
+browser session, settings and PostgreSQL directory. Source versions and caches
+live in the existing desktop profile's `updates` subdirectory.
 
 Updates follow `main`, not tagged releases. The small `desktop-source.yml` job
 stores GitHub's source ZIP as an immutable asset in the private `desktop-sources`
@@ -43,12 +50,19 @@ The repository stays private, but each published desktop source ZIP is available
 to anyone through the hub. `source-auth.ts` is now a credential-free transport;
 signature verification and local building remain independent of hosting.
 
-The packaging commands below remain for legacy/manual development builds; normal
-Windows distribution no longer builds or publishes NSIS installers. Existing
-installer-based versions need to move to this launcher once, because those older
-binaries cannot discover the new source-update protocol themselves.
+Existing installer-based versions need this installer upgrade once to gain the
+source update protocol. They do not need a separate source ZIP or console launcher.
+The old `Start AI Shuffle.cmd` entry remains a development/testing tool.
 
 ## Testing without stopping the normal desktop
+
+`verify-installed-desktop.mjs` runs on fresh Windows CI only. It installs the real
+NSIS package, completes onboarding, reinstalls over the same profile, downloads
+and builds the real signed main archive through IPC, restarts through the installed
+EXE, and checks that setup and data survive. Only the disposable installed copy's
+baseline revision is changed to simulate an older release; signatures, the feed,
+builds, application code and restart behavior are real. The shipped installer is
+never modified by this test.
 
 The source launcher supports `--isolated --root <separate-folder> --port 18080
 --protected-port 18081`. The profile stores its port choices and keeps its own
@@ -98,11 +112,9 @@ hosted public downloads or GitHub download permissions.
   on the right. Feature pages lend their header actions to the strip through
   `$lib/stores/page-header.svelte`.
 - Native menu with the usual accelerators, native notifications, window
-  placement that survives restarts, and auto-update through electron-updater,
-  fed by the GitHub release for the app's `v*` tag.
-- Settings → Downloads shows the installed desktop version and update status,
-  with Check for updates and Restart and update actions. Updates download in
-  the background; preview and development builds show that updates are disabled.
+  placement that survives restarts, and signed source updates from `main`.
+- The sidebar update button checks, downloads and prepares updates, then offers
+  Update and restart. Preview builds keep their updates disabled.
 
 Other workers (a homelab box, a remote managed worker) are managed inside the
 web UI under Devices, as on the web and on Android. The app itself only ever

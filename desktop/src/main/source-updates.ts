@@ -16,6 +16,8 @@ export interface SourceOptions {
   root: string;
   publicKey: string;
   bootstrapNode: string;
+  /** Trusted revision included in the installer, before its first source update. */
+  baseline?: { revision: string; sequence: number };
   fetch?: typeof fetch;
   build?: (source: string, stage: string, revision: string, progress: (message: string) => void) => Promise<InstalledBuild>;
 }
@@ -51,8 +53,9 @@ export class SourceUpdates {
   private writes: Promise<void> = Promise.resolve();
   private readonly request: typeof fetch;
   constructor(readonly options: SourceOptions) { this.request = options.fetch ?? ((url) => publicSourceFetch(String(url))); }
-  get version(): string | null { return this.running ?? this.state.active ?? null; }
+  get version(): string | null { return this.running ?? this.state.active ?? this.options.baseline?.revision ?? null; }
   get pendingVersion(): string | null { return this.state.pending ?? null; }
+  get hasSourceState(): boolean { return !!(this.state.active || this.state.pending || this.state.blocked); }
   private directory(revision: string): string {
     if (!REVISION.test(revision)) throw new Error('Invalid installed revision');
     return path.join(this.options.root, 'versions', revision);
@@ -76,6 +79,20 @@ export class SourceUpdates {
     // A crashed first boot may already have migrated the database. Never roll
     // application code back automatically over that possibly changed database.
     if (this.state.booting) await this.failed();
+  }
+  /** A newer milestone installer may supersede older healthy source code. */
+  async useNewerBaseline(): Promise<void> {
+    const baseline = this.options.baseline;
+    if (!baseline || this.state.blocked || this.state.booting) return;
+    const revisions = [this.state.active, this.state.pending].filter((value): value is string => !!value);
+    if (!revisions.length) return;
+    for (const revision of revisions) {
+      const manifest = verifySourceManifest(await fs.readFile(path.join(this.directory(revision), 'release.json'), 'utf8'), this.options.publicKey);
+      if (manifest.sequence >= baseline.sequence) return;
+    }
+    this.state.previous = this.state.active ?? this.state.previous;
+    delete this.state.active; delete this.state.pending;
+    await this.save();
   }
   private async lock(): Promise<() => Promise<void>> {
     const file = path.join(this.options.root, 'update.lock');
@@ -122,7 +139,9 @@ export class SourceUpdates {
       const installed = this.state.pending ?? this.version;
       if (manifest.revision === installed) return { kind: this.state.pending ? 'ready' : 'current', version: this.state.pending?.slice(0, 12) };
       if (installed) {
-        const old = verifySourceManifest(await fs.readFile(path.join(this.directory(installed), 'release.json'), 'utf8'), this.options.publicKey);
+        const old = installed === this.options.baseline?.revision && !this.state.active
+          ? this.options.baseline
+          : verifySourceManifest(await fs.readFile(path.join(this.directory(installed), 'release.json'), 'utf8'), this.options.publicKey);
         if (manifest.sequence <= old.sequence) return { kind: 'current' };
       }
       if (this.state.failed?.includes(manifest.revision)) throw new Error('This revision failed to start. Check again after a newer main-branch update. Previous files and data have been retained.');
