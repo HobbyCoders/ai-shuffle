@@ -28,6 +28,20 @@ class EmulatorReadinessTest(unittest.TestCase):
             self.assertEqual("other_error", readiness(LAUNCHER_ANR.replace("com.android.launcher3", package), UNLOCKED, AWAKE))
         self.assertEqual("other_error", readiness(LAUNCHER_ANR.replace("Application Not Responding", "Application Error"), UNLOCKED, AWAKE))
 
+    def test_google_api36_launcher_is_ready_but_not_anr_recoverable(self):
+        pixel = HOME.replace("com.android.launcher3", "com.google.android.apps.nexuslauncher")
+        self.assertEqual("ready", readiness(pixel, UNLOCKED, AWAKE))
+        self.assertEqual("waiting", readiness(pixel, "mInputRestricted=true", AWAKE))
+        self.assertEqual("waiting", readiness(pixel, UNLOCKED, "mWakefulness=Asleep"))
+        self.assertEqual("waiting", readiness(pixel.replace("nexuslauncher/", "nexuslauncher.other/"), UNLOCKED, AWAKE))
+        self.assertEqual("waiting", readiness(pixel + HOME, UNLOCKED, AWAKE))
+        self.run_preparation([pixel])
+        self.assertFalse(any("force-stop" in command for command in self.commands))
+        pixel_anr = LAUNCHER_ANR.replace("com.android.launcher3", "com.google.android.apps.nexuslauncher")
+        with self.assertRaisesRegex(RuntimeError, "refusing recovery"):
+            self.run_preparation([pixel_anr])
+        self.assertFalse(any("force-stop" in command for command in self.commands))
+
     def test_full_dump_with_historical_focus_is_not_ready(self):
         self.assertEqual("waiting", readiness(HOME + LAUNCHER_ANR, UNLOCKED, AWAKE))
 

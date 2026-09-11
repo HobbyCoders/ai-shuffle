@@ -9,6 +9,7 @@ import com.journeyapps.barcodescanner.DecoratedBarcodeView
 class QrCaptureActivity : CaptureActivity() {
     override fun initializeContent(): DecoratedBarcodeView {
         setContentView(R.layout.activity_qr_capture)
+        protectSystemInsets()
         findViewById<Button>(R.id.scannerBack).apply {
             com.hobbycoders.aishuffle.tools.guardConsentTouch(this)
             setOnClickListener {

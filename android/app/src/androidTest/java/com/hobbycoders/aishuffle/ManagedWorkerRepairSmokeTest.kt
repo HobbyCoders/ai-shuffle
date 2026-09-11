@@ -194,8 +194,12 @@ class ManagedWorkerRepairSmokeTest {
                 try {
                     form().use { scenario ->
                         lateinit var task: ActivityManager.AppTask
+                        val destroyed = CountDownLatch(1)
                         scenario.onActivity { activity ->
                             task = activity.getSystemService(ActivityManager::class.java).appTasks.single { it.taskInfo.taskId == activity.taskId }
+                            activity.lifecycle.addObserver(androidx.lifecycle.LifecycleEventObserver { _, event ->
+                                if (event == Lifecycle.Event.ON_DESTROY) destroyed.countDown()
+                            })
                         }
                         submit(); assertTrue(started.await(5, TimeUnit.SECONDS))
                         scenario.moveToState(Lifecycle.State.CREATED)
@@ -210,7 +214,9 @@ class ManagedWorkerRepairSmokeTest {
                         assertTrue("Held repair response was not released", responseBuilt.await(5, TimeUnit.SECONDS))
                         // Resumption must close the stale form, so do not require a stable RESUMED state.
                         task.moveToFront()
-                        waitFor("Repair form did not close after its identity changed") { scenario.state == Lifecycle.State.DESTROYED }
+                        // ActivityScenario.state throws during the transient STARTED stage on API 36.
+                        // Observe actual destruction instead; never turn a transition into success.
+                        assertTrue("Repair form did not close after its identity changed", destroyed.await(8, TimeUnit.SECONDS))
                         instrumentation.waitForIdleSync()
                         assertEquals(expectedServer, ServerStore.get(context).getById(server.id))
                         assertEquals(other, ServerStore.get(context).getById(other.id))

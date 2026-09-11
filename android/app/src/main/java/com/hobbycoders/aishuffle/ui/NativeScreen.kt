@@ -40,6 +40,7 @@ abstract class NativeScreen : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         setContentView(R.layout.activity_native_screen)
+        protectSystemInsets()
         content = findViewById(R.id.screenContent)
         status = findViewById(R.id.screenStatus)
         toolbar = findViewById(R.id.screenToolbar)

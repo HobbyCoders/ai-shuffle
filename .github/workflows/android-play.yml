@@ -89,7 +89,8 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          # Robolectric's Android 16 runtime requires Java 21; app bytecode stays 17.
+          java-version: '21'
           cache: gradle
       - uses: android-actions/setup-android@v3
       - uses: actions/setup-node@v4

@@ -18,7 +18,6 @@ import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.widget.PopupMenu
 import androidx.core.content.ContextCompat
-import androidx.core.view.WindowCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.ScriptHandler
@@ -276,7 +275,7 @@ class ChatActivity : NativeScreen() {
         status.doAfterTextChanged { status.visibility = if (it.isNullOrBlank()) View.GONE else View.VISIBLE }
         // Keep system bars and the keyboard outside the chat viewport. The WebView
         // gets all remaining height, with no surrounding ScrollView or blank status row.
-        WindowCompat.setDecorFitsSystemWindows(window, true)
+        // NativeScreen applies insets to the content container, even after replacing its child.
         val shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setBackgroundColor(color(R.color.surface))
             addView(toolbar, LinearLayout.LayoutParams(-1, dp(56)))

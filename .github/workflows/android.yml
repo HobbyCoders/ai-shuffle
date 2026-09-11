@@ -77,11 +77,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          # Robolectric's Android 16 runtime requires Java 21; app bytecode stays 17.
+          java-version: '21'
           cache: gradle
 
       - name: Set up Android SDK
@@ -187,7 +188,15 @@ jobs:
           if-no-files-found: error
 
   android-ui:
-    name: Android emulator verification
+    name: Android emulator verification (API ${{ matrix.api }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - api: 34
+            target: default
+          - api: 36
+            target: google_apis
     needs: build
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
@@ -213,18 +222,18 @@ jobs:
       # A separate failing step is necessary to genuinely stop before launch.
       - name: Prepare AVD and check disk space before emulator startup
         run: |
-          sdkmanager --install platform-tools 'platforms;android-34' emulator 'system-images;android-34;default;x86_64'
+          sdkmanager --install platform-tools 'platforms;android-${{ matrix.api }}' emulator 'system-images;android-${{ matrix.api }};${{ matrix.target }};x86_64'
           export ANDROID_AVD_HOME="$HOME/.android/avd"
           mkdir -p "$ANDROID_AVD_HOME"
-          avdmanager create avd --force --name test --package 'system-images;android-34;default;x86_64' --device pixel_6 <<< no
+          avdmanager create avd --force --name test --package 'system-images;android-${{ matrix.api }};${{ matrix.target }};x86_64' --device pixel_6 <<< no
           printf '\ndisk.dataPartition.size=6144M\n' >> "$ANDROID_AVD_HOME/test.avd/config.ini"
           bash ci/emulator-diagnostics.sh before-boot
           bash ci/emulator-storage.sh check
       - name: Exercise native onboarding and tool permissions
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 34
-          target: default
+          api-level: ${{ matrix.api }}
+          target: ${{ matrix.target }}
           arch: x86_64
           profile: pixel_6
           working-directory: android
@@ -247,7 +256,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-ui-verification
+          name: android-ui-verification-api-${{ matrix.api }}
           path: |
             ${{ runner.temp }}/android-emulator/
             android/app/build/reports/androidTests/

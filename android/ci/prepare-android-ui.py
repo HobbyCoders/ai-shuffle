@@ -26,7 +26,13 @@ def readiness(displays: str, policy: str, power: str) -> str:
         return "launcher_anr"
     if "Application Not Responding:" in focus or "Application Error:" in focus:
         return "other_error"
-    launcher_focused = re.fullmatch(r"Window\{[^}]+ u0 " + re.escape(LAUNCHER) + r"/[^}]+\}", focus)
+    # AOSP API 34 uses Quickstep; Google's API 36 image uses Pixel Launcher.
+    # Recognize only these exact home packages. ANR recovery above remains
+    # restricted to the known Quickstep first-boot issue, never a Pixel/app ANR.
+    launcher_focused = any(
+        re.fullmatch(r"Window\{[^}]+ u0 " + re.escape(package) + r"/[^}]+\}", focus)
+        for package in (LAUNCHER, "com.google.android.apps.nexuslauncher")
+    )
     awake = re.search(r"^\s*mWakefulness=Awake\s*$", power, re.MULTILINE)
     unlocked = re.search(r"^\s*mInputRestricted=false\s*$", policy, re.MULTILINE)
     return "ready" if launcher_focused and awake and unlocked else "waiting"

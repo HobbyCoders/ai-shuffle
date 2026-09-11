@@ -10,6 +10,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.hobbycoders.aishuffle.R
+import com.hobbycoders.aishuffle.ui.protectSystemInsets
 import com.hobbycoders.aishuffle.databinding.ActivityVoiceCallBinding
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -35,6 +36,7 @@ class VoiceCallActivity : AppCompatActivity() {
         if (!VoiceCallState.isActive) VoiceCallState.reset()
         binding = ActivityVoiceCallBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        protectSystemInsets()
 
         binding.muteButton.setOnClickListener { VoiceCallService.toggleMute(this) }
         binding.hangupButton.setOnClickListener {

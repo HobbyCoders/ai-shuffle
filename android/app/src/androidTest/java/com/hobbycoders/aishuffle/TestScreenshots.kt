@@ -36,6 +36,36 @@ internal object TestScreenshots {
             }
             assertTrue("Windows did not commit a rendered frame for $name", rendered.await(5, TimeUnit.SECONDS))
         }
+        // Verify the actual window-produced insets on every captured Shuffle surface
+        // (native forms, chat, QR and voice), including rotation and keyboard captures.
+        if (android.os.Build.VERSION.SDK_INT >= 35) instrumentation.runOnMainSync {
+            val activities = androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance()
+                .getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED)
+            activities.filter { it is com.hobbycoders.aishuffle.ui.NativeScreen ||
+                it is com.hobbycoders.aishuffle.ui.QrCaptureActivity ||
+                it is com.hobbycoders.aishuffle.voice.VoiceCallActivity }.forEach { activity ->
+                val content = activity.findViewById<android.view.ViewGroup>(android.R.id.content)
+                val child = content.getChildAt(0)
+                val insets = requireNotNull(androidx.core.view.ViewCompat.getRootWindowInsets(content))
+                val safe = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars() or
+                    androidx.core.view.WindowInsetsCompat.Type.displayCutout() or
+                    androidx.core.view.WindowInsetsCompat.Type.ime())
+                val position = IntArray(2).also { child.getLocationInWindow(it) }
+                val decor = activity.window.decorView
+                val light = activity.resources.configuration.uiMode and
+                    android.content.res.Configuration.UI_MODE_NIGHT_MASK != android.content.res.Configuration.UI_MODE_NIGHT_YES
+                val appearance = requireNotNull(activity.window.insetsController).systemBarsAppearance
+                assertEquals("$name status icon contrast", light,
+                    appearance and android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS != 0)
+                assertEquals("$name navigation icon contrast", light,
+                    appearance and android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS != 0)
+                assertTrue("$name overlaps left system inset", position[0] >= safe.left)
+                assertTrue("$name overlaps status bar/cutout", position[1] >= safe.top)
+                assertTrue("$name overlaps right system inset", position[0] + child.width <= decor.width - safe.right)
+                assertTrue("$name overlaps navigation bar/keyboard", position[1] + child.height <= decor.height - safe.bottom)
+                assertTrue("$name lost its safe viewport", child.width > 0 && child.height > 0)
+            }
+        }
         val automation = instrumentation.uiAutomation
         var image = automation.takeScreenshot()
         repeat(2) {
