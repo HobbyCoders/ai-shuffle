@@ -6,15 +6,25 @@ on:
       release_tag:
         required: true
         type: string
+      candidate_run_id:
+        required: false
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       release_tag:
         description: Existing stable release to receive the verified Windows installer (vX.Y.Z)
         required: true
         type: string
+      candidate_run_id:
+        description: Reuse a private installer candidate after a verification-only fix (optional run ID)
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: desktop-installer-${{ inputs.release_tag }}
@@ -22,6 +32,7 @@ concurrency:
 
 jobs:
   build:
+    if: inputs.candidate_run_id == ''
     runs-on: blacksmith-2vcpu-windows-2025
     timeout-minutes: 50
     env:
@@ -57,24 +68,59 @@ jobs:
       - name: Build stable Windows installer
         working-directory: desktop
         run: npm run dist -- --win nsis --x64 "--config.extraMetadata.version=$env:DESKTOP_VERSION"
-      - name: Verify installed app, upgrade, and in-app update support
+      - name: Collect private installer candidate
         run: |
           $installer = @(Get-ChildItem desktop/release -Filter '*.exe' -File)
           if ($installer.Count -ne 1) { throw 'Expected exactly one installer' }
-          node desktop/scripts/verify-installed-desktop.mjs $installer[0].FullName (Join-Path $env:RUNNER_TEMP 'installed-desktop-evidence')
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item desktop/worker/desktop-build.json desktop/release/desktop-build.json
           $hash = (Get-FileHash -Algorithm SHA256 $installer[0].FullName).Hash.ToLowerInvariant()
           "$hash  $($installer[0].Name)" | Set-Content -Encoding ascii desktop/release/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-stable-installer
+          name: windows-installer-candidate
           path: |
             desktop/release/*.exe
             desktop/release/SHA256SUMS
             desktop/release/desktop-build.json
           compression-level: 0
           if-no-files-found: error
+          retention-days: 1
+
+  verify:
+    needs: build
+    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: blacksmith-2vcpu-windows-2025
+    timeout-minutes: 35
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer-candidate
+          path: installer
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id || github.run_id }}
+      - name: Verify installed app, upgrade, and in-app update support
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') { throw 'Stable vX.Y.Z tag required' }
+          $installer = @(Get-ChildItem installer -Filter '*.exe' -File)
+          if ($installer.Count -ne 1) { throw 'Expected exactly one installer' }
+          if ($installer[0].Name -ne "AI-Shuffle-Desktop-$($env:RELEASE_TAG.Substring(1))-win-x64.exe") { throw 'Candidate release version mismatch' }
+          $hash = (Get-FileHash -Algorithm SHA256 $installer[0].FullName).Hash.ToLowerInvariant()
+          if ((Get-Content installer/SHA256SUMS -Raw).Trim() -ne "$hash  $($installer[0].Name)") { throw 'Candidate checksum mismatch' }
+          node desktop/scripts/verify-installed-desktop.mjs $installer[0].FullName (Join-Path $env:RUNNER_TEMP 'installed-desktop-evidence')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-stable-installer
+          path: installer/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -83,7 +129,7 @@ jobs:
           if-no-files-found: ignore
 
   publish:
-    needs: build
+    needs: verify
     runs-on: ubuntu-latest
     environment: account-hub-production
     steps:

@@ -30,6 +30,7 @@ async function close(){if(page&&!page.isClosed())await page.evaluate(()=>window.
  if(browser)await browser.close().catch(()=>{});browser=null;page=null;}
 async function auth(){return page.evaluate(async()=>{const r=await fetch('/api/v1/auth/status');const s=await r.json();return {setup:s.setup_required,onboarding:s.onboarding_complete};});}
 async function screenshot(name){await page.screenshot({path:path.join(output,name+'.png'),mask:[page.locator('code, textarea, input')]});}
+async function showSidebar(){const button=page.getByRole('button',{name:'Show sidebar',exact:true});if(await button.isVisible())await button.click();}
 try{
  await installPreview(installer,install,()=>console.log('Installing verified Windows package…'));
  assert(await exists(exe));
@@ -44,7 +45,7 @@ try{
  await page.getByRole('button',{name:'Continue without an account',exact:true}).click();
  const workspace=page.getByLabel('Default workspace folder');if(await workspace.count())await workspace.fill(path.join(temporary,'workspace'));
  await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Finish without a provider',exact:true}).click();
- await page.getByRole('button',{name:'More',exact:true}).waitFor();
+ await page.waitForURL(url=>url.origin==='http://127.0.0.1:8000'&&url.pathname!=='/setup');
  const expected=await auth();assert.equal(expected.setup,false);assert.equal(expected.onboarding,true);
  await fs.writeFile(path.join(profile,'installer-preservation.txt'),'keep existing user data');
  await screenshot('installed-app');await close();passed('Normal installer starts bundled app and enables in-app main updates');
@@ -56,6 +57,7 @@ try{
  // signed main archive are untouched. This forces a real first source update.
  await fs.writeFile(buildPath,JSON.stringify({revision:'0'.repeat(40),sequence:1}));
  await launch();await page.evaluate(()=>window.shuffleDesktop.updates.check());
+ await showSidebar();
  await page.getByRole('button',{name:'Download update',exact:true}).waitFor({timeout:45000});
  await page.getByRole('button',{name:'Download update',exact:true}).click();
  await until(async()=>{const state=await page.evaluate(()=>window.shuffleDesktop.updates.getState());if(state.phase==='error')throw Error(state.error);return state.phase==='ready';},'Main update did not finish building',1200000);
