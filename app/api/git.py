@@ -150,14 +150,15 @@ async def get_git_status(
     Get git repository status for a project or worktree.
 
     Returns current branch, uncommitted changes, and sync status with remote.
-    When worktree_id is provided, returns status for the worktree directory.
+    worktree_id or session_id selects the session's own checkout directory.
     """
     check_project_access(request, project_id)
 
-    # During startup, the project record may not exist yet (race between
-    # frontend polling and project creation).  Return an empty status
-    # instead of 404 so the poller can retry silently.
-    if worktree_id:
+    # A v2 branch session has session_id but no legacy worktree_id. Resolve
+    # its own checkout, just like diff-stats and the other git endpoints.
+    # Only project-wide startup polls may fall back to an empty status when
+    # the project record has not been created yet.
+    if worktree_id or session_id:
         working_dir = await get_working_dir_async(project_id, worktree_id, session_id)
     else:
         working_dir = get_project_path(project_id, allow_missing=True)
