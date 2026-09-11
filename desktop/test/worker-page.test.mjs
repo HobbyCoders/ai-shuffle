@@ -32,33 +32,14 @@ function page({ state = { phase: 'starting', postgres: { phase: 'starting' } }, 
  return { el: (id) => elements.get(id), calls, timers, emit: (state) => onState(state), log: () => onLog(), bridge };
 }
 
-test('startup failures still offer in-app update and restart with progress and retryable errors', async () => {
- let listener; const calls = [];
- const updates = {
-  getState: async () => ({ phase: 'idle' }), onState: cb => { listener = cb; },
-  check: () => calls.push('check'), download: () => calls.push('download'), install: () => calls.push('install')
- };
- const p = page({ state: { phase: 'failed', error: 'Application download interrupted' }, updates }); await tick();
- assert.equal(p.el('updates').hidden, false);
- p.el('update-check').listeners.click(); assert.deepEqual(calls, ['check']);
- listener({ phase: 'available', version: '1.1.0' });
- assert.equal(p.el('update-check').textContent, 'Download update'); assert.equal(p.el('update-install').hidden, true);
- p.el('update-check').listeners.click(); assert.deepEqual(calls, ['check', 'download']);
- listener({ phase: 'downloading', percent: 42 });
- assert.match(p.el('update-status').textContent, /42%/); assert.equal(p.el('update-check').disabled, true);
- listener({ phase: 'error', version: '1.1.0', error: 'Network unavailable' });
- assert.equal(p.el('update-status').textContent, 'Network unavailable'); assert.equal(p.el('update-check').disabled, false);
- assert.equal(p.el('update-check').textContent, 'Download update');
- p.el('update-check').listeners.click();
- listener({ phase: 'ready', version: '1.1.0' });
- assert.equal(p.el('update-install').hidden, false);
- p.el('update-install').listeners.click(); assert.deepEqual(calls, ['check', 'download', 'download', 'install']);
- listener({ phase: 'ready', version: '1.1.0', error: 'Database did not stop' });
- assert.match(p.el('update-status').textContent, /Database did not stop/); assert.equal(p.el('update-install').hidden, false);
- p.el('update-install').listeners.click(); assert.equal(calls.at(-1), 'install');
- listener({ phase: 'unsupported' }); assert.equal(p.el('updates').hidden, true);
+test('startup remains independent of the update service, including startup failures', async () => {
+ const updates = new Proxy({}, { get() { assert.fail('splash must not access the update service'); } });
+ const p = page({ updates }); await tick();
+ assert.equal(p.el('status').dataset.mode, 'starting');
+ p.emit({ phase: 'failed', error: 'Local startup failed' });
+ assert.equal(p.el('status-error').textContent, 'Local startup failed');
+ assert.equal(p.el('restart').hidden, false);
 });
-
 test('ordinary startup is quiet, reflects readiness, and loads logs only when requested', async () => {
  const p = page(); await tick();
  assert.equal(p.el('status').dataset.mode, 'starting');

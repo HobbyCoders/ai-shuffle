@@ -39,31 +39,6 @@
  }
  $('version').textContent = `AI Shuffle Desktop ${desktop.version}`;
 
- if (desktop.updates) {
-  let updateRevision = 0;
-  let downloadUpdate = false;
-  function renderUpdate(state) {
-   downloadUpdate = state.phase === 'available' || (state.phase === 'error' && !!state.version);
-   $('update-check').textContent = downloadUpdate ? 'Download update' : 'Check for updates';
-   $('updates').hidden = state.phase === 'unsupported';
-   $('update-check').disabled = ['checking', 'downloading', 'ready'].includes(state.phase);
-   $('update-install').hidden = state.phase !== 'ready';
-   $('update-status').textContent = state.phase === 'ready' && state.error ? `${state.error} Try restarting again.`
-    : state.phase === 'checking' ? 'Checking for application updates…'
-    : state.phase === 'available' ? `Update ${state.version} is available. Download it to prepare for restart.`
-    : state.phase === 'downloading' ? state.message || `Preparing update${state.percent === null ? '' : `: ${state.percent}%`}…`
-    : state.phase === 'ready' ? `Update ${state.version} is ready. Restart when your work is finished.`
-    : state.phase === 'error' ? state.error || 'Could not check for updates. Try again.'
-    : 'Updates come from main and build on this computer. Your data stays here.';
-  }
-  desktop.updates.onState(state => { updateRevision++; renderUpdate(state); });
-  const initialRevision = updateRevision;
-  void desktop.updates.getState().then(state => { if (initialRevision === updateRevision) renderUpdate(state); }).catch(() => {});
-  $('update-check').addEventListener('click', () => void (downloadUpdate ? desktop.updates.download() : desktop.updates.check()));
-  $('update-install').addEventListener('click', () => desktop.updates.install());
- }
-
-
  function describePostgres(pg) {
   if (!pg) return 'Waiting for database status.';
   const phases = { idle: 'Waiting to start.', starting: 'Starting…', ready: 'Running on this computer.', stopping: 'Stopping…', stopped: 'Stopped.', failed: 'Could not start.' };
