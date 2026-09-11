@@ -21,7 +21,7 @@ export interface SourceOptions {
   fetch?: typeof fetch;
   build?: (source: string, stage: string, revision: string, progress: (message: string) => void) => Promise<InstalledBuild>;
 }
-export interface InstalledBuild extends BuiltSource { runtimeKey: string }
+export interface InstalledBuild extends BuiltSource { runtimeKey: string; layout?: 2 }
 export interface SourceApplication {
   revision: string;
   directory: string;
@@ -177,7 +177,7 @@ export class SourceUpdates {
       if (this.options.build) built = await this.options.build(source, stage, manifest.revision, message);
       else {
         const native = await prepareNativeRuntime(source, this.options.root, this.options.bootstrapNode, message);
-        built = { ...await buildSource({ source, server: path.join(stage, 'server'), cache: path.join(this.options.root, 'dependencies', native.key), runtime: native.runtime, revision: manifest.revision, log: path.join(this.options.root, 'build.log'), progress: message }), runtimeKey: native.key };
+        built = { ...await buildSource({ source, server: path.join(stage, 'server'), cache: path.join(this.options.root, 'dependencies', native.key.slice(0, 24)), runtime: native.runtime, revision: manifest.revision, log: path.join(this.options.root, 'build.log'), progress: message }), runtimeKey: native.key, layout: 2 };
       }
       await fs.writeFile(path.join(stage, 'build.json'), JSON.stringify(built));
       await fs.writeFile(path.join(stage, 'release.json'), signed);
@@ -192,9 +192,10 @@ export class SourceUpdates {
     const dir = this.directory(revision);
     const manifest = verifySourceManifest(await fs.readFile(path.join(dir, 'release.json'), 'utf8'), this.options.publicKey);
     const built = JSON.parse(await fs.readFile(path.join(dir, 'build.json'), 'utf8')) as InstalledBuild;
-    if (manifest.revision !== revision || built.revision !== revision || !DIGEST.test(built.runtimeKey) || (built.pythonKey !== null && !DIGEST.test(built.pythonKey))) throw new Error('Invalid built application');
-    const resources = path.join(this.options.root, 'runtimes', built.runtimeKey);
-    const python = built.pythonKey ? path.join(this.options.root, 'dependencies', built.runtimeKey, 'python', built.pythonKey.slice(0, 24), 'Scripts/python.exe') : path.join(resources, 'worker/python/python.exe');
+    if (manifest.revision !== revision || built.revision !== revision || !DIGEST.test(built.runtimeKey) || (built.pythonKey !== null && !DIGEST.test(built.pythonKey)) || (built.layout !== undefined && built.layout !== 2)) throw new Error('Invalid built application');
+    const cacheKey = built.layout === 2 ? built.runtimeKey.slice(0, 24) : built.runtimeKey;
+    const resources = path.join(this.options.root, 'runtimes', cacheKey);
+    const python = built.pythonKey ? path.join(this.options.root, 'dependencies', cacheKey, 'python', built.pythonKey.slice(0, 24), 'Scripts/python.exe') : path.join(resources, 'worker/python/python.exe');
     const desktopDir = path.join(dir, 'source/desktop');
     const electron = path.resolve(built.electron);
     const dependencyRoot = path.resolve(this.options.root, 'dependencies') + path.sep;

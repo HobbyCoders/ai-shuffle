@@ -111,7 +111,7 @@ function log(msg) {
 
 function run(cmd, cmdArgs, opts = {}) {
 	log(`$ ${cmd} ${cmdArgs.join(' ')}${opts.cwd ? `  (in ${path.relative(repoDir, opts.cwd) || '.'})` : ''}`);
-	const result = spawnSync(cmd, cmdArgs, { stdio: 'inherit', shell: false, ...opts });
+	const result = spawnSync(cmd, cmdArgs, { stdio: 'inherit', shell: false, windowsHide: true, ...opts });
 	if (result.status !== 0) {
 		throw new Error(`${cmd} ${cmdArgs.join(' ')} exited with ${result.status ?? result.signal}`);
 	}

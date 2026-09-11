@@ -154,6 +154,21 @@ test('installer baseline rejects source metadata older than its bundled build',a
  assert.equal((await u.check()).kind,'current');assert.equal(f.builds,0);
 });
 
+test('compact Windows native and Python dependency caches resolve after activation; legacy layouts stay readable',async t=>{
+ const f=await fixture(t);const build=f.options.build;const pythonKey='e'.repeat(64);
+ f.options.build=async(...args)=>{
+  const built=await build(...args);
+  await fs.rename(path.join(f.root,'runtimes',KEY),path.join(f.root,'runtimes',KEY.slice(0,24)));
+  const python=path.join(f.root,'dependencies',KEY.slice(0,24),'python',pythonKey.slice(0,24),'Scripts/python.exe');
+  await fs.mkdir(path.dirname(python),{recursive:true});await fs.writeFile(python,'python runtime');
+  return {...built,layout:2,pythonKey};
+ };
+ await f.release(A);const u=f.create();await u.load();await u.download();
+ const app=await u.select();assert.equal(app.resources,path.join(f.root,'runtimes',KEY.slice(0,24)));
+ assert.equal(app.python,path.join(f.root,'dependencies',KEY.slice(0,24),'python',pythonKey.slice(0,24),'Scripts/python.exe'));
+ await u.healthy();assert.equal((await u.current()).revision,A);
+});
+
 test('a newer milestone installer supersedes older healthy source code but never rolls back failed boot state',async t=>{
  const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();await u.healthy();
  u=new SourceUpdates({...f.options,baseline:{revision:B,sequence:200}});await u.load();await u.useNewerBaseline();

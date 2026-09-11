@@ -9,12 +9,14 @@ export async function prepareNativeRuntime(source: string, root: string, bootstr
   const hash = createHash('sha256');
   for (const file of ['desktop/runtime-contract.json', 'desktop/scripts/build-worker.mjs', 'desktop/scripts/postgres-binaries.mjs']) hash.update(file + '\0' + (await fs.readFile(path.join(source, file), 'utf8')).replace(/\r\n/g, '\n'));
   const key = hash.digest('hex');
-  const target = path.join(root, 'runtimes', key);
+  // Windows DLL loading still has path limits even when Node supports long
+  // paths. Keep native caches compact; the full fingerprint stays in build.json.
+  const target = path.join(root, 'runtimes', key.slice(0, 24));
   const manifestFile = path.join(target, 'worker/manifest.json');
   try { await fs.access(manifestFile); }
   catch {
     progress('Downloading and preparing Python, Node and PostgreSQL. This only runs when those runtimes change.');
-    const temporary = `${target}.building-${randomUUID()}`;
+    const temporary = path.join(root, 'runtimes', `build-${randomUUID().slice(0, 8)}`);
     await fs.mkdir(temporary, { recursive: true });
     const log = await fs.open(path.join(root, 'build.log'), 'a');
     try {
