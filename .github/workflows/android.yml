@@ -155,8 +155,9 @@ jobs:
             [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || exit 1
             export ANDROID_VERSION_NAME="$version"
           fi
-          ./gradlew assembleRelease --stacktrace
+          ./gradlew assembleRelease bundleRelease --stacktrace
           python3 ci/verify-mobile-apk.py app/build/outputs/apk/release/app-release.apk
+          python3 ci/verify-mobile-apk.py --app-bundle app/build/outputs/bundle/release/app-release.aab
 
       - name: Verify APK is signed with the release key
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository

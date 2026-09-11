@@ -1,0 +1,196 @@
+name: Android Play internal release
+
+# First run: leave publish_to_play off and manually upload the AAB in Play
+# Console. Enroll in Play App Signing using the EXISTING signing key, not a
+# newly generated Google key, to preserve updates from sideloaded installs.
+# Compare signing-certificate.pem with Play's APP signing certificate (not just
+# its upload certificate). Keep the keystore backup; GitHub secrets are not
+# downloadable. Never upload a keystore/private key as a workflow artifact.
+#
+# Then configure GitHub environment google-play-internal:
+# - restrict deployment branches to main; optionally require a reviewer
+# - secret GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: Google service-account JSON key
+# - variable PLAY_SIGNING_READY=true only after verifying the signing identity
+# Enable Android Publisher API in the service account's Cloud project. Invite
+# its email in Play Console with access ONLY to this app and testing releases
+# (no production release permission). Add your own Google account as an internal
+# tester and use Play Console's opt-in link. Do not create a production release.
+#
+# API/permission/16 KB native-library eligibility must be checked in Play Console
+# on the first upload. This workflow does not claim Play acceptance or silently
+# migrate targetSdk. Internal testing is not managed enterprise private apps.
+# Never publish before compatible workers are deployed and verified.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/android-play.yml'
+      - 'android/ci/test-play-workflow.py'
+      - 'android/ci/verify-mobile-apk.py'
+      - 'android/ci/test-mobile-apk.py'
+  workflow_dispatch:
+    inputs:
+      publish_to_play:
+        description: Upload to internal testing (off = build bundle for first manual upload)
+        type: boolean
+        default: false
+      workers_ready:
+        description: Compatible workers and account hub are deployed and verified
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One Play edit at a time; never cancel a release while committing it.
+concurrency:
+  group: android-play-internal
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    name: Play workflow safety checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install PyYAML==6.0.3
+      - run: python android/ci/test-play-workflow.py
+      - run: python android/ci/test-mobile-apk.py
+
+  bundle:
+    name: Build signed Play bundle
+    needs: checks
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version_code: ${{ steps.version.outputs.code }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require existing release signing secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing signing secret $name; refusing an unsigned or replacement-key build."
+              exit 1
+            fi
+          done
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build bundled mobile UI
+        run: bash android/scripts/sync-mobile-ui.sh
+      - name: Set compatible version code
+        id: version
+        # Same epoch-minute scheme as android.yml, not this workflow's run_number.
+        # A duplicate minute is rejected by Play; rerun later, never reuse a code.
+        run: |
+          code=$(( $(date +%s) / 60 ))
+          echo "ANDROID_VERSION_CODE=$code" >> "$GITHUB_ENV"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+      - name: Decode existing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/play-release.jks"
+      - name: Test and build signed bundle
+        working-directory: android
+        env:
+          KEYSTORE_PATH: ${{ runner.temp }}/play-release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          bash gradlew testDebugUnitTest lintDebug bundleRelease --no-daemon --stacktrace
+          python3 ci/verify-mobile-apk.py --app-bundle app/build/outputs/bundle/release/app-release.aab
+          # Export only the public certificate so the owner can compare Play's
+          # app-signing identity before enabling uploads. Password stays in env.
+          keytool -exportcert -rfc -keystore "$KEYSTORE_PATH" -storepass:env KEYSTORE_PASSWORD \
+            -alias "$KEY_ALIAS" -file app/build/outputs/bundle/release/signing-certificate.pem
+          # Jarsigner reports unsigned jars with exit 0 unless strict is used.
+          # Trust our own certificate to avoid self-signed certificate warnings.
+          keytool -importcert -noprompt -alias release \
+            -file app/build/outputs/bundle/release/signing-certificate.pem \
+            -keystore "$RUNNER_TEMP/play-truststore.p12" -storepass changeit
+          jarsigner -verify -strict -keystore "$RUNNER_TEMP/play-truststore.p12" \
+            -storepass changeit app/build/outputs/bundle/release/app-release.aab
+      - name: Upload bundle and public signing certificate
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-shuffle-play-bundle
+          path: |
+            android/app/build/outputs/bundle/release/app-release.aab
+            android/app/build/outputs/bundle/release/signing-certificate.pem
+          if-no-files-found: error
+          retention-days: 14
+      - name: Build summary
+        env:
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+        run: |
+          printf '### Play bundle built\n- Package: `com.hobbycoders.aishuffle`\n- Version code: `%s`\n- Download `ai-shuffle-play-bundle` from this run.\n- A bundle build is NOT a Play release. First upload and signing enrollment happen in Play Console.\n' "$VERSION_CODE" >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove temporary signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/play-release.jks" "$RUNNER_TEMP/play-truststore.p12"
+
+  publish:
+    name: Publish only to internal testing
+    needs: bundle
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      inputs.publish_to_play
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: google-play-internal
+    steps:
+      - name: Require Play enrollment and rollout readiness
+        env:
+          PLAY_SIGNING_READY: ${{ vars.PLAY_SIGNING_READY }}
+          ANDROID_WORKERS_READY: ${{ vars.ANDROID_WORKERS_READY }}
+          WORKERS_CONFIRMED: ${{ inputs.workers_ready }}
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ "$PLAY_SIGNING_READY" != true ] || [ "$ANDROID_WORKERS_READY" != true ] || [ "$WORKERS_CONFIRMED" != true ]; then
+            echo '::error::Complete first manual upload, verify Play app-signing identity, set PLAY_SIGNING_READY=true, and confirm compatible workers before publishing.'
+            exit 1
+          fi
+          if [ -z "$GOOGLE_PLAY_SERVICE_ACCOUNT_JSON" ]; then
+            echo '::error::Set GOOGLE_PLAY_SERVICE_ACCOUNT_JSON in the google-play-internal environment.'
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai-shuffle-play-bundle
+          path: play-bundle
+      - name: Upload to internal testing only
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1, pinned
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.hobbycoders.aishuffle
+          releaseFiles: play-bundle/app-release.aab
+          tracks: internal
+          status: completed
+      - name: Release summary
+        env:
+          VERSION_CODE: ${{ needs.bundle.outputs.version_code }}
+        run: |
+          printf '### Internal release submitted\nVersion code: `%s`. Check the internal track in Play Console and test the update on your enrolled phone. No production release was requested.\n' "$VERSION_CODE" >> "$GITHUB_STEP_SUMMARY"

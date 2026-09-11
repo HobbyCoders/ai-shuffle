@@ -44,6 +44,24 @@ class MobileApkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stale or modified"):
             module.verify_apk(self.apk, self.bundle)
 
+    def test_complete_app_bundle_matches_source(self):
+        with zipfile.ZipFile(self.apk, "w") as archive:
+            for name, data in self.contents.items():
+                archive.writestr("base/assets/mobile-ui/" + name, data)
+        module.verify_apk(self.apk, self.bundle, app_bundle=True)
+
+    def test_app_bundle_rejects_apk_layout(self):
+        self.pack(self.contents)
+        with self.assertRaisesRegex(ValueError, "missing 3 mobile assets"):
+            module.verify_apk(self.apk, self.bundle, app_bundle=True)
+
+    def test_app_bundle_rejects_stale_asset(self):
+        with zipfile.ZipFile(self.apk, "w") as archive:
+            for name, data in self.contents.items():
+                archive.writestr("base/assets/mobile-ui/" + name, b"stale" if name.endswith(".js") else data)
+        with self.assertRaisesRegex(ValueError, "stale or modified"):
+            module.verify_apk(self.apk, self.bundle, app_bundle=True)
+
     def test_missing_source_build_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "source mobile bundle"):
             module.verify_apk(self.apk, self.root / "absent")
