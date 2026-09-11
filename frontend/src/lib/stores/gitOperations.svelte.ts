@@ -185,7 +185,8 @@ async function _pollToTerminal(
 	projectId: string,
 	token: number,
 	op: gitApi.GitOperation,
-	startedAt: number
+	startedAt: number,
+	sessionId?: string
 ): Promise<gitApi.GitOperation> {
 	let consecutiveFailures = 0;
 
@@ -200,7 +201,7 @@ async function _pollToTerminal(
 		}
 
 		try {
-			op = await gitApi.getGitOperation(projectId, op.operation_id);
+			op = await gitApi.getGitOperation(projectId, op.operation_id, undefined, sessionId);
 			if (_opToken !== token) return op;
 			consecutiveFailures = 0; // any success resets the tolerance window
 			gitOperations.replaceSteps(op.steps);
@@ -383,7 +384,7 @@ export const gitOperations = {
 				session_id: meta?.sessionId ?? null,
 				kind: meta?.kind ?? title
 			});
-			return await _pollToTerminal(projectId, token, op, startedAt);
+			return await _pollToTerminal(projectId, token, op, startedAt, meta?.sessionId ?? undefined);
 		} catch (e) {
 			if (_opToken === token) gitOperations.fail(_errText(e));
 			throw e;
@@ -407,11 +408,13 @@ export const gitOperations = {
 			try {
 				const op = await gitApi.getGitOperation(
 					persisted.project_id,
-					persisted.operation_id
+					persisted.operation_id,
+					undefined,
+					persisted.session_id ?? undefined
 				);
 				if (_opToken !== token) return;
 				gitOperations.replaceSteps(op.steps);
-				await _pollToTerminal(persisted.project_id, token, op, startedAt);
+				await _pollToTerminal(persisted.project_id, token, op, startedAt, persisted.session_id ?? undefined);
 			} catch (e) {
 				if (_opToken === token) gitOperations.fail(_errText(e));
 			}

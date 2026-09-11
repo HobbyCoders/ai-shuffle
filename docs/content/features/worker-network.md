@@ -67,6 +67,13 @@ the mirror is read-only and offers **Fork here**, which starts a new session
 on the current worker with the transcript as context. The original is never
 changed.
 
+Git controls work from any worker too: Commit, Push, Pull, Create PR, Finish
+and Ship It use your saved options and run against the owning worker’s
+checkout. Finish and Ship It show progress here and continue on the owner
+if you reload the page. If the owner is unreachable, reconnect it and use
+Retry; Git actions never fall back to a checkout on the viewing device.
+Both workers need a version that supports remote Git actions.
+
 Automations and connectors have one owner device too. A definition restored
 on a new worker stays inactive until you assign it.
 

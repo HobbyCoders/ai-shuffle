@@ -41,6 +41,7 @@ from app.core.github_service import (
     github_service,
 )
 from app.core.worktree_manager import worktree_manager
+from app.api.git_owner import session_git_action
 from app.api.auth import require_auth
 from app.api.common import check_project_access
 from app.api.git_helpers import (
@@ -835,6 +836,7 @@ async def _prepare_operation(
 
 
 @router.post("/finish")
+@session_git_action
 async def finish(
     request: Request,
     project_id: str,
@@ -908,6 +910,7 @@ async def finish(
 
 
 @router.post("/ship")
+@session_git_action
 async def ship(
     request: Request,
     project_id: str,
@@ -980,16 +983,18 @@ async def ship(
 
 
 @router.get("/operations/{operation_id}")
+@session_git_action
 async def get_operation(
     request: Request,
     project_id: str,
     operation_id: str,
+    session_id: str | None = None,
     token: str = Depends(require_auth),
 ):
     """Poll the status and per-step progress of a running/finished operation."""
     check_project_access(request, project_id)
     op = _operations.get(operation_id)
-    if not op or op.project_id != project_id:
+    if not op or op.project_id != project_id or (session_id and op.session_id != session_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Operation not found")
     return op.snapshot()
 
@@ -1039,6 +1044,7 @@ def _stale_pr_state(cache_key: str) -> Optional[Dict[str, Any]]:
 
 
 @router.get("/pr-state", response_model=PrStateResponse)
+@session_git_action
 async def get_pr_state(
     request: Request,
     project_id: str,

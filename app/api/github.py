@@ -21,6 +21,7 @@ from app.core.github_service import (
 )
 from app.core.config import settings
 from app.core.session_pr_state import persist_pr_state
+from app.api.git_owner import session_git_action
 from app.api.auth import require_auth, get_api_user_from_request
 from app.api.common import check_project_access, resolve_project_path
 
@@ -327,6 +328,7 @@ async def get_pull_request(
 
 
 @router.post("/pulls", response_model=PullRequestResponse, status_code=status.HTTP_201_CREATED)
+@session_git_action
 async def create_pull_request(
     request: Request,
     project_id: str,
@@ -342,7 +344,14 @@ async def create_pull_request(
     check_project_access(request, project_id)
     await check_github_auth()
 
-    repo = await get_repo_for_project(request, project_id)
+    if body.session_id:
+        from app.api.git_helpers import get_working_dir_async
+        working_dir = await get_working_dir_async(project_id, session_id=body.session_id)
+        repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
+        if not repo:
+            raise HTTPException(400, "Session checkout has no GitHub remote")
+    else:
+        repo = await get_repo_for_project(request, project_id)
 
     try:
         t_gh_start = time.perf_counter()

@@ -432,19 +432,19 @@ export async function getBranches(projectId: string, includeRemote: boolean = fa
 /**
  * Create a new branch
  */
-export async function createBranch(projectId: string, name: string, startPoint?: string): Promise<Branch> {
+export async function createBranch(projectId: string, name: string, startPoint?: string, sessionId?: string): Promise<Branch> {
     const body: CreateBranchRequest = { name };
     if (startPoint) {
         body.start_point = startPoint;
     }
-    return api.post<Branch>(`${BASE}/${projectId}/git/branches`, body);
+    return api.post<Branch>(`${BASE}/${projectId}/git/branches${scopeQs(undefined, sessionId)}`, body);
 }
 
 /**
  * Delete a branch
  */
-export async function deleteBranch(projectId: string, name: string): Promise<void> {
-    await api.delete(`${BASE}/${projectId}/git/branches/${encodeURIComponent(name)}`);
+export async function deleteBranch(projectId: string, name: string, sessionId?: string): Promise<void> {
+    await api.delete(`${BASE}/${projectId}/git/branches/${encodeURIComponent(name)}${scopeQs(undefined, sessionId)}`);
 }
 
 /**
@@ -453,8 +453,8 @@ export async function deleteBranch(projectId: string, name: string): Promise<voi
  * When `autoStash` is true, the backend stashes uncommitted changes before
  * checking out (instead of returning a 409). Mirrors the pull auto_stash flow.
  */
-export async function checkout(projectId: string, ref: string, worktreeId?: string, autoStash: boolean = false): Promise<{ success: boolean; message: string }> {
-    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
+export async function checkout(projectId: string, ref: string, worktreeId?: string, autoStash: boolean = false, sessionId?: string): Promise<{ success: boolean; message: string }> {
+    const params = scopeQs(worktreeId, sessionId);
     return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/checkout${params}`, { ref, auto_stash: autoStash });
 }
 
@@ -478,8 +478,10 @@ interface RawCommitGraphResponse {
     total: number;
 }
 
-export async function getCommitGraph(projectId: string, limit?: number): Promise<CommitGraphResponse> {
-    const params = limit ? `?limit=${limit}` : '';
+export async function getCommitGraph(projectId: string, limit?: number, worktreeId?: string, sessionId?: string): Promise<CommitGraphResponse> {
+    const query = new URLSearchParams(scopeQs(worktreeId, sessionId));
+    if (limit) query.set('limit', String(limit));
+    const params = query.size ? `?${query}` : '';
     const raw = await api.get<RawCommitGraphResponse>(`${BASE}/${projectId}/git/graph${params}`);
 
     // Transform raw commits to frontend format
@@ -1056,9 +1058,10 @@ export interface InitRepoResponse {
  */
 export async function initRepository(
     projectId: string,
-    request: InitRepoRequest = {}
+    request: InitRepoRequest = {},
+    sessionId?: string
 ): Promise<InitRepoResponse> {
-    return api.post<InitRepoResponse>(`${BASE}/${projectId}/git/init`, request);
+    return api.post<InitRepoResponse>(`${BASE}/${projectId}/git/init${scopeQs(undefined, sessionId)}`, request);
 }
 
 // ============================================================================
@@ -1080,9 +1083,10 @@ export interface CloneRepoResponse {
  */
 export async function cloneRepository(
     projectId: string,
-    request: CloneRepoRequest
+    request: CloneRepoRequest,
+    sessionId?: string
 ): Promise<CloneRepoResponse> {
-    return api.post<CloneRepoResponse>(`${BASE}/${projectId}/git/clone`, request);
+    return api.post<CloneRepoResponse>(`${BASE}/${projectId}/git/clone${scopeQs(undefined, sessionId)}`, request);
 }
 
 // ============================================================================
@@ -1223,10 +1227,11 @@ export async function startShipOperation(
 export async function getGitOperation(
     projectId: string,
     operationId: string,
-    options?: RequestOptions
+    options?: RequestOptions,
+    sessionId?: string
 ): Promise<GitOperation> {
     return api.get<GitOperation>(
-        `${BASE}/${projectId}/git/operations/${encodeURIComponent(operationId)}`,
+        `${BASE}/${projectId}/git/operations/${encodeURIComponent(operationId)}${scopeQs(undefined, sessionId)}`,
         options
     );
 }

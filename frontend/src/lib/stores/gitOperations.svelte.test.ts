@@ -117,15 +117,16 @@ describe('gitOperations — server-polled operations', () => {
 			op({ status: 'running', steps: [{ id: 'merge', label: 'Merge PR', status: 'pending' }] })
 		);
 
-		const p = gitOperations.runServer('proj-1', 'Finish', starter);
+		const p = gitOperations.runServer('proj-1', 'Finish', starter, { sessionId: 'remote-origin' });
 
 		// Let the kickoff resolve so its steps are mirrored.
 		await vi.advanceTimersByTimeAsync(0);
 		expect(gitOperations.current.status).toBe('running');
 		expect(git.operationInProgress).toBe(true);
 
-		// First poll → still running.
+		// First poll remains scoped to the originating session.
 		await vi.advanceTimersByTimeAsync(1_000);
+		expect(mocks.getGitOperation).toHaveBeenCalledWith('proj-1', 'op-1', undefined, 'remote-origin');
 		expect(gitOperations.current.steps[0].status).toBe('running');
 		expect(gitOperations.current.status).toBe('running');
 
@@ -247,7 +248,7 @@ describe('gitOperations — server-polled operations', () => {
 		gitOperations.resumePersisted();
 		await vi.advanceTimersByTimeAsync(0); // first getGitOperation (re-attach)
 
-		expect(mocks.getGitOperation).toHaveBeenCalledWith('proj-9', 'op-resumed');
+		expect(mocks.getGitOperation).toHaveBeenCalledWith('proj-9', 'op-resumed', undefined, 'sess-9');
 		expect(gitOperations.current.status).toBe('running');
 		expect(git.operationInProgress).toBe(true);
 

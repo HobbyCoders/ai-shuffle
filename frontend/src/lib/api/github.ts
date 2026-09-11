@@ -58,6 +58,7 @@ export interface CreatePullRequestRequest {
     body?: string;
     head: string;
     base: string;
+    draft?: boolean;
     session_id?: string;
 }
 

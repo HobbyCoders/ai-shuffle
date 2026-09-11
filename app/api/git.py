@@ -30,6 +30,7 @@ from app.core.project_utils import get_project_working_dir, get_worktree_working
 from app.db import database
 from app.db.async_database import run_sync
 from app.db.base import WorktreeStatus
+from app.api.git_owner import session_git_action
 from app.api.auth import require_auth, get_api_user_from_request
 from app.api.common import check_project_access, resolve_project_path
 
@@ -139,6 +140,7 @@ from app.api.schemas.git import (  # noqa: E402
 # =============================================================================
 
 @router.get("/status", response_model=GitStatusResponse)
+@session_git_action
 async def get_git_status(
     request: Request,
     project_id: str,
@@ -209,10 +211,12 @@ async def get_git_status(
 
 
 @router.post("/init", response_model=InitRepoResponse)
+@session_git_action
 async def init_repository(
     request: Request,
     project_id: str,
     body: InitRepoRequest,
+    session_id: str | None = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -221,7 +225,7 @@ async def init_repository(
     Optionally creates an initial commit and/or a GitHub repository with remote.
     """
     check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
+    working_dir = await get_working_dir_async(project_id, session_id=session_id)
 
     # Guard: don't re-init an existing repo
     if await run_git(git_service.is_git_repo, working_dir):
@@ -325,7 +329,7 @@ async def init_repository(
     repo = await run_git(ensure_git_repository_record, project_id, working_dir)
 
     # Update record with GitHub info if we created a repo
-    if github_full_name and repo:
+    if github_full_name and repo and repo.get("id"):
         remote_url = await run_git(git_service.get_remote_url, working_dir)
         await run_sync(
             database.update_git_repository,
@@ -350,10 +354,12 @@ async def init_repository(
 
 
 @router.post("/clone", response_model=CloneRepoResponse)
+@session_git_action
 async def clone_repository(
     request: Request,
     project_id: str,
     body: CloneRepoRequest,
+    session_id: str | None = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -362,7 +368,7 @@ async def clone_repository(
     The project directory must not already be a git repository.
     """
     check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
+    working_dir = await get_working_dir_async(project_id, session_id=session_id)
 
     # Guard: don't clone into an existing repo
     if await run_git(git_service.is_git_repo, working_dir):
@@ -389,7 +395,7 @@ async def clone_repository(
     repo = await run_git(ensure_git_repository_record, project_id, working_dir)
 
     # Update record with remote info from cloned repo
-    if repo:
+    if repo and repo.get("id"):
         remote_url = await run_git(git_service.get_remote_url, working_dir)
         current_branch = await run_git(git_service.get_current_branch, working_dir)
         await run_sync(
@@ -407,6 +413,7 @@ async def clone_repository(
 
 
 @router.get("/branches", response_model=BranchListResponse)
+@session_git_action
 async def list_branches(
     request: Request,
     project_id: str,
@@ -474,10 +481,12 @@ async def list_branches(
 
 
 @router.post("/branches", response_model=OperationResponse)
+@session_git_action
 async def create_branch(
     request: Request,
     project_id: str,
     body: CreateBranchRequest,
+    session_id: str | None = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -488,7 +497,7 @@ async def create_branch(
         body: Branch creation request with name and optional start point
     """
     check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
+    working_dir = await get_working_dir_async(project_id, session_id=session_id)
 
     if not await run_git(git_service.is_git_repo, working_dir):
         raise HTTPException(
@@ -522,11 +531,13 @@ async def create_branch(
 
 
 @router.delete("/branches/{branch_name:path}", response_model=OperationResponse)
+@session_git_action
 async def delete_branch(
     request: Request,
     project_id: str,
     branch_name: str,
     force: bool = False,
+    session_id: str | None = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -538,7 +549,7 @@ async def delete_branch(
         force: Force delete even if not fully merged
     """
     check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
+    working_dir = await get_working_dir_async(project_id, session_id=session_id)
 
     if not await run_git(git_service.is_git_repo, working_dir):
         raise HTTPException(
@@ -571,6 +582,7 @@ async def delete_branch(
 
 
 @router.post("/checkout", response_model=OperationResponse)
+@session_git_action
 async def checkout_branch(
     request: Request,
     project_id: str,
@@ -661,11 +673,13 @@ async def checkout_branch(
 
 
 @router.get("/graph", response_model=CommitGraphResponse)
+@session_git_action
 async def get_commit_graph(
     request: Request,
     project_id: str,
     limit: int = 100,
     branch: Optional[str] = None,
+    session_id: str | None = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -677,7 +691,7 @@ async def get_commit_graph(
         branch: Filter to specific branch (default: all branches)
     """
     check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
+    working_dir = await get_working_dir_async(project_id, session_id=session_id)
 
     if not await run_git(git_service.is_git_repo, working_dir):
         raise HTTPException(
@@ -713,6 +727,7 @@ async def get_commit_graph(
 
 
 @router.post("/fetch", response_model=FetchResponse)
+@session_git_action
 async def fetch_from_remote(
     request: Request,
     project_id: str,
@@ -781,6 +796,7 @@ async def fetch_from_remote(
 # =============================================================================
 
 @router.get("/diff-stats", response_model=DiffStatsResponse)
+@session_git_action
 async def get_diff_stats(
     request: Request,
     project_id: str,
@@ -827,6 +843,7 @@ async def get_diff_stats(
 # =============================================================================
 
 @router.get("/changed-files", response_model=ChangedFilesResponse)
+@session_git_action
 async def get_changed_files(
     request: Request,
     project_id: str,
@@ -936,6 +953,7 @@ async def get_changed_files(
 
 
 @router.post("/file-diff", response_model=FileDiffResponse)
+@session_git_action
 async def get_file_diff(
     request: Request,
     project_id: str,
@@ -967,6 +985,7 @@ async def get_file_diff(
 
 
 @router.post("/stage", response_model=OperationResponse)
+@session_git_action
 async def stage_files(
     request: Request,
     project_id: str,
@@ -1000,6 +1019,7 @@ async def stage_files(
 
 
 @router.post("/unstage", response_model=OperationResponse)
+@session_git_action
 async def unstage_files(
     request: Request,
     project_id: str,
@@ -1032,6 +1052,7 @@ async def unstage_files(
 
 
 @router.post("/discard", response_model=OperationResponse)
+@session_git_action
 async def discard_changes(
     request: Request,
     project_id: str,
@@ -1073,6 +1094,7 @@ async def discard_changes(
 
 
 @router.post("/commit", response_model=CommitResponse)
+@session_git_action
 async def create_commit(
     request: Request,
     project_id: str,
@@ -1139,6 +1161,7 @@ async def create_commit(
 
 
 @router.post("/push", response_model=OperationResponse)
+@session_git_action
 async def push_commits(
     request: Request,
     project_id: str,
@@ -1213,6 +1236,7 @@ async def push_commits(
 # =============================================================================
 
 @router.post("/pull", response_model=PullResponse)
+@session_git_action
 async def pull_from_remote(
     request: Request,
     project_id: str,

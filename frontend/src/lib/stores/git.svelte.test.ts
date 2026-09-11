@@ -130,6 +130,37 @@ describe('git store — cleaned-up / reused worktree', () => {
 });
 
 describe('git store — checkout-keyed cache (G4)', () => {
+	it('keeps a remote checkout separate from the same local project and branch', async () => {
+		await git.loadRepository('p1', false, 'local-session');
+		const localKey = git.current.contextKey;
+		git.setRemoteSession('remote-session', true);
+		git.restoreCacheImmediate('p1', null, 'project', 'remote-session', 'feat/x');
+		expect(git.current.contextKey).not.toBe(localKey);
+		expect(git.current.hydrated).toBe(false);
+
+		mocks.getPrState.mockResolvedValue(prState(99));
+		mocks.getWorktrees.mockClear();
+		await git.loadRepository('p1', false, 'remote-session');
+		expect(git.current.prState?.open_pr?.number).toBe(99);
+		expect(mocks.getGitStatus).toHaveBeenLastCalledWith('p1', undefined, undefined, 'remote-session');
+		expect(mocks.getWorktrees).not.toHaveBeenCalled();
+
+		git.restoreCacheImmediate('p1', null, 'project', 'local-session', 'feat/x');
+		expect(git.current.contextKey).toBe(localKey);
+		expect(git.current.prState?.open_pr?.number).toBe(7);
+	});
+
+	it('retries an unavailable owner using the same remote session', async () => {
+		git.setRemoteSession('offline-session', true);
+		mocks.getGitStatus.mockRejectedValueOnce({ status: 503, detail: 'Owning worker is unreachable' });
+		await git.loadRepository('p1', false, 'offline-session');
+		expect(git.current.error).toContain('Owning worker');
+		await git.retryLoad();
+		expect(mocks.getGitStatus).toHaveBeenLastCalledWith('p1', undefined, undefined, 'offline-session');
+		expect(git.current.error).toBeNull();
+		expect(git.current.hydrated).toBe(true);
+	});
+
 	it('two sessions on the same checkout share state — a switch is never empty', async () => {
 		await git.loadRepository('p1', false, 'ses-1');
 		expect(git.current.status?.current_branch).toBe('feat/x');
@@ -174,6 +205,23 @@ describe('git store — checkout-keyed cache (G4)', () => {
 });
 
 describe('git store — request versioning (G4)', () => {
+	it('keeps a saved commit/push flow on its captured owner after switching sessions', async () => {
+		git.setRemoteSession('remote-commit', true);
+		await git.loadRepository('p1', false, 'remote-commit');
+		const target = git.captureTarget();
+		await git.loadRepository('p2', false, 'local-other');
+		const currentKey = git.current.contextKey;
+		mocks.commitChanges.mockResolvedValue({ success: true, status: status({ current_branch: 'remote-branch' }) });
+		mocks.pushCommits.mockResolvedValue({ success: true, status: status({ current_branch: 'remote-branch' }) });
+
+		await git.commitChanges('Saved message', false, target);
+		await git.pushCommits(undefined, true, false, target);
+		expect(mocks.commitChanges).toHaveBeenCalledWith('p1', { message: 'Saved message', include_unstaged: false }, undefined, 'remote-commit');
+		expect(mocks.pushCommits).toHaveBeenCalledWith('p1', { branch: undefined, set_upstream: true, force: false }, undefined, 'remote-commit');
+		expect(git.current.contextKey).toBe(currentKey);
+		expect(git.current.status?.current_branch).toBe('feat/x');
+	});
+
 	it('a slow in-flight response never overwrites a newer one for the same key', async () => {
 		await git.loadRepository('p1', false, 'ses-1');
 

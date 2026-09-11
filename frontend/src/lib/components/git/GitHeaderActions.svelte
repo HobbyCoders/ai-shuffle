@@ -35,6 +35,7 @@
 		 *  fire a second action while work is running. */
 		operationInProgress?: boolean;
 		isGitRepo?: boolean;
+		error?: string | null;
 		/** Show the branch checkout selector. Disabled when the branch pill is
 		 *  hosted elsewhere (e.g. the context pill bar above the chat input). */
 		showBranchSelector?: boolean;
@@ -69,7 +70,7 @@
 		onOpenDiffReview?: () => void;
 	}
 
-	let { projectId, isStreaming = false, operationInProgress = false, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview }: Props = $props();
+	let { projectId, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview }: Props = $props();
 
 	// Mutating git buttons are blocked while streaming OR while another git
 	// operation is in flight — the user must never fire a second action while
@@ -354,7 +355,11 @@
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
 
 <div class="git-actions">
-	{#if isGitRepo}
+	{#if error}
+		<button class="git-btn" title={error} onclick={() => git.retryLoad()}>
+			<TriangleAlert size={13} /> Git unavailable · Retry
+		</button>
+	{:else if isGitRepo}
 	<!-- Branch selector (hidden when hosted in the context pill bar) -->
 	{#if showBranchSelector}
 	<div class="branch-selector" bind:this={dropdownRef}>

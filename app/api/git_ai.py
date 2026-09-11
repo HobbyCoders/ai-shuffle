@@ -15,6 +15,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 
 from app.core.git_service import git_service
+from app.api.git_owner import session_git_action
 from app.api.auth import require_auth
 from app.api.common import check_project_access
 from app.api.git_helpers import run_git, get_working_dir, get_working_dir_async
@@ -238,6 +239,7 @@ Return ONLY the JSON object, no markdown code blocks or explanation."""
 # =============================================================================
 
 @router.post("/generate-commit-message", response_model=GenerateCommitMessageResponse)
+@session_git_action
 async def generate_commit_message(
     request: Request,
     project_id: str,
@@ -258,6 +260,7 @@ async def generate_commit_message(
 
 
 @router.post("/generate-pr-description", response_model=GeneratePRDescriptionResponse)
+@session_git_action
 async def generate_pr_description(
     request: Request,
     project_id: str,

@@ -300,7 +300,7 @@
 	}
 
 	function handleRepoInitialized() {
-		if (activeTab?.project) git.loadRepository(activeTab.project, true);
+		if (activeProject) git.loadRepository(activeProject, true, activeSessionId ?? undefined);
 	}
 
 	// PR lifecycle for the active session's branch. Fetched by the git store's
@@ -311,26 +311,24 @@
 	// this derivation can't.
 	const openPrForBranch = $derived($gitPrState?.open_pr ?? null);
 
-	// Load git repository when active tab's project changes (only when GitHub CLI is authenticated).
+	// Load Git for the active session on its owning worker.
 	// Extract the project and worktree strings OUTSIDE the effect to avoid tracking the entire
 	// activeTab object, which changes on every streaming poll and would re-trigger load needlessly.
-	const activeProject = $derived(activeTab?.project ?? null);
+	const activeProject = $derived(activeTab?.project || activeTab?.projectV2Id || null);
 	const activeWorktreeId = $derived(
 		(activeTab?.worktreeId || activeTab?.worktreeBranch) && !activeTab?.worktreeDeleted
 			? (activeTab.worktreeId ?? null)
 			: null
 	);
 	const activeSessionId = $derived(activeTab?.sessionId ?? null);
-	// Remote-placed session: the repo lives on the OWNING install, not on this
-	// device's filesystem. The backend annotates every cross-install session as
-	// remote (reachable or offline) via the session row's `is_remote`. Loading/
-	// polling the LOCAL git status for such a session finds no repo at the project
-	// path and would surface a bogus "Init Repo" state — so we skip local git
-	// entirely for remote sessions and suppress the header's local git actions (the
-	// ContextPillBar shows the read-only runner branch context instead).
+	// Session-scoped Git requests are executed by the owning worker.
 	const activeIsRemote = $derived(
 		$sessions.find((s) => s.id === activeSessionId)?.is_remote ?? false
 	);
+
+	const activeGithubAvailable = $derived(activeIsRemote
+		? $gitPrState?.has_github === true
+		: $githubFeaturesAvailable);
 
 	// GitHub auth verdicts feed the git store's hysteresis guard rather than
 	// gating the UI directly: `gh auth status` is a subprocess that transiently
@@ -362,7 +360,8 @@
 		// commit, diff) needs a local checkout and nothing else; requiring GitHub
 		// auth here is what made a `gh` blip call clearRepository() and hide the
 		// UI. GitHub-backed actions consult `githubFeaturesAvailable` instead.
-		if (project && !isRemote) {
+		if (project) {
+			git.setRemoteSession(sessionId, isRemote);
 			// IMMEDIATE: restore cached state so UI updates within the same frame.
 			// sessionId scopes v2 branch sessions to their own checkout — without it
 			// a branch session with no legacy worktree row would poll the base checkout.
@@ -420,9 +419,9 @@
 		!!activeTab &&
 			shouldShowHeaderGitActions({
 				viewType: $activeView?.type,
-				hasProject: !!activeTab.project,
+				hasProject: !!activeProject,
 				githubAuthenticated: $githubAuthenticated,
-				githubAvailable: $githubFeaturesAvailable,
+				githubAvailable: activeGithubAvailable,
 				worktreeDeleted: !!activeTab.worktreeDeleted,
 				isRemote: activeIsRemote,
 				sessionMode: activeTab.mode
@@ -561,7 +560,7 @@
 
 	/** Whether git action buttons may fire (guards double-taps + in-flight ops). */
 	function gitActionsBlocked(): boolean {
-		return gitControlsStreaming.current || gitOperationRunning.current || !activeProject;
+		return gitControlsStreaming.current || gitOperationRunning.current || !activeProject || !git.current.hydrated || !!git.current.error;
 	}
 
 	function errText(e: unknown): string {
@@ -587,12 +586,10 @@
 	 * handleCreatePR and Commit's "next step = PR" path. Assumes the caller has
 	 * already pushed if it drives its own push step.
 	 */
-	async function runCreatePR(opts: CreatePROptions): Promise<{ url: string; number: number }> {
-		const projectId = activeProject!;
-		const worktreeId = activeWorktreeId ?? undefined;
-		const sessionId = activeSessionId ?? undefined;
-		const base = opts.base ?? $gitStatus?.default_branch ?? $githubRepoInfo?.default_branch ?? 'main';
-		const head = $gitStatus?.current_branch;
+	async function runCreatePR(opts: CreatePROptions, target = git.captureTarget()): Promise<{ url: string; number: number }> {
+		const { projectId, worktreeId, sessionId } = target;
+		const base = opts.base ?? target.base ?? 'main';
+		const head = target.head;
 		if (!head) throw new Error('No current branch to open a pull request from');
 		let title = opts.title?.trim();
 		let body = opts.body;
@@ -601,14 +598,15 @@
 			title = gen.title;
 			body = body ?? gen.body;
 		}
-		const pr = await createPullRequest(projectId, { title, body: body ?? '', head, base, session_id: sessionId });
+		const pr = await createPullRequest(projectId, { title, body: body ?? '', head, base, draft: opts.draft ?? false, session_id: sessionId });
 		return { url: pr.url, number: pr.number };
 	}
 
 	async function handleCommit(opts: CommitOptions = {}) {
 		if (gitActionsBlocked()) return;
 		markGitActivity(); // user git action → responsive poll cadence
-		const projectId = activeProject!;
+		const target = git.captureTarget();
+		const projectId = target.projectId;
 		const prefs = gitActionPreferences.current;
 		const includeUnstaged = opts.includeUnstaged ?? prefs.includeUnstaged;
 		const userMessage = opts.message?.trim();
@@ -630,27 +628,27 @@
 			let message = userMessage;
 			if (!message) {
 				gitOperations.setStep('message', 'running');
-				const gen = await generateCommitMessage(projectId, { include_unstaged: includeUnstaged }, activeWorktreeId ?? undefined, activeSessionId ?? undefined);
+				const gen = await generateCommitMessage(projectId, { include_unstaged: includeUnstaged }, target.worktreeId, target.sessionId);
 				message = gen.message;
 				gitOperations.setStep('message', 'done');
 			}
 
 			gitOperations.setStep('commit', 'running');
-			await git.commitChanges(message, includeUnstaged);
+			await git.commitChanges(message, includeUnstaged, target);
 			gitOperations.setStep('commit', 'done');
 
 			if (nextStep === 'push' || nextStep === 'pr') {
 				gitOperations.setStep('push', 'running');
-				await git.pushCommits(undefined, true, false);
+				await git.pushCommits(undefined, true, false, target);
 				gitOperations.setStep('push', 'done');
 			}
 
 			let prInfo: { url: string; number: number } | null = null;
 			if (nextStep === 'pr') {
 				gitOperations.setStep('pr', 'running');
-				prInfo = await runCreatePR({});
+				prInfo = await runCreatePR({}, target);
 				gitOperations.setStep('pr', 'done', { detail: `#${prInfo.number}` });
-				git.refreshPrState(true).catch(() => {});
+				if (activeSessionId === (target.sessionId ?? null)) git.refreshPrState(true).catch(() => {});
 			}
 
 			gitOperations.succeed();
@@ -721,21 +719,21 @@
 	async function handleCreatePR(opts: CreatePROptions = {}) {
 		if (gitActionsBlocked()) return;
 		markGitActivity(); // user git action → responsive poll cadence
-		const projectId = activeProject!;
+		const target = git.captureTarget();
 		gitOperations.begin('Create PR', [
 			{ id: 'push', label: 'Push to remote' },
 			{ id: 'pr', label: 'Open pull request' }
 		]);
 		try {
 			gitOperations.setStep('push', 'running');
-			await git.pushCommits(undefined, true, false);
+			await git.pushCommits(undefined, true, false, target);
 			gitOperations.setStep('push', 'done');
 
 			gitOperations.setStep('pr', 'running');
-			const prInfo = await runCreatePR(opts);
+			const prInfo = await runCreatePR(opts, target);
 			gitOperations.setStep('pr', 'done', { detail: `#${prInfo.number}` });
 
-			git.refreshPrState(true).catch(() => {});
+			if (activeSessionId === (target.sessionId ?? null)) git.refreshPrState(true).catch(() => {});
 			gitOperations.succeed();
 			const url = prInfo.url;
 			notify(`Opened pull request #${prInfo.number}`, { severity: 'success', action: { label: 'View PR', onClick: () => openPRUrl(url) } });
@@ -886,24 +884,25 @@
 {#snippet headerActions()}
 	{#if activeTab && shouldShowHeaderGitActions({
 		viewType: $activeView?.type,
-		hasProject: !!activeTab.project,
+		hasProject: !!activeProject,
 		githubAuthenticated: $githubAuthenticated,
-		githubAvailable: $githubFeaturesAvailable,
+		githubAvailable: activeGithubAvailable,
 		worktreeDeleted: !!activeTab.worktreeDeleted,
 		isRemote: activeIsRemote,
 		sessionMode: activeTab.mode
 	})}
 		<div class="git-actions-host">
 			<GitHeaderActions
-				projectId={activeTab.project}
+				projectId={activeProject!}
 				isStreaming={$gitControlsStreaming}
+				error={$git.error}
 				operationInProgress={$gitOperationRunning}
 				isGitRepo={$gitStatus?.is_git_repo !== false}
 				showBranchSelector={false}
 				projectName={headerProjectName}
 				worktreeBranch={activeWorktreeBranch}
 				openPR={openPrForBranch}
-				githubAvailable={$githubFeaturesAvailable}
+				githubAvailable={activeGithubAvailable}
 				onClickCommit={handleCommit}
 				onClickCreatePR={handleCreatePR}
 				onClickFinish={handleFinish}
@@ -1026,7 +1025,7 @@
 	Local-git surfaces: gated on a project, NOT on GitHub auth. A transient
 	`gh auth status` failure must not unmount an open diff review (G10c).
 -->
-{#if activeTab?.project}
+{#if activeProject}
 	{#if createBranchEverOpened}
 		<LazyPanel
 			handle={CreateBranchModalLazy}
@@ -1034,8 +1033,8 @@
 			bare
 			props={{
 				open: showCreateBranchModal,
-				projectId: activeTab.project,
-				defaultName: activeTab.title || '',
+				projectId: activeProject,
+				defaultName: activeTab?.title || '',
 				onClose: () => (showCreateBranchModal = false),
 				onCreated: () => git.refreshStatus()
 			}}
@@ -1049,9 +1048,10 @@
 			bare
 			props={{
 				open: showInitRepoModal,
-				projectId: activeTab.project,
+				projectId: activeProject,
 				projectName: headerProjectName ?? '',
 				onClose: () => (showInitRepoModal = false),
+				sessionId: activeSessionId ?? undefined,
 				onInitialized: handleRepoInitialized
 			}}
 		/>
@@ -1063,7 +1063,7 @@
 			label="changed files"
 			bare
 			props={{
-				projectId: activeTab.project,
+				projectId: activeProject,
 				open: showChangedFilesPanel,
 				reviewMode,
 				onClose: closeChangedFilesPanel,
@@ -1078,7 +1078,7 @@
 			label="the diff viewer"
 			bare
 			props={{
-				projectId: activeTab.project,
+				projectId: activeProject,
 				file: selectedDiffFile,
 				onClose: () => (selectedDiffFile = null)
 			}}

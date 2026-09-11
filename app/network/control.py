@@ -58,7 +58,7 @@ def owner_of(session_row: Dict[str, Any]) -> Optional[str]:
     return owner
 
 
-async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = None, *, timeout: float | None = None) -> Dict[str, Any]:
     """POST a control action to the owner with a device token."""
     ctx = engine.require_context()
     link = transport._links.get(device_id)
@@ -80,6 +80,7 @@ async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = Non
             result = await link._request(
                 client, "POST", f"/api/v1/network/peer/control/{action}",
                 json_body=jsonable_encoder(body or {}),
+                **({"timeout": timeout} if timeout is not None else {}),
             )
         except transport.PeerError as exc:
             message = str(exc)
@@ -134,6 +135,9 @@ async def hydrate(device_id: str, session_id: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 async def handle(action: str, body: Dict[str, Any], *, from_device: str) -> Dict[str, Any]:
+    if action == "session-git":
+        from app.api.git_owner import handle_session_git
+        return await handle_session_git(body, from_device)
     if action in {"git-state", "git-op"}:
         from app.network import git
         handler = git.handle_state if action == "git-state" else git.handle_op

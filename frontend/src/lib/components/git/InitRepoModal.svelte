@@ -12,12 +12,13 @@
 	interface Props {
 		open: boolean;
 		projectId: string;
+		sessionId?: string;
 		projectName?: string;
 		onClose: () => void;
 		onInitialized?: () => void;
 	}
 
-	let { open, projectId, projectName = '', onClose, onInitialized }: Props = $props();
+	let { open, projectId, sessionId, projectName = '', onClose, onInitialized }: Props = $props();
 
 	type Mode = 'init' | 'clone';
 
@@ -85,14 +86,14 @@
 			if (isCloneMode) {
 				await cloneRepository(projectId, {
 					clone_url: cloneUrl.trim(),
-				});
+				}, sessionId);
 			} else {
 				await initRepository(projectId, {
 					create_initial_commit: createInitialCommit,
 					create_github_repo: createGithubRepo,
 					github_repo_name: createGithubRepo ? githubRepoName.trim() : undefined,
 					github_private: githubPrivate,
-				});
+				}, sessionId);
 			}
 			onInitialized?.();
 			onClose();

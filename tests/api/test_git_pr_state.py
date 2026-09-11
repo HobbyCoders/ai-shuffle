@@ -94,6 +94,7 @@ def pr_app():
 @pytest.fixture
 def pr_client(pr_app, mock_git_service, mock_github_service):
     with ExitStack() as stack:
+        stack.enter_context(patch("app.api.git_owner.database.get_session", side_effect=lambda sid: {"id": sid, "project_id": "p1"}))
         stack.enter_context(patch.object(gitops, "git_service", mock_git_service))
         stack.enter_context(patch.object(gitops, "github_service", mock_github_service))
         stack.enter_context(patch.object(gitops, "check_project_access", MagicMock()))

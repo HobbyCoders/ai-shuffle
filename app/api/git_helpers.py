@@ -388,6 +388,12 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
             except (IndexError, ValueError) as e:
                 logger.warning(f"Failed to parse GitHub repo name from URL '{remote_url}': {e}")
 
+    # A v2-only session can have a checkout without a legacy projects row.
+    # Its Git metadata is still usable; do not insert a dangling foreign key.
+    if not database.get_project(project_id):
+        return {"id": None, "remote_url": remote_url, "default_branch": default_branch,
+                "github_repo_name": github_repo_name, "last_synced_at": None}
+
     repo = database.create_git_repository(
         repository_id=repo_id,
         project_id=project_id,

@@ -76,14 +76,14 @@ class PeerLink:
         self.endpoints = merged
 
     async def _request(self, client: httpx.AsyncClient, method: str, path: str, *, json_body=None,
-                       params=None, auth: bool = True) -> Any:
+                       params=None, auth: bool = True, timeout: float = REQUEST_TIMEOUT) -> Any:
         if self.base_url is None:
             raise PeerError("no endpoint")
         headers = {"Accept": "application/json"}
         if auth:
             headers["Authorization"] = "Bearer " + (self.token or "")
         response = await client.request(method, self.base_url + path, json=json_body, params=params,
-                                        headers=headers, timeout=120 if path == "/api/v1/network/peer/state" else REQUEST_TIMEOUT)
+                                        headers=headers, timeout=120 if path == "/api/v1/network/peer/state" else timeout)
         if response.status_code == 401 and auth:
             self.token = None
             raise PeerError("token rejected")
