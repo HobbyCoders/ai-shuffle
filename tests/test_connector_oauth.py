@@ -97,7 +97,7 @@ def test_callback_produces_encrypted_account_and_reconnect_preserves_id(client, 
     credentials = {"client_id": "client", "client_secret": "secret", "refresh_token": "refresh-secret",
                    "email_address": "person@example.com", "oauth_managed": True}
     monkeypatch.setattr(oauth, "_credentials", AsyncMock(return_value=credentials))
-    flow = start(client, name="My Gmail", options={"label_ids": "INBOX,STARRED", "max_results": 25})
+    flow = start(client, name="My Gmail", options={"labels": "INBOX,STARRED", "max_results": 25})
     response = client.get(oauth.CALLBACK, params={"state": flow["flow_id"], "code": "one-time-code"})
     assert response.status_code == 200
     assert "refresh-secret" not in response.text
@@ -105,7 +105,7 @@ def test_callback_produces_encrypted_account_and_reconnect_preserves_id(client, 
     assert len(rows) == 1
     row = rows[0]
     assert row["name"] == "My Gmail"
-    assert row["config"]["label_ids"] == "INBOX,STARRED"
+    assert row["config"]["labels"] == "INBOX,STARRED"
     assert row["config"]["max_results"] == 25
     assert row["config"]["enabled_action_categories"] == ""
     assert "refresh-secret" not in json.dumps(row["config"])

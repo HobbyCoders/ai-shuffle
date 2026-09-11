@@ -53,7 +53,7 @@ def test_identity_and_assets_are_the_stamped_branch(app, checkout):
     assert identity == json.loads((checkout / "frontend/build" / preview.MANIFEST).read_text())
     assert identity["branch"] == "preview-fixture"
     assert str(checkout) not in response.text
-    for path, content in (("/chat/real-session", "Branch UI"), ("/_app/app.js", "branch bundle"), ("/static/index.html", "Branch UI"), ("/icons/icon.svg", "<svg/>"), ("/favicon.svg?filename=../../.git/config", "<svg/>")):
+    for path, content in (("/plaid-link?oauth_state_id=resume", "Branch UI"), ("/chat/real-session", "Branch UI"), ("/_app/app.js", "branch bundle"), ("/static/index.html", "Branch UI"), ("/icons/icon.svg", "<svg/>"), ("/favicon.svg?filename=../../.git/config", "<svg/>")):
         page = c.get(path)
         assert page.status_code == 200
         assert content in page.text

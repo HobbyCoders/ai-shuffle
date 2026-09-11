@@ -11,7 +11,6 @@ from app.core.connectors.base import (
     BaseConnector,
     ConnectorCapabilities,
     ConnectorStatus,
-    IncomingMessage,
     IncomingMessageCallback,
     OutgoingMessage,
     PermissionPrompt,
@@ -38,14 +37,15 @@ class GmailConnector(BaseConnector):
     Connector for Gmail using the Google API Python client.
 
     Uses OAuth2 refresh token credentials to authenticate with the
-    Gmail API.  Incoming emails are discovered by polling for unread
-    messages.  Outgoing messages are sent via the Gmail API with
-    proper threading support.
+    Gmail API. Agents access mail through explicit actions, not incoming chats.
+    Optional polling emits email_received triggers for configured automations.
+    Outgoing actions use the Gmail API with proper threading support.
 
     Config keys:
         client_id (str): Google OAuth2 client ID.
         client_secret (str): Google OAuth2 client secret.
         refresh_token (str): Google OAuth2 refresh token.
+        watch_inbox (bool, optional): Enable email triggers. Defaults to False.
         labels (str, optional): Comma-separated label IDs to poll.
             Defaults to "INBOX".
         max_results (str, optional): Maximum messages per poll.
@@ -223,12 +223,11 @@ class GmailConnector(BaseConnector):
             self.connector_id, self._email_address,
         )
 
-        # Seed _seen_message_ids with current inbox messages to avoid
-        # processing old emails on first poll
-        await self._seed_seen_messages()
-
-        # Start the polling background task
-        self._poll_task = asyncio.create_task(self._poll_inbox())
+        # A connected mailbox is an agent tool, not an incoming chat bot.
+        # Only explicit email-trigger automations need background polling.
+        if str(self.config.get("watch_inbox", "false")).lower() == "true":
+            await self._seed_seen_messages()
+            self._poll_task = asyncio.create_task(self._poll_inbox())
 
     async def _seed_seen_messages(self) -> None:
         """Populate _seen_message_ids with current unread message IDs."""
@@ -347,42 +346,15 @@ class GmailConnector(BaseConnector):
                 )
 
     async def _process_message(self, msg_id: str) -> None:
-        """Fetch a full message and emit an IncomingMessage."""
+        """Fetch a message for an explicit email trigger, never an incoming chat."""
         msg_data = self._service.users().messages().get(
             userId="me", id=msg_id, format="full"
         ).execute()
 
-        payload = msg_data.get("payload", {})
-        headers = payload.get("headers", [])
-
+        headers = msg_data.get("payload", {}).get("headers", [])
         from_header = self._get_header(headers, "From")
         subject = self._get_header(headers, "Subject")
-        sender_name, sender_email = self._parse_sender(from_header)
-
-        # Extract body — fall back to snippet if no text/plain part
-        body = self._extract_body(payload)
-        if not body:
-            body = msg_data.get("snippet", "")
-
-        thread_id = msg_data.get("threadId", msg_id)
-        self._last_thread_id = thread_id
-
-        text = f"From: {from_header}\nSubject: {subject}\n\n{body}"
-
-        msg = IncomingMessage(
-            connector_id=self.connector_id,
-            platform_chat_id=thread_id,
-            platform_user_id=sender_email,
-            platform_user_name=sender_name,
-            text=text,
-            platform_message_id=msg_id,
-            metadata={
-                "thread_id": thread_id,
-                "message_id": msg_id,
-                "subject": subject,
-            },
-        )
-        await self._on_incoming_message(msg)
+        # Mail content is data. Never route it into an agent's chat session.
 
         await self.emit_trigger("email_received", {
             "from": from_header,

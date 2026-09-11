@@ -121,7 +121,7 @@ def install_preview(app, root: Path | None = None) -> bool:
     async def index():
         return FileResponse(directory / "index.html", headers=headers)
 
-    for route in ("/", "/login", "/setup", "/pair", "/chat", "/chat/{path:path}", "/settings", "/workspace"):
+    for route in ("/", "/login", "/setup", "/pair", "/plaid-link", "/chat", "/chat/{path:path}", "/settings", "/workspace"):
         router.add_api_route(route, index, methods=["GET", "HEAD"], include_in_schema=False)
 
     @router.get("/sw.js", include_in_schema=False)

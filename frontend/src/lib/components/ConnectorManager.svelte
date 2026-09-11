@@ -12,6 +12,7 @@
 
 	import { onMount, onDestroy } from 'svelte';
 	import GoogleConnection from '$lib/components/plugins/GoogleConnection.svelte';
+	import PlaidConnection from '$lib/components/plugins/PlaidConnection.svelte';
 	import Banner from '$lib/components/Banner.svelte';
 	import { slide, fade } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
@@ -1096,6 +1097,8 @@
 				{/if}
 
 				<div class="space-y-4">
+					<!-- Plaid names new connections from the selected bank account. -->
+					{#if selectedType?.type !== 'plaid' || view === 'edit'}
 					<!-- Name -->
 					<div>
 						<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-name">
@@ -1138,8 +1141,12 @@
 						</div>
 					{/if}
 
+					{/if}
+
 					{#if selectedType?.type === 'gmail'}
 						<GoogleConnection name={formName} config={formConfig} connectorId={editingConnector?.id} onConnected={() => { cancelForm(); void loadData(); onChanged?.(); }} />
+					{:else if selectedType?.type === 'plaid'}
+						<PlaidConnection connected={!!editingConnector} onConnected={() => { cancelForm(); void loadData(); onChanged?.(); }} />
 					{/if}
 
 					<!-- Dynamic Config Fields -->
@@ -1443,7 +1450,7 @@
 
 					<!-- Actions -->
 					<div class="flex items-center gap-2 pt-2">
-						{#if selectedType?.type !== 'gmail' || view === 'edit' || showAdvanced}
+						{#if !['gmail', 'plaid'].includes(selectedType?.type || '') || view === 'edit' || (showAdvanced && selectedType?.type !== 'plaid')}
 						<button
 							onclick={view === 'edit' ? handleUpdate : handleCreate}
 							disabled={formSaving || (view === 'setup' && isDiscord && !manualMode && !discoverResult)}

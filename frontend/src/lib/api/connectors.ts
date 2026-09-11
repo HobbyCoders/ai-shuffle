@@ -14,7 +14,7 @@ export interface ConnectorConfig {
 
 export interface ConnectorCreate {
 	name: string;
-	type: 'telegram' | 'discord' | 'whatsapp' | 'webhook' | 'slack' | 'line' | 'signal' | 'imessage' | 'msteams' | 'bluebubbles' | 'spotify' | 'hue' | 'homeassistant' | 'gmail';
+	type: 'telegram' | 'discord' | 'whatsapp' | 'webhook' | 'slack' | 'line' | 'signal' | 'imessage' | 'msteams' | 'bluebubbles' | 'spotify' | 'hue' | 'homeassistant' | 'gmail' | 'plaid';
 	config: ConnectorConfig;
 	events: string[];
 	api_user_id?: string;
@@ -31,7 +31,7 @@ export interface ConnectorUpdate {
 
 export interface Connector {
 	id: string;
-	type: 'telegram' | 'discord' | 'whatsapp' | 'webhook' | 'slack' | 'line' | 'signal' | 'imessage' | 'msteams' | 'bluebubbles' | 'spotify' | 'hue' | 'homeassistant' | 'gmail';
+	type: 'telegram' | 'discord' | 'whatsapp' | 'webhook' | 'slack' | 'line' | 'signal' | 'imessage' | 'msteams' | 'bluebubbles' | 'spotify' | 'hue' | 'homeassistant' | 'gmail' | 'plaid';
 	name: string;
 	api_user_id: string | null;
 	config: ConnectorConfig;

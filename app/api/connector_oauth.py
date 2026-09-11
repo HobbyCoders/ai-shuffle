@@ -34,8 +34,9 @@ class GoogleApp(BaseModel):
 
 
 class GoogleOptions(BaseModel):
-    label_ids: str = "INBOX"
-    enabled_action_categories: str = ""
+    labels: str = "INBOX"
+    watch_inbox: bool = False
+    enabled_action_categories: str | list[str] = ""
     poll_interval_seconds: int = Field(default=60, ge=15, le=86400)
     max_results: int = Field(default=20, ge=1, le=100)
 

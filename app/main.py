@@ -49,7 +49,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # runtime style injection and component libraries).
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; "
+            "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdn.plaid.com; "
             "style-src 'self' 'unsafe-inline'; "
             # http:: cross-install artifact requests answer with a 307 to the
             # peer install that actually holds the blob, and cluster peers
@@ -62,7 +62,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             # api.openai.com: the voice call surface POSTs its WebRTC SDP offer
             # directly from the browser to OpenAI Realtime (voiceCall.ts) —
             # without this the fetch dies as a CSP block ("Failed to fetch").
-            "connect-src 'self' ws: wss: https://*.cloudflareaccess.com https://static.cloudflareinsights.com https://img.shields.io https://em-content.zobj.net https://api.openai.com; "
+            "connect-src 'self' ws: wss: https://*.cloudflareaccess.com https://static.cloudflareinsights.com https://img.shields.io https://em-content.zobj.net https://api.openai.com https://*.plaid.com; "
+            "frame-src 'self' https://cdn.plaid.com; "
             "font-src 'self'; "
             "frame-ancestors 'self';"
         )
@@ -578,6 +579,10 @@ if not install_preview(app) and static_dir.exists():
 
     @app.get("/login")
     async def serve_spa_login():
+        return FileResponse(static_dir / "index.html")
+
+    @app.get("/plaid-link")
+    async def serve_plaid_link():
         return FileResponse(static_dir / "index.html")
 
     @app.get("/setup")

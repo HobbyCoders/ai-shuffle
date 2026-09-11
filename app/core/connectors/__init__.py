@@ -37,6 +37,7 @@ from app.core.connectors.spotify import SpotifyConnector
 from app.core.connectors.hue import HueConnector
 from app.core.connectors.homeassistant import HomeAssistantConnector
 from app.core.connectors.gmail import GmailConnector
+from app.core.connectors.plaid import PlaidConnector
 
 register_connector("telegram", TelegramConnector)
 register_connector("discord", DiscordConnector)
@@ -52,6 +53,7 @@ register_connector("spotify", SpotifyConnector)
 register_connector("hue", HueConnector)
 register_connector("homeassistant", HomeAssistantConnector)
 register_connector("gmail", GmailConnector)
+register_connector("plaid", PlaidConnector)
 
 # Global singleton — imported by other modules
 from app.core.connectors.manager import connector_manager  # noqa: F401, E402

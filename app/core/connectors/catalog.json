@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "revision": "ef14235ad3d9e24ae92547fa316c5d62e6bb8db9",
+  "revision": "932d363da0618aa802f5501655bbe7e6a612fee2",
   "packages": {
     "telegram": {
       "module": "telegram",
@@ -109,8 +109,15 @@
       "module": "gmail",
       "class": "GmailConnector",
       "files": {
-        "gmail.py": "2cd5f332d92803c3c9232958f3cacd22deca0569e0ee226a008e502a989f2bc1",
+        "gmail.py": "191b23a87a0c1a5611dcf40f79283fddd4205dde412b2fc2af3635dd1b05463b",
         "gmail_actions.py": "5d822d18f57077ec12f1e3ac9db0fbd887c3e6be0c488d463b092812373195b2"
+      }
+    },
+    "plaid": {
+      "module": "plaid",
+      "class": "PlaidConnector",
+      "files": {
+        "plaid.py": "874aebed2ee1582cfb78e83ca44ef9fa2ac909d179356c4ee2c19b4a17d0ee09"
       }
     }
   },
@@ -133,5 +140,5 @@
     ]
   },
   "sdk": 1,
-  "release": "997f807c5368f3d3"
+  "release": "114fc6382a2eaff1"
 }

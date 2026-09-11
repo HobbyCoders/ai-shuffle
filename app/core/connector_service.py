@@ -37,6 +37,7 @@ def get_sensitive_fields(connector_type: str) -> List[str]:
         "hue": ["api_key"],
         "homeassistant": ["access_token"],
         "gmail": ["client_secret", "refresh_token"],
+        "plaid": ["client_secret", "access_token"],
     }
     return mapping.get(connector_type, [])
 
@@ -626,11 +627,12 @@ def get_connector_type_info() -> List[Dict]:
         {
             "type": "gmail",
             "name": "Gmail",
-            "description": "Email integration via Gmail API",
+            "description": "Connect your Google account for agent email tools, not a chat bot",
             "config_fields": [
                 {"key": "client_id", "label": "OAuth Client ID", "type": "text", "required": True, "description": "From Google Cloud Console"},
                 {"key": "client_secret", "label": "OAuth Client Secret", "type": "password", "required": True},
                 {"key": "refresh_token", "label": "OAuth Refresh Token", "type": "password", "required": True, "description": "From OAuth2 authorization flow"},
+                {"key": "watch_inbox", "label": "Watch Inbox for Automations", "type": "text", "required": False, "placeholder": "false", "description": "Set true to poll for email_received triggers. Never starts chats or auto-replies."},
                 {"key": "labels", "label": "Gmail Labels", "type": "text", "required": False, "placeholder": "INBOX", "description": "Comma-separated labels to watch"},
                 {"key": "max_results", "label": "Max Results per Poll", "type": "text", "required": False, "placeholder": "10"},
                 {"key": "enabled_action_categories", "label": "Enabled AI Action Categories", "type": "list", "required": False,
@@ -639,6 +641,12 @@ def get_connector_type_info() -> List[Dict]:
             ],
         },
     ]
+
+    types.append({
+        "type": "plaid", "name": "Personal Finance (Plaid)",
+        "description": "Connect bank and credit-card accounts through Plaid Link. Read-only accounts, balances, and purchases; no payments or transfers.",
+        "config_fields": [],
+    })
 
     # Enrich each type with capabilities from the registered connector class
     from dataclasses import asdict

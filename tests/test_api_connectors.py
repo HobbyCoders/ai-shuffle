@@ -18,7 +18,7 @@ class TestListConnectorTypes:
         response = authenticated_client.get("/api/v1/connectors/types")
         assert response.status_code == 200
         types = response.json()
-        assert len(types) == 14
+        assert len(types) == 15
 
     def test_list_types_structure(self, authenticated_client):
         response = authenticated_client.get("/api/v1/connectors/types")

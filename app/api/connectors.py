@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/connectors", tags=["Connectors"])
 from app.api.connector_oauth import router as oauth_router
 router.include_router(oauth_router)
+from app.api.connector_plaid import router as plaid_router
+router.include_router(plaid_router)
 
 
 # ---- Meta endpoints ----

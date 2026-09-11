@@ -1503,6 +1503,7 @@ class ConnectorType(str, Enum):
     HUE = "hue"
     HOMEASSISTANT = "homeassistant"
     GMAIL = "gmail"
+    PLAID = "plaid"
 
 
 VALID_CONNECTOR_EVENTS = [

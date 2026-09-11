@@ -173,7 +173,7 @@ def _create_discovery_tools() -> list:
             "available_connectors": [
                 "telegram", "discord", "slack", "whatsapp", "line",
                 "signal", "imessage", "teams", "bluebubbles",
-                "spotify", "hue", "home_assistant", "gmail",
+                "spotify", "hue", "home_assistant", "gmail", "plaid",
             ],
             "common_tool_matchers": {
                 "Bash": "Matches the Bash/shell tool",

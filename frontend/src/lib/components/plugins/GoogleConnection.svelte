@@ -39,7 +39,7 @@
 		if (!popup) { error = 'Allow pop-ups for this app, then try again.'; return; }
 		busy = true;
 		try {
-			const result = await api.post<{ authorization_url: string; flow_id: string }>('/connectors/oauth/google/start', { name, connector_id: connectorId || null, options: Object.fromEntries(['label_ids', 'enabled_action_categories', 'poll_interval_seconds', 'max_results'].filter(key => config[key] !== undefined && config[key] !== '').map(key => [key, config[key]])) });
+			const result = await api.post<{ authorization_url: string; flow_id: string }>('/connectors/oauth/google/start', { name, connector_id: connectorId || null, options: Object.fromEntries(['labels', 'watch_inbox', 'enabled_action_categories', 'poll_interval_seconds', 'max_results'].filter(key => config[key] !== undefined && config[key] !== '').map(key => [key, config[key]])) });
 			flowId = result.flow_id;
 			popup.location.href = result.authorization_url;
 			const deadline = Date.now() + 600_000;
@@ -61,7 +61,7 @@
 <section class="google-signin" aria-label="Google account">
 	{#if error}<p role="alert">{error}</p>{/if}
 	{#if status?.configured}
-		<p>Google will ask you to allow reading, composing, sending, and organizing email. AI Shuffle keeps your account credentials encrypted on this installation.</p>
+		<p>Connect your own Gmail account—not a bot. Agents can use Gmail tools when you ask; connecting does not start email chats or auto-replies. Google will ask you to allow reading, composing, sending, and organizing email. AI Shuffle keeps your account credentials encrypted on this installation.</p>
 		<button class="connect" disabled={busy} onclick={connect}>{busy ? 'Waiting for Google…' : connectorId ? 'Reconnect with Google' : 'Connect with Google'}</button>
 	{:else if status}
 		<p>Google sign-in needs a one-time administrator setup for this installation. After that, accounts connect through Google without copying tokens.</p>

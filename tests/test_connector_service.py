@@ -41,11 +41,11 @@ class TestGetSensitiveFields:
     def test_unknown_type_returns_empty(self):
         assert get_sensitive_fields("nonexistent") == []
 
-    def test_all_14_types_have_entries(self):
+    def test_all_15_types_have_entries(self):
         types = [
             "telegram", "discord", "whatsapp", "webhook", "slack", "line",
             "signal", "imessage", "msteams", "bluebubbles", "spotify",
-            "hue", "homeassistant", "gmail",
+            "hue", "homeassistant", "gmail", "plaid",
         ]
         for t in types:
             result = get_sensitive_fields(t)
@@ -184,9 +184,9 @@ class TestGetConnectorTypeInfo:
             for field in discord["config_fields"]
         )
 
-    def test_returns_14_types(self):
+    def test_returns_15_types(self):
         types = get_connector_type_info()
-        assert len(types) == 14
+        assert len(types) == 15
 
     def test_all_types_have_required_fields(self):
         types = get_connector_type_info()
@@ -202,7 +202,7 @@ class TestGetConnectorTypeInfo:
         expected = {
             "telegram", "discord", "whatsapp", "webhook", "slack", "line",
             "signal", "imessage", "msteams", "bluebubbles", "spotify",
-            "hue", "homeassistant", "gmail",
+            "hue", "homeassistant", "gmail", "plaid",
         }
         assert type_names == expected
 
