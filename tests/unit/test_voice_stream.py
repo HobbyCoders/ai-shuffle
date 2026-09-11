@@ -9,6 +9,34 @@ import pytest
 from app.core import voice_stream
 
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history,greet,opens", [([],True,True),([{"role":"user","content":"Earlier conversation"}],True,False),([],False,False)])
+async def test_live_startup_sends_opening_only_on_first_browser_call(history,greet,opens):
+    call=voice_stream.VoiceStream(AsyncMock(),{"id":"s1"},{"model":"gpt-live-1","voice":"marin","greet":greet,"options":{"opening":"Hello caller.","instructions":"Be concise."}},"secret",3600)
+    call.upstream=AsyncMock()
+    call.upstream.recv.return_value=json.dumps({"type":"session.started"})
+    await call.start_live(history)
+    sent=[json.loads(args.args[0]) for args in call.upstream.send.call_args_list]
+    assert sent[0]["session"]["instructions"] == "Be concise."
+    assert len(sent) == (2 if opens else 1)
+    if opens:
+        assert sent[1]["type"] == "session.instructions.append"
+        assert sent[1]["delegation_id"] is None
+        assert sent[1]["content"].endswith("Hello caller.")
+
+
+@pytest.mark.asyncio
+async def test_responses_delegation_never_dispatches_client_worker(monkeypatch):
+    call=voice_stream.VoiceStream(AsyncMock(),{"id":"s1"},{"model":"gpt-live-1","voice":"marin","options":{"delegation_type":"responses","delegation_model":"prov:openai:reasoner"}},"secret",3600)
+    call.upstream=Upstream([json.dumps({"type":"session.delegation.created","delegation":{"id":"managed","input":[]}})])
+    delegate=AsyncMock()
+    monkeypatch.setattr(voice_stream,"delegate_to_selected_model",delegate)
+    await call.receive_upstream()
+    delegate.assert_not_called()
+
+
 class Upstream:
     def __init__(self, events):
         self.events = events
@@ -106,6 +134,9 @@ async def test_browser_audio_is_encoded_for_each_provider():
         await call.receive_browser()
         event = json.loads(call.upstream.sent[0]) if call.is_live else msgpack.unpackb(call.upstream.sent[0], raw=False)
         assert event["audio"] == (base64.b64encode(pcm).decode() if call.is_live else pcm)
+        if not call.is_live:
+            from app.core.voice_models import model_details
+            assert event["prompt"] == model_details(model)["prompts"][0]["text"]
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,7 @@ from typing import Dict, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.db import database
 from app.db.async_database import run_sync
@@ -551,6 +551,8 @@ class VoiceSettingsResponse(BaseModel):
     voice_max_call_minutes: int
     # Compatibility field for older clients; app tools are no longer a preference.
     voice_app_tools_enabled: bool = True
+    model_details: dict = Field(default_factory=dict)
+    voice_options: dict = Field(default_factory=dict)
 
 
 class VoiceSettingsUpdateRequest(BaseModel):
@@ -565,12 +567,25 @@ class VoiceSettingsUpdateRequest(BaseModel):
     voice_voice: Optional[str] = None
     voice_provider_id: Optional[str] = None
     voice_max_call_minutes: Optional[int] = None
+    voice_options: Optional[dict] = None
+    voice_options_model: Optional[str] = None
     # Deprecated compatibility input: accepted but ignored, including False/null.
     voice_app_tools_enabled: Optional[bool] = None
 
 
 def _truthy_setting(raw: Optional[str]) -> bool:
     return (raw or "").strip().lower() in ("1", "true", "on", "yes")
+
+
+def get_voice_options(model: str) -> dict:
+    import json
+    from app.core.voice_options import validate_options
+    try:
+        value = json.loads(database.get_system_setting(f"voice_options:{model}") or "{}")
+        return validate_options(model, value)
+    except (ValueError, TypeError):
+        logger.warning("Invalid saved options for voice model %s; using defaults", model)
+        return validate_options(model, {})
 
 
 def get_voice_settings() -> dict:
@@ -604,14 +619,20 @@ def get_voice_settings() -> dict:
         "voice_provider_id": provider_id,
         "voice_max_call_minutes": max_minutes,
         "voice_app_tools_enabled": True,
+        "voice_options": get_voice_options(model),
     }
+
+
+def _voice_settings_response(value: dict) -> VoiceSettingsResponse:
+    from app.core.voice_models import model_details
+    return VoiceSettingsResponse(**value, model_details=model_details(value["voice_model"], value.get("voice_options")))
 
 
 @router.get("/voice", response_model=VoiceSettingsResponse)
 async def get_voice_settings_endpoint(token: str = Depends(require_auth)):
     """Get the current voice-mode settings (defaults applied)."""
     # Keep all synchronous settings reads in one worker hop.
-    return VoiceSettingsResponse(**await run_sync(get_voice_settings))
+    return _voice_settings_response(await run_sync(get_voice_settings))
 
 
 @router.put("/voice", response_model=VoiceSettingsResponse)
@@ -663,6 +684,21 @@ async def update_voice_settings(
         if minutes is None or minutes <= 0:
             raise HTTPException(400, "voice_max_call_minutes must be a positive integer")
 
+        options = get_voice_options(model)
+        if "voice_options" in supplied:
+            if request.voice_options_model is not None and request.voice_options_model != model:
+                raise HTTPException(409, "The selected voice model changed. Reload settings before saving.")
+            if request.voice_options is None:
+                raise HTTPException(400, "voice_options must be an object; use an empty string to reset a prompt.")
+            from app.core.voice_options import validate_options
+            try:
+                options = validate_options(model, {**options, **request.voice_options})
+            except (ValueError, TypeError) as exc:
+                raise HTTPException(400, f"Invalid voice options: {exc}") from exc
+        if model == "gpt-live-1" and supplied & {"voice_options", "voice_model", "voice_provider_id"}:
+            from app.core.voice_stream import validate_delegation_options
+            validate_delegation_options(options, provider)
+
         if supplied & {"voice_model", "voice_provider_id", "voice_voice"}:
             database.set_system_setting(VOICE_MODEL_KEY, model)
             database.set_system_setting(VOICE_VOICE_KEY, voice)
@@ -670,13 +706,16 @@ async def update_voice_settings(
                 database.set_system_setting(VOICE_PROVIDER_ID_KEY, provider)
             else:
                 database.delete_system_setting(VOICE_PROVIDER_ID_KEY)
+        if "voice_options" in supplied:
+            import json
+            database.set_system_setting(f"voice_options:{model}", json.dumps(options))
         if "voice_max_call_minutes" in supplied:
             database.set_system_setting(VOICE_MAX_CALL_MINUTES_KEY, str(minutes))
         if "voice_mode_enabled" in supplied:
             database.set_system_setting(VOICE_MODE_ENABLED_KEY, "true" if request.voice_mode_enabled else "false")
         return get_voice_settings()
 
-    return VoiceSettingsResponse(**await run_sync(_apply))
+    return _voice_settings_response(await run_sync(_apply))
 
 
 # ============================================================================

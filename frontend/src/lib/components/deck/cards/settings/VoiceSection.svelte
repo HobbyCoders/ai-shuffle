@@ -3,9 +3,9 @@
 	 * VoiceSection — Settings → Voice (ruling VM17).
 	 *
 	 * Runtime-editable knobs backed by `GET/PUT /api/v1/settings/voice`:
-	 * the enable flag, the realtime model, the agent's voice (with a preview
-	 * of the selected one, VM21), which OpenAI API-key provider row funds
-	 * calls, and a cap on total call length. Refresh on shared settings changes;
+	 * the enable flag, model-specific voices, funding provider and call cap.
+	 * Runtime details and prompt text come from the server's producing paths.
+	 * Refresh on shared settings changes;
 	 * the PUT is a partial update, and an explicit `null` provider clears the pin.
 	 *
 	 * Two traps this section is written around:
@@ -22,14 +22,13 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
-	import { AudioLines, Play, Square } from 'lucide-svelte';
+	import { AudioLines } from 'lucide-svelte';
+	import VoiceModelOptions from './VoiceModelOptions.svelte';
 	import {
 		VOICE_MODELS,
-		voicesForModel,
 		FAL_VOICE_PROVIDER,
 		getVoiceProviders,
 		loadVoiceSettings,
-		previewVoice,
 		saveVoiceSettings,
 		type VoiceProvider,
 		type VoiceSettings,
@@ -41,7 +40,8 @@
 	let saving = $state(false);
 	const falSelected = $derived(settings?.voice_provider_id === FAL_VOICE_PROVIDER);
 	const models = $derived(VOICE_MODELS.filter(m => (m.id === 'fal-ai/personaplex/realtime') === falSelected));
-	const voices = $derived(voicesForModel(settings?.voice_model ?? ''));
+	const details = $derived(settings?.model_details?.model === settings?.voice_model ? settings?.model_details : undefined);
+	const voices = $derived(details?.voices ?? []);
 
 	let error = $state('');
 	let success = $state('');
@@ -85,19 +85,21 @@
 	});
 
 	async function save(patch: Parameters<typeof saveVoiceSettings>[0]) {
-		if (!current()) return;
+		if (!current()) return false;
 		++request;
 		saving = true;
 		error = '';
 		success = '';
 		try {
 			const updated = await saveVoiceSettings(patch);
-			if (!current()) return;
+			if (!current()) return false;
 			settings = updated;
 			success = 'Saved';
 			setTimeout(() => (success = ''), 2000);
+			return true;
 		} catch (e: any) {
 			if (current()) error = e?.detail || 'Failed to save voice settings';
+			return false;
 		} finally {
 			if (current()) {
 				saving = false;
@@ -119,64 +121,9 @@
 		void save({ voice_max_call_minutes: parsed });
 	}
 
-	// ---- Voice preview (VM21) ---------------------------------------------
-	// One shared <audio> element for the SELECTED voice; starting a preview
-	// stops whatever was playing. Fetched blobs are cached per voice so
-	// replays don't re-bill the TTS call.
-	let previewing = $state(false);
-	let loadingPreview = $state(false);
-	let previewAudio: HTMLAudioElement | null = null;
-	const previewCache = new Map<string, string>();
-
-	function stopPreview() {
-		previewAudio?.pause();
-		previewAudio = null;
-		previewing = false;
-	}
-
-	async function togglePreview() {
-		const voiceId = settings?.voice_voice;
-		if (!voiceId) return;
-		if (previewing) {
-			stopPreview();
-			return;
-		}
-		if (loadingPreview) return;
-		error = '';
-		try {
-			let url = previewCache.get(voiceId);
-			if (!url) {
-				loadingPreview = true;
-				const blob = await previewVoice(voiceId);
-				url = URL.createObjectURL(blob);
-				previewCache.set(voiceId, url);
-			}
-			const audio = new Audio(url);
-			audio.onended = () => {
-				if (previewAudio === audio) stopPreview();
-			};
-			previewAudio = audio;
-			previewing = true;
-			await audio.play();
-		} catch (e: any) {
-			stopPreview();
-			error = e?.detail || 'Could not play the voice preview.';
-		} finally {
-			loadingPreview = false;
-		}
-	}
-
-	function changeVoice(voiceId: string) {
-		stopPreview();
-		void save({ voice_voice: voiceId });
-	}
-
 	onDestroy(() => {
 		alive = false;
 		++request;
-		stopPreview();
-		for (const url of previewCache.values()) URL.revokeObjectURL(url);
-		previewCache.clear();
 	});
 </script>
 
@@ -262,31 +209,16 @@
 				<select
 					class="sel"
 					value={settings.voice_voice}
-					disabled={saving}
+					disabled={saving || !details}
 					aria-label="Agent voice"
-					onchange={(e) => changeVoice(e.currentTarget.value)}
+					onchange={(e) => save({ voice_voice: e.currentTarget.value })}
 				>
+					{#if !details}<option value={settings.voice_voice}>{settings.voice_voice} (saved)</option>{/if}
 					{#each voices as voice}
 						<option value={voice.id}>{voice.label}</option>
 					{/each}
 				</select>
-				<button
-					type="button"
-					class="preview-btn"
-					class:playing={previewing}
-					disabled={falSelected || saving || (loadingPreview && !previewing)}
-					aria-label={previewing ? 'Stop the voice preview' : 'Preview the selected voice'}
-					title={previewing ? 'Stop preview' : 'Hear this voice'}
-					onclick={togglePreview}
-				>
-					{#if loadingPreview}
-						<span class="preview-spinner" aria-hidden="true"></span>
-					{:else if previewing}
-						<Square size={12} strokeWidth={2} />
-					{:else}
-						<Play size={12} strokeWidth={2} />
-					{/if}
-				</button>
+
 			</div>
 		</div>
 
@@ -312,6 +244,39 @@
 			</div>
 		</div>
 
+
+		<div class="set-row">
+			<div class="lab">
+				<p>{details?.preview_note ?? 'Model details are unavailable. Update the server to load model-specific voices, runtime settings and prompts.'}</p>
+				<p>Changes apply to new calls. Existing sessions keep their original model, voice and provider.</p>
+				<p>Model availability depends on your provider account. Catalog listings do not guarantee voice-session access.</p>
+			</div>
+		</div>
+		{#if details}
+			{#if settings.voice_options}
+				{#key settings.voice_model}
+					<VoiceModelOptions model={settings.voice_model} providerId={settings.voice_provider_id} options={settings.voice_options} {details} {saving} onSave={patch => save({voice_options:patch, voice_options_model:settings!.voice_model})} />
+				{/key}
+			{/if}
+			<div class="model-details" data-testid="voice-model-details">
+				<h4>Model runtime settings</h4>
+				<p>Effective saved configuration. Editable values above and system-managed transport values are shown here.</p>
+				<dl>
+					{#each details.runtime_settings as setting}
+						<div><dt>{setting.label}</dt><dd>{setting.value}</dd></div>
+					{/each}
+				</dl>
+				<h4>Voice agent system prompts</h4>
+				<p>{details.prompt_note}</p>
+				{#each details.prompts as prompt}
+					<details class="prompt">
+						<summary>{prompt.label}</summary>
+						<pre>{prompt.text}</pre>
+					</details>
+				{/each}
+			</div>
+		{/if}
+
 		{#if error}<div class="set-row"><div class="lab"><p class="msg err">{error}</p></div></div>{/if}
 		{#if success}<div class="set-row"><div class="lab"><p class="msg ok">{success}</p></div></div>{/if}
 	{/if}
@@ -325,55 +290,18 @@
 		max-width: 260px;
 	}
 
-	.preview-btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 30px;
-		height: 30px;
-		flex-shrink: 0;
-		border: 1px solid var(--border);
-		border-radius: 50%;
-		background: var(--background);
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: color 0.15s ease, border-color 0.15s ease;
-	}
-	.preview-btn:hover:not(:disabled) {
-		color: var(--primary);
-		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
-	}
-	.preview-btn:disabled {
-		opacity: 0.45;
-		cursor: not-allowed;
-	}
-	.preview-btn.playing {
-		color: var(--primary);
-		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-	}
-	.preview-spinner {
-		width: 11px;
-		height: 11px;
-		border: 1.5px solid color-mix(in oklch, var(--primary) 35%, transparent);
-		border-top-color: var(--primary);
-		border-radius: 50%;
-		animation: preview-spin 0.8s linear infinite;
-	}
-	@keyframes preview-spin {
-		to {
-			transform: rotate(360deg);
-		}
-	}
-
-	.msg {
-		margin: 0;
-		font-size: 12.5px;
-	}
-	.msg.ok {
-		color: var(--success, #16a34a);
-	}
-	.msg.err {
-		color: var(--destructive);
+	.model-details { padding: 16px; border-top: 1px solid var(--border); min-width: 0; }
+	.model-details h4 { margin: 0 0 8px; font-size: 14px; }
+	.model-details p { color: var(--muted-foreground); font-size: 12px; line-height: 1.6; margin: 0 0 12px; }
+	dl { margin: 0 0 24px; }
+	dl div { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+	dt { color: var(--muted-foreground); }
+	dd { margin: 0; overflow-wrap: anywhere; }
+	.prompt { border: 1px solid var(--border); border-radius: 8px; margin-top: 8px; }
+	summary { padding: 12px; cursor: pointer; font-size: 13px; }
+	pre { margin: 0; padding: 0 12px 12px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 var(--font-mono, monospace); }
+	@media (max-width: 480px) {
+		dl div { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+		.set-row .ctl .sel { max-width: 100%; }
 	}
 </style>

@@ -47,45 +47,56 @@ export const VOICE_MODELS = [
 		hint: 'Cheapest · about $0.01–0.05 per minute',
 	},
 	{
+		id: 'gpt-realtime-2',
+		label: 'GPT Realtime 2',
+		hint: 'Realtime voice and tools',
+	},
+	{
 		id: 'gpt-realtime',
 		label: 'GPT Realtime (legacy)',
 		hint: 'Previous generation',
 	},
-	{ id: 'fal-ai/personaplex/realtime', label: 'PersonaPlex', hint: 'Full-duplex voice and reasoning' },
+	{ id: 'fal-ai/personaplex/realtime', label: 'PersonaPlex', hint: 'Full-duplex conversation · no connected tools' },
 ] as const;
 
 export { FAL_VOICE_PROVIDER, usesDelegation, usesAudioStream } from '$lib/constants/voice-engines';
 export const voiceModelLabel = (model: string): string => VOICE_MODELS.find(m => m.id === model)?.label ?? model;
-export function voicesForModel(model: string): readonly { id: string; label: string; hint: string }[] {
-	if (model !== 'fal-ai/personaplex/realtime') return VOICE_VOICES;
-	return ['NATF', 'NATM', 'VARF', 'VARM'].flatMap(prefix =>
-		Array.from({ length: prefix.startsWith('NAT') ? 4 : 5 }, (_, i) => ({ id: `${prefix}${i}`, label: `${prefix}${i}`, hint: '' })));
+export interface VoiceOptions {
+ instructions?: string;
+ transcription_model?: string;
+ max_output_tokens?: number | 'inf';
+ turn_detection?: 'server_vad' | 'semantic_vad';
+ eagerness?: 'auto' | 'low' | 'medium' | 'high';
+ threshold?: number;
+ prefix_padding_ms?: number;
+ silence_duration_ms?: number;
+ idle_timeout_ms?: number | null;
+ opening?: string;
+ delegation_type?: 'client' | 'responses';
+ delegation_model?: string;
+ delegation_effort?: string;
+ delegation_instructions?: string;
 }
-
-export interface VoiceSessionConfig { model: string; voice: string; provider_id: string | null }
+export interface VoiceSessionConfig { model: string; voice: string; provider_id: string | null; options?: VoiceOptions }
 export function getVoiceSessionConfig(id: string): Promise<VoiceSessionConfig> {
 	return api.get<VoiceSessionConfig>(`/voice/sessions/${encodeURIComponent(id)}/config`);
 }
 
-/**
- * The voices the realtime models can speak with (backend allowlist, VM21).
- * Marin and cedar are the gpt-realtime generation's recommended pair; the
- * one-word character notes are what the settings dropdown shows.
- */
-export const VOICE_VOICES = [
-	{ id: 'marin', label: 'Marin', hint: 'Warm, natural · recommended' },
-	{ id: 'cedar', label: 'Cedar', hint: 'Calm, natural · recommended' },
-	{ id: 'alloy', label: 'Alloy', hint: 'Neutral, even' },
-	{ id: 'ash', label: 'Ash', hint: 'Soft, warm' },
-	{ id: 'ballad', label: 'Ballad', hint: 'Expressive, gentle' },
-	{ id: 'coral', label: 'Coral', hint: 'Bright, friendly' },
-	{ id: 'echo', label: 'Echo', hint: 'Deep, steady' },
-	{ id: 'sage', label: 'Sage', hint: 'Measured, thoughtful' },
-	{ id: 'shimmer', label: 'Shimmer', hint: 'Light, upbeat' },
-	{ id: 'verse', label: 'Verse', hint: 'Clear, versatile' },
-] as const;
+export interface VoiceModelDetails {
+	model: string;
+	voices: { id: string; label: string }[];
+	transport: 'stream' | 'webrtc';
+	runtime_settings: { label: string; value: string }[];
+	transcription_models?: string[];
+	prompts: { label: string; text: string }[];
+	prompt_note: string;
+	preview_note: string;
+}
 
 export interface VoiceSettings {
+	/** Absent only when talking to an older server. Never guess its voice list. */
+	model_details?: VoiceModelDetails;
+	voice_options?: VoiceOptions;
 	voice_mode_enabled: boolean;
 	voice_model: string;
 	voice_voice: string;
@@ -97,6 +108,8 @@ export interface VoiceSettings {
 
 /** Partial update. An explicit `null` provider clears the pinned provider. */
 export interface VoiceSettingsUpdate {
+	voice_options?: VoiceOptions;
+	voice_options_model?: string;
 	voice_mode_enabled?: boolean;
 	voice_model?: string;
 	voice_voice?: string;
@@ -138,6 +151,7 @@ export interface VoiceSessionCreated {
 	client_secret: string;
 	expires_at: number | null;
 	model: string;
+	options?: VoiceOptions;
 }
 
 /** Re-mint for an existing voice session (VW3 contract). */
@@ -145,6 +159,7 @@ export interface VoiceSecret {
 	client_secret: string;
 	expires_at: number | null;
 	model: string;
+	options?: VoiceOptions;
 }
 
 /** Server-side call state (VW3 contract; usage + cost added in VW5). */

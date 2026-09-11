@@ -1,10 +1,10 @@
 <script lang="ts">
 	/** Session-scoped call status and controls. Compact mode sits beside the
 	 * persistent text composer; unmounting this view never ends the call. */
-	import { onDestroy } from 'svelte';
+	import { onDestroy, untrack } from 'svelte';
 	import { Mic, MicOff, PhoneOff, Volume2, VolumeX } from 'lucide-svelte';
 	import { voiceCallState, hangup, toggleAgent, toggleMic } from '$lib/services/voiceCall';
-	import { getVoiceCallState } from '$lib/api/voice';
+	import { getVoiceCallState, voiceModelLabel, usesDelegation, usesAudioStream } from '$lib/api/voice';
 
 	interface Props {
 		sessionId: string;
@@ -20,6 +20,11 @@
 	const mine = $derived(call.sessionId === sessionId);
 	const status = $derived(mine ? call.status : 'idle');
 	const live = $derived(status === 'live' || status === 'reconnecting');
+	const boundModel = $derived(mine ? call.model : null);
+	const delegated = $derived(mine && usesDelegation(call.model, call.options));
+	const realtime = $derived(mine && !!call.model && !usesAudioStream(call.model));
+	const engineLabel = $derived(mine && call.model ? voiceModelLabel(call.model) : 'Voice agent');
+	const modeLabel = $derived(delegated ? 'Selected-model delegation' : call.model === 'gpt-live-1' ? 'OpenAI Responses delegation' : realtime ? (call.options?.turn_detection === 'server_vad' ? 'Realtime agent tools · Normal VAD' : 'Realtime agent tools') : 'Full-duplex conversation');
 
 	const statusLabel = $derived(
 		status === 'live'
@@ -29,7 +34,7 @@
 					? 'Speaking…'
 					: call.userSpeaking
 						? 'Hearing you…'
-						: 'Listening'
+						: realtime || call.model === 'gpt-live-1' ? 'Listening' : 'Audio connected'
 			: status === 'connecting'
 				? 'Connecting…'
 				: status === 'reconnecting'
@@ -63,7 +68,10 @@
 
 	async function pollCost() {
 		try {
-			const state = await getVoiceCallState(sessionId);
+			const id = sessionId;
+			const model = call.model;
+			const state = await getVoiceCallState(id);
+			if (!mine || !live || sessionId !== id || call.model !== model || !realtime) return;
 			costUsd = state?.estimated_cost_usd ?? null;
 			activeTasks = state?.active_tasks ?? 0;
 		} catch {
@@ -72,13 +80,19 @@
 	}
 
 	$effect(() => {
-		if (live) {
-			void pollCost();
-			costTimer ??= setInterval(() => void pollCost(), COST_POLL_MS);
-		} else if (costTimer) {
-			clearInterval(costTimer);
-			costTimer = null;
+		// Only binding/status changes restart telemetry, never microphone levels.
+		void boundModel;
+		void sessionId;
+		costUsd = null;
+		activeTasks = 0;
+		if (live && realtime) {
+			untrack(() => void pollCost());
+			costTimer = setInterval(() => void pollCost(), COST_POLL_MS);
 		}
+		return () => {
+			if (costTimer) clearInterval(costTimer);
+			costTimer = null;
+		};
 	});
 
 	/** "~$0.12" once there is something to show; "<$0.01" while it is tiny. */
@@ -129,13 +143,13 @@
 				<span class="orb" class:on={live} class:muted={call.micMuted} class:speaking={live && call.agentSpeaking}></span>
 			</div>
 			<div class="vp-title">
-				<h3>Voice agent</h3>
+				<h3>{engineLabel}</h3>
+				{#if mine && call.model}<p class="vp-mode">{modeLabel}</p>{/if}
 				<p>
 					<span class="vp-status" class:speaking={live && call.agentSpeaking}>{statusLabel}</span>
 					{#if elapsed}<span class="vp-elapsed">· {elapsed}</span>{/if}
-					{#if mine && live && workingLabel}<span class="vp-working">· {workingLabel}</span>{/if}
-					{#if mine && call.model}<span class="vp-model">· {call.model}</span>{/if}
-					{#if mine && costLabel}<span
+					{#if realtime && live && workingLabel}<span class="vp-working">· {workingLabel}</span>{/if}
+					{#if realtime && costLabel}<span
 							class="vp-cost"
 							title="Estimated OpenAI spend for this call (list prices, cached-input discounts ignored)"
 							>· {costLabel}</span
@@ -193,7 +207,7 @@
 <style>
 	.compact.voice-dock-wrapper { width: 100%; padding: 0; margin: 0 0 8px; }
 	.compact .voice-dock { padding: 8px 12px; }
-	.compact .orb-wrap, .compact .vp-model { display: none; }
+	.compact .orb-wrap { display: none; }
 	.compact .vp-head { gap: 8px; }
 	.compact .vp-title h3 { font-size: 12px; }
 
@@ -306,7 +320,6 @@
 		color: var(--foreground);
 	}
 	.vp-elapsed,
-	.vp-model,
 	.vp-cost {
 		font-family: var(--font-mono, monospace);
 		font-size: 11px;

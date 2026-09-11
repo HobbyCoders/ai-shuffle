@@ -14,7 +14,7 @@ import { appData } from '$lib/stores/app-data.svelte';
 import { layout } from '$lib/stores/layout.svelte';
 import { appMode } from '$lib/stores/sessionMode.svelte';
 import { notify } from '$lib/stores/notifications';
-import { createVoiceSession } from '$lib/api/voice';
+import { createVoiceSession, loadVoiceSettings, usesDelegation } from '$lib/api/voice';
 import { startCall, confirmCallReplacement } from '$lib/services/voiceCall';
 import { contextWindowForChoice } from '$lib/constants/model-context';
 import { getDefaultModel } from '$lib/constants/models';
@@ -32,6 +32,13 @@ export async function startNewVoiceSession(): Promise<boolean> {
 	const from = get(activeSession);
 	try {
 		if (!(await confirmCallReplacement(null))) return false;
+		const settings = await loadVoiceSettings();
+		// The voice lane seeds its own composer. Calls launched from a code/chat
+		// surface use voice defaults rather than inheriting an unrelated model.
+		const defaults = from.mode !== 'voice' && usesDelegation(settings.voice_model, settings.voice_options)
+			? settings.voice_options : undefined;
+		const model = defaults?.delegation_model || from.modelOverride || getDefaultModel();
+		const effort = defaults?.delegation_model ? defaults.delegation_effort || null : from.effortLevelOverride;
 		const created = await createVoiceSession({
 			profile_id: from.profile || null,
 			project_id: from.project || null,
@@ -41,11 +48,11 @@ export async function startNewVoiceSession(): Promise<boolean> {
 			base_branch: from.worktreeBaseBranch || null,
 			execution_mode: from.worktreeIntent,
 			target_instance_id: from.deviceIntent?.id || null,
-			model: from.modelOverride || getDefaultModel(),
+			model,
 			permission_mode: from.permissionModeOverride,
-			effort: from.effortLevelOverride,
+			effort,
 			fast: from.fastMode,
-			context_window: contextWindowForChoice(from.modelOverride || getDefaultModel(), from.contextWindowChoice)
+			context_window: contextWindowForChoice(model, from.contextWindowChoice)
 		});
 		// The board row must exist before we switch: ChatView reads `mode`
 		// off the sessions list to decide the surface.
@@ -66,7 +73,8 @@ export async function startNewVoiceSession(): Promise<boolean> {
 		// once live; there is no separate "connect" step for the user).
 		await startCall(created.session_id, {
 			client_secret: created.client_secret,
-			model: created.model
+			model: created.model,
+			options: created.options
 		});
 		return true;
 	} catch (e) {

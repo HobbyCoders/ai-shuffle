@@ -76,6 +76,19 @@ describe('ControlsDock split controls', () => {
   expect(screen.queryByRole('listbox')).toBeNull();
   request.mockRestore();
  });
+ it('locks Responses delegation to its saved backend', async () => {
+  const request = vi.spyOn(api, 'get').mockResolvedValue({voice_model:'gpt-live-1',voice_options:{delegation_type:'responses'}});
+  await loadVoiceSettings(true); setLane('voice'); renderDock();
+  await waitFor(() => expect((screen.getByRole('button',{name:'Model: GPT Live 1'}) as HTMLButtonElement).disabled).toBe(true));
+  request.mockRestore();
+ });
+ it('seeds a new voice composer from the saved client delegation default', async () => {
+  const model=getModels()[0].value;
+  const request=vi.spyOn(api,'get').mockResolvedValue({voice_model:'gpt-live-1',voice_options:{delegation_type:'client',delegation_model:model}});
+  await loadVoiceSettings(true);setLane('voice');renderDock();
+  await waitFor(()=>expect(get(activeSession).modelOverride).toBe(model));
+  request.mockRestore();
+ });
  it('keeps the selected delegation model editable for GPT Live 1', async () => {
   const request = vi.spyOn(api, 'get').mockResolvedValue({ voice_model: 'gpt-live-1' });
   await loadVoiceSettings(true);

@@ -36,7 +36,7 @@
  */
 
 import { get, writable } from 'svelte/store';
-import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, getVoiceCallState } from '$lib/api/voice';
+import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, getVoiceCallState, type VoiceOptions } from '$lib/api/voice';
 import { openNativeVoice } from './nativeVoice';
 import { usesAudioStream } from '$lib/constants/voice-engines';
 import type { VoiceAudioStream } from './voiceAudioStream';
@@ -79,6 +79,7 @@ export interface VoiceCallStoreState {
 	/** Non-fatal advisory rendered in the caption area (e.g. reconnect skipped). */
 	notice: string | null;
 	model: string | null;
+	options?: VoiceOptions;
 	/** True while the agent's audio is playing (WebRTC output-buffer events). */
 	agentSpeaking: boolean;
 	/** True while server VAD hears the user talking. */
@@ -659,7 +660,7 @@ async function handoffNativeVoice(owner: string, attempt: number): Promise<boole
  */
 export async function startCall(
 	sessionIdIn: string,
-	cred: { client_secret: string; model: string }
+	cred: { client_secret: string; model: string; options?: VoiceOptions }
 ): Promise<void> {
 	const current = get(voiceCallState);
 	if (isCallSurfaceActive(current, current.sessionId)) {
@@ -677,6 +678,7 @@ export async function startCall(
 		sessionId: sessionIdIn,
 		status: 'connecting',
 		model: cred.model,
+		options: cred.options,
 	});
 
 	try {

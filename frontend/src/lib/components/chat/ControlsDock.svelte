@@ -33,7 +33,7 @@
 	 */
 	import { onDestroy, tick, type Snippet } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { getVoiceSessionConfig, loadVoiceSettings, usesDelegation, voiceModelLabel } from '$lib/api/voice';
+	import { getVoiceSessionConfig, loadVoiceSettings, usesDelegation, voiceModelLabel, type VoiceOptions } from '$lib/api/voice';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { anyCredential } from '$lib/stores/auth.svelte';
 	import ContextUsageBar from './ContextUsageBar.svelte';
@@ -201,19 +201,32 @@
 	// first-run floor.
 	const modelValue = $derived($activeSession.modelOverride ?? getDefaultModel());
 	let voiceEngine = $state<string | null>(null);
+	let voiceOptions = $state<VoiceOptions | undefined>(undefined);
+	let voiceDefaultsInitialized = false;
 	let voiceRevision = $state(0);
 	watchResources(['settings'], () => { voiceRevision++; });
 	const voiceLane = $derived($activeSession.mode === 'voice');
-	const modelLocked = $derived(voiceLane && (!voiceEngine || !usesDelegation(voiceEngine)));
+	const modelLocked = $derived(voiceLane && (!voiceEngine || !usesDelegation(voiceEngine, voiceOptions)));
 	$effect(() => {
 		const id = $activeSession.sessionId;
 		const voice = voiceLane;
+		if (id || !voice) voiceDefaultsInitialized = false;
 		void voiceRevision;
 		let stale = false;
 		voiceEngine = null;
 		if (voice) {
-			const request = id ? getVoiceSessionConfig(id).then(c => c.model) : loadVoiceSettings().then(s => s.voice_model);
-			void request.then(model => { if (!stale) voiceEngine = model; }).catch(() => {});
+			const request = id ? getVoiceSessionConfig(id) : loadVoiceSettings().then(s => ({model:s.voice_model,options:s.voice_options}));
+			void request.then(config => {
+				if (stale) return;
+				voiceEngine = config.model; voiceOptions = config.options;
+				if (!id && !voiceDefaultsInitialized && usesDelegation(config.model, config.options)) {
+					voiceDefaultsInitialized = true;
+					if (config.options?.delegation_model) {
+						activeSession.setModelOverride(config.options.delegation_model);
+						activeSession.setEffortLevelOverride(config.options.delegation_effort || null);
+					}
+				}
+			}).catch(() => {});
 		}
 		return () => { stale = true; };
 	});

@@ -835,6 +835,7 @@ class VoiceBridge:
         client_tools: Optional[List[Dict[str, Any]]] = None,
         client_instructions: Optional[str] = None,
         instructions_override: Optional[str] = None,
+        voice_options: Optional[dict] = None,
         app_tools: Optional[List[Any]] = None,
         greet: bool = False,
     ) -> None:
@@ -915,6 +916,8 @@ class VoiceBridge:
         # The route-composed prompt (base + mode appendix). None → the
         # built-in VOICE_INSTRUCTIONS.
         self._instructions_override = (instructions_override or "").strip() or None
+        from app.core.voice_options import realtime_session_options
+        self._session_options = realtime_session_options(voice_options)
 
         # -- bridged app tools ---------------------------------------------
         # SDK ``@tool`` objects (the app-config surface) the bridge declares as
@@ -1180,7 +1183,7 @@ class VoiceBridge:
                 + [dict(tool) for tool in VOICE_WEB_TOOLS]
                 + [dict(tool) for tool in self._app_tool_schemas]
                 + [dict(tool) for tool in self._client_tools],
-                "audio": {"input": {"turn_detection": dict(TURN_DETECTION_CONFIG)}},
+                **self._session_options,
             },
         })
 
@@ -2837,6 +2840,7 @@ class VoiceCallRegistry:
         client_tools: Optional[List[Dict[str, Any]]] = None,
         client_instructions: Optional[str] = None,
         instructions_override: Optional[str] = None,
+        voice_options: Optional[dict] = None,
         app_tools: Optional[List[Any]] = None,
         greet: bool = False,
     ) -> VoiceBridge:
@@ -2883,6 +2887,7 @@ class VoiceCallRegistry:
                 client_tools=client_tools,
                 client_instructions=client_instructions,
                 instructions_override=instructions_override,
+                voice_options=voice_options,
                 app_tools=app_tools,
                 greet=bool(greet) and first_attach,
             )

@@ -15,7 +15,11 @@ import { resourceSync } from '$lib/services/resource-sync';
 
 const settings = (voice = 'marin', minutes = 60) => ({ voice_mode_enabled: true,
  voice_model: 'gpt-realtime-2.1', voice_voice: voice, voice_provider_id: null,
- voice_max_call_minutes: minutes, voice_app_tools_enabled: false });
+ voice_max_call_minutes: minutes, voice_app_tools_enabled: false,
+ model_details: { model: 'gpt-realtime-2.1', transport: 'webrtc' as const,
+  voices: ['marin', 'cedar'].map(id => ({id, label: id})), runtime_settings: [],
+  prompts: [{label: 'Voice agent', text: 'Actual server prompt'}], prompt_note: 'Runtime context is appended.',
+  preview_note: 'Start a call to hear this model accurately.' } });
 function changeAccount() {
  identity.epoch++;
  for (const listener of identity.listeners) listener();
@@ -37,6 +41,38 @@ async function mountSection(appToolsEnabled = false) {
   server = value; resourceSync.invalidate(['settings']);
  } };
 }
+
+
+
+describe('model-specific details', () => {
+ it('replaces voices and prompts after a remote model change', async () => {
+  const view = await mountSection();
+  view.remote({ ...settings('NATF2'), voice_model: 'fal-ai/personaplex/realtime',
+   model_details: { ...settings().model_details, model: 'fal-ai/personaplex/realtime',
+    voices: [{id:'NATF2', label:'NATF2'}], prompts: [{label:'Voice agent', text:'PersonaPlex prompt'}] } });
+  await screen.findByText('PersonaPlex prompt');
+  expect(screen.queryByRole('option', {name:'marin'})).toBeNull();
+  expect(screen.queryByText('Actual server prompt')).toBeNull();
+  expect((screen.getByLabelText('Agent voice') as HTMLSelectElement).value).toBe('NATF2');
+ });
+ it('renders all server voices including ones not known by the client', async () => {
+  const view = await mountSection();
+  view.remote({ ...settings('quartz'), voice_model:'gpt-live-1',
+   model_details: { ...settings().model_details, model:'gpt-live-1',
+    voices: [{id:'quartz', label:'Quartz'}, {id:'provider-new-voice', label:'New voice'}] } });
+  await screen.findByRole('option', {name:'Quartz'});
+  expect(screen.getByRole('option', {name:'New voice'})).toBeTruthy();
+  expect(screen.queryByRole('option', {name:'marin'})).toBeNull();
+ });
+ it('fails closed on mismatched metadata instead of offering wrong voices', async () => {
+  const view = await mountSection();
+  view.remote({...settings(), voice_model:'gpt-live-1'});
+  await waitFor(() => expect((screen.getByLabelText('Agent voice') as HTMLSelectElement).disabled).toBe(true));
+  expect(screen.queryByTestId('voice-model-details')).toBeNull();
+  expect(screen.queryByRole('option', {name:'cedar'})).toBeNull();
+  expect(screen.getByText(/Model details are unavailable/)).toBeTruthy();
+ });
+});
 
 describe('voice settings controls', () => {
  it('offers GPT Live 1 without a fal.ai limitation notice', async () => {
@@ -74,7 +110,7 @@ describe('voice settings controls', () => {
   expect(screen.getByRole('switch', { name: 'Enable voice mode' }).getAttribute('aria-checked')).toBe('true');
   expect((screen.getByLabelText('Realtime model') as HTMLSelectElement).value).toBe('gpt-realtime-2.1');
   expect((screen.getByLabelText('Agent voice') as HTMLSelectElement).value).toBe('marin');
-  expect(screen.getByRole('button', { name: 'Preview the selected voice' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Preview the selected voice' })).toBeNull();
   expect((screen.getByLabelText('Max call minutes') as HTMLInputElement).value).toBe('60');
   transport.put.mockResolvedValue({ ...settings(), voice_max_call_minutes: 120 });
   await fireEvent.input(screen.getByLabelText('Max call minutes'), {target:{value:'120'}});
@@ -117,7 +153,7 @@ describe('remaining voice settings writes', () => {
    await screen.findByLabelText('Agent voice');
    await waitFor(() => expect(warning).toHaveBeenCalledWith('[voice] could not list eligible providers', failure));
    expect(screen.getByText(/Add an OpenAI provider or a fal.ai API key/)).toBeTruthy();
-   expect(screen.getByRole('button', { name: 'Preview the selected voice' })).toBeTruthy();
+   expect(screen.queryByRole('button', { name: 'Preview the selected voice' })).toBeNull();
    expect(transport.get.mock.calls.map(([path]) => path)).toEqual(['/settings/voice', '/voice/providers']);
   } finally {
    warning.mockRestore();

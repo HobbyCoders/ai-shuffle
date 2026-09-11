@@ -25,7 +25,9 @@ import json
 import httpx
 import pytest
 
-from app.core import encryption, voice_bridge
+from app.core import encryption
+from app.core.voice_options import validate_options
+from app.core import voice_bridge
 from app.db import database as db
 
 
@@ -149,7 +151,10 @@ class TestVoiceSettings:
             "voice_provider_id": None,
             "voice_max_call_minutes": 240,
             "voice_app_tools_enabled": True,
+            "model_details": resp.json()["model_details"],
+            "voice_options": validate_options(resp.json()["voice_model"], {}),
         }
+        assert resp.json()["model_details"]["model"] == "gpt-realtime-2.1"
 
     def test_put_roundtrip(self, authenticated_client, mock_db):
         pid = _make_provider()
@@ -169,7 +174,10 @@ class TestVoiceSettings:
             "voice_provider_id": pid,
             "voice_max_call_minutes": 30,
             "voice_app_tools_enabled": True,
+            "model_details": resp.json()["model_details"],
+            "voice_options": validate_options(resp.json()["voice_model"], {}),
         }
+        assert resp.json()["model_details"]["model"] == "gpt-realtime-2.1-mini"
         # Persisted: a fresh GET returns the same values.
         assert authenticated_client.get(VOICE_SETTINGS).json() == resp.json()
 
@@ -778,6 +786,7 @@ class TestVoiceSecretRemint:
             "client_secret": "ek_test_secret",
             "expires_at": 1786000000,
             "model": "gpt-realtime-2.1-mini",
+            "options": validate_options("gpt-realtime-2.1-mini", {}),
         }
         # Funded by the row the session was created on, not the ambiguous set.
         assert captured["request"].headers["authorization"] == "Bearer sk-other"
@@ -1357,6 +1366,7 @@ class TestStreamingVoiceModels:
         assert created.json()["client_secret"] == ""
         assert json.loads(db.get_session(sid)["voice_config"]) == {
             "model": PERSONAPLEX_MODEL, "voice": "NATF2", "provider_id": FAL_PROVIDER_ID,
+            "options": {"instructions": ""}, "greet": True,
         }
         _enable_voice(voice_model="gpt-realtime", voice_voice="marin")
         config = authenticated_client.get(f"{VOICE_ROOT}/sessions/{sid}/config").json()

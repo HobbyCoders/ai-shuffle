@@ -194,6 +194,7 @@ class VoiceSessionResponse(BaseModel):
     client_secret: str
     expires_at: Optional[int] = None
     model: str
+    options: dict = Field(default_factory=dict)
 
 
 class VoiceSecretResponse(BaseModel):
@@ -201,6 +202,7 @@ class VoiceSecretResponse(BaseModel):
     client_secret: str
     expires_at: Optional[int] = None
     model: str
+    options: dict = Field(default_factory=dict)
 
 
 class VoiceCallRequest(BaseModel):
@@ -437,13 +439,13 @@ def _resolve_provider_row(
 
 
 async def _mint_client_secret(
-    api_key: str, model: str, voice: Optional[str] = None
+    api_key: str, model: str, voice: Optional[str] = None, options: Optional[dict] = None
 ) -> Dict[str, Any]:
     """POST OpenAI's client-secrets endpoint and return the parsed body.
 
-    Our session config stays MINIMAL here (type/model/voice/input
-    transcription): the VW3 sideband owns instructions, tools and VAD via
-    ``session.update``. The VOICE has to ride on the mint (VM21): it can only
+    Audio, transcription, VAD and token settings travel with the mint, before
+    any user audio arrives. The sideband uses the same pinned options and adds
+    instructions/tools via ``session.update``. The VOICE must ride here: it can only
     be set before the model first speaks, and by the time the sideband attaches
     the model may already be talking.
 
@@ -457,9 +459,9 @@ async def _mint_client_secret(
     """
     from app.core.http_client import get_http_client
 
-    audio: Dict[str, Any] = {
-        "input": {"transcription": {"model": INPUT_TRANSCRIPTION_MODEL}}
-    }
+    from app.core.voice_options import realtime_session_options
+    configured = realtime_session_options(options)
+    audio = configured["audio"]
     if voice:
         audio["output"] = {"voice": voice}
     payload = {
@@ -467,6 +469,7 @@ async def _mint_client_secret(
         "session": {
             "type": "realtime",
             "model": model,
+            **configured,
             "audio": audio,
         },
     }
@@ -726,11 +729,22 @@ async def create_voice_session(
     model = voice_settings["voice_model"]
     if (model == PERSONAPLEX_MODEL) != (provider_row["id"] == FAL_PROVIDER_ID):
         raise HTTPException(400, "The voice model does not belong to the selected provider.")
-    if model == LIVE_MODEL and not (request.model or "").strip():
-        raise HTTPException(400, "Choose a delegation model before starting GPT Live 1.")
+    options = voice_settings.get("voice_options", {})
+    selected_model, selected_effort = request.model, request.effort
+    if model == LIVE_MODEL:
+        from app.core.voice_stream import validate_delegation_options
+        await run_sync(validate_delegation_options, options, provider_row["id"])
+        if options.get("delegation_type") == "responses":
+            selected_model = options["delegation_model"]
+            selected_effort = options.get("delegation_effort") or None
+        elif not selected_model:
+            selected_model = options.get("delegation_model")
+            selected_effort = selected_effort or options.get("delegation_effort") or None
+        if not (selected_model or "").strip():
+            raise HTTPException(400, "Choose a delegation model before starting GPT Live 1.")
     client_secret, expires_at = "", None
     if transport_for(model) == "webrtc":
-        body = await _mint_client_secret(api_key, model, voice_settings["voice_voice"])
+        body = await _mint_client_secret(api_key, model, voice_settings["voice_voice"], options)
         client_secret, expires_at = _extract_client_secret(body)
 
     # Resolve the profile the same way normal session creation does (explicit →
@@ -754,8 +768,8 @@ async def create_voice_session(
         "is_active": True,
         "provider_id": None if model == LIVE_MODEL else provider_row["id"],
         "derive_provider_from_profile": model != LIVE_MODEL,
-        "model": request.model,
-        "effort": request.effort,
+        "model": selected_model,
+        "effort": selected_effort,
         "permission_mode": request.permission_mode,
         "context_window": request.context_window,
         "fast": request.fast,
@@ -763,7 +777,8 @@ async def create_voice_session(
         "hidden": session_mode == "command",
         "voice_config": {
             "model": model, "voice": voice_settings["voice_voice"],
-            "provider_id": provider_row["id"],
+            "provider_id": provider_row["id"], "options": options,
+            "greet": session_mode is None,
         },
     }
 
@@ -863,7 +878,7 @@ async def create_voice_session(
         session_id=session_id,
         client_secret=client_secret,
         expires_at=expires_at,
-        model=model,
+        model=model, options=options,
     )
 
 
@@ -897,13 +912,13 @@ async def mint_voice_session_secret(
     model = config["model"]
     client_secret, expires_at = "", None
     if transport_for(model) == "webrtc":
-        body = await _mint_client_secret(api_key, model, config["voice"])
+        body = await _mint_client_secret(api_key, model, config["voice"], config.get("options"))
         client_secret, expires_at = _extract_client_secret(body)
     _remember_client_secret(session_id, client_secret, expires_at)
     logger.info("Voice: re-minted client secret for session %s", session_id)
 
     return VoiceSecretResponse(
-        client_secret=client_secret, expires_at=expires_at, model=model,
+        client_secret=client_secret, expires_at=expires_at, model=model, options=config.get("options", {}),
     )
 
 
@@ -1039,7 +1054,10 @@ async def attach_voice_call(
 
     # Compose the agent's system prompt: the base contract, plus the appendix
     # for the client's session mode (browser calls have none).
-    instructions_override = voice_bridge.VOICE_INSTRUCTIONS
+    config = session_config(session_row, voice_settings)
+    from app.core.voice_options import effective_options
+    options = effective_options(config)
+    instructions_override = options["instructions"] or voice_bridge.VOICE_INSTRUCTIONS
     if session_mode is not None:
         appendix = voice_bridge.DEFAULT_MODE_INSTRUCTIONS[session_mode]
         instructions_override = f"{instructions_override}\n\n{appendix}"
@@ -1077,6 +1095,7 @@ async def attach_voice_call(
             client_tools=client_tools,
             client_instructions=client_instructions,
             instructions_override=instructions_override,
+            voice_options=options,
             app_tools=app_tools,
             greet=greet,
         )
