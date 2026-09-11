@@ -7,6 +7,9 @@ import { auth } from '$lib/stores/auth.svelte';
 import { platform } from '$lib/stores/platform.svelte';
 import '$lib/test-stubs/composer-dom';
 import { installMobileShell } from './register';
+import { api } from '$lib/api/client';
+import { createMessageSender } from '$lib/stores/session/message-sender';
+import type { InternalMutableState } from '$lib/stores/session/ws-message-handlers';
 
 vi.hoisted(() => {
 	// No component request may reach a real backend in these tests.
@@ -63,6 +66,73 @@ async function openComposer(compact = true) {
 }
 
 describe('mobile composer drawer after send', () => {
+	it('closes after the real first-send worktree path adopts its new session id', async () => {
+		Object.assign(activeSession.current, {
+			sessionId: null, mode: 'code', project: 'drawer-project', messages: [],
+			worktreeIntent: 'worktree', worktreeMode: 'new', worktreeBranch: 'drawer-branch'
+		});
+		const post = vi.spyOn(api, 'post').mockResolvedValue({
+			session_id: 'created-by-send', branch_name: 'drawer-branch', status: 'ready'
+		});
+		const sendQuery = vi.fn(() => true);
+		// Use the production sender to populate sessionId from the worktree POST,
+		// not a mock that merely seeds the field consumed by the composer.
+		const sender = createMessageSender({
+			getState: () => activeSession.current,
+			update: fn => {
+				Object.assign(activeSession.current, fn(activeSession.current));
+				activeSession.setDraft(activeSession.current.draft); // notify shared subscribers
+			},
+			internal: {
+				pendingTools: new Set(), awaitingNewSession: false, pendingRequestId: null,
+				stopRequestedBeforeSession: false, worktreeCreationGeneration: 0, worktreeCreateAbort: null
+			} as InternalMutableState,
+			wsConn: { isConnected: () => true, connect: vi.fn(), send: sendQuery, resetReconnectAttempts: vi.fn() },
+			sessionEphemeralCache: { remove: vi.fn() },
+			appData: { loadSessions: vi.fn(), loadApiUserSessions: vi.fn() },
+			persistSession: vi.fn(), stopTimeout: { get: () => null, set: vi.fn() },
+			getActiveSession: () => sender
+		});
+		vi.spyOn(activeSession, 'sendMessage').mockImplementation(sender.sendMessage);
+		const { container, trigger } = await openComposer(false);
+		await fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+		await waitFor(() => expect(post).toHaveBeenCalledWith('/sessions/with-worktree', expect.any(Object)));
+		await waitFor(() => expect(sendQuery).toHaveBeenCalledWith(expect.objectContaining({
+			type: 'query', session_id: 'created-by-send', prompt
+		})));
+		expect(activeSession.current.sessionId).toBe('created-by-send');
+		await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'));
+		expect(container.querySelector('.mobile-controls-open')).toBeNull();
+	});
+
+	it('does not re-expand after closing a drawer whose control still has focus', async () => {
+		let resolveSend!: (sent: boolean) => void;
+		vi.spyOn(activeSession, 'sendMessage').mockReturnValue(new Promise(resolve => { resolveSend = resolve; }));
+		const { container, trigger } = await openComposer();
+		await fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+		const control = container.querySelector<HTMLButtonElement>('.mobile-composer-controls button')!;
+		control.focus();
+		expect(document.activeElement).toBe(control);
+		resolveSend(true);
+		await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'));
+		await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+		expect(container.querySelector('.mobile-collapsed')).not.toBeNull();
+		expect(document.activeElement).not.toBe(trigger);
+	});
+
+	it('does not close the next new-chat drawer when an old send completes', async () => {
+		let resolveSend!: (sent: boolean) => void;
+		vi.spyOn(activeSession, 'sendMessage').mockReturnValue(new Promise(resolve => { resolveSend = resolve; }));
+		const { trigger } = await openComposer();
+		await fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+		activeSession.newChat();
+		await tick();
+		resolveSend(true);
+		await tick();
+		expect(trigger.getAttribute('aria-expanded')).toBe('true');
+	});
+
+
 	it.each([
 		['send button', true, false],
 		['Enter', true, false],

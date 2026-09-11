@@ -76,7 +76,8 @@ export function setSkipRestore(value: boolean) {
 	}
 }
 
-function getInitGeneration(): number {
+/** Navigation epoch: session adoption during a send does not advance it. */
+export function getInitGeneration(): number {
 	if (typeof window === 'undefined') return 0;
 	return parseInt(sessionStorage.getItem(INIT_GEN_KEY) || '0', 10);
 }

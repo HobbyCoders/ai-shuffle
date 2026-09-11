@@ -93,7 +93,8 @@ describe('mobile composer deferred ownership reconciliation', () => {
 		['command autocomplete', { commandAutocompleteOpen: true }],
 		['file autocomplete', { fileAutocompleteOpen: true }],
 		['draft', { hasDraft: true }],
-		['editor focus', { composerFocused: true }]
+		['editor focus', { composerFocused: true }],
+		['toolbar interaction after focus loss', { interactionOwned: true }]
 	])('never collapses while %s owns the interaction', (_label, patch) => {
 		expect(reconcileMobileComposerExpanded(true, { ...idleReconcileState, ...patch })).toBe(true);
 	});
@@ -102,6 +103,7 @@ describe('mobile composer deferred ownership reconciliation', () => {
 		expect(reconcileMobileComposerExpanded(true, {
 			...idleReconcileState,
 			activeElementOwned: true,
+			interactionOwned: true,
 			controlsOpen: true
 		}, 'successful-send')).toBe(false);
 	});

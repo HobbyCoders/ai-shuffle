@@ -41,6 +41,8 @@ export interface MobileComposerReconcileState {
 	fileAutocompleteOpen: boolean;
 	/** Focus currently belongs to the island or a registered composer portal. */
 	activeElementOwned: boolean;
+	/** Last interaction belongs to the composer, even if a control lost focus. */
+	interactionOwned?: boolean;
 }
 
 export type MobileComposerReconcileReason = 'deferred-focus' | 'successful-send';

@@ -25,6 +25,7 @@
 	import { cancelVoiceInput, globalSttState } from '$lib/services/globalStt';
 	import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
+	import { getInitGeneration } from '$lib/stores/session/session-init';
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import { anyCredential } from '$lib/stores/auth.svelte';
 
@@ -306,6 +307,10 @@
 	// Island ref
 	let islandRef = $state<HTMLDivElement | null>(null);
 	let mobileComposerExpanded = $state(false);
+	// Mobile buttons can lose focus when disabled (voice preparation), and touch
+	// browsers need not focus them at all. Retain interaction ownership until the
+	// user explicitly moves outside the composer, rather than relying on focus.
+	let composerInteractionOwned = false;
 	/** The mobile composer shell is a platform decision, not a window width. */
 	function isMobileComposerViewport(): boolean {
 		return platform.isMobile;
@@ -356,7 +361,8 @@
 				controlsOpen: mobileControlsOpen,
 				commandAutocompleteOpen: showCommandAutocomplete,
 				fileAutocompleteOpen: showFileAutocomplete,
-				activeElementOwned: isComposerOwnedNode(document.activeElement)
+				activeElementOwned: isComposerOwnedNode(document.activeElement),
+				interactionOwned: composerInteractionOwned
 			}
 		);
 	}
@@ -410,22 +416,41 @@
 		if (isMobileComposerViewport()) mobileComposerExpanded = true;
 	}
 
-	function handleComposerPointerDown() {
+	function isComposerActionNode(target: EventTarget | null): boolean {
+		return target instanceof Element && !!target.closest('.controls-dock, [data-composer-owned-overlay="true"]');
+	}
+
+	function handleComposerPointerDown(event: PointerEvent) {
 		if (!isMobileComposerViewport()) return;
 		armExpandPointerGuard();
+		composerInteractionOwned = isComposerActionNode(event.target);
 		mobileComposerExpanded = true;
+	}
+
+	function handleDocumentFocusIn(event: FocusEvent) {
+		if (!isMobileComposerViewport()) return;
+		// Body focus is a side effect of disabled controls/native pickers, not a
+		// deliberate keyboard move to another control.
+		if (event.target === document.body || event.target === document.documentElement) return;
+		composerInteractionOwned = isComposerActionNode(event.target);
+		scheduleMobileComposerReconciliation();
 	}
 
 	function handleDocumentPointerDown(event: PointerEvent) {
 		if (!compact || !isMobileComposerViewport()) return;
 		if (isComposerOwnedNode(event.target)) {
 			armExpandPointerGuard();
+			composerInteractionOwned = isComposerActionNode(event.target);
 			mobileComposerExpanded = true;
 			return;
 		}
 		// A transcript/background tap is an explicit request to leave the empty
 		// composer. Blurring first makes the deferred ownership check deterministic
 		// even when the tapped element itself cannot receive focus.
+		composerInteractionOwned = false;
+		if (isComposerOwnedNode(document.activeElement) && document.activeElement instanceof HTMLElement) {
+			document.activeElement.blur();
+		}
 		editorRef?.blur();
 		scheduleMobileComposerReconciliation();
 	}
@@ -438,8 +463,10 @@
 
 	onMount(() => {
 		document.addEventListener('pointerdown', handleDocumentPointerDown);
+		document.addEventListener('focusin', handleDocumentFocusIn);
 		return () => {
 			document.removeEventListener('pointerdown', handleDocumentPointerDown);
+			document.removeEventListener('focusin', handleDocumentFocusIn);
 		};
 	});
 
@@ -571,6 +598,7 @@
 		// clearing means a failed interrupt / dropped WS doesn't lose the user's
 		// typed prompt or uploaded attachments — we repopulate the editor.
 		const sendingSessionId = $activeSession.sessionId;
+		const sendingNavigation = getInitGeneration();
 		const priorDraftJSON = getDraftJSON();
 		const priorInputValue = inputValue;
 		const priorUploadedFiles = uploadedFiles;
@@ -603,6 +631,12 @@
 			// The dock owns the drawer state; resetting the expansion latch alone
 			// leaves the drawer open and prevents the composer from collapsing.
 			controlsDockRef?.setMobileSheetOpen(false);
+			// Closing the drawer restores focus to its toolbar trigger. Release
+			// that focus too, or deferred reconciliation reopens the empty composer.
+			if (isComposerOwnedNode(document.activeElement) && document.activeElement instanceof HTMLElement) {
+				document.activeElement.blur();
+			}
+			composerInteractionOwned = false;
 			mobileComposerExpanded = composerShell().reconcileExpanded(
 				mobileComposerExpanded,
 				{
@@ -625,7 +659,11 @@
 				pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : undefined,
 			);
 			if (sent === false) restoreOnFailure();
-			else if ($activeSession.sessionId === sendingSessionId) collapseMobileComposer();
+			else if (ownsComposer() && !mobileComposerDestroyed && getInitGeneration() === sendingNavigation) {
+				// A first send can adopt a new session id before it resolves (notably
+				// worktree creation). Only actual navigation retires its drawer close.
+				collapseMobileComposer();
+			}
 		} catch (err) {
 			console.error('[ChatInput] sendMessage threw', err);
 			restoreOnFailure();
