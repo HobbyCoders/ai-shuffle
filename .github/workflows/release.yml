@@ -59,11 +59,10 @@ jobs:
 
             ### Desktop install
 
-            Run the Windows installer. The app runs an AI Shuffle worker on your
-            computer and opens its web UI. It bundles Python, Node and its own
-            persistent PostgreSQL database; no database configuration is needed.
             On Windows, unzip the source download and double-click `Start AI Shuffle.cmd`.
             It downloads the runtimes and builds the application on your computer.
+            No account is required for desktop downloads or updates. The app runs
+            its own worker and persistent PostgreSQL database.
             After that, use Update and restart inside AI Shuffle. Main-branch updates
             need no installer, application-package build, or tagged release.
             Other workers are managed inside the app under Devices.

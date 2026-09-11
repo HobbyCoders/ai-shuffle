@@ -19,13 +19,6 @@ test('browser download verification and launcher share one public trust key',asy
  const key=pem.split(/\r?\n/).filter(line=>line&&!line.startsWith('---')).join('');
  assert(source.includes(`const signingPublicKey='${key}'`));
 });
-test('Windows credentials are DPAPI protected',{skip:process.platform!=='win32'},async t=>{
- const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-dpapi-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
- const file=path.join(root,'account.dat'),token='c'.repeat(64),script=fileURLToPath(new URL('../scripts/update-credential.ps1',import.meta.url));
- execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-File',script,'-Action','write','-Path',file],{input:token});
- assert(!(await fs.readFile(file,'utf8')).includes(token));
- assert.equal(execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-File',script,'-Action','read','-Path',file],{encoding:'utf8'}),token);
-});
 async function fixture(t) {
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-source-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
  const {privateKey,publicKey:key}=generateKeyPairSync('ed25519');const publicKey=key.export({type:'spki',format:'pem'});
@@ -80,7 +73,7 @@ test('cleanup detaches dependency junctions; builds do not inherit credentials',
  process.env.SHUFFLE_TEST_SECRET='not-for-builds';try{assert.equal(buildEnvironment(process.execPath,'python').SHUFFLE_TEST_SECRET,undefined);}finally{delete process.env.SHUFFLE_TEST_SECRET;}
 });
 test('bootstrap first launch still downloads and selects an application; older source managers remain supported',async t=>{
- const bootstrap=await fs.readFile(new URL('../scripts/bootstrap.mjs',import.meta.url),'utf8');
+ const bootstrap=(await fs.readFile(new URL('../scripts/bootstrap.mjs',import.meta.url),'utf8')).replaceAll('\r\n','\n');
  const start=bootstrap.indexOf('  await updates.load();');const end=bootstrap.indexOf('\n}\nconsole.log(`Starting AI Shuffle',start);
  assert(start>=0&&end>start);
  const body=bootstrap.slice(start,end);
@@ -127,15 +120,26 @@ test('source commands guard concurrent checks and downloads and release the guar
  await assert.rejects(u.check(),/already running/);await assert.rejects(u.download(),/already running/);
  finishBuild();assert.equal((await downloading).kind,'ready');assert.equal(f.builds,1);
 });
-test('automatic metadata checks never request interactive account authentication, even after an explicit download',async t=>{
- const f=await fixture(t);await f.release(A);const modes=[];
+test('automatic checks and downloads use the public source transport without account state',async t=>{
+ const f=await fixture(t);await f.release(A);const requests=[];
  const module={exports:{}};const localRequire=createRequire(new URL('../dist/main/source-updates.js',import.meta.url));
  vm.runInNewContext(await fs.readFile(new URL('../dist/main/source-updates.js',import.meta.url),'utf8'),{
   exports:module.exports,module,Buffer,AbortSignal,process,
-  require:id=>id==='./source-auth'?{SOURCE_ORIGIN:'https://hobbycoders.com',accountSourceFetch:async(_root,url,interactive)=>{modes.push(interactive);return f.options.fetch(url);}}:localRequire(id)
+  require:id=>id==='./source-auth'?{SOURCE_ORIGIN:'https://hobbycoders.com',publicSourceFetch:async(...args)=>{requests.push(args);return f.options.fetch(args[0]);}}:localRequire(id)
  });
  const u=new module.exports.SourceUpdates({...f.options,fetch:undefined});await u.load();
- await u.check();assert.deepEqual(modes,[false]);
- await u.download();assert.deepEqual(modes,[false,true,true]);await u.select();await u.healthy();await f.release(B);
- await u.check();assert.equal(modes.at(-1),false);assert.equal(f.builds,1);
+ await u.check();assert.deepEqual(requests,[['https://hobbycoders.com/v1/desktop/manifest']]);
+ await u.download();assert.equal(requests.length,3);assert(requests.every(args=>args.length===1));await u.select();await u.healthy();await f.release(B);
+ await u.check();assert.equal(requests.length,4);assert.equal(f.builds,1);
+});
+test('public source requests omit credentials and reject off-origin URLs and redirects',async()=>{
+ const module={exports:{}};const requests=[];
+ vm.runInNewContext(await fs.readFile(new URL('../dist/main/source-auth.js',import.meta.url),'utf8'),{
+  exports:module.exports,module,URL,AbortSignal,fetch:async(...args)=>{requests.push(args);return new Response('ok');}
+ });
+ const request=module.exports.publicSourceFetch;
+ await request('https://hobbycoders.com/v1/desktop/manifest');
+ assert.equal(requests[0][1].credentials,'omit');assert.equal(requests[0][1].redirect,'error');assert.equal(requests[0][1].headers,undefined);
+ for(const url of ['https://evil.example/v1/desktop/manifest','https://user:secret@hobbycoders.com/v1/desktop/manifest','https://hobbycoders.com/v1/desktop/manifest?token=secret'])await assert.rejects(request(url),/Invalid source/);
+ assert.equal(requests.length,1);
 });

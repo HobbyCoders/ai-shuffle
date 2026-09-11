@@ -1,9 +1,9 @@
-/** Main-branch source updates: authenticated metadata, local builds, atomic restart activation. */
+/** Main-branch source updates: signed metadata, local builds, atomic restart activation. */
 import { createHash, verify } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { extractSource } from './source-archive';
-import { accountSourceFetch, SOURCE_ORIGIN } from './source-auth';
+import { publicSourceFetch, SOURCE_ORIGIN } from './source-auth';
 import { buildSource, removeSourceDirectory, type BuiltSource } from './source-build';
 import { prepareNativeRuntime } from './source-runtime';
 
@@ -50,8 +50,7 @@ export class SourceUpdates {
   private checking = false;
   private writes: Promise<void> = Promise.resolve();
   private readonly request: typeof fetch;
-  private interactive = false;
-  constructor(readonly options: SourceOptions) { this.request = options.fetch ?? ((url) => accountSourceFetch(options.root, String(url), this.interactive)); }
+  constructor(readonly options: SourceOptions) { this.request = options.fetch ?? ((url) => publicSourceFetch(String(url))); }
   get version(): string | null { return this.running ?? this.state.active ?? null; }
   get pendingVersion(): string | null { return this.state.pending ?? null; }
   private directory(revision: string): string {
@@ -116,7 +115,6 @@ export class SourceUpdates {
     if (this.state.booting) return { kind: 'current' };
     if (this.state.pending) return { kind: 'ready', version: this.state.pending.slice(0, 12) };
     this.checking = true;
-    this.interactive = interactive;
     let unlock: (() => Promise<void>) | undefined;
     try {
       unlock = await this.lock();
@@ -131,7 +129,7 @@ export class SourceUpdates {
       if (!download) return { kind: 'available', version: manifest.revision.slice(0, 12) };
       await this.stage(manifest, signed, progress);
       return { kind: 'ready', version: manifest.revision.slice(0, 12) };
-    } finally { try { if (unlock) await unlock(); } finally { this.checking = false; this.interactive = false; } }
+    } finally { try { if (unlock) await unlock(); } finally { this.checking = false; } }
   }
   private async stage(manifest: SourceManifest, signed: string, progress: SourceProgress): Promise<void> {
     const stage = path.join(this.options.root, 'staging');

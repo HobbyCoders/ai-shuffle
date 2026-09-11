@@ -8,22 +8,24 @@ worker the app starts, so the two never drift apart.
 ## Windows distribution: no installer
 
 Download the Windows source ZIP at <https://hobbycoders.com/desktop>, unzip it,
-and double-click `Start AI Shuffle.cmd`. Sign in with your AI Shuffle account
-when the launcher opens the browser. It adds a Start menu shortcut, downloads
+and double-click `Start AI Shuffle.cmd`. No account is needed.
+The launcher adds a Start menu shortcut, downloads
 Python, Node, PostgreSQL and Electron, and builds the frontend, tools and desktop
 JavaScript locally. The first launch can take several minutes and needs internet
 access. Runtime files and dependency caches live under
 `%LOCALAPPDATA%/AI Shuffle Source`; existing user data stays in its current locations.
 
 Updates follow `main`, not tagged releases. The small `desktop-source.yml` job
-mirrors GitHub's existing source ZIP into private R2 storage and signs a revision,
-checksum and size. It uses a standard GitHub-hosted runner, not Blacksmith, and
-performs no application or installer build. The account hub grants revocable,
-download-only device access. Credentials are protected with Windows DPAPI; clients
-never receive a GitHub credential. The Cloudflare deployment token needs R2 write
-access for the private `ai-shuffle-desktop-sources` bucket. Public bucket access
-must remain disabled. The signing key is the `DESKTOP_APPLICATION_SIGNING_KEY`
-GitHub secret; its public half ships with the launcher.
+stores GitHub's source ZIP as an immutable asset in the private `desktop-sources`
+GitHub release and signs its revision, checksum and size. It uses a standard
+GitHub-hosted runner and performs no application or installer build. The existing
+account-hub D1 database holds signed metadata and the GitHub asset ID. No R2
+subscription is needed. Downloads and updates are public and require no account.
+The existing hub streams only CI-published archives using its `DESKTOP_GITHUB_TOKEN` Worker secret,
+scoped to Contents: read on this repository. Clients never receive that GitHub
+credential or an upstream signed URL. The publisher uses the `ACCOUNT_HUB_DATABASE_ID` GitHub environment
+variable and existing D1 deployment permissions. The signing key is the
+`DESKTOP_APPLICATION_SIGNING_KEY` GitHub secret; its public half ships with the launcher.
 
 The app checks for updates in the background without downloading them. When one
 is available, a small update button appears next to Search in the sidebar header.
@@ -37,12 +39,9 @@ but does not automatically run old code over a potentially migrated database.
 PostgreSQL major-version upgrades still require a deliberate data migration; never
 change the pinned major version without adding and testing that migration.
 
-**Future distribution note:** the source repository may become public, or the files
-may move to another host. The goal is to let users update without an account.
-Authentication lives in `source-auth.ts`, separate from signature verification and
-local building, so that change can replace the download transport without changing
-the update format. Do not expose the private bucket or repository before that
-policy change is approved.
+The repository stays private, but each published desktop source ZIP is available
+to anyone through the hub. `source-auth.ts` is now a credential-free transport;
+signature verification and local building remain independent of hosting.
 
 The packaging commands below remain for legacy/manual development builds; normal
 Windows distribution no longer builds or publishes NSIS installers. Existing
@@ -69,7 +68,7 @@ restart. No worker source patches or replacement UI bridge are used. It checks
 that the original application's listener PIDs stay unchanged. The optional
 `--feed-directory` and `--public-key` switches are restricted to explicit isolated
 profiles; they never change the normal update feed. A local feed does not test
-hosted account sign-in or R2 permissions.
+hosted public downloads or GitHub download permissions.
 
 ## What the app does
 
