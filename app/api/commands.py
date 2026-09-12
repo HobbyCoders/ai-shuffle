@@ -539,23 +539,18 @@ async def get_rewind_checkpoints(session_id: str, http_request: Request = None):
 
     Uses JSONL rewind service to parse checkpoints directly from JSONL file.
     """
+    session = await run_sync(database.get_session, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if http_request is not None:
+        check_session_access(http_request, session)
+    from app.api.rewind_owner import forward_rewind
+    remote = await forward_rewind(session, "checkpoints")
+    if remote is not None:
+        return CheckpointsResponseV2.model_validate(remote)
+
     def _load_checkpoints() -> CheckpointsResponseV2:
-        """The whole handler body in ONE hop — every step of it blocks.
-
-        The session read, the project-path resolution, the JSONL transcript
-        parse (``_get_checkpoints``, potentially megabytes of file I/O) and the
-        DB fallback are all synchronous with no awaits between them, so there is
-        nothing to interleave: run inline they froze every other request on this
-        worker for the whole parse. Same calls, same order, same short-circuits.
-        """
-        # Get session info
-        session = database.get_session(session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        if http_request is not None:
-            check_session_access(http_request, session)
-
+        """Keep local transcript/checkpoint IO in one worker-thread hop."""
         sdk_session_id = session.get("sdk_session_id")
         if not sdk_session_id:
             return CheckpointsResponseV2(
@@ -817,10 +812,8 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
     - restore_files: Restore files to checkpoint state (requires file checkpointing)
     - include_response: Keep Claude's response to target message
     """
-    # Get session info and (when the rewind can actually proceed) its checkout,
-    # in ONE hop — both are synchronous DB work with nothing awaited between
-    # them. The working dir is resolved only on the path that reaches it, so the
-    # two early returns below still short-circuit before project resolution.
+    # Authorize and route before inspecting local provider state or resolving a
+    # checkout. A mirrored session intentionally has no local resume pointer.
     def _load_session():
         session = database.get_session(session_id)
         if not session:
@@ -829,11 +822,17 @@ async def execute_rewind(session_id: str, request: RewindRequestV2, http_request
         if http_request is not None:
             check_session_access(http_request, session)
 
-        if not session.get("sdk_session_id") or request.target_uuid.startswith("db-"):
-            return session, None
-        return session, get_working_dir_for_project(session.get("project_id"))
+        return session
 
-    session, working_dir = await run_sync(_load_session)
+    session = await run_sync(_load_session)
+    from app.api.rewind_owner import forward_rewind
+    remote = await forward_rewind(session, "execute", request.model_dump())
+    if remote is not None:
+        return RewindResponseV2.model_validate(remote)
+
+    working_dir = None
+    if session.get("sdk_session_id") and not request.target_uuid.startswith("db-"):
+        working_dir = await run_sync(get_working_dir_for_project, session.get("project_id"))
 
     sdk_session_id = session.get("sdk_session_id")
     if not sdk_session_id:

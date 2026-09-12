@@ -135,6 +135,9 @@ async def hydrate(device_id: str, session_id: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 async def handle(action: str, body: Dict[str, Any], *, from_device: str) -> Dict[str, Any]:
+    if action == "rewind":
+        from app.api.rewind_owner import handle_rewind
+        return await handle_rewind(body, from_device)
     if action == "session-git":
         from app.api.git_owner import handle_session_git
         return await handle_session_git(body, from_device)
