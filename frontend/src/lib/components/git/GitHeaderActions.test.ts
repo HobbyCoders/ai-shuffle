@@ -4,7 +4,7 @@
  * These mount the real header with its git/github stores mocked (but the real
  * header-dropdowns and gitActionPreferences singletons) so we can drive the
  * chevron option popovers end-to-end. Covered:
- *  - the button-visibility matrix (Commit / Create PR / Finish / Push / Pull /
+ *  - the button-visibility matrix (Commit / Create PR / Ship It / Push / Pull /
  *    Ship It appear for the right repo state)
  *  - a chevron opens its popover; Escape and outside-click close it; opening one
  *    popover closes another (shared single-open store)
@@ -190,7 +190,6 @@ function baseHandlers() {
 	return {
 		onClickCommit: vi.fn(),
 		onClickCreatePR: vi.fn(),
-		onClickFinish: vi.fn(),
 		onClickPush: vi.fn(),
 		onClickPull: vi.fn(),
 		onClickNewBranch: vi.fn(),
@@ -233,6 +232,37 @@ afterEach(() => {
 // ── Visibility matrix ───────────────────────────────────────────────────────
 
 describe('GitHeaderActions button visibility', () => {
+	it('shows only the merge step for an up-to-date open PR, even with no branch diff', async () => {
+		setSnapshot({
+			status: { is_git_repo: true, current_branch: 'feature/x', default_branch: 'main',
+				ahead: 0, unpushed: 0, differs_from_base: false },
+			diffStats: { additions: 0, deletions: 0, files_changed: 0 },
+			openPr: { number: 42, title: 'x', url: 'http://x' }
+		});
+		gitActionPreferences.setCleanupAfterMerge(false);
+		const { handlers } = renderHeader();
+		const button = screen.getByText('Ship It').closest('button')!;
+		expect(button.title).toBe('Merge PR #42');
+		expect(screen.queryByText('Finish')).toBeNull();
+		expect(screen.queryByText('Commit')).toBeNull();
+		expect(screen.queryByText('Create PR')).toBeNull();
+		await fireEvent.click(button);
+		expect(handlers.onClickShipIt).toHaveBeenCalledOnce();
+		await fireEvent.click(screen.getByRole('button', { name: 'Ship It options' }));
+		expect(screen.getAllByRole('listitem').map(e => e.textContent)).toEqual(['Merge PR #42']);
+	});
+
+	it('prevents the Ship It popover from bypassing merge conflicts', async () => {
+		cleanAheadBranch();
+		const { handlers } = renderHeader({ openPR: { number: 42, title: 'x', url: 'u', mergeable: false } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Ship It options' }));
+		const submit = screen.getByRole('dialog').querySelector('button.opt-submit') as HTMLButtonElement;
+		expect(submit.disabled).toBe(true);
+		await fireEvent.click(submit);
+		expect(handlers.onClickShipIt).not.toHaveBeenCalled();
+	});
+
+
 	it('hides merged work and restores actions as the same branch gets new work', async () => {
 		const sha = 'a'.repeat(40);
 		const snapshot = {
@@ -289,14 +319,14 @@ describe('GitHeaderActions button visibility', () => {
 			expect(screen.getByText('Push')).toBeTruthy();
 		});
 
-		it('hides Finish (PR merge) when GitHub is unavailable', () => {
+		it('hides Ship It (PR merge) when GitHub is unavailable', () => {
 			cleanAheadBranch();
 			renderHeader({
 				githubAvailable: false,
 				openPR: { number: 12, title: 'A PR', url: 'u', mergeable: true }
 			});
 
-			expect(screen.queryByText('Finish')).toBeNull();
+			expect(screen.queryByText('Ship It')).toBeNull();
 		});
 
 		it('defaults to available so existing call sites are unchanged', () => {
@@ -316,11 +346,11 @@ describe('GitHeaderActions button visibility', () => {
 		expect(screen.getByRole('button', { name: 'Pull request options' })).toBeTruthy();
 	});
 
-	it('shows Finish (merge) when an open PR is passed', () => {
+	it('shows Ship It (merge) when an open PR is passed', () => {
 		cleanAheadBranch();
 		renderHeader({ openPR: { number: 42, title: 'x', url: 'http://x' } });
-		expect(screen.getByText('Finish')).toBeTruthy();
-		expect(screen.getByRole('button', { name: 'Merge options' })).toBeTruthy();
+		expect(screen.getByText('Ship It')).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Ship It options' })).toBeTruthy();
 	});
 
 	it('shows Pull when the branch is behind upstream', () => {
@@ -330,32 +360,32 @@ describe('GitHeaderActions button visibility', () => {
 		expect(screen.getByRole('button', { name: 'Pull options' })).toBeTruthy();
 	});
 
-	it('disables Finish when the open PR is explicitly not mergeable', () => {
+	it('disables Ship It when the open PR is explicitly not mergeable', () => {
 		cleanAheadBranch();
 		renderHeader({
 			openPR: { number: 42, title: 'x', url: 'http://x', mergeable: false }
 		});
-		const finishBtn = screen.getByText('Finish').closest('button') as HTMLButtonElement;
-		expect(finishBtn.disabled).toBe(true);
+		const shipBtn = screen.getByText('Ship It').closest('button') as HTMLButtonElement;
+		expect(shipBtn.disabled).toBe(true);
 		// Warning icon: title explains the mergeability block.
-		expect(finishBtn.title).toContain('not mergeable');
+		expect(shipBtn.title).toContain('merge conflicts');
 	});
 
-	it('keeps Finish enabled when mergeability is unknown (null)', () => {
+	it('keeps Ship It enabled when mergeability is unknown (null)', () => {
 		cleanAheadBranch();
 		renderHeader({
 			openPR: { number: 42, title: 'x', url: 'http://x', mergeable: null }
 		});
-		const finishBtn = screen.getByText('Finish').closest('button') as HTMLButtonElement;
-		expect(finishBtn.disabled).toBe(false);
+		const shipBtn = screen.getByText('Ship It').closest('button') as HTMLButtonElement;
+		expect(shipBtn.disabled).toBe(false);
 	});
 
 	it('does not render the informational PR chip even with an open PR', () => {
 		cleanAheadBranch();
 		renderHeader({ openPR: { number: 42, title: 'My PR', url: 'http://x/pr/42' } });
 		expect(screen.queryByRole('link', { name: /PR #/ })).toBeNull();
-		// Finish stays as the PR entry point.
-		expect(screen.getByText('Finish')).toBeTruthy();
+		// Ship It stays as the PR entry point.
+		expect(screen.getByText('Ship It')).toBeTruthy();
 	});
 
 	it('shows Create PR when differsFromBase even with zero commits ahead', () => {
@@ -429,7 +459,7 @@ describe('GitHeaderActions default branch', () => {
 
 describe('GitHeaderActions snapshot coherence', () => {
 	it('holds the previous action while a switch revalidates — never an intermediate value', async () => {
-		// Coherent state: an open PR ⇒ Finish.
+		// Coherent state: an open PR ⇒ Ship It.
 		cleanAheadBranch();
 		renderHeader({ openPR: null });
 		setSnapshot({
@@ -447,7 +477,7 @@ describe('GitHeaderActions snapshot coherence', () => {
 			openPr: { number: 12, title: 'x', url: 'http://x', mergeable: null }
 		});
 		await tick();
-		expect(screen.getByText('Finish')).toBeTruthy();
+		expect(screen.getByText('Ship It')).toBeTruthy();
 
 		// Session switch: the store keeps the last-known values as a placeholder
 		// (hydrated: false) while it revalidates. Half of that placeholder — no
@@ -470,11 +500,11 @@ describe('GitHeaderActions snapshot coherence', () => {
 		});
 		await tick();
 
-		// Still Finish — held from the last coherent snapshot — and disabled so it
+		// Still Ship It — held from the last coherent snapshot — and disabled so it
 		// can't be fired against unconfirmed state.
-		expect(screen.getByText('Finish')).toBeTruthy();
+		expect(screen.getByText('Ship It')).toBeTruthy();
 		expect(screen.queryByText('Create PR')).toBeNull();
-		expect((screen.getByText('Finish').closest('button') as HTMLButtonElement).disabled).toBe(true);
+		expect((screen.getByText('Ship It').closest('button') as HTMLButtonElement).disabled).toBe(true);
 	});
 
 	it('never renders Ship It against a carried-over placeholder', async () => {
@@ -510,7 +540,7 @@ describe('GitHeaderActions snapshot coherence', () => {
 // ── Failed PR lookup keeps the PR (findings G2 / G3) ───────────────────────
 
 describe('GitHeaderActions failed PR lookup', () => {
-	it('keeps "Finish" and marks it last-known when the lookup failed', async () => {
+	it('keeps "Ship It" and marks it last-known when the lookup failed', async () => {
 		cleanAheadBranch();
 		renderHeader({ openPR: null });
 		setSnapshot({
@@ -534,11 +564,11 @@ describe('GitHeaderActions failed PR lookup', () => {
 
 		// NEVER "Create PR" because a lookup blipped.
 		expect(screen.queryByText('Create PR')).toBeNull();
-		expect(screen.getByText('Finish')).toBeTruthy();
+		expect(screen.getByText('Ship It')).toBeTruthy();
 		// …and the user is told the value is unconfirmed.
 		expect(screen.getByLabelText('Last known PR state — GitHub unreachable')).toBeTruthy();
 		expect(
-			(screen.getByText('Finish').closest('button') as HTMLButtonElement).title
+			(screen.getByText('Ship It').closest('button') as HTMLButtonElement).title
 		).toContain('last known state');
 	});
 
@@ -546,7 +576,7 @@ describe('GitHeaderActions failed PR lookup', () => {
 		cleanAheadBranch();
 		renderHeader({ openPR: { number: 12, title: 'x', url: 'http://x', mergeable: null } });
 		await tick();
-		expect(screen.getByText('Finish')).toBeTruthy();
+		expect(screen.getByText('Ship It')).toBeTruthy();
 		expect(screen.queryByLabelText('Last known PR state — GitHub unreachable')).toBeNull();
 	});
 });

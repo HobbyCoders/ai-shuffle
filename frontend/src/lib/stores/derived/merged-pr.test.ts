@@ -10,7 +10,7 @@ const status = transformGitStatus({ is_git_repo: true, current_branch: 'feat/x',
 
 function actions(isHeadMerged: boolean, hasChanges = false, hasOpenPr = false) {
 	return {
-		primary: computePrimaryAction({ hasChanges, hasOpenPr, isHeadMerged, isMergeable: null,
+		primary: computePrimaryAction({ hasChanges, hasOpenPr, isHeadMerged,
 			commitsAhead: 1, differsFromBase: true, isOnDefaultBranch: false, needsPull: false }),
 		ship: computeShowShipIt({ hasChanges, isHeadMerged, isRepoConfirmed: true,
 			branchDiffersFromBase: true, isOnDefaultBranch: false, needsPull: false, hasShipItHandler: true })
@@ -43,7 +43,7 @@ describe('already-merged branch actions', () => {
 	it('keeps a new open PR actionable on a reused branch', () => {
 		const open = { ...merged, open_pr: { number: 9, title: 'New work', url: '', mergeable: null, draft: false, state: 'OPEN' } };
 		expect(isCurrentHeadMerged(status, open)).toBe(false);
-		expect(actions(true, false, true).primary).toBe('finish');
+		expect(actions(true, false, true).primary).toBe('clean');
 	});
 	it('preserves a known merged head across GitHub outages', () => {
 		expect(isCurrentHeadMerged(status, { ...merged, lookup_failed: true, served_stale: true })).toBe(true);

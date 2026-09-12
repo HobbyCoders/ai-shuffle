@@ -29,10 +29,6 @@ export interface CreatePROptions {
 	base?: string;
 	draft?: boolean;
 }
-export interface FinishOptions {
-	mergeMethod?: MergeMethod;
-	cleanup?: boolean;
-}
 export interface ShipItOptions {
 	mergeMethod?: MergeMethod;
 	cleanup?: boolean;
@@ -42,7 +38,7 @@ export interface ShipItOptions {
 }
 
 /** Which git action a split-button / option popover is driving. */
-export type GitActionKind = 'commit' | 'push' | 'pull' | 'pr' | 'finish' | 'shipit';
+export type GitActionKind = 'commit' | 'push' | 'pull' | 'pr' | 'shipit';
 
 // ── Ship It step preview ────────────────────────────────────────────────────
 
@@ -51,6 +47,9 @@ export interface ShipItStepInput {
 	hasChanges: boolean;
 	/** A pull request already exists for the branch → skip the Create PR step. */
 	hasOpenPR: boolean;
+	/** Commits not on origin/<branch>; unknown requires a push check. */
+	unpushed?: number | null;
+	prNumber?: number;
 	/** User's cleanup-after-merge preference → append the branch/worktree cleanup step. */
 	cleanup: boolean;
 }
@@ -63,17 +62,17 @@ export interface ShipItStep {
 /**
  * Derive the ordered Ship It pipeline preview from the current repo state.
  *
- * Ship It always pushes and merges; the Commit and Create PR steps are only
- * shown when they're actually needed (dirty tree / no existing PR), and cleanup
+ * Commit, push, and Create PR are shown only when needed. An unknown remote
+ * state keeps the push check; a confirmed up-to-date branch skips it. Cleanup
  * is appended only when the user keeps that preference on. Pure so the header
  * can render an honest preview and it can be unit-tested without the component.
  */
 export function computeShipItSteps(input: ShipItStepInput): ShipItStep[] {
 	const steps: ShipItStep[] = [];
 	if (input.hasChanges) steps.push({ id: 'commit', label: 'Commit changes' });
-	steps.push({ id: 'push', label: 'Push to remote' });
+	if (input.hasChanges || input.unpushed !== 0) steps.push({ id: 'push', label: 'Push to remote' });
 	if (!input.hasOpenPR) steps.push({ id: 'pr', label: 'Create pull request' });
-	steps.push({ id: 'merge', label: 'Merge pull request' });
+	steps.push({ id: 'merge', label: input.hasOpenPR && input.prNumber ? `Merge PR #${input.prNumber}` : 'Merge pull request' });
 	if (input.cleanup) steps.push({ id: 'cleanup', label: 'Clean up branch' });
 	return steps;
 }

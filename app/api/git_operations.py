@@ -654,6 +654,7 @@ async def _execute_ship(
     existing_pr: Any,
     dirty: bool,
     include_unstaged: bool,
+    needs_push: bool = True,
     merge_method: str,
     draft: bool,
     cleanup: bool,
@@ -684,16 +685,20 @@ async def _execute_ship(
         else:
             op.set_step("commit", STEP_SKIPPED, detail="Nothing to commit")
 
-        # --- push ------------------------------------------------------------
-        op.set_step("push", STEP_RUNNING)
-        ok, err = await run_git(
-            git_service.push, working_dir, branch=feature_branch, set_upstream=True
-        )
-        if not ok:
-            op.set_step("push", STEP_ERROR, error=err or "Failed to push")
-            op.status = "error"
-            return
-        op.set_step("push", STEP_DONE)
+        # Unknown remote state still requires a push check. Dirty trees always
+        # push the commit just created, even if preflight was up to date.
+        if dirty or needs_push:
+            op.set_step("push", STEP_RUNNING)
+            ok, err = await run_git(
+                git_service.push, working_dir, branch=feature_branch, set_upstream=True
+            )
+            if not ok:
+                op.set_step("push", STEP_ERROR, error=err or "Failed to push")
+                op.status = "error"
+                return
+            op.set_step("push", STEP_DONE)
+        else:
+            op.set_step("push", STEP_SKIPPED, detail="Branch already pushed")
 
         # --- create PR (skip when one is already open) -----------------------
         if existing_pr is not None:
@@ -972,6 +977,7 @@ async def ship(
             base_branch=base_branch,
             existing_pr=existing_pr,
             dirty=dirty,
+            needs_push=(st or {}).get("unpushed") != 0,
             include_unstaged=body.include_unstaged,
             merge_method=body.merge_method,
             draft=body.draft,

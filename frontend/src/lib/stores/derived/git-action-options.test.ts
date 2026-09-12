@@ -12,6 +12,19 @@ const ids = (input: Parameters<typeof computeShipItSteps>[0]) =>
 	computeShipItSteps(input).map((s) => s.id);
 
 describe('computeShipItSteps', () => {
+	it('omits push when origin already has all commits, naming the existing PR', () => {
+		expect(computeShipItSteps({ hasChanges: false, unpushed: 0, hasOpenPR: true, prNumber: 42, cleanup: false }))
+			.toEqual([{ id: 'merge', label: 'Merge PR #42' }]);
+	});
+	it('still pushes a new commit from a dirty but previously up-to-date branch', () => {
+		expect(ids({ hasChanges: true, unpushed: 0, hasOpenPR: true, cleanup: false }))
+			.toEqual(['commit', 'push', 'merge']);
+	});
+	it('creates a PR without pushing again when committed work is already remote', () => {
+		expect(ids({ hasChanges: false, unpushed: 0, hasOpenPR: false, cleanup: true }))
+			.toEqual(['pr', 'merge', 'cleanup']);
+	});
+
 	it('shows the full pipeline for a dirty branch with no PR and cleanup on', () => {
 		expect(ids({ hasChanges: true, hasOpenPR: false, cleanup: true })).toEqual([
 			'commit',
@@ -49,7 +62,7 @@ describe('computeShipItSteps', () => {
 		]);
 	});
 
-	it('always keeps push and merge (minimal clean + existing-PR + no-cleanup case)', () => {
+	it('keeps the push check when remote state is unknown', () => {
 		expect(ids({ hasChanges: false, hasOpenPR: true, cleanup: false })).toEqual([
 			'push',
 			'merge'

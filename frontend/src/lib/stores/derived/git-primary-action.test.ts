@@ -1,11 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { computePrimaryAction, finishBlockedByMergeability, type PrimaryActionInput } from './git-primary-action';
+import { computePrimaryAction, mergeBlockedByMergeability, type PrimaryActionInput } from './git-primary-action';
 
 function input(overrides: Partial<PrimaryActionInput> = {}): PrimaryActionInput {
 	return {
 		hasChanges: false,
 		hasOpenPr: false,
-		isMergeable: null,
 		commitsAhead: 0,
 		differsFromBase: false,
 		isOnDefaultBranch: false,
@@ -21,12 +20,12 @@ describe('computePrimaryAction', () => {
 		).toBe('commit');
 	});
 
-	it('finish when an open PR exists on a clean tree', () => {
-		expect(computePrimaryAction(input({ hasOpenPr: true }))).toBe('finish');
+	it('leaves merging to Ship It when an open PR exists on a clean tree', () => {
+		expect(computePrimaryAction(input({ hasOpenPr: true }))).toBe('clean');
 	});
 
-	it('finish even when mergeable is unknown (null)', () => {
-		expect(computePrimaryAction(input({ hasOpenPr: true, isMergeable: null }))).toBe('finish');
+	it('does not create a second PR when branch commits are ahead', () => {
+		expect(computePrimaryAction(input({ hasOpenPr: true, commitsAhead: 3 }))).toBe('clean');
 	});
 
 	it('create-pr when clean, no PR, ahead of default branch', () => {
@@ -52,10 +51,10 @@ describe('computePrimaryAction', () => {
 	});
 });
 
-describe('finishBlockedByMergeability', () => {
+describe('mergeBlockedByMergeability', () => {
 	it('blocks only on an explicit false', () => {
-		expect(finishBlockedByMergeability(false)).toBe(true);
-		expect(finishBlockedByMergeability(null)).toBe(false);
-		expect(finishBlockedByMergeability(true)).toBe(false);
+		expect(mergeBlockedByMergeability(false)).toBe(true);
+		expect(mergeBlockedByMergeability(null)).toBe(false);
+		expect(mergeBlockedByMergeability(true)).toBe(false);
 	});
 });

@@ -3,7 +3,7 @@
 	 * GitHeaderActions - Git controls for the PageHeader
 	 *
 	 * Branch selector dropdown (checkout branches), split action buttons, and diff
-	 * stats. Each mutating action (Commit / Push / Pull / Create PR / Finish /
+	 * stats. Each mutating action (Commit / Push / Pull / Create PR /
 	 * Ship It) is a split button: the main area runs the action immediately with
 	 * saved defaults, and the chevron opens a compact GitActionOptionsDropdown for
 	 * per-invocation overrides. Branch selector, diff review, and Init Repo remain
@@ -17,21 +17,21 @@
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
 	import { isCurrentHeadMerged } from '$lib/stores/derived/merged-pr';
-	import { computePrimaryAction, finishBlockedByMergeability, type PrimaryGitAction } from '$lib/stores/derived/git-primary-action';
+	import { computePrimaryAction, mergeBlockedByMergeability, type PrimaryGitAction } from '$lib/stores/derived/git-primary-action';
 	import GitActionOptionsDropdown from './GitActionOptionsDropdown.svelte';
+	import { computeShipItSteps } from '$lib/stores/derived/git-action-options';
 	import type {
 		CommitOptions,
 		PushOptions,
 		PullOptions,
 		CreatePROptions,
-		FinishOptions,
 		ShipItOptions
 	} from '$lib/stores/derived/git-action-options';
 
 	interface Props {
 		projectId: string;
 		isStreaming?: boolean;
-		/** True while a git operation (commit/push/PR/finish/ship) is in flight.
+		/** True while a git operation (commit/push/PR/ship) is in flight.
 		 *  Disables the mutating action buttons + branch switch so the user can't
 		 *  fire a second action while work is running. */
 		operationInProgress?: boolean;
@@ -45,7 +45,7 @@
 		/** When set, forces worktree read-only mode and uses this as the branch display.
 		 *  This ensures the correct branch shows immediately without waiting for the store to load. */
 		worktreeBranch?: string | null;
-		/** When set, shows the "Finish" button instead of Commit/Create PR */
+		/** Existing PR to merge through Ship It */
 		openPR?: { number: number; title: string; url: string; mergeable?: boolean | null } | null;
 		/** Mutating actions. A bare main-button click passes no options (falling
 		 *  back to the gitActionPreferences defaults); the option popover passes an
@@ -53,14 +53,13 @@
 		 *  through one function. */
 		onClickCommit: (opts?: CommitOptions) => void;
 		onClickCreatePR: (opts?: CreatePROptions) => void;
-		onClickFinish: (opts?: FinishOptions) => void;
 		onClickPush: (opts?: PushOptions) => void;
 		onClickPull: (opts?: PullOptions) => void;
 		onClickNewBranch: () => void;
 		onClickInitRepo?: () => void;
 		/** Are the GitHub-backed actions usable? The header itself no longer
 		 *  requires GitHub auth (local git must work without it), so this gates
-		 *  ONLY the gh-dependent actions — Create PR / Finish / Ship It. Pass the
+		 *  ONLY the gh-dependent actions — Create PR / Ship It. Pass the
 		 *  git store's hysteresis-guarded `githubFeaturesAvailable`; a single
 		 *  failed `gh auth status` must not flip it. Defaults to true so callers
 		 *  that don't pass it keep today's behaviour. */
@@ -71,7 +70,7 @@
 		onOpenDiffReview?: () => void;
 	}
 
-	let { projectId, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview }: Props = $props();
+	let { projectId, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview }: Props = $props();
 
 	// Mutating git buttons are blocked while streaming OR while another git
 	// operation is in flight — the user must never fire a second action while
@@ -118,7 +117,6 @@
 	const pushOptsOpen = $derived($openHeaderDropdown === 'git-push');
 	const pullOptsOpen = $derived($openHeaderDropdown === 'git-pull');
 	const prOptsOpen = $derived($openHeaderDropdown === 'git-pr');
-	const finishOptsOpen = $derived($openHeaderDropdown === 'git-finish');
 	const shipItOptsOpen = $derived($openHeaderDropdown === 'git-shipit');
 
 	// Use worktreeBranch prop as immediate fallback while store is loading
@@ -164,14 +162,13 @@
 	const needsPull = $derived(commitsBehindUpstream > 0 && hasUpstream);
 	const canPush = $derived(!hasChanges && commitsAheadUpstream > 0 && hasUpstream && !needsPull);
 
-	// Primary action decision (Commit / Finish / Create PR / clean placeholder)
+	// Primary action decision (Commit / Create PR / clean placeholder)
 	// extracted into a pure, unit-tested helper — the template renders its result.
 	const computedPrimaryAction = $derived(
 		computePrimaryAction({
 			hasChanges,
 			isHeadMerged,
 			hasOpenPr: !!openPr,
-			isMergeable: openPr?.mergeable ?? null,
 			commitsAhead,
 			differsFromBase: branchDiffersFromBase,
 			isOnDefaultBranch,
@@ -190,10 +187,9 @@
 
 	// GitHub-only actions degrade to their local predecessor when gh is
 	// unusable, rather than rendering a button that is guaranteed to fail.
-	// 'finish' (merge the open PR) and 'create-pr' both need gh; 'commit' and
-	// 'push' do not. Never invent an action — fall back to 'clean', which is the
+	// 'create-pr' needs gh; 'commit' and 'push' do not. Never invent an action — fall back to 'clean', which is the
 	// no-op placeholder.
-	const GITHUB_ONLY_ACTIONS = new Set<PrimaryGitAction>(['create-pr', 'finish']);
+	const GITHUB_ONLY_ACTIONS = new Set<PrimaryGitAction>(['create-pr']);
 	const resolvedPrimaryAction = $derived(snapshotPending ? heldPrimaryAction : computedPrimaryAction);
 	const primaryAction = $derived(
 		!githubAvailable && GITHUB_ONLY_ACTIONS.has(resolvedPrimaryAction)
@@ -201,9 +197,13 @@
 			: resolvedPrimaryAction
 	);
 	/** The PR the rendered action refers to — held alongside the action so a
-	 *  greyed "Finish" still names the PR it would merge. */
+	 *  greyed "Ship It" still names the PR it would merge. */
 	const shownPr = $derived(snapshotPending ? heldOpenPr : openPr);
-	const finishBlocked = $derived(finishBlockedByMergeability(shownPr?.mergeable ?? null));
+	const mergeBlocked = $derived(mergeBlockedByMergeability(shownPr?.mergeable ?? null));
+	const shipItSummary = $derived(computeShipItSteps({
+		hasChanges, unpushed: snapshot.status?.unpushed, hasOpenPR: !!shownPr,
+		prNumber: shownPr?.number, cleanup: false
+	}).map(step => step.label).join(', '));
 	// The backend serves the LAST KNOWN-GOOD PR when it cannot reach GitHub
 	// (`pr_lookup_failed` + `stale`), and a `gh` transport failure surfaces as a
 	// 502 rather than an empty result. Either way the value shown is real but not
@@ -221,13 +221,14 @@
 	const isRepoConfirmed = $derived(!snapshotPending && snapshot.status?.is_git_repo === true);
 
 	// Ship It shows only when there's actually something to ship — uncommitted
-	// changes OR real content over the base branch — on a non-default branch
+	// changes, unmerged content, or an open PR — on a non-default branch
 	// that isn't behind upstream, and only for a confirmed repo. See
 	// computeShowShipIt for the full rationale.
 	const computedShowShipIt = $derived(computeShowShipIt({
 		isRepoConfirmed,
 		hasChanges,
 		isHeadMerged,
+		hasOpenPr: !!openPr,
 		branchDiffersFromBase,
 		isOnDefaultBranch,
 		needsPull,
@@ -328,7 +329,7 @@
 	// Chevron handler for a git-action split button: toggle its option popover.
 	// The shared store guarantees single-open, so this also closes any other
 	// popover (or the branch selector). Never fires when actions are busy.
-	type GitActionDropdownId = 'git-commit' | 'git-push' | 'git-pull' | 'git-pr' | 'git-finish' | 'git-shipit';
+	type GitActionDropdownId = 'git-commit' | 'git-push' | 'git-pull' | 'git-pr' | 'git-shipit';
 	function toggleActionDropdown(id: GitActionDropdownId) {
 		if (actionsBusy) return;
 		if ($openHeaderDropdown === id) closeDropdown(id);
@@ -553,7 +554,7 @@
 		</div>
 	{/if}
 
-	<!-- Commit / Create PR / Finish split button — primary action decided by
+	<!-- Commit / Create PR split button — primary action decided by
 	     computePrimaryAction (unit-tested pure helper) -->
 	{#if primaryAction === 'commit'}
 		<div class="split-btn-group git-primary">
@@ -591,58 +592,6 @@
 					busy={actionsBusy}
 					onClose={() => closeActionDropdown('git-commit')}
 					onCommit={onClickCommit}
-				/>
-			{/if}
-		</div>
-	{:else if primaryAction === 'finish'}
-		<div class="split-btn-group git-primary">
-			<button
-				class="git-btn split-main"
-				class:stale={snapshotPending}
-				onclick={() => onClickFinish()}
-				disabled={primaryDisabled || finishBlocked}
-				title={isStreaming
-					? 'Cannot finish during streaming'
-					: finishBlocked
-						? `PR #${shownPr?.number} is not mergeable yet — resolve conflicts on GitHub or wait for GitHub to compute mergeability`
-						: `Quick merge PR #${shownPr?.number} with saved settings${lastKnownSuffix}`}
-			>
-				{#if finishBlocked}
-					<TriangleAlert size={14} strokeWidth={1.5} />
-				{:else}
-					<CheckCircle2 size={14} strokeWidth={1.5} />
-				{/if}
-				<span class="btn-label">Finish</span>
-				{#if prIsLastKnown}
-					<!-- The PR is real but unconfirmed this cycle: mark it rather than
-					     hiding it or falling back to "Create PR". -->
-					<span class="last-known-dot" aria-label="Last known PR state — GitHub unreachable"></span>
-				{/if}
-			</button>
-			<button
-				class="git-btn split-chevron"
-				class:active={finishOptsOpen}
-				onclick={() => toggleActionDropdown('git-finish')}
-				disabled={actionsBusy}
-				aria-label="Merge options"
-				aria-haspopup="dialog"
-				aria-expanded={finishOptsOpen}
-				title="Merge options"
-			>
-				<ChevronDown size={11} strokeWidth={1.5} />
-			</button>
-			{#if finishOptsOpen}
-				<GitActionOptionsDropdown
-					action="finish"
-					{currentBranch}
-					{defaultBranch}
-					baseBranches={baseBranchNames}
-					openPR={shownPr}
-					{hasChanges}
-					{isWorktreeMode}
-					busy={actionsBusy}
-					onClose={() => closeActionDropdown('git-finish')}
-					onFinish={onClickFinish}
 				/>
 			{/if}
 		</div>
@@ -685,7 +634,7 @@
 				/>
 			{/if}
 		</div>
-	{:else}
+	{:else if !showShipIt}
 		<button
 			class="git-btn git-primary"
 			disabled={true}
@@ -697,8 +646,7 @@
 	{/if}
 
 	<!-- Ship It split button: one-click pipeline (commit → push → PR → merge → cleanup) -->
-	<!-- Shows only when there's something to ship: uncommitted changes OR real
-	     content over the base branch. Hidden for branches that are "ahead" by
+	<!-- Shows for uncommitted changes, unmerged branch content, or an open PR. Hidden for branches that are "ahead" by
 	     commit count but carry a 0/0 net diff (already-merged / cleaned-up). -->
 	{#if showShipIt}
 		<div class="split-btn-group">
@@ -706,11 +654,16 @@
 				class="git-btn split-main"
 				class:stale={snapshotPending}
 				onclick={() => onClickShipIt?.()}
-				disabled={primaryDisabled}
-				title={isStreaming ? 'Cannot ship during streaming' : 'Ship It — commit, push, create PR, merge, and clean up in one shot'}
+				disabled={primaryDisabled || mergeBlocked}
+				title={isStreaming ? 'Cannot ship during streaming' : mergeBlocked
+					? `PR #${shownPr?.number} has merge conflicts — resolve them before shipping`
+					: `${shipItSummary}${lastKnownSuffix}`}
 			>
-				<Rocket size={13} strokeWidth={1.5} />
+				{#if mergeBlocked}<TriangleAlert size={13} strokeWidth={1.5} />{:else}<Rocket size={13} strokeWidth={1.5} />{/if}
 				<span class="btn-label">Ship It</span>
+				{#if prIsLastKnown}
+					<span class="last-known-dot" aria-label="Last known PR state — GitHub unreachable"></span>
+				{/if}
 			</button>
 			<button
 				class="git-btn split-chevron"
@@ -733,7 +686,8 @@
 					openPR={shownPr}
 					{hasChanges}
 					{isWorktreeMode}
-					busy={actionsBusy}
+					busy={primaryDisabled || mergeBlocked}
+					unpushed={snapshot.status?.unpushed}
 					onClose={() => closeActionDropdown('git-shipit')}
 					onShipIt={onClickShipIt}
 				/>

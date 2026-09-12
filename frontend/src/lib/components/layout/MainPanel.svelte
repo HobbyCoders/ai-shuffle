@@ -25,7 +25,6 @@
 	import {
 		generateCommitMessage,
 		generatePRDescription,
-		startFinishOperation,
 		startShipOperation,
 		type GitOperation
 	} from '$lib/api/git';
@@ -35,7 +34,6 @@
 		PushOptions,
 		PullOptions,
 		CreatePROptions,
-		FinishOptions,
 		ShipItOptions,
 		OperationOrigin
 	} from '$lib/stores/derived/git-action-options';
@@ -734,35 +732,6 @@
 		}
 	}
 
-	async function handleFinish(opts: FinishOptions = {}) {
-		if (gitActionsBlocked()) return;
-		markGitActivity(); // user git action → responsive poll cadence
-		const projectId = activeProject!;
-		// Capture the origin at START so completion side-effects apply to the
-		// session/project the operation was launched from — never a switched-to one.
-		const origin: OperationOrigin = { sessionId: activeSessionId, projectId };
-		const prefs = gitActionPreferences.current;
-		const mergeMethod = opts.mergeMethod ?? prefs.mergeMethod;
-		const cleanup = opts.cleanup ?? prefs.cleanupAfterMerge;
-		try {
-			const op = await gitOperations.runServer(
-				projectId,
-				'Finish',
-				() =>
-					startFinishOperation(projectId, {
-						worktree_id: activeWorktreeId ?? undefined,
-						session_id: activeSessionId ?? undefined,
-						merge_method: mergeMethod,
-						cleanup
-					}),
-				{ sessionId: origin.sessionId, kind: 'finish' }
-			);
-			onOperationDone(op, origin);
-		} catch {
-			// runServer already pinned the failure in the progress popover.
-		}
-	}
-
 	async function handleShipIt(opts: ShipItOptions = {}) {
 		if (gitActionsBlocked()) return;
 		markGitActivity(); // user git action → responsive poll cadence
@@ -897,7 +866,6 @@
 				githubAvailable={activeGithubAvailable}
 				onClickCommit={handleCommit}
 				onClickCreatePR={handleCreatePR}
-				onClickFinish={handleFinish}
 				onClickNewBranch={() => { createBranchEverOpened = true; showCreateBranchModal = true; }}
 				onClickPush={handlePush}
 				onClickPull={handlePull}

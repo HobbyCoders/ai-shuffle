@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * GitActionOptionsDropdown — one compact popover shell for every git-action
-	 * split button (Commit / Push / Pull / Create PR / Finish / Ship It).
+	 * split button (Commit / Push / Pull / Create PR / Ship It).
 	 *
 	 * The chevron on each split button toggles this panel; the main button always
 	 * fires the action directly with saved defaults and never opens the panel.
@@ -23,7 +23,6 @@
 		type PushOptions,
 		type PullOptions,
 		type CreatePROptions,
-		type FinishOptions,
 		type ShipItOptions
 	} from '$lib/stores/derived/git-action-options';
 
@@ -35,6 +34,7 @@
 		baseBranches?: string[];
 		openPR?: { number: number } | null;
 		hasChanges: boolean;
+		unpushed?: number | null;
 		/** Worktree sessions delete a worktree on cleanup; plain repos delete a branch. */
 		isWorktreeMode?: boolean;
 		busy?: boolean;
@@ -43,7 +43,6 @@
 		onPush?: (o: PushOptions) => void;
 		onPull?: (o: PullOptions) => void;
 		onCreatePR?: (o: CreatePROptions) => void;
-		onFinish?: (o: FinishOptions) => void;
 		onShipIt?: (o: ShipItOptions) => void;
 	}
 
@@ -54,6 +53,7 @@
 		baseBranches = [],
 		openPR = null,
 		hasChanges,
+		unpushed = null,
 		isWorktreeMode = false,
 		busy = false,
 		onClose,
@@ -61,7 +61,6 @@
 		onPush,
 		onPull,
 		onCreatePR,
-		onFinish,
 		onShipIt
 	}: Props = $props();
 
@@ -133,11 +132,8 @@
 		});
 		onClose();
 	}
-	function submitFinish() {
-		onFinish?.({ mergeMethod: prefs.mergeMethod, cleanup: prefs.cleanupAfterMerge });
-		onClose();
-	}
 	function submitShipIt() {
+		if (busy) return;
 		onShipIt?.({
 			mergeMethod: prefs.mergeMethod,
 			cleanup: prefs.cleanupAfterMerge,
@@ -147,7 +143,7 @@
 	}
 
 	const shipSteps = $derived(
-		computeShipItSteps({ hasChanges, hasOpenPR: !!openPR, cleanup: prefs.cleanupAfterMerge })
+		computeShipItSteps({ hasChanges, unpushed, hasOpenPR: !!openPR, prNumber: openPR?.number, cleanup: prefs.cleanupAfterMerge })
 	);
 
 	// Base-branch options: default branch first, then any other local branches.
@@ -156,7 +152,7 @@
 	);
 </script>
 
-<!-- Shared between the Finish and Ship It branches (identical merge controls). -->
+<!-- Ship It merge settings. -->
 {#snippet mergeMethodFieldset()}
 	<fieldset class="opt-radio-group">
 		<legend class="opt-label">Merge method</legend>
@@ -311,15 +307,6 @@
 		</button>
 
 		<button type="button" class="opt-submit" disabled={busy} onclick={submitCreatePR}>Create PR</button>
-
-	{:else if action === 'finish'}
-		<div class="opt-title">Merge options</div>
-		{@render mergeMethodFieldset()}
-		{@render cleanupToggle()}
-
-		<button type="button" class="opt-submit" disabled={busy} onclick={submitFinish}>
-			{openPR ? `Merge PR #${openPR.number}` : 'Merge PR'}
-		</button>
 
 	{:else if action === 'shipit'}
 		<div class="opt-title">Ship It</div>

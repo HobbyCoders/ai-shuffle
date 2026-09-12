@@ -3,8 +3,7 @@
  *
  * Ship It runs the whole pipeline (commit → push → PR → merge → cleanup), so it
  * must only appear when the folder is a confirmed git repository AND the branch
- * actually has something to ship: uncommitted working-tree changes, or committed
- * content that differs from the base branch. The repo-confirmation guard matters
+ * has uncommitted changes, unmerged branch content, or an open PR to merge. The repo-confirmation guard matters
  * because worktree sessions are reusable — the same folder can be emptied/cleaned
  * up between sessions, and Ship It must never render against a folder with no repo.
  *
@@ -27,6 +26,8 @@ export interface ShipItVisibilityInput {
 	hasChanges: boolean;
 	/** Current HEAD is already included in a merged PR. */
 	isHeadMerged?: boolean;
+	/** An existing PR still needs to be merged, even when the branch diff is empty. */
+	hasOpenPr?: boolean;
 	/** Branch carries real committed content over its base branch
 	 *  (a three-dot base...HEAD diff is non-empty). Commit count alone is not
 	 *  enough — see module docstring. */
@@ -42,8 +43,7 @@ export interface ShipItVisibilityInput {
 /**
  * Resolve whether the Ship It button should render.
  *
- * Shows only when there is something to ship (uncommitted changes OR real
- * content over the base branch) on a non-default branch that is not behind its
+ * Shows for uncommitted changes, unmerged branch content, or an open PR on a non-default branch that is not behind its
  * upstream, and only when a handler is wired up.
  */
 export function computeShowShipIt(input: ShipItVisibilityInput): boolean {
@@ -65,5 +65,5 @@ export function computeShowShipIt(input: ShipItVisibilityInput): boolean {
 	if (isOnDefaultBranch || needsPull) return false;
 
 	// Something to ship = uncommitted work OR committed content the base lacks.
-	return hasChanges || (!input.isHeadMerged && branchDiffersFromBase);
+	return !!input.hasOpenPr || hasChanges || (!input.isHeadMerged && branchDiffersFromBase);
 }

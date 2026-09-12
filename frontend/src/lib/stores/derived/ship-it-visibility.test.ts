@@ -26,6 +26,10 @@ function input(overrides: Partial<ShipItVisibilityInput> = {}): ShipItVisibility
 }
 
 describe('computeShowShipIt', () => {
+	it('shows for an existing PR even with no uncommitted or branch diff', () => {
+		expect(computeShowShipIt(input({ hasOpenPr: true }))).toBe(true);
+	});
+
 	it('shows when there are uncommitted working-tree changes', () => {
 		expect(computeShowShipIt(input({ hasChanges: true }))).toBe(true);
 	});

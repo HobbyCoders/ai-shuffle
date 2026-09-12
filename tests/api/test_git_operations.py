@@ -594,6 +594,77 @@ class TestExecuteFinish:
 # =============================================================================
 
 class TestExecuteShip:
+    @pytest.mark.parametrize("new_work", [False, True])
+    async def test_real_remote_status_drives_push(self, tmp_path, mock_github_service, new_work):
+        import subprocess
+        from app.core.git_service import GitService
+
+        remote = tmp_path / "remote.git"
+        work = tmp_path / "work"
+        work.mkdir()
+        def git(*args):
+            subprocess.run(["git", *args], cwd=work, check=True, capture_output=True)
+
+        git("init", "--initial-branch=main")
+        git("config", "user.email", "test@example.invalid")
+        git("config", "user.name", "Test")
+        git("commit", "--allow-empty", "-m", "Base")
+        git("init", "--bare", str(remote))
+        git("remote", "add", "origin", str(remote))
+        git("push", "-u", "origin", "main")
+        git("checkout", "-b", "feat/x")
+        (work / "feature.txt").write_text("initial work")
+        git("add", ".")
+        git("commit", "-m", "Feature")
+        git("push", "-u", "origin", "feat/x")
+        if new_work:
+            (work / "feature.txt").write_text("new work")
+            git("commit", "-am", "Update feature")
+
+        service = GitService()
+        state = service.get_status(str(work))
+        assert state["is_clean"] is True
+        assert state["unpushed"] == int(new_work)
+        # The branch differs from main in both cases; only remote-ahead matters.
+        assert state["ahead"] > 0
+        op = _ship_op()
+        with patch.object(gitops, "git_service", service), \
+             patch.object(gitops, "github_service", mock_github_service), \
+             patch.object(service, "push", wraps=service.push) as push:
+            await _execute_ship(
+                op, working_dir=str(work), worktree_id=None, repo="o/r",
+                feature_branch="feat/x", default_branch="main", base_branch="main",
+                existing_pr=_pr(), dirty=not state["is_clean"],
+                needs_push=state["unpushed"] != 0, include_unstaged=True,
+                merge_method="squash", draft=False, cleanup=False, session_id=None,
+            )
+        assert op.status == "done"
+        assert push.call_count == int(new_work)
+        assert service.get_status(str(work))["unpushed"] == 0
+
+    @pytest.mark.parametrize("dirty,needs_push", [(False, False), (False, True), (True, False)])
+    async def test_push_only_when_needed(
+        self, mock_git_service, mock_github_service, mock_worktree_manager, dirty, needs_push
+    ):
+        op = _ship_op()
+        with patch.multiple(
+            gitops, git_service=mock_git_service, github_service=mock_github_service,
+            worktree_manager=mock_worktree_manager,
+            generate_commit_message_for_dir=AsyncMock(return_value="Update feature"),
+            stage_and_commit=AsyncMock(return_value=(True, "abc123", None)),
+        ):
+            await _execute_ship(
+                op, working_dir="/wd", worktree_id=None, repo="o/r",
+                feature_branch="feat/x", default_branch="main", base_branch="main",
+                existing_pr=_pr(), dirty=dirty, needs_push=needs_push, include_unstaged=True,
+                merge_method="squash", draft=False, cleanup=False, session_id=None,
+            )
+        assert op.status == "done"
+        assert mock_git_service.push.call_count == int(dirty or needs_push)
+        assert _step_status(op, "push") == ("done" if dirty or needs_push else "skipped")
+        mock_github_service.merge_pull.assert_called_once_with("o/r", 7, "squash")
+        mock_github_service.create_pull.assert_not_called()
+
     async def test_clean_tree_skips_commit_existing_pr_skips_create(
         self, mock_git_service, mock_github_service, mock_worktree_manager
     ):
@@ -788,6 +859,14 @@ class TestFinishEndpoint:
 
 
 class TestShipEndpoint:
+    @pytest.mark.parametrize("unpushed,needs_push", [(0, False), (2, True), (None, True)])
+    def test_preflight_passes_remote_ahead_state(self, op_client, mock_git_service, unpushed, needs_push):
+        mock_git_service.get_status.return_value = {"is_clean": True, "unpushed": unpushed, "ahead": 5}
+        with patch.object(gitops, "_execute_ship", new_callable=AsyncMock) as execute:
+            resp = op_client.post("/api/v1/projects/p1/git/ship", json={"cleanup": False})
+        assert resp.status_code == 200
+        assert execute.call_args.kwargs["needs_push"] is needs_push
+
     def test_lifecycle_returns_running(self, op_client):
         resp = op_client.post("/api/v1/projects/p1/git/ship", json={})
         assert resp.status_code == 200
