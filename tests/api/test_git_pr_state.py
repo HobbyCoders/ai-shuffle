@@ -405,3 +405,27 @@ class TestPrStateOffLoop:
             assert not (threads[name] & loop_thread), (
                 f"{name} ran on the event-loop thread"
             )
+
+
+class TestSidebarRecovery:
+    def test_session_poll_repairs_sidebar_even_on_header_cache_hit(self, pr_client):
+        with patch.object(gitops, "schedule_session_pr_reconcile") as schedule:
+            for _ in range(2):
+                response = pr_client.get(
+                    "/api/v1/projects/p1/git/pr-state?session_id=s"
+                )
+                assert response.status_code == 200
+            assert schedule.call_count == 2
+            schedule.assert_called_with("s")
+
+    def test_project_poll_does_not_schedule_session_reconcile(self, pr_client):
+        with patch.object(gitops, "schedule_session_pr_reconcile") as schedule:
+            assert pr_client.get("/api/v1/projects/p1/git/pr-state").status_code == 200
+            schedule.assert_not_called()
+
+    def test_non_github_session_does_not_schedule_refresh(self, pr_client, mock_github_service):
+        mock_github_service.get_repo_from_remote.return_value = None
+        with patch.object(gitops, "schedule_session_pr_reconcile") as schedule:
+            response = pr_client.get("/api/v1/projects/p1/git/pr-state?session_id=s")
+            assert response.status_code == 200
+            schedule.assert_not_called()

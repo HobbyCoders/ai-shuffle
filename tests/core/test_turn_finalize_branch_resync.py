@@ -221,6 +221,7 @@ async def test_turn_end_runs_the_resync_before_the_pr_reconcile(monkeypatch):
 
     async def fake_reconcile(session_id):
         order.append("reconcile")
+        return True
 
     monkeypatch.setattr(pr_state, "reconcile_session_pr", fake_reconcile)
     monkeypatch.setattr(
@@ -250,7 +251,7 @@ async def test_a_failing_resync_never_breaks_turn_teardown(monkeypatch):
     import app.core.session_pr_state as pr_state
 
     async def noop_reconcile(session_id):
-        return None
+        return True
 
     monkeypatch.setattr(pr_state, "reconcile_session_pr", noop_reconcile)
     flushed = []

@@ -238,10 +238,9 @@ async def persist_turn_end_state(session_id: str) -> None:
     # updates without waiting for a GitHub poll. Fire-and-forget: gh must not
     # delay turn teardown.
     try:
-        from app.core.session_pr_state import reconcile_session_pr
+        from app.core.session_pr_state import schedule_session_pr_reconcile
 
-        task = asyncio.create_task(reconcile_session_pr(session_id))
-        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        schedule_session_pr_reconcile(session_id, force=True)
     except Exception:
         logger.debug("scheduling PR reconcile failed", exc_info=True)
 

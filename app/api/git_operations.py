@@ -54,7 +54,7 @@ from app.api.git_ai import (
     generate_commit_message_for_dir,
     generate_pr_description_for_dir,
 )
-from app.core.session_pr_state import persist_pr_state
+from app.core.session_pr_state import persist_pr_state, schedule_session_pr_reconcile
 
 logger = logging.getLogger(__name__)
 
@@ -1080,6 +1080,9 @@ async def get_pr_state(
     cache_key = f"{working_dir}:{branch}"
     cached = _pr_state_cache.get_or_miss(cache_key)
     if cached is not CACHE_MISS:
+        # Repair the sidebar on the owning worker, even on header-cache hits.
+        if session_id and cached.get("has_github"):
+            schedule_session_pr_reconcile(session_id)
         return PrStateResponse(**cached)
 
     # Base shape when there's nothing to say about GitHub.
@@ -1143,6 +1146,8 @@ async def get_pr_state(
         # "not signed in" stay uncached so they cost nothing to correct.
         if result["has_github"]:
             _pr_state_cache.set(cache_key, dict(result))
+            if session_id:
+                schedule_session_pr_reconcile(session_id)
         return PrStateResponse(**result)
 
     # --- failed refresh: never cache, serve the last good value if we have one
